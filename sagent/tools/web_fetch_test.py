@@ -1,52 +1,24 @@
-"""Tests for ``tools.web_fetch``: URL fetcher with SSRF guard + cache."""
+"""Tests for ``tools.web_fetch``: URL fetcher tool, SSRF guard, cache."""
 
 from __future__ import annotations
 
-from types import ModuleType
 from typing import cast
-from unittest.mock import MagicMock, patch
-from urllib.parse import unquote, urlparse
+from unittest.mock import patch
 
 import asyncio
 import socket
-import sys
+
+from wesearch.errors import CloudflareChallengeError, FetchError
+from wesearch.web import WebFetchResult
 
 import pytest
 
-
-# Install a stub for ``trafilatura`` BEFORE importing the production module
-# so the lazy import never pays the real package's import cost (~150ms).
-# The tests patch ``...trafilatura.extract`` explicitly when needed.
-if "trafilatura" not in sys.modules:
-    _stub = ModuleType("trafilatura")
-    # Set extract via __dict__ to avoid basedpyright's "unknown attr" complaint
-    # about ModuleType.
-    _stub.__dict__["extract"] = MagicMock(return_value="")
-    sys.modules["trafilatura"] = _stub
-
-from wesearch.errors import CloudflareChallengeError, FetchError
-
 from sagent.tools.lib.bash import parse_bash
 from sagent.tools.web_fetch import (
-    _ADAPTERS,
-    _KIND_HTML,
-    _KIND_MARKDOWN,
-    _KIND_RSS,
     WebFetch,
-    _extract_text,
-    _fetch_body,
-    _fetch_with_fallback,
-    _format_rss,
-    _GoogleNewsAdapter,
     _match_http_fetch,
-    _parse_rss_cluster,
-    _reader_proxy_fetch,
-    _RedditAdapter,
     _request_bodies,
-    _rss_url,
-    _safe_fetch,
     _validated_host,
-    _XAdapter,
 )
 from sagent.types.runtime import ToolResult
 
@@ -70,6 +42,11 @@ def _addrinfo_multi(*ips: str) -> list[AddrInfo]:
     for ip in ips:
         out.extend(_addrinfo(ip))
     return out
+
+
+def _result(text: str, *, kind: str = "html") -> WebFetchResult:
+    """A ``WebFetchResult`` stub for patching ``fetch_web`` in ``run`` tests."""
+    return WebFetchResult(text=text, url="https://x", kind=kind, truncated=False)
 
 
 def test_webfetch_metadata() -> None:
@@ -99,14 +76,48 @@ def test_prompt_empty() -> None:
     assert WebFetch().prompt() == ""
 
 
-def test_safe_fetch_rejects_bad_scheme() -> None:
-    with pytest.raises(ValueError, match="Unsupported scheme"):
-        _safe_fetch("ftp://example.com")
+def test_run_passes_validated_host_resolver_to_fetch_web() -> None:
+    """``run`` applies SSRF by threading ``_validated_host`` into ``fetch_web``."""
+    captured: dict[str, object] = {}
+
+    def fake_fetch_web(url: str, **kwargs: object) -> WebFetchResult:
+        del url
+        captured["validated_hosts"] = kwargs.get("validated_hosts")
+        return _result("{}")
+
+    with patch(
+        "sagent.tools.web_fetch.fetch_web",
+        side_effect=fake_fetch_web,
+    ):
+        result = asyncio.run(WebFetch().run({"url": "https://example.com"}))
+    assert not result.is_error
+    assert captured["validated_hosts"] is _validated_host
 
 
-def test_safe_fetch_rejects_missing_host() -> None:
-    with pytest.raises(ValueError, match="no host"):
-        _safe_fetch("https:///abc")
+def test_run_appends_truncation_notice_when_body_exceeds_limit() -> None:
+    """An over-limit page is cut WITH the truncation notice, not silently.
+
+    Drives the real ``fetch_web`` (only the network layer is mocked) so the
+    regression is exercised end-to-end: ``fetch_web`` must not pre-cap the text
+    such that sagent's ``truncate`` sees an at-limit string and appends nothing.
+    """
+    from wesearch import web  # noqa: PLC0415 -- patch the network below fetch_web.
+
+    from sagent.tools.core import (  # noqa: PLC0415 -- test-local constant.
+        TOOL_RESULT_MAX_CHARS,
+    )
+
+    over = TOOL_RESULT_MAX_CHARS + 500
+    with (
+        patch.object(
+            web, "fetch_with_reader_fallback", return_value=(b"z" * over, False)
+        ),
+        patch.object(web, "_extract_text", return_value="z" * over),
+        patch("socket.getaddrinfo", return_value=_addrinfo("93.184.216.34")),
+    ):
+        result = asyncio.run(WebFetch().run({"url": "https://example.com"}))
+    assert not result.is_error
+    assert "(truncated, 500 chars omitted)" in result.content
 
 
 def test_validated_host_rejects_dns_failure() -> None:
@@ -176,20 +187,6 @@ def test_validated_host_returns_bare_host_not_netloc() -> None:
     ):
         vh = _validated_host("example.com:8443")
     assert vh.host == "example.com"
-
-
-def test_reddit_adapter_matches_canonical() -> None:
-    assert _RedditAdapter().matches("https://reddit.com/r/x") is True
-
-
-def test_reddit_adapter_matches_subdomain() -> None:
-    adapter = _RedditAdapter()
-    assert adapter.matches("https://www.reddit.com/r/x") is True
-    assert adapter.matches("https://old.reddit.com/r/x") is True
-
-
-def test_reddit_adapter_rejects_non_reddit() -> None:
-    assert _RedditAdapter().matches("https://example.com") is False
 
 
 def test_match_http_fetch_simple_curl() -> None:
@@ -269,7 +266,7 @@ def test_run_post_rejects_both_json_and_form() -> None:
 
 def test_run_fetch_error_returns_tool_result_error() -> None:
     with patch(
-        "sagent.tools.web_fetch._fetch_body",
+        "sagent.tools.web_fetch.fetch_web",
         side_effect=ValueError("bad url"),
     ):
         result = asyncio.run(WebFetch().run({"url": "https://x"}))
@@ -280,21 +277,14 @@ def test_run_fetch_error_returns_tool_result_error() -> None:
 def test_run_explicit_transport_passes_through() -> None:
     captured: dict[str, object] = {}
 
-    async def fake_fetch_body(
-        raw_url: str,
-        *,
-        method: str,
-        json_body: object,
-        form_body: object,
-        transport: object,
-    ) -> tuple[bytes, str]:
-        del raw_url, method, json_body, form_body
-        captured["transport"] = transport
-        return b"{}", _KIND_HTML
+    def fake_fetch_web(url: str, **kwargs: object) -> WebFetchResult:
+        del url
+        captured["transport"] = kwargs.get("transport")
+        return _result("{}")
 
     with patch(
-        "sagent.tools.web_fetch._fetch_body",
-        side_effect=fake_fetch_body,
+        "sagent.tools.web_fetch.fetch_web",
+        side_effect=fake_fetch_web,
     ):
         result = asyncio.run(
             WebFetch().run({"url": "https://example.com", "transport": "zendriver"})
@@ -311,192 +301,79 @@ def test_run_rejects_invalid_transport() -> None:
     assert "Invalid transport" in result.content
 
 
-def test_run_json_response_skips_extraction() -> None:
-    """JSON-looking content is returned as-is (no trafilatura involvement)."""
-    body = b'{"hello": "world"}'
-
-    async def fake_fetch_body(
-        raw_url: str,
-        *,
-        method: str,
-        json_body: object,
-        form_body: object,
-        transport: object = "auto",
-    ) -> tuple[bytes, str]:
-        del raw_url, method, json_body, form_body, transport
-        return body, _KIND_HTML
-
+def test_run_returns_extracted_text() -> None:
+    """The tool wraps ``fetch_web``'s text into the ToolResult content."""
     with patch(
-        "sagent.tools.web_fetch._fetch_body",
-        side_effect=fake_fetch_body,
+        "sagent.tools.web_fetch.fetch_web",
+        return_value=_result('{"hello": "world"}'),
     ):
         result = asyncio.run(WebFetch().run({"url": "https://api/json"}))
     assert '"hello"' in result.content
 
 
-def test_run_flags_challenge_page_returned_as_success() -> None:
-    # RED: a block/challenge page can arrive as apparent SUCCESS -- e.g. the
-    # reader-proxy rung returns Cloudflare's "security check" HTML with HTTP 200.
-    # Rendered verbatim, the user sees block-page prose with NO indication the
-    # document was not retrieved. The tool must flag such content as an error.
-    challenge = (
-        b"<html><head><title>Just a moment...</title></head>"
-        b"<body>Security check required. Ray ID: abc123</body></html>"
+def test_run_cloudflare_challenge_yields_specific_guidance_not_bare_403() -> None:
+    # fetch() classifies the block at the boundary and raises a
+    # CloudflareChallengeError (is-a FetchError). The tool's ERROR path must
+    # render its SPECIFIC actionable guidance, not the generic "Fetch failed:
+    # HTTP 403" that the plain FetchError path produces.
+    err = CloudflareChallengeError(
+        url="https://x.com",
+        status=403,
+        headers={"server": "cloudflare", "cf-ray": "a1"},
+        body=b"<title>Just a moment...</title>",
     )
-    url = "https://blocked.example"
-    with patch(
-        "sagent.tools.web_fetch._safe_fetch",
-        return_value=challenge,
-    ):
-        result = asyncio.run(WebFetch().run({"url": url}))
+    with patch("sagent.tools.web_fetch.fetch_web", side_effect=err):
+        result = asyncio.run(WebFetch().run({"url": "https://x.com"}))
     assert result.is_error
-    # The "Just a moment" body is a Cloudflare challenge -- the error must carry
-    # that SPECIFIC guidance (rotate IP / real browser), not a generic string.
     assert "cloudflare" in result.content.lower()
-    # The offending URL is echoed back in the error content.
-    assert result.content.count(url) >= 1
+    assert CloudflareChallengeError.guidance in result.content
+    assert "HTTP 403" not in result.content
 
 
-def test_run_does_not_flag_real_content() -> None:
-    # Guard against over-flagging: ordinary fetched content is not an error.
-    body = b"<html><body><h1>Build isolation</h1><p>uv builds packages...</p></body></html>"
-
-    async def fake_fetch_body(
-        raw_url: str,
-        *,
-        method: str,
-        json_body: object,
-        form_body: object,
-        transport: object = "auto",
-    ) -> tuple[bytes, str]:
-        del raw_url, method, json_body, form_body, transport
-        return body, _KIND_HTML
-
-    with (
-        patch(
-            "sagent.tools.web_fetch._fetch_body",
-            side_effect=fake_fetch_body,
-        ),
-        patch(
-            "sagent.tools.web_fetch.trafilatura.extract",
-            return_value="Build isolation. uv builds packages...",
-        ),
-    ):
-        result = asyncio.run(WebFetch().run({"url": "https://docs.example"}))
-    assert not result.is_error
-
-
-def test_run_does_not_flag_page_that_merely_embeds_recaptcha() -> None:
-    # DRV-1: a legitimate 200 page (login/contact form) that EMBEDS a reCAPTCHA
-    # widget is real content, not a block. The success-path guard must not flag
-    # it on the weak "g-recaptcha"/"data-sitekey" markers -- those only mean a
-    # block when the page IS the challenge (4xx/5xx), not when it hosts a widget.
-    body = (
-        b"<html><body><h1>Sign in</h1>"
-        b'<form><input name="email">'
-        b'<div class="g-recaptcha" data-sitekey="abc"></div>'
-        b"<button>Log in</button></form></body></html>"
-    )
-
-    async def fake_fetch_body(
-        raw_url: str,
-        *,
-        method: str,
-        json_body: object,
-        form_body: object,
-        transport: object = "auto",
-    ) -> tuple[bytes, str]:
-        del raw_url, method, json_body, form_body, transport
-        return body, _KIND_HTML
-
-    with (
-        patch(
-            "sagent.tools.web_fetch._fetch_body",
-            side_effect=fake_fetch_body,
-        ),
-        patch(
-            "sagent.tools.web_fetch.trafilatura.extract",
-            return_value="Sign in. Log in.",
-        ),
-    ):
-        result = asyncio.run(WebFetch().run({"url": "https://site.example/login"}))
-    assert not result.is_error
+def test_run_fetch_error_oserror() -> None:
+    err = FetchError(url="https://x", status=500, headers={}, body=b"boom")
+    with patch("sagent.tools.web_fetch.fetch_web", side_effect=err):
+        result = asyncio.run(WebFetch().run({"url": "https://x"}))
+    assert result.is_error
 
 
 def test_run_cache_hit_skips_second_fetch() -> None:
-    html = b"<html><body>cached body</body></html>"
-
-    async def fake_fetch_body(
-        raw_url: str,
-        *,
-        method: str,
-        json_body: object,
-        form_body: object,
-        transport: object = "auto",
-    ) -> tuple[bytes, str]:
-        del raw_url, method, json_body, form_body, transport
-        return html, _KIND_HTML
-
-    tool = WebFetch()
-    with (
-        patch(
-            "sagent.tools.web_fetch._fetch_body",
-            side_effect=fake_fetch_body,
-        ) as mock_body,
-        patch(
-            "sagent.tools.web_fetch.trafilatura.extract",
-            return_value="extracted",
-        ),
-    ):
+    with patch(
+        "sagent.tools.web_fetch.fetch_web",
+        return_value=_result("extracted"),
+    ) as mock_web:
+        tool = WebFetch()
         _ = asyncio.run(tool.run({"url": "https://example.com"}))
         _ = asyncio.run(tool.run({"url": "https://example.com"}))
-    assert mock_body.call_count == 1
+    assert mock_web.call_count == 1
 
 
 def test_run_cache_separates_transports() -> None:
-    async def fake_fetch_body(
-        raw_url: str,
-        *,
-        method: str,
-        json_body: object,
-        form_body: object,
-        transport: object = "auto",
-    ) -> tuple[bytes, str]:
-        del raw_url, method, json_body, form_body, transport
-        return b"{}", _KIND_HTML
-
-    tool = WebFetch()
     with patch(
-        "sagent.tools.web_fetch._fetch_body",
-        side_effect=fake_fetch_body,
-    ) as mock_body:
+        "sagent.tools.web_fetch.fetch_web",
+        return_value=_result("{}"),
+    ) as mock_web:
+        tool = WebFetch()
         _ = asyncio.run(tool.run({"url": "https://example.com"}))
         _ = asyncio.run(
             tool.run({"url": "https://example.com", "transport": "zendriver"})
         )
-    assert mock_body.call_count == 2
+    assert mock_web.call_count == 2
 
 
 def test_run_post_json_passes_through() -> None:
     captured: dict[str, object] = {}
 
-    async def fake_fetch_body(
-        raw_url: str,
-        *,
-        method: str,
-        json_body: object,
-        form_body: object,
-        transport: object = "auto",
-    ) -> tuple[bytes, str]:
-        captured["method"] = method
-        captured["json_body"] = json_body
-        captured["form_body"] = form_body
-        del raw_url, transport
-        return b'{"ok": 1}', _KIND_HTML
+    def fake_fetch_web(url: str, **kwargs: object) -> WebFetchResult:
+        del url
+        captured["method"] = kwargs.get("method")
+        captured["json_body"] = kwargs.get("json_body")
+        captured["form_body"] = kwargs.get("form_body")
+        return _result('{"ok": 1}')
 
     with patch(
-        "sagent.tools.web_fetch._fetch_body",
-        side_effect=fake_fetch_body,
+        "sagent.tools.web_fetch.fetch_web",
+        side_effect=fake_fetch_web,
     ):
         result = asyncio.run(
             WebFetch().run(
@@ -515,21 +392,14 @@ def test_run_post_json_passes_through() -> None:
 def test_run_post_form_passes_through() -> None:
     captured: dict[str, object] = {}
 
-    async def fake_fetch_body(
-        raw_url: str,
-        *,
-        method: str,
-        json_body: object,
-        form_body: object,
-        transport: object = "auto",
-    ) -> tuple[bytes, str]:
-        captured["form_body"] = form_body
-        del raw_url, method, json_body, transport
-        return b"ok", _KIND_HTML
+    def fake_fetch_web(url: str, **kwargs: object) -> WebFetchResult:
+        del url
+        captured["form_body"] = kwargs.get("form_body")
+        return _result("ok")
 
     with patch(
-        "sagent.tools.web_fetch._fetch_body",
-        side_effect=fake_fetch_body,
+        "sagent.tools.web_fetch.fetch_web",
+        side_effect=fake_fetch_web,
     ):
         _ = asyncio.run(
             WebFetch().run(
@@ -544,816 +414,6 @@ def test_run_post_form_passes_through() -> None:
     assert isinstance(form_body, dict)
     body = cast(dict[str, str], form_body)
     assert body["a"] == "b"
-
-
-def test_run_handles_reddit_thread_via_rss() -> None:
-    """A Reddit thread is fetched as an Atom feed and rendered to markdown.
-
-    Reddit's anonymous JSON API is bot-walled; the ``.rss`` feed is the
-    only path that still serves. A thread feed carries the post plus
-    top-level comments as Atom entries.
-    """
-    feed = (
-        b'<?xml version="1.0" encoding="UTF-8"?>'
-        b'<feed xmlns="http://www.w3.org/2005/Atom">'
-        b"<title>Post title : LocalLLaMA</title>"
-        b"<entry><title>Post title</title>"
-        b"<author><name>/u/op</name></author>"
-        b"<content type='html'>&lt;p&gt;body&lt;/p&gt;</content></entry>"
-        b"<entry><title>/u/commenter on Post title</title>"
-        b"<content type='html'>&lt;p&gt;hi&lt;/p&gt;</content></entry>"
-        b"</feed>"
-    )
-
-    async def fake_fetch_body(
-        raw_url: str,
-        *,
-        method: str,
-        json_body: object,
-        form_body: object,
-        transport: object = "auto",
-    ) -> tuple[bytes, str]:
-        del raw_url, method, json_body, form_body, transport
-        return feed, _KIND_RSS
-
-    with patch(
-        "sagent.tools.web_fetch._fetch_body",
-        side_effect=fake_fetch_body,
-    ):
-        result = asyncio.run(
-            WebFetch().run({"url": "https://reddit.com/r/foo/comments/abc"}),
-        )
-    assert "Post title" in result.content
-    assert "/u/commenter" in result.content
-
-
-def test_run_fetch_error_oserror() -> None:
-    err = FetchError(url="https://x", status=500, headers={}, body=b"boom")
-    with patch("sagent.tools.web_fetch._fetch_body", side_effect=err):
-        result = asyncio.run(WebFetch().run({"url": "https://x"}))
-    assert result.is_error
-
-
-def test_run_cloudflare_challenge_yields_specific_guidance_not_bare_403() -> None:
-    # Regression: fetch() now classifies the block at the boundary and raises a
-    # CloudflareChallengeError (is-a FetchError). The tool's ERROR path must
-    # render its SPECIFIC actionable guidance, not the generic "Fetch failed:
-    # HTTP 403" that the old error path produced.
-    err = CloudflareChallengeError(
-        url="https://x.com",
-        status=403,
-        headers={"server": "cloudflare", "cf-ray": "a1"},
-        body=b"<title>Just a moment...</title>",
-    )
-    with patch("sagent.tools.web_fetch._fetch_body", side_effect=err):
-        result = asyncio.run(WebFetch().run({"url": "https://x.com"}))
-    assert result.is_error
-    assert "cloudflare" in result.content.lower()
-    assert CloudflareChallengeError.guidance in result.content
-    assert "HTTP 403" not in result.content
-
-
-def test_fetch_body_non_reddit_path() -> None:
-    """Non-Reddit URLs take the simple ``_safe_fetch`` path."""
-    with patch(
-        "sagent.tools.web_fetch._safe_fetch",
-        return_value=b"hello",
-    ):
-        body, kind = asyncio.run(
-            _fetch_body(
-                "https://example.com",
-                method="GET",
-                json_body=None,
-                form_body=None,
-            ),
-        )
-    assert body == b"hello"
-    assert kind == _KIND_HTML
-
-
-@pytest.mark.parametrize(
-    ("input_url", "expected_url"),
-    [
-        # Thread permalink → append /.rss.
-        (
-            "https://reddit.com/r/foo/comments/abc/",
-            "https://reddit.com/r/foo/comments/abc/.rss",
-        ),
-        # Thread with title slug.
-        (
-            "https://www.reddit.com/r/foo/comments/abc/some_title/",
-            "https://www.reddit.com/r/foo/comments/abc/some_title/.rss",
-        ),
-        # Legacy .json listing URL → strip .json, append /.rss, keep query.
-        (
-            "https://www.reddit.com/r/foo/new.json?limit=25",
-            "https://www.reddit.com/r/foo/new/.rss?limit=25",
-        ),
-        # Subreddit root.
-        ("https://reddit.com/r/foo", "https://reddit.com/r/foo/.rss"),
-        # Already an .rss feed → unchanged.
-        (
-            "https://www.reddit.com/r/foo/new/.rss?limit=10",
-            "https://www.reddit.com/r/foo/new/.rss?limit=10",
-        ),
-    ],
-)
-def test_rss_url_normalizes_reddit_urls(input_url: str, expected_url: str) -> None:
-    """Every Reddit URL shape maps to its ``.rss`` feed equivalent."""
-    assert _rss_url(input_url) == expected_url
-
-
-def test_extract_text_html_path_uses_trafilatura() -> None:
-    """``_extract_text`` for HTML goes through trafilatura.extract."""
-    with patch(
-        "sagent.tools.web_fetch.trafilatura.extract",
-        return_value="cleaned text",
-    ):
-        out = asyncio.run(
-            _extract_text(
-                b"<html><body><p>Hi</p></body></html>",
-                kind=_KIND_HTML,
-                method="GET",
-            ),
-        )
-    assert out == "cleaned text"
-
-
-def test_extract_text_html_fallback_when_extract_none() -> None:
-    """When trafilatura returns nothing, the raw decoded content is returned."""
-    with patch(
-        "sagent.tools.web_fetch.trafilatura.extract",
-        return_value=None,
-    ):
-        out = asyncio.run(
-            _extract_text(
-                b"<html><body>raw fallback</body></html>",
-                kind=_KIND_HTML,
-                method="GET",
-            ),
-        )
-    assert "raw fallback" in out
-
-
-def test_extract_text_markdown_kind_returns_as_is() -> None:
-    """Markdown kind (reader-proxy output) skips trafilatura."""
-    md = b"# Title\n\nReader proxy returned this verbatim.\n"
-    # If trafilatura ran, it would strip the markdown structure; we use
-    # a sentinel return value to assert it stayed untouched.
-    with patch(
-        "sagent.tools.web_fetch.trafilatura.extract",
-        return_value="WRONG",
-    ):
-        out = asyncio.run(_extract_text(md, kind=_KIND_MARKDOWN, method="GET"))
-    assert "# Title" in out
-    assert "WRONG" not in out
-
-
-def test_fetch_with_fallback_passthrough_on_success() -> None:
-    """Initial rung success returns ``(body, _KIND_HTML)`` with no fallback."""
-    proxy = MagicMock(return_value=b"PROXY")
-    with (
-        patch(
-            "sagent.tools.web_fetch._safe_fetch",
-            return_value=b"OK",
-        ),
-        patch(
-            "sagent.tools.web_fetch._reader_proxy_fetch",
-            proxy,
-        ),
-    ):
-        body, kind = _fetch_with_fallback(
-            "https://example.com",
-            method="GET",
-            json_body=None,
-            form_body=None,
-        )
-    assert body == b"OK"
-    assert kind == _KIND_HTML
-    proxy.assert_not_called()
-
-
-def test_fetch_with_fallback_403_falls_to_reader_proxy() -> None:
-    """A 403 GET routes through ``_reader_proxy_fetch`` with kind=markdown."""
-    err = FetchError(url="https://x", status=403, headers={}, body=b"blocked")
-    proxy = MagicMock(return_value=b"# extracted")
-    with (
-        patch(
-            "sagent.tools.web_fetch._safe_fetch",
-            side_effect=err,
-        ),
-        patch(
-            "sagent.tools.web_fetch._reader_proxy_fetch",
-            proxy,
-        ),
-    ):
-        body, kind = _fetch_with_fallback(
-            "https://x",
-            method="GET",
-            json_body=None,
-            form_body=None,
-        )
-    assert body == b"# extracted"
-    assert kind == _KIND_MARKDOWN
-    proxy.assert_called_once_with("https://x", transport="auto")
-
-
-def test_fetch_with_fallback_429_and_503_also_trigger_fallback() -> None:
-    """The bot-wall set is {403, 429, 503} — all three engage the ladder."""
-    for status in (429, 503):
-        err = FetchError(url="https://x", status=status, headers={}, body=b"")
-        proxy = MagicMock(return_value=b"# md")
-        with (
-            patch(
-                "sagent.tools.web_fetch._safe_fetch",
-                side_effect=err,
-            ),
-            patch(
-                "sagent.tools.web_fetch._reader_proxy_fetch",
-                proxy,
-            ),
-        ):
-            body, kind = _fetch_with_fallback(
-                "https://x",
-                method="GET",
-                json_body=None,
-                form_body=None,
-            )
-        assert body == b"# md", f"status {status}: proxy body not returned"
-        assert kind == _KIND_MARKDOWN, f"status {status}: kind not markdown"
-
-
-def test_fetch_with_fallback_404_does_not_engage_ladder() -> None:
-    """Non-bot-wall errors (404) surface immediately, no fallback."""
-    err = FetchError(url="https://x", status=404, headers={}, body=b"")
-    proxy = MagicMock()
-    with (
-        patch(
-            "sagent.tools.web_fetch._safe_fetch",
-            side_effect=err,
-        ),
-        patch(
-            "sagent.tools.web_fetch._reader_proxy_fetch",
-            proxy,
-        ),
-        pytest.raises(FetchError) as exc_info,
-    ):
-        _fetch_with_fallback(
-            "https://x",
-            method="GET",
-            json_body=None,
-            form_body=None,
-        )
-    assert exc_info.value.status == 404
-    proxy.assert_not_called()
-
-
-def test_fetch_with_fallback_post_403_does_not_engage_ladder() -> None:
-    """POST 403 surfaces immediately — fallback is GET-only."""
-    err = FetchError(url="https://x", status=403, headers={}, body=b"")
-    proxy = MagicMock()
-    with (
-        patch(
-            "sagent.tools.web_fetch._safe_fetch",
-            side_effect=err,
-        ),
-        patch(
-            "sagent.tools.web_fetch._reader_proxy_fetch",
-            proxy,
-        ),
-        pytest.raises(FetchError) as exc_info,
-    ):
-        _fetch_with_fallback(
-            "https://x",
-            method="POST",
-            json_body=None,
-            form_body={"a": "1"},
-        )
-    assert exc_info.value.status == 403
-    proxy.assert_not_called()
-
-
-def test_fetch_with_fallback_all_rungs_fail_raises_original_error() -> None:
-    """When proxy also fails, the original (rung-1) FetchError is raised."""
-    orig = FetchError(url="https://x", status=403, headers={}, body=b"orig")
-    proxy_err = FetchError(
-        url="https://r.jina.ai/...", status=500, headers={}, body=b""
-    )
-    with (
-        patch(
-            "sagent.tools.web_fetch._safe_fetch",
-            side_effect=orig,
-        ),
-        patch(
-            "sagent.tools.web_fetch._reader_proxy_fetch",
-            side_effect=proxy_err,
-        ),
-        pytest.raises(FetchError) as exc_info,
-    ):
-        _fetch_with_fallback(
-            "https://x",
-            method="GET",
-            json_body=None,
-            form_body=None,
-        )
-    # The rung-1 error is what surfaces; proxy error is chained as ``__cause__``.
-    assert exc_info.value.status == 403
-    assert exc_info.value.body == b"orig"
-    assert isinstance(exc_info.value.__cause__, FetchError)
-    assert exc_info.value.__cause__.status == 500
-
-
-def test_reader_proxy_fetch_raises_on_soft_failure_sentinel() -> None:
-    """Jina returns 200 with a Warning: line when its backend got 403'd.
-
-    The proxy must detect that sentinel and raise FetchError so the
-    ladder treats it as a fall-through, not as a successful fetch.
-    """
-    soft_fail = (
-        b"Title: example.org\n\n"
-        b"Warning: Target URL returned error 403: Forbidden\n\n"
-        b"Markdown Content:\n\n"
-    )
-    with (
-        patch(
-            "sagent.tools.web_fetch._safe_fetch",
-            return_value=soft_fail,
-        ),
-        pytest.raises(FetchError) as exc_info,
-    ):
-        _reader_proxy_fetch("https://www.example.org/article")
-    # 502 is the synthetic status used to signal proxy-level failure.
-    assert exc_info.value.status == 502
-
-
-def test_fetch_with_fallback_jina_soft_failure_surfaces_rung1_error() -> None:
-    """Soft-failed proxy + 403 rung-1 surfaces the original rung-1 error."""
-    orig = FetchError(url="https://x", status=403, headers={}, body=b"akamai")
-    soft_fail = b"Warning: Target URL returned error 403\n"
-
-    def fake_safe_fetch(url: str, **_kw: object) -> bytes:
-        if "r.jina.ai" in url:
-            return soft_fail
-        raise orig
-
-    with (
-        patch(
-            "sagent.tools.web_fetch._safe_fetch",
-            side_effect=fake_safe_fetch,
-        ),
-        pytest.raises(FetchError) as exc_info,
-    ):
-        _fetch_with_fallback(
-            "https://x",
-            method="GET",
-            json_body=None,
-            form_body=None,
-        )
-    assert exc_info.value.status == 403
-    assert exc_info.value.body == b"akamai"
-
-
-def test_reader_proxy_fetch_rejects_cloudflare_interstitial() -> None:
-    challenge = b"<html><title>Just a moment...</title></html>"
-    with (
-        patch(
-            "sagent.tools.web_fetch._safe_fetch",
-            return_value=challenge,
-        ),
-        pytest.raises(CloudflareChallengeError),
-    ):
-        _reader_proxy_fetch("https://www.example.org/article")
-
-
-def test_reader_proxy_fetch_uses_jina_template_and_url_encodes() -> None:
-    """Reader proxy targets r.jina.ai with the user URL as path data."""
-    captured: dict[str, object] = {}
-
-    def fake_safe_fetch(url: str, **_kw: object) -> bytes:
-        captured["url"] = url
-        return b"# markdown"
-
-    with patch(
-        "sagent.tools.web_fetch._safe_fetch",
-        side_effect=fake_safe_fetch,
-    ):
-        body = _reader_proxy_fetch(
-            "https://www.example.org/2026/05/article?x=1&y=2#frag"
-        )
-    assert body == b"# markdown"
-    url = captured["url"]
-    assert isinstance(url, str)
-    parsed_proxy = urlparse(url)
-    assert parsed_proxy.scheme == "https"
-    assert parsed_proxy.netloc == "r.jina.ai"
-    encoded = parsed_proxy.path.removeprefix("/")
-    target = urlparse(unquote(encoded))
-    assert target.scheme == "https"
-    assert target.netloc == "www.example.org"
-    assert target.path == "/2026/05/article"
-    assert target.query == "x=1&y=2"
-    assert target.fragment == "frag"
-    assert "%3F" in encoded
-    assert "%26" in encoded
-    assert "%23" in encoded
-    assert "?" not in encoded
-    assert "#" not in encoded
-
-
-def test_fetch_with_fallback_bot_wall_falls_to_reader_proxy() -> None:
-    """A 403 on the direct rung falls through to the reader proxy.
-
-    The direct rung (``_safe_fetch`` -> wesearch.fetch, Chrome
-    impersonation) is the sole first-party fetch; the reader proxy is the only
-    fallback, since a same-egress curl retry would present an identical
-    fingerprint and hit the same wall.
-    """
-    err = FetchError(url="https://x", status=403, headers={}, body=b"")
-    proxy = MagicMock(return_value=b"# md")
-    with (
-        patch(
-            "sagent.tools.web_fetch._safe_fetch",
-            side_effect=err,
-        ),
-        patch(
-            "sagent.tools.web_fetch._reader_proxy_fetch",
-            proxy,
-        ),
-    ):
-        body, kind = _fetch_with_fallback(
-            "https://x",
-            method="GET",
-            json_body=None,
-            form_body=None,
-        )
-    assert body == b"# md"
-    assert kind == _KIND_MARKDOWN
-    proxy.assert_called_once()
-
-
-# Host adapter dispatch & per-host adapters.
-
-
-def test_adapter_registry_contains_all_three_hosts() -> None:
-    """Registry holds Reddit, Google News, and X adapters in that order."""
-    assert len(_ADAPTERS) == 3
-    assert isinstance(_ADAPTERS[0], _RedditAdapter)
-    assert isinstance(_ADAPTERS[1], _GoogleNewsAdapter)
-    assert isinstance(_ADAPTERS[2], _XAdapter)
-
-
-def test_fetch_body_unmatched_url_uses_generic_ladder() -> None:
-    """A URL with no matching adapter falls through to ``_fetch_with_fallback``."""
-    with patch(
-        "sagent.tools.web_fetch._fetch_with_fallback",
-        return_value=(b"generic", _KIND_HTML),
-    ) as mock_ladder:
-        body, kind = asyncio.run(
-            _fetch_body(
-                "https://example.com",
-                method="GET",
-                json_body=None,
-                form_body=None,
-            ),
-        )
-    mock_ladder.assert_called_once()
-    assert body == b"generic"
-    assert kind == _KIND_HTML
-
-
-def test_fetch_body_post_bypasses_adapters() -> None:
-    """POST requests skip adapter dispatch even on matching hosts."""
-    with patch(
-        "sagent.tools.web_fetch._fetch_with_fallback",
-        return_value=(b"posted", _KIND_HTML),
-    ) as mock_ladder:
-        asyncio.run(
-            _fetch_body(
-                "https://reddit.com/api/v1/x",
-                method="POST",
-                json_body={"a": 1},
-                form_body=None,
-            ),
-        )
-    mock_ladder.assert_called_once()
-
-
-# Google News adapter.
-
-
-def test_google_news_matches_only_exact_host() -> None:
-    adapter = _GoogleNewsAdapter()
-    assert adapter.matches("https://news.google.com/") is True
-    assert adapter.matches("https://news.google.com/topstories") is True
-    assert adapter.matches("https://google.com/news") is False
-    assert adapter.matches("https://www.news.google.com/") is False
-
-
-@pytest.mark.parametrize(
-    ("input_url", "expected_path"),
-    [
-        ("https://news.google.com/", "/rss"),
-        ("https://news.google.com", "/rss"),
-        ("https://news.google.com/home", "/rss"),
-        ("https://news.google.com/topstories", "/rss"),
-        ("https://news.google.com/foryou", "/rss"),
-        ("https://news.google.com/topstories/", "/rss"),
-        ("https://news.google.com/search?q=foo", "/rss/search"),
-    ],
-)
-def test_google_news_rewrites_front_page_paths_to_rss(
-    input_url: str, expected_path: str
-) -> None:
-    """Front-page and search paths route to their RSS counterparts."""
-    captured: dict[str, object] = {}
-
-    def fake_safe_fetch(url: str, **_kw: object) -> bytes:
-        captured["url"] = url
-        return b"<?xml version='1.0'?><rss><channel></channel></rss>"
-
-    with patch(
-        "sagent.tools.web_fetch._safe_fetch",
-        side_effect=fake_safe_fetch,
-    ):
-        body, kind = asyncio.run(_GoogleNewsAdapter().fetch(input_url))
-    fetched = captured["url"]
-    assert isinstance(fetched, str)
-    assert urlparse(fetched).path == expected_path
-    assert kind == _KIND_RSS
-    assert body.startswith(b"<?xml")
-
-
-def test_google_news_preserves_query_string_on_rewrite() -> None:
-    """Locale parameters (``hl``, ``gl``, ``ceid``) survive the rewrite."""
-    captured: dict[str, object] = {}
-
-    def fake_safe_fetch(url: str, **_kw: object) -> bytes:
-        captured["url"] = url
-        return b"<?xml version='1.0'?><rss><channel></channel></rss>"
-
-    with patch(
-        "sagent.tools.web_fetch._safe_fetch",
-        side_effect=fake_safe_fetch,
-    ):
-        asyncio.run(
-            _GoogleNewsAdapter().fetch(
-                "https://news.google.com/topstories?hl=en-US&gl=US&ceid=US:en",
-            ),
-        )
-    fetched = captured["url"]
-    assert isinstance(fetched, str)
-    assert "hl=en-US" in fetched
-    assert "gl=US" in fetched
-
-
-def test_google_news_already_rss_path_passes_through() -> None:
-    """A URL already on ``/rss/...`` is fetched unchanged."""
-    captured: dict[str, object] = {}
-
-    def fake_safe_fetch(url: str, **_kw: object) -> bytes:
-        captured["url"] = url
-        return b"<?xml version='1.0'?><rss><channel></channel></rss>"
-
-    with patch(
-        "sagent.tools.web_fetch._safe_fetch",
-        side_effect=fake_safe_fetch,
-    ):
-        _, kind = asyncio.run(
-            _GoogleNewsAdapter().fetch("https://news.google.com/rss/search?q=foo"),
-        )
-    assert captured["url"] == "https://news.google.com/rss/search?q=foo"
-    assert kind == _KIND_RSS
-
-
-def test_google_news_article_url_not_rewritten() -> None:
-    """Article-detail URLs fall through as HTML (no RSS equivalent)."""
-    captured: dict[str, object] = {}
-
-    def fake_safe_fetch(url: str, **_kw: object) -> bytes:
-        captured["url"] = url
-        return b"<html>article body</html>"
-
-    article = "https://news.google.com/articles/CAIiE..."
-    with patch(
-        "sagent.tools.web_fetch._safe_fetch",
-        side_effect=fake_safe_fetch,
-    ):
-        body, kind = asyncio.run(_GoogleNewsAdapter().fetch(article))
-    assert captured["url"] == article
-    assert kind == _KIND_HTML
-    assert b"article" in body
-
-
-# RSS formatter.
-
-
-def test_format_rss_renders_title_and_items() -> None:
-    """Each ``<item>`` becomes a heading with link and meta line."""
-    feed = (
-        b"<?xml version='1.0'?>"
-        b"<rss><channel>"
-        b"<title>Top stories</title>"
-        b"<item>"
-        b"<title>Headline one</title>"
-        b"<link>https://example.com/a</link>"
-        b"<pubDate>Fri, 22 May 2026 00:00:00 GMT</pubDate>"
-        b"<source url='https://nyt.example'>NYT</source>"
-        b"</item>"
-        b"</channel></rss>"
-    )
-    out = _format_rss(feed)
-    assert "# Top stories" in out
-    assert "## Headline one" in out
-    assert out.count("https://example.com/a") >= 1
-    assert "NYT" in out
-    assert "Fri, 22 May 2026" in out
-
-
-def test_format_rss_expands_google_news_cluster() -> None:
-    """Sibling stories embedded in a description's ``<ol>`` become bullets."""
-    cluster = (
-        "<ol>"
-        '<li><a href="https://lead.example">Lead headline</a>'
-        '&nbsp;&nbsp;<font color="#6f6f6f">NYT</font></li>'
-        '<li><a href="https://sib.example/1">Sibling one</a>'
-        '&nbsp;&nbsp;<font color="#6f6f6f">CNN</font></li>'
-        '<li><a href="https://sib.example/2">Sibling two</a>'
-        '&nbsp;&nbsp;<font color="#6f6f6f">BBC</font></li>'
-        "</ol>"
-    )
-    feed = (
-        "<?xml version='1.0'?>"
-        "<rss><channel>"
-        "<title>Top stories</title>"
-        "<item>"
-        "<title>Lead headline</title>"
-        "<link>https://lead.example</link>"
-        f"<description><![CDATA[{cluster}]]></description>"
-        "</item>"
-        "</channel></rss>"
-    ).encode()
-    out = _format_rss(feed)
-    # Lead is shown once at the top; siblings as bullets.
-    assert out.count("Lead headline") == 1
-    assert "- [Sibling one](https://sib.example/1) -- CNN" in out
-    assert "- [Sibling two](https://sib.example/2) -- BBC" in out
-
-
-def test_format_rss_renders_atom_entries() -> None:
-    """Atom ``<entry>`` feeds render the same listing-friendly shape."""
-    feed = (
-        b'<?xml version="1.0" encoding="UTF-8"?>'
-        b'<feed xmlns="http://www.w3.org/2005/Atom">'
-        b"<title>newest submissions : LocalLLaMA</title>"
-        b"<entry>"
-        b"<title>Granite 4.1 Architecture Changes?</title>"
-        b"<author><name>/u/the-salami</name></author>"
-        b"<updated>2026-05-28T17:44:55+00:00</updated>"
-        b"<link href='https://www.reddit.com/r/LocalLLaMA/comments/abc/post/'/>"
-        b"<content type='html'>&lt;p&gt;Why pure transformer?&lt;/p&gt;</content>"
-        b"</entry>"
-        b"</feed>"
-    )
-    out = _format_rss(feed)
-    assert "# newest submissions : LocalLLaMA" in out
-    assert "## Granite 4.1 Architecture Changes?" in out
-    assert "/u/the-salami -- 2026-05-28T17:44:55+00:00" in out
-    assert out.count("https://www.reddit.com/r/LocalLLaMA/comments/abc/post/") >= 1
-    assert "Why pure transformer?" in out
-
-
-def test_format_rss_invalid_xml_returns_raw_decoded() -> None:
-    """Malformed XML degrades gracefully to a decoded byte slice."""
-    out = _format_rss(b"not xml at all")
-    assert "not xml" in out
-
-
-def test_format_rss_rejects_entity_expansion_payload() -> None:
-    """Defusedxml blocks billion-laughs / XXE payloads at parse time."""
-    payload = (
-        b"<?xml version='1.0'?>"
-        b"<!DOCTYPE lolz ["
-        b"<!ENTITY lol 'lol'>"
-        b"<!ENTITY lol2 '&lol;&lol;&lol;&lol;&lol;'>"
-        b"]>"
-        b"<rss><channel><title>&lol2;</title></channel></rss>"
-    )
-    out = _format_rss(payload)
-    # The parse fails (defusedxml refuses entity definitions); we
-    # fall through to the decoded-bytes branch. The "lol" entity
-    # text must not appear expanded.
-    assert "lollollol" not in out
-
-
-def test_format_rss_empty_channel_no_items() -> None:
-    """A feed with no items still emits the title heading."""
-    out = _format_rss(
-        b"<?xml version='1.0'?><rss><channel><title>Empty feed</title></channel></rss>",
-    )
-    assert "# Empty feed" in out
-
-
-def test_parse_rss_cluster_unescapes_entities() -> None:
-    """HTML entities in titles and sources are decoded."""
-    fragment = (
-        '<li><a href="https://example.com/x">It&#8217;s here</a>'
-        "&nbsp;&nbsp;<font>The &amp; Co.</font></li>"
-    )
-    entries = _parse_rss_cluster(fragment)
-    assert len(entries) == 1
-    title, link, source = entries[0]
-    assert title == "It\u2019s here"
-    assert link == "https://example.com/x"
-    assert source == "The & Co."
-
-
-def test_parse_rss_cluster_optional_source() -> None:
-    """Missing ``<font>`` source yields an empty string, not a crash."""
-    fragment = '<li><a href="https://example.com/y">Bare title</a></li>'
-    entries = _parse_rss_cluster(fragment)
-    assert entries == [("Bare title", "https://example.com/y", "")]
-
-
-# X (Twitter) adapter.
-
-
-def test_x_adapter_matches_x_and_twitter_hosts() -> None:
-    adapter = _XAdapter()
-    assert adapter.matches("https://x.com/user/status/123") is True
-    assert adapter.matches("https://twitter.com/user/status/123") is True
-    assert adapter.matches("https://mobile.twitter.com/user") is True
-    assert adapter.matches("https://example.com/x.com") is False
-
-
-def test_x_adapter_routes_through_reader_proxy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """X fetches flow through the Jina reader proxy when opt-in is set."""
-    monkeypatch.setenv("SAGENT_ALLOW_THIRD_PARTY_RENDER", "1")
-    with patch(
-        "sagent.tools.web_fetch._reader_proxy_fetch",
-        return_value=b"# tweet content",
-    ) as mock_proxy:
-        body, kind = asyncio.run(
-            _XAdapter().fetch("https://x.com/user/status/123"),
-        )
-    mock_proxy.assert_called_once_with(
-        "https://x.com/user/status/123", transport="auto"
-    )
-    assert body == b"# tweet content"
-    assert kind == _KIND_MARKDOWN
-
-
-def test_x_adapter_rejects_third_party_proxy_by_default(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Without the opt-in env flag, X fetches must refuse the third-party hop.
-
-    Twitter/X content flows through ``r.jina.ai`` -- a third-party
-    renderer the caller cannot opt out of. Default to refusing the
-    proxy and require ``SAGENT_ALLOW_THIRD_PARTY_RENDER=1`` so a
-    privacy-sensitive caller doesn't silently egress URLs to Jina.
-    """
-    monkeypatch.delenv("SAGENT_ALLOW_THIRD_PARTY_RENDER", raising=False)
-
-    def _explode(url: str) -> bytes:
-        del url
-        raise AssertionError(
-            "reader proxy must not be called when opt-in flag is missing"
-        )
-
-    with (
-        patch(
-            "sagent.tools.web_fetch._reader_proxy_fetch",
-            side_effect=_explode,
-        ),
-        pytest.raises(FetchError) as exc,
-    ):
-        asyncio.run(_XAdapter().fetch("https://x.com/user/status/123"))
-    body = exc.value.body.decode("utf-8", errors="replace").lower()
-    assert "third-party" in body or "proxy" in body
-    assert "SAGENT_ALLOW_THIRD_PARTY_RENDER".lower() in body
-
-
-# Integration: dispatch through WebFetch.run end-to-end.
-
-
-def test_run_google_news_routes_to_rss_extraction() -> None:
-    """End-to-end: news.google.com home URL → RSS feed → markdown output."""
-    feed = (
-        b"<?xml version='1.0'?>"
-        b"<rss><channel>"
-        b"<title>Top stories - Google News</title>"
-        b"<item><title>Lead</title><link>https://x</link></item>"
-        b"</channel></rss>"
-    )
-    with patch(
-        "sagent.tools.web_fetch._safe_fetch",
-        return_value=feed,
-    ):
-        result = asyncio.run(WebFetch().run({"url": "https://news.google.com/"}))
-    assert "# Top stories - Google News" in result.content
-    assert "## Lead" in result.content
 
 
 @pytest.mark.parametrize("bad_form", [[], "stringly", 42])
