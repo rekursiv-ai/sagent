@@ -163,14 +163,10 @@ repos:
         stages: [pre-push]
         entry: &pytest-entry >-
           bash -c '
-            if [ -n "$CI" ]; then
-              workers=1;
-            else
-              workers=$(nproc);
-              workers=$((workers / 2));
-              ((workers < 2)) && workers=2;
-              ((workers > 32)) && workers=32;
-            fi;
+            workers=$(nproc);
+            workers=$((workers / 2));
+            ((workers < 2)) && workers=2;
+            ((workers > 32)) && workers=32;
             exec uv --quiet run --frozen --group test \
             pytest -n="$workers" "$@"
           ' pytest
@@ -186,14 +182,10 @@ repos:
         # tests for this marker, which is not a failure. Regular pytest stays strict.
         entry: >-
           bash -c '
-            if [ -n "$CI" ]; then
-              workers=1;
-            else
-              workers=$(nproc);
-              workers=$((workers / 2));
-              ((workers < 2)) && workers=2;
-              ((workers > 32)) && workers=32;
-            fi;
+            workers=$(nproc);
+            workers=$((workers / 2));
+            ((workers < 2)) && workers=2;
+            ((workers > 32)) && workers=32;
             uv --quiet run --frozen --group test \
             pytest -n="$workers" "$@" || test "$?" = 5
           ' pytest
@@ -210,14 +202,10 @@ repos:
         # stays strict so an empty collection there still fails.
         entry: >-
           bash -c '
-            if [ -n "$CI" ]; then
-              workers=1;
-            else
-              workers=$(nproc);
-              workers=$((workers / 2));
-              ((workers < 2)) && workers=2;
-              ((workers > 32)) && workers=32;
-            fi;
+            workers=$(nproc);
+            workers=$((workers / 2));
+            ((workers < 2)) && workers=2;
+            ((workers > 32)) && workers=32;
             uv --quiet run --frozen --group test \
             pytest -n="$workers" "$@" || test "$?" = 5
           ' pytest
