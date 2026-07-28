@@ -161,6 +161,12 @@ repos:
         always_run: true
         pass_filenames: false
         stages: [pre-push]
+        # --testmon-forceselect runs only tests whose covered code changed since
+        # the cached .testmondata baseline. It must be -forceselect, NOT plain
+        # --testmon: pyproject addopts carries a default `-m` marker filter, and
+        # plain --testmon self-deactivates whenever -m is present
+        # (tarpas/pytest-testmon#238). On a cache miss testmon runs everything,
+        # so it is fail-safe.
         entry: &pytest-entry >-
           bash -c '
             workers=$(nproc);
@@ -170,7 +176,7 @@ repos:
             exec uv --quiet run --frozen --group test \
             pytest -n="$workers" "$@"
           ' pytest
-        args: [-q, --tb=short]
+        args: [-q, --tb=short, --testmon-forceselect]
 
       - id: pytest-slow
         name: pytest (slow)
