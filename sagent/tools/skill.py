@@ -379,15 +379,39 @@ def _load_skill(skill_dir: Path, source: str) -> SkillInfo | None:
 
 
 def _scan_roots(roots: list[Path], source: str) -> list[SkillInfo]:
-    """Collect every loadable ``<name>/SKILL.md`` under each root."""
+    """Collect every loadable ``<name>/SKILL.md`` under each root.
+
+    Recurses into nested skill directories so a child doc such as
+    ``trax/paper/SKILL.md`` registers as its own skill (name from
+    frontmatter). Symlink cycles (e.g. ``.claude`` -> ``.sagent``) are
+    broken via a resolved-path visited set.
+    """
     out: list[SkillInfo] = []
+    visited: set[Path] = set()
     for root in roots:
         if not root.exists() or not root.is_dir():
             continue
         for child in sorted(root.iterdir()):
             if not child.is_dir():
                 continue
-            info = _load_skill(child, source)
-            if info is not None:
-                out.append(info)
+            _scan_skill_dir(child, source, out, visited)
     return out
+
+
+def _scan_skill_dir(
+    skill_dir: Path,
+    source: str,
+    out: list[SkillInfo],
+    visited: set[Path],
+) -> None:
+    """Load ``skill_dir``'s SKILL.md (if any), then recurse into subdirs."""
+    resolved = skill_dir.resolve()
+    if resolved in visited:
+        return
+    visited.add(resolved)
+    info = _load_skill(skill_dir, source)
+    if info is not None:
+        out.append(info)
+    for sub in sorted(skill_dir.iterdir()):
+        if sub.is_dir():
+            _scan_skill_dir(sub, source, out, visited)

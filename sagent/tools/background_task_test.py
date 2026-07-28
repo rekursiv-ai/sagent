@@ -396,7 +396,8 @@ async def test_cancel_persistent_subagent_uses_shutdown_lifecycle() -> None:
                     tool_name="persistent-agent",
                     queue_id="child",
                     started=0.0,
-                    kind="persistent_subagent",
+                    kind="subagent",
+                    lifecycle="serviced",
                     persistent_run_id="run-child",
                 ),
             )
@@ -428,7 +429,8 @@ async def test_cancel_persistent_subagent_writes_cancelled_lifecycle(
                 tool_name="persistent-agent",
                 queue_id="child",
                 started=0.0,
-                kind="persistent_subagent",
+                kind="subagent",
+                lifecycle="serviced",
                 persistent_run_id="run-1",
                 notify_on_asleep=False,
             ),
@@ -471,7 +473,8 @@ async def test_cancel_persistent_subagent_helper_with_bg_entry() -> None:
                     tool_name="persistent-agent",
                     queue_id="child",
                     started=0.0,
-                    kind="persistent_subagent",
+                    kind="subagent",
+                    lifecycle="serviced",
                     persistent_run_id="run-child",
                 ),
             )
@@ -519,7 +522,8 @@ async def test_foreground_persistent_subagent_returns_without_detached_result() 
                     tool_name="persistent-agent",
                     queue_id="child",
                     started=0.0,
-                    kind="persistent_subagent",
+                    kind="subagent",
+                    lifecycle="serviced",
                     persistent_run_id="run-child",
                 ),
             )
@@ -530,7 +534,7 @@ async def test_foreground_persistent_subagent_returns_without_detached_result() 
         finally:
             _ = task.cancel()
     assert result.is_error
-    assert "Persistent subagent jobs cannot be foregrounded" in result.content
+    assert "Serviced subagent jobs cannot be foregrounded" in result.content
     assert "persistent:child" in agent.background
 
 

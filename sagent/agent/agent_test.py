@@ -605,6 +605,24 @@ async def test_agent_run_yields_idle_at_end() -> None:
 
 
 @pytest.mark.asyncio
+async def test_drive_until_first_idle_returns_first_post_work_result() -> None:
+    """T3: ``drive_until_first_idle`` skips the boot idle, returns real work.
+
+    The runtime publishes a boot ``AgentIdle`` at the top of the first
+    ``run_forever`` iteration -- before any work, with empty history. The
+    method must NOT return on that edge; it returns only on the first
+    post-work idle, carrying the assistant's actual reply.
+    """
+    model = StubModel(responses=[types.runtime.AssistantMessage(text="real answer")])
+    a = _build_agent(model=model)
+    result = await a.drive_until_first_idle(types.runtime.UserMessage(text="go"))
+    assert result.content == "real answer"
+    # ``drive_until_first_idle`` does NOT shut down; the loop is still live.
+    assert not a._shutting_down
+    a.shutdown(force=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.real_sleep
 async def test_agent_run_does_not_silently_drop_failed_detached_redrive() -> None:
     """A transient error on a post-idle detached re-drive must not vanish.
@@ -687,10 +705,10 @@ async def test_agent_run_does_not_silently_drop_failed_detached_redrive() -> Non
         )
     )
 
-    # Capture errors exactly as ``AgentSpawn._execute_child`` does: via an
-    # observer watching for ``ModelResponseError``, registered *first* (the
-    # same order ``_execute_child`` uses). This is the surface that decides
-    # ``is_error`` for the spawned child -- not the yielded stream.
+    # Capture errors exactly as ``AgentSpawn._run_oneshot_child`` does: via
+    # an observer watching for ``ModelResponseError``, registered *first*
+    # (the same order the oneshot path uses). This is the surface that
+    # decides ``is_error`` for the spawned child -- not the yielded stream.
     captured_errors: list[BaseException] = []
 
     def _capture_error(event: types.runtime.RuntimeEvent) -> None:
@@ -828,15 +846,15 @@ async def test_agent_run_waits_for_background_tool_result() -> None:
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
 async def test_agent_run_not_blocked_by_persistent_subagent() -> None:
-    """A live persistent subagent must not wedge a one-shot ``Agent.run``.
+    """A live serviced subagent must not wedge a one-shot ``Agent.run``.
 
     The background idle gate (``has_pending_background``) must report only
-    *finite, turn-scoped* work. Persistent subagents register in ``_bg``
-    with ``kind="persistent_subagent"`` and live indefinitely by design --
-    they own their own ``serve_forever`` and are explicitly spared by
-    ``shutdown`` (agent.py ``_should_cancel_background``). If the idle gate
-    counts them as pending, ``AgentIdle`` never fires and ``Agent.run``
-    hangs forever waiting on a daemon that never completes.
+    *finite, turn-scoped* work. Subagents register in ``_bg`` with
+    ``kind="subagent"`` and live indefinitely by design -- they own their
+    own ``serve_forever`` and are explicitly spared by ``shutdown``
+    (agent.py ``_should_cancel_background``). If the idle gate counts them
+    as pending, ``AgentIdle`` never fires and ``Agent.run`` hangs forever
+    waiting on a daemon that never completes.
     """
     model = StubModel(responses=[types.runtime.AssistantMessage(text="done")])
     a = _build_agent(model=model)
@@ -849,7 +867,8 @@ async def test_agent_run_not_blocked_by_persistent_subagent() -> None:
             tool_name="reviewer",
             queue_id="sub-1",
             started=0.0,
-            kind="persistent_subagent",
+            kind="subagent",
+            lifecycle="serviced",
             persistent_run_id="r1",
         ),
     )
@@ -862,8 +881,8 @@ async def test_agent_run_not_blocked_by_persistent_subagent() -> None:
         await asyncio.wait_for(_drive(), timeout=2.0)
     except TimeoutError:
         pytest.fail(
-            "Agent.run hung on a persistent subagent: has_pending_background"
-            " counts kind='persistent_subagent' as turn-blocking work"
+            "Agent.run hung on a serviced subagent: has_pending_background"
+            " counts kind='subagent' as turn-blocking work"
         )
     finally:
         _ = daemon.cancel()
@@ -947,9 +966,10 @@ async def test_has_pending_background_predicate_table() -> None:
             tool_name="x",
             queue_id="q",
             started=0.0,
-            kind=cast("Literal['tool', 'persistent_subagent', 'detached']", kind),
+            kind=cast("Literal['tool', 'subagent', 'detached']", kind),
+            lifecycle="serviced",
             hidden=hidden,
-            persistent_run_id="r" if kind == "persistent_subagent" else "",
+            persistent_run_id="r" if kind == "subagent" else "",
         )
 
     running, done = await _running(), await _done()
@@ -962,7 +982,7 @@ async def test_has_pending_background_predicate_table() -> None:
             ("live tool", _entry(running), True),
             ("done tool", _entry(done), False),
             ("hidden tool", _entry(running, hidden=True), False),
-            ("persistent subagent", _entry(running, kind="persistent_subagent"), False),
+            ("subagent", _entry(running, kind="subagent"), False),
             ("detached", _entry(running, kind="detached"), False),
         ]
         for label, entry, expected in cases:
@@ -976,7 +996,7 @@ async def test_has_pending_background_predicate_table() -> None:
         # (the tool blocks); after the tool drains, the subagent alone does not.
         a._bg.clear()
         a._bg["tool"] = _entry(running)
-        a._bg["sub"] = _entry(running, kind="persistent_subagent")
+        a._bg["sub"] = _entry(running, kind="subagent")
         assert a._has_pending_background() is True
         a._bg["tool"] = _entry(done)
         assert a._has_pending_background() is False, (
@@ -1271,15 +1291,19 @@ def test_agent_record_response_budget_exhaustion_raises() -> None:
     a.record_response(
         types.model.ModelResponse(message=types.runtime.AssistantMessage(text="x"))
     )
-    # Force an over-budget total and verify the next call raises a
-    # ``UserFacingError`` subclass (polished remediation, not raw
-    # ``RuntimeError``) so the REPL renderer surfaces it cleanly.
-    a.cost_tracker.total_cost_usd = 2.0
+    # The per-agent cap is checked against ``_own_cost_usd`` (this agent's
+    # own spend), not the shared root cost sink. A single over-cap response
+    # trips it; verify the raise is a ``UserFacingError`` subclass (polished
+    # remediation, not raw ``RuntimeError``).
     with pytest.raises(types.exceptions.BudgetExhaustedError) as exc_info:
         a.record_response(
-            types.model.ModelResponse(message=types.runtime.AssistantMessage(text="x"))
+            types.model.ModelResponse(
+                message=types.runtime.AssistantMessage(text="x"),
+                total_cost=2.0,
+            )
         )
     assert exc_info.value.max_budget_usd == 1.0
+    assert exc_info.value.total_cost_usd == pytest.approx(2.0)
     assert "Budget exhausted" in str(exc_info.value)
 
 
@@ -2517,7 +2541,8 @@ async def test_shutdown_force_preserves_persistent_subagent() -> None:
             queue_id="child",
             started=0.0,
             hidden=False,
-            kind="persistent_subagent",
+            kind="subagent",
+            lifecycle="serviced",
             persistent_run_id="run-child",
         ),
     )
@@ -2551,7 +2576,8 @@ async def test_shutdown_force_preserves_missing_registry_persistent_subagent() -
             queue_id="missing-child",
             started=0.0,
             hidden=False,
-            kind="persistent_subagent",
+            kind="subagent",
+            lifecycle="serviced",
             persistent_run_id="run-missing",
         ),
     )
@@ -6693,11 +6719,17 @@ def test_subagent_inherits_root_cost_tracker() -> None:
     assert child.cost_tracker.total_cost_usd == 0.0
 
 
-def test_persistent_subagent_shadows_root_cost_tracker() -> None:
-    """C5: persistent subagent gets its own cost tracker (parent unaffected)."""
+def test_serviced_subagent_cost_rolls_up_to_root() -> None:
+    """Unified lifecycle: a serviced subagent's cost rolls up to the root.
+
+    Every child -- oneshot or serviced -- inherits the root cost sink, so
+    the root's ``total_cost_usd`` is the whole tree's spend. The child's
+    own tracker stays at zero (it is not a root sink); its per-agent cap
+    is enforced against ``_own_cost_usd`` instead.
+    """
     root = _build_agent()
     child = _build_agent()
-    child._persistent = True
+    child._lifecycle = "serviced"
     response = types.model.ModelResponse(
         message=types.runtime.AssistantMessage(text="ok"),
         tokens=types.model.TokenCount(),
@@ -6705,8 +6737,33 @@ def test_persistent_subagent_shadows_root_cost_tracker() -> None:
     )
     with root._install_contextvars(), child._install_contextvars():
         child.record_response(response)
-    assert root.cost_tracker.total_cost_usd == 0.0
-    assert child.cost_tracker.total_cost_usd == pytest.approx(0.02)
+    assert root.cost_tracker.total_cost_usd == pytest.approx(0.02)
+    assert child.cost_tracker.total_cost_usd == 0.0
+
+
+def test_child_cost_records_once_on_root_tokens_self_only() -> None:
+    """T7: child cost hits the ROOT total once; root tokens stay self-only.
+
+    - ``root.cost_tracker.total_cost_usd`` gains the child's cost exactly once.
+    - ``root.cost_tracker.total`` (tokens) is unchanged -- token totals are
+      self-only, so the child's tokens never leak into the root's count.
+    - ``child._own_cost_usd`` equals the child's own cost (drives its cap).
+    """
+    root = _build_agent()
+    child = _build_agent()
+    response = types.model.ModelResponse(
+        message=types.runtime.AssistantMessage(text="ok"),
+        tokens=types.model.TokenCount(input_tokens=42, output_tokens=7),
+        total_cost=0.03,
+    )
+    with root._install_contextvars(), child._install_contextvars():
+        child.record_response(response)
+    assert root.cost_tracker.total_cost_usd == pytest.approx(0.03)
+    assert root.cost_tracker.total == types.model.TokenCount()
+    assert child.cost_tracker.total == types.model.TokenCount(
+        input_tokens=42, output_tokens=7
+    )
+    assert child._own_cost_usd == pytest.approx(0.03)
 
 
 def test_subagent_tool_state_depth_increments() -> None:
@@ -7515,7 +7572,8 @@ async def test_shutdown_force_false_cancels_detached_and_explicit_bg() -> None:
             tool_name="Y",
             queue_id="job-persistent",
             started=0.0,
-            kind="persistent_subagent",
+            kind="subagent",
+            lifecycle="serviced",
             persistent_run_id="run-persistent",
         ),
     )
@@ -7528,7 +7586,7 @@ async def test_shutdown_force_false_cancels_detached_and_explicit_bg() -> None:
         assert detached_task.cancelled()
         assert explicit_task.cancelled()
         assert not persistent_task.cancelled(), (
-            "persistent_subagent owns its own serve_forever; must NOT be cancelled"
+            "serviced subagent owns its own serve_forever; must NOT be cancelled"
         )
     finally:
         _ = persistent_task.cancel()
@@ -7786,17 +7844,19 @@ def test_agent_run_has_no_await_between_run_active_check_and_set() -> None:
 # --- A31: unified background-cancel predicate ------------------------------
 
 
-_BgKind = Literal["tool", "persistent_subagent", "detached"]
+_BgKind = Literal["tool", "subagent", "detached"]
 
 
 def _bg_entry(
     task: asyncio.Task[object],
     *,
     kind: _BgKind,
+    lifecycle: Literal["oneshot", "serviced"] = "serviced",
     hidden: bool = False,
 ) -> BackgroundTaskEntry:
-    # ``persistent_run_id`` is mandatory when ``kind="persistent_subagent"``
-    # and ignored otherwise; supplying a stub keeps the helper general.
+    # ``persistent_run_id`` is mandatory for a serviced subagent and ignored
+    # otherwise; supplying a stub keeps the helper general.
+    needs_run_id = kind == "subagent" and lifecycle == "serviced"
     return BackgroundTaskEntry(
         task=task,
         tool_name="t",
@@ -7804,7 +7864,8 @@ def _bg_entry(
         started=0.0,
         hidden=hidden,
         kind=kind,
-        persistent_run_id="run-test" if kind == "persistent_subagent" else "",
+        lifecycle=lifecycle,
+        persistent_run_id="run-test" if needs_run_id else "",
     )
 
 
@@ -7826,7 +7887,7 @@ async def test_should_cancel_background_tools_only_mode() -> None:
         )
         assert (
             _should_cancel_background(
-                _bg_entry(live, kind="persistent_subagent"), mode="tools_only"
+                _bg_entry(live, kind="subagent"), mode="tools_only"
             )
             is False
         )
@@ -7842,7 +7903,12 @@ async def test_should_cancel_background_tools_only_mode() -> None:
 
 @pytest.mark.asyncio
 async def test_should_cancel_background_all_mode() -> None:
-    """All mode cancels every non-hidden non-persistent live job."""
+    """All mode cancels every non-hidden live job except a serviced subagent.
+
+    A serviced subagent owns its own ``serve_forever`` and is exempt; a
+    oneshot subagent has self-stopped so it is NOT exempt (it would be
+    cancelled were it still live).
+    """
     loop = asyncio.get_running_loop()
     live = cast(asyncio.Task[object], loop.create_future())
     done_future = loop.create_future()
@@ -7858,9 +7924,15 @@ async def test_should_cancel_background_all_mode() -> None:
         )
         assert (
             _should_cancel_background(
-                _bg_entry(live, kind="persistent_subagent"), mode="all"
+                _bg_entry(live, kind="subagent", lifecycle="serviced"), mode="all"
             )
             is False
+        )
+        assert (
+            _should_cancel_background(
+                _bg_entry(live, kind="subagent", lifecycle="oneshot"), mode="all"
+            )
+            is True
         )
         assert (
             _should_cancel_background(

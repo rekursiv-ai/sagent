@@ -650,7 +650,8 @@ class SlackAdapter:
             session_dir=self._session_dir / label,
             persistent_retry=True,
         )
-        child._persistent = True  # noqa: SLF001 -- cross-layer flag on child agent
+        child._lifecycle = "serviced"  # noqa: SLF001 -- cross-layer serviced flag
+        child._is_subagent = True  # noqa: SLF001 -- cross-layer subagent flag
         agent_registry[label] = child
         self._active_agents[label] = {"persona": "custom", "system": system_text}
         _save_manifest(self._session_dir, self._active_agents)

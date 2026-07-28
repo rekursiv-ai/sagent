@@ -388,6 +388,96 @@ def int_val(value: object, default: int) -> int:
     return default
 
 
+@overload
+def dict_val(value: object) -> dict[str, object]: ...  # pragma: no cover
+
+
+@overload
+def dict_val[T](value: object, item: type[T]) -> dict[str, T]: ...  # pragma: no cover
+
+
+def dict_val[T](value: object, item: type[T | object] = object) -> dict[str, T]:
+    """Narrow a JSON-decoded value to a str-keyed dict, else empty.
+
+    Keys are coerced to ``str``; values are kept only when they are instances
+    of ``item`` (omit to keep every value), so ``dict_val(raw, int)`` yields a
+    ``dict[str, int]`` and the checker tracks the value type downstream. A
+    non-object value yields an empty dict, so reading an untyped ``json.loads``
+    result needs no isinstance guard at the call site. Wrap the result in
+    :class:`~types.MappingProxyType` for a frozen-dataclass field default.
+
+    Args:
+      value: Value to read, expected to be a JSON object.
+      item: Runtime type each value must be to be kept; omit to keep all.
+
+    Returns:
+      result: The value as a ``dict[str, item]``, possibly empty.
+
+    """
+    if not isinstance(value, Mapping):
+        return {}
+    src = cast(Mapping[object, object], value)
+    # ``isinstance(v, item)`` proves each kept value is ``T`` at runtime, but the
+    # ``type[T | object]`` default (needed to accept the no-arg overload) widens
+    # the static narrowing to ``object``; the overloads carry the exact type.
+    kept = {str(k): v for k, v in src.items() if isinstance(v, item)}
+    return cast("dict[str, T]", kept)
+
+
+@overload
+def list_val(value: object) -> list[object]: ...  # pragma: no cover
+
+
+@overload
+def list_val[T](value: object, item: type[T]) -> list[T]: ...  # pragma: no cover
+
+
+def list_val[T](value: object, item: type[T | object] = object) -> list[T]:
+    """Narrow a JSON-decoded value to a list, else empty.
+
+    Elements are kept only when they are instances of ``item`` (omit to keep
+    every element), so ``list_val(raw, str)`` yields a ``list[str]`` and the
+    checker tracks the element type downstream. A non-list value yields an empty
+    list, so reading an untyped ``json.loads`` result needs no isinstance guard
+    at the call site. Wrap the result in ``tuple(...)`` for a frozen-dataclass
+    field default.
+
+    Args:
+      value: Value to read, expected to be a JSON array.
+      item: Runtime type each element must be to be kept; omit to keep all.
+
+    Returns:
+      result: The value as a ``list[item]``, possibly empty.
+
+    """
+    if not isinstance(value, list):
+        return []
+    src = cast("list[object]", value)
+    # See ``dict_val``: the runtime ``isinstance`` proves ``T``; the defaulted
+    # ``type[T | object]`` widens the static narrowing, so cast to the contract.
+    kept = [x for x in src if isinstance(x, item)]
+    return cast("list[T]", kept)
+
+
+def dicts_val(value: object) -> list[dict[str, object]]:
+    """Narrow a JSON-decoded value to a list of str-keyed dicts, else empty.
+
+    Composes :func:`list_val` and :func:`dict_val` for the common shape of a
+    JSON array of objects (message parts, tool calls, records): non-list values,
+    non-object elements, and empty objects are dropped, and each kept element is
+    normalized to ``dict[str, object]`` so the caller can read its fields without
+    an isinstance guard.
+
+    Args:
+      value: Value to read, expected to be a JSON array of objects.
+
+    Returns:
+      result: The object elements as ``dict[str, object]``, possibly empty.
+
+    """
+    return [d for x in list_val(value) if (d := dict_val(x))]
+
+
 def str_val(value: object, default: str = "") -> str:
     """Return ``value`` if it is a string, else ``default``.
 
@@ -406,48 +496,6 @@ def str_val(value: object, default: str = "") -> str:
 
     """
     return value if isinstance(value, str) else default
-
-
-def str_list_val(value: object) -> tuple[str, ...]:
-    """Read a JSON array, keeping only its string elements as a tuple.
-
-    The list sibling of the scalar ``*_val`` accessors. A non-list value yields
-    an empty tuple; non-string elements are dropped rather than coerced, so a
-    malformed entry never fabricates a value (consistent with :func:`str_val`).
-
-    Args:
-      value: Value to read, expected to be a JSON array of strings.
-
-    Returns:
-      result: Tuple of the string elements, possibly empty.
-
-    """
-    if not isinstance(value, list):
-        return ()
-    return tuple(x for x in cast("list[object]", value) if isinstance(x, str))
-
-
-def str_map_val(value: object) -> Mapping[str, str]:
-    """Read a JSON object, keeping only its string-valued string keys.
-
-    The mapping sibling of :func:`str_list_val`. A non-object value yields an
-    empty mapping; entries whose key or value is not a string are dropped rather
-    than coerced. The result is an immutable :class:`MappingProxyType` so it is
-    safe as a frozen-dataclass field default and cannot be mutated by callers.
-
-    Args:
-      value: Value to read, expected to be a JSON object of string -> string.
-
-    Returns:
-      result: Immutable mapping of the string entries, possibly empty.
-
-    """
-    if not isinstance(value, dict):
-        return MappingProxyType({})
-    items = cast("dict[object, object]", value)
-    return MappingProxyType(
-        {k: v for k, v in items.items() if isinstance(k, str) and isinstance(v, str)}
-    )
 
 
 def datetime_val(value: object, default: datetime | None = None) -> datetime | None:

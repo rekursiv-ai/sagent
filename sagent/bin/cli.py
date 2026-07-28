@@ -1006,7 +1006,8 @@ def _start_resumed_persistent(
     label: str,
 ) -> None:
     """Register and launch a resumed persistent subagent."""
-    child._persistent = True  # noqa: SLF001 -- resume restores the persistent runtime mode
+    child._lifecycle = "serviced"  # noqa: SLF001 -- resume restores serviced runtime mode
+    child._is_subagent = True  # noqa: SLF001 -- resumed child is a subagent
     child.name = label
     agent_registry[label] = child
     forwarder = _build_forwarder(
@@ -1029,7 +1030,8 @@ def _start_resumed_persistent(
             queue_id=label,
             started=time.time(),
             hidden=False,
-            kind="persistent_subagent",
+            kind="subagent",
+            lifecycle="serviced",
             persistent_run_id=record.run_id,
             notify_on_asleep=record.notify_on_asleep,
         ),

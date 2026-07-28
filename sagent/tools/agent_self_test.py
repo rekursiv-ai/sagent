@@ -451,7 +451,8 @@ async def test_diagnostics_reports_live_cost_tracker_state() -> None:
         ),
         total_cost=0.42,
     )
-    agent.cost_tracker.record(response, model_id="stub-1")
+    agent.cost_tracker.record_tokens(response, model_id="stub-1")
+    agent.cost_tracker.record_cost(response)
     agent.activity.num_tool_call_rounds = 2
     t = AgentSelf()
     with _active(agent):

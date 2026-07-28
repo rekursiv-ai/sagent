@@ -284,9 +284,26 @@ class Agent:
             else uuid.uuid4().hex[:8]
         )
         self._status: str = ""
-        self._persistent: bool = False
+        # Lifecycle policy set once at spawn. ``"oneshot"`` stops after the
+        # first post-work idle (the drive-until-first-idle usage); ``"serviced"``
+        # keeps its ``serve_forever`` loop alive, servicing its inbox until an
+        # explicit shutdown. Both are addressable in ``agent_registry`` for
+        # their whole life.
+        self._lifecycle: Literal["oneshot", "serviced"] = "oneshot"
+        # Per-agent cost accumulator for ``max_budget_usd`` enforcement. Cost
+        # rolls up to the root ``cost_root_var`` tracker for the tree total;
+        # this plain float tracks only THIS agent's own spend so a subagent's
+        # budget cap is checked against its own calls, not the tree.
+        self._own_cost_usd: float = 0.0
+        # True for agents spawned by ``AgentSpawn`` (both lifecycles). The root
+        # REPL/CLI agent leaves it False so ``/send`` / ``/halt all`` can
+        # target every subagent while never routing to the root or to self.
+        self._is_subagent: bool = False
         self._shutting_down: bool = False
         self._run_active: bool = False
+        # Live ``serve_forever`` task from ``drive_until_first_idle``, kept so
+        # a one-shot caller can await the loop to completion after shutdown.
+        self._drive_task: asyncio.Task[None] | None = None
         # Rate-limit advisories already shown, keyed by ``(label, blocked)`` so
         # a window escalating warn -> blocked still re-fires; cleared when the
         # window drops below the hysteresis clear point.
@@ -324,8 +341,8 @@ class Agent:
         # turn-scoped ``_bg`` tool is unfinished work, so ``AgentIdle`` must
         # not fire (and ``Agent.run`` must not reap) until it drains. Only
         # ``kind="tool"`` non-hidden, still-running jobs count -- mirroring
-        # ``_should_cancel_background``'s taxonomy. Persistent subagents and
-        # hidden infra (REPL pump, watchdogs) live indefinitely by design;
+        # ``_should_cancel_background``'s taxonomy. Subagents and hidden
+        # infra (REPL pump, watchdogs) live indefinitely by design;
         # counting them would wedge a one-shot ``Agent.run`` forever.
         self.runtime.has_pending_background = self._has_pending_background
         for fn in (
@@ -621,6 +638,21 @@ class Agent:
         return self._session_id
 
     @property
+    def is_serviced(self) -> bool:
+        """True when this agent keeps serving its inbox after the first idle.
+
+        ``"serviced"`` agents run ``serve_forever`` until an explicit
+        shutdown; ``"oneshot"`` agents self-stop after the first post-work
+        idle. Both are live, inbox-serviceable loops while running.
+        """
+        return self._lifecycle == "serviced"
+
+    @property
+    def is_subagent(self) -> bool:
+        """True when spawned by ``AgentSpawn`` (either lifecycle)."""
+        return self._is_subagent
+
+    @property
     def status(self) -> str:
         """Free-form status string surfaced by the status pane."""
         return self._status
@@ -723,7 +755,7 @@ class Agent:
 
     @property
     def background(self) -> dict[str, BackgroundTaskEntry]:
-        """Merged view: cohort-detached tools + explicit-bg + persistent + REPL pump."""
+        """Merged view: cohort-detached tools + explicit-bg + subagents + REPL pump."""
         merged: dict[str, BackgroundTaskEntry] = {}
         for call_id, task in self.runtime.detached.items():
             name, started = self._tool_registry.get(call_id, ("?", time.time()))
@@ -808,7 +840,7 @@ class Agent:
         name: str,
         system: SystemPromptArg,
         session_dir: str | Path | None,
-        persistent: bool,
+        lifecycle: Literal["oneshot", "serviced"],
     ) -> Agent:
         """Recreate this agent with construction-time identity fields changed."""
         rebuilt = Agent(
@@ -833,7 +865,8 @@ class Agent:
         )
         rebuilt.cache_ttl = self.cache_ttl
         rebuilt.service_tier = self.service_tier
-        rebuilt._persistent = persistent
+        rebuilt._lifecycle = lifecycle
+        rebuilt._is_subagent = self._is_subagent
         return rebuilt
 
     def replace_tool(self, name: str, tool: types.tools.Tool) -> None:
@@ -1256,10 +1289,10 @@ class Agent:
 
         Cancels long-lived tasks that would otherwise outlive
         ``serve_forever`` and write to a dead inbox: every cohort-decayed
-        ``runtime.detached`` task, and every non-persistent explicit
-        ``background: true`` tool job in ``self._bg``. Persistent
-        subagents are exempt -- they own their own ``serve_forever`` and
-        are never touched by the parent's shutdown.
+        ``runtime.detached`` task, and every explicit ``background: true``
+        tool job in ``self._bg``. Serviced subagents are exempt -- they
+        own their own ``serve_forever`` and are never touched by the
+        parent's shutdown; oneshot subagents have already self-stopped.
 
         ``force=True`` additionally drains the foreground cohort by
         pushing a ``Kill()`` verb before ``Quit()``. The cooperative
@@ -1331,9 +1364,74 @@ class Agent:
         )
 
     async def serve_forever(self) -> None:
-        """Drive the agent until ``shutdown`` is called."""
-        with self._install_contextvars():
-            await self.runtime.run_forever()
+        """Drive the agent until ``shutdown`` is called.
+
+        Registration lifetime is decoupled from any single driver task:
+        :meth:`register` writes the ``agent_registry`` entry before the
+        loop starts and :meth:`deregister` removes it after the loop
+        exits, so the stable label is addressable by ``/send`` and
+        ``AgentSend`` for the agent's whole serving life -- one-shot and
+        serviced alike.
+
+        When a spawner already owns the registry entry (it registered
+        ``self`` synchronously so the label is visible the instant the
+        spawn tool returns), this reuses that label and does NOT own the
+        deregister -- the spawner's teardown path does. Otherwise (the
+        root agent, direct ``serve_forever`` callers) this self-registers
+        and self-deregisters.
+        """
+        preexisting = self._registered_label()
+        owns_registry = preexisting is None
+        label = preexisting or self._dedup_label()
+        if owns_registry:
+            self.register(label)
+        try:
+            with self._install_contextvars(label=label):
+                await self.runtime.run_forever()
+        finally:
+            if owns_registry:
+                self.deregister(label)
+
+    def _registered_label(self) -> str | None:
+        """Return the ``agent_registry`` label already bound to ``self``."""
+        for existing_label, agent in agent_registry.items():
+            if agent is self:
+                return existing_label
+        return None
+
+    def register(self, label: str) -> None:
+        """Insert this agent into ``agent_registry`` under ``label``.
+
+        Spawner-owned: the registry entry's lifetime is the agent's
+        serving life, not one driver task's. Call :meth:`deregister` with
+        the same label to remove it.
+
+        Args:
+          label: Deduplicated registry key (see :meth:`_dedup_label`).
+
+        """
+        agent_registry[label] = self
+
+    def deregister(self, label: str) -> None:
+        """Remove this agent's ``agent_registry`` entry under ``label``.
+
+        Args:
+          label: The label previously passed to :meth:`register`.
+
+        """
+        if agent_registry.get(label) is self:
+            _ = agent_registry.pop(label, None)
+
+    def _dedup_label(self) -> str:
+        """Return the stable spawn label, de-duplicated against collisions.
+
+        Both lifecycles register under their stable label (``self.name``
+        for a spawned child, or the inherited ``agent_label_var``). A
+        numeric suffix is appended only on collision so ``AgentSend`` can
+        still address a specific agent when several share a base name.
+        """
+        base_label = self.name or agent_label_var.get("") or "Agent"
+        return unique_registry_label(base_label)
 
     async def run(
         self, msg: types.runtime.UserMessage
@@ -1434,54 +1532,135 @@ class Agent:
                 self.runtime.observers.remove(_watch)
             self._run_active = False
 
+    async def drive_until_first_idle(
+        self,
+        msg: types.runtime.UserMessage,
+        *,
+        result_of: Callable[
+            [list[types.runtime.ModelContextEvent]], types.runtime.ToolResult
+        ]
+        | None = None,
+    ) -> types.runtime.ToolResult:
+        """Push ``msg``, serve until the first post-work idle, return its result.
+
+        Unlike :meth:`run`, this does NOT shut down: it leaves the agent's
+        ``serve_forever`` loop live so a serviced agent keeps servicing its
+        inbox after the first reply. One-shot callers shut down explicitly
+        after this returns.
+
+        The runtime publishes a boot ``AgentIdle`` at the top of the first
+        ``run_forever`` iteration -- before any work, with empty history.
+        That boot edge is suppressed by :func:`_is_work_idle`; the method
+        returns only on the first idle where the agent has actually
+        produced work.
+
+        Args:
+          msg: User message to push and drive to the first work idle.
+          result_of: Extractor turning the final history into a
+              ``ToolResult``; defaults to the last assistant message's text.
+
+        Returns:
+          result: The first post-work reply as a ``ToolResult``.
+
+        Raises:
+          RuntimeError: When another driver is already in flight on this agent.
+
+        """
+        if self._run_active:
+            raise RuntimeError(
+                "Agent.drive_until_first_idle is not reentrant; another caller"
+                f" already drives this agent (session_id={self._session_id})."
+            )
+        self._run_active = True
+        first_idle: asyncio.Event = asyncio.Event()
+
+        def _watch(event: types.runtime.RuntimeEvent) -> None:
+            # Two terminal edges. (1) A post-work ``AgentIdle`` -- the normal
+            # first-result return. (2) A ``ModelResponseError`` -- the child
+            # produced no work idle, so returning lets the caller surface the
+            # error instead of blocking until the (still-live) loop is shut down.
+            if isinstance(event, types.runtime.ModelResponseError) or (
+                isinstance(event, types.runtime.AgentIdle)
+                and _is_work_idle(self.history)
+            ):
+                first_idle.set()
+
+        self.runtime.observers.append(_watch)
+        try:
+            self.runtime.inbox.push_back(msg)
+            drive = asyncio.create_task(self.serve_forever())
+            # Expose the live loop task so a one-shot caller can await it to
+            # completion after it pushes ``shutdown`` -- the loop keeps
+            # running when this method returns.
+            self._drive_task = drive
+            drive.add_done_callback(
+                types.exceptions.log_task_exception(
+                    logger, "drive_until_first_idle drive task crashed"
+                ),
+            )
+            idle_task = asyncio.create_task(first_idle.wait())
+            # Wait on the drive task too: a crash/Quit ends the loop without
+            # ever firing a work idle, so ``first_idle`` would never set.
+            _done, _pending = await asyncio.wait(
+                {idle_task, drive},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not idle_task.done():
+                _ = idle_task.cancel()
+            extractor = result_of or _default_last_assistant_result
+            return extractor(self.history)
+        finally:
+            if _watch in self.runtime.observers:
+                self.runtime.observers.remove(_watch)
+            self._run_active = False
+
     # -- Internal helpers ---------------------------------------------
 
     @contextlib.contextmanager
-    def _install_contextvars(self):
+    def _install_contextvars(self, *, label: str | None = None):
         """Install per-agent ContextVars for the lifetime of the block.
 
-        Non-persistent subagents inherit the parent's cost tracker so
-        the root sees the full spawn-tree spend (and ``max_budget_usd``
-        caps the tree, not just the root's own calls). Tool-state depth
-        is incremented from the parent so ``AgentSpawn`` depth caps
-        actually fire. Default-name collisions in ``agent_registry``
-        are resolved with a numeric suffix so ``AgentSend`` can address
-        a specific agent even when several share a base name.
+        Every child inherits the root's cost tracker via ``cost_root_var``
+        so the root sees the full spawn-tree spend (and ``max_budget_usd``
+        caps each agent against its own ``_own_cost_usd``, not the shared
+        sink). Tool-state depth is incremented from the parent so
+        ``AgentSpawn`` depth caps actually fire.
+
+        Registry ownership is NOT held here -- :meth:`register` /
+        :meth:`deregister` own the ``agent_registry`` entry with a lifetime
+        decoupled from any one driver task. When ``label`` is None (direct
+        callers, tests) this CM registers and deregisters itself so the
+        registry entry still exists for the block; when ``label`` is passed
+        (``serve_forever``) the caller owns the registry and this CM only
+        binds the ContextVars.
+
+        Args:
+          label: Deduplicated registry label already owned by the caller,
+              or ``None`` to have this CM dedup and own the entry itself.
+
         """
         agent_token = current_agent_var.set(self)
         parent_root = cost_root_var.get(None)
+        # Every child inherits the root cost sink so cost rolls up to one
+        # place. Only the true root (no ambient sink) installs itself.
         cost_token: contextvars.Token[CostTracker | None] | None = (
-            cost_root_var.set(self.cost_tracker)
-            if self._persistent or parent_root is None
-            else None
+            cost_root_var.set(self.cost_tracker) if parent_root is None else None
         )
         parent_state = tool_state_var.get(None)
         prior_depth = self.tool_state.depth
         self.tool_state.depth = 0 if parent_state is None else parent_state.depth + 1
-        # Persistent agents have a definite ``self.name`` set by
-        # ``AgentSpawn._spawn_persistent`` and own their own task; their
-        # identity must come from ``self.name`` directly. Inheriting
-        # ``agent_label_var`` from the parent task (``asyncio.create_task``
-        # copies the current context) would silently overwrite the parent's
-        # registry entry -- e.g. spawning persistent ``"reviewer-opus"``
-        # from a parent with label ``"Agent"`` would set
-        # ``agent_registry["Agent"] = reviewer_opus``, and then every
-        # ``AgentSend("Agent", ...)`` from any sub would route to the
-        # reviewer instead of the running parent.
-        if self._persistent:
-            label = self.name
-        else:
-            base_label = agent_label_var.get("") or self.name
-            label = unique_registry_label(base_label)
+        owns_registry = label is None
+        if label is None:
+            label = self._dedup_label()
+            self.register(label)
         label_token = agent_label_var.set(label)
         counter_token = agent_counter_var.set(itertools.count())
         state_token = tool_state_var.set(self.tool_state)
-        agent_registry[label] = self
         try:
             yield
         finally:
-            if agent_registry.get(label) is self:
-                _ = agent_registry.pop(label, None)
+            if owns_registry:
+                self.deregister(label)
             tool_state_var.reset(state_token)
             agent_counter_var.reset(counter_token)
             agent_label_var.reset(label_token)
@@ -1564,26 +1743,31 @@ class Agent:
     # -- Observers ----------------------------------------------------
 
     def record_response(self, response: types.model.ModelResponse) -> None:
-        """Record a completed response into ``cost_tracker``.
+        """Record a completed response: tokens self-only, cost to the root sink.
 
-        Writes through to ``cost_root_var.get(self.cost_tracker)`` so
-        subagents accumulate into the root agent's tracker.
+        Tokens (and per-call provenance) go to ``self.cost_tracker`` so the
+        status pane's per-agent token count stays self-only. Cost goes to
+        the root cost sink (``cost_root_var``) so ``root.total_cost_usd`` is
+        the whole spawn tree's spend, counted exactly once per response. The
+        per-agent budget cap is checked against ``_own_cost_usd`` -- this
+        agent's own spend -- so a subagent's cap governs the subagent, not
+        the tree.
 
         Args:
           response: Completed model response with token counts and cost.
 
         Raises:
-          BudgetExhaustedError: Cumulative cost reached ``max_budget_usd``.
+          BudgetExhaustedError: This agent's own cost reached ``max_budget_usd``.
 
         """
-        target = cost_root_var.get(None) or self.cost_tracker
-        target.record(response, model_id=self.model.model_id)
+        self.cost_tracker.record_tokens(response, model_id=self.model.model_id)
+        cost_sink = cost_root_var.get(None) or self.cost_tracker
+        cost_sink.record_cost(response)
+        self._own_cost_usd += response.total_cost
         # Anchor the proactive compaction trigger on the provider's exact
         # input usage. The three token pools are disjoint by the
         # ``TokenCount`` convention (input is non-cached), so their sum is the
-        # full prompt size the server counted. Recorded on ``self`` (not
-        # ``target``) so a cost-rooted subagent still gates on its own last
-        # request.
+        # full prompt size the server counted.
         self._last_input_tokens = (
             response.tokens.input_tokens
             + response.tokens.cache_creation_tokens
@@ -1591,10 +1775,10 @@ class Agent:
         )
         if (
             self._max_budget_usd is not None
-            and target.total_cost_usd >= self._max_budget_usd
+            and self._own_cost_usd >= self._max_budget_usd
         ):
             raise types.exceptions.BudgetExhaustedError(
-                total_cost_usd=target.total_cost_usd,
+                total_cost_usd=self._own_cost_usd,
                 max_budget_usd=self._max_budget_usd,
             )
         self._surface_usage_warning()
@@ -1842,9 +2026,9 @@ class Agent:
         / one-shot ``Agent.run`` termination). Only ``kind="tool"``,
         non-hidden, not-yet-done jobs count -- the same taxonomy
         ``_should_cancel_background`` uses to decide what a turn owns.
-        Persistent subagents (``kind="persistent_subagent"``) and hidden
-        infra (REPL pump, watchdogs) live past the turn by design, so
-        counting them would wedge ``Agent.run`` on work that never ends.
+        Subagents (``kind="subagent"``) and hidden infra (REPL pump,
+        watchdogs) live past the turn by design, so counting them would
+        wedge ``Agent.run`` on work that never ends.
 
         Do NOT bound a tool's duration here. Boundedness is the tool's
         responsibility, not the agent's: ``Bash`` self-caps its timeout,
@@ -2160,6 +2344,40 @@ def _context_overflow_error(
         attempts=attempts,
         final_tokens=final_tokens,
     )
+
+
+def _is_work_idle(history: list[types.runtime.ModelContextEvent]) -> bool:
+    """True when an ``AgentIdle`` reflects real work, not the boot transition.
+
+    The runtime publishes its first ``AgentIdle`` at the top of the first
+    ``run_forever`` iteration -- before the agent has done any work. An
+    empty history is the unambiguous marker of that boot edge. Shared by
+    :meth:`Agent.drive_until_first_idle` (which must not return on boot)
+    and the persistent-child forwarder (which must not spam a boot ping).
+
+    Args:
+      history: The agent's resolved history at idle time.
+
+    Returns:
+      is_work: True when history is non-empty (post-work idle).
+
+    """
+    return bool(history)
+
+
+def _default_last_assistant_result(
+    history: list[types.runtime.ModelContextEvent],
+) -> types.runtime.ToolResult:
+    """Return the last ``AssistantMessage``'s text as a ``ToolResult``.
+
+    The default result extractor for :meth:`Agent.drive_until_first_idle`
+    when the caller supplies none. ``AgentSpawn`` passes its own
+    ``AgentSend``-aware extractor instead.
+    """
+    for entry in reversed(history):
+        if isinstance(entry, types.runtime.AssistantMessage):
+            return types.runtime.ToolResult(call_id="", content=entry.text)
+    return types.runtime.ToolResult(call_id="", content="")
 
 
 def _last_assistant_index(
@@ -3286,11 +3504,12 @@ def _should_cancel_background(
     - ``tools_only`` -- ``Agent._cancel_all_background`` (called from
       ``clear()`` and ``kill_all_tools()``). Drops only user-scheduled
       ``background: true`` tool jobs; ``detached`` (cohort-decayed) and
-      ``persistent_subagent`` survive because those have their own
-      lifecycle owners.
-    - ``all`` -- ``Agent.shutdown``. Drops every visible non-persistent
-      job because the process is exiting; persistent subagents own
-      their own ``serve_forever`` and shut themselves down.
+      ``subagent`` survive because those have their own lifecycle owners.
+    - ``all`` -- ``Agent.shutdown``. Drops every visible job whose owner
+      is the exiting process; a serviced subagent owns its own
+      ``serve_forever`` and shuts itself down, so it is exempt. A oneshot
+      subagent has self-stopped after its first result, so it is
+      effectively gone already.
 
     Both modes skip ``hidden=True`` infra (REPL pump, watchdogs).
     """
@@ -3300,4 +3519,4 @@ def _should_cancel_background(
         return job.kind == "tool"
     if job.task.done():
         return False
-    return job.kind != "persistent_subagent"
+    return not (job.kind == "subagent" and job.lifecycle == "serviced")

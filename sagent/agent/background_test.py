@@ -114,11 +114,11 @@ def test_split_bg_args_rejects_negative_delay_by_coercion() -> None:
 
 
 def test_background_task_entry_rejects_empty_persistent_run_id() -> None:
-    """E1: ``kind='persistent_subagent'`` requires a non-empty run id.
+    """E1: a serviced ``kind='subagent'`` requires a non-empty run id.
 
-    The persistent-driver bookkeeping keys off ``persistent_run_id``;
-    an empty id silently aliases two distinct subagents to the same
-    slot. Catch at construction.
+    The serviced-driver bookkeeping keys off ``persistent_run_id``; an
+    empty id silently aliases two distinct subagents to the same slot.
+    Catch at construction.
     """
     loop = asyncio.new_event_loop()
     try:
@@ -129,9 +129,30 @@ def test_background_task_entry_rejects_empty_persistent_run_id() -> None:
                 tool_name="child",
                 queue_id="q",
                 started=0.0,
-                kind="persistent_subagent",
+                kind="subagent",
+                lifecycle="serviced",
                 persistent_run_id="",
             )
+        _ = task.cancel()
+        loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+    finally:
+        loop.close()
+
+
+def test_background_task_entry_allows_empty_run_id_for_oneshot_subagent() -> None:
+    """A oneshot subagent has no serviced-driver bookkeeping, so no run id."""
+    loop = asyncio.new_event_loop()
+    try:
+        task = loop.create_task(asyncio.sleep(0))
+        entry = BackgroundTaskEntry(
+            task=task,
+            tool_name="child",
+            queue_id="q",
+            started=0.0,
+            kind="subagent",
+            lifecycle="oneshot",
+        )
+        assert entry.persistent_run_id == ""
         _ = task.cancel()
         loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
     finally:

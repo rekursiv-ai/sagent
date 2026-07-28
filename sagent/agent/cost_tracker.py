@@ -1,25 +1,27 @@
 """Per-session token and cost accounting.
 
-The single store: every model response across the entire spawn tree
-writes through ``Agent._record_response`` to the ``CostTracker`` that
-the root agent installed in ``cost_root_var`` at lifecycle open.
-Sub-agent responses land in the root's tracker by ContextVar
-inheritance; persistent sub-agents shadow the var with their own
-tracker so they accumulate independently.
+Recording is split across two sinks. Cost rolls up to one place; tokens
+stay local:
 
-Two methods, both name what they do:
+- Every agent calls :meth:`record_tokens` on its OWN tracker, so
+  ``total`` is that agent's self-only token count (what the status pane
+  renders per agent).
+- Cost is recorded once on the root cost sink -- the ``CostTracker`` the
+  root agent installed in ``cost_root_var`` at lifecycle open -- via
+  :meth:`record_cost`, so ``root.total_cost_usd`` is the whole spawn
+  tree's spend counted exactly once per response. Each agent separately
+  tracks its own cost on ``Agent._own_cost_usd`` (a plain float) for its
+  ``max_budget_usd`` cap; the cap is per-agent, the rollup is tree-wide.
 
-- :meth:`record` -- write one model response. Always live; status pane reads
-  ``tracker.total*`` directly.
+Three methods, each named for what it does:
+
+- :meth:`record_tokens` -- token totals + per-call provenance, self-only.
+- :meth:`record_cost` -- cumulative USD cost; root sink only.
 - :meth:`restore_totals` -- session-resume hook; overwrites cumulative
   totals (``total_cost_usd`` + ``total``) from persisted metadata.
   Per-call provenance (``calls_by_model``, ``last_request``,
   ``last_response_time``) is intentionally *not* restored: those describe
   the live process's call history, and resume restarts that history.
-
-There is no fold step, no snapshot, no second store. ``Agent`` keeps a
-small ``_run_start`` snapshot for ``last_run_*`` deltas, but that is
-internal bookkeeping, not a separate cost store.
 """
 
 from __future__ import annotations
@@ -54,19 +56,36 @@ class CostTracker:
     treat any value within the first second of process start as a
     placeholder rather than a real model response."""
 
-    def record(self, response: ModelResponse, *, model_id: str) -> None:
-        """Update totals from one completed model response.
+    def record_tokens(self, response: ModelResponse, *, model_id: str) -> None:
+        """Update token totals + per-call provenance from one response.
+
+        The token half of the recording split: every agent calls this on
+        its OWN tracker so ``total`` stays self-only (the status pane's
+        per-agent token count). The cost half is :meth:`record_cost`,
+        which the root sink alone accumulates for the tree rollup.
 
         Args:
-          response: Completed model response with token counts and cost.
+          response: Completed model response with token counts.
           model_id: Model identifier for per-model call tracking.
 
         """
         self.last_request = response.tokens
         self.last_response_time = time.time()
         self.total = self.total + response.tokens
-        self.total_cost_usd += response.total_cost
         self.calls_by_model[model_id] = self.calls_by_model.get(model_id, 0) + 1
+
+    def record_cost(self, response: ModelResponse) -> None:
+        """Add one response's cost to the cumulative USD total.
+
+        The cost half of the recording split: recorded once on the root
+        cost sink (via ``cost_root_var``) so ``total_cost_usd`` is the
+        whole spawn tree's spend, counted exactly once per response.
+
+        Args:
+          response: Completed model response carrying ``total_cost``.
+
+        """
+        self.total_cost_usd += response.total_cost
 
     def restore_totals(self, *, total_cost_usd: float, total: TokenCount) -> None:
         """Overwrite cumulative totals from persisted session metadata.

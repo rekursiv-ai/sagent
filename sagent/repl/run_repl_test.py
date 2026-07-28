@@ -1084,10 +1084,17 @@ async def test_run_repl_unwinds_observers_and_before_tool_spawn(
 
 
 @pytest.mark.asyncio
-async def test_repl_teardown_skips_persistent_subagent_tasks_after_shutdown() -> None:
+async def test_repl_teardown_skips_subagent_tasks_after_shutdown() -> None:
+    """T8: unified ``kind='subagent'`` children (both lifecycles) are exempt
+    from REPL raw-cancel; only ``kind='tool'`` jobs are returned.
+
+    A subagent owns its own ``serve_forever`` loop and must be stopped
+    gracefully, never raw-cancelled from the REPL teardown.
+    """
     agent = _FakeAgent()
     tool_task = asyncio.create_task(asyncio.sleep(10.0))
-    child_task = asyncio.create_task(asyncio.sleep(10.0))
+    serviced_task = asyncio.create_task(asyncio.sleep(10.0))
+    oneshot_task = asyncio.create_task(asyncio.sleep(10.0))
     agent.background = {
         "tool": BackgroundTaskEntry(
             task=tool_task,
@@ -1097,13 +1104,23 @@ async def test_repl_teardown_skips_persistent_subagent_tasks_after_shutdown() ->
             kind="tool",
             hidden=False,
         ),
-        "child": BackgroundTaskEntry(
-            task=child_task,
+        "serviced": BackgroundTaskEntry(
+            task=serviced_task,
             tool_name="Agent",
-            queue_id="child",
+            queue_id="serviced",
             started=0.0,
-            kind="persistent_subagent",
+            kind="subagent",
+            lifecycle="serviced",
             persistent_run_id="run-child",
+            hidden=False,
+        ),
+        "oneshot": BackgroundTaskEntry(
+            task=oneshot_task,
+            tool_name="Agent",
+            queue_id="oneshot",
+            started=0.0,
+            kind="subagent",
+            lifecycle="oneshot",
             hidden=False,
         ),
     }
@@ -1111,8 +1128,11 @@ async def test_repl_teardown_skips_persistent_subagent_tasks_after_shutdown() ->
         assert _background_tasks_for_repl_cancel(_as_agent(agent)) == [tool_task]
     finally:
         _ = tool_task.cancel()
-        _ = child_task.cancel()
-        await asyncio.gather(tool_task, child_task, return_exceptions=True)
+        _ = serviced_task.cancel()
+        _ = oneshot_task.cancel()
+        await asyncio.gather(
+            tool_task, serviced_task, oneshot_task, return_exceptions=True
+        )
 
 
 @pytest.mark.asyncio
@@ -2014,7 +2034,7 @@ async def test_repl_commit_during_cohort_preempts_tools_to_background() -> None:
 
 
 def _make_subagent_job(queue_id: str = "child-1") -> BackgroundTaskEntry:
-    """Return a BackgroundTaskEntry with kind='persistent_subagent'."""
+    """Return a BackgroundTaskEntry with kind='subagent'."""
     task = MagicMock()
     task.done.return_value = False
     task.cancelled.return_value = False
@@ -2023,7 +2043,7 @@ def _make_subagent_job(queue_id: str = "child-1") -> BackgroundTaskEntry:
         tool_name="AgentSpawn",
         queue_id=queue_id,
         started=0.0,
-        kind="persistent_subagent",
+        kind="subagent",
         persistent_run_id=f"run-{queue_id}",
         hidden=False,
         delay_sec=0.0,
@@ -2056,7 +2076,7 @@ def test_subagent_phase_stopped_when_task_done() -> None:
         tool_name="AgentSpawn",
         queue_id="child-1",
         started=0.0,
-        kind="persistent_subagent",
+        kind="subagent",
         persistent_run_id="run-child-1",
         hidden=False,
         delay_sec=0.0,
@@ -2113,7 +2133,7 @@ def test_subagent_phase_errored_when_task_crashed() -> None:
         tool_name="AgentSpawn",
         queue_id="child-crashed",
         started=0.0,
-        kind="persistent_subagent",
+        kind="subagent",
         persistent_run_id="run-child-crashed",
         hidden=False,
         delay_sec=0.0,
