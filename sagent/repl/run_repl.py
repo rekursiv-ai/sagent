@@ -171,11 +171,16 @@ async def run_repl(
 
 
 def _background_tasks_for_repl_cancel(agent: Agent) -> list[asyncio.Task[object]]:
-    """Return unfinished REPL-owned background tasks safe to raw-cancel."""
+    """Return unfinished REPL-owned background tasks safe to raw-cancel.
+
+    Subagents (either lifecycle) own their own ``serve_forever`` loop and
+    must be stopped gracefully, never raw-cancelled from the REPL
+    teardown -- so they are excluded here.
+    """
     return [
         job.task
         for job in list(agent.background.values())
-        if job.kind != "persistent_subagent" and not job.task.done()
+        if job.kind != "subagent" and not job.task.done()
     ]
 
 
@@ -509,7 +514,7 @@ def format_tasks(agent: Agent) -> str:
         tag = " (self)" if other is agent else ""
         lines.append(f"  {label}{tag:<8s}  fg={fg} bg={bg_n}")
         for job in visible_bg:
-            if job.kind == "persistent_subagent":
+            if job.kind == "subagent":
                 phase = _subagent_phase(job)
             else:
                 phase = _generic_job_phase(job, now)

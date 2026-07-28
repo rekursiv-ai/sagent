@@ -97,6 +97,34 @@ def test_discover_ignores_files_inside_root(tmp_path: Path) -> None:
     assert out == []
 
 
+def test_discover_finds_nested_child_skill(tmp_path: Path) -> None:
+    # Parent skill ``trax`` with a nested child doc ``trax/paper/SKILL.md``
+    # whose frontmatter name is ``trax-paper``. Both must register.
+    parent = _write_skill(tmp_path, "trax", description="parent").parent
+    child = parent / "paper"
+    child.mkdir()
+    (child / "SKILL.md").write_text(
+        "---\nname: trax-paper\ndescription: author a Paper\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    out = discover(tmp_path)
+    names = {s.name for s in out}
+    assert "trax" in names
+    assert "trax-paper" in names
+
+
+def test_discover_nested_survives_symlink_cycle(tmp_path: Path) -> None:
+    # ``.claude`` -> ``.sagent`` style self-link must not loop forever.
+    parent = _write_skill(tmp_path, "trax", description="parent").parent
+    loop_link = parent / "self"
+    try:
+        loop_link.symlink_to(tmp_path / ".sagent" / "skills")
+    except OSError:
+        pytest.skip("symlinks unsupported on this platform")
+    out = discover(tmp_path)
+    assert "trax" in {s.name for s in out}
+
+
 def test_discover_falls_back_to_first_nonempty_line(tmp_path: Path) -> None:
     """When frontmatter lacks ``description``, the first non-header line wins."""
     skill_dir = tmp_path / ".sagent" / "skills" / "alpha"

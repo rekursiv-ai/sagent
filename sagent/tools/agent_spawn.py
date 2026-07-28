@@ -18,6 +18,7 @@ itself *is* the registry for those objects.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -79,6 +80,9 @@ from sagent.types.tools import Tool
 
 
 agent_lib = lazy_import("sagent.agent")
+# The concrete module (not the package facade) owns the private
+# ``_is_work_idle`` boot/work-idle predicate shared with the forwarder.
+_agent_module = lazy_import("sagent.agent.agent")
 
 if TYPE_CHECKING:
     from sagent.agent import (
@@ -541,17 +545,14 @@ class AgentSpawn:
         child_path = f"{parent_path}_{child_idx}" if parent_path else str(child_idx)
         label = custom_label or f"Agent_{child_path}"
 
-        if persistent:
-            return self._spawn_persistent(
-                child, label, prompt, notify_on_asleep=notify_on_asleep
-            )
-
-        return await self._execute_child(
+        return await self._spawn_child(
             child,
-            prompt=prompt,
-            label=label,
+            label,
+            prompt,
+            lifecycle="serviced" if persistent else "oneshot",
             child_path=child_path,
             eff_max_depth=eff_max_depth,
+            notify_on_asleep=notify_on_asleep,
         )
 
     def _build_child(
@@ -600,7 +601,53 @@ class AgentSpawn:
             child.service_tier = cast(str | None, model_options["service_tier"])
         return child
 
-    async def _execute_child(
+    async def _spawn_child(
+        self,
+        child: _Agent,
+        label: str,
+        prompt: str,
+        *,
+        lifecycle: Literal["oneshot", "serviced"],
+        child_path: str = "",
+        eff_max_depth: int | None = None,
+        notify_on_asleep: bool = True,
+    ) -> ToolResult:
+        """Spawn a child on the unified ``serve_forever`` lifecycle.
+
+        Both lifecycles register the child under its stable ``label`` (so
+        ``/send`` and ``AgentSend`` can reach it) and run a live
+        inbox-serviceable loop. ``"oneshot"`` drives to the first post-work
+        idle, returns that reply, then shuts the loop down. ``"serviced"``
+        keeps the loop alive; it stops only via
+        ``cancel_persistent_subagent``.
+
+        Args:
+          child: Constructed child agent.
+          label: Stable registry / AgentSend label.
+          prompt: Seed message for the child's inbox.
+          lifecycle: ``"oneshot"`` or ``"serviced"``.
+          child_path: Spawn-path segment for the child's counter var.
+          eff_max_depth: Effective depth cap for the child's own spawns.
+          notify_on_asleep: Serviced-only idle-ping toggle.
+
+        Returns:
+          result: The first-idle reply (oneshot) or the started handle
+              (serviced).
+
+        """
+        if lifecycle == "serviced":
+            return self._spawn_serviced(
+                child, label, prompt, notify_on_asleep=notify_on_asleep
+            )
+        return await self._run_oneshot_child(
+            child,
+            prompt=prompt,
+            label=label,
+            child_path=child_path,
+            eff_max_depth=eff_max_depth,
+        )
+
+    async def _run_oneshot_child(
         self,
         child: _Agent,
         *,
@@ -609,9 +656,20 @@ class AgentSpawn:
         child_path: str,
         eff_max_depth: int | None,
     ) -> ToolResult:
-        """Run a non-persistent child with contextvar isolation."""
+        """Drive a oneshot child to its first result, then stop it.
+
+        The child runs a real ``serve_forever`` loop (registered under
+        ``label``), so it is addressable while it works. After
+        ``drive_until_first_idle`` returns the first reply, the child's
+        loop is shut down and deregistered and a terminal ``completed``
+        lifecycle record is written so a resume never resurrects it.
+        """
         parent_agent = _current_agent()
         assert parent_agent is not None
+        child._is_subagent = True  # noqa: SLF001 -- cross-layer subagent flag
+        child._lifecycle = "oneshot"  # noqa: SLF001 -- cross-layer lifecycle flag
+        child.name = label
+        run_id = uuid.uuid4().hex
         depth_token = max_depth_var.set(eff_max_depth)
         path_token = agent_path_var.set(child_path)
         label_token = agent_label_var.set(label)
@@ -622,40 +680,52 @@ class AgentSpawn:
             if isinstance(event, ModelResponseError):
                 child_errors.append(event.exception)
 
+        forwarder = _build_forwarder(label, self._verbosity, parent_agent, child=child)
+        child.runtime.observers.append(_capture_error)
+        if forwarder is not None:
+            child.runtime.observers.append(forwarder)
         try:
-            forwarder = _build_forwarder(
-                label, self._verbosity, parent_agent, child=child
+            result = await child.drive_until_first_idle(
+                UserMessage(text=prompt),
+                result_of=_last_assistant_result,
             )
-            child.runtime.observers.append(_capture_error)
-            if forwarder is not None:
-                child.runtime.observers.append(forwarder)
-            try:
-                async for _event in child.run(UserMessage(text=prompt)):
-                    pass
-            finally:
-                if forwarder is not None and forwarder in child.runtime.observers:
-                    child.runtime.observers.remove(forwarder)
-                if forwarder is not None:
-                    forwarder.emit_done()
-                child.runtime.observers.remove(_capture_error)
-            if child_errors:
-                child_error = child_errors[-1]
-                return ToolResult(
-                    call_id="",
-                    content=(
-                        f"Child agent {label!r} failed:"
-                        f" {type(child_error).__name__}: {child_error}"
-                    ),
-                    is_error=True,
-                )
-            return _last_assistant_result(child.history)
         finally:
+            if forwarder is not None and forwarder in child.runtime.observers:
+                child.runtime.observers.remove(forwarder)
+            if forwarder is not None:
+                forwarder.emit_done()
+            if _capture_error in child.runtime.observers:
+                child.runtime.observers.remove(_capture_error)
+            child.shutdown(force=True)
+            drive_task = child._drive_task  # noqa: SLF001 -- await the loop to completion
+            if drive_task is not None:
+                with suppress(asyncio.CancelledError):
+                    await drive_task
+            child.deregister(label)
+            # Restore the parent as the current agent BEFORE persisting so
+            # the terminal lifecycle record lands on the PARENT's session
+            # (``_persist_lifecycle`` reads ``current_agent_var``), not the
+            # ephemeral child's.
             current_agent_var.reset(agent_token)
             agent_label_var.reset(label_token)
             agent_path_var.reset(path_token)
             max_depth_var.reset(depth_token)
+            self._persist_lifecycle(
+                child, label, run_id, state="completed", notify_on_asleep=False
+            )
+        if child_errors:
+            child_error = child_errors[-1]
+            return ToolResult(
+                call_id="",
+                content=(
+                    f"Child agent {label!r} failed:"
+                    f" {type(child_error).__name__}: {child_error}"
+                ),
+                is_error=True,
+            )
+        return result
 
-    def _spawn_persistent(
+    def _spawn_serviced(
         self,
         child: _Agent,
         label: str,
@@ -663,19 +733,21 @@ class AgentSpawn:
         *,
         notify_on_asleep: bool = True,
     ) -> ToolResult:
-        """Start a persistent child agent via ``serve_forever()``.
+        """Start a serviced child agent via ``serve_forever()``.
 
         Registers the child in ``agent_registry``, attaches the parent
         forwarder as an observer, seeds the child's inbox with the prompt,
-        spawns ``serve_forever`` as a visible bg job under
-        ``parent._bg``. Returns immediately with the label.
+        spawns ``serve_forever`` as a visible bg job under ``parent._bg``.
+        The loop stays live; it stops only via
+        ``cancel_persistent_subagent``. Returns the started handle naming
+        the reply channel.
 
-        Augments the child's system prompt with the persistent-agent IPC
+        Augments the child's system prompt with the serviced-agent IPC
         rule so the child's LLM knows its plain assistant text is
         invisible to the parent and that ``AgentSend(to=<parent>)`` is
         the only reliable reply channel.
 
-        Rejects duplicate labels: a persistent agent's label is its
+        Rejects duplicate labels: a serviced agent's label is its
         addressable identity for ``AgentSend``. Silently overwriting
         ``agent_registry[label]`` would orphan the prior agent (whose
         background task keeps running but becomes unreachable) and --
@@ -687,14 +759,14 @@ class AgentSpawn:
         if label.startswith("job-"):
             return ToolResult(
                 call_id="",
-                content=f"Persistent agent label {label!r} is reserved for job ids.",
+                content=f"Serviced agent label {label!r} is reserved for job ids.",
                 is_error=True,
             )
         if label in agent_registry:
             return ToolResult(
                 call_id="",
                 content=(
-                    f"Persistent agent {label!r} is already running."
+                    f"Serviced agent {label!r} is already running."
                     " Kill it via BackgroundTask before spawning a"
                     " replacement with the same label."
                 ),
@@ -712,15 +784,16 @@ class AgentSpawn:
                     parent_label=parent_label,
                 ),
                 session_dir=self._session_root_dir / label,
-                persistent=True,
+                lifecycle="serviced",
             )
         else:
-            child._persistent = True  # noqa: SLF001 -- cross-layer flag
+            child._lifecycle = "serviced"  # noqa: SLF001 -- cross-layer lifecycle flag
             child.name = label
-            child._system_spec = _augment_system_for_persistent(  # noqa: SLF001 -- spec mutation is intentional for the persistent IPC rule
+            child._system_spec = _augment_system_for_persistent(  # noqa: SLF001 -- spec mutation is intentional for the serviced IPC rule
                 child._system_spec,  # noqa: SLF001 -- see above
                 parent_label=parent_label,
             )
+        child._is_subagent = True  # noqa: SLF001 -- cross-layer subagent flag
         run_id = uuid.uuid4().hex
         self._persist_lifecycle(
             child,
@@ -730,6 +803,9 @@ class AgentSpawn:
             notify_on_asleep=notify_on_asleep,
         )
         agent_registry[label] = child
+        # ``skip_first_work_idle`` is unused on this path (serviced does not
+        # consume an idle via ``drive_until_first_idle``); the latch stays
+        # False so every work idle -- including the first -- is delivered.
         forwarder = _build_forwarder(
             label,
             self._verbosity,
@@ -754,7 +830,7 @@ class AgentSpawn:
             except Exception:
                 state = "failed"
                 _logger.exception(
-                    "persistent agent %r crashed in serve_forever",
+                    "serviced agent %r crashed in serve_forever",
                     label,
                 )
             finally:
@@ -786,11 +862,12 @@ class AgentSpawn:
                 bg_key,
                 BackgroundTaskEntry(
                     task=task,
-                    tool_name="persistent-agent",
+                    tool_name="serviced-agent",
                     queue_id=label,
                     started=time.time(),
                     hidden=False,
-                    kind="persistent_subagent",
+                    kind="subagent",
+                    lifecycle="serviced",
                     persistent_run_id=run_id,
                     notify_on_asleep=notify_on_asleep,
                 ),
@@ -814,7 +891,7 @@ class AgentSpawn:
             )
         return ToolResult(
             call_id="",
-            content=f"Persistent agent started: {label}. {reply_path}",
+            content=f"Serviced agent started: {label}. {reply_path}",
         )
 
     def _persist_lifecycle(
@@ -882,15 +959,21 @@ class AgentSpawn:
         """Resolve ``(model, model_spec)`` for the child.
 
         Per-field fallthrough: ``LLM arg → factory arg →
-        parent.model_spec.<field>``. When the resolved tuple equals
-        the parent's spec, reuse ``parent.model`` without rebuilding.
+        parent.model_spec.<field>``. Whenever a rebuildable spec results
+        (provider + auth + model_id all resolved), a FRESH transport is
+        built via ``build_provider(...).model(...)`` -- including the
+        common case where the child simply inherits the parent's spec.
+        Each child must own an independent transport so N spawns run
+        concurrently on N processes; aliasing ``parent.model`` would
+        serialize (and, on subprocess providers, corrupt) them through
+        one transport.
 
-        When the parent has no ``model_spec`` (e.g. test harnesses
-        that inject a raw ``Model``) and the LLM / factory supplied
-        no model strings at all, inherit ``parent.model`` as-is and
-        return a ``None`` spec. If the LLM / factory *did* ask for a
-        switch but the resulting trio is missing fields, that's an
-        error - we can't build a provider without all three.
+        The sole reuse case is a parent with **no** ``model_spec`` (e.g.
+        test harnesses that inject a raw ``Model``): there is nothing to
+        rebuild from, so ``parent.model`` is inherited as-is with a
+        ``None`` spec. If the LLM / factory asked for a switch but the
+        resulting trio is missing fields, that's an error - we can't
+        build a provider without all three.
         """
         parent_spec = parent_agent.model_spec if parent_agent is not None else None
         llm_asked = any(x is not None for x in (provider, auth, model_id, account))
@@ -923,22 +1006,31 @@ class AgentSpawn:
             account, self._account, parent_spec.account if parent_spec else None
         )
 
+        # Spec-less parent (test harness / raw ``Model`` inject) with NO
+        # requested change: there is nothing to hand ``build_provider``, so
+        # aliasing ``parent.model`` is the only option. This is the ONLY case
+        # that reuses the parent's model object -- a rebuildable spec always
+        # rebuilds below. When the child DID ask for a switch but the parent
+        # has no spec to fill the gaps, fall through to the missing-fields
+        # error below rather than silently ignoring the request.
         if (
-            parent_agent is not None
-            and parent_spec is not None
-            and (p, a, m, ac)
-            == (
-                parent_spec.provider,
-                parent_spec.auth,
-                parent_spec.model_id,
-                parent_spec.account,
-            )
+            parent_spec is None
+            and parent_agent is not None
+            and not llm_asked
+            and not factory_asked
         ):
             return parent_agent.model, parent_spec
 
-        if not llm_asked and not factory_asked and parent_agent is not None:
-            return parent_agent.model, parent_spec
-
+        # A matching spec used to reuse ``parent.model`` here as an
+        # optimization. That aliased every same-model child onto the parent's
+        # single transport -- harmless for stateless HTTP providers, but on a
+        # subprocess-backed provider (AnthropicCLI/GoogleCLI) it forced N
+        # children through one ``claude`` process + pipe, serializing and
+        # corrupting concurrent turns. Rebuilding a fresh transport per child
+        # (below) is the whole point of spawns running "like a tool" in
+        # parallel; the saved constructor call is not worth the lost
+        # concurrency + isolation. See
+        # ``test_resolve_model_rebuilds_fresh_transport_when_spec_matches``.
         if p is None or a is None or m is None:
             return ToolResult(
                 call_id="",
@@ -950,6 +1042,7 @@ class AgentSpawn:
                 ),
                 is_error=True,
             )
+        # ``parent_spec`` is non-None past the spec-less guard above.
         parent_provider = parent_spec.provider if parent_spec is not None else None
         if p != parent_provider and p not in self._allow_providers:
             return provider_not_allowed_result(
@@ -1163,10 +1256,12 @@ class _ChildForwarder:
 
     __slots__ = (
         "_child",
+        "_first_work_idle_consumed",
         "_forward_set",
         "_label",
         "_notify_on_asleep",
         "_parent_agent",
+        "_skip_first_work_idle",
         "_stats",
     )
 
@@ -1179,6 +1274,7 @@ class _ChildForwarder:
         stats: ChildStats,
         label: str,
         notify_on_asleep: bool = False,
+        skip_first_work_idle: bool = False,
     ) -> None:
         self._parent_agent = parent_agent
         self._child = child
@@ -1186,6 +1282,12 @@ class _ChildForwarder:
         self._stats = stats
         self._label = label
         self._notify_on_asleep = notify_on_asleep
+        # ``drive_until_first_idle`` consumes the first post-work idle and
+        # returns it as the spawn tool's ToolResult; without this latch the
+        # forwarder would ALSO push that same idle as an AgentSendMessage,
+        # double-delivering the child's first reply to the parent.
+        self._skip_first_work_idle = skip_first_work_idle
+        self._first_work_idle_consumed = False
 
     def __call__(self, event: RuntimeEvent) -> None:
         if isinstance(event, ChildEvent):
@@ -1213,12 +1315,18 @@ class _ChildForwarder:
             #
             # Boot suppression: the runtime publishes its first
             # ``AgentIdle`` at the top of the first ``run_forever``
-            # iteration -- i.e. before the child has done any work.
-            # An empty history is the unambiguous marker of that
-            # transition; without this guard, every fresh persistent
-            # child immediately spams the parent with a useless
-            # "[child is idle]" before processing its seeded prompt.
-            if not self._child.history:
+            # iteration -- i.e. before the child has done any work. The
+            # shared ``_is_work_idle`` predicate (empty history == boot)
+            # suppresses that useless "[child is idle]" ping; without it
+            # every fresh child spams the parent before its seeded prompt
+            # is even processed.
+            if not _agent_module._is_work_idle(self._child.history):  # noqa: SLF001 -- shared boot/work-idle predicate
+                return
+            # Latch: skip exactly the first work idle that
+            # ``drive_until_first_idle`` already consumed as the spawn
+            # ToolResult, then deliver every subsequent idle.
+            if self._skip_first_work_idle and not self._first_work_idle_consumed:
+                self._first_work_idle_consumed = True
                 return
             # Carry the child's last assistant text so a child that
             # replied with plain assistant text instead of AgentSend
@@ -1268,15 +1376,19 @@ def _build_forwarder(
     *,
     child: _Agent,
     notify_on_asleep: bool = False,
+    skip_first_work_idle: bool = False,
 ) -> _ChildForwarder | None:
     """Construct a forwarder bound to ``parent_agent`` (or None when at root).
 
     ``notify_on_asleep`` only takes effect when this forwarder is attached
-    to a persistent child; non-persistent children complete inside one
-    ``child.run()`` call and never publish AgentIdle while the parent is
-    waiting on the result. The ``child`` handle lets the forwarder read
-    ``child.history`` at idle time so the parent's inbox notification
-    can carry the child's last assistant text.
+    to a serviced child; a one-shot child's forwarder is detached before
+    it could publish a second idle. The ``child`` handle lets the
+    forwarder read ``child.history`` at idle time so the parent's inbox
+    notification can carry the child's last assistant text.
+
+    ``skip_first_work_idle`` latches out the first post-work idle that
+    ``drive_until_first_idle`` already consumed as the spawn ToolResult,
+    so a serviced child's first reply is delivered exactly once.
     """
     if parent_agent is None:
         return None
@@ -1289,6 +1401,7 @@ def _build_forwarder(
         stats=stats,
         label=label,
         notify_on_asleep=notify_on_asleep,
+        skip_first_work_idle=skip_first_work_idle,
     )
 
 

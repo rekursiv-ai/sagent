@@ -1282,6 +1282,33 @@ def test_load_persistent_agents_ignores_all_terminal_states(tmp_path: Path) -> N
     assert load_persistent_agents(tmp_path) == []
 
 
+def test_load_persistent_agents_omits_completed_oneshot(tmp_path: Path) -> None:
+    """T6: a finished oneshot child (state='completed') is not resurrected.
+
+    A oneshot child writes a terminal ``completed`` lifecycle record when
+    it self-stops. ``load_persistent_agents`` keeps only ``running``
+    records, so the completed oneshot is omitted and resume never
+    re-hosts it.
+    """
+    session_file = tmp_path / "session.jsonl"
+    completed = PersistentAgentRecord(
+        label="oneshot-child",
+        run_id="run-oneshot",
+        session_dir=str(tmp_path / "children" / "run-oneshot"),
+        state="completed",
+        provider="OpenAISubscription",
+        auth="credentials",
+        account="default",
+        model_id="gpt-5.5",
+        tools=("Read",),
+        system="system text",
+        notify_on_asleep=False,
+    )
+    append_session(session_file, persistent_agents=[completed])
+
+    assert load_persistent_agents(tmp_path) == []
+
+
 def test_load_persistent_agents_rejects_empty_session_dir(tmp_path: Path) -> None:
     _write_jsonl(
         tmp_path / "session.jsonl",

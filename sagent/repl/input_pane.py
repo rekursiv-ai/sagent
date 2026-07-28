@@ -74,7 +74,7 @@ from sagent.repl.slash import (
     parse_slash,
 )
 from sagent.tools.background_task import cancel_persistent_subagent
-from sagent.tools.core import agent_registry
+from sagent.tools.core import agent_label_var, agent_registry
 from sagent.types.exceptions import (
     UserFacingError,
     log_exception_or_warning,
@@ -239,6 +239,19 @@ def _dispatch_send(sender: Agent, action: SlashSend, printer: Printer | None) ->
             printer.write_tool_error(f"[/send] no matching subagents: {action.target}")
         return
     source = sender.name or "user"
+    # Self-send guard (ported from ``agent_send.py``): a ``/send`` to the
+    # caller's own label is undelayed and almost certainly a mistake --
+    # ``_resolve_targets`` already filters the caller out, but drop any
+    # residual self-target and warn rather than push a message to self.
+    caller = agent_label_var.get("")
+    if caller and caller in targets:
+        targets = [label for label in targets if label != caller]
+        if printer is not None:
+            printer.write_tool_error(
+                f"[/send] refusing undelayed self-send to {caller!r}"
+            )
+    if not targets:
+        return
     for label in targets:
         target = agent_registry[label]
         if action.content.startswith("/"):
@@ -297,11 +310,19 @@ def _dispatch_target_control(
 
 
 def _resolve_targets(pattern: str) -> list[str]:
-    """Resolve an exact, glob, brace-list, or regex subagent target."""
+    """Resolve an exact, glob, brace-list, or regex subagent target.
+
+    Only serviceable labels are eligible (see :func:`_is_serviceable`):
+    live subagents in the registry, never the caller itself or the root
+    agent. So ``/send``, ``/halt``, ``/kill`` -- and the ``*`` / glob /
+    regex / brace fan-outs built on this -- can never route to self or
+    the root.
+    """
+    caller = agent_label_var.get("")
     labels = [
         label
         for label, agent in agent_registry.items()
-        if _is_persistent_subagent(agent)
+        if _is_serviceable(label, agent, caller=caller)
     ]
     if pattern.startswith("{") and pattern.endswith("}"):
         wanted = [part.strip() for part in pattern[1:-1].split(",") if part.strip()]
@@ -320,9 +341,28 @@ def _resolve_targets(pattern: str) -> list[str]:
     return [pattern] if pattern in labels else []
 
 
-def _is_persistent_subagent(agent: AgentLike) -> bool:
-    """Return true when ``agent`` is a live persistent subagent."""
-    return bool(getattr(agent, "_persistent", False))
+def _is_serviceable(label: str, agent: AgentLike, *, caller: str) -> bool:
+    """Return true when ``label`` is a targetable subagent for the caller.
+
+    Serviceable = a live subagent in the registry that is neither the
+    caller itself nor the root agent. This is the single gate behind
+    ``/send`` / ``/halt`` / ``/kill`` target resolution, so those verbs
+    can never route to self or to the root (``/halt all`` never halts
+    self).
+
+    Args:
+      label: The agent's registry label.
+      agent: The registered agent.
+      caller: The caller's own ``agent_label_var`` label (empty when the
+          caller has no established identity, e.g. the root REPL pump).
+
+    Returns:
+      serviceable: True when the agent is addressable by the caller.
+
+    """
+    if label == caller:
+        return False
+    return bool(getattr(agent, "is_subagent", False))
 
 
 def _dispatch_halt(
@@ -341,8 +381,9 @@ def _dispatch_halt(
         agent.halt()
         return
     if action.target == "all":
+        caller = agent_label_var.get("")
         for label, target in agent_registry.items():
-            if _is_persistent_subagent(target):
+            if _is_serviceable(label, target, caller=caller):
                 target.halt()
                 if printer is not None:
                     printer.write_slash_block(f"[/halt {label}] halted")

@@ -14,7 +14,11 @@ import pytest
 
 from sagent.agent.agent import Agent as _RealAgent
 from sagent.agent.background import BackgroundTaskEntry
-from sagent.agent.state import AgentLike, agent_registry
+from sagent.agent.state import (
+    AgentLike,
+    agent_label_var,
+    agent_registry,
+)
 from sagent.repl import input_pane as repl_input_mod
 from sagent.repl.input_pane import (
     REPL_PUMP_KEY,
@@ -85,7 +89,7 @@ class _StubAgent:
     killed: list[str] = field(default_factory=list)
     shutdown_calls: list[bool] = field(default_factory=list)
     background_registry: dict[str, BackgroundTaskEntry] = field(default_factory=dict)
-    _persistent: bool = False
+    is_subagent: bool = False
 
     def halt(self) -> None:
         self.halted += 1
@@ -115,7 +119,7 @@ def _agent() -> Agent:
 
 
 def _persistent_agent() -> Agent:
-    return cast("Agent", _StubAgent(_persistent=True))
+    return cast("Agent", _StubAgent(is_subagent=True))
 
 
 @pytest.mark.asyncio
@@ -362,6 +366,44 @@ async def test_dispatch_defer_pushes_user_deferred_message() -> None:
     ), f"expected UserDeferredMessage; got {pushed!r}"
 
 
+def test_resolve_targets_includes_oneshot_subagent() -> None:
+    """T2: a live oneshot subagent is a valid ``/send`` target.
+
+    Under the unified lifecycle every spawned agent -- oneshot or
+    serviced -- is a live, inbox-serviceable loop registered under its
+    stable label. Target resolution gates on ``is_subagent``, not on the
+    old serviced-only ``_persistent`` flag, so a oneshot child resolves.
+    """
+    oneshot = cast("Agent", _StubAgent(name="oneshot-child", is_subagent=True))
+    agent_registry.update({"oneshot-child": oneshot})
+    try:
+        assert _resolve_targets("oneshot-child") == ["oneshot-child"]
+    finally:
+        agent_registry.clear()
+
+
+def test_resolve_targets_star_excludes_caller_and_root() -> None:
+    """T5: ``*`` never resolves the caller's own label or the root agent.
+
+    ``_resolve_targets`` gates on ``_is_serviceable`` (a subagent that is
+    not the caller and not the root), so a fan-out cannot route to self
+    or to the root.
+    """
+    root = _agent()  # is_subagent=False -> the root
+    me = cast("Agent", _StubAgent(name="me", is_subagent=True))
+    peer = cast("Agent", _StubAgent(name="peer", is_subagent=True))
+    agent_registry.update({"root": root, "me": me, "peer": peer})
+    label_token = agent_label_var.set("me")
+    try:
+        resolved = _resolve_targets("*")
+        assert "root" not in resolved, "root must not be a target"
+        assert "me" not in resolved, "caller must not target itself"
+        assert resolved == ["peer"]
+    finally:
+        agent_label_var.reset(label_token)
+        agent_registry.clear()
+
+
 def test_resolve_targets_supports_exact_glob_brace_and_regex() -> None:
     child1 = _persistent_agent()
     child2 = _persistent_agent()
@@ -433,6 +475,31 @@ async def test_dispatch_halt_all_targets_every_persistent_subagent() -> None:
     assert child2_stub.halted == 1, (
         f"fix-compact must be halted by /halt all; halted={child2_stub.halted}"
     )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_halt_all_never_halts_self() -> None:
+    """T5: ``/halt all`` halts peers but never the caller itself.
+
+    The caller is registered as a subagent under its own label; the
+    ``_is_serviceable`` gate excludes it, so ``/halt all`` from that
+    caller must not call ``halt`` on itself.
+    """
+    me = _persistent_agent()
+    peer = _persistent_agent()
+    me_stub = cast(_StubAgent, me)
+    peer_stub = cast(_StubAgent, peer)
+    label_token = agent_label_var.set("me")
+    with patch(
+        "sagent.repl.input_pane.agent_registry",
+        new={"me": me, "peer": peer},
+    ):
+        try:
+            _ = await _dispatch(me, SlashHalt(target="all"), None)
+        finally:
+            agent_label_var.reset(label_token)
+    assert me_stub.halted == 0, "/halt all must never halt the caller itself"
+    assert peer_stub.halted == 1, "/halt all must halt peer subagents"
 
 
 @pytest.mark.asyncio
@@ -714,7 +781,7 @@ async def test_input_pump_cancellation_propagates() -> None:
 @pytest.mark.asyncio
 async def test_dispatch_halt_routes_to_registered_persistent_agent() -> None:
     a = _agent()
-    other = _StubAgent(name="Other", _persistent=True)
+    other = _StubAgent(name="Other", is_subagent=True)
     with patch(
         "sagent.repl.input_pane.agent_registry",
         new={"Other": other},

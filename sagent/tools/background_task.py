@@ -197,7 +197,7 @@ class BackgroundTask:
             return ToolResult(
                 call_id="", content=f"No such job: {job_id}", is_error=True
             )
-        if job.kind == "persistent_subagent":
+        if job.kind == "subagent":
             # Strip the ``persistent:`` prefix to recover the child's label;
             # ``cancel_persistent_subagent`` owns the full graceful path
             # (lifecycle write + child shutdown + cancel_background).
@@ -240,11 +240,11 @@ class BackgroundTask:
             return ToolResult(
                 call_id="", content=f"No such job: {job_id}", is_error=True
             )
-        if job.kind == "persistent_subagent":
+        if job.kind == "subagent" and job.lifecycle == "serviced":
             return ToolResult(
                 call_id="",
                 content=(
-                    "Persistent subagent jobs cannot be foregrounded; use AgentSend "
+                    "Serviced subagent jobs cannot be foregrounded; use AgentSend "
                     "to message the child or BackgroundTask cancel to stop it."
                 ),
                 is_error=True,
@@ -305,7 +305,7 @@ def cancel_persistent_subagent(agent: AgentLike, label: str) -> bool:
     """
     queue_id = f"persistent:{label}"
     job = agent.background.get(queue_id)
-    if job is not None and job.kind == "persistent_subagent":
+    if job is not None and job.kind == "subagent":
         shutdown_persistent_subagent(agent, job)
         agent.cancel_background(queue_id)
         return True

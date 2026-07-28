@@ -20,12 +20,13 @@ from sagent.lib.custom_json import (
     dataclass_to_json,
     datetime_val,
     decode,
+    dict_val,
+    dicts_val,
     float_val,
     int_val,
     json_freeze,
     json_unfreeze,
-    str_list_val,
-    str_map_val,
+    list_val,
     str_val,
     validate_json_schema,
 )
@@ -167,35 +168,45 @@ class TestStrVal:
         assert str_val(None, "fallback") == "fallback"
 
 
-class TestStrListVal:
-    def test_keeps_strings(self) -> None:
-        assert str_list_val(["a", "b"]) == ("a", "b")
+class TestDictVal:
+    def test_keeps_all_values(self) -> None:
+        assert dict_val({"a": 1, "b": "x", "c": None}) == {"a": 1, "b": "x", "c": None}
 
-    def test_drops_non_strings(self) -> None:
-        assert str_list_val(["a", 1, None, "b"]) == ("a", "b")
+    def test_coerces_keys_to_str(self) -> None:
+        assert dict_val({3: "c"}) == {"3": "c"}
 
-    def test_non_list_is_empty(self) -> None:
-        assert str_list_val("ab") == ()
-        assert str_list_val(None) == ()
-
-
-class TestStrMapVal:
-    def test_keeps_string_entries(self) -> None:
-        assert dict(str_map_val({"a": "1", "b": "2"})) == {"a": "1", "b": "2"}
-
-    def test_drops_non_string_keys_or_values(self) -> None:
-        assert dict(str_map_val({"a": "1", "b": 2, 3: "c"})) == {"a": "1"}
+    def test_filters_by_item_type(self) -> None:
+        typed: dict[str, int] = dict_val({"a": 1, "b": "x", "c": 2}, int)
+        assert typed == {"a": 1, "c": 2}
 
     def test_non_dict_is_empty(self) -> None:
-        assert dict(str_map_val(["a", "b"])) == {}
-        assert dict(str_map_val(None)) == {}
+        assert dict_val(["a", "b"]) == {}
+        assert dict_val(None) == {}
 
-    def test_result_is_immutable(self) -> None:
-        result = str_map_val({"a": "1"})
-        with pytest.raises(TypeError):
-            # Asserting the returned MappingProxyType rejects writes; the
-            # assignment is intentionally ill-typed.
-            result["b"] = "2"  # ty: ignore[invalid-assignment]  # pyright: ignore[reportIndexIssue] -- immutability check
+
+class TestListVal:
+    def test_keeps_all_elements(self) -> None:
+        assert list_val(["a", 1, None]) == ["a", 1, None]
+
+    def test_filters_by_item_type(self) -> None:
+        typed: list[str] = list_val(["a", 1, None, "b"], str)
+        assert typed == ["a", "b"]
+
+    def test_non_list_is_empty(self) -> None:
+        assert list_val({"a": 1}) == []
+        assert list_val(None) == []
+
+
+class TestDictsVal:
+    def test_keeps_and_normalizes_objects(self) -> None:
+        assert dicts_val([{"a": 1}, {3: "x"}]) == [{"a": 1}, {"3": "x"}]
+
+    def test_drops_non_objects(self) -> None:
+        assert dicts_val([{"a": 1}, "skip", None, 5]) == [{"a": 1}]
+
+    def test_non_list_is_empty(self) -> None:
+        assert dicts_val({"a": 1}) == []
+        assert dicts_val(None) == []
 
 
 class TestDatetimeVal:

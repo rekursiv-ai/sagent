@@ -96,6 +96,12 @@ def _make_parent(model: StubProviderModel | None = None) -> Agent:
     return Agent(model=m, tools=[])
 
 
+def _stub_provider_model(model_id: str) -> StubProviderModel:
+    """``provider.model`` side_effect: a stub model for any requested id."""
+    del model_id
+    return StubProviderModel(model_id="stub")
+
+
 def test_pick_field_priority() -> None:
     assert _pick_field("a", "b", "c") == "a"
     assert _pick_field(None, "b", "c") == "b"
@@ -299,7 +305,7 @@ async def test_run_depth_cap_exceeded() -> None:
 async def test_run_without_current_agent_returns_error() -> None:
     """Root use (no ``current_agent_var``) must not assertion-crash.
 
-    ``AgentSpawn._execute_child`` later asserts ``parent_agent is not
+    ``AgentSpawn._run_oneshot_child`` later asserts ``parent_agent is not
     None``; if the run path admits a ``None`` parent we hit a bare
     ``AssertionError`` that escapes the tool envelope. Reject early
     with a clean ``ToolResult(is_error=True)`` so a tool-call from a
@@ -371,6 +377,103 @@ async def test_non_persistent_child_has_single_registry_label() -> None:
 
     assert not result.is_error
     assert parent_model.label_count == 1
+
+
+@pytest.mark.asyncio
+async def test_oneshot_child_stays_registered_until_explicit_stop() -> None:
+    """T1: a oneshot child's registry entry survives its first result.
+
+    ``drive_until_first_idle`` returns the first reply but leaves the
+    serve loop live -- so the label is still addressable in
+    ``agent_registry`` (by ``/send`` / AgentSend) until an explicit
+    shutdown. The prior bug popped the entry the instant the driver task's
+    contextvar CM unwound.
+    """
+    child = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="answer")]),
+        tools=[],
+    )
+    child.name = "oneshot-child"
+    try:
+        result = await child.drive_until_first_idle(UserMessage(text="go"))
+        assert result.content == "answer"
+        assert "oneshot-child" in agent_registry, (
+            "oneshot child must remain registered until explicit stop"
+        )
+        assert agent_registry["oneshot-child"] is child
+    finally:
+        child.shutdown(force=True)
+        drive = child._drive_task
+        if drive is not None:
+            with suppress(asyncio.CancelledError):
+                await drive
+        agent_registry.pop("oneshot-child", None)
+    assert "oneshot-child" not in agent_registry
+
+
+@pytest.mark.asyncio
+async def test_oneshot_spawn_writes_completed_lifecycle(tmp_path: Path) -> None:
+    """T6: a finished oneshot child writes a terminal ``completed`` record.
+
+    The terminal record lets ``load_persistent_agents`` (which keeps only
+    ``running`` entries) omit the finished oneshot, so a resume never
+    resurrects it.
+    """
+    parent = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
+        tools=[],
+        session_dir=tmp_path,
+    )
+    with _parent_context(parent):
+        result = await AgentSpawn().run({"prompt": "do it", "label": "oneshot-w"})
+    assert not result.is_error
+    lifecycle = [
+        json.loads(line)
+        for line in (tmp_path / "session.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if "persistent_agent" in line
+    ]
+    assert lifecycle, "oneshot child wrote no lifecycle record"
+    assert lifecycle[-1]["label"] == "oneshot-w"
+    assert lifecycle[-1]["state"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_serviced_forwarder_delivers_first_reply_exactly_once() -> None:
+    """T4: the serviced forwarder delivers a child's first reply once, not twice.
+
+    The forwarder pushes exactly one ``AgentSendMessage`` for the child's
+    first post-work idle -- the boot idle (empty history) is suppressed
+    and the ``skip_first_work_idle`` latch (used when a caller consumes
+    the first idle via ``drive_until_first_idle``) prevents a duplicate.
+    """
+    parent = _make_parent()
+    child = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="first reply")]),
+        tools=[],
+    )
+    # Latched forwarder: the first work idle is consumed elsewhere, so the
+    # forwarder must NOT also push it.
+    latched = _ChildForwarder(
+        parent_agent=parent,
+        child=child,
+        forward_set=frozenset(),
+        stats=ChildStats(label="c", start=time.monotonic()),
+        label="c",
+        notify_on_asleep=True,
+        skip_first_work_idle=True,
+    )
+    child.runtime.append_history(UserMessage(text="go"))
+    child.runtime.append_history(AssistantMessage(text="first reply"))
+    latched(AgentIdle())  # first work idle -- latched out
+    assert parent.runtime.inbox.empty(), "latched first work idle must not be pushed"
+    latched(AgentIdle())  # second work idle -- delivered
+    queue = parent.runtime.inbox._queue
+    assert queue.qsize() == 1, f"expected exactly one delivery, got {queue.qsize()}"
+    msg = queue.get_nowait()
+    assert isinstance(msg, AgentSendMessage)
+    assert msg.text == "[c is idle] first reply"
 
 
 @pytest.mark.asyncio
@@ -531,29 +634,89 @@ def test_inherit_no_parent() -> None:
     assert t._inherit("thinking", None) is None
 
 
-def test_resolve_model_reuses_parent_when_spec_matches() -> None:
+def test_resolve_model_rebuilds_fresh_transport_when_spec_matches() -> None:
+    """A child inheriting the parent's spec gets its OWN transport, not an alias.
+
+    Regression guard for the shared-subprocess bug: ``_resolve_model`` used
+    to return ``parent.model`` verbatim when the resolved provider/auth/
+    model_id/account matched the parent. On a subprocess-backed provider
+    (AnthropicCLI/GoogleCLI) that aliased every same-model child onto the
+    parent's single ``claude`` process and pipe -- serializing (and
+    corrupting) N spawns through one transport. A spec that can be rebuilt
+    MUST rebuild via ``build_provider(...).model(...)`` so each child owns
+    an independent transport.
+    """
     spec = ModelSpec(provider="StubP", auth="env", model_id="stub", account=None)
     parent = Agent(
         model=StubProviderModel(model_id="stub"),
         tools=[],
         model_spec=spec,
     )
+    fake_provider = MagicMock()
+    fake_provider.model.side_effect = _stub_provider_model
     t = AgentSpawn()
-    resolved = t._resolve_model(
-        provider="StubP",
-        auth="env",
-        model_id="stub",
-        account=None,
-        parent_agent=parent,
-    )
+    with patch(
+        "sagent.tools.agent_spawn.build_provider",
+        return_value=fake_provider,
+    ) as build:
+        resolved = t._resolve_model(
+            provider="StubP",
+            auth="env",
+            model_id="stub",
+            account=None,
+            parent_agent=parent,
+        )
     assert isinstance(resolved, tuple)
     model, returned_spec = resolved
-    assert model is parent.model
+    assert model is not parent.model  # fresh transport, not the shared alias
     assert returned_spec == spec
+    build.assert_called_once_with("StubP", "env", account=None)
 
 
-def test_resolve_model_no_args_reuses_parent_model() -> None:
-    parent = _make_parent()
+def test_resolve_model_each_child_gets_distinct_transport() -> None:
+    """N inherit-spec children resolve to N distinct model objects.
+
+    The load-bearing property for scaling: each spawn's transport must be
+    independent so N children run concurrently on N processes rather than
+    serializing through one.
+    """
+    spec = ModelSpec(provider="StubP", auth="env", model_id="stub", account=None)
+    parent = Agent(
+        model=StubProviderModel(model_id="stub"),
+        tools=[],
+        model_spec=spec,
+    )
+    fake_provider = MagicMock()
+    fake_provider.model.side_effect = _stub_provider_model
+    t = AgentSpawn()
+    models: list[object] = []
+    with patch(
+        "sagent.tools.agent_spawn.build_provider",
+        return_value=fake_provider,
+    ):
+        for _ in range(5):
+            resolved = t._resolve_model(
+                provider=None,
+                auth=None,
+                model_id=None,
+                account=None,
+                parent_agent=parent,
+            )
+            assert isinstance(resolved, tuple)
+            models.append(resolved[0])
+    assert len({id(m) for m in models}) == 5
+    assert all(m is not parent.model for m in models)
+
+
+def test_resolve_model_no_spec_falls_back_to_parent_model() -> None:
+    """A spec-less parent (test harness / raw-Model inject) can't rebuild.
+
+    Without a ``model_spec`` there is nothing to hand ``build_provider``,
+    so aliasing ``parent.model`` is the only option and is correct here --
+    the reuse hazard only exists when a rebuildable spec is present.
+    """
+    parent = _make_parent()  # constructed with no model_spec
+    assert parent.model_spec is None
     t = AgentSpawn()
     resolved = t._resolve_model(
         provider=None,
@@ -717,7 +880,7 @@ async def test_persistent_run_writes_failed_lifecycle_record(
 
     t = AgentSpawn()
     with _parent_context(parent):
-        result = t._spawn_persistent(child, "doomed", "p")
+        result = t._spawn_serviced(child, "doomed", "p")
         assert not result.is_error
         task = _persistent_tasks.get("doomed")
         assert task is not None
@@ -759,7 +922,7 @@ async def test_persistent_run_logs_unhandled_exception(
         _parent_context(parent),
         caplog.at_level(logging.ERROR, logger=_AGENT_SPAWN_LOGGER),
     ):
-        result = t._spawn_persistent(child, "doomed", "p")
+        result = t._spawn_serviced(child, "doomed", "p")
         assert not result.is_error
         task = _persistent_tasks.get("doomed")
         assert task is not None
@@ -793,8 +956,8 @@ async def test_persistent_child_does_not_overwrite_parent_registry_entry() -> No
     (including back from this same child) routes to the child, not to
     the running parent. The parent never wakes.
 
-    The fix: persistent agents have a definite ``self.name`` set by
-    ``_spawn_persistent``; the label must come from that, not from the
+    The fix: serviced agents have a definite ``self.name`` set by
+    ``_spawn_serviced``; the label must come from that, not from the
     inherited ``agent_label_var``.
     """
     parent = _make_parent()
@@ -811,7 +974,7 @@ async def test_persistent_child_does_not_overwrite_parent_registry_entry() -> No
         )
         t = AgentSpawn()
         try:
-            result = t._spawn_persistent(child, "child1", "p")
+            result = t._spawn_serviced(child, "child1", "p")
             assert not result.is_error
             # Yield to scheduler so the child's task enters
             # serve_forever -> _install_contextvars (the bug site).
@@ -850,7 +1013,7 @@ async def test_spawn_persistent_rejects_job_prefix_label() -> None:
 
     t = AgentSpawn()
     with _parent_context(parent):
-        result = t._spawn_persistent(child, "job-helper", "prompt")
+        result = t._spawn_serviced(child, "job-helper", "prompt")
     assert result.is_error
     assert "reserved" in result.content
 
@@ -881,9 +1044,9 @@ async def test_spawn_persistent_rejects_duplicate_label() -> None:
 
     t = AgentSpawn()
     with _parent_context(parent):
-        first = t._spawn_persistent(child1, "dup-label", "p1")
+        first = t._spawn_serviced(child1, "dup-label", "p1")
         assert not first.is_error
-        second = t._spawn_persistent(child2, "dup-label", "p2")
+        second = t._spawn_serviced(child2, "dup-label", "p2")
         assert second.is_error, f"second spawn must error, got {second.content!r}"
         assert "dup-label" in second.content
         # The first agent's task is still scheduled; let it run to
@@ -904,7 +1067,7 @@ async def test_spawn_persistent_rejects_duplicate_label() -> None:
 # Two layers tested:
 #   1. Forwarder unit: AgentIdle in -> inbox push out (or no push when
 #      notify_on_asleep=False).
-#   2. End-to-end: _spawn_persistent(..., notify_on_asleep=True) wires
+#   2. End-to-end: _spawn_serviced(..., notify_on_asleep=True) wires
 #      the child's serve_forever such that the parent inbox observes
 #      the notification after the child finishes its seeded prompt.
 
@@ -1211,7 +1374,7 @@ async def test_persistent_spawn_session_root_dir_uses_label_path(
     spawn = AgentSpawn(session_root_dir=tmp_path / "children")
 
     with _parent_context(parent):
-        result = spawn._spawn_persistent(child, "fix-tools", "do work")
+        result = spawn._spawn_serviced(child, "fix-tools", "do work")
 
     task = _persistent_tasks.get("fix-tools")
     spawned = agent_registry.get("fix-tools")
@@ -1259,7 +1422,7 @@ async def test_persistent_spawn_persists_base_system_without_ipc_rule(
     spawn = AgentSpawn()
 
     with _parent_context(parent, label="parent-label"):
-        result = spawn._spawn_persistent(child, "fix-tools", "do work")
+        result = spawn._spawn_serviced(child, "fix-tools", "do work")
 
     task = _persistent_tasks.get("fix-tools")
     try:
@@ -1306,7 +1469,7 @@ async def test_persistent_spawn_writes_parent_lifecycle_record(tmp_path: Path) -
     spawn = AgentSpawn()
 
     with _parent_context(parent):
-        result = spawn._spawn_persistent(
+        result = spawn._spawn_serviced(
             child, "fix-tools", "do work", notify_on_asleep=False
         )
 
@@ -1350,7 +1513,7 @@ async def test_persistent_spawn_with_notify_on_asleep_notifies_parent() -> None:
     t = AgentSpawn()
 
     with _parent_context(parent):
-        result = t._spawn_persistent(
+        result = t._spawn_serviced(
             child, "watcher-child", "do work", notify_on_asleep=True
         )
         assert not result.is_error
@@ -1399,7 +1562,7 @@ async def test_persistent_spawn_notify_on_asleep_false_stays_silent() -> None:
     t = AgentSpawn()
 
     with _parent_context(parent):
-        result = t._spawn_persistent(
+        result = t._spawn_serviced(
             child, "quiet-child", "do work", notify_on_asleep=False
         )
         assert not result.is_error
@@ -1445,7 +1608,7 @@ async def test_persistent_spawn_augments_child_system_prompt() -> None:
     t = AgentSpawn()
 
     with _parent_context(parent, label="parent-label"):
-        result = t._spawn_persistent(child, "augmented-child", "do work")
+        result = t._spawn_serviced(child, "augmented-child", "do work")
         assert not result.is_error
         task = _persistent_tasks.get("augmented-child")
         assert task is not None
@@ -1477,7 +1640,7 @@ async def test_persistent_spawn_return_value_names_reply_channel() -> None:
     t = AgentSpawn()
 
     with _parent_context(parent):
-        result = t._spawn_persistent(child, "channel-child", "do work")
+        result = t._spawn_serviced(child, "channel-child", "do work")
         assert not result.is_error
         assert "AgentSend" in result.content
         assert "channel-child" in result.content
@@ -1564,8 +1727,8 @@ def test_resolve_model_rejects_provider_outside_allow_list() -> None:
 
 def test_resolve_model_parent_provider_always_allowed() -> None:
     """The parent's own provider is always accepted, even when not
-    in the allow list -- inheritance must keep working. The returned
-    model must be the parent's exact model instance.
+    in the allow list -- inheritance must keep working. The child gets a
+    FRESH transport built from the inherited spec, never the parent's alias.
     """
     spec = ModelSpec(provider="StubP", auth="env", model_id="stub", account=None)
     parent_model = StubProviderModel(model_id="stub")
@@ -1574,18 +1737,25 @@ def test_resolve_model_parent_provider_always_allowed() -> None:
         tools=[],
         model_spec=spec,
     )
+    fake_provider = MagicMock()
+    fake_provider.model.side_effect = _stub_provider_model
     t = AgentSpawn(allow_providers=("OpenAISubscription",))
-    resolved = t._resolve_model(
-        provider="StubP",
-        auth="env",
-        model_id="stub",
-        account=None,
-        parent_agent=parent,
-    )
+    with patch(
+        "sagent.tools.agent_spawn.build_provider",
+        return_value=fake_provider,
+    ) as build:
+        resolved = t._resolve_model(
+            provider="StubP",
+            auth="env",
+            model_id="stub",
+            account=None,
+            parent_agent=parent,
+        )
     assert isinstance(resolved, tuple)
     model, returned_spec = resolved
-    assert model is parent_model
+    assert model is not parent_model  # fresh transport, parent provider allowed
     assert returned_spec == spec
+    build.assert_called_once_with("StubP", "env", account=None)
 
 
 @pytest.mark.asyncio

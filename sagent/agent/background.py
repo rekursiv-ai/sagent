@@ -47,10 +47,11 @@ class BackgroundTaskEntry:
     - **Tool** (``kind="tool"``, ``hidden=False``). User-scheduled tool
       invocations spawned via ``background: true``. Listed by the
       ``BackgroundTask`` tool, cancellable by the model, foregroundable.
-    - **Persistent subagent** (``kind="persistent_subagent"``,
-      ``hidden=False``). Child agent running its own ``serve_forever``.
-      Shut down via ``child.shutdown(force=True)`` rather than raw cancel
-      so its driver loop exits cleanly.
+    - **Subagent** (``kind="subagent"``, ``hidden=False``). Child agent
+      running its own ``serve_forever``. A ``lifecycle="serviced"``
+      subagent is shut down via ``child.shutdown(force=True)`` rather than
+      raw cancel so its driver loop exits cleanly; a ``lifecycle="oneshot"``
+      subagent self-stops after its first result.
     - **Detached** (``kind="detached"``, ``hidden=False``). Cohort-decayed
       tasks owned by ``runtime.detached``; the Agent's ``background``
       property synthesizes these on demand from the runtime view.
@@ -79,23 +80,35 @@ class BackgroundTaskEntry:
     hidden: bool = False
     """True for infra; user-invisible."""
 
-    kind: Literal["tool", "persistent_subagent", "detached"] = "tool"
+    kind: Literal["tool", "subagent", "detached"] = "tool"
     """Dispatch hint for shutdown semantics."""
 
-    persistent_run_id: str = ""
-    """Lifecycle run id for persistent subagents.
+    lifecycle: Literal["oneshot", "serviced"] = "serviced"
+    """Serving policy for a ``kind="subagent"`` entry.
 
-    Empty for non-persistent kinds; ``__post_init__`` rejects an empty
-    value when ``kind == "persistent_subagent"`` so the persistent-driver
+    ``"serviced"`` subagents own their ``serve_forever`` (exempt from
+    raw-cancel and shutdown-cancel); ``"oneshot"`` subagents self-stop
+    after their first result. Ignored for non-subagent kinds."""
+
+    persistent_run_id: str = ""
+    """Lifecycle run id for serviced subagents.
+
+    Empty for other kinds; ``__post_init__`` rejects an empty value when
+    ``kind == "subagent"`` and ``lifecycle == "serviced"`` so the driver
     bookkeeping always has a run id to key off."""
 
     notify_on_asleep: bool = True
-    """Whether persistent subagent idle pings are enabled."""
+    """Whether subagent idle pings are enabled."""
 
     def __post_init__(self) -> None:
-        if self.kind == "persistent_subagent" and not self.persistent_run_id:
+        if (
+            self.kind == "subagent"
+            and self.lifecycle == "serviced"
+            and not self.persistent_run_id
+        ):
             raise ValueError(
-                "persistent_run_id is required when kind='persistent_subagent'",
+                "persistent_run_id is required when kind='subagent'"
+                " and lifecycle='serviced'",
             )
 
 

@@ -21,6 +21,7 @@ from sagent.agent import Agent
 from sagent.agent.session_io import (
     PersistentAgentRecord,
     SessionMeta,
+    append_session,
 )
 from sagent.agent.state import agent_registry
 from sagent.bin.cli import (
@@ -46,6 +47,7 @@ from sagent.bin.cli import (
     _resolve_provider_and_allow,
     _resolve_session_dir,
     _resume_label,
+    _resume_persistent_agents,
     _run_headless,
     parse_agent_args,
     resolve_tools,
@@ -198,6 +200,45 @@ def test_build_persistent_child_forwards_provider_options(
     child = _build_persistent_child(record, allow_providers=(), parent_label="parent")
     assert captured["options"] == ProviderOptions(server_side_context_management=True)
     assert child.provider_options == record.provider_options
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_resurrect_completed_oneshot(tmp_path: Path) -> None:
+    """T6: resume re-hosts only ``running`` records; a completed oneshot is skipped.
+
+    A oneshot child writes a terminal ``completed`` lifecycle record on
+    stop. ``_resume_persistent_agents`` re-hosts via
+    ``load_persistent_agents`` (state=='running' only), so a completed
+    oneshot never comes back on resume.
+    """
+    parent = cast("Agent", FakeAgent())
+    append_session(
+        tmp_path / "session.jsonl",
+        persistent_agents=[
+            PersistentAgentRecord(
+                label="oneshot-child",
+                run_id="run-oneshot",
+                session_dir=str(tmp_path / "children" / "run-oneshot"),
+                state="completed",
+                provider="Anthropic",
+                auth="env",
+                account=None,
+                model_id="claude-opus-4-8",
+                tools=(),
+                system="system text",
+                notify_on_asleep=False,
+            )
+        ],
+    )
+    before = set(agent_registry)
+    await _resume_persistent_agents(
+        parent,
+        tmp_path,
+        allow_providers=("Anthropic",),
+        parent_label="parent",
+    )
+    assert set(agent_registry) == before, "completed oneshot must not be resurrected"
+    assert "oneshot-child" not in agent_registry
 
 
 def test_build_persistent_child_restores_thinking_state(
