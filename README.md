@@ -43,56 +43,45 @@
   ·
   <a href="https://github.com/rekursiv-ai/sagent/blob/main/docs/selfhosted.md">Self-hosted</a>
   ·
+  <a href="https://github.com/rekursiv-ai/sagent/blob/main/docs/showcase.md">Showcase</a>
+  ·
   <a href="https://github.com/rekursiv-ai/sagent/tree/main/examples">Examples</a>
 </p>
+
+## Quick Start
+
+```bash
+# Mac:
+#   brew install ripgrep fd uv
+
+# Ubuntu/Debian:
+#   sudo apt-get install -y curl ripgrep fd-find
+#   curl -LsSf https://astral.sh/uv/install.sh | sh
+
+uv tool install sagent
+
+sagent
+```
 
 ## Better CLI
 
 Things Claude Code, Codex CLI, and Gemini CLI don't do:
 
-- **One CLI, every provider.** Anthropic, OpenAI, Google, Moonshot,
-  DashScope, MiniMax, OpenAI-compatible endpoints, self-hosted
-  HuggingFace models, and a managed `llama.cpp` server — all behind
-  one binary.
-- **Unified cost tracking.** One USD total across every provider in
-  a session; sub-agent costs roll up to the root automatically.
-  `--max-budget-usd N` caps the whole tree.
-- **Hot self-mutation.** *"Switch to OpenAI then back."* Mid-session,
-  no restart.
-- **Self-directing agent fleets.** Agents mutate their own runtime —
-  provider, model, thinking effort, context — in plain English,
-  mid-task. Paired with peer-to-peer `AgentSend`, a coordinator can
-  retune its workers on the fly: *"switch to o1, crank thinking,
-  recompact and drop the file reads."* It can also tell you how many
-  tokens it's holding.
-- **Recursive agent-to-agent messaging.** Any spawned agent can spawn
-  and `AgentSend` to peers, so coordination is an arbitrary tree of
-  agents, not a flat star. Claude Code's experimental Agent Teams
-  (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`) is the closest comparable
-  feature but is flat: one fixed lead, peer teammates, no nested
-  teams. Codex and Gemini CLIs have no peer messaging at all.
-- **Interruptible and detachable tasks.** *"The task is stuck."*
-  *"Detach `foo` and let it keep running."*
-- **Richer built-in tools.** `PaperSearch` and `PaperFetch` walk
-  citation graphs and fetch PDFs, multi-backend `WebSearch`,
-  `WebFetch` with markdown extraction, atomic read/write tracking
-  on file tools.
-- **Unix-aligned and pipeable.** `stdin`, `stdout`, exit codes, and
-  `--output-format json` are first-class — not a non-interactive
-  escape hatch. Pipes like `jq`, REPLs like `ipython` (same
-  `prompt_toolkit` underneath).
+- **Async REPL.** Chat with agents *about* jobs while those jobs run. No ctrl+b, no manual juggling.
+- **Hot self-mutation.** Switch provider, model, or thinking effort mid-session in plain English. No restart.
+- **One CLI, every provider.** Anthropic, OpenAI, Google, Moonshot, DashScope, MiniMax, OpenAI-compatible endpoints, self-hosted HuggingFace models, and a managed `llama.cpp` server, all behind one binary.
+- **Unified cost tracking.** One USD total across every provider in a session; sub-agent costs roll up to the root. `--max-budget-usd N` caps the whole tree.
+- **Self-directing agent fleets.** Agents retune their own runtime -- provider, model, thinking, context -- mid-task. A coordinator can do it to its workers over `AgentSend`: *"switch to o1, crank thinking, recompact and drop the file reads."*
+- **Recursive agent messaging.** Any spawned agent can spawn and `AgentSend` to any peer, so coordination is a tree, not a star. Claude Code's experimental Agent Teams is flat (one lead, no nesting); Codex and Gemini have no peer messaging.
+- **Interruptible, detachable tasks.** Tell a stuck task to stop, or detach one and let it keep running.
+- **Richer built-in tools.** `PaperSearch`/`PaperFetch` walk citation graphs and fetch PDFs, multi-backend `WebSearch`, `WebFetch` with markdown extraction, atomic read/write tracking on file tools.
+- **Unix-aligned and pipeable.** `stdin`, `stdout`, exit codes, and `--output-format json` are first-class. Pipe through `jq`, drop into `ipython` (same `prompt_toolkit` underneath).
 
 ## Uniquely also an API
 
-- **One runtime, every surface.** The same `Agent` class powers the
-  CLI, your application code, and recursive sub-agents.
-- **Typed Python objects.** `Agent`, `Tool`, `Model`, `Provider`,
-  and `Message` are protocols and dataclasses you import, compose,
-  and unit-test.
-- **Peer-to-peer agent messaging.** Any spawned agent can `AgentSend`
-  to any other named peer — not just its parent. Like user input,
-  peer messages preempt the receiving agent's tool calls, so no agent
-  blocks waiting on a stuck child.
+- **One runtime, every surface.** The same `Agent` class powers the CLI, your application code, and recursive sub-agents.
+- **Typed Python objects.** `Agent`, `Tool`, `Model`, `Provider`, and `Message` are protocols and dataclasses you import, compose, and unit-test.
+- **Peer-to-peer agent messaging.** Any spawned agent can `AgentSend` to any other named peer -- not just its parent. Like user input, peer messages preempt the receiving agent's tool calls, so no agent blocks waiting on a stuck child.
 
 Use it as a library:
 
@@ -114,93 +103,55 @@ print(result.content)
 ## Install
 
 Sagent requires Python 3.12 or newer. `ripgrep` and `fd-find` are
-optional — sagent has Python fallbacks when absent — but recommended
+optional -- sagent has Python fallbacks when absent -- but recommended
 for faster `Grep` / `Glob`. PDF rendering uses the bundled `pypdfium2`
-wheel and needs no system install.
+wheel and needs no system install. The [Quick Start](#quick-start)
+above installs the `sagent` CLI.
 
-### CLI
-
-Installs the `sagent` binary into an isolated environment so it lands
-on your PATH without touching the system Python.
-
-#### Ubuntu / Debian
+Add sagent to your own project as a library:
 
 ```bash
-sudo apt-get install -y ripgrep fd-find pipx
-pipx install sagent
+uv add sagent
 ```
 
-#### macOS
+Or run from a source checkout:
 
 ```bash
-brew install ripgrep fd pipx
-pipx install --backend pip sagent
-```
-
-### Library
-
-For embedding sagent in your own Python project.
-
-#### Ubuntu / Debian
-
-```bash
-sudo apt-get install -y ripgrep fd-find python3-venv
-python3 -m venv .venv && source .venv/bin/activate
-pip install sagent
-```
-
-#### macOS
-
-```bash
-brew install ripgrep fd
-python3 -m venv .venv && source .venv/bin/activate
-pip install sagent
-```
-
-### From source
-
-#### Ubuntu / Debian
-
-```bash
-sudo apt-get install -y ripgrep fd-find git
-curl -LsSf https://astral.sh/uv/install.sh | sh
 git clone --depth 1 https://github.com/rekursiv-ai/sagent.git
 cd sagent
-sagent/bin/cli.py --help
+uv run sagent --help
 ```
 
-#### macOS
+## Run
+
+Bare `sagent` uses Anthropic and reads `ANTHROPIC_API_KEY`:
 
 ```bash
-brew install ripgrep fd uv git
-git clone --depth 1 https://github.com/rekursiv-ai/sagent.git
-cd sagent
-sagent/bin/cli.py --help
+export ANTHROPIC_API_KEY=...
+sagent
 ```
 
-## Quickstart: CLI
-
-Use Claude backend,
-
-```
-claude auth login --claudeai
-sagent/bin/cli.py --allow-providers AnthropicCLI --provider AnthropicCLI --auth credentials
-```
-
-`AnthropicCLI` inherits your HOME for macOS Keychain access and runs Claude
-non-interactively, so use it only in trusted working directories.
+Pick a different provider by setting its key (see
+[Provider setup](#provider-setup)) and passing `--provider`:
 
 ```bash
-export GOOGLE_API_KEY=...
-sagent/bin/cli.py --provider Google --model gemini-3.1-pro-preview
+export OPENAI_API_KEY=...
+sagent --provider OpenAI
 ```
 
-For non-interactive use, pipe a prompt on stdin:
+`--provider` defaults to the first name in `--allow-providers`, so
+`SAGENT_ALLOW_PROVIDERS` alone picks the default backend and also caps
+which providers spawned sub-agents may use:
+
+```bash
+SAGENT_ALLOW_PROVIDERS=OpenAI sagent   # OpenAI is now the default provider
+```
+
+Pipe a prompt on stdin for non-interactive use:
 
 ```bash
 printf 'Say hi in one sentence.' | \
-  sagent/bin/cli.py --provider Google --model gemini-3.1-pro-preview \
-  --output-format json
+  sagent --provider OpenAI --output-format json
 ```
 
 Use `--continue` to resume the most recent session for this working directory, `--session PATH` for an explicit session directory, or `--ephemeral` when prompts and auto-memory should not be written to disk. Use `--max-budget-usd N` to cap API spend for the current run.
@@ -237,7 +188,7 @@ See [API](docs/api.md), [Tutorial](docs/tutorial.md), and [Concepts](docs/concep
 
 ## Provider setup
 
-Sagent ships API-key providers for Anthropic, OpenAI, OpenAISubscription, Google, Moonshot, DashScope, MiniMax, and generic OpenAI-compatible endpoints, plus a managed local `LlamaCpp` provider. Set the key for the provider you plan to use:
+Sagent ships API-key providers for Anthropic, OpenAI, OpenAISubscription, Google, Moonshot, DashScope, MiniMax, and generic OpenAI-compatible endpoints, a subscription-backed `AnthropicCLI` that rides your installed `claude` login, plus a managed local `LlamaCpp` provider. Set the key (or run the login) for the provider you plan to use:
 
 ```bash
 export ANTHROPIC_API_KEY=...
@@ -248,9 +199,18 @@ export DASHSCOPE_API_KEY=...
 export MINIMAX_API_KEY=...
 ```
 
+and
+
+```bash
+export SAGENT_ALLOW_PROVIDERS=...
+```
+
+to set the default value of the `--provider` flag.
+
 | Provider | Environment variable | Example model |
 | --- | --- | --- |
 | `Anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-6` |
+| `AnthropicCLI` | none (`claude auth login --claudeai`) | `claude-sonnet-4-6` |
 | `OpenAI` | `OPENAI_API_KEY` | `gpt-5.6-sol` |
 | `Google` | `GOOGLE_API_KEY` | `gemini-3.1-pro-preview` |
 | `Moonshot` | `MOONSHOT_API_KEY` | `kimi-k2.6` |
@@ -269,10 +229,10 @@ Install the local runtime extra from a checkout:
 uv sync --extra selfhosted
 ```
 
-Or install it from PyPI:
+Or add it to your project from PyPI:
 
 ```bash
-pip install "sagent[selfhosted]"
+uv add "sagent[selfhosted]"
 ```
 
 Then pass a HuggingFace repo ID or local snapshot path:
@@ -310,38 +270,6 @@ The [`examples/`](examples/) directory contains small, runnable examples:
 - `openai_compatible_provider.py`: connect an OpenAI-compatible endpoint.
 
 Start with the [tutorial](docs/tutorial.md), then use the examples as copyable patterns. See [Examples](examples/) and [Tools](docs/tools.md).
-
-## Built with sagent
-
-> *We used sagent to stand up a persistent, multi-agent dev team — then used
-> that team to ship and maintain a real library.*
-
-[**agent-team**](https://github.com/blackjax-devs/agent-team) is a development
-*channel* of five specialized agents — a tech lead, a senior and a junior
-engineer, a statistician, and a tech writer — running as one persistent server
-with a web UI. The agents message each other (`@swe`, `@statistician`) and hand
-off work the way a human team does. It's a thin role profile on top of sagent;
-sagent does the heavy lifting:
-
-- **Persistent sessions + resume** keep each agent's full history across
-  restarts, so the team picks a multi-day thread back up exactly where it left
-  off.
-- **Per-agent MCP servers** (`extra_mcp_servers`) inject a peer-messaging tool
-  into every agent — that's what turns five isolated CLIs into one channel.
-- **Unified cost tracking + `--max-budget-usd`** roll every agent's spend into
-  one number with a hard cap on the whole team.
-- **Sub-agent spawning** lets the tech lead fan work out to ephemeral helpers
-  and collect the results.
-
-We dogfood it daily on the [BlackJAX](https://github.com/blackjax-devs/blackjax)
-ecosystem. The team built and now maintains
-[**tuningfork**](https://github.com/blackjax-devs/tuningfork), a BlackJAX-native
-MCMC benchmark suite (14 models × 24 samplers × 10 warmups × 6 SMC methods): the
-statistician agent verifies algorithm-to-paper correctness and tunes sampler
-parameters, the engineers implement and run the benchmark loop, and the tech
-lead coordinates hand-offs and gates merges — all over sagent's channel.
-
-*Built something with sagent? Open a PR adding it here.*
 
 ## Security and privacy
 
@@ -384,115 +312,17 @@ of each project.
 
 ### How each project works
 
-**[aider](https://github.com/Aider-AI/aider)** --
-Git-native pair programmer. The LLM emits markdown-formatted edits (14
-edit formats) and aider parses them -- there is no structured tool calling.
-All providers route through litellm as a single string-addressed transport.
-`/model` switches the backend mid-session by raising `SwitchCoder`, which
-reconstructs the entire `Coder` object; conversation history carries over
-but the swap is destructive. A tree-sitter repo map with PageRank ranking
-provides structural code awareness that Sagent lacks. No multi-agent
-capabilities beyond a synchronous Architect-to-Editor handoff. Importable
-via `Coder.create()` but the scripting API is explicitly unsupported and
-may change without notice.
-
-**[LangChain/LangGraph](https://github.com/langchain-ai/langchain)** --
-Broad Python application framework for LLM pipelines. Multi-provider,
-multi-agent (via LangGraph state machines), and fully programmatic. Context
-compaction, backend swapping, and agent self-mutation are all possible but
-application-defined rather than built-in -- the framework provides building
-blocks, not an opinionated agent loop. Sagent is a smaller, more
-opinionated runtime with typed protocols, a concrete inbox loop, and
-built-in session persistence.
-
-**[OpenClaw](https://github.com/openclaw/openclaw)** --
-Multi-platform personal assistant (desktop, mobile, web) with multi-provider
-and multi-agent support. Agents coordinate across channels but the system
-is oriented toward end-user assistant workflows rather than developer
-tooling. TypeScript-based, not available as a Python library.
-
-**[Cline](https://github.com/cline/cline)** --
-VS Code extension with multi-provider support. Users can switch models in
-the settings panel mid-conversation, but the extension is not importable as
-a library. Single-agent with no spawn or coordination primitives. Context
-management is truncation-based rather than structured compaction.
-
-**[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** (Anthropic) --
-Closed-source vendor CLI with strong tool-use capabilities and structured
-context compaction. Agents can spawn recursive sub-agents and compact their
-own context, but cannot switch providers (Anthropic-only) or dynamically
-adjust token limits. Not available as a Python library; the SDK is
-JavaScript. No user-initiated backend swap since there is only one backend.
-
-**[Codex CLI](https://github.com/openai/codex)** (OpenAI) --
-Rust-based CLI locked to OpenAI models. Single-agent, single-provider, no
-compaction, no programmatic API. Clean local-execution model with
-sandboxing, but no extensibility surface for custom tools, provider
-swapping, or multi-agent coordination.
-
-**[Gemini CLI](https://github.com/google-gemini/gemini-cli)** (Google) --
-TypeScript CLI locked to Google models. Has context compaction via
-summarization. Single-agent, single-provider, no programmatic API, no
-custom tool protocol. Designed as a terminal interface for Gemini, not as a
-composable runtime.
-
-**[Flue](https://github.com/withastro/flue)** (Astro) --
-TypeScript "agent harness framework," explicitly headless and runtime-agnostic
-(Node.js, Cloudflare Workers, GitHub Actions). Agents are TypeScript modules
-with triggers (HTTP webhook, CLI). Sandbox is pluggable: a fast in-process
-`just-bash` virtual sandbox by default, or full Linux containers via
-Daytona/E2B connectors. `session.task()` spawns child agents in the same
-sandbox; the same primitive is exposed to the LLM, so agents can recursively
-delegate. Multi-provider via model strings (`anthropic/claude-sonnet-4-6`,
-`openrouter/...`). No interactive UI, no built-in compaction, no
-agent-initiated backend swap -- the developer chooses the model at `init()`
-or per call. Skills, AGENTS.md, and per-call MCP tool injection are
-first-class.
-
-**[Pi](https://pi.dev/)** ([earendil-works/pi](https://github.com/earendil-works/pi),
-formerly `badlogic/pi-mono`) --
-TypeScript "minimal terminal coding harness." The design point is the
-opposite of Sagent's: ship aggressively few defaults and make every layer
-extensible (skills, prompt templates, themes, extensions, packages
-distributed via npm or git). `/model` and `Ctrl+L` swap the backend
-mid-session; `/tree`, `/fork`, and `/clone` make session history a
-branchable tree (genuine context hot-swap); `/compact` runs a structured
-summarization prompt that records read/modified files. `/reload` lets the
-agent rewrite its own skills, prompts, themes, and extensions and pick up
-the change in place -- a soft form of self-mutation. Sub-agents ship only
-as an example extension; plan mode, permission gates, sandboxing, and MCP
-support are all similarly opt-in. Print/JSON, RPC, and SDK modes make it
-embeddable. Star count reflects the whole monorepo
-(`pi-coding-agent` + `pi-agent-core` + `pi-ai` + TUI/web-UI libraries),
-not the coding agent in isolation.
-
-**[npcsh](https://github.com/npc-worldwide/npcsh)** --
-Python "AI-powered, agentic shell" built on the sibling `npcpy` library and
-LiteLLM. The design point is the opposite of Sagent's minimalism: agents
-are filesystem-defined NPC personas (`.npc` files) grouped in YAML "teams,"
-tools are `.jinx` skill files, and dozens of full-screen modes ship in the
-box -- `/deep_research`, `/wander`, `/guac` (LLM Python REPL), `/yap`
-(voice), `/kg` (knowledge graph), `/convene` (multi-NPC discussion),
-`/delegate` (sub-agent with review loop), `/serve` (OpenAI-compatible team
-API). `/set model` and `/set provider` swap the backend mid-session;
-`/reattach` resumes prior sessions but there is no branchable session
-tree. Context "compaction" is a rate-limit fallback that drops middle
-messages (`_state.py:4183-4186`), not LLM-summarization. Sub-agents exist
-but are orchestrator-hub-and-spoke, not detached peers.
-
-**[Attractor](https://github.com/strongdm/attractor)** (StrongDM) --
-*Specification, not an implementation.* A pair of NLSpecs (`attractor-spec.md`,
-`coding-agent-loop-spec.md`, `unified-llm-spec.md`) you hand to a coding agent
-and ask it to build. Attractor proper is a DOT-graph pipeline runner: nodes
-are AI tasks, edges encode routing/conditions, the graph IS the workflow.
-The spec mandates structured fidelity modes (`full`/`truncate`/`compact`/
-`summary:{low,medium,high}`) for cross-stage context handoff, per-node model
-selection via a CSS-like stylesheet, parallel/fan-in handlers, human-gate
-nodes, and checkpoint/resume. The companion coding-agent-loop spec defines
-provider-aligned toolsets (apply_patch for OpenAI, edit_file for Anthropic,
-gemini-cli tools for Gemini) and subagent spawn primitives. Categories above
-reflect what an Attractor-conformant implementation must support; the actual
-runtime shape depends on whoever builds it.
+- **[aider](https://github.com/Aider-AI/aider)** -- git-native pair programmer; markdown-diff edits (no structured tool calls), litellm transport, destructive mid-session `/model` swap, tree-sitter repo map, no multi-agent.
+- **[LangChain/LangGraph](https://github.com/langchain-ai/langchain)** -- broad LLM-app framework; everything is possible but application-defined, not an opinionated agent loop.
+- **[OpenClaw](https://github.com/openclaw/openclaw)** -- TypeScript multi-platform personal assistant; multi-agent but end-user-oriented, no Python library.
+- **[Cline](https://github.com/cline/cline)** -- VS Code extension; multi-provider, single-agent, truncation-based context, not importable.
+- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** (Anthropic) -- Anthropic-only vendor CLI; recursive sub-agents and compaction, but no provider swap and no Python library (JS SDK).
+- **[Codex CLI](https://github.com/openai/codex)** (OpenAI) -- OpenAI-only Rust CLI; sandboxed local execution, single-agent, no compaction, no API.
+- **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** (Google) -- Google-only TypeScript CLI; summarization compaction, single-agent, no API, no custom tools.
+- **[Flue](https://github.com/withastro/flue)** (Astro) -- headless TypeScript harness; pluggable sandboxes, recursive `session.task()` delegation, model chosen per call (no agent-initiated swap), no UI/compaction.
+- **[Pi](https://pi.dev/)** ([earendil-works/pi](https://github.com/earendil-works/pi)) -- minimal TypeScript harness; branchable session tree, `/reload` soft self-mutation, sub-agents opt-in only.
+- **[npcsh](https://github.com/npc-worldwide/npcsh)** -- Python agentic shell; filesystem-defined NPC personas, many built-in modes, hub-and-spoke sub-agents, rate-limit-fallback "compaction".
+- **[Attractor](https://github.com/strongdm/attractor)** (StrongDM) -- a spec, not an implementation; DOT-graph pipeline where nodes are AI tasks and the graph is the workflow.
 
 </details>
 

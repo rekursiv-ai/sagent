@@ -281,18 +281,18 @@ async def test_call_tool_detaches_background_args() -> None:
 @pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_registered_handler_routes_call_over_http() -> None:
-    """A real MCP client over HTTP reaches the decorator-registered handler.
+    """A real MCP client over HTTP reaches the registered call handler.
 
     The other unit tests call ``bridge._call_tool`` (the method) directly;
-    only this one exercises the ``@server.call_tool()`` wiring through the
-    live streamable-http transport, so a regression in ``_register_handlers``
-    (registering the wrong callable) is caught by the unit suite.
+    only this one exercises the ``on_call_tool`` wiring through the live
+    streamable-http transport, so a regression in the handler registration
+    (binding the wrong callable) is caught by the unit suite.
     """
     bridge = ToolsBridge([cast(Tool, _EchoTool())])
     await bridge.start()
     try:
         async with (
-            streamable_http_client(bridge.url) as (read, write, _),
+            streamable_http_client(bridge.url) as (read, write),
             ClientSession(read, write) as session,
         ):
             await session.initialize()
@@ -428,7 +428,7 @@ async def test_call_tool_preserves_image_attachments() -> None:
         assert isinstance(blocks[0], TextContent)
         assert isinstance(blocks[1], ImageContent)
         assert blocks[1].data == base64.b64encode(b"image-bytes").decode()
-        assert blocks[1].mimeType == "image/png"
+        assert blocks[1].mime_type == "image/png"
     finally:
         await bridge.stop()
 

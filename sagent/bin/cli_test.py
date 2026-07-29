@@ -1111,6 +1111,19 @@ def test_resolve_provider_and_allow_rejects_empty_spec() -> None:
     assert exc.value.code == 1
 
 
+def test_resolve_provider_and_allow_resumed_primary_outside_allow_is_rejected() -> None:
+    """A resume-pinned provider must not silently widen ``SAGENT_ALLOW_PROVIDERS``.
+
+    An operator locking the host to ``OpenAI`` must not be overridden by a
+    resumed session that happens to pin ``Anthropic``: unlike an explicit
+    ``--provider`` (which the user typed this run), a persisted provider is
+    not consent to widen the allow-set.
+    """
+    with pytest.raises(SystemExit) as exc:
+        _resolve_provider_and_allow("OpenAI", primary="Anthropic", from_resume=True)
+    assert exc.value.code == 1
+
+
 if __name__ == "__main__":
     from sagent.lib.testing.main import test_main
 

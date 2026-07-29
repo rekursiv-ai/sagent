@@ -607,20 +607,33 @@ def _resolve_provider_and_allow(
     spec: str,
     *,
     primary: str | None,
+    from_resume: bool = False,
 ) -> tuple[str, tuple[str, ...]]:
     """Resolve the provider and its allow-list together from ``spec``.
 
     ``primary`` is the provider when the user passed ``--provider`` or a
     resumed session pinned one; ``None`` means "use the default", which
-    is the first allowed provider. An explicit provider is unioned into
-    the allow-set so the caller need not name it twice. Unknown or empty
-    ``spec`` exits via :func:`_parse_allow_providers`.
+    is the first allowed provider. An explicit ``--provider`` is unioned
+    into the allow-set so the caller need not name it twice. A resumed
+    provider (``from_resume``) is NOT consent to widen the operator's
+    ``SAGENT_ALLOW_PROVIDERS`` lock: if it falls outside ``spec`` it is
+    rejected, so an old session cannot smuggle a disallowed provider past
+    the master knob. Unknown or empty ``spec`` exits via
+    :func:`_parse_allow_providers`.
     """
     parsed = _parse_allow_providers(spec)
     if primary is None:
         return parsed[0], parsed
     if primary in parsed:
         return primary, parsed
+    if from_resume:
+        sys.stderr.write(
+            f"Error: resumed session's provider {primary!r} is not in"
+            f" --allow-providers {list(parsed)}; the operator's allow-list"
+            " is not widened by a persisted provider. Pass"
+            f" --provider {primary} to override, or widen --allow-providers.\n"
+        )
+        sys.exit(1)
     # Route the union back through ``_parse_allow_providers`` so an
     # unknown ``primary`` surfaces the same error/exit as any other
     # unknown CSV entry.
@@ -1387,10 +1400,12 @@ def main() -> int:
     # allowed provider (``primary=None``).
     resumed_provider = loaded_session is not None and bool(loaded_session[0].provider)
     args.provider_from_resume = resumed_provider
-    explicit = bool(getattr(args, "provider_explicit", False)) or resumed_provider
+    user_explicit = bool(getattr(args, "provider_explicit", False))
+    explicit = user_explicit or resumed_provider
     args.provider, allow_providers = _resolve_provider_and_allow(
         args.allow_providers,
         primary=args.provider if explicit else None,
+        from_resume=resumed_provider and not user_explicit,
     )
     try:
         thinking_state = _resolve_cli_thinking_state(args)
