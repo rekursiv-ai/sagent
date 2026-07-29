@@ -39,11 +39,11 @@ dependencies = [
     # web server / api
     "uvicorn>=0.30.0",
     # mcp
-    "mcp>=1.10",
+    "mcp>=2.0.0",
     "starlette>=0.40",
     # llm
     "anthropic>=0.72.0",
-    "openai",
+    "openai>=2.20",
     # config
     "pyyaml>=6.0",
     # text / docs

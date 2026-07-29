@@ -38,6 +38,7 @@ if TYPE_CHECKING:
         lowlevel as _mcp_server_lowlevel,
         streamable_http_manager as _mcp_streamable_http_manager,
     )
+    from mcp.server.context import ServerRequestContext
     from mcp.server.lowlevel import Server
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
     from starlette import (
@@ -292,11 +293,14 @@ class ToolsBridge:
 
         """
         self._stopped = False
-        self._server = _mcp_server_lowlevel.Server("sagent-cli-bridge")
+        self._server = _mcp_server_lowlevel.Server(
+            "sagent-cli-bridge",
+            on_list_tools=self._on_list_tools,
+            on_call_tool=self._on_call_tool,
+        )
         manager = _mcp_streamable_http_manager.StreamableHTTPSessionManager(
             app=self._server, stateless=True
         )
-        self._register_handlers(self._server)
 
         async def handle_mcp(scope: Scope, receive: Receive, send: Send) -> None:
             await manager.handle_request(scope, receive, send)
@@ -388,35 +392,43 @@ class ToolsBridge:
         """Server name registered with the CLI's MCP config."""
         return "sagent"
 
-    def _register_handlers(self, server: Server) -> None:
-        """Wire ``list_tools`` and ``call_tool`` to the live tool registry."""
-
-        @server.list_tools()
-        async def _list_tools() -> list[mcp_types.Tool]:  # pyright: ignore[reportUnusedFunction]  -- decorator-registered
-            # The CLI fetched the catalog: a ``sagent`` MCP client just
-            # connected. Bump the counter + wake any spawn waiting for it.
-            async with self._listed_cond:
-                self._listed_count += 1
-                self._listed_cond.notify_all()
-            return [
+    async def _on_list_tools(
+        self,
+        ctx: ServerRequestContext[object],
+        params: mcp_types.PaginatedRequestParams | None,
+    ) -> mcp_types.ListToolsResult:
+        """Advertise the live tool registry to a connecting MCP client."""
+        del ctx, params
+        # The CLI fetched the catalog: a ``sagent`` MCP client just
+        # connected. Bump the counter + wake any spawn waiting for it.
+        async with self._listed_cond:
+            self._listed_count += 1
+            self._listed_cond.notify_all()
+        return mcp_types.ListToolsResult(
+            tools=[
                 mcp_types.Tool(
                     name=t.name,
                     description=t.description,
-                    inputSchema=cast(
+                    input_schema=cast(
                         "dict[str, object]",
                         json_unfreeze(bg_augmented_schema(t.directive_schema)),
                     ),
                 )
                 for t in self._tools.values()
             ]
+        )
 
-        @server.call_tool()
-        async def _on_call_tool(  # pyright: ignore[reportUnusedFunction]  -- decorator-registered
-            name: str, arguments: dict[str, object]
-        ) -> list[mcp_types.ContentBlock]:
-            # Dispatch owns the unknown-tool path (``_call_tool``); no
-            # duplicate guard here.
-            return await self._call_tool(name, arguments)
+    async def _on_call_tool(
+        self,
+        ctx: ServerRequestContext[object],
+        params: mcp_types.CallToolRequestParams,
+    ) -> mcp_types.CallToolResult:
+        """Route a client tool call through the live registry."""
+        del ctx
+        # Dispatch owns the unknown-tool path (``_call_tool``); no
+        # duplicate guard here.
+        blocks = await self._call_tool(params.name, dict(params.arguments or {}))
+        return mcp_types.CallToolResult(content=blocks)
 
     async def _call_tool(
         self,
@@ -617,7 +629,7 @@ class ToolsBridge:
             mcp_types.ImageContent(
                 type="image",
                 data=base64.b64encode(att.data).decode(),
-                mimeType=att.descriptor,
+                mime_type=att.descriptor,
             )
             for att in result.attachments
             if att.descriptor.startswith("image/")
