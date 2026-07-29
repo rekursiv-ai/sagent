@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  The self-mutating multi-provider coding-agent CLI and typed Python library.
+  A coding-agent CLI and strongly-typed Python library -- self-mutating, hot-swapping, multi-provider, with async tool calls and bidirectional recursive spawn.
 </p>
 
 <p align="center">
@@ -52,11 +52,17 @@
 
 ```bash
 # Mac:
-#   brew install ripgrep fd uv
+#   # Required for quick install.
+#   brew install uv
+#   # Optional for improved performance.
+#   brew install ripgrep fd
 
 # Ubuntu/Debian:
-#   sudo apt-get install -y curl ripgrep fd-find
-#   curl -LsSf https://astral.sh/uv/install.sh | sh
+#   # Required for quick install.
+#   sudo apt-get install -y curl &&
+#       curl -LsSf https://astral.sh/uv/install.sh | sh
+#   # Optional for improved performance.
+#   sudo apt-get install -y ripgrep fd-find
 
 uv tool install sagent
 
