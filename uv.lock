@@ -3039,7 +3039,7 @@ wheels = [
 
 [[package]]
 name = "sagent"
-version = "0.1.10"
+version = "0.1.11"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -3871,7 +3871,7 @@ wheels = [
 
 [[package]]
 name = "wesearch"
-version = "0.1.3"
+version = "0.1.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "beautifulsoup4", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -3881,9 +3881,9 @@ dependencies = [
     { name = "zendriver", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "zstandard", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d0/54/b1e063ab3b37d3bdd08a4adcb06b24037ad114bf116d8ba8ad305ff767a3/wesearch-0.1.3.tar.gz", hash = "sha256:7e4f211e075fe1f8e81d226cd09a5a600a9c4d7ebf273eaece28548bf4d43ba0", size = 329130, upload-time = "2026-07-26T17:59:49.052Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/29/78/1def45aee2e1cde6688961e0521a9e0a7bb47f6176042b4dbda389a2e2da/wesearch-0.1.4.tar.gz", hash = "sha256:1d7f4f3b9e1b1f6bc1ff0b5bd1f93a63b19a8ab148c8919b928e21c236c2b160", size = 330312, upload-time = "2026-07-29T01:53:39.413Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/eb/ce/0219d3adeda93b4dde24f843298c06686a7cc92021218058bc693cd46d32/wesearch-0.1.3-py3-none-any.whl", hash = "sha256:743b29bd43a7f004097799319a700595dbca9660edaf82347ab96b7eaa325803", size = 179651, upload-time = "2026-07-26T17:59:47.848Z" },
+    { url = "https://files.pythonhosted.org/packages/9c/09/876ff76284379a1e70baa474a8c1d5879c2bd64f0195cb2aea52a1630832/wesearch-0.1.4-py3-none-any.whl", hash = "sha256:616957b6d2c1ba0dfff39f87c16dcce80c70a9f156b5884ec97c791893dea76b", size = 175524, upload-time = "2026-07-29T01:53:38.196Z" },
 ]
 
 [package.optional-dependencies]
