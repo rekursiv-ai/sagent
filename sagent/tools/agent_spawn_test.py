@@ -1500,6 +1500,65 @@ async def test_persistent_spawn_writes_parent_lifecycle_record(tmp_path: Path) -
 
 @pytest.mark.asyncio
 @pytest.mark.real_sleep
+async def test_persistent_spawn_model_error_reaches_parent_inbox() -> None:
+    """A serviced child whose model call fails must reach the parent's inbox.
+
+    A model-level failure (bad model id, revoked creds) leaves the child
+    parked on ``AWAIT_RECOVERY`` -- it never publishes ``AgentIdle`` and its
+    ``serve_forever`` does not crash -- so the ``notify_on_asleep`` idle ping
+    never fires. Without a dedicated error edge the parent's model never learns
+    the child died: the forwarder renders ``ModelResponseError`` to the pane
+    only. This asserts the child-fatal error is delivered to the parent's inbox
+    (its decision layer), the only channel the parent's model reads.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _FailingModel(StubProviderModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
+            del request, publish
+            raise RuntimeError("unsupported model for this account")
+
+    parent = _make_parent()
+    child = Agent(model=_FailingModel(), tools=[])
+    t = AgentSpawn()
+
+    with _parent_context(parent):
+        result = t._spawn_serviced(
+            child, "doomed-child", "do work", notify_on_asleep=True
+        )
+        assert not result.is_error
+        task = _persistent_tasks.get("doomed-child")
+        assert task is not None
+
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while parent.runtime.inbox.empty():
+            if asyncio.get_running_loop().time() >= deadline:
+                pytest.fail(
+                    "parent inbox never received the child's model-error notification"
+                )
+            await asyncio.sleep(0.01)
+
+        first = parent.runtime.inbox._queue.get_nowait()
+        assert isinstance(first, AgentSendMessage)
+        assert first.source == "doomed-child"
+        assert "unsupported model for this account" in first.text, (
+            f"unexpected payload: {first.text!r}"
+        )
+
+        child.shutdown(force=True)
+        try:
+            await asyncio.wait_for(task, timeout=2.0)
+        except (TimeoutError, Exception):
+            _ = task.cancel()
+
+
+@pytest.mark.asyncio
+@pytest.mark.real_sleep
 async def test_persistent_spawn_with_notify_on_asleep_notifies_parent() -> None:
     """End-to-end: a persistent child seeded with a prompt completes one
     round, becomes idle, and the parent inbox receives the notification
