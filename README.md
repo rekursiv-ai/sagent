@@ -156,7 +156,7 @@ printf 'Say hi in one sentence.' | \
 
 Use `--continue` to resume the most recent session for this working directory, `--session PATH` for an explicit session directory, or `--ephemeral` when prompts and auto-memory should not be written to disk. Use `--max-budget-usd N` to cap API spend for the current run.
 
-See [CLI](docs/cli.md) and [Sessions](docs/sessions.md) for the full flag set.
+See [CLI](https://github.com/rekursiv-ai/sagent/blob/main/docs/cli.md) and [Sessions](https://github.com/rekursiv-ai/sagent/blob/main/docs/sessions.md) for the full flag set.
 
 ## Quickstart: Python
 
@@ -184,7 +184,7 @@ asyncio.run(main())
 
 `Agent.run()` accepts a JSON directive with a `prompt` key and returns a `Message`.
 
-See [API](docs/api.md), [Tutorial](docs/tutorial.md), and [Concepts](docs/concepts.md) for more detail.
+See [API](https://github.com/rekursiv-ai/sagent/blob/main/docs/api.md), [Tutorial](https://github.com/rekursiv-ai/sagent/blob/main/docs/tutorial.md), and [Concepts](https://github.com/rekursiv-ai/sagent/blob/main/docs/concepts.md) for more detail.
 
 ## Provider setup
 
@@ -219,7 +219,7 @@ to set the default value of the `--provider` flag.
 | `SelfHosted` | none | `Qwen/Qwen3.6-27B` |
 | `LlamaCpp` | none (uses `LLAMA_CPP_MODEL` + `LLAMA_CPP_SERVER`) | `qwen3.6-27b-12gb` |
 
-See [Providers](docs/providers.md) for the provider matrix, inference rules, and OpenAI-compatible provider setup.
+See [Providers](https://github.com/rekursiv-ai/sagent/blob/main/docs/providers.md) for the provider matrix, inference rules, and OpenAI-compatible provider setup.
 
 ## Self-hosted models
 
@@ -257,11 +257,11 @@ endpoint. Point `LLAMA_CPP_SERVER` at a built `llama-server` binary and
 `LLAMA_CPP_MODEL` at a `.gguf` file, then run
 `sagent --provider LlamaCpp --model qwen3.6-27b-12gb`.
 
-See [Self-hosted Models](docs/selfhosted.md) for options, local snapshot paths, and runtime requirements.
+See [Self-hosted Models](https://github.com/rekursiv-ai/sagent/blob/main/docs/selfhosted.md) for options, local snapshot paths, and runtime requirements.
 
 ## Examples
 
-The [`examples/`](examples/) directory contains small, runnable examples:
+The [`examples/`](https://github.com/rekursiv-ai/sagent/tree/main/examples/) directory contains small, runnable examples:
 
 - `offline_custom_tool.py`: run an agent/tool/model loop without API keys.
 - `decorator_tool.py`: wrap a function as a tool.
@@ -269,7 +269,7 @@ The [`examples/`](examples/) directory contains small, runnable examples:
 - `multi_agent_reviewer.py`: spawn an isolated reviewer child.
 - `openai_compatible_provider.py`: connect an OpenAI-compatible endpoint.
 
-Start with the [tutorial](docs/tutorial.md), then use the examples as copyable patterns. See [Examples](examples/) and [Tools](docs/tools.md).
+Start with the [tutorial](https://github.com/rekursiv-ai/sagent/blob/main/docs/tutorial.md), then use the examples as copyable patterns. See [Examples](https://github.com/rekursiv-ai/sagent/tree/main/examples/) and [Tools](https://github.com/rekursiv-ai/sagent/blob/main/docs/tools.md).
 
 ## Security and privacy
 
@@ -282,7 +282,7 @@ responses, tool results, file snippets, and paths.
 Use narrow tool sets, pass `--ephemeral` for one-off sensitive
 prompts so sessions and auto-memory are disabled, and run Sagent inside your own
 OS/container sandbox when a task needs hard isolation. See
-[Security](docs/security.md).
+[Security](https://github.com/rekursiv-ai/sagent/blob/main/docs/security.md).
 
 ## Comparison
 
