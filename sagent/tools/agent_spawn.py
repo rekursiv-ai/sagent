@@ -1305,6 +1305,29 @@ class _ChildForwarder:
                 )
             )
             return
+        if isinstance(event, ModelResponseError) and self._child.is_serviced:
+            # A child-fatal model failure (bad model id, revoked creds, cap hit)
+            # parks a SERVICED child on ``AWAIT_RECOVERY``: it never publishes
+            # ``AgentIdle`` and its ``serve_forever`` does not crash, so neither
+            # the idle-ping path below nor the ``_run`` failure handler ever
+            # surfaces it. Render-only forwarding (``ChildEvent``, below) reaches
+            # the parent's pane but NOT its model context, so the parent would
+            # wait on a dead child forever. Push the error into the parent's
+            # inbox -- the one channel its model reads -- regardless of
+            # ``notify_on_asleep`` (a parent that muted idle pings still must
+            # learn its child died). Fall through so the render path also fires.
+            # A oneshot child is exempt: ``_run_oneshot_child`` already returns
+            # the error as the spawn tool's ``ToolResult``, so an inbox push
+            # would double-signal the same failure.
+            self._parent_agent.runtime.inbox.push_back(
+                AgentSendMessage(
+                    source=self._label,
+                    text=(
+                        f"[{self._label} failed] "
+                        f"{type(event.exception).__name__}: {event.exception}"
+                    ),
+                )
+            )
         if isinstance(event, AgentIdle) and self._notify_on_asleep:
             # Inbox push -- not parent.publish. The parent's model sees
             # this in its conversation history; the runtime event bus
