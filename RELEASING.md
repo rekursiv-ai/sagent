@@ -1,71 +1,73 @@
 # Releasing sagent to PyPI
 
-Maintainer-only.
+Maintainer-only. Replace `X.Y.Z` with the new version throughout.
 
-Publishing is fully automated: a published GitHub Release on
-`rekursiv-ai/sagent` triggers `.github/workflows/publish-pypi.yml`
-(`release: published`, `publish-pypi.yml:4-5`), which builds with
-`uv build`, validates, and uploads to PyPI via OIDC trusted publishing
-(`id-token: write`, `environment: pypi`, no API token).
+A published GitHub Release triggers `.github/workflows/publish-pypi.yml`,
+which builds, validates, and uploads to PyPI via OIDC trusted publishing
+(no API token). Follow the steps in order.
 
 ## Steps
 
-Replace `X.Y.Z` with the new version.
+1. **(First release only) Register the trusted publisher on PyPI.**
+   Skip if already done. Web-console only, no CLI. Go to
+   https://pypi.org/manage/project/sagent/settings/publishing/ and add
+   a publisher with these exact values:
 
-1. Bump the version in `pyproject.toml` (source of truth). PyPI rejects
-   re-uploads, so this must increase.
-2. Validate locally (same checks CI runs, CONTRIBUTING.md:18-30):
+   | Field | Value |
+   |---|---|
+   | Owner | `rekursiv-ai` |
+   | Repository name | `sagent` |
+   | Workflow filename | `publish-pypi.yml` |
+   | Environment name | `pypi` |
+
+   Environment name **must** be `pypi` (matches `publish-pypi.yml:16`).
+   Blank here = `invalid-publisher` at publish time.
+
+2. **Bump the version** in `pyproject.toml` (source of truth). Must
+   increase; PyPI rejects re-uploads.
+
+3. **Validate locally** (same checks CI runs, CONTRIBUTING.md:18-30):
    ```bash
    uv build
    uv run python sagent/bin/check_wheel.py
    ```
-3. Commit and merge to `main`. Confirm the published `pyproject.toml`
-   shows the new version before continuing:
+
+4. **Commit and merge to `main`.** Confirm the published version:
    ```bash
    gh api repos/rekursiv-ai/sagent/contents/pyproject.toml --jq .content | base64 -d | grep '^version'
    ```
-4. Cut the release (this is what actually triggers PyPI publish):
+
+5. **Cut the release** (this triggers the PyPI publish):
    ```bash
    gh release create vX.Y.Z --repo rekursiv-ai/sagent --title "vX.Y.Z" --generate-notes
    ```
-5. Watch the workflow:
+
+6. **Watch the workflow:**
    ```bash
    gh run watch --repo rekursiv-ai/sagent $(gh run list --repo rekursiv-ai/sagent --workflow publish-pypi.yml --limit 1 --json databaseId --jq '.[0].databaseId')
    ```
 
-## Check what's live on PyPI
+7. **Confirm it's live:**
+   ```bash
+   curl -s https://pypi.org/pypi/sagent/json | jq -r '.info.version'   # should print X.Y.Z
+   ```
+   Browser: https://pypi.org/project/sagent/
 
-```bash
-# Latest version
-curl -s https://pypi.org/pypi/sagent/json | jq -r '.info.version'
+## If the workflow fails
 
-# All published versions
-curl -s https://pypi.org/pypi/sagent/json | jq -r '.releases | keys[]'
+- **`invalid-publisher`** ("valid token, but no corresponding
+  publisher") — the trusted publisher isn't registered or doesn't match.
+  Do step 1, then re-run: `gh workflow run publish-pypi.yml --repo rekursiv-ai/sagent`.
 
-# Or via pip
-pip index versions sagent
-```
+- **Transient PyPI failure** — re-run without a new tag:
+  `gh workflow run publish-pypi.yml --repo rekursiv-ai/sagent`.
 
-Browser: https://pypi.org/project/sagent/
-
-## Manual re-publish
-
-If a release exists but the workflow needs to re-run (e.g. transient
-PyPI failure), trigger it without cutting a new tag via
-`workflow_dispatch` (`publish-pypi.yml:6`):
-
-```bash
-gh workflow run publish-pypi.yml --repo rekursiv-ai/sagent
-```
-
-## Notes
-
-- Bumping the version alone does not deploy. The release event is the
-  trigger.
-- PyPI does not allow overwriting a published version. To re-upload,
-  bump to `X.Y.Z+1`.
-- The `pypi` GitHub environment may have required reviewers/protection
-  rules gating the publish step -- check repo Settings -> Environments
-  if it stalls.
-- Trusted publishing is configured on the `pypi` GitHub environment in
-  `rekursiv-ai/sagent`; rotate via PyPI project settings, not here.
+- **Must ship now, publishing still broken** — upload directly with the
+  project's API token (`rekursiv-ai`-owned, e.g. `$PYPI_TOKEN_WORK`; a
+  personal token can't publish `sagent`):
+  ```bash
+  uv build --out-dir dist
+  uv run --with twine twine check dist/sagent-X.Y.Z*
+  uv run --with twine twine upload dist/sagent-X.Y.Z* -u __token__ -p "$PYPI_TOKEN_WORK"
+  ```
+  Permanent and public; PyPI never allows re-uploading a version.
