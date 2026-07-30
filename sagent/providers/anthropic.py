@@ -133,12 +133,13 @@ _DEFAULT_API_TARGET_INPUT_TOKENS = (
 # transports; the CLI transport can't pass the knob.
 _FAST_MODE_MODELS = frozenset(
     {
+        "claude-opus-5",
         "claude-opus-4-8",
         "claude-opus-4-7",
         "claude-opus-4-6",
     }
 )
-_DEFAULT_1M_MODELS = frozenset({"claude-fable-5", "claude-sonnet-5"})
+_DEFAULT_1M_MODELS = frozenset({"claude-fable-5", "claude-sonnet-5", "claude-opus-5"})
 
 
 def supports_fast_mode(model_id: str) -> bool:
@@ -161,6 +162,7 @@ def supports_fast_mode(model_id: str) -> bool:
 _CONTEXT_MANAGEMENT_MODELS = frozenset(
     {
         "claude-fable-5",
+        "claude-opus-5",
         "claude-opus-4-8",
         "claude-opus-4-7",
         "claude-opus-4-6",
@@ -333,7 +335,7 @@ class Anthropic:
     """
 
     # Latest model we roll to when ``model_id`` is None. Bump on release.
-    DEFAULT_MODEL = "claude-opus-4-8+1m"
+    DEFAULT_MODEL = "claude-opus-5"
     DEFAULT_UTILITY_MODEL = "claude-haiku-4-5"
 
     supported_options: ClassVar[frozenset[str]] = frozenset(
@@ -375,6 +377,30 @@ class Anthropic:
             max_request_tokens=1_000_000,
             max_response_tokens=128_000,
             pricing=_FABLE,
+            readable_thinking=False,
+            enabled_thinking_mode=False,
+            valid_efforts=("low", "medium", "high", "xhigh", "max"),
+            chars_per_token=2.83,
+            max_image_dim=_NATIVE_DIM_HIRES,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
+        ),
+        "claude-opus-5": ModelProfile(
+            max_request_tokens=1_000_000,
+            max_response_tokens=128_000,
+            pricing=_OPUS,
+            readable_thinking=False,
+            enabled_thinking_mode=False,
+            valid_efforts=("low", "medium", "high", "xhigh", "max"),
+            chars_per_token=2.83,
+            max_image_dim=_NATIVE_DIM_HIRES,
+            max_image_bytes=_IMAGE_BYTES,
+            max_request_bytes=_REQUEST_BYTES,
+        ),
+        "claude-opus-5+1m": ModelProfile(
+            max_request_tokens=1_000_000,
+            max_response_tokens=128_000,
+            pricing=_OPUS,
             readable_thinking=False,
             enabled_thinking_mode=False,
             valid_efforts=("low", "medium", "high", "xhigh", "max"),

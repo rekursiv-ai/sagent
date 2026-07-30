@@ -612,7 +612,7 @@ def test_anthropic_model_pricing_exposed() -> None:
 
 def test_anthropic_fable_model_profile() -> None:
     p = Anthropic.from_key("k")
-    assert Anthropic.DEFAULT_MODEL == "claude-opus-4-8+1m"
+    assert Anthropic.DEFAULT_MODEL == "claude-opus-5"
     m = p.model("claude-fable-5")
     assert m.max_request_tokens == 1_000_000
     assert m.max_response_tokens == 128_000
