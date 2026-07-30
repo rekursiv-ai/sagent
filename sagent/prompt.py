@@ -125,6 +125,7 @@ def environment(model_id: str) -> str:
     # verified against Anthropic's docs (January 2026).
     model_info: dict[str, tuple[str, str]] = {
         "claude-fable-5": ("Claude Fable 5", "unknown"),
+        "claude-opus-5": ("Claude Opus 5", "May 2026"),
         "claude-opus-4-8": ("Claude Opus 4.8", "January 2026"),
         "claude-opus-4-7": ("Claude Opus 4.7", "January 2026"),
         "claude-opus-4-6": ("Claude Opus 4.6", "May 2025"),
