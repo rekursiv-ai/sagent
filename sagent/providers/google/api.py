@@ -42,7 +42,7 @@ from sagent.lib.custom_json import (
     int_val,
     json_unfreeze,
 )
-from sagent.providers import google_catalog
+from sagent.providers.google import catalog as google_catalog
 from sagent.providers.lib.errors import (
     error_status_code,
     is_request_too_large,

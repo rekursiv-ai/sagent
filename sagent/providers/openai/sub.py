@@ -99,7 +99,6 @@ from sagent import types
 from sagent.lib import debug_log
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import MutableJSON, int_val, json_unfreeze
-from sagent.providers import openai_catalog
 from sagent.providers.lib.errors import (
     StreamingResponseNotReadError,
     error_status_code,
@@ -116,7 +115,8 @@ from sagent.providers.lib.oauth import (
     pkce_pair,
 )
 from sagent.providers.lib.stop_reason import normalize_stop_reason
-from sagent.providers.openai import OpenAI, _OpenAIModel
+from sagent.providers.openai import catalog as openai_catalog
+from sagent.providers.openai.api import OpenAI, _OpenAIModel
 from sagent.types.exceptions import (
     AuthRefreshError,
     UserFacingError,

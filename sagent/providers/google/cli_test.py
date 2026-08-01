@@ -15,9 +15,9 @@ import time
 import pytest
 
 from sagent.lib.custom_json import MutableJSON
-from sagent.providers import google_cli
-from sagent.providers.google import Google
-from sagent.providers.google_cli import (
+from sagent.providers.google import cli as google_cli
+from sagent.providers.google.api import Google
+from sagent.providers.google.cli import (
     GoogleCLI,
     _dispatch_session_update,
     _GoogleCLIModel,
@@ -68,7 +68,7 @@ def test_from_cli_requires_credentials(
 ) -> None:
     """``from_credentials`` raises ``FileNotFoundError`` if no creds file exists."""
     monkeypatch.setattr(
-        "sagent.providers.google_cli._CREDS_PATH",
+        "sagent.providers.google.cli._CREDS_PATH",
         tmp_path / "missing.json",
     )
     with pytest.raises(FileNotFoundError, match="no credentials"):
@@ -81,7 +81,7 @@ def test_from_cli_rejects_missing_executable(
     """``from_credentials`` fails fast if ``gemini`` is not on ``PATH``."""
     creds = _write_creds(tmp_path)
     monkeypatch.setattr(
-        "sagent.providers.google_cli._CREDS_PATH",
+        "sagent.providers.google.cli._CREDS_PATH",
         creds,
     )
 
@@ -90,7 +90,7 @@ def test_from_cli_rejects_missing_executable(
         return None
 
     monkeypatch.setattr(
-        "sagent.providers.google_cli.shutil.which",
+        "sagent.providers.google.cli.shutil.which",
         _which_missing,
     )
     with pytest.raises(RuntimeError, match="not on PATH"):
@@ -103,7 +103,7 @@ def test_from_cli_with_credentials(
     """``from_credentials`` returns a configured provider when both creds + CLI exist."""
     creds = _write_creds(tmp_path)
     monkeypatch.setattr(
-        "sagent.providers.google_cli._CREDS_PATH",
+        "sagent.providers.google.cli._CREDS_PATH",
         creds,
     )
 
@@ -112,7 +112,7 @@ def test_from_cli_with_credentials(
         return "/usr/bin/gemini"
 
     monkeypatch.setattr(
-        "sagent.providers.google_cli.shutil.which",
+        "sagent.providers.google.cli.shutil.which",
         _which_gemini,
     )
     provider = GoogleCLI.from_credentials()
@@ -126,7 +126,7 @@ def test_from_cli_rejects_malformed_credentials(
     creds = tmp_path / "oauth_creds.json"
     creds.write_text("", encoding="utf-8")
     monkeypatch.setattr(
-        "sagent.providers.google_cli._CREDS_PATH",
+        "sagent.providers.google.cli._CREDS_PATH",
         creds,
     )
 
@@ -135,7 +135,7 @@ def test_from_cli_rejects_malformed_credentials(
         return "/usr/bin/gemini"
 
     monkeypatch.setattr(
-        "sagent.providers.google_cli.shutil.which",
+        "sagent.providers.google.cli.shutil.which",
         _which_gemini,
     )
     with pytest.raises(ValueError, match="Invalid credentials"):
@@ -148,7 +148,7 @@ def test_from_cli_rejects_credentials_missing_oauth_fields(
     creds = tmp_path / "oauth_creds.json"
     creds.write_text(json.dumps({}), encoding="utf-8")
     monkeypatch.setattr(
-        "sagent.providers.google_cli._CREDS_PATH",
+        "sagent.providers.google.cli._CREDS_PATH",
         creds,
     )
 
@@ -157,7 +157,7 @@ def test_from_cli_rejects_credentials_missing_oauth_fields(
         return "/usr/bin/gemini"
 
     monkeypatch.setattr(
-        "sagent.providers.google_cli.shutil.which",
+        "sagent.providers.google.cli.shutil.which",
         _which_gemini,
     )
     with pytest.raises(ValueError, match="Invalid credentials"):
@@ -902,7 +902,7 @@ async def test_writeback_credentials_atomic_and_0o600(
     so a mid-write crash never disturbs ``target``.
     """
     monkeypatch.setattr(
-        "sagent.providers.google_cli._CREDS_PATH",
+        "sagent.providers.google.cli._CREDS_PATH",
         tmp_path / "home" / ".gemini" / "oauth_creds.json",
     )
     provider = GoogleCLI()
@@ -953,7 +953,7 @@ def test_writeback_credentials_works_across_event_loops(
 ) -> None:
     """A model whose lock was first used in loop A still works in loop B."""
     monkeypatch.setattr(
-        "sagent.providers.google_cli._CREDS_PATH",
+        "sagent.providers.google.cli._CREDS_PATH",
         tmp_path / "home" / ".gemini" / "oauth_creds.json",
     )
     provider = GoogleCLI()

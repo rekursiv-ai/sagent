@@ -25,15 +25,15 @@ import inspect
 
 import pytest
 
-from sagent.providers.anthropic import _AnthropicModel
-from sagent.providers.anthropic_cli import _AnthropicCLIModel
-from sagent.providers.dashscope import _DashScopeModel
-from sagent.providers.google import _GeminiModel
-from sagent.providers.google_cli import _GoogleCLIModel
-from sagent.providers.minimax import _MiniMaxModel
-from sagent.providers.moonshot import _MoonshotModel
-from sagent.providers.openai import _OpenAIModel
-from sagent.providers.openai_sub import _OpenAISubModel
+from sagent.providers.anthropic.api import _AnthropicModel
+from sagent.providers.anthropic.cli import _AnthropicCLIModel
+from sagent.providers.dashscope.api import _DashScopeModel
+from sagent.providers.google.api import _GeminiModel
+from sagent.providers.google.cli import _GoogleCLIModel
+from sagent.providers.minimax.api import _MiniMaxModel
+from sagent.providers.moonshot.api import _MoonshotModel
+from sagent.providers.openai.api import _OpenAIModel
+from sagent.providers.openai.sub import _OpenAISubModel
 from sagent.types.model import Model
 from sagent.types.providers import Provider
 

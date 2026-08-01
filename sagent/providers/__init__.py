@@ -16,24 +16,27 @@ them at a localhost inference server.
 
 from typing import Literal, get_args
 
-from sagent.providers.anthropic import Anthropic
-from sagent.providers.anthropic_cli import AnthropicCLI
-from sagent.providers.dashscope import DashScope
-from sagent.providers.google import Google
-from sagent.providers.google_cli import GoogleCLI
-from sagent.providers.llamacpp import LlamaCpp
-from sagent.providers.minimax import MiniMax
-from sagent.providers.moonshot import Moonshot
-from sagent.providers.openai import OpenAI
-from sagent.providers.openai_compat import OpenAICompat
-from sagent.providers.openai_sub import OpenAISubscription
+from sagent.providers.anthropic.api import Anthropic
+from sagent.providers.anthropic.cli import AnthropicCLI
+from sagent.providers.dashscope.api import DashScope
+from sagent.providers.google.api import Google
+from sagent.providers.google.cli import GoogleCLI
+from sagent.providers.llamacpp.server import LlamaCpp
+from sagent.providers.minimax.api import MiniMax
+from sagent.providers.moonshot.api import Moonshot
+from sagent.providers.openai.api import OpenAI
+from sagent.providers.openai.compat import OpenAICompat
+from sagent.providers.openai.sub import OpenAISubscription
 from sagent.providers.providers import (
     build_provider,
     default_auth_for_provider,
     infer_provider,
     supported_provider_options,
 )
-from sagent.providers.selfhosted import SelfHosted, SelfHostedModel
+from sagent.providers.selfhosted.server import (
+    SelfHosted,
+    SelfHostedModel,
+)
 
 
 ProviderName = Literal[

@@ -11,7 +11,7 @@ import os
 import sys
 
 from sagent.agent import Agent
-from sagent.providers.openai_compat import OpenAICompat
+from sagent.providers.openai.compat import OpenAICompat
 from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,

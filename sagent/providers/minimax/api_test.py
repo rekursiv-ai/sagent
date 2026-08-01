@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from sagent.providers.minimax import MiniMax
+from sagent.providers.minimax.api import MiniMax
 from sagent.types.cost import PriceCatalogProduct
 
 

@@ -11,7 +11,7 @@ from PIL import Image
 import pytest
 import tiktoken
 
-from sagent.providers.openai import OpenAI
+from sagent.providers.openai.api import OpenAI
 from sagent.types.cost import PriceCatalogProduct
 from sagent.types.model import ModelRequest
 from sagent.types.runtime import UserMessage

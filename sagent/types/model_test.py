@@ -7,7 +7,10 @@ from typing import cast
 
 import pytest
 
-from sagent.providers import anthropic, anthropic_catalog
+from sagent.providers.anthropic import (
+    api as anthropic,
+    catalog as anthropic_catalog,
+)
 from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,

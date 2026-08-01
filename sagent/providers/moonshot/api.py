@@ -21,8 +21,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import ClassVar
 
-from sagent.providers import moonshot_catalog
-from sagent.providers.openai_compat import (
+from sagent.providers.moonshot import catalog as moonshot_catalog
+from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
 )

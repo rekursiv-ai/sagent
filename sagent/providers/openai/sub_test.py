@@ -20,13 +20,14 @@ import pytest
 
 from sagent.agent.retry import is_rate_limited, is_retryable
 from sagent.lib.custom_json import JSONValue
-from sagent.providers import OpenAI, openai_sub
+from sagent.providers import OpenAI
 from sagent.providers.lib.errors import (
     StreamingResponseNotReadError,
     find_response_not_read,
 )
 from sagent.providers.lib.id_remap import IdRemapper
-from sagent.providers.openai_sub import (
+from sagent.providers.openai import sub as openai_sub
+from sagent.providers.openai.sub import (
     OpenAISubscription,
     _build_input,
     _build_tool,
@@ -400,7 +401,7 @@ def test_build_user_item_drops_non_image_attachment_with_warning(
     The Responses API has no analogue of Anthropic's PDF block; opaque drop
     would silently lose user intent, so the path logs each skipped descriptor.
     """
-    with caplog.at_level("WARNING", logger="sagent.providers.openai_sub"):
+    with caplog.at_level("WARNING", logger="sagent.providers.openai.sub"):
         item = _build_user_item(
             UserMessage(
                 text="see attached",
@@ -559,7 +560,7 @@ def test_login_manual_advertises_localhost_redirect_uri(
     out = io.StringIO()
     with (
         patch(
-            "sagent.providers.openai_sub.httpx.Client",
+            "sagent.providers.openai.sub.httpx.Client",
             return_value=http_client,
         ),
         patch.object(
@@ -929,7 +930,7 @@ async def _reasoning_effort_for(
     with (
         patch.object(provider, "get_sdk", AsyncMock(return_value=sdk)),
         patch(
-            "sagent.providers.openai_sub.oai_responses.ResponseCompletedEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseCompletedEvent",
             _CompletedEvent,
         ),
     ):
@@ -959,7 +960,7 @@ async def _create_kwargs_for(
     with (
         patch.object(provider, "get_sdk", AsyncMock(return_value=sdk)),
         patch(
-            "sagent.providers.openai_sub.oai_responses.ResponseCompletedEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseCompletedEvent",
             _CompletedEvent,
         ),
     ):
@@ -1026,7 +1027,7 @@ async def _reasoning_for(request: ModelRequest) -> object:
     with (
         patch.object(provider, "get_sdk", AsyncMock(return_value=sdk)),
         patch(
-            "sagent.providers.openai_sub.oai_responses.ResponseCompletedEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseCompletedEvent",
             _CompletedEvent,
         ),
     ):
@@ -1111,7 +1112,7 @@ class TestHandleAuthError:
             expires_at=0.0,
         )
         with patch(
-            "sagent.providers.openai_sub.DEFAULT_CREDENTIALS_PATH",
+            "sagent.providers.openai.sub.DEFAULT_CREDENTIALS_PATH",
             cred_file,
         ):
             await provider.handle_auth_error()
@@ -1157,7 +1158,7 @@ class TestHandleAuthError:
         with (
             patch.object(provider, "_refresh", _fake_refresh),
             patch(
-                "sagent.providers.openai_sub.DEFAULT_CREDENTIALS_PATH",
+                "sagent.providers.openai.sub.DEFAULT_CREDENTIALS_PATH",
                 cred_file,
             ),
         ):
@@ -1206,7 +1207,7 @@ class TestHandleAuthError:
         with (
             patch.object(provider, "_refresh", _fake_refresh),
             patch(
-                "sagent.providers.openai_sub.DEFAULT_CREDENTIALS_PATH",
+                "sagent.providers.openai.sub.DEFAULT_CREDENTIALS_PATH",
                 cred_file,
             ),
         ):
@@ -1252,11 +1253,11 @@ class TestHandleAuthError:
         mock_http.__aexit__ = AsyncMock(return_value=False)
         with (
             patch(
-                "sagent.providers.openai_sub.httpx.AsyncClient",
+                "sagent.providers.openai.sub.httpx.AsyncClient",
                 return_value=mock_http,
             ),
             patch(
-                "sagent.providers.openai_sub.DEFAULT_CREDENTIALS_PATH",
+                "sagent.providers.openai.sub.DEFAULT_CREDENTIALS_PATH",
                 cred_file,
             ),
         ):
@@ -1289,11 +1290,11 @@ class TestHandleAuthError:
         mock_http.__aexit__ = AsyncMock(return_value=False)
         with (
             patch(
-                "sagent.providers.openai_sub.httpx.AsyncClient",
+                "sagent.providers.openai.sub.httpx.AsyncClient",
                 return_value=mock_http,
             ),
             patch(
-                "sagent.providers.openai_sub.DEFAULT_CREDENTIALS_PATH",
+                "sagent.providers.openai.sub.DEFAULT_CREDENTIALS_PATH",
                 tmp_path / "does_not_exist.json",
             ),
         ):
@@ -1350,11 +1351,11 @@ class TestEnsureValidRace:
 
         with (
             patch(
-                "sagent.providers.openai_sub.httpx.AsyncClient",
+                "sagent.providers.openai.sub.httpx.AsyncClient",
                 return_value=mock_http,
             ),
             patch(
-                "sagent.providers.openai_sub.DEFAULT_CREDENTIALS_PATH",
+                "sagent.providers.openai.sub.DEFAULT_CREDENTIALS_PATH",
                 cred_file,
             ),
         ):
@@ -1400,7 +1401,7 @@ class TestEnsureValidRace:
         with (
             patch.object(provider, "_refresh", _fake_refresh),
             patch(
-                "sagent.providers.openai_sub.DEFAULT_CREDENTIALS_PATH",
+                "sagent.providers.openai.sub.DEFAULT_CREDENTIALS_PATH",
                 cred_file,
             ),
         ):
@@ -1443,7 +1444,7 @@ class TestEnsureValidRace:
         provider._sdk_token = _make_jwt({"exp": 0.0})
 
         with patch(
-            "sagent.providers.openai_sub.DEFAULT_CREDENTIALS_PATH",
+            "sagent.providers.openai.sub.DEFAULT_CREDENTIALS_PATH",
             cred_file,
         ):
             token = await provider._ensure_valid()
@@ -1547,7 +1548,7 @@ class TestStreamIdleTimeout:
     ) -> None:
         stream = _NeverYieldingStream()
         monkeypatch.setattr(
-            "sagent.providers.openai_sub._STREAM_IDLE_TIMEOUT",
+            "sagent.providers.openai.sub._STREAM_IDLE_TIMEOUT",
             0.01,
         )
 
@@ -1568,15 +1569,15 @@ class TestStreamIdleTimeout:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "sagent.providers.openai_sub._STREAM_IDLE_TIMEOUT",
+            "sagent.providers.openai.sub._STREAM_IDLE_TIMEOUT",
             0.05,
         )
         monkeypatch.setattr(
-            "sagent.providers.openai_sub.oai_responses.ResponseTextDeltaEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseTextDeltaEvent",
             _TextDeltaEvent,
         )
         monkeypatch.setattr(
-            "sagent.providers.openai_sub.oai_responses.ResponseCompletedEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseCompletedEvent",
             _CompletedEvent,
         )
         stream = _DelayedStream(
@@ -1601,7 +1602,7 @@ class TestStreamIdleTimeout:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "sagent.providers.openai_sub.oai_responses.ResponseTextDeltaEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseTextDeltaEvent",
             _TextDeltaEvent,
         )
         stream = _DelayedStream([_TextDeltaEvent("partial")], delay_sec=0.0)
@@ -1621,7 +1622,7 @@ class TestStreamIdleTimeout:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "sagent.providers.openai_sub.oai_responses.ResponseErrorEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseErrorEvent",
             _ResponseErrorEvent,
         )
         stream = _DelayedStream([_ResponseErrorEvent()], delay_sec=0.0)
@@ -1654,7 +1655,7 @@ class TestStreamIdleTimeout:
         exit.
         """
         monkeypatch.setattr(
-            "sagent.providers.openai_sub.oai_responses.ResponseErrorEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseErrorEvent",
             _ResponseErrorEvent,
         )
 
@@ -1684,7 +1685,7 @@ class TestStreamIdleTimeout:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "sagent.providers.openai_sub.oai_responses.ResponseFailedEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseFailedEvent",
             _FailedEvent,
         )
         stream = _DelayedStream([_FailedEvent()], delay_sec=0.0)
@@ -1709,11 +1710,11 @@ class TestStreamIdleTimeout:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "sagent.providers.openai_sub.oai_responses.ResponseTextDeltaEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseTextDeltaEvent",
             _TextDeltaEvent,
         )
         monkeypatch.setattr(
-            "sagent.providers.openai_sub.oai_responses.ResponseIncompleteEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseIncompleteEvent",
             _IncompleteEvent,
         )
         stream = _DelayedStream(
@@ -1736,11 +1737,11 @@ class TestStreamIdleTimeout:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "sagent.providers.openai_sub.oai_responses.ResponseTextDeltaEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseTextDeltaEvent",
             _TextDeltaEvent,
         )
         monkeypatch.setattr(
-            "sagent.providers.openai_sub.oai_responses.ResponseIncompleteEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseIncompleteEvent",
             _IncompleteEvent,
         )
         stream = _DelayedStream(
@@ -1762,7 +1763,7 @@ class TestStreamIdleTimeout:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "sagent.providers.openai_sub.oai_responses.ResponseCompletedEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseCompletedEvent",
             _CompletedEvent,
         )
         event = _CompletedEvent(
@@ -1792,11 +1793,11 @@ class TestStreamIdleTimeout:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "sagent.providers.openai_sub.oai_responses.ResponseOutputItemDoneEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseOutputItemDoneEvent",
             _ReasoningOutputDoneEvent,
         )
         monkeypatch.setattr(
-            "sagent.providers.openai_sub.oai_responses.ResponseCompletedEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseCompletedEvent",
             _CompletedEvent,
         )
         response = await _consume_stream(
@@ -1822,15 +1823,15 @@ class TestStreamIdleTimeout:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "sagent.providers.openai_sub.oai_responses.ResponseRefusalDeltaEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseRefusalDeltaEvent",
             _RefusalDeltaEvent,
         )
         monkeypatch.setattr(
-            "sagent.providers.openai_sub.oai_responses.ResponseRefusalDoneEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseRefusalDoneEvent",
             _RefusalDoneEvent,
         )
         monkeypatch.setattr(
-            "sagent.providers.openai_sub.oai_responses.ResponseCompletedEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseCompletedEvent",
             _CompletedEvent,
         )
         response = await _consume_stream(
@@ -1854,19 +1855,19 @@ class TestStreamIdleTimeout:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "sagent.providers.openai_sub.oai_responses.ResponseTextDeltaEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseTextDeltaEvent",
             _TextDeltaEvent,
         )
         monkeypatch.setattr(
-            "sagent.providers.openai_sub.oai_responses.ResponseReasoningTextDeltaEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseReasoningTextDeltaEvent",
             _ReasoningDeltaEvent,
         )
         monkeypatch.setattr(
-            "sagent.providers.openai_sub.oai_responses.ResponseReasoningSummaryTextDeltaEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseReasoningSummaryTextDeltaEvent",
             _ReasoningDeltaEvent,
         )
         monkeypatch.setattr(
-            "sagent.providers.openai_sub.oai_responses.ResponseCompletedEvent",
+            "sagent.providers.openai.sub.oai_responses.ResponseCompletedEvent",
             _CompletedEvent,
         )
         thinking_chunks: list[str] = []
@@ -1940,7 +1941,7 @@ class TestRefreshErrors:
         mock_http.__aexit__ = AsyncMock(return_value=False)
         with (
             patch(
-                "sagent.providers.openai_sub.httpx.AsyncClient",
+                "sagent.providers.openai.sub.httpx.AsyncClient",
                 return_value=mock_http,
             ),
             pytest.raises(AuthRefreshError) as excinfo,
@@ -1984,11 +1985,11 @@ class TestRefreshErrors:
         mock_http.__aexit__ = AsyncMock(return_value=False)
         with (
             patch(
-                "sagent.providers.openai_sub.httpx.AsyncClient",
+                "sagent.providers.openai.sub.httpx.AsyncClient",
                 return_value=mock_http,
             ),
             patch(
-                "sagent.providers.openai_sub.DEFAULT_CREDENTIALS_PATH",
+                "sagent.providers.openai.sub.DEFAULT_CREDENTIALS_PATH",
                 cred_file,
             ),
         ):
@@ -2013,7 +2014,7 @@ class TestRefreshErrors:
         mock_http.__aexit__ = AsyncMock(return_value=False)
         with (
             patch(
-                "sagent.providers.openai_sub.httpx.AsyncClient",
+                "sagent.providers.openai.sub.httpx.AsyncClient",
                 return_value=mock_http,
             ),
             pytest.raises(httpx.HTTPStatusError),
