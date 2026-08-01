@@ -1,19 +1,19 @@
 # sagent🪄
 
 <p align="center">
-  <img alt="sagent logo" src="https://raw.githubusercontent.com/rekursiv-ai/sagent/main/assets/logo-custom.webp" width="180">
-</p>
-
-<p align="center">
-  A coding-agent CLI and strongly-typed Python library -- self-mutating, hot-swapping, multi-provider, with async tool calls and bidirectional recursive spawn.
-</p>
-
-<p align="center">
   <a href="https://pypi.org/project/sagent/"><img alt="PyPI" src="https://img.shields.io/pypi/v/sagent.svg"></a>
   <a href="https://github.com/rekursiv-ai/sagent/actions/workflows/package-validation.yml"><img alt="CI" src="https://github.com/rekursiv-ai/sagent/actions/workflows/package-validation.yml/badge.svg?branch=main"></a>
   <img alt="Python" src="https://img.shields.io/badge/python-3.12%2B-blue.svg">
   <a href="https://github.com/rekursiv-ai/sagent/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
   <a href="https://discord.gg/2GZFPPvCqn"><img alt="Discord" src="https://img.shields.io/discord/1530237005311639592?logo=discord&logoColor=white&label=Discord&color=5865F2"></a>
+</p>
+
+<p align="center">
+  <img alt="sagent logo" src="https://raw.githubusercontent.com/rekursiv-ai/sagent/main/assets/logo-custom.webp" width="180">
+</p>
+
+<p align="center">
+  A coding-agent CLI and strongly-typed Python library -- self-mutating, hot-swapping, multi-provider, with async tool calls and bidirectional recursive spawn.
 </p>
 
 <p align="center">
