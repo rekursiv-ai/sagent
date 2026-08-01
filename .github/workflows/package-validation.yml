@@ -1,3 +1,6 @@
+# DO NOT EDIT -- generated from package-validation.yml.tmpl and this
+# package's sync config. Hand edits are overwritten; change
+# the template, the generator, or the sync config instead.
 name: Package validation
 
 on:
@@ -27,7 +30,7 @@ jobs:
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v6
-      - name: Install ripgrep and fd-find
+      - name: Install system packages
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep fd-find
       - name: Validate package
         run: |
