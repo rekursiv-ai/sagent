@@ -884,8 +884,8 @@ def test_build_response_estimates_tokens_and_cost() -> None:
     )
     assert response.message.text == "hello"
     assert response.stop_reason == "model_finished"
-    assert response.tokens.input_tokens == 4
-    assert response.tokens.output_tokens == 1
+    assert response.tokens.request == 4
+    assert response.tokens.response == 1
     assert response.total_cost >= 0.0
     assert len(response.message.thinking_blocks) == 1
 

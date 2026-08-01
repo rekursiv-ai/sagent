@@ -47,7 +47,7 @@ from sagent.lib.custom_json import MutableJSON
 from sagent.testing import FakeAgent
 from sagent.tools.core import agent_registry
 from sagent.tools.slack import Slack
-from sagent.types.model import ModelSpec
+from sagent.types.model import ModelRecipe
 from sagent.types.runtime import (
     AssistantMessage,
     ModelResponseError,
@@ -1421,7 +1421,7 @@ class TestAdapterConstruction:
     async def test_spawn_agent_writes_manifest(self, tmp_path: Path) -> None:
         adapter, _ = _make_adapter(tmp_path=tmp_path)
         adapter._model = MagicMock()
-        adapter._model_spec = MagicMock()
+        adapter._model_recipe = MagicMock()
         adapter._compactor = None
         adapter._effort = None
         adapter._max_tool_call_rounds = None
@@ -1483,7 +1483,7 @@ class TestAdapterConstruction:
             app_token="xapp-fake",  # noqa: S106 -- test credential
             bot_token="xoxb-fake",  # noqa: S106 -- test credential
             model=model,
-            model_spec=ModelSpec(
+            model_recipe=ModelRecipe(
                 provider="OpenAI",
                 auth="env",
                 model_id="gpt",

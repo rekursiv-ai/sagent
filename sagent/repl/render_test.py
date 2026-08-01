@@ -837,3 +837,51 @@ if __name__ == "__main__":
     from sagent.lib.testing.main import test_main
 
     test_main(__file__)
+
+
+def test_service_suspended_surfaces_the_provider_message() -> None:
+    """The provider's explanation must reach the banner.
+
+    A bare "temporarily blocked" label hid an entitlement message across
+    four escalating retries -- the user saw a wait with no way to learn
+    it would never clear.
+    """
+    event = ModelServiceSuspended(
+        provider="OpenAISubscription",
+        auth="credentials",
+        account=None,
+        model_id="gpt-5.6-sol+fast",
+        retry_at=time.time() + 7.0,
+        delay_sec=7.0,
+        server_supplied=False,
+        error=ServiceErrorSnapshot(
+            type_name="RateLimitError",
+            message="Usage credits are required for fast mode.",
+            status=429,
+        ),
+    )
+    text = service_suspended_text(event)
+    assert "Usage credits are required for fast mode." in text
+    assert "resumes in 7s" in text
+
+
+def test_service_suspended_truncates_a_long_provider_message() -> None:
+    """A verbose provider message must not bury the resume time.
+
+    The banner is a single line; an unbounded message wraps across the
+    pane and pushes "resumes in Ns" out of view.
+    """
+    event = ModelServiceSuspended(
+        provider="p",
+        auth="a",
+        account=None,
+        model_id="m",
+        retry_at=time.time() + 7.0,
+        delay_sec=7.0,
+        server_supplied=False,
+        error=ServiceErrorSnapshot(type_name="E", message="x" * 400, status=429),
+    )
+    text = service_suspended_text(event)
+    assert len(text) < 200
+    assert "resumes in 7s" in text
+    assert text.endswith("]")

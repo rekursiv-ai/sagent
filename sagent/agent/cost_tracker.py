@@ -8,17 +8,17 @@ stay local:
   renders per agent).
 - Cost is recorded once on the root cost sink -- the ``CostTracker`` the
   root agent installed in ``cost_root_var`` at lifecycle open -- via
-  :meth:`record_cost`, so ``root.total_cost_usd`` is the whole spawn
-  tree's spend counted exactly once per response. Each agent separately
-  tracks its own cost on ``Agent._own_cost_usd`` (a plain float) for its
-  ``max_budget_usd`` cap; the cap is per-agent, the rollup is tree-wide.
+  :meth:`record_cost`, so ``root.spend`` is the whole spawn tree's spend
+  counted exactly once per response. Each agent separately tracks its own
+  cost on ``Agent._own_spend`` for its ``max_budget_usd`` cap; the cap is
+  per-agent, the rollup is tree-wide.
 
 Three methods, each named for what it does:
 
 - :meth:`record_tokens` -- token totals + per-call provenance, self-only.
 - :meth:`record_cost` -- cumulative USD cost; root sink only.
 - :meth:`restore_totals` -- session-resume hook; overwrites cumulative
-  totals (``total_cost_usd`` + ``total``) from persisted metadata.
+  totals (``spend`` + ``total``) from persisted metadata.
   Per-call provenance (``calls_by_model``, ``last_request``,
   ``last_response_time``) is intentionally *not* restored: those describe
   the live process's call history, and resume restarts that history.
@@ -29,7 +29,8 @@ from __future__ import annotations
 import dataclasses
 import time
 
-from sagent.types.model import ModelResponse, TokenCount
+from sagent.types.cost import TokenCost, TokenCount
+from sagent.types.model import ModelResponse
 
 
 @dataclasses.dataclass(kw_only=True, slots=True)
@@ -42,17 +43,17 @@ class CostTracker:
     total: TokenCount = dataclasses.field(default_factory=TokenCount)
     """Cumulative token counts across all recorded responses."""
 
-    total_cost_usd: float = 0.0
-    """Cumulative USD cost."""
+    spend: TokenCost = dataclasses.field(default_factory=TokenCost)
+    """Cumulative USD cost, per token bucket."""
 
     calls_by_model: dict[str, int] = dataclasses.field(default_factory=dict)
     """Map from model id to number of recorded calls."""
 
     last_response_time: float = dataclasses.field(default_factory=time.time)
-    """Wall-clock seconds of the last ``record``.
+    """Wall-clock seconds of the last recorded response.
 
     Seeded to construction time so renderers that show "time since last
-    response" produce a sane non-zero delta before the first ``record``;
+    response" produce a sane non-zero delta before the first record;
     treat any value within the first second of process start as a
     placeholder rather than a real model response."""
 
@@ -78,22 +79,23 @@ class CostTracker:
         """Add one response's cost to the cumulative USD total.
 
         The cost half of the recording split: recorded once on the root
-        cost sink (via ``cost_root_var``) so ``total_cost_usd`` is the
-        whole spawn tree's spend, counted exactly once per response.
+        cost sink (via ``cost_root_var``) so ``spend`` is the whole spawn
+        tree's spend, counted exactly once per response.
 
         Args:
-          response: Completed model response carrying ``total_cost``.
+          response: Completed model response carrying ``spend``.
 
         """
-        self.total_cost_usd += response.total_cost
+        self.spend = self.spend + response.spend
 
-    def restore_totals(self, *, total_cost_usd: float, total: TokenCount) -> None:
+    def restore_totals(self, *, spend: TokenCost, total: TokenCount) -> None:
         """Overwrite cumulative totals from persisted session metadata.
 
-        Counterpart to :meth:`record` for the session-resume path: seeds
-        the cumulative-total fields (``total_cost_usd`` and ``total``)
-        with the values written by an earlier session before any new
-        responses are recorded on top.
+        Counterpart to :meth:`record_tokens` / :meth:`record_cost` for the
+        session-resume path: seeds
+        the cumulative-total fields (``spend`` and ``total``) with the
+        values written by an earlier session before any new responses are
+        recorded on top.
 
         Per-call provenance fields (``calls_by_model``, ``last_request``,
         ``last_response_time``) are intentionally left untouched: they
@@ -101,9 +103,9 @@ class CostTracker:
         process starts that history fresh.
 
         Args:
-          total_cost_usd: Persisted cumulative USD cost.
+          spend: Persisted cumulative USD cost.
           total: Persisted cumulative token counts.
 
         """
-        self.total_cost_usd = total_cost_usd
+        self.spend = spend
         self.total = total

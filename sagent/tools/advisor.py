@@ -187,7 +187,7 @@ class Advisor:
         self._uses += 1
         debug_log.trace(
             "advisor_invoke",
-            model=self._model.model_id,
+            model=self._model.spec.tagged_model_id,
             prompt_len=len(prompt),
             uses=self._uses,
             max_uses=self._max_uses,

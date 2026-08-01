@@ -7,10 +7,10 @@ box) subclass ``OpenAICompat`` and override a handful of class attrs::
         DEFAULT_MODEL = "kimi-k2.6"
         ENV_VAR = "MOONSHOT_API_KEY"
         BASE_URL = "https://api.moonshot.ai/v1"
-        KNOWN_MODELS = {...}
+        CAPABILITIES = {...}
 
 The model backend (``OpenAICompatModel``) exposes hooks for
-provider-specific tweaks (``_reasoning_field``, ``_effort_model_ids``,
+provider-specific tweaks (``_reasoning_field``, ``_is_effort_model``,
 ``_transform_body``). Overriding one method on a subclass is enough
 for most provider divergence.
 
@@ -24,7 +24,8 @@ Usage::
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, ClassVar, Self, cast
+from types import MappingProxyType
+from typing import TYPE_CHECKING, ClassVar, Self, cast, override
 
 import asyncio
 import base64
@@ -48,6 +49,7 @@ else:
     image_lib = lazy_import("sagent.lib.image")
     tiktoken = lazy_import("tiktoken")  # 30ms cold
 
+from sagent import types
 from sagent.lib import debug_log, token_count
 from sagent.lib.custom_json import (
     MutableJSON,
@@ -55,30 +57,27 @@ from sagent.lib.custom_json import (
     int_val,
     json_unfreeze,
 )
-from sagent.providers.lib.cost import (
-    ModelProfile,
-    Pricing,
-    compute_cost,
-)
 from sagent.providers.lib.errors import (
     error_status_code,
     is_request_too_large,
     raise_if_request_too_large,
 )
 from sagent.providers.lib.id_remap import IdRemapper
+from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.lib.usage import openai_usage
-from sagent.thinking import ThinkingCapability, valid_thinking_states
 from sagent.types.model import (
+    ModelCapability,
     ModelRequest,
     ModelResponse,
+    ModelSpec,
     PromptTooLongError,
     StreamInterruptedError,
+    ThinkingEffort,
     TokenCount,
     UsageSnapshot,
     base_model_id,
     latency_from_model_id,
-    strip_latency_tags,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -98,48 +97,6 @@ _STREAM_IDLE_TIMEOUT = (
 )
 
 
-def openai_chat_reasoning_effort(model_id: str, effort: str) -> str | None:
-    """Map Sagent effort to OpenAI Chat Completions wire values.
-
-    Args:
-      model_id: OpenAI model identifier, optionally carrying Sagent tags.
-      effort: Sagent reasoning-effort value.
-
-    Returns:
-      wire_effort: OpenAI reasoning-effort value, or ``None`` when unknown.
-
-    """
-    if effort not in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
-        return None
-    if base_model_id(model_id).startswith("gpt-5.6"):
-        if effort == "minimal":
-            return "none"
-        if effort == "max":
-            return "xhigh"
-        return effort
-    if effort in ("none", "minimal"):
-        return "minimal"
-    if effort in ("xhigh", "max"):
-        return "high"
-    return effort
-
-
-def openai_responses_reasoning_effort(model_id: str, effort: str) -> str | None:
-    """Map Sagent effort to OpenAI Responses API wire values.
-
-    Args:
-      model_id: OpenAI model identifier, optionally carrying Sagent tags.
-      effort: Sagent reasoning-effort value.
-
-    Returns:
-      wire_effort: OpenAI reasoning-effort value, or ``None`` when unknown.
-
-    """
-    if base_model_id(model_id).startswith("gpt-5.6") and effort == "max":
-        return "max"
-    return openai_chat_reasoning_effort(model_id, effort)
-
-
 class OpenAICompat:
     """Base provider for OpenAI chat-completions compatible endpoints."""
 
@@ -147,8 +104,37 @@ class OpenAICompat:
     DEFAULT_UTILITY_MODEL: ClassVar[str] = ""
     ENV_VAR: ClassVar[str] = ""
     BASE_URL: ClassVar[str] = ""
-    KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {}
+
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = MappingProxyType({})
+    """Per-model capability; empty on the plain compat base."""
+
+    TRANSPORT: ClassVar[ModelCapability] = ModelCapability(
+        fast=False,
+        manages_context=False,
+        prompt_cache_breakpoints=False,
+        retries_internally=False,
+        account_auth=False,
+        latency_modes=frozenset(),
+        service_tiers=frozenset(),
+    )
+    """Chat-completions vendors expose no cache, tier, or fast knob.
+
+    Efforts are NOT zeroed here: a vendor whose rows declare a reasoning
+    ladder (DashScope) keeps it, and a vendor without one has empty rows
+    already -- so zeroing would only ever destroy real capability.
+    """
+
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]]
+
+    @property
+    def ROLES(self) -> Mapping[types.providers.ModelRole, str]:  # noqa: N802
+        """Role name to base id; ``utility`` falls back to the default."""
+        return MappingProxyType(
+            {
+                "default": self.DEFAULT_MODEL,
+                "utility": self.DEFAULT_UTILITY_MODEL or self.DEFAULT_MODEL,
+            }
+        )
 
     def __init__(self, *, api_key: str, base_url: str | None = None) -> None:
         self.api_key = api_key
@@ -197,42 +183,35 @@ class OpenAICompat:
         """Create a model backend.
 
         Args:
-          model_id: Model ID. ``None`` uses ``DEFAULT_MODEL``.
+          model_id: Catalog id with optional tags, or a role name.
           max_request_tokens: Override max input tokens.
 
         Returns:
           model: Chat-completions model backend.
 
         Raises:
-          ValueError: If ``model_id`` is not in ``KNOWN_MODELS``, or it
+          ValueError: If ``model_id`` is not in ``CAPABILITIES``, or it
               carries a ``+fast`` tag the backend has no latency mode for.
 
         """
-        mid = model_id if model_id is not None else self.DEFAULT_MODEL
-        # Strip only latency tags for the lookup: catalogs here carry no
-        # ``+1m`` variants, so a foreign context tag stays an error.
-        profile = self.KNOWN_MODELS.get(mid) or self.KNOWN_MODELS.get(
-            strip_latency_tags(mid),
+        mid = model_id if model_id is not None else "default"
+        spec = types.providers.resolve(
+            mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT
         )
-        if profile is None:
-            known = ", ".join(sorted(self.KNOWN_MODELS))
-            raise ValueError(
-                f"Unknown model {mid!r} for {type(self).__name__}."
-                f" Known models: {known}",
-            )
         model = self.MODEL_CLASS(
             provider=self,
-            model_id=mid,
-            profile=profile,
+            # ``mid`` may be a role name; the spec carries the resolved id.
+            model_id=spec.tagged_model_id,
             max_request_tokens=(
                 max_request_tokens
                 if max_request_tokens is not None
-                else profile.max_request_tokens
+                else spec.context_limits.max_request_tokens
             ),
+            spec=spec,
         )
         if (
             latency_from_model_id(mid) is not None
-            and "fast" not in model.valid_latency_modes
+            and "fast" not in model.spec.valid_latency_modes
         ):
             raise ValueError(
                 f"Model {mid!r} for {type(self).__name__} does not support"
@@ -247,8 +226,7 @@ class OpenAICompat:
           model: Backend for the cheapest/fastest known model.
 
         """
-        mid = self.DEFAULT_UTILITY_MODEL or self.DEFAULT_MODEL
-        return self.model(mid)
+        return self.model("utility")
 
 
 def _is_context_overflow_text(msg: str) -> bool:
@@ -281,12 +259,15 @@ def _is_context_overflow_text(msg: str) -> bool:
     return "model context" in lower and "exceed" in lower
 
 
-class OpenAICompatModel:
+class OpenAICompatModel(ModelDefaults):
     """Chat-completions model backend.
 
     Hook methods (``_reasoning_field``, ``_is_effort_model``,
     ``_transform_body``) are cheap overrides for provider quirks.
     """
+
+    spec: ModelSpec = ModelSpec()
+    """What this model can do; replaced from the catalog at construction."""
 
     # Message field carrying reasoning/thinking text on responses.
     # Kimi/Qwen/DeepSeek use ``reasoning_content``; OpenAI surfaces
@@ -298,13 +279,13 @@ class OpenAICompatModel:
         *,
         provider: OpenAICompat,
         model_id: str,
-        profile: ModelProfile,
         max_request_tokens: int,
+        spec: ModelSpec | None = None,
     ) -> None:
         self._provider = provider
         self._model_id = model_id
-        self._profile = profile
         self._max_request_tokens = max_request_tokens
+        self.spec = spec or ModelSpec()
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
         self._last_usage: UsageSnapshot | None = None
@@ -318,6 +299,7 @@ class OpenAICompatModel:
                 self._client = httpx.AsyncClient()
             return self._client
 
+    @override
     async def close(self) -> None:
         """Close the reusable HTTP client."""
         if self._client is not None:
@@ -347,7 +329,7 @@ class OpenAICompatModel:
     @property
     def max_response_tokens(self) -> int:
         """Maximum output tokens the model can generate."""
-        return self._profile.max_response_tokens
+        return self.spec.context_limits.max_response_tokens
 
     @property
     def supports_streaming(self) -> bool:
@@ -360,39 +342,29 @@ class OpenAICompatModel:
         return self._reasoning_field is not None
 
     @property
-    def valid_thinking_states(self) -> tuple[str, ...]:
-        """OpenAI-compat vendors surface readable reasoning, no redaction.
-
-        Vendors exposing a ``reasoning_content`` field (Moonshot,
-        MiniMax, DashScope) return readable text; plain chat-completions
-        (no reasoning field) supports only ``off-hide``. None expose a
-        server-side redaction mode.
-        """
-        return valid_thinking_states(
-            ThinkingCapability(supports_thinking=self.supports_thinking),
-        )
-
-    @property
     def supports_effort(self) -> bool:
         """Whether the model accepts a ``reasoning_effort`` hint."""
         return self._is_effort_model(self._model_id)
 
+    def _is_effort_model(self, model_id: str) -> bool:
+        """Whether ``model_id`` accepts a reasoning-effort knob.
+
+        Catalog-backed vendors answer from the spec. A vendor whose
+        reasoning ids are only recognizable by shape (DashScope) overrides
+        this with a predicate.
+        """
+        del model_id
+        return bool(self.spec.supported_thinking_efforts)
+
     @property
     def valid_efforts(self) -> tuple[str, ...]:
         """Effort levels accepted by reasoning models; empty otherwise."""
-        if not self.supports_effort:
-            return ()
-        return ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+        return tuple(self.spec.supported_thinking_efforts)
 
     @property
     def supports_cache_control(self) -> bool:
         """Whether the provider supports prompt caching."""
-        return False
-
-    @property
-    def valid_service_tiers(self) -> tuple[str, ...]:
-        """OpenAI-compat vendors (Moonshot, MiniMax, DashScope) have no tier knob."""
-        return ()
+        return self.spec.prompt_cache_breakpoints
 
     @property
     def valid_latency_modes(self) -> tuple[str, ...]:
@@ -419,10 +391,10 @@ class OpenAICompatModel:
           tier: Service tier to send, or ``None`` to omit the field.
 
         """
-        if request.latency == "fast" and "fast" in self.valid_latency_modes:
+        if request.latency == "fast" and "fast" in self.spec.valid_latency_modes:
             return "priority"
         if request.service_tier is not None and (
-            request.service_tier in self.valid_service_tiers
+            request.service_tier in self.spec.valid_service_tiers
         ):
             return request.service_tier
         return None
@@ -435,22 +407,19 @@ class OpenAICompatModel:
     @property
     def supports_persistent_retry(self) -> bool:
         """Whether the provider retries internally on transient failures."""
-        return False
+        return self.spec.retries_internally
 
     @property
     def supports_account_auth(self) -> bool:
         """Whether the provider uses account-based authentication."""
-        return False
+        return self.spec.account_auth
 
+    @override
     def approx_text_tokens(self, text: str) -> int:
         """Local estimate via ``len(text) // 4``."""
         return len(text) // 4
 
-    @property
-    def pricing(self) -> Pricing:
-        """Per-million-token pricing schedule for this model."""
-        return self._profile.pricing
-
+    @override
     def approx_image_tokens(self, data: bytes) -> int:
         """Estimate image tokens using the model family's published formula.
 
@@ -468,10 +437,7 @@ class OpenAICompatModel:
         tiles = math.ceil(dims[0] / 512) * math.ceil(dims[1] / 512)
         return 85 + tiles * 170
 
-    def approx_request_tokens(self, request: ModelRequest) -> int:
-        """Walk-and-sum every wire-bearing surface of ``request``."""
-        return token_count.approx_request_tokens(request, self)
-
+    @override
     async def actual_text_tokens(self, text: str) -> int:
         """Local tiktoken count when an encoding for ``model_id`` exists.
 
@@ -483,10 +449,7 @@ class OpenAICompatModel:
             return self.approx_text_tokens(text)
         return len(enc.encode(text))
 
-    async def actual_image_tokens(self, data: bytes) -> int:
-        """Delegate to the local heuristic (OpenAI's published tile formula)."""
-        return self.approx_image_tokens(data)
-
+    @override
     async def actual_request_tokens(self, request: ModelRequest) -> int:
         """Local tiktoken-driven walk; falls back to approx without an encoding."""
         enc = self._tiktoken_encoding()
@@ -512,22 +475,17 @@ class OpenAICompatModel:
     @property
     def max_image_dim(self) -> int:
         """Maximum image edge (pixels) accepted, from the model profile."""
-        return self._profile.max_image_dim
+        return self.spec.context_limits.max_image_edge_px
 
     @property
     def max_image_bytes(self) -> int:
         """Maximum size (bytes) of a single image, from the model profile."""
-        return self._profile.max_image_bytes
+        return self.spec.context_limits.max_image_bytes
 
     @property
     def max_request_bytes(self) -> int:
         """Maximum request-body size (bytes), from the model profile."""
-        return self._profile.max_request_bytes
-
-    def _is_effort_model(self, model_id: str) -> bool:
-        """Override: does ``model_id`` accept ``reasoning_effort``?"""
-        del model_id
-        return False
+        return self.spec.context_limits.max_request_bytes
 
     def _transform_body(
         self,
@@ -555,19 +513,6 @@ class OpenAICompatModel:
         if is_request_too_large(error_status_code(error), str(error)):
             return False
         return _is_context_overflow_text(str(error))
-
-    def is_retryable_provider_error(self, error: Exception) -> bool:
-        """No provider-specific transient cases beyond status codes.
-
-        Args:
-          error: Exception raised by the provider call.
-
-        Returns:
-          retryable: Always ``False`` (status-code dispatch covers retries).
-
-        """
-        del error
-        return False
 
     @property
     def _endpoint(self) -> str:
@@ -618,17 +563,18 @@ class OpenAICompatModel:
                     request.effort,
                 )
         elif request.effort is not None and self.supports_effort:
-            # Map through the shared table: the wire accepts only a subset of
-            # sagent's advertised efforts. An unknown value should be impossible
-            # (the agent's effort setter validates against ``valid_efforts``), so
-            # warn rather than silently run at the most expensive level.
-            mapped = openai_chat_reasoning_effort(self._model_id, request.effort)
+            # The catalog stores the wire value as data; a parallel mapper
+            # keyed off a different vocabulary let ``off``/``min`` pass every
+            # agent-side gate and then raise here.
+            mapped = self.spec.supported_thinking_efforts.get(
+                cast("ThinkingEffort", request.effort)
+            )
             if mapped is None:
-                logger.warning(
-                    "unknown reasoning effort %r; defaulting to 'high'",
-                    request.effort,
+                valid = ", ".join(self.spec.supported_thinking_efforts)
+                raise ValueError(
+                    f"Unknown effort {request.effort!r} for {self._model_id}."
+                    f" Valid efforts: {valid}",
                 )
-                mapped = "high"
             body["reasoning_effort"] = mapped
         tier = self.effective_service_tier(request)
         if tier is not None:
@@ -657,25 +603,7 @@ class OpenAICompatModel:
             )
         return self._transform_body(body, request)
 
-    async def buffer(self, request: ModelRequest) -> ModelResponse:
-        """Send a request via the streaming path with no callbacks.
-
-        The non-streaming POST has a fixed client timeout that fails
-        on large compaction prompts; the streaming path uses an idle-
-        based timeout that scales with response time.
-
-        Args:
-          request: Fully-built model request.
-
-        Returns:
-          response: Parsed ``ModelResponse``.
-
-        Raises:
-          PromptTooLongError: Server reports context overflow.
-
-        """
-        return await self.stream(request, None)
-
+    @override
     async def stream(
         self,
         request: ModelRequest,
@@ -719,10 +647,11 @@ class OpenAICompatModel:
             return await consume_stream(
                 r,
                 publish=publish,
-                pricing=self._profile.pricing,
+                spec=self.spec,
                 reasoning_field=self._reasoning_field,
             )
 
+    @override
     def usage_snapshot(self) -> UsageSnapshot | None:
         """Return normalized usage from the latest response's headers."""
         return self._last_usage
@@ -898,7 +827,7 @@ async def consume_stream(
     r: httpx.Response,
     *,
     publish: Callable[[RuntimeEvent], None] | None,
-    pricing: Pricing,
+    spec: ModelSpec,
     reasoning_field: str | None,
 ) -> ModelResponse:
     """Parse an SSE stream into an assembled ``ModelResponse``.
@@ -911,7 +840,7 @@ async def consume_stream(
       r: Open streaming response from the provider.
       publish: Called per streamed ``RuntimeEvent``; ``None`` disables
           live streaming.
-      pricing: Per-token price schedule for cost computation.
+      spec: Active model spec, used to price the reported usage.
       reasoning_field: Provider-specific reasoning-text field name,
           or ``None`` when the provider does not surface reasoning.
 
@@ -1020,23 +949,17 @@ async def consume_stream(
     # non-cached remainder so ``TokenCount.input_tokens`` is disjoint from the
     # cache pools (the convention the cost contract and consumers rely on).
     input_tokens = max(0, total_input - cache_read - cache_write)
-    in_cost, out_cost, total_cost = compute_cost(
-        pricing,
-        input_tokens,
-        output_tokens,
-        cache_creation=cache_write,
+    tokens = TokenCount(
+        request=input_tokens,
+        response=output_tokens,
+        cache_write=cache_write,
         cache_read=cache_read,
     )
     if saw_refusal and finish_reason in (None, "stop"):
         finish_reason = "content_filter"
     response = ModelResponse(
         message=asst,
-        tokens=TokenCount(
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_creation_tokens=cache_write,
-            cache_read_tokens=cache_read,
-        ),
+        tokens=tokens,
         stop_reason=normalize_stop_reason(
             finish_reason,
             kind="openai",
@@ -1044,9 +967,7 @@ async def consume_stream(
         ),
         message_id=message_id,
         request_id=message_id,
-        input_cost=in_cost,
-        output_cost=out_cost,
-        total_cost=total_cost,
+        spend=spec.spend(tokens),
     )
     if not saw_done:
         raise StreamInterruptedError(response)

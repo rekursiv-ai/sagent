@@ -54,6 +54,12 @@ from sagent.bin.cli import (
 )
 from sagent.providers import PROVIDER_NAMES
 from sagent.testing import FakeAgent
+from sagent.types.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenPrice,
+)
+from sagent.types.model import Limits, ModelSpec
 from sagent.types.providers import ProviderOptions
 from sagent.types.runtime import (
     AssistantMessage,
@@ -139,8 +145,19 @@ class _ChildStubModel:
     supports_effort: bool = False
     valid_efforts: tuple[str, ...] = ()
     supports_cache_control: bool = False
-    valid_service_tiers: tuple[str, ...] = ()
-    valid_latency_modes: tuple[str, ...] = ()
+    service_tiers: tuple[str, ...] = ()
+    latency_modes: tuple[str, ...] = ()
+
+    @property
+    def spec(self) -> ModelSpec:
+        return ModelSpec(
+            model_id=self.model_id,
+            context_limits=Limits(
+                max_request_tokens=self.max_request_tokens,
+                max_response_tokens=self.max_response_tokens,
+            ),
+            prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+        )
 
 
 def _child_record(**overrides: object) -> PersistentAgentRecord:
@@ -281,7 +298,7 @@ def test_implicit_provider_derives_auth_from_provider(
 
     class _Provider:
         def model(self, model_id: str | None = None) -> object:
-            return argparse.Namespace(model_id=model_id or "m")
+            return argparse.Namespace(spec=ModelSpec(model_id=model_id or "m"))
 
     calls: list[tuple[str, str]] = []
 
@@ -317,7 +334,9 @@ def test_implicit_startup_falls_back_from_missing_api_key_to_claude_login(
 
     class _Provider:
         def model(self, model_id: str | None = None) -> object:
-            return argparse.Namespace(model_id=model_id or "claude-test")
+            return argparse.Namespace(
+                spec=ModelSpec(model_id=model_id or "claude-test")
+            )
 
     def fake_build_provider(
         provider_name: str,
@@ -344,7 +363,7 @@ def test_implicit_startup_falls_back_from_missing_api_key_to_claude_login(
         ("AnthropicCLI", "credentials"),
     ]
     assert ns.provider == "AnthropicCLI"
-    assert model.model_id == "claude-test"
+    assert model.spec.tagged_model_id == "claude-test"
     assert auth == "credentials"
 
 
@@ -396,7 +415,7 @@ def test_implicit_startup_fallback_honors_allow_providers(
 
     class _Provider:
         def model(self, model_id: str | None = None) -> object:
-            return argparse.Namespace(model_id=model_id or "gpt-test")
+            return argparse.Namespace(spec=ModelSpec(model_id=model_id or "gpt-test"))
 
     def fake_build_provider(
         provider_name: str,
@@ -423,7 +442,7 @@ def test_implicit_startup_fallback_honors_allow_providers(
         ("OpenAISubscription", "credentials"),
     ]
     assert ns.provider == "OpenAISubscription"
-    assert model.model_id == "gpt-test"
+    assert model.spec.tagged_model_id == "gpt-test"
     assert auth == "credentials"
 
 

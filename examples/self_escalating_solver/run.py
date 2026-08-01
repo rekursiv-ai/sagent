@@ -40,7 +40,7 @@ from sagent.providers import (
     Google,
     default_auth_for_provider,
 )
-from sagent.types.model import ModelSpec
+from sagent.types.model import ModelRecipe
 
 
 HERE = Path(__file__).parent
@@ -94,12 +94,12 @@ def _provider(provider_name: str):
 
 
 def build(provider_name: str, model_id: str):
-    """Return (Model, ModelSpec) for one arm. The spec is what AgentSelf swaps from."""
+    """Return (Model, ModelRecipe) for one arm. The spec is what AgentSelf swaps from."""
     model = _provider(provider_name).model(model_id)
     # auth must map to a real provider factory; "api" had no `from_api`. The
     # provider's conventional auth (Anthropic/Google → "env") is what AgentSelf
     # uses when it reconstructs the model to swap, so reuse that here.
-    spec = ModelSpec(
+    spec = ModelRecipe(
         provider=provider_name,
         auth=default_auth_for_provider(provider_name),
         model_id=model_id,
@@ -238,7 +238,7 @@ async def run_live(config_name: str, trials: int) -> dict[str, Any]:
         f"correct={high['correct']} ${high['cost_usd']}"
     )
 
-    # self-mutate starts cheap, carries a ModelSpec, and upgrades to mut_id
+    # self-mutate starts cheap, carries a ModelRecipe, and upgrades to mut_id
     # (a DIFFERENT, cheaper provider/model than the high-tier baseline).
     mutate_prompt = solver.system_for(allow_upgrade=True, strong_model=mut_id)
     self_runs: list[dict[str, Any]] = []
@@ -257,7 +257,7 @@ async def run_live(config_name: str, trials: int) -> dict[str, Any]:
             cheap_model,
             system_prompt=mutate_prompt,
             allow_upgrade=True,
-            model_spec=cheap_spec,
+            model_recipe=cheap_spec,
             max_budget=1.00,
         )
         self_runs.append(s)

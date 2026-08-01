@@ -18,13 +18,15 @@ DeepSeek/DashScope). Tool-calling uses the standard ``tool_calls`` block.
 
 from __future__ import annotations
 
-from typing import ClassVar, Final
+from collections.abc import Mapping
+from typing import ClassVar
 
-from sagent.providers.lib.cost import ModelProfile, Pricing
+from sagent.providers import moonshot_catalog
 from sagent.providers.openai_compat import (
     OpenAICompat,
     OpenAICompatModel,
 )
+from sagent.types.model import ModelCapability
 
 
 class _MoonshotModel(OpenAICompatModel):
@@ -37,9 +39,6 @@ class _MoonshotModel(OpenAICompatModel):
 # and no request-body byte ceiling; images are preprocessed server-side. Use the
 # 0=unlimited sentinel rather than borrowing OpenAI's caps (verified Jun 2026;
 # https://platform.kimi.ai/docs/guide/use-kimi-vision-model).
-_IMAGE_DIM: Final = 0
-_IMAGE_BYTES: Final = 0
-_REQUEST_BYTES: Final = 0
 
 
 class Moonshot(OpenAICompat):
@@ -54,99 +53,7 @@ class Moonshot(OpenAICompat):
     #
     # To add a new model: check the Moonshot platform docs for the
     # model's context window and max output tokens.
-    KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
-        "kimi-k2.6": ModelProfile(
-            max_request_tokens=256_000,
-            max_response_tokens=96_000,
-            pricing=Pricing(
-                request=0.95,
-                response=4.00,
-                cache_read=0.16,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "kimi-k2.5": ModelProfile(
-            max_request_tokens=256_000,
-            max_response_tokens=96_000,
-            pricing=Pricing(
-                request=0.60,
-                response=3.00,
-                cache_read=0.10,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "kimi-k2-0905-preview": ModelProfile(
-            max_request_tokens=256_000,
-            max_response_tokens=32_768,
-            pricing=Pricing(
-                request=0.60,
-                response=2.50,
-                cache_read=0.15,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "kimi-k2-0711-preview": ModelProfile(
-            max_request_tokens=131_072,
-            max_response_tokens=32_768,
-            pricing=Pricing(
-                request=0.60,
-                response=2.50,
-                cache_read=0.15,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "kimi-k2-turbo-preview": ModelProfile(
-            max_request_tokens=256_000,
-            max_response_tokens=32_768,
-            pricing=Pricing(
-                request=1.20,
-                response=5.00,
-                cache_read=0.30,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "moonshot-v1-8k": ModelProfile(
-            max_request_tokens=8_000,
-            max_response_tokens=16_384,
-            pricing=Pricing(
-                request=0.20,
-                response=2.00,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "moonshot-v1-32k": ModelProfile(
-            max_request_tokens=32_000,
-            max_response_tokens=16_384,
-            pricing=Pricing(
-                request=0.40,
-                response=4.00,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "moonshot-v1-128k": ModelProfile(
-            max_request_tokens=128_000,
-            max_response_tokens=16_384,
-            pricing=Pricing(
-                request=0.60,
-                response=6.00,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-    }
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = moonshot_catalog.MODELS
+    """Per-model capability; transport limits live on ``TRANSPORT``."""
+
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _MoonshotModel

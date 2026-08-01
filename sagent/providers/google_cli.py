@@ -19,7 +19,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, NotRequired, TypedDict, cast, override
+from typing import (
+    TYPE_CHECKING,
+    ClassVar,
+    Final,
+    NotRequired,
+    TypedDict,
+    cast,
+    override,
+)
 
 import asyncio
 import base64
@@ -32,22 +40,19 @@ import os
 import shutil
 import tempfile
 
-from sagent.lib import token_count
+from sagent import types
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import JSON, MutableJSON, validate_json_schema
+from sagent.providers import google_catalog
 from sagent.providers.google import Google
 from sagent.providers.lib.cli_respawn import respawn_for_cadence
-from sagent.providers.lib.cost import (
-    ModelProfile,
-    Pricing,
-    compute_cost,
-)
 from sagent.providers.lib.errors import (
     error_status_code,
     is_request_too_large,
 )
 from sagent.providers.lib.hotspare import HotSpare
 from sagent.providers.lib.mcp_bridge import ToolsBridge
+from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.lib.oauth import (
     credential_file_lock,
     credentials_path,
@@ -57,12 +62,12 @@ from sagent.providers.lib.subproc import (
     Subproc,
     SubprocessTransportError,
 )
-from sagent.thinking import ThinkingCapability, valid_thinking_states
 from sagent.types.model import (
+    ModelCapability,
     ModelRequest,
     ModelResponse,
+    ModelSpec,
     TokenCount,
-    UsageSnapshot,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -114,12 +119,15 @@ class GoogleCLICredentials(TypedDict):
 class GoogleCLI(Google):
     """Provider that drives the user's installed ``gemini`` CLI subprocess.
 
-    Inherits ``KNOWN_MODELS`` (limits, pricing) from :class:`Google`.
+    Inherits ``CAPABILITIES`` (limits, pricing) from :class:`Google`.
     Auth is the CLI's own OAuth credentials at
     ``~/.gemini/oauth_creds.json`` (or the named-account variant).
     Cost figures are estimated from public per-token pricing since ACP
     does not surface per-turn usage on ``session/prompt`` responses.
     """
+
+    TRANSPORT: ClassVar[ModelCapability] = google_catalog.CLI
+    """ACP exposes no effort knob and rolls its own history."""
 
     def __init__(self, *, account: str | None = None) -> None:
         # Skip Google.__init__: the CLI provides auth, no api_key needed.
@@ -192,31 +200,29 @@ class GoogleCLI(Google):
           model: Backend wrapping a managed ``gemini --experimental-acp`` subprocess.
 
         Raises:
-          ValueError: If the resolved id is not in ``KNOWN_MODELS``.
+          ValueError: If the resolved id is not in ``CAPABILITIES``.
 
         """
-        mid = model_id if model_id is not None else self.DEFAULT_MODEL
-        profile = self.KNOWN_MODELS.get(mid)
-        if profile is None:
-            known = ", ".join(sorted(self.KNOWN_MODELS))
-            raise ValueError(
-                f"Unknown model {mid!r} for GoogleCLI. Known models: {known}",
-            )
+        mid = model_id if model_id is not None else "default"
+        spec = types.providers.resolve(
+            mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT
+        )
         return _GoogleCLIModel(
             provider=self,
-            model_id=mid,
-            profile=profile,
+            # ``mid`` may be a role name; the spec carries the resolved id.
+            model_id=spec.tagged_model_id,
+            spec=spec,
             max_request_tokens=(
                 max_request_tokens
                 if max_request_tokens is not None
-                else profile.max_request_tokens
+                else spec.context_limits.max_request_tokens
             ),
         )
 
     @override
     def utility_model(self) -> _GoogleCLIModel:  # ty: ignore[invalid-method-override]  -- shared catalog, different transport
         """Return the cheapest CLI-backed model."""
-        return self.model(self.DEFAULT_UTILITY_MODEL)
+        return self.model("utility")
 
     @property
     def account(self) -> str | None:
@@ -234,29 +240,31 @@ class _GoogleCLIProcState:
     system_hash: str
 
 
-class _GoogleCLIModel:
+class _GoogleCLIModel(ModelDefaults):
     """``gemini --experimental-acp`` subprocess wrapped as a sagent ``Model``.
 
     Args:
       provider: Owning :class:`GoogleCLI`.
       model_id: Gemini model id passed via ``--model``.
-      profile: Resolved :class:`ModelProfile` for limits + pricing.
       max_request_tokens: Per-request input cap.
 
     """
+
+    spec: ModelSpec = ModelSpec()
+    """What this model can do; replaced from the catalog at construction."""
 
     def __init__(
         self,
         *,
         provider: GoogleCLI,
         model_id: str,
-        profile: ModelProfile,
         max_request_tokens: int,
+        spec: ModelSpec | None = None,
     ) -> None:
         self._provider = provider
         self._model_id = model_id
-        self._profile = profile
         self._max_request_tokens = max_request_tokens
+        self.spec = spec or ModelSpec()
         self._last_sent_index = 0
         self._system_hash: str = ""
         self._turn_count = 0
@@ -287,7 +295,7 @@ class _GoogleCLIModel:
     @property
     def max_response_tokens(self) -> int:
         """Per-request output token cap from the profile."""
-        return self._profile.max_response_tokens
+        return self.spec.context_limits.max_response_tokens
 
     @property
     def supports_streaming(self) -> bool:
@@ -300,37 +308,25 @@ class _GoogleCLIModel:
 
         ACP exposes ``agent_thought_chunk`` notifications, but legacy Gemini
         models (``gemini-1.5-*``) cannot accept ``thinkingConfig`` on the
-        underlying API. Honor the per-model profile flag rather than blanket-
+        underlying API. Honor the per-model spec rather than blanket-
         advertising support.
         """
-        return self._profile.supports_thinking
-
-    @property
-    def valid_thinking_states(self) -> tuple[str, ...]:
-        """Gemini CLI surfaces readable thought chunks; no redaction mode."""
-        return valid_thinking_states(
-            ThinkingCapability(supports_thinking=self.supports_thinking),
-        )
+        return bool(self.spec.supported_thinking_budgets)
 
     @property
     def supports_effort(self) -> bool:
         """``False``: ACP has no effort knob on ``session/prompt``."""
-        return False
+        return bool(self.spec.supported_thinking_efforts)
 
     @property
     def valid_efforts(self) -> tuple[str, ...]:
         """No effort knob on the ACP transport."""
-        return ()
+        return tuple(self.spec.supported_thinking_efforts)
 
     @property
     def supports_cache_control(self) -> bool:
         """``False``: prompt cache is the CLI's concern, not ours."""
-        return False
-
-    @property
-    def valid_service_tiers(self) -> tuple[str, ...]:
-        """The Gemini CLI manages tier selection itself."""
-        return ()
+        return self.spec.prompt_cache_breakpoints
 
     @property
     def valid_latency_modes(self) -> tuple[str, ...]:
@@ -345,37 +341,34 @@ class _GoogleCLIModel:
     @property
     def supports_persistent_retry(self) -> bool:
         """``False``: persistent retry conflicts with subprocess lifecycle."""
-        return False
+        return self.spec.retries_internally
 
     @property
     def supports_account_auth(self) -> bool:
         """``True``: the provider runs on the user's CLI subscription."""
-        return True
-
-    @property
-    def pricing(self) -> Pricing:
-        """Per-million-token pricing for the active profile."""
-        return self._profile.pricing
+        return self.spec.account_auth
 
     @property
     def max_image_dim(self) -> int:
         """Maximum image edge (pixels) accepted, from the model profile."""
-        return self._profile.max_image_dim
+        return self.spec.context_limits.max_image_edge_px
 
     @property
     def max_image_bytes(self) -> int:
         """Maximum size (bytes) of a single image, from the model profile."""
-        return self._profile.max_image_bytes
+        return self.spec.context_limits.max_image_bytes
 
     @property
     def max_request_bytes(self) -> int:
         """Maximum request-body size (bytes), from the model profile."""
-        return self._profile.max_request_bytes
+        return self.spec.context_limits.max_request_bytes
 
+    @override
     def approx_text_tokens(self, text: str) -> int:
         """Local estimate via ``len(text) // 4`` (Gemini's heuristic)."""
         return len(text) // 4
 
+    @override
     def approx_image_tokens(self, data: bytes) -> int:
         """Local estimate via Gemini's tile heuristic."""
         dims = image_lib.get_dimensions(data)
@@ -383,22 +376,6 @@ class _GoogleCLIModel:
             return 0
         # 258 tokens per 512x512 tile (matches `Google._GeminiModel`).
         return ((dims[0] + 511) // 512) * ((dims[1] + 511) // 512) * 258
-
-    def approx_request_tokens(self, request: ModelRequest) -> int:
-        """Walk-and-sum every wire-bearing surface of ``request``."""
-        return token_count.approx_request_tokens(request, self)
-
-    async def actual_text_tokens(self, text: str) -> int:
-        """Subprocess transport has no tokenizer access; falls back to approx."""
-        return self.approx_text_tokens(text)
-
-    async def actual_image_tokens(self, data: bytes) -> int:
-        """Subprocess transport has no tokenizer access; falls back to approx."""
-        return self.approx_image_tokens(data)
-
-    async def actual_request_tokens(self, request: ModelRequest) -> int:
-        """Subprocess transport has no tokenizer access; falls back to approx."""
-        return self.approx_request_tokens(request)
 
     def is_context_overflow(self, error: Exception) -> bool:
         """Classify whether an error means the prompt exceeded the token window.
@@ -421,27 +398,7 @@ class _GoogleCLIModel:
         msg = str(error).lower()
         return "too large" in msg or "too long" in msg or "exceeds the maximum" in msg
 
-    def is_retryable_provider_error(self, error: Exception) -> bool:
-        """``False`` -- subprocess errors are handled via respawn, not retry."""
-        del error
-        return False
-
-    def usage_snapshot(self) -> UsageSnapshot | None:
-        """No rate-limit telemetry over the CLI subprocess transport."""
-        return None
-
-    async def buffer(self, request: ModelRequest) -> ModelResponse:
-        """Run the request through the streaming path with no callbacks.
-
-        Args:
-          request: Fully-built model request.
-
-        Returns:
-          response: Translated model response.
-
-        """
-        return await self.stream(request, None)
-
+    @override
     async def stream(
         self,
         request: ModelRequest,
@@ -488,6 +445,7 @@ class _GoogleCLIModel:
             logger.exception("GoogleCLI: credential writeback failed.")
         return response
 
+    @override
     async def close(self) -> None:
         """Tear down the subprocess pool and the MCP bridge."""
         await self._hot_spare.close()
@@ -631,9 +589,7 @@ class _GoogleCLIModel:
         full_text = "".join(text_parts)
         input_tokens = self.approx_request_tokens(request)
         output_tokens = self.approx_text_tokens(full_text)
-        in_cost, out_cost, total_cost = compute_cost(
-            self._profile.pricing, input_tokens, output_tokens
-        )
+        tokens = TokenCount(request=input_tokens, response=output_tokens)
         self._last_input_tokens = input_tokens
         thinking_blocks = (
             ({"type": "thinking", "thinking": "".join(thinking_parts)},)
@@ -646,10 +602,7 @@ class _GoogleCLIModel:
                 thinking_blocks=thinking_blocks,
                 tool_calls=(),
             ),
-            tokens=TokenCount(
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-            ),
+            tokens=tokens,
             stop_reason=normalize_stop_reason(
                 stop_reason,
                 kind="google",
@@ -657,9 +610,7 @@ class _GoogleCLIModel:
             ),
             message_id=self._session_id,
             request_id=self._session_id,
-            input_cost=in_cost,
-            output_cost=out_cost,
-            total_cost=total_cost,
+            spend=self.spec.spend(tokens),
         )
 
     async def _spawn_initialized_proc(self) -> Subproc:

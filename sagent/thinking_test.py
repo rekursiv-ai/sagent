@@ -5,14 +5,12 @@ from __future__ import annotations
 import pytest
 
 from sagent.thinking import (
-    ThinkingCapability,
     ThinkingState,
     request_thinking,
     resolve_thinking_command,
     should_redact_thinking,
     should_show_thinking,
     thinking_mode_supported,
-    valid_thinking_states,
 )
 
 
@@ -82,76 +80,6 @@ def test_state_projections(
     assert request_thinking(state) == request_mode
     assert should_show_thinking(state) is show
     assert should_redact_thinking(state) is redact
-
-
-@pytest.mark.parametrize(
-    ("capability", "expected"),
-    [
-        # No thinking (OpenAI-chat, SelfHosted, LlamaCpp): off only.
-        (ThinkingCapability(supports_thinking=False), ("off-hide",)),
-        # Readable, no redaction (Google, OpenAISub, DashScope): all but redact.
-        (
-            ThinkingCapability(supports_thinking=True),
-            ("adaptive-show", "adaptive-hide", "on-show", "on-hide", "off-hide"),
-        ),
-        # Readable + redaction (plain Anthropic): all six.
-        (
-            ThinkingCapability(supports_thinking=True, supports_redaction=True),
-            (
-                "adaptive-show",
-                "adaptive-hide",
-                "on-show",
-                "on-hide",
-                "off-hide",
-                "redact-hide",
-            ),
-        ),
-        # No readable text (signed-but-empty blocks): every -show drops out.
-        (
-            ThinkingCapability(
-                supports_thinking=True,
-                readable_text=False,
-                supports_redaction=True,
-            ),
-            ("adaptive-hide", "on-hide", "off-hide", "redact-hide"),
-        ),
-        # Adaptive-only (rejects enabled): on-* states drop out.
-        (
-            ThinkingCapability(
-                supports_thinking=True,
-                supports_enabled_mode=False,
-                supports_redaction=True,
-            ),
-            ("adaptive-show", "adaptive-hide", "off-hide", "redact-hide"),
-        ),
-        # opus-4-8: adaptive-only AND no readable text -> only adaptive-hide,
-        # off-hide, redact-hide survive (no -show, no on-*).
-        (
-            ThinkingCapability(
-                supports_thinking=True,
-                readable_text=False,
-                supports_enabled_mode=False,
-                supports_redaction=True,
-            ),
-            ("adaptive-hide", "off-hide", "redact-hide"),
-        ),
-    ],
-)
-def test_valid_thinking_states(
-    capability: ThinkingCapability, expected: tuple[ThinkingState, ...]
-) -> None:
-    assert valid_thinking_states(capability) == expected
-
-
-def test_valid_thinking_states_always_includes_off() -> None:
-    """``off-hide`` is valid for every capability."""
-    for cap in (
-        ThinkingCapability(supports_thinking=False),
-        ThinkingCapability(supports_thinking=True),
-        ThinkingCapability(supports_thinking=True, readable_text=False),
-        ThinkingCapability(supports_thinking=True, supports_redaction=True),
-    ):
-        assert "off-hide" in valid_thinking_states(cap)
 
 
 @pytest.mark.parametrize(

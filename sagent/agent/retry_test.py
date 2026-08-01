@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import ClassVar, cast, override
 
@@ -33,6 +33,7 @@ from sagent.agent.retry import (
 )
 from sagent.testing import MockModelCaps
 from sagent.types.model import (
+    Model,
     ModelRequest,
     ModelResponse,
     RequestTooLargeError,
@@ -1667,3 +1668,90 @@ if __name__ == "__main__":
     from sagent.lib.testing.main import test_main
 
     test_main(__file__)
+
+
+class _EntitlementError(Exception):
+    """A 429 whose body says the account lacks an entitlement, not a quota."""
+
+    status_code = 429
+    body: ClassVar[Mapping[str, object]] = {
+        "type": "error",
+        "error": {
+            "type": "rate_limit_error",
+            "message": "Usage credits are required for fast mode.",
+        },
+    }
+
+
+def test_entitlement_429_is_fatal_not_rate_limited() -> None:
+    """A credits/entitlement 429 can never clear by waiting.
+
+    A provider returns "Usage credits are required for fast mode." as a
+    ``rate_limit_error`` with status 429, indistinguishable from real
+    throttling by status alone. Retrying burns the whole budget on a
+    request that will never succeed, and the banner says only
+    "temporarily blocked" while it does.
+    """
+    assert is_rate_limited(_EntitlementError()) is False
+
+
+def test_entitlement_429_is_not_retryable() -> None:
+    """The fatal classification must hold on the retry path too.
+
+    ``is_rate_limited`` gates the long-backoff branch, but ``is_retryable``
+    decides whether to retry at all -- and it walks the status chain
+    independently, so a 429 reads retryable there unless carved out.
+    """
+    model = _ScriptedModel()
+    assert is_retryable(_EntitlementError(), cast("Model", model)) is False
+
+
+def test_ordinary_429_stays_rate_limited() -> None:
+    """The entitlement carve-out must not swallow real throttling."""
+
+    class _ThrottledError(Exception):
+        status_code = 429
+        body: ClassVar[Mapping[str, object]] = {
+            "type": "error",
+            "error": {"type": "rate_limit_error", "message": "rate limit exceeded"},
+        }
+
+    assert is_rate_limited(_ThrottledError()) is True
+
+
+def test_snapshot_prefers_the_body_message_over_the_raw_json() -> None:
+    """``str(error)`` on an SDK error is the whole JSON body.
+
+    Rendering that verbatim buried the one useful sentence in a wall of
+    braces; the body's own ``message`` is what the user needs to read.
+    """
+    snap = service_error_snapshot(_EntitlementError())
+    assert snap.message == "Usage credits are required for fast mode."
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Usage credits are required for fast mode.",
+        "Your credit balance is too low to access the API.",
+        "You have exceeded your usage credits for this month.",
+        "Your org is out of extra usage for the month.",
+    ],
+)
+def test_exhausted_quota_messages_are_fatal(message: str) -> None:
+    """Out-of-quota reads as a 429 but no wait refills the account.
+
+    A provider phrases the same fatal condition several ways -- missing
+    credits, drained balance, org extra-usage exhausted -- all as
+    ``rate_limit_error``. Matching only one wording leaves the others
+    retrying against a wall.
+    """
+
+    class _ExhaustedError(Exception):
+        status_code = 429
+        body: ClassVar[Mapping[str, object]] = {
+            "type": "error",
+            "error": {"type": "rate_limit_error", "message": message},
+        }
+
+    assert is_rate_limited(_ExhaustedError()) is False

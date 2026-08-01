@@ -300,7 +300,7 @@ def do_switch_model(
       printer: Optional sink for status messages.
 
     """
-    spec = agent.model_spec
+    spec = agent.model_recipe
     if spec is None:
         _write(printer, "[/model] agent has no model spec; cannot swap.")
         return
@@ -328,7 +328,7 @@ def do_switch_model(
         inferred = infer_provider(parsed.model_id, spec.provider)
         if inferred is not None:
             prov_override, auth_override = inferred
-    old_id = agent.model.model_id
+    old_id = agent.model.spec.tagged_model_id
     try:
         target = agent.change_model(
             provider=prov_override,
@@ -358,7 +358,7 @@ def do_switch_thinking(agent: Agent, command: str, printer: Printer | None) -> N
     """
     current = agent.thinking_state or _infer_thinking_state(agent)
     if not command:
-        valid = ", ".join(agent.model.valid_thinking_states)
+        valid = ", ".join(agent.model.spec.valid_thinking_states)
         _write(printer, f"[/thinking] {current}\n[/thinking] options: {valid}")
         return
     try:
@@ -366,12 +366,12 @@ def do_switch_thinking(agent: Agent, command: str, printer: Printer | None) -> N
     except ValueError as exc:
         _write(printer, f"[/thinking] {exc}")
         return
-    valid = agent.model.valid_thinking_states
+    valid = agent.model.spec.valid_thinking_states
     if state not in valid:
         options = ", ".join(valid)
         _write(
             printer,
-            f"[/thinking] {state} not supported by {agent.model.model_id!r};"
+            f"[/thinking] {state} not supported by {agent.model.spec.tagged_model_id!r};"
             f" options: {options}",
         )
         return
@@ -411,7 +411,7 @@ def do_switch_effort(agent: Agent, value: str, printer: Printer | None) -> None:
       printer: Optional sink for status messages.
 
     """
-    valid = agent.model.valid_efforts
+    valid = agent.model.spec.supported_thinking_efforts
     if not value:
         current = agent.effort or "unset"
         options = ", ".join(valid) or "(none)"
@@ -437,7 +437,7 @@ def _infer_thinking_state(agent: Agent) -> ThinkingState:
 
 def _provider_supports_redact(agent: Agent) -> bool:
     """Return whether the current provider takes the redact-thinking option."""
-    spec = agent.model_spec
+    spec = agent.model_recipe
     if spec is None:
         return False
     try:
@@ -448,7 +448,7 @@ def _provider_supports_redact(agent: Agent) -> bool:
 
 def _rebuild_current_model(agent: Agent, printer: Printer | None) -> bool:
     """Queue a rebuild of the current provider/model with stored provider args."""
-    spec = agent.model_spec
+    spec = agent.model_recipe
     if spec is None:
         _write(printer, "[/thinking] agent has no model spec; cannot rebuild model")
         return False
@@ -473,7 +473,7 @@ async def do_login(agent: Agent, printer: Printer | None) -> None:
       printer: Optional sink for status messages.
 
     """
-    spec = agent.model_spec
+    spec = agent.model_recipe
     if spec is None:
         _write(printer, "[/login] agent has no model spec")
         return

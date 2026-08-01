@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from email.utils import parsedate_to_datetime
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import asyncio
 import logging
@@ -160,6 +160,12 @@ def is_retryable(error: Exception, model: Model) -> bool:
     # chain must not flip it retryable. Classify before walking the chain.
     if isinstance(error, RequestTooLargeError):
         return False
+    # An entitlement error is fatal whatever status it wears: Anthropic
+    # sends "credit balance is too low" as both 400 and 429, and no wait
+    # refills an account. Classified before the status walk, which would
+    # otherwise read every 429/5xx as retryable.
+    if _is_entitlement_error(_body_error_message(error)):
+        return False
     if model.is_retryable_provider_error(error):
         return True
     return _is_retryable(error, 0)
@@ -182,7 +188,16 @@ def is_rate_limited(error: Exception) -> bool:
       rate_limited: True when the provider throttled the request.
 
     """
-    return error_status(error) == 429 or _body_error_type(error) == "rate_limit_error"
+    if not (
+        error_status(error) == 429 or _body_error_type(error) == "rate_limit_error"
+    ):
+        return False
+    # An entitlement 429 is fatal wearing a throttle's status: Anthropic
+    # reports "Usage credits are required for fast mode." as a
+    # ``rate_limit_error``, and no amount of waiting turns credits on.
+    # Treating it as transient burns the whole retry budget while the
+    # banner says only "temporarily blocked".
+    return not _is_entitlement_error(_body_error_message(error))
 
 
 def error_status(error: Exception) -> int | None:
@@ -420,9 +435,11 @@ def service_error_snapshot(error: Exception) -> runtime_types.ServiceErrorSnapsh
     """
     response = getattr(error, "response", None)
     headers = getattr(response, "headers", {}) or {}
+    # An SDK error stringifies to its entire JSON body; the body's own
+    # ``message`` is the one sentence worth showing a user.
     return runtime_types.ServiceErrorSnapshot(
         type_name=type(error).__name__,
-        message=str(error),
+        message=_body_error_message(error) or str(error),
         status=error_status(error),
         headers=_diagnostic_headers(headers),
         body=_response_body_excerpt(response),
@@ -600,7 +617,7 @@ async def send_with_retry(
             overloaded = status == 529 or _body_error_type(e) == "overloaded_error"
             persistent = (
                 persistent_retry
-                and model.supports_persistent_retry
+                and model.spec.retries_internally
                 and (rate_limited or overloaded or is_protocol_flake)
             )
             server_delay = extract_retry_after(e)
@@ -735,6 +752,44 @@ def _is_retryable(error: Exception, depth: int) -> bool:
     if cause is not None and isinstance(cause, Exception) and depth < _MAX_CAUSE_DEPTH:
         return _is_retryable(cause, depth + 1)
     return False
+
+
+_ENTITLEMENT_PHRASES: Final = (
+    "usage credits are required",
+    "credit balance is too low",
+    "insufficient credits",
+    "exceeded your usage credits",
+    "out of extra usage",
+)
+"""Body-message markers for a 429 that describes entitlement, not throughput.
+
+Anthropic phrases one fatal condition several ways -- credits not enabled,
+balance drained, org extra-usage exhausted -- all as ``rate_limit_error``.
+Waiting refills none of them, so each must classify fatal.
+"""
+
+
+def _is_entitlement_error(message: str | None) -> bool:
+    """Whether a 429 body message describes a missing entitlement."""
+    if message is None:
+        return False
+    lowered = message.lower()
+    return any(phrase in lowered for phrase in _ENTITLEMENT_PHRASES)
+
+
+def _body_error_message(error: Exception) -> str | None:
+    """Extract the provider-declared error ``message`` from a JSON body."""
+    body = getattr(error, "body", None)
+    if not isinstance(body, Mapping):
+        return None
+    typed = cast(Mapping[object, object], body)
+    nested = typed.get("error")
+    if isinstance(nested, Mapping):
+        message = cast(Mapping[object, object], nested).get("message")
+        if isinstance(message, str):
+            return message
+    message = typed.get("message")
+    return message if isinstance(message, str) else None
 
 
 def _body_error_type(error: Exception) -> str | None:

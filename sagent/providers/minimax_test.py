@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from sagent.providers.minimax import MiniMax
+from sagent.types.cost import PriceCatalogProduct
 
 
 def test_minimax_from_key() -> None:
@@ -47,10 +48,10 @@ def test_minimax_model_supports_thinking_via_reasoning_field() -> None:
 
 def test_minimax_known_models_have_pricing() -> None:
     p = MiniMax.from_key("k")
-    for mid in MiniMax.KNOWN_MODELS:
+    for mid in MiniMax.CAPABILITIES:
         m = p.model(mid)
-        assert m.pricing.request > 0
-        assert m.pricing.response > 0
+        assert m.spec.prices[PriceCatalogProduct()].request > 0
+        assert m.spec.prices[PriceCatalogProduct()].response > 0
 
 
 def test_minimax_base_url_override_via_from_key() -> None:

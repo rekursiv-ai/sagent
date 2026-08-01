@@ -2,15 +2,29 @@
 
 The "how do I call a model" types: the ``Model`` Protocol, the request
 and response shapes, the budget and pricing primitives, and the
-``ModelSpec`` recipe used to build a Model from CLI-style strings.
+``ModelRecipe`` recipe used to build a Model from CLI-style strings.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final, Literal, Protocol, runtime_checkable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, fields, replace
+from types import MappingProxyType
+from typing import (
+    TYPE_CHECKING,
+    Final,
+    Literal,
+    Protocol,
+    Self,
+    runtime_checkable,
+)
 
+from sagent.types.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenCost,
+    TokenCount,
+)
 from sagent.types.exceptions import UserFacingError
 from sagent.types.runtime import (
     AssistantMessage,
@@ -28,18 +42,24 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "ALL_THINKING_EFFORTS",
     "CONTEXT_TAGS",
     "LATENCY_TAGS",
     "ContextBudget",
+    "Limits",
     "Model",
+    "ModelCapability",
+    "ModelRecipe",
     "ModelRequest",
     "ModelResponse",
     "ModelSpec",
     "ModelTerminationError",
-    "Pricing",
     "PromptTooLongError",
     "RequestTooLargeError",
     "StreamInterruptedError",
+    "ThinkingBudget",
+    "ThinkingEffort",
+    "ThinkingOutput",
     "TokenCount",
     "UsageSnapshot",
     "UsageWindow",
@@ -47,8 +67,286 @@ __all__ = [
     "default_buffer_tokens",
     "latency_from_model_id",
     "split_model_id",
-    "strip_latency_tags",
 ]
+
+
+type ThinkingEffort = Literal["off", "min", "low", "medium", "high", "xhigh", "max"]
+type ThinkingBudget = Literal["auto", "fixed"]
+type ThinkingOutput = Literal["text", "redacted"]
+
+_THINKING_STATES: Final = (
+    "adaptive-show",
+    "adaptive-hide",
+    "on-show",
+    "on-hide",
+    "off-hide",
+    "redact-hide",
+)
+"""Canonical thinking states, in the order the UI presents them."""
+
+ALL_THINKING_EFFORTS: Mapping[ThinkingEffort, str] = MappingProxyType(
+    {
+        "off": "off",
+        "min": "min",
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "max": "max",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Limits:
+    """Hard ceilings for one context configuration of one model."""
+
+    max_request_tokens: int = 0
+    """Input tokens the model accepts; ``0`` means unknown."""
+
+    max_response_tokens: int = 0
+    """Output tokens the model can generate in one response."""
+
+    max_request_bytes: int = 0
+    """HTTP wire ceiling, distinct from the token window. ``0`` = none."""
+
+    max_image_edge_px: int = 0
+    """Long edge above which the server downscales. ``0`` = no resize."""
+
+    max_image_bytes: int = 0
+    """Per-image byte cap after resize. ``0`` = no cap."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelCapability:
+    """One catalog row, or one transport's restrictions.
+
+    ``context_limits`` is a mapping when the model offers several
+    context configurations (``""``, ``"+1m"``), and a bare ``Limits``
+    once narrowed to one.
+    """
+
+    model_id: str = ""
+    """The id the vendor accepts on the wire, without option tags."""
+
+    context_limits: Mapping[str, Limits] | Limits = field(default_factory=Limits)
+    """Limits per context tag, or one ``Limits`` once narrowed."""
+
+    prices: PriceCatalog = field(default_factory=PriceCatalog)
+    """USD rates, keyed by latency tier and request-size threshold."""
+
+    chars_per_token: float = 4.0
+    """Divisor for the local token estimate; measured per tokenizer."""
+
+    supported_thinking_efforts: Mapping[ThinkingEffort, str] = ALL_THINKING_EFFORTS
+    """Offered effort levels, each mapped to its wire value."""
+
+    supported_thinking_budgets: frozenset[ThinkingBudget] = frozenset(
+        {"auto", "fixed"},
+    )
+    """Whether the caller may leave the reasoning budget open, fix it, or both."""
+
+    supported_thinking_outputs: frozenset[ThinkingOutput] = frozenset(
+        {"text", "redacted"}
+    )
+    """Whether reasoning comes back readable, redacted, or either."""
+
+    fast: bool = True
+    """Whether this transport exposes the fast tier at all."""
+
+    manages_context: bool = True
+    """Whether the server rolls history under quota pressure."""
+
+    prompt_cache_breakpoints: bool = True
+    """Whether the caller may place explicit prompt-cache breakpoints."""
+
+    retries_internally: bool = True
+    """Whether the transport retries transient failures on its own."""
+
+    account_auth: bool = True
+    """Whether this transport bills an account rather than an API key."""
+
+    latency_modes: frozenset[str] = frozenset({"fast"})
+    """Latency hints this transport accepts; ``fast`` is the only one defined."""
+
+    service_tiers: frozenset[str] = frozenset(
+        {"auto", "default", "flex", "priority", "standard_only"}
+    )
+    """Vendor service-tier values; the transport narrows to what it accepts."""
+
+    @property
+    def serves_fast(self) -> bool:
+        """Whether a fast-tier price row is reachable."""
+        return self.fast and any(k.fast for k in self.prices)
+
+    def __and__(self, other: ModelCapability) -> Self:
+        # ``replace`` keeps the concrete class: meeting a narrowed
+        # ``ModelSpec`` must not silently downgrade it and drop the
+        # ``context`` / ``serve_fast`` tags it carries.
+        return replace(
+            self,
+            context_limits=self.context_limits,
+            chars_per_token=self.chars_per_token,
+            prices=(
+                self.prices
+                if other.fast
+                else PriceCatalog({k: v for k, v in self.prices.items() if not k.fast})
+            ),
+            supported_thinking_efforts=MappingProxyType(
+                {
+                    k: v
+                    for k, v in self.supported_thinking_efforts.items()
+                    if k in other.supported_thinking_efforts
+                }
+            ),
+            supported_thinking_budgets=(
+                self.supported_thinking_budgets & other.supported_thinking_budgets
+            ),
+            supported_thinking_outputs=(
+                self.supported_thinking_outputs & other.supported_thinking_outputs
+            ),
+            fast=self.fast and other.fast,
+            manages_context=self.manages_context and other.manages_context,
+            prompt_cache_breakpoints=(
+                self.prompt_cache_breakpoints and other.prompt_cache_breakpoints
+            ),
+            retries_internally=self.retries_internally and other.retries_internally,
+            account_auth=self.account_auth and other.account_auth,
+            latency_modes=self.latency_modes & other.latency_modes,
+            service_tiers=self.service_tiers & other.service_tiers,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelSpec(ModelCapability):
+    """A capability resolved to one context tag and one latency tier."""
+
+    context_limits: Limits = field(default_factory=Limits)
+    """The one context's limits; ``narrow`` collapsed the mapping."""
+
+    context: str = ""
+    """The selected context tag (``""`` or e.g. ``"+1m"``)."""
+
+    serve_fast: bool = False
+    """Whether this instance requests the fast tier."""
+
+    @property
+    def valid_thinking_states(self) -> tuple[str, ...]:
+        """Canonical thinking states reachable on this model.
+
+        The three thinking axes already determine the state set:
+        ``auto`` is the ``adaptive-*`` states, ``fixed`` the ``on-*``
+        ones, ``text`` gates every ``-show``, and ``redacted`` gates
+        ``redact-hide`` (which rides ``adaptive``). ``off-hide`` is
+        always reachable.
+        """
+        budgets = self.supported_thinking_budgets
+        outputs = self.supported_thinking_outputs
+        if not budgets:
+            return ("off-hide",)
+        states: list[str] = []
+        for state in _THINKING_STATES:
+            if state == "off-hide":
+                states.append(state)
+            elif state == "redact-hide":
+                if "redacted" in outputs and "auto" in budgets:
+                    states.append(state)
+            elif (
+                (state.startswith("adaptive-") and "auto" not in budgets)
+                or (state.startswith("on-") and "fixed" not in budgets)
+                or (state.endswith("-show") and "text" not in outputs)
+            ):
+                continue
+            else:
+                states.append(state)
+        return tuple(states)
+
+    @property
+    def valid_latency_modes(self) -> tuple[str, ...]:
+        """Latency hints reachable here.
+
+        ``fast`` needs both transport support and a way to bill it: a
+        priced fast row (Anthropic) or a fast service tier (OpenAI).
+        """
+        if "fast" not in self.latency_modes:
+            return ()
+        if not self.serves_fast and "priority" not in self.service_tiers:
+            return ()
+        return tuple(sorted(self.latency_modes))
+
+    @property
+    def valid_service_tiers(self) -> tuple[str, ...]:
+        """Service tiers reachable here."""
+        return tuple(sorted(self.service_tiers))
+
+    def spend(
+        self, tokens: TokenCount, *, served_fast: bool | None = None
+    ) -> TokenCost:
+        """Price ``tokens`` at the tier its request size falls into.
+
+        Tier selection uses the whole prompt: ordinary, cache-write, and
+        cache-read pools stay disjoint for billing, but vendors size the
+        tier from their sum.
+
+        Args:
+          tokens: What the server reported.
+          served_fast: Overrides ``serve_fast`` when the vendor reports
+              the speed it actually served (Anthropic's ``usage.speed``):
+              a request that asked for fast can fall back to standard and
+              is billed at standard rates.
+
+        Returns:
+          spend: USD cost, per bucket.
+
+        """
+        fast = self.serve_fast if served_fast is None else served_fast
+        prompt = tokens.request + tokens.cache_write + tokens.cache_read
+        return self.prices[PriceCatalogProduct(fast, prompt)] * tokens
+
+    @property
+    def tagged_model_id(self) -> str:
+        """Display id carrying its option tags; ``model_id`` is the wire id."""
+        return f"{self.model_id}{self.context}{'+fast' if self.serve_fast else ''}"
+
+    @classmethod
+    def narrow(
+        cls,
+        cap: ModelCapability,
+        /,
+        *,
+        context: str = "",
+        fast: bool = False,
+    ) -> Self:
+        """Resolve ``cap`` to one context tag.
+
+        A ``ModelSpec`` IS a ``ModelCapability``, so an already-narrowed
+        spec type-checks as input here. Narrowing one again keeps its
+        tags rather than resetting them, which would leave a spec
+        claiming the default context while carrying another's limits.
+
+        Args:
+          cap: Catalog row, already met with its transport.
+          context: Context tag to select (``""`` for the default).
+          fast: Whether this instance serves the fast tier.
+
+        Returns:
+          spec: The narrowed spec.
+
+        """
+        limits = cap.context_limits
+        if isinstance(cap, ModelSpec):
+            context = context or cap.context
+            fast = fast or cap.serve_fast
+        return cls(
+            **{
+                f.name: getattr(cap, f.name)
+                for f in fields(ModelCapability)
+                if f.name != "context_limits"
+            },
+            context=context,
+            serve_fast=fast,
+            context_limits=limits if isinstance(limits, Limits) else limits[context],
+        )
 
 
 CONTEXT_TAGS: Final = ("+1m", "+200k")
@@ -152,128 +450,6 @@ def latency_from_model_id(model_id: str) -> str | None:
     return "fast" if "+fast" in split_model_id(model_id)[1] else None
 
 
-def strip_latency_tags(model_id: str) -> str:
-    """Drop latency tags, keeping the context-tagged id in canonical order.
-
-    Profile lookups use this: a ``+1m`` variant carries its own catalog
-    entry, so ``claude-opus-4-8+1m+fast`` must resolve
-    ``claude-opus-4-8+1m`` -- not the base id -- while providers whose
-    catalogs have no tagged entries keep rejecting foreign context tags.
-
-    Args:
-      model_id: Model id, possibly with trailing option tags.
-
-    Returns:
-      context_id: ``model_id`` without latency tags.
-
-    """
-    base, tags = split_model_id(model_id)
-    return base + "".join(t for t in CONTEXT_TAGS if t in tags)
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Pricing:
-    """Per-million-token prices in USD.
-
-    ``fast_request`` / ``fast_response`` apply when the provider reports
-    that a request actually ran in fast mode (Anthropic ``usage.speed``
-    == ``"fast"``). The server is authoritative: a request opted in
-    that fell back to standard speed is billed at standard rates.
-    """
-
-    request: float = 0.0
-    """Price per million input tokens."""
-
-    response: float = 0.0
-    """Price per million output tokens."""
-
-    cache_write: float = 0.0
-    """Price per million tokens written to prompt cache."""
-
-    cache_read: float = 0.0
-    """Price per million tokens served from prompt cache."""
-
-    fast_request: float = 0.0
-    """Price per million input tokens when the server billed fast mode.
-    ``0.0`` (default) means fast mode isn't priced; callers should not
-    select fast pricing for this model."""
-
-    fast_response: float = 0.0
-    """Price per million output tokens when the server billed fast mode."""
-
-    long_context_threshold: int = 0
-    """Prompt-token threshold above which long-context multipliers apply.
-    ``0`` disables tiered pricing."""
-
-    long_context_input_multiplier: float = 1.0
-    """Multiplier for uncached, cache-write, and cache-read input rates above
-    ``long_context_threshold``."""
-
-    long_context_output_multiplier: float = 1.0
-    """Multiplier for output rates above ``long_context_threshold``."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class TokenCount:
-    """Immutable 4-tuple of token counts returned by a model request."""
-
-    input_tokens: int = 0
-    """Non-cached prompt tokens.
-
-    Excludes ``cache_read_tokens`` and ``cache_creation_tokens``; the three
-    pools are disjoint, so the full prompt size the server counted is their
-    sum. Providers whose API reports a cache-inclusive total (OpenAI, Google)
-    must subtract the cached portion at construction so this convention holds
-    uniformly -- see ``providers/lib/cost.py``.
-    """
-
-    output_tokens: int = 0
-    """Output (response) tokens."""
-
-    cache_creation_tokens: int = 0
-    """Tokens spent creating cache breakpoints."""
-
-    cache_read_tokens: int = 0
-    """Tokens served from prompt cache."""
-
-    def __add__(self, other: TokenCount) -> TokenCount:
-        # Runtime guard against non-TokenCount operands: returning
-        # ``NotImplemented`` lets Python try the reflected dunder or
-        # raise a clear ``TypeError``. The annotation promises
-        # ``TokenCount``; pyright sees the isinstance as redundant, but
-        # at runtime callers reaching through ``object``-typed plumbing
-        # (status pane, persisted-metadata round-trip) can still pass a
-        # non-``TokenCount``; the unchecked code raised
-        # ``AttributeError`` mid-expression there.
-        if not isinstance(other, TokenCount):  # pyright: ignore[reportUnnecessaryIsInstance]
-            return NotImplemented  # pyright: ignore[reportUnreachable]
-        return TokenCount(
-            input_tokens=self.input_tokens + other.input_tokens,
-            output_tokens=self.output_tokens + other.output_tokens,
-            cache_creation_tokens=self.cache_creation_tokens
-            + other.cache_creation_tokens,
-            cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
-        )
-
-    def __sub__(self, other: TokenCount) -> TokenCount:
-        # See ``__add__``: same runtime guard, same reasoning.
-        if not isinstance(other, TokenCount):  # pyright: ignore[reportUnnecessaryIsInstance]
-            return NotImplemented  # pyright: ignore[reportUnreachable]
-        # Clamp at zero per field: a snapshot taken before a user-initiated
-        # ``CostTracker.restore_totals`` may exceed the post-restore total,
-        # producing a negative delta the status pane would render as
-        # "-12 tokens". Subtraction is unchecked everywhere else; this is
-        # the one place an external mutation breaks monotonicity.
-        return TokenCount(
-            input_tokens=max(0, self.input_tokens - other.input_tokens),
-            output_tokens=max(0, self.output_tokens - other.output_tokens),
-            cache_creation_tokens=max(
-                0, self.cache_creation_tokens - other.cache_creation_tokens
-            ),
-            cache_read_tokens=max(0, self.cache_read_tokens - other.cache_read_tokens),
-        )
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelRequest:
     """Full conversation sent to an LLM backend."""
@@ -297,29 +473,16 @@ class ModelRequest:
     """Extended-thinking mode; ``None`` disables thinking."""
 
     effort: str | None = None
-    """Effort hint; provider-specific accepted values (see provider
-    docs -- e.g. Anthropic accepts ``low``/``medium``/``high``/``xhigh``/
-    ``max``, Qwen3 enables hybrid thinking on any non-``none`` value).
-    ``None`` omits the field so the API applies its own default."""
+    """Effort hint; ``None`` omits the field. See ``spec.supported_thinking_efforts``."""
 
     cache_ttl: Literal["5m", "1h"] = "5m"
     """Prompt-cache TTL; providers without prompt caching ignore this."""
 
     service_tier: str | None = None
-    """Processing-tier hint; accepted values are provider-specific (see
-    ``Model.valid_service_tiers``). Providers without service-tier
-    support ignore this field. ``None`` omits the hint so the API
-    applies its own default."""
+    """Processing-tier hint; ``None`` omits it. See ``spec.valid_service_tiers``."""
 
     latency: str | None = None
-    """Cross-provider latency hint; currently only ``"fast"`` is defined.
-    Each provider maps it to its own wire field: Anthropic Opus 4.6/4.7/4.8
-    to ``speed="fast"`` (fast mode), OpenAI to ``service_tier="priority"``.
-    The agent layer derives it from the model id's ``+fast`` option tag
-    (validated at ``Provider.model()`` construction against
-    ``Model.valid_latency_modes``); a request that still reaches a
-    provider without a fast path has it dropped. ``None`` requests the
-    default."""
+    """Cross-provider latency hint; only ``"fast"`` is defined."""
 
     stop_sequences: tuple[str, ...] = ()
     """Optional stop sequences; provider-specific support."""
@@ -347,14 +510,13 @@ class ModelResponse:
     request_id: str = ""
     """HTTP-level request id from the response headers."""
 
-    input_cost: float = 0.0
-    """USD cost of the prompt tokens."""
+    spend: TokenCost = field(default_factory=TokenCost)
+    """USD cost of this request, per token bucket."""
 
-    output_cost: float = 0.0
-    """USD cost of the generated tokens."""
-
-    total_cost: float = 0.0
-    """Total USD cost of the request."""
+    @property
+    def total_cost(self) -> float:
+        """Total USD cost of the request."""
+        return self.spend.total
 
 
 class PromptTooLongError(Exception):
@@ -410,8 +572,8 @@ class StreamInterruptedError(Exception):
         tokens = response.tokens
         super().__init__(
             "Stream indicated tool_use but delivered no tool blocks "
-            f"(input_tokens={tokens.input_tokens}, "
-            f"output_tokens={tokens.output_tokens}, "
+            f"(input_tokens={tokens.request}, "
+            f"output_tokens={tokens.response}, "
             f"stop_reason={response.stop_reason!r}).",
         )
         self.response = response
@@ -444,130 +606,17 @@ class Model(Protocol):
     """
 
     @property
-    def max_request_tokens(self) -> int:
-        """Maximum input tokens the model accepts."""
-        ...
+    def spec(self) -> ModelSpec:
+        """What this model can do, narrowed to the selected context.
 
-    @property
-    def model_id(self) -> str:
-        """Provider-specific model identifier."""
-        ...
+        Every capability question -- window size, byte ceilings, which
+        thinking efforts the wire accepts, whether a fast tier exists --
+        is answered from here. Reading it needs no credentials and no
+        request.
 
-    @property
-    def max_response_tokens(self) -> int:
-        """Maximum output tokens the model can generate."""
-        ...
-
-    @property
-    def supports_streaming(self) -> bool:
-        """Whether the model supports token-by-token streaming."""
-        ...
-
-    @property
-    def supports_thinking(self) -> bool:
-        """Whether the model supports extended thinking."""
-        ...
-
-    @property
-    def valid_thinking_states(self) -> tuple[str, ...]:
-        """Accepted ``/thinking`` states for this provider/model.
-
-        Provider-specific, derived from the model's thinking capability
-        (see :func:`sagent.thinking.valid_thinking_states`).
-        Always contains ``off-hide``. Excludes ``-show`` states when the
-        provider forces server-side redaction (no readable text), and
-        excludes ``redact-hide`` when the provider exposes no redaction
-        mode. A state outside this set is a rejected request, not a no-op.
-        """
-        ...
-
-    @property
-    def supports_effort(self) -> bool:
-        """Whether the model accepts an effort hint."""
-        ...
-
-    @property
-    def valid_efforts(self) -> tuple[str, ...]:
-        """Accepted ``effort`` values; empty when unsupported.
-
-        Provider-specific. Anthropic exposes ``low`` / ``medium`` /
-        ``high`` / ``xhigh`` / ``max``; OpenAI reasoning models and Google
-        expose their own sets. An empty tuple means the model takes no
-        effort hint (``supports_effort`` is ``False``). A value outside
-        this set is a rejected request, not a silent no-op.
-        """
-        ...
-
-    @property
-    def supports_cache_control(self) -> bool:
-        """Whether the provider supports prompt caching."""
-        ...
-
-    @property
-    def valid_service_tiers(self) -> tuple[str, ...]:
-        """Accepted ``service_tier`` values; empty when unsupported.
-
-        Provider-specific. OpenAI chat-completions exposes ``"auto"`` /
-        ``"default"`` / ``"flex"`` / ``"priority"``; OpenAI Codex
-        subscription only exposes ``"priority"``; Anthropic Messages
-        exposes ``"auto"`` / ``"standard_only"``. An empty tuple means
-        the request field is dropped.
-        """
-        ...
-
-    @property
-    def valid_latency_modes(self) -> tuple[str, ...]:
-        """Accepted ``latency`` values; empty when unsupported.
-
-        Anthropic Opus 4.6/4.7/4.8 (API + subscription transports) and
-        OpenAI (API + subscription) accept ``("fast",)``. The Anthropic
-        CLI transport and providers without a fast path return ``()``.
-        ``None`` is always implicitly valid and means default latency.
-        """
-        ...
-
-    @property
-    def supports_context_management(self) -> bool:
-        """Whether the provider manages context overflow internally."""
-        ...
-
-    @property
-    def supports_persistent_retry(self) -> bool:
-        """Whether the provider retries internally on transient
-        failures.
-        """
-        ...
-
-    @property
-    def supports_account_auth(self) -> bool:
-        """Whether the provider uses account-based authentication."""
-        ...
-
-    @property
-    def max_image_dim(self) -> int:
-        """Maximum image dimension (pixels) accepted by the API."""
-        ...
-
-    @property
-    def max_image_bytes(self) -> int:
-        """Maximum size (bytes) of a SINGLE image after resize.
-
-        Per-image limit the provider serializer resizes each attachment
-        down to. Distinct from :attr:`max_request_bytes`, the ceiling on
-        the WHOLE request body.
-        """
-        ...
-
-    @property
-    def max_request_bytes(self) -> int:
-        """Maximum size (bytes) of the entire request body the API accepts.
-
-        The HTTP wire ceiling -- distinct from both the token window
-        (:attr:`max_request_tokens`) and the per-image cap
-        (:attr:`max_image_bytes`). Driven mostly by attachment bytes, it
-        is not relieved by a larger context window. The byte-aware
-        compaction gate triggers on estimated request bytes against this
-        value, and the read tool bounds rendered bytes below it.
+        Declared read-only so an implementation may store it as a plain
+        attribute or derive it; a bare attribute annotation would reject
+        the latter.
         """
         ...
 
@@ -664,11 +713,6 @@ class Model(Protocol):
           tokens: Best-truth input token count.
 
         """
-        ...
-
-    @property
-    def pricing(self) -> Pricing:
-        """Per-million-token pricing schedule for this model."""
         ...
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
@@ -822,8 +866,7 @@ class ContextBudget:
     """Per-request aggregate character budget for tool results."""
 
     keep_recent_on_compact: int | None = None
-    """Number of recent history entries the compactor preserves
-    verbatim; ``None`` lets the compactor choose."""
+    """Recent entries the compactor keeps verbatim; ``None`` lets it choose."""
 
     def __post_init__(self) -> None:
         if self.max_request_tokens <= 0:
@@ -870,16 +913,19 @@ class ContextBudget:
         """Derive proportional ``ContextBudget`` defaults from a model's limits.
 
         Args:
-          model: Model whose ``max_request_tokens`` and
-              ``max_response_tokens`` seed the budget.
+          model: Model whose limits and measured tokenizer density seed
+              the budget.
 
         Returns:
           budget: New ``ContextBudget`` with proportional defaults.
 
         """
-        inp = model.max_request_tokens
-        out = model.max_response_tokens
-        cpt = 4
+        inp = model.spec.context_limits.max_request_tokens
+        out = model.spec.context_limits.max_response_tokens
+        # The spec carries the measured ratio (2.83 for the opus-5
+        # generation, 4.83 for the 4-5s); planning at a flat 4 made every
+        # derived char budget wrong by that model's whole error.
+        cpt = max(1, round(model.spec.chars_per_token))
         buffer = default_buffer_tokens(inp)
         return cls(
             max_request_tokens=inp,
@@ -899,7 +945,7 @@ class ContextBudget:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ModelSpec:
+class ModelRecipe:
     """Recipe for building a ``Model`` from CLI-style strings."""
 
     provider: str
@@ -921,8 +967,8 @@ class ModelSpec:
         # ``account`` may legitimately be empty / ``None`` (default
         # backend).
         if not self.provider:
-            raise ValueError("ModelSpec.provider must be non-empty")
+            raise ValueError("ModelRecipe.provider must be non-empty")
         if not self.auth:
-            raise ValueError("ModelSpec.auth must be non-empty")
+            raise ValueError("ModelRecipe.auth must be non-empty")
         if not self.model_id:
-            raise ValueError("ModelSpec.model_id must be non-empty")
+            raise ValueError("ModelRecipe.model_id must be non-empty")

@@ -57,7 +57,7 @@ from sagent.tools.core import (
     provider_not_allowed_result,
 )
 from sagent.types.compactor import Compactor
-from sagent.types.model import Model, ModelSpec
+from sagent.types.model import Model, ModelRecipe
 from sagent.types.runtime import (
     AgentIdle,
     AgentSendMessage,
@@ -271,7 +271,7 @@ class AgentSpawn:
     Model selection is exposed to the LLM as four independent strings
     - ``provider``, ``auth``, ``model_id``, ``account`` - mirroring
     ``cli.py``'s CLI flags. Each follows the standard ``LLM arg →
-    factory arg → parent.model_spec.<field>`` fallthrough. When every
+    factory arg → parent.model_recipe.<field>`` fallthrough. When every
     field matches the parent's spec the child simply reuses
     ``parent.model``; otherwise a fresh ``Model`` is built via
     :func:`providers.build_provider`.
@@ -560,7 +560,7 @@ class AgentSpawn:
         *,
         system: str | None,
         child_model: Model,
-        child_spec: ModelSpec | None,
+        child_spec: ModelRecipe | None,
         child_tools: list[Tool],
         max_rounds: int | None,
         model_options: Mapping[str, object],
@@ -579,7 +579,7 @@ class AgentSpawn:
         )
         init_kwargs: dict[str, object] = {
             "model": child_model,
-            "model_spec": child_spec,
+            "model_recipe": child_spec,
             "system": child_system,
             "tools": child_tools,
             "compactor": self._inherit("compactor", parent_agent),
@@ -955,11 +955,11 @@ class AgentSpawn:
         model_id: str | None,
         account: str | None,
         parent_agent: _Agent | None,
-    ) -> tuple[Model, ModelSpec | None] | ToolResult:
-        """Resolve ``(model, model_spec)`` for the child.
+    ) -> tuple[Model, ModelRecipe | None] | ToolResult:
+        """Resolve ``(model, model_recipe)`` for the child.
 
         Per-field fallthrough: ``LLM arg → factory arg →
-        parent.model_spec.<field>``. Whenever a rebuildable spec results
+        parent.model_recipe.<field>``. Whenever a rebuildable spec results
         (provider + auth + model_id all resolved), a FRESH transport is
         built via ``build_provider(...).model(...)`` -- including the
         common case where the child simply inherits the parent's spec.
@@ -968,14 +968,14 @@ class AgentSpawn:
         serialize (and, on subprocess providers, corrupt) them through
         one transport.
 
-        The sole reuse case is a parent with **no** ``model_spec`` (e.g.
+        The sole reuse case is a parent with **no** ``model_recipe`` (e.g.
         test harnesses that inject a raw ``Model``): there is nothing to
         rebuild from, so ``parent.model`` is inherited as-is with a
         ``None`` spec. If the LLM / factory asked for a switch but the
         resulting trio is missing fields, that's an error - we can't
         build a provider without all three.
         """
-        parent_spec = parent_agent.model_spec if parent_agent is not None else None
+        parent_spec = parent_agent.model_recipe if parent_agent is not None else None
         llm_asked = any(x is not None for x in (provider, auth, model_id, account))
         factory_asked = any(
             x is not None
@@ -1037,7 +1037,7 @@ class AgentSpawn:
                 content=(
                     "Cannot build a model: need provider, auth, and"
                     f" model_id; got provider={p!r}, auth={a!r},"
-                    f" model_id={m!r}. The parent agent has no model_spec"
+                    f" model_id={m!r}. The parent agent has no model_recipe"
                     " to inherit from."
                 ),
                 is_error=True,
@@ -1050,10 +1050,10 @@ class AgentSpawn:
             )
         built_provider = build_provider(p, a, account=ac)
         new_model = built_provider.model(m)
-        new_spec = ModelSpec(
+        new_spec = ModelRecipe(
             provider=p,
             auth=a,
-            model_id=new_model.model_id,
+            model_id=new_model.spec.tagged_model_id,
             account=ac,
         )
         return new_model, new_spec

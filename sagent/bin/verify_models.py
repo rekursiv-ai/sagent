@@ -3,9 +3,9 @@
 # fmt: off
 '''' 2>/dev/null #
 exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
-Verify KNOWN_MODELS limits against provider APIs and docs.
+Verify CAPABILITIES limits against provider APIs and docs.
 
-Checks that every provider's KNOWN_MODELS entries have correct
+Checks that every provider's CAPABILITIES entries have correct
 max_request_tokens and max_response_tokens by querying live APIs or
 scraping official documentation pages.
 
@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import cast
 
 import argparse
 import asyncio
@@ -37,9 +38,11 @@ import sys
 
 import httpx
 
+from sagent import providers
 from sagent.providers.anthropic import Anthropic
 from sagent.providers.google import Google
 from sagent.providers.openai import OpenAI
+from sagent.types.model import Limits, ModelCapability
 
 
 def _out(msg: str) -> None:
@@ -185,14 +188,14 @@ def _num(s: str) -> int:
 
 def compare(
     provider_name: str,
-    known: Mapping[str, object],
+    known: Mapping[str, ModelCapability],
     live: dict[str, ModelLimits],
 ) -> int:
-    """Compare KNOWN_MODELS entries against live API limits.
+    """Compare CAPABILITIES entries against live API limits.
 
     Args:
       provider_name: Display name for log output.
-      known: KNOWN_MODELS mapping from the provider class.
+      known: CAPABILITIES mapping from the provider class.
       live: Limits fetched from the live API.
 
     Returns:
@@ -205,7 +208,7 @@ def compare(
         k = known.get(mid)
         lv = live.get(mid)
         if k is None:
-            _out(f"  {provider_name}.{mid}: in API but not in KNOWN_MODELS")
+            _out(f"  {provider_name}.{mid}: in API but not in CAPABILITIES")
             if lv:
                 _out(
                     f"    API: req={lv.max_request_tokens:,}"
@@ -215,8 +218,12 @@ def compare(
             continue
         if lv is None:
             continue
-        k_req = getattr(k, "max_request_tokens", 0)
-        k_resp = getattr(k, "max_response_tokens", 0)
+        # The untagged context is the one the vendor API reports; ``+1m``
+        # is an opt-in the model list does not enumerate.
+        limits = k.context_limits
+        base = limits if isinstance(limits, Limits) else limits[""]
+        k_req = base.max_request_tokens
+        k_resp = base.max_response_tokens
         if k_req != lv.max_request_tokens:
             _out(
                 f"  {provider_name}.{mid}: max_request_tokens"
@@ -234,8 +241,49 @@ def compare(
     return errors
 
 
+def audit_catalogs() -> int:
+    """Check every provider catalog for self-consistency, offline.
+
+    Catches the drift a live query cannot: a row whose ``model_id`` does
+    not match its key ships the wrong id on the wire; an empty price
+    catalog raises at first bill rather than at import; a zero window
+    silently disables the compaction trigger.
+
+    Returns:
+      error_count: Number of problems found.
+
+    """
+    errors = 0
+    for name in sorted(providers.PROVIDER_NAMES):
+        cls = getattr(providers, name, None)
+        catalog = getattr(cls, "CAPABILITIES", None)
+        if not isinstance(catalog, Mapping):
+            continue
+        rows = cast("Mapping[str, ModelCapability]", catalog)
+        for mid, cap in rows.items():
+            if cap.model_id != mid:
+                _out(f"  {name}.{mid}: model_id is {cap.model_id!r}, not the key")
+                errors += 1
+            if not cap.prices:
+                _out(f"  {name}.{mid}: no price rows -- spend() would raise")
+                errors += 1
+            limits = cap.context_limits
+            per_tag = {"": limits} if isinstance(limits, Limits) else limits
+            for tag, lim in per_tag.items():
+                where = f"{name}.{mid}{tag}"
+                if lim.max_request_tokens <= 0:
+                    _out(f"  {where}: max_request_tokens is 0")
+                    errors += 1
+                if lim.max_response_tokens <= 0:
+                    _out(f"  {where}: max_response_tokens is 0")
+                    errors += 1
+    if not errors:
+        _out("  catalogs: all rows OK")
+    return errors
+
+
 async def _run() -> int:
-    """Verify all providers' KNOWN_MODELS against live APIs.
+    """Verify all providers' CAPABILITIES against live APIs.
 
     Returns:
       exit_code: 0 if all limits match, 1 otherwise.
@@ -250,9 +298,19 @@ async def _run() -> int:
         choices=["google", "openai", "anthropic", "all"],
         default="all",
     )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Only run the offline catalog audit; skip every network query.",
+    )
     args = parser.parse_args()
     target = args.provider
-    total_errors = 0
+    _out("Catalog audit (offline):")
+    total_errors = audit_catalogs()
+    if args.offline:
+        if total_errors:
+            _out(f"\n{total_errors} problem(s) found.")
+        return 1 if total_errors else 0
 
     if target in ("all", "google"):
         _out("Google (API query):")
@@ -261,12 +319,12 @@ async def _run() -> int:
             _out("  [skip] GOOGLE_API_KEY not set")
         else:
             live = await fetch_google(key)
-            total_errors += compare("Google", Google.KNOWN_MODELS, live)
+            total_errors += compare("Google", Google.CAPABILITIES, live)
 
     if target in ("all", "openai"):
         _out("OpenAI (doc scrape):")
-        live = await fetch_openai(list(OpenAI.KNOWN_MODELS))
-        total_errors += compare("OpenAI", OpenAI.KNOWN_MODELS, live)
+        live = await fetch_openai(list(OpenAI.CAPABILITIES))
+        total_errors += compare("OpenAI", OpenAI.CAPABILITIES, live)
 
     if target in ("all", "anthropic"):
         _out("Anthropic (API query):")
@@ -274,8 +332,8 @@ async def _run() -> int:
         if not key:
             _out("  [skip] ANTHROPIC_API_KEY not set")
         else:
-            live = await fetch_anthropic(key, list(Anthropic.KNOWN_MODELS))
-            total_errors += compare("Anthropic", Anthropic.KNOWN_MODELS, live)
+            live = await fetch_anthropic(key, list(Anthropic.CAPABILITIES))
+            total_errors += compare("Anthropic", Anthropic.CAPABILITIES, live)
 
     if total_errors:
         _out(f"\n{total_errors} mismatch(es) found.")

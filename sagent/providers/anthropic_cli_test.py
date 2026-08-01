@@ -933,10 +933,10 @@ def test_build_model_response_normalizes_input_to_last_round() -> None:
         stop_reason="end_turn",
         fallback_message_id="m1",
     )
-    assert response.tokens.input_tokens == 3
-    assert response.tokens.cache_creation_tokens == 1_200
-    assert response.tokens.cache_read_tokens == 96_000
-    assert response.tokens.output_tokens == 450
+    assert response.tokens.request == 3
+    assert response.tokens.cache_write == 1_200
+    assert response.tokens.cache_read == 96_000
+    assert response.tokens.response == 450
     assert response.total_cost == pytest.approx(1.25)
 
 
@@ -1016,9 +1016,9 @@ async def test_drain_captures_last_round_usage_for_context_anchor() -> None:
     model = provider.model("claude-haiku-4-5")
     response = await model._drain_until_result(cast(Subproc, _Proc()), publish=None)
     # Input side = round 2's context footprint, not the 146k sum.
-    assert response.tokens.input_tokens == 3
-    assert response.tokens.cache_read_tokens == 96_000
-    assert response.tokens.output_tokens == 70
+    assert response.tokens.request == 3
+    assert response.tokens.cache_read == 96_000
+    assert response.tokens.response == 70
     assert model._last_input_tokens == 96_003
 
 
@@ -1149,8 +1149,8 @@ async def test_session_persistent_stream_returns_empty_when_history_cleared(
     # cost) so the runtime gets a clean "model said nothing" turn.
     assert response.message.text == ""
     assert response.message.tool_calls == ()
-    assert response.tokens.input_tokens == 0
-    assert response.tokens.output_tokens == 0
+    assert response.tokens.request == 0
+    assert response.tokens.response == 0
 
     # Provider state was reset: next real call will use ``--session-id``
     # (not ``--resume``).
@@ -2005,9 +2005,9 @@ def test_build_model_response_sums_model_usage_rows() -> None:
     assert response.message.text == "reply"
     # No ``message_start`` observed → input side is 0 ("unknown — estimate
     # instead"), NOT the cumulative 300 (see the normalization tests below).
-    assert response.tokens.input_tokens == 0
+    assert response.tokens.request == 0
     # Output IS cumulative: every internal round's generation was produced.
-    assert response.tokens.output_tokens == 60
+    assert response.tokens.response == 60
     assert response.total_cost == pytest.approx(0.0012)
     assert response.stop_reason == "model_finished"
     assert response.message_id == "sid-x"

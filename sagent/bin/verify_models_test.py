@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Self
 
 import sys
@@ -11,6 +10,14 @@ import httpx
 import pytest
 
 from sagent.bin import verify_models
+from sagent.types.model import Limits, ModelCapability
+
+
+def _cap(request: int, response: int) -> ModelCapability:
+    """A capability carrying only the two limits ``compare`` reads."""
+    return ModelCapability(
+        context_limits=Limits(max_request_tokens=request, max_response_tokens=response)
+    )
 
 
 class _Response:
@@ -173,9 +180,9 @@ class TestCompare:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         known = {
-            "same": SimpleNamespace(max_request_tokens=10, max_response_tokens=20),
-            "diff": SimpleNamespace(max_request_tokens=1, max_response_tokens=2),
-            "dead": SimpleNamespace(max_request_tokens=1, max_response_tokens=2),
+            "same": _cap(10, 20),
+            "diff": _cap(1, 2),
+            "dead": _cap(1, 2),
         }
         live = {
             "same": verify_models.ModelLimits(
@@ -193,12 +200,12 @@ class TestCompare:
         }
         assert verify_models.compare("Provider", known, live) == 3
         out = capsys.readouterr().out
-        assert "in API but not in KNOWN_MODELS" in out
+        assert "in API but not in CAPABILITIES" in out
         assert "max_request_tokens" in out
         assert "max_response_tokens" in out
 
     def test_reports_all_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
-        known = {"m": SimpleNamespace(max_request_tokens=1, max_response_tokens=2)}
+        known = {"m": _cap(1, 2)}
         live = {
             "m": verify_models.ModelLimits(max_request_tokens=1, max_response_tokens=2)
         }

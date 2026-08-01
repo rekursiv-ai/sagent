@@ -50,7 +50,9 @@ should prefer the API-key path (``OpenAI.from_key``).
 from __future__ import annotations
 
 from collections.abc import AsyncIterable, Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import (
     IO,
     TYPE_CHECKING,
@@ -67,7 +69,6 @@ from urllib.parse import quote_plus
 import asyncio
 import base64
 import contextlib
-import dataclasses
 import inspect
 import json
 import logging
@@ -94,14 +95,11 @@ else:
     oai_responses = lazy_import("openai.types.responses")
     image_lib = lazy_import("sagent.lib.image")
 
+from sagent import types
 from sagent.lib import debug_log
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import MutableJSON, int_val, json_unfreeze
-from sagent.providers.lib.cost import (
-    ModelProfile,
-    Pricing,
-    compute_cost,
-)
+from sagent.providers import openai_catalog
 from sagent.providers.lib.errors import (
     StreamingResponseNotReadError,
     error_status_code,
@@ -119,21 +117,21 @@ from sagent.providers.lib.oauth import (
 )
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.openai import OpenAI, _OpenAIModel
-from sagent.providers.openai_compat import (
-    openai_responses_reasoning_effort,
-)
 from sagent.types.exceptions import (
     AuthRefreshError,
     UserFacingError,
 )
 from sagent.types.model import (
+    Limits,
+    ModelCapability,
     ModelRequest,
     ModelResponse,
+    ModelSpec,
     PromptTooLongError,
     StreamInterruptedError,
+    ThinkingEffort,
     TokenCount,
     base_model_id,
-    strip_latency_tags,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -187,13 +185,6 @@ _STREAM_IDLE_TIMEOUT = (
     600.0  # config-globals: ignore -- stream idle timeout, user-retunable
 )
 
-# Must stay identical to ``_OpenAIModel._is_effort_model``'s prefix set
-# (openai.py): the two OpenAI transports share one ``KNOWN_MODELS`` catalog and
-# the wire-mapping docstring requires them to agree on which ids are reasoning
-# models. A bare ``"o"`` over-matches (e.g. a future ``omni-*`` id), diverging
-# from the API-key path -- pin the exact reasoning families instead.
-_EFFORT_PREFIXES: Final = ("o1", "o3", "o4", "gpt-5")
-
 
 def _default_credentials_path() -> Path:
     """Return the active Codex auth file, honoring ``CODEX_HOME``."""
@@ -214,25 +205,22 @@ class _CredentialFileError(ValueError):
     """Stored credentials do not match the subscription OAuth schema."""
 
 
-def _subscription_profile(profile: ModelProfile) -> ModelProfile:
-    """Clamp the public API profile to the subscription token contract.
+def _subscription_limits(cap: ModelCapability) -> Limits:
+    """Clamp a capability's windows to the subscription wire contract.
 
-    Only the token windows differ between the API and the Codex
-    subscription backend, so only they are clamped. The image and wire
-    byte caps are a property of the underlying OpenAI model, identical
-    across the two auth paths -- inherit them from ``profile`` so a future
-    per-model divergence in the parent flows through automatically instead
-    of being silently overwritten by a stale local constant.
+    Only the token windows differ between the API and the Codex backend,
+    and the ``+1m`` context is unreachable once clamped -- so the result
+    is a single ``Limits``, not a context map.
     """
-    return dataclasses.replace(
-        profile,
+    limits = cap.context_limits
+    base = limits if isinstance(limits, Limits) else limits[""]
+    return replace(
+        base,
         max_request_tokens=min(
-            profile.max_request_tokens,
-            _SUBSCRIPTION_MAX_REQUEST_TOKENS,
+            base.max_request_tokens, _SUBSCRIPTION_MAX_REQUEST_TOKENS
         ),
         max_response_tokens=min(
-            profile.max_response_tokens,
-            _SUBSCRIPTION_MAX_RESPONSE_TOKENS,
+            base.max_response_tokens, _SUBSCRIPTION_MAX_RESPONSE_TOKENS
         ),
     )
 
@@ -240,9 +228,9 @@ def _subscription_profile(profile: ModelProfile) -> ModelProfile:
 class OpenAISubscription(OpenAI):
     """OpenAI provider -- OAuth + ChatGPT subscription billing.
 
-    Derives KNOWN_MODELS from OpenAI (API pricing inherited, token
+    Derives CAPABILITIES from OpenAI (API pricing inherited, token
     limits clamped to the subscription wire contract, ``+1m`` ids
-    dropped -- see the ``KNOWN_MODELS`` comprehension below).
+    dropped -- see the ``CAPABILITIES`` comprehension below).
     Cost tracking uses standard API per-token pricing even though
     subscription users pay a flat fee. This is intentional: it gives
     a consistent "what would this session cost at API rates" metric
@@ -259,13 +247,16 @@ class OpenAISubscription(OpenAI):
     # below to the base id to stay resolvable against this narrowed catalog.
     DEFAULT_MODEL: ClassVar[str] = "gpt-5.6-sol"
 
-    # Keep pricing inherited from the public API profiles, but clamp limits
-    # separately because subscription auth is a different backend contract.
-    KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
-        name: _subscription_profile(profile)
-        for name, profile in OpenAI.KNOWN_MODELS.items()
-        if not name.endswith("+1m")
-    }
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = MappingProxyType(
+        {
+            name: replace(cap, context_limits=_subscription_limits(cap))
+            for name, cap in openai_catalog.MODELS.items()
+        }
+    )
+    """The Responses wire: every advertised effort, clamped token windows."""
+
+    TRANSPORT: ClassVar[ModelCapability] = openai_catalog.SUBSCRIPTION
+    """Codex subscription: account auth, ``/fast`` maps to the priority tier."""
 
     class Credentials(TypedDict):
         """OAuth credentials for an OpenAI ChatGPT subscription."""
@@ -487,41 +478,35 @@ class OpenAISubscription(OpenAI):
         """Create a Responses API model backend.
 
         Args:
-          model_id: Model ID. ``None`` uses ``DEFAULT_MODEL``.
+          model_id: Catalog id with optional tags, or a role name.
           max_request_tokens: Override max input tokens. ``None`` uses profile default.
 
         Returns:
           model: Responses API model backend.
 
         Raises:
-          ValueError: If ``model_id`` is not in ``KNOWN_MODELS``.
+          UnknownModelError: ``model_id`` is not in ``CAPABILITIES``.
+          UnsupportedTagError: The id asks for a tag this model or
+              transport does not offer.
 
         """
-        mid = model_id if model_id is not None else self.DEFAULT_MODEL
-        # Fail fast -- every supported model must be in KNOWN_MODELS. Strip
-        # latency tags before lookup. ``+1m`` is NOT stripped and is absent
-        # from the narrowed subscription catalog, so a ``+1m`` id raises below
-        # rather than silently clamping (the suffix buys nothing under the
-        # subscription wire contract). Callers must use the base id.
-        profile = self.KNOWN_MODELS.get(mid) or self.KNOWN_MODELS.get(
-            strip_latency_tags(mid),
+        mid = model_id if model_id is not None else "default"
+        # ``+1m`` is absent from the narrowed subscription catalog, so a
+        # ``+1m`` id raises rather than silently clamping: the suffix buys
+        # nothing under the subscription wire contract.
+        spec = types.providers.resolve(
+            mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT
         )
-        if profile is None:
-            known = ", ".join(sorted(self.KNOWN_MODELS))
-            raise ValueError(
-                f"Unknown model {mid!r} for {type(self).__name__}."
-                f" Known models: {known}",
-            )
+        window = spec.context_limits.max_request_tokens
         return _OpenAISubModel(
             provider=self,
-            model_id=mid,
-            profile=profile,
+            # ``mid`` may be a role name; the spec carries the resolved id.
+            model_id=spec.tagged_model_id,
             max_request_tokens=min(
-                max_request_tokens
-                if max_request_tokens is not None
-                else profile.max_request_tokens,
-                profile.max_request_tokens,
+                max_request_tokens if max_request_tokens is not None else window,
+                window,
             ),
+            spec=spec,
         )
 
     @override
@@ -532,7 +517,7 @@ class OpenAISubscription(OpenAI):
           model: Utility model backend.
 
         """
-        return self.model(self.DEFAULT_UTILITY_MODEL)
+        return self.model("utility")
 
     # -- Token management ----------------------------------------------
 
@@ -872,22 +857,11 @@ class _OpenAISubModel(_OpenAIModel):
         await self._provider.close_sdk()
         await super().close()
 
-    @override
-    def _is_effort_model(self, model_id: str) -> bool:
-        """True for OpenAI reasoning models that accept ``reasoning_effort``."""
-        return any(model_id.startswith(p) for p in _EFFORT_PREFIXES)
-
     @property
     @override
     def supports_thinking(self) -> bool:
         """Whether the model accepts a thinking/reasoning request."""
         return self.supports_effort
-
-    @property
-    @override
-    def valid_service_tiers(self) -> tuple[str, ...]:
-        """Codex ``/fast`` slash command sets ``service_tier="priority"``."""
-        return ("priority",)
 
     @property
     @override
@@ -905,7 +879,7 @@ class _OpenAISubModel(_OpenAIModel):
     @override
     def supports_account_auth(self) -> bool:
         """Whether the provider uses account authentication."""
-        return True
+        return self.spec.account_auth
 
     @override
     def is_context_overflow(self, error: Exception) -> bool:
@@ -944,19 +918,6 @@ class _OpenAISubModel(_OpenAIModel):
         match on the SDK's canonical retry-hint substring instead.
         """
         return "you can retry" in str(error).lower()
-
-    @override
-    async def buffer(self, request: ModelRequest) -> ModelResponse:
-        """Send a buffered request via the streaming path.
-
-        Args:
-          request: Model request to send.
-
-        Returns:
-          response: Translated model response.
-
-        """
-        return await self.stream(request, None)
 
     @override
     async def stream(
@@ -1037,7 +998,7 @@ class _OpenAISubModel(_OpenAIModel):
                 )
             return await _consume_stream(
                 event_stream,
-                pricing=self._profile.pricing,
+                spec=self.spec,
                 publish=publish,
             )
         except Exception as exc:
@@ -1056,14 +1017,29 @@ class _OpenAISubModel(_OpenAIModel):
             raise
 
     def _reasoning_effort(self, request: ModelRequest) -> str | None:
-        """Map sagent thinking/effort knobs onto OpenAI reasoning effort."""
+        """Map sagent thinking/effort knobs onto OpenAI reasoning effort.
+
+        Raises:
+          ValueError: If ``request.effort`` is not one the model accepts.
+              Silently substituting ``"high"`` billed reasoning the caller
+              never asked for -- at the most expensive level.
+
+        """
         if not self.supports_effort:
             return None
         if request.effort is not None:
-            return (
-                openai_responses_reasoning_effort(self._model_id, request.effort)
-                or "high"
+            # The catalog holds the wire value; the Responses rows differ from
+            # the Chat rows only in how ``max`` maps, which is data, not code.
+            wire = self.spec.supported_thinking_efforts.get(
+                cast("ThinkingEffort", request.effort)
             )
+            if wire is None:
+                valid = ", ".join(self.spec.supported_thinking_efforts)
+                raise ValueError(
+                    f"Unknown effort {request.effort!r} for {self._model_id}."
+                    f" Valid efforts: {valid}",
+                )
+            return wire
         if request.thinking == "adaptive":
             return "medium"
         if request.thinking == "enabled":
@@ -1288,7 +1264,7 @@ class _OpenAIStreamError(UserFacingError):
 async def _consume_stream(
     stream: AsyncIterable[object],
     *,
-    pricing: Pricing,
+    spec: ModelSpec,
     publish: Callable[[RuntimeEvent], None] | None,
 ) -> ModelResponse:
     """Parse a Responses API event stream into an assembled ModelResponse."""
@@ -1432,7 +1408,7 @@ async def _consume_stream(
         cache_read=cache_read,
         finish_reason=finish_reason,
         message_id=message_id,
-        pricing=pricing,
+        spec=spec,
     )
     if not completed:
         raise StreamInterruptedError(response)
@@ -1493,18 +1469,17 @@ def _build_stream_response(
     cache_read: int,
     finish_reason: str | None,
     message_id: str,
-    pricing: Pricing,
+    spec: ModelSpec,
 ) -> ModelResponse:
     raw_reason = _FINISH_MAP.get(finish_reason or "", finish_reason)
 
     # The Responses API reports a cache-inclusive prompt total; keep ordinary,
     # cache-write, and cache-read pools disjoint in Sagent's normalized usage.
     non_cached_input = max(0, input_tokens - cache_read - cache_write)
-    in_cost, out_cost, total_cost = compute_cost(
-        pricing,
-        non_cached_input,
-        output_tokens,
-        cache_creation=cache_write,
+    tokens = TokenCount(
+        request=non_cached_input,
+        response=output_tokens,
+        cache_write=cache_write,
         cache_read=cache_read,
     )
     thinking_blocks: list[Mapping[str, object]] = list(encrypted_reasoning)
@@ -1516,12 +1491,7 @@ def _build_stream_response(
             thinking_blocks=tuple(thinking_blocks),
             tool_calls=tuple(tool_calls),
         ),
-        tokens=TokenCount(
-            input_tokens=non_cached_input,
-            output_tokens=output_tokens,
-            cache_creation_tokens=cache_write,
-            cache_read_tokens=cache_read,
-        ),
+        tokens=tokens,
         stop_reason=normalize_stop_reason(
             raw_reason,
             kind="openai",
@@ -1529,9 +1499,7 @@ def _build_stream_response(
         ),
         message_id=message_id,
         request_id=message_id,
-        input_cost=in_cost,
-        output_cost=out_cost,
-        total_cost=total_cost,
+        spend=spec.spend(tokens),
     )
 
 

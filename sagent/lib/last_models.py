@@ -3,7 +3,7 @@
 Stored at ``~/.sagent/last-models.json`` as a flat
 ``{provider_class_name: model_id}`` map. Updated on every
 ``Agent.swap_model`` (and at initial agent construction when a
-``ModelSpec`` is supplied). Looked up by the ``/model`` slash
+``ModelRecipe`` is supplied). Looked up by the ``/model`` slash
 command when the user changes provider without naming a model -- so
 ``/model provider=OpenAISubscription`` resumes the last OpenAI model
 the user picked, falling back to ``OpenAISubscription.DEFAULT_MODEL``

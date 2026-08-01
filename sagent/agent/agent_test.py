@@ -5,11 +5,13 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal, cast, override
 from unittest.mock import MagicMock, Mock, patch
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import logging
 import re
@@ -57,6 +59,17 @@ from sagent.lib.custom_json import JSON, json_freeze
 from sagent.providers import Google
 from sagent.tools.read import Read
 from sagent.types.compactor import CompactRestorable
+from sagent.types.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenCost,
+    TokenPrice,
+)
+from sagent.types.model import (
+    Limits,
+    ModelSpec,
+    ThinkingEffort,
+)
 from sagent.types.tape import (
     ContextSplice,
     TapeRecord,
@@ -135,8 +148,42 @@ class StubModel:
         )
 
     @property
-    def pricing(self) -> types.model.Pricing:
-        return types.model.Pricing()
+    def spec(self) -> ModelSpec:
+        """Derive the spec from this stub's configured flags."""
+        return ModelSpec(
+            model_id=self.model_id,
+            context_limits=Limits(
+                max_request_tokens=self.max_request_tokens,
+                max_response_tokens=self.max_response_tokens,
+                max_request_bytes=self.max_request_bytes,
+                max_image_edge_px=self.max_image_dim,
+                max_image_bytes=self.max_image_bytes,
+            ),
+            prices=PriceCatalog(
+                {PriceCatalogProduct(): TokenPrice()}
+                | (
+                    {PriceCatalogProduct(fast=True): TokenPrice()}
+                    if self.valid_latency_modes
+                    else {}
+                )
+            ),
+            supported_thinking_efforts=MappingProxyType(
+                {cast("ThinkingEffort", e): e for e in self.valid_efforts}
+            ),
+            supported_thinking_budgets=(
+                frozenset({"auto", "fixed"}) if self.supports_thinking else frozenset()
+            ),
+            supported_thinking_outputs=(
+                frozenset({"text"}) if self.supports_thinking else frozenset()
+            ),
+            fast=bool(self.valid_latency_modes),
+            latency_modes=frozenset(self.valid_latency_modes),
+            service_tiers=frozenset(self.valid_service_tiers),
+            manages_context=self.supports_context_management,
+            prompt_cache_breakpoints=self.supports_cache_control,
+            retries_internally=self.supports_persistent_retry,
+            account_auth=self.supports_account_auth,
+        )
 
     def approx_text_tokens(self, text: str) -> int:
         return max(1, len(text) // 4)
@@ -244,6 +291,7 @@ def _build_agent(
     budget: types.model.ContextBudget | None = None,
     max_budget_usd: float | None = None,
     session_dir: Path | None = None,
+    effort: str | None = None,
 ) -> Agent:
     return Agent(
         model=model or StubModel(),
@@ -252,6 +300,7 @@ def _build_agent(
         budget=budget,
         max_budget_usd=max_budget_usd,
         session_dir=session_dir,
+        effort=effort,
     )
 
 
@@ -261,7 +310,7 @@ def test_agent_init_sets_basics() -> None:
     assert a.tools == []
     assert isinstance(a.activity, ActivityTracker)
     assert a.history == []
-    assert a.cost_tracker.total_cost_usd == 0.0
+    assert a.cost_tracker.spend.total == 0.0
 
 
 def test_agent_budget_defaults_from_model() -> None:
@@ -1291,7 +1340,7 @@ def test_agent_record_response_budget_exhaustion_raises() -> None:
     a.record_response(
         types.model.ModelResponse(message=types.runtime.AssistantMessage(text="x"))
     )
-    # The per-agent cap is checked against ``_own_cost_usd`` (this agent's
+    # The per-agent cap is checked against ``_own_spend`` (this agent's
     # own spend), not the shared root cost sink. A single over-cap response
     # trips it; verify the raise is a ``UserFacingError`` subclass (polished
     # remediation, not raw ``RuntimeError``).
@@ -1299,7 +1348,7 @@ def test_agent_record_response_budget_exhaustion_raises() -> None:
         a.record_response(
             types.model.ModelResponse(
                 message=types.runtime.AssistantMessage(text="x"),
-                total_cost=2.0,
+                spend=TokenCost(request=2.0),
             )
         )
     assert exc_info.value.max_budget_usd == 1.0
@@ -1320,9 +1369,9 @@ def test_record_response_anchors_on_disjoint_token_pools() -> None:
         types.model.ModelResponse(
             message=types.runtime.AssistantMessage(text="x"),
             tokens=types.model.TokenCount(
-                input_tokens=100_000,
-                output_tokens=500,
-                cache_read_tokens=400_000,
+                request=100_000,
+                response=500,
+                cache_read=400_000,
             ),
         )
     )
@@ -1466,7 +1515,7 @@ def test_system_prompt_rejects_dict() -> None:
 def test_max_request_tokens_setter_rejects_over_model_limit() -> None:
     a = _build_agent()
     with pytest.raises(ValueError, match="exceeds model's"):
-        a.max_request_tokens = a.model.max_request_tokens + 1
+        a.max_request_tokens = a.model.spec.context_limits.max_request_tokens + 1
 
 
 def test_max_request_tokens_setter_accepts_within_limit() -> None:
@@ -1478,7 +1527,7 @@ def test_max_request_tokens_setter_accepts_within_limit() -> None:
 def test_max_response_tokens_setter_rejects_over_model_limit() -> None:
     a = _build_agent()
     with pytest.raises(ValueError, match="exceeds model's"):
-        a.max_response_tokens = a.model.max_response_tokens + 1
+        a.max_response_tokens = a.model.spec.context_limits.max_response_tokens + 1
 
 
 def test_max_response_tokens_setter_accepts_within_limit() -> None:
@@ -1583,6 +1632,29 @@ def test_effort_setter_accepts_none_unconditionally() -> None:
     assert a.effort is None
 
 
+def test_constructor_drops_effort_the_model_does_not_accept() -> None:
+    """The ctor must not install an effort the setter would reject.
+
+    ``AgentSpawn`` inherits the parent's effort into a child that may run
+    a different model, and it arrives through the ctor. Storing it raw
+    sends a rejected value on the child's first request.
+    """
+    a = _build_agent(effort="high")  # StubModel.supports_effort = False
+    assert a.effort is None
+
+
+def test_constructor_drops_effort_outside_valid_efforts() -> None:
+    model = StubModel(supports_effort=True, valid_efforts=("low", "high"))
+    a = _build_agent(model=model, effort="medium")
+    assert a.effort is None
+
+
+def test_constructor_keeps_effort_the_model_accepts() -> None:
+    model = StubModel(supports_effort=True, valid_efforts=("low", "high"))
+    a = _build_agent(model=model, effort="high")
+    assert a.effort == "high"
+
+
 def test_cache_ttl_setter_rejects_invalid() -> None:
     a = _build_agent()
     with pytest.raises(ValueError, match="cache_ttl must be"):
@@ -1596,7 +1668,7 @@ def test_cache_ttl_setter_accepts_valid() -> None:
 
 
 def test_service_tier_setter_rejects_when_model_lacks_support() -> None:
-    a = _build_agent()  # StubModel.valid_service_tiers = ()
+    a = _build_agent()  # StubModel.spec.valid_service_tiers = ()
     with pytest.raises(ValueError, match="does not support service_tier"):
         a.service_tier = "priority"
 
@@ -1674,8 +1746,8 @@ def test_tools_property_lists_wrapped_tools() -> None:
 
 def test_total_cost_total_tokens_num_rounds_initially_zero() -> None:
     a = _build_agent()
-    assert a.total_cost_usd == 0.0
-    assert a.total_tokens.input_tokens == 0
+    assert a.cost_tracker.spend.total == 0.0
+    assert a.total_tokens.request == 0
     assert a.num_tool_call_rounds == 0
 
 
@@ -1759,7 +1831,7 @@ def test_swap_model_clamps_whole_window_budget_to_smaller_model() -> None:
     # Default budget == old model's max (the "whole window" case). Swapping
     # to a smaller model clamps the budget down instead of raising.
     a = _build_agent()
-    assert a.budget.max_request_tokens == a.model.max_request_tokens
+    assert a.budget.max_request_tokens == a.model.spec.context_limits.max_request_tokens
     a.swap_model(StubModel(model_id="small", max_request_tokens=50_000))
     assert a.budget.max_request_tokens == 50_000
 
@@ -1767,7 +1839,7 @@ def test_swap_model_clamps_whole_window_budget_to_smaller_model() -> None:
 def test_swap_model_grows_whole_window_budget_to_larger_model() -> None:
     # A budget pinned at the old model's max follows the new model up.
     a = _build_agent()
-    assert a.budget.max_request_tokens == a.model.max_request_tokens
+    assert a.budget.max_request_tokens == a.model.spec.context_limits.max_request_tokens
     a.swap_model(StubModel(model_id="big", max_request_tokens=1_000_000))
     assert a.budget.max_request_tokens == 1_000_000
 
@@ -1791,7 +1863,9 @@ def test_swap_model_clamps_pinned_budget_over_new_max() -> None:
 
 def test_swap_model_rescales_response_window_to_smaller_model() -> None:
     a = _build_agent()
-    assert a.budget.max_response_tokens == a.model.max_response_tokens
+    assert (
+        a.budget.max_response_tokens == a.model.spec.context_limits.max_response_tokens
+    )
     a.swap_model(StubModel(model_id="small", max_response_tokens=256))
     assert a.budget.max_response_tokens == 256
 
@@ -2041,14 +2115,14 @@ async def test_swap_model_logs_close_failure_via_log_task_exception(
 
 
 def _build_agent_with_spec(model_id: str = "claude-opus-4-7") -> Agent:
-    """Build an agent with a real ``types.model.ModelSpec`` so ``change_model`` works.
+    """Build an agent with a real ``types.model.ModelRecipe`` so ``change_model`` works.
 
     ``_build_agent`` uses ``StubModel`` without a spec. ``change_model``
-    consults ``self.model_spec`` to inherit fields and to detect the
+    consults ``self.model_recipe`` to inherit fields and to detect the
     cross-provider case; this helper attaches an Anthropic spec.
     """
     a = _build_agent()
-    a.model_spec = types.model.ModelSpec(
+    a.model_recipe = types.model.ModelRecipe(
         provider="Anthropic", auth="api", model_id=model_id, account=None
     )
     return a
@@ -2154,7 +2228,7 @@ def test_change_model_cross_provider_no_model_preserves_current(
 
 
 def test_resolve_target_spec_provider_change_uses_target_default_auth() -> None:
-    spec = types.model.ModelSpec(
+    spec = types.model.ModelRecipe(
         provider="OpenAISubscription",
         auth="credentials",
         model_id="gpt-5.5",
@@ -2172,7 +2246,7 @@ def test_resolve_target_spec_provider_change_uses_target_default_auth() -> None:
 
 
 def test_resolve_target_spec_explicit_default_account_is_preserved() -> None:
-    spec = types.model.ModelSpec(
+    spec = types.model.ModelRecipe(
         provider="OpenAISubscription",
         auth="credentials",
         model_id="gpt-5.5",
@@ -2203,7 +2277,7 @@ def test_change_model_cross_provider_falls_back_to_default(
 ) -> None:
     """When current model isn't in new provider's catalog, use DEFAULT_MODEL.
 
-    ``claude-opus-4-7`` is not in ``Google.KNOWN_MODELS``; with no
+    ``claude-opus-4-7`` is not in ``Google.CAPABILITIES``; with no
     ``last_models`` entry recorded, resolution falls through to
     ``Google.DEFAULT_MODEL``.
     """
@@ -2264,15 +2338,15 @@ def test_change_model_apply_resets_oversized_budget(
     a = _build_agent(
         model=StubModel(max_request_tokens=1_000_000, max_response_tokens=32_000)
     )
-    a.model_spec = types.model.ModelSpec(
+    a.model_recipe = types.model.ModelRecipe(
         provider="Anthropic", auth="api", model_id="claude-opus-4-7+1m"
     )
     _ = a.change_model(model_id="claude-sonnet-4-6")
     items = asyncio.new_event_loop().run_until_complete(a.runtime.inbox.drain())
     switch = next(m for m in items if isinstance(m, types.runtime.ModelSwitch))
     switch.apply()
-    assert a.model.model_id == "claude-sonnet-4-6"
-    assert a.max_request_tokens == a.model.max_request_tokens
+    assert a.model.spec.tagged_model_id == "claude-sonnet-4-6"
+    assert a.max_request_tokens == a.model.spec.context_limits.max_request_tokens
 
 
 # --- Agent.relogin ----------------------------------------------------------
@@ -2294,7 +2368,7 @@ async def test_relogin_calls_login_classmethod() -> None:
 async def test_relogin_anthropic_cli_invokes_native_login() -> None:
     """In-session ``/login`` reaches Claude Code instead of rejecting it."""
     a = _build_agent_with_spec()
-    a.model_spec = types.model.ModelSpec(
+    a.model_recipe = types.model.ModelRecipe(
         provider="AnthropicCLI",
         auth="credentials",
         model_id="claude-opus-4-8",
@@ -2310,7 +2384,7 @@ async def test_relogin_anthropic_cli_invokes_native_login() -> None:
 async def test_relogin_forwards_named_account() -> None:
     """``/login`` refreshes the active credential slot, not the default one."""
     a = _build_agent_with_spec()
-    a.model_spec = types.model.ModelSpec(
+    a.model_recipe = types.model.ModelRecipe(
         provider="OpenAISubscription",
         auth="credentials",
         model_id="gpt-5.6-sol",
@@ -2392,7 +2466,7 @@ async def test_relogin_reloads_auth_when_provider_supports_protocol() -> None:
     model = _ModelWithProvider(_provider=live_provider)
 
     a = _build_agent(model=model)
-    a.model_spec = types.model.ModelSpec(
+    a.model_recipe = types.model.ModelRecipe(
         provider="Anthropic", auth="api", model_id="claude-opus-4-7"
     )
 
@@ -2461,7 +2535,7 @@ async def test_relogin_raises_when_provider_has_no_login() -> None:
 async def test_relogin_unknown_provider_raises() -> None:
     """``relogin`` for an unrecognized provider class raises ``ValueError``."""
     a = _build_agent()
-    a.model_spec = types.model.ModelSpec(
+    a.model_recipe = types.model.ModelRecipe(
         provider="NotAProvider", auth="api", model_id="x"
     )
     with pytest.raises(ValueError, match="unknown provider"):
@@ -3818,7 +3892,7 @@ async def test_compact_if_needed_triggers_on_last_response_total() -> None:
     a.record_response(
         types.model.ModelResponse(
             message=types.runtime.AssistantMessage(text=""),
-            tokens=types.model.TokenCount(input_tokens=990_000),
+            tokens=types.model.TokenCount(request=990_000),
         )
     )
     await a.compact_if_needed(history, a.model)
@@ -3844,7 +3918,7 @@ async def test_compact_if_needed_adds_tokens_appended_since_last_response() -> N
     a.record_response(
         types.model.ModelResponse(
             message=types.runtime.AssistantMessage(text=""),
-            tokens=types.model.TokenCount(input_tokens=800_000),
+            tokens=types.model.TokenCount(request=800_000),
         )
     )
     # History ends with the response's AssistantMessage, then a fresh
@@ -3874,7 +3948,7 @@ async def test_compact_if_needed_no_since_term_when_response_is_tail() -> None:
     a.record_response(
         types.model.ModelResponse(
             message=types.runtime.AssistantMessage(text=""),
-            tokens=types.model.TokenCount(input_tokens=800_000),
+            tokens=types.model.TokenCount(request=800_000),
         )
     )
     history: list[types.runtime.ModelContextEvent] = [
@@ -3907,9 +3981,7 @@ async def test_compact_if_needed_counts_cached_input_tokens() -> None:
     a.record_response(
         types.model.ModelResponse(
             message=types.runtime.AssistantMessage(text=""),
-            tokens=types.model.TokenCount(
-                input_tokens=5_000, cache_read_tokens=985_000
-            ),
+            tokens=types.model.TokenCount(request=5_000, cache_read=985_000),
         )
     )
     # 5_000 + 985_000 = 990_000; 1.1 * 990_000 = 1_089_000 >= 1M -> fires.
@@ -4298,7 +4370,11 @@ async def test_agent_compactor_scrunches_when_inner_output_still_oversized() -> 
         for m in resolved
         if isinstance(m, (types.runtime.UserMessage, types.runtime.AgentSendMessage))
     )
-    target = a.model.max_request_tokens - a.max_response_tokens - a.budget.buffer_tokens
+    target = (
+        a.model.spec.context_limits.max_request_tokens
+        - a.max_response_tokens
+        - a.budget.buffer_tokens
+    )
     assert visible_chars // 4 <= target, (
         f"post-scrunch view ({visible_chars // 4} tok) still exceeds target {target}"
     )
@@ -4574,7 +4650,7 @@ async def test_agent_compactor_scrunch_uses_agent_budget_not_model_cap() -> None
     expected = a.max_request_tokens - a.max_response_tokens - a.budget.buffer_tokens
     assert seen_targets[0] == expected, (
         f"scrunch target {seen_targets[0]} != agent budget {expected}"
-        f" (model cap is {a.model.max_request_tokens})"
+        f" (model cap is {a.model.spec.context_limits.max_request_tokens})"
     )
 
 
@@ -4804,8 +4880,15 @@ class _OverflowModel:
     call_index: int = 0
 
     @property
-    def pricing(self) -> types.model.Pricing:
-        return types.model.Pricing()
+    def spec(self) -> ModelSpec:
+        return ModelSpec(
+            model_id=self.model_id,
+            context_limits=Limits(
+                max_request_tokens=self.max_request_tokens,
+                max_response_tokens=self.max_response_tokens,
+            ),
+            prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+        )
 
     def approx_text_tokens(self, text: str) -> int:
         return max(1, len(text) // 4)
@@ -4890,8 +4973,15 @@ class _RawOverflowModel:
     call_index: int = 0
 
     @property
-    def pricing(self) -> types.model.Pricing:
-        return types.model.Pricing()
+    def spec(self) -> ModelSpec:
+        return ModelSpec(
+            model_id=self.model_id,
+            context_limits=Limits(
+                max_request_tokens=self.max_request_tokens,
+                max_response_tokens=self.max_response_tokens,
+            ),
+            prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+        )
 
     def approx_text_tokens(self, text: str) -> int:
         return max(1, len(text) // 4)
@@ -5079,8 +5169,15 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
         max_request_bytes: int = 32 * 1024 * 1024
 
         @property
-        def pricing(self) -> types.model.Pricing:
-            return types.model.Pricing()
+        def spec(self) -> ModelSpec:
+            return ModelSpec(
+                model_id=self.model_id,
+                context_limits=Limits(
+                    max_request_tokens=self.max_request_tokens,
+                    max_response_tokens=self.max_response_tokens,
+                ),
+                prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+            )
 
         def approx_text_tokens(self, text: str) -> int:
             return max(1, len(text) // 4)
@@ -6710,13 +6807,13 @@ def test_subagent_inherits_root_cost_tracker() -> None:
     child = _build_agent()
     response = types.model.ModelResponse(
         message=types.runtime.AssistantMessage(text="ok"),
-        tokens=types.model.TokenCount(input_tokens=10, output_tokens=5),
-        total_cost=0.02,
+        tokens=types.model.TokenCount(request=10, response=5),
+        spend=TokenCost(request=0.02),
     )
     with root._install_contextvars(), child._install_contextvars():
         child.record_response(response)
-    assert root.cost_tracker.total_cost_usd == pytest.approx(0.02)
-    assert child.cost_tracker.total_cost_usd == 0.0
+    assert root.cost_tracker.spend.total == pytest.approx(0.02)
+    assert child.cost_tracker.spend.total == 0.0
 
 
 def test_serviced_subagent_cost_rolls_up_to_root() -> None:
@@ -6725,7 +6822,7 @@ def test_serviced_subagent_cost_rolls_up_to_root() -> None:
     Every child -- oneshot or serviced -- inherits the root cost sink, so
     the root's ``total_cost_usd`` is the whole tree's spend. The child's
     own tracker stays at zero (it is not a root sink); its per-agent cap
-    is enforced against ``_own_cost_usd`` instead.
+    is enforced against ``_own_spend`` instead.
     """
     root = _build_agent()
     child = _build_agent()
@@ -6733,37 +6830,35 @@ def test_serviced_subagent_cost_rolls_up_to_root() -> None:
     response = types.model.ModelResponse(
         message=types.runtime.AssistantMessage(text="ok"),
         tokens=types.model.TokenCount(),
-        total_cost=0.02,
+        spend=TokenCost(request=0.02),
     )
     with root._install_contextvars(), child._install_contextvars():
         child.record_response(response)
-    assert root.cost_tracker.total_cost_usd == pytest.approx(0.02)
-    assert child.cost_tracker.total_cost_usd == 0.0
+    assert root.cost_tracker.spend.total == pytest.approx(0.02)
+    assert child.cost_tracker.spend.total == 0.0
 
 
 def test_child_cost_records_once_on_root_tokens_self_only() -> None:
     """T7: child cost hits the ROOT total once; root tokens stay self-only.
 
-    - ``root.cost_tracker.total_cost_usd`` gains the child's cost exactly once.
+    - ``root.cost_tracker.spend.total`` gains the child's cost exactly once.
     - ``root.cost_tracker.total`` (tokens) is unchanged -- token totals are
       self-only, so the child's tokens never leak into the root's count.
-    - ``child._own_cost_usd`` equals the child's own cost (drives its cap).
+    - ``child._own_spend`` equals the child's own cost (drives its cap).
     """
     root = _build_agent()
     child = _build_agent()
     response = types.model.ModelResponse(
         message=types.runtime.AssistantMessage(text="ok"),
-        tokens=types.model.TokenCount(input_tokens=42, output_tokens=7),
-        total_cost=0.03,
+        tokens=types.model.TokenCount(request=42, response=7),
+        spend=TokenCost(request=0.03),
     )
     with root._install_contextvars(), child._install_contextvars():
         child.record_response(response)
-    assert root.cost_tracker.total_cost_usd == pytest.approx(0.03)
+    assert root.cost_tracker.spend.total == pytest.approx(0.03)
     assert root.cost_tracker.total == types.model.TokenCount()
-    assert child.cost_tracker.total == types.model.TokenCount(
-        input_tokens=42, output_tokens=7
-    )
-    assert child._own_cost_usd == pytest.approx(0.03)
+    assert child.cost_tracker.total == types.model.TokenCount(request=42, response=7)
+    assert child._own_spend.total == pytest.approx(0.03)
 
 
 def test_subagent_tool_state_depth_increments() -> None:
@@ -6863,7 +6958,8 @@ async def test_model_switch_event_queues_swap_until_call_drains() -> None:
             stream_entered.set()
             await gate.wait()
             return types.model.ModelResponse(
-                message=types.runtime.AssistantMessage(text="from A"), total_cost=0.10
+                message=types.runtime.AssistantMessage(text="from A"),
+                spend=TokenCost(request=0.10),
             )
 
     model_a = GatedModel(model_id="model-A")
@@ -6924,11 +7020,18 @@ def test_swap_model_resets_thinking_state_invalid_for_new_model() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _EnabledOnlyModel(StubModel):
-        # Supports thinking, but only the ``on-*`` (enabled) states.
+        """Reasons, but only via the ``fixed`` budget -- no ``adaptive``."""
+
         @property
         @override
-        def valid_thinking_states(self) -> tuple[str, ...]:
-            return ("on-show", "on-hide", "off-hide")
+        def spec(self) -> ModelSpec:
+            # Two-arg ``super``: ``slots=True`` rebuilds the class, so the
+            # zero-arg form's ``__class__`` cell points at the discarded
+            # original and raises on Python < 3.14 (python/cpython#90562).
+            return dataclasses.replace(
+                super(_EnabledOnlyModel, self).spec,
+                supported_thinking_budgets=frozenset({"fixed"}),
+            )
 
     a = Agent(model=StubModel(), tools=[], thinking_state="adaptive-hide")
     assert a.thinking_state == "adaptive-hide"
@@ -6955,12 +7058,20 @@ def test_swap_model_resets_legacy_thinking_mode_invalid_for_new_model() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _EnabledOnlyModel(StubModel):
-        supports_thinking: bool = True  # supports thinking, but enabled-only
+        """Reasons, but only via the ``fixed`` budget -- no ``adaptive``."""
+
+        supports_thinking: bool = True
 
         @property
         @override
-        def valid_thinking_states(self) -> tuple[str, ...]:
-            return ("on-show", "on-hide", "off-hide")
+        def spec(self) -> ModelSpec:
+            # Two-arg ``super``: ``slots=True`` rebuilds the class, so the
+            # zero-arg form's ``__class__`` cell points at the discarded
+            # original and raises on Python < 3.14 (python/cpython#90562).
+            return dataclasses.replace(
+                super(_EnabledOnlyModel, self).spec,
+                supported_thinking_budgets=frozenset({"fixed"}),
+            )
 
     a = _build_agent(model=StubModel(supports_thinking=True))
     a.thinking = "adaptive"  # state=None, wire mode "adaptive"
@@ -7169,7 +7280,8 @@ async def test_post_compact_estimates_use_live_background_aware_tools() -> None:
         @override
         def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
             self.estimated_tools.append(request.tools)
-            return super().approx_request_tokens(request)
+            # Two-arg ``super``: see ``_EnabledOnlyModel``.
+            return super(_RecordingModel, self).approx_request_tokens(request)
 
     @dataclass(slots=True, kw_only=True)
     class _OkCompactor:
@@ -7382,13 +7494,22 @@ async def test_will_retrigger_uses_agent_budget_not_model_cap() -> None:
 
 @pytest.mark.asyncio
 async def test_post_compact_hook_budget_uses_active_model_ratio() -> None:
+    """The hook budget scales by the model's own chars-per-token.
+
+    The ratio comes from ``spec.chars_per_token`` (one rule, set from the
+    catalog) rather than a probe of ``approx_text_tokens``.
+    """
     calls: list[int] = []
 
     @dataclass(slots=True, kw_only=True)
     class _RatioModel(StubModel):
+        @property
         @override
-        def approx_text_tokens(self, text: str) -> int:
-            return len(text) // 2
+        def spec(self) -> ModelSpec:
+            # Two-arg ``super``: see ``_EnabledOnlyModel`` above.
+            return dataclasses.replace(
+                super(_RatioModel, self).spec, chars_per_token=2.0
+            )
 
         @override
         def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
@@ -7434,7 +7555,7 @@ async def test_post_compact_hook_budget_uses_active_model_ratio() -> None:
     budget = types.model.ContextBudget(
         max_request_tokens=1_000,
         max_response_tokens=5,
-        chars_per_token=4,
+        chars_per_token=2,
         buffer_tokens=5,
     )
     a = Agent(
@@ -7498,7 +7619,7 @@ def test_agent_resume_rebaselines_persistence(tmp_path: Path) -> None:
     assert size_after_phase1 > 0
 
     # Phase 2: fresh agent, same session_dir. Load, resume, save.
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     a2 = _build_agent(session_dir=tmp_path)
     a2.resume(*loaded)
@@ -7535,7 +7656,7 @@ def test_agent_resume_loads_service_suspended_retry_at(tmp_path: Path) -> None:
     a1.runtime.publish(types.runtime.SaveSession())
     append_session(tmp_path / "session.jsonl", runtime_events=[earlier, later])
 
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     a2 = _build_agent(session_dir=tmp_path)
     a2.resume(*loaded)

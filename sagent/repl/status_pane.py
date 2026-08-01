@@ -48,7 +48,7 @@ def render_status_pane(agent: Agent) -> str:
     ):
         return ""
     tokens = agent.cost_tracker.total
-    cost = float(agent.cost_tracker.total_cost_usd)
+    cost = agent.cost_tracker.spend.total
     # ``output_tokens`` includes a live char-count estimate so the user
     # sees a moving counter while the model streams; ``cost`` is
     # intentionally settled-only -- pricing requires the provider-
@@ -61,16 +61,16 @@ def render_status_pane(agent: Agent) -> str:
         if activity.active
         else 0
     )
-    output_tokens = tokens.output_tokens + live_response_tokens
+    output_tokens = tokens.response + live_response_tokens
     elapsed = activity.elapsed_seconds
     if activity.active:
         elapsed += asyncio.get_running_loop().time() - activity.current_call_start
     metrics = (
         f"{format_elapsed(elapsed)}"
-        f" {format_count(tokens.input_tokens)}↑"
+        f" {format_count(tokens.request)}↑"
         f" {format_count(output_tokens)}↓"
-        f" {format_count(tokens.cache_creation_tokens)}↟"
-        f" {format_count(tokens.cache_read_tokens)}↡"
+        f" {format_count(tokens.cache_write)}↟"
+        f" {format_count(tokens.cache_read)}↡"
         f" ${cost:.2f}"
     )
     # The wait-reason threshold is per-turn, not session-cumulative:

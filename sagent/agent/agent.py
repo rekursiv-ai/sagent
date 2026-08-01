@@ -161,7 +161,7 @@ class Agent:
 
     Args:
       model: Rich provider model the agent calls.
-      model_spec: Optional spec recording how the model was built.
+      model_recipe: Optional spec recording how the model was built.
       system: Static system prompt string or a no-arg factory rebuilt
           each request.
       tools: Rich tools advertised to the model.
@@ -186,7 +186,7 @@ class Agent:
       persistent_retry: Enable persistent-mode backoff for 429/529.
 
     Side effects:
-      Constructing with a non-``None`` ``model_spec`` (and
+      Constructing with a non-``None`` ``model_recipe`` (and
       :meth:`swap_model` with a non-``None`` ``spec``) writes
       ``~/.sagent/last-models.json`` via ``last_models.record`` so the
       ``/model`` slash command can resume the same model_id when the
@@ -200,7 +200,7 @@ class Agent:
         self,
         *,
         model: types.model.Model,
-        model_spec: types.model.ModelSpec | None = None,
+        model_recipe: types.model.ModelRecipe | None = None,
         system: SystemPromptArg = "",
         tools: list[types.tools.Tool] | None = None,
         compactor: types.compactor.Compactor | None = None,
@@ -229,9 +229,9 @@ class Agent:
         self.name = name
         self.description = description
         self.model = model
-        self.model_spec = model_spec
-        if model_spec is not None:
-            last_models.record(model_spec.provider, model_spec.model_id)
+        self.model_recipe = model_recipe
+        if model_recipe is not None:
+            last_models.record(model_recipe.provider, model_recipe.model_id)
         self._base_system_spec: SystemPromptArg = system
         self._system_spec: SystemPromptArg = system
         self._tools_list: list[types.tools.Tool] = list(tools or [])
@@ -249,7 +249,13 @@ class Agent:
             should_show_thinking(thinking_state) if thinking_state else show_thinking
         )
         self._provider_options = provider_options or types.providers.ProviderOptions()
-        self._effort = effort
+        # Drop an effort this model does not accept rather than storing it
+        # raw: ``AgentSpawn`` inherits the parent's effort into a child that
+        # may run a different model, and it arrives here, not through the
+        # setter. ``swap_model`` applies the same rule on every swap.
+        self._effort = (
+            effort if effort in model.spec.supported_thinking_efforts else None
+        )
         self._cache_ttl: Literal["5m", "1h"] = "5m"
         self._service_tier: str | None = None
         self.persistent_retry = persistent_retry
@@ -294,7 +300,7 @@ class Agent:
         # rolls up to the root ``cost_root_var`` tracker for the tree total;
         # this plain float tracks only THIS agent's own spend so a subagent's
         # budget cap is checked against its own calls, not the tree.
-        self._own_cost_usd: float = 0.0
+        self._own_spend = types.cost.TokenCost()
         # True for agents spawned by ``AgentSpawn`` (both lifecycles). The root
         # REPL/CLI agent leaves it False so ``/send`` / ``/halt all`` can
         # target every subagent while never routing to the root or to self.
@@ -374,7 +380,7 @@ class Agent:
     @property
     def max_request_bytes(self) -> int:
         """The active model's request-body byte ceiling (wire limit)."""
-        return self.model.max_request_bytes
+        return self.model.spec.context_limits.max_request_bytes
 
     @property
     def max_request_tokens(self) -> int:
@@ -392,10 +398,10 @@ class Agent:
           ValueError: If ``value`` exceeds the model's ``max_request_tokens``.
 
         """
-        if value > self.model.max_request_tokens:
+        if value > self.model.spec.context_limits.max_request_tokens:
             raise ValueError(
                 f"max_request_tokens={value:,} exceeds model's"
-                f" {self.model.max_request_tokens:,}",
+                f" {self.model.spec.context_limits.max_request_tokens:,}",
             )
         self._budget = dataclasses.replace(self._budget, max_request_tokens=value)
 
@@ -415,10 +421,10 @@ class Agent:
           ValueError: If ``value`` exceeds the model's ``max_response_tokens``.
 
         """
-        if value > self.model.max_response_tokens:
+        if value > self.model.spec.context_limits.max_response_tokens:
             raise ValueError(
                 f"max_response_tokens={value:,} exceeds model's"
-                f" {self.model.max_response_tokens:,}",
+                f" {self.model.spec.context_limits.max_response_tokens:,}",
             )
         self._budget = dataclasses.replace(self._budget, max_response_tokens=value)
 
@@ -553,10 +559,10 @@ class Agent:
 
         """
         if value is not None:
-            valid = self.model.valid_efforts
+            valid = self.model.spec.supported_thinking_efforts
             if not valid:
                 raise ValueError(
-                    f"Model {self.model.model_id!r} does not support effort.",
+                    f"Model {self.model.spec.tagged_model_id!r} does not support effort.",
                 )
             if value not in valid:
                 quoted = ", ".join(repr(e) for e in valid)
@@ -609,10 +615,10 @@ class Agent:
 
         """
         if value is not None:
-            valid = self.model.valid_service_tiers
+            valid = self.model.spec.valid_service_tiers
             if not valid:
                 raise ValueError(
-                    f"Model {self.model.model_id!r} does not support service_tier.",
+                    f"Model {self.model.spec.tagged_model_id!r} does not support service_tier.",
                 )
             if value not in valid:
                 quoted = ", ".join(repr(t) for t in valid)
@@ -630,7 +636,7 @@ class Agent:
         ``claude-opus-4-8+fast`` -- and is validated at
         ``Provider.model()`` construction.
         """
-        return types.model.latency_from_model_id(self.model.model_id)
+        return types.model.latency_from_model_id(self.model.spec.tagged_model_id)
 
     @property
     def session_id(self) -> str:
@@ -739,11 +745,6 @@ class Agent:
         return self._max_budget_usd
 
     @property
-    def total_cost_usd(self) -> float:
-        """Cumulative USD cost across all recorded responses."""
-        return self.cost_tracker.total_cost_usd
-
-    @property
     def total_tokens(self) -> types.model.TokenCount:
         """Cumulative token counts across all recorded responses."""
         return self.cost_tracker.total
@@ -845,7 +846,7 @@ class Agent:
         """Recreate this agent with construction-time identity fields changed."""
         rebuilt = Agent(
             model=self.model,
-            model_spec=self.model_spec,
+            model_recipe=self.model_recipe,
             system=system,
             tools=self.tools,
             compactor=self.compactor,
@@ -903,7 +904,7 @@ class Agent:
         wrapper.set_inner(tool)
 
     def swap_model(
-        self, model: types.model.Model, *, spec: types.model.ModelSpec | None = None
+        self, model: types.model.Model, *, spec: types.model.ModelRecipe | None = None
     ) -> None:
         """Replace the active model.
 
@@ -926,17 +927,17 @@ class Agent:
             self._budget,
             max_request_tokens=_rescaled_window(
                 self._budget.max_request_tokens,
-                old_max=old.max_request_tokens,
-                new_max=model.max_request_tokens,
+                old_max=old.spec.context_limits.max_request_tokens,
+                new_max=model.spec.context_limits.max_request_tokens,
             ),
             max_response_tokens=_rescaled_window(
                 self._budget.max_response_tokens,
-                old_max=old.max_response_tokens,
-                new_max=model.max_response_tokens,
+                old_max=old.spec.context_limits.max_response_tokens,
+                new_max=model.spec.context_limits.max_response_tokens,
             ),
         )
         self.model = model
-        self.model_spec = spec
+        self.model_recipe = spec
         self._agent_model.set_inner(model)
         self.runtime.model = self._agent_model
         # Reset thinking when it is not valid for the new model.
@@ -950,20 +951,27 @@ class Agent:
         # (always valid) rather than guess a replacement.
         state_invalid = (
             self._thinking_state is not None
-            and self._thinking_state not in model.valid_thinking_states
+            and self._thinking_state not in model.spec.valid_thinking_states
         )
         mode_invalid = not thinking_mode_supported(
-            self._thinking, model.valid_thinking_states
+            self._thinking, model.spec.valid_thinking_states
         )
-        if state_invalid or mode_invalid or not model.supports_thinking:
+        if (
+            state_invalid
+            or mode_invalid
+            or not bool(model.spec.supported_thinking_budgets)
+        ):
             self._thinking_state = "off-hide"
             self._thinking = None
             self._show_thinking = False
-        if self._effort is not None and self._effort not in model.valid_efforts:
+        if (
+            self._effort is not None
+            and self._effort not in model.spec.supported_thinking_efforts
+        ):
             self._effort = None
-        if not model.valid_service_tiers:
+        if not model.spec.valid_service_tiers:
             self._service_tier = None
-        if not model.supports_cache_control:
+        if not model.spec.prompt_cache_breakpoints:
             self._cache_ttl = "5m"
         if spec is not None:
             last_models.record(spec.provider, spec.model_id)
@@ -1021,14 +1029,14 @@ class Agent:
         auth: str | None = None,
         model_id: str | None = None,
         account: str | None = None,
-    ) -> types.model.ModelSpec:
+    ) -> types.model.ModelRecipe:
         """Resolve, build, and queue a model swap. The high-level API.
 
         Kwarg semantics: each defaults to ``None`` meaning "inherit from
-        the current ``model_spec``." Note that ``account=None`` therefore
+        the current ``model_recipe``." Note that ``account=None`` therefore
         inherits the current account override; setting ``account`` to
         the default backend account (literal ``None``) is not expressible
-        via this API -- construct a ``types.model.ModelSpec`` and call
+        via this API -- construct a ``types.model.ModelRecipe`` and call
         :meth:`swap_model` directly for that corner.
 
         Cross-provider resolution when ``model_id`` is omitted:
@@ -1054,14 +1062,14 @@ class Agent:
           target: Resolved target spec (the spec the swap will land on).
 
         Raises:
-          ValueError: ``model_spec`` is unset, the resolved provider is
+          ValueError: ``model_recipe`` is unset, the resolved provider is
               unknown, or the resolved model id is rejected by the
               provider's catalog.
 
         """
-        spec = self.model_spec
+        spec = self.model_recipe
         if spec is None:
-            raise ValueError("agent has no model_spec; cannot change_model")
+            raise ValueError("agent has no model_recipe; cannot change_model")
         target = _resolve_target_spec(
             spec,
             provider=provider,
@@ -1111,13 +1119,13 @@ class Agent:
         cleared so the status pane stops showing "retrying in ...".
 
         Raises:
-          ValueError: ``model_spec`` is unset, the provider class is
+          ValueError: ``model_recipe`` is unset, the provider class is
               unknown, or the provider has no ``login`` classmethod.
 
         """
-        spec = self.model_spec
+        spec = self.model_recipe
         if spec is None:
-            raise ValueError("agent has no model_spec; cannot relogin")
+            raise ValueError("agent has no model_recipe; cannot relogin")
         prov_cls = getattr(providers, spec.provider, None)
         if prov_cls is None:
             raise ValueError(f"unknown provider {spec.provider!r}")
@@ -1165,7 +1173,7 @@ class Agent:
     def _apply_model_change(
         self,
         model: types.model.Model,
-        spec: types.model.ModelSpec,
+        spec: types.model.ModelRecipe,
     ) -> None:
         """Apply a high-level model change, resetting stale derived budgets.
 
@@ -1174,14 +1182,16 @@ class Agent:
         customisation, so renderers surface a notification.
         """
         if (
-            self._budget.max_request_tokens > model.max_request_tokens
-            or self._budget.max_response_tokens > model.max_response_tokens
+            self._budget.max_request_tokens
+            > model.spec.context_limits.max_request_tokens
+            or self._budget.max_response_tokens
+            > model.spec.context_limits.max_response_tokens
         ):
             prior = self._budget
             self._budget = types.model.ContextBudget.from_model(model)
             self.runtime.publish(
                 types.runtime.BudgetReset(
-                    model_id=model.model_id,
+                    model_id=model.spec.tagged_model_id,
                     prior_max_request_tokens=prior.max_request_tokens,
                     prior_max_response_tokens=prior.max_response_tokens,
                     new_max_request_tokens=self._budget.max_request_tokens,
@@ -1221,14 +1231,16 @@ class Agent:
         self.tool_state = tool_state
         if meta.status:
             self._status = meta.status
-        self.cost_tracker.restore_totals(
-            total_cost_usd=meta.total_cost_usd, total=meta.tokens
-        )
+        self.cost_tracker.restore_totals(spend=meta.spend, total=meta.tokens)
         self.activity.num_tool_call_rounds = meta.num_tool_call_rounds
         self.activity.elapsed_seconds = meta.total_active_elapsed_seconds
         self.compaction_state.compact_count = meta.compact_count
         self.runtime.resume_retry_at = _latest_service_retry_at(meta.runtime_events)
-        if meta.provider and meta.model_id and meta.model_id != self.model.model_id:
+        if (
+            meta.provider
+            and meta.model_id
+            and meta.model_id != self.model.spec.tagged_model_id
+        ):
             restored = restore_model(meta)
             if restored is not None:
                 new_model, new_spec = restored
@@ -1269,14 +1281,14 @@ class Agent:
         error: Exception,
     ) -> None:
         """Publish a durable event for a recoverable model-service block."""
-        spec = self.model_spec
+        spec = self.model_recipe
         self.runtime.service_suspended_until = retry_at
         self.runtime.publish(
             types.runtime.ModelServiceSuspended(
                 provider=spec.provider if spec else type(self.model).__name__,
                 auth=spec.auth if spec else "",
                 account=spec.account if spec else None,
-                model_id=self.model.model_id,
+                model_id=self.model.spec.tagged_model_id,
                 retry_at=retry_at,
                 delay_sec=delay_sec,
                 server_supplied=server_supplied,
@@ -1622,7 +1634,7 @@ class Agent:
 
         Every child inherits the root's cost tracker via ``cost_root_var``
         so the root sees the full spawn-tree spend (and ``max_budget_usd``
-        caps each agent against its own ``_own_cost_usd``, not the shared
+        caps each agent against its own ``_own_spend``, not the shared
         sink). Tool-state depth is incremented from the parent so
         ``AgentSpawn`` depth caps actually fire.
 
@@ -1747,9 +1759,9 @@ class Agent:
 
         Tokens (and per-call provenance) go to ``self.cost_tracker`` so the
         status pane's per-agent token count stays self-only. Cost goes to
-        the root cost sink (``cost_root_var``) so ``root.total_cost_usd`` is
+        the root cost sink (``cost_root_var``) so ``root.spend`` is
         the whole spawn tree's spend, counted exactly once per response. The
-        per-agent budget cap is checked against ``_own_cost_usd`` -- this
+        per-agent budget cap is checked against ``_own_spend`` -- this
         agent's own spend -- so a subagent's cap governs the subagent, not
         the tree.
 
@@ -1760,25 +1772,27 @@ class Agent:
           BudgetExhaustedError: This agent's own cost reached ``max_budget_usd``.
 
         """
-        self.cost_tracker.record_tokens(response, model_id=self.model.model_id)
+        self.cost_tracker.record_tokens(
+            response, model_id=self.model.spec.tagged_model_id
+        )
         cost_sink = cost_root_var.get(None) or self.cost_tracker
         cost_sink.record_cost(response)
-        self._own_cost_usd += response.total_cost
+        self._own_spend = self._own_spend + response.spend
         # Anchor the proactive compaction trigger on the provider's exact
         # input usage. The three token pools are disjoint by the
         # ``TokenCount`` convention (input is non-cached), so their sum is the
         # full prompt size the server counted.
         self._last_input_tokens = (
-            response.tokens.input_tokens
-            + response.tokens.cache_creation_tokens
-            + response.tokens.cache_read_tokens
+            response.tokens.request
+            + response.tokens.cache_write
+            + response.tokens.cache_read
         )
         if (
             self._max_budget_usd is not None
-            and self._own_cost_usd >= self._max_budget_usd
+            and self._own_spend.total >= self._max_budget_usd
         ):
             raise types.exceptions.BudgetExhaustedError(
-                total_cost_usd=self._own_cost_usd,
+                total_cost_usd=self._own_spend.total,
                 max_budget_usd=self._max_budget_usd,
             )
         self._surface_usage_warning()
@@ -2134,9 +2148,11 @@ class Agent:
         # fraction -- independent of, and OR'd with, the token gate. A
         # non-positive ``max_request_bytes`` means "no wire limit" (offline /
         # self-hosted), disabling the byte gate.
-        byte_gate = model.max_request_bytes > 0 and self._compactable_wire_bytes(
-            history, model
-        ) >= int(model.max_request_bytes * byte_compact_trigger)
+        byte_gate = (
+            model.spec.context_limits.max_request_bytes > 0
+            and self._compactable_wire_bytes(history, model)
+            >= int(model.spec.context_limits.max_request_bytes * byte_compact_trigger)
+        )
         if not token_gate and not byte_gate:
             self.compaction_state.compact_failures = 0
             return True
@@ -2218,7 +2234,8 @@ class Agent:
             tool_result_budget_chars=self.budget.message_budget_chars,
         )
         return _wire_attachment_bytes(
-            materialized.messages, max_image_bytes=model.max_image_bytes
+            materialized.messages,
+            max_image_bytes=model.spec.context_limits.max_image_bytes,
         )
 
     async def compact_now(self) -> bool:
@@ -2488,19 +2505,6 @@ def _wire_request_bytes(
     return total
 
 
-def _budget_for_model_ratio(
-    budget: types.model.ContextBudget,
-    model: types.model.Model,
-) -> types.model.ContextBudget:
-    """Return ``budget`` with chars-per-token inferred from ``model``."""
-    sample = "x" * 1_000
-    tokens = model.approx_text_tokens(sample)
-    if tokens <= 0:
-        return budget
-    chars_per_token = max(1, round(len(sample) / tokens))
-    return dataclasses.replace(budget, chars_per_token=chars_per_token)
-
-
 def _compact_failure_error(last_err: Exception, model: types.model.Model) -> Exception:
     """Pick the user-facing error after a failed ``compact_now``.
 
@@ -2555,14 +2559,14 @@ def _rescaled_window(current: int, *, old_max: int, new_max: int) -> int:
 
 
 def _resolve_target_spec(
-    spec: types.model.ModelSpec,
+    spec: types.model.ModelRecipe,
     *,
     provider: str | None,
     auth: str | None,
     model_id: str | None,
     account: str | None,
-) -> types.model.ModelSpec:
-    """Resolve a ``change_model`` kwargs payload to a complete ``types.model.ModelSpec``.
+) -> types.model.ModelRecipe:
+    """Resolve a ``change_model`` kwargs payload to a complete ``types.model.ModelRecipe``.
 
     ``None`` kwargs inherit from ``spec``. The model-id branch implements
     the cross-provider preservation rule documented on
@@ -2582,7 +2586,7 @@ def _resolve_target_spec(
         final_model_id = spec.model_id
     else:
         final_model_id = last_models.get(prov_name) or _default_model_for(prov_name)
-    return types.model.ModelSpec(
+    return types.model.ModelRecipe(
         provider=prov_name,
         auth=final_auth,
         account=final_account,
@@ -2593,18 +2597,18 @@ def _resolve_target_spec(
 def _provider_knows_model(prov_name: str, model_id: str) -> bool:
     """Return True when the provider class's catalog includes ``model_id``.
 
-    Reads ``cls.KNOWN_MODELS`` without instantiating so the probe is
-    side-effect-free (no credential lookup). Latency tags (``+fast``)
-    ride on catalog ids and are stripped before the membership check,
-    mirroring the providers' own profile-lookup rule.
+    Reads ``cls.CAPABILITIES`` without instantiating so the probe is
+    side-effect-free (no credential lookup). Option tags ride on catalog
+    ids and are stripped before the membership check, mirroring the
+    providers' own lookup rule.
     """
     cls = getattr(providers, prov_name, None)
     if cls is None:
         return False
-    known = getattr(cls, "KNOWN_MODELS", None)
-    if not isinstance(known, dict):
+    known = getattr(cls, "CAPABILITIES", None)
+    if not isinstance(known, Mapping):
         return False
-    return model_id in known or types.model.strip_latency_tags(model_id) in known
+    return types.model.base_model_id(model_id) in known
 
 
 def _default_model_for(prov_name: str) -> str:
@@ -2742,7 +2746,7 @@ class _AgentModel:
         # framing, so it stays a conservative lower bound that never
         # false-rejects a request the provider would accept; a genuine miss
         # still hits the reactive 413.
-        max_request_bytes = self._inner.max_request_bytes
+        max_request_bytes = self._inner.spec.context_limits.max_request_bytes
         if max_request_bytes > 0:
             guard_messages = materialize_request(
                 types.model.ModelRequest(messages=list(history)),
@@ -2751,7 +2755,7 @@ class _AgentModel:
             wire_bytes = _wire_request_bytes(
                 guard_messages,
                 system=cached_system,
-                max_image_bytes=self._inner.max_image_bytes,
+                max_image_bytes=self._inner.spec.context_limits.max_image_bytes,
             )
             if wire_bytes > max_request_bytes:
                 raise types.model.RequestTooLargeError(
@@ -2773,12 +2777,22 @@ class _AgentModel:
         # and the cost of re-checking before request build is one bool
         # per attempt. Drop the guards only when both invariants become
         # statically enforced.
-        rich_thinking = self._agent.thinking if self._inner.supports_thinking else None
-        rich_effort = self._agent.effort if self._inner.supports_effort else None
-        rich_service_tier = (
-            self._agent.service_tier if self._inner.valid_service_tiers else None
+        rich_thinking = (
+            self._agent.thinking
+            if bool(self._inner.spec.supported_thinking_budgets)
+            else None
         )
-        rich_latency = self._agent.latency if self._inner.valid_latency_modes else None
+        rich_effort = (
+            self._agent.effort
+            if bool(self._inner.spec.supported_thinking_efforts)
+            else None
+        )
+        rich_service_tier = (
+            self._agent.service_tier if self._inner.spec.valid_service_tiers else None
+        )
+        rich_latency = (
+            self._agent.latency if self._inner.spec.valid_latency_modes else None
+        )
 
         # Consume the persisted resume deadline ONCE, before the loop. It is a
         # one-shot wall-clock wait carried across a process restart (a prior
@@ -3271,9 +3285,7 @@ class _AgentCompactor:
                 await post_compact_enrich(
                     history=payload,
                     tool_state=self._agent.tool_state,
-                    budget=_budget_for_model_ratio(
-                        self._agent.budget, self._agent.model
-                    ),
+                    budget=self._agent.budget,
                     tools=self._agent.tools_map,
                     background_tasks=self._agent.background,
                     estimate_tokens=self._agent.max_request_tokens - used,

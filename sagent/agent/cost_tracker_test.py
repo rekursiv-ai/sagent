@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from sagent.agent.cost_tracker import CostTracker
+from sagent.types.cost import TokenCost
 from sagent.types.model import ModelResponse, TokenCount
 from sagent.types.runtime import AssistantMessage
 
@@ -14,13 +15,13 @@ def _make_response(*, total_cost: float = 0.0, **tokens: int) -> ModelResponse:
     return ModelResponse(
         message=AssistantMessage(text="x"),
         tokens=TokenCount(**tokens),
-        total_cost=total_cost,
+        spend=TokenCost(request=total_cost),
     )
 
 
 def test_cost_tracker_defaults() -> None:
     t = CostTracker()
-    assert t.total_cost_usd == 0.0
+    assert t.spend.total == 0.0
     assert isinstance(t.total, TokenCount)
     assert isinstance(t.last_request, TokenCount)
     assert t.calls_by_model == {}
@@ -30,13 +31,13 @@ def test_cost_tracker_record_cost_accumulates_cost() -> None:
     t = CostTracker()
     t.record_cost(_make_response(total_cost=0.10))
     t.record_cost(_make_response(total_cost=0.25))
-    assert t.total_cost_usd == pytest.approx(0.35)
+    assert t.spend.total == pytest.approx(0.35)
 
 
 def test_cost_tracker_record_cost_leaves_tokens_untouched() -> None:
     """``record_cost`` is cost-only: it must not move token totals."""
     t = CostTracker()
-    t.record_cost(_make_response(total_cost=0.10, input_tokens=99))
+    t.record_cost(_make_response(total_cost=0.10, request=99))
     assert t.total == TokenCount()
     assert t.calls_by_model == {}
 
@@ -52,9 +53,9 @@ def test_cost_tracker_record_tokens_counts_calls_per_model() -> None:
 def test_cost_tracker_record_tokens_leaves_cost_untouched() -> None:
     """``record_tokens`` is token-only: it must not move ``total_cost_usd``."""
     t = CostTracker()
-    t.record_tokens(_make_response(total_cost=5.0, input_tokens=10), model_id="m")
-    assert t.total_cost_usd == 0.0
-    assert t.total == TokenCount(input_tokens=10)
+    t.record_tokens(_make_response(total_cost=5.0, request=10), model_id="m")
+    assert t.spend.total == 0.0
+    assert t.total == TokenCount(request=10)
 
 
 def test_cost_tracker_record_tokens_updates_last_request() -> None:
@@ -75,8 +76,8 @@ def test_cost_tracker_restore_totals_overwrites_totals() -> None:
     t = CostTracker()
     t.record_cost(_make_response(total_cost=0.10))
     persisted_total = TokenCount()
-    t.restore_totals(total_cost_usd=99.0, total=persisted_total)
-    assert t.total_cost_usd == 99.0
+    t.restore_totals(spend=TokenCost(request=99.0), total=persisted_total)
+    assert t.spend.total == 99.0
     assert t.total is persisted_total
 
 
@@ -93,7 +94,7 @@ def test_cost_tracker_restore_totals_preserves_per_call_provenance() -> None:
     before_calls = dict(t.calls_by_model)
     before_last_request = t.last_request
     before_last_response_time = t.last_response_time
-    t.restore_totals(total_cost_usd=99.0, total=TokenCount())
+    t.restore_totals(spend=TokenCost(request=99.0), total=TokenCount())
     assert t.calls_by_model == before_calls
     assert t.last_request is before_last_request
     assert t.last_response_time == before_last_response_time

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
@@ -18,11 +18,12 @@ import time
 import urllib.error
 import urllib.request
 
-from sagent.providers.lib.cost import ModelProfile, Pricing
+from sagent.providers import llamacpp_catalog
 from sagent.providers.openai_compat import (
     OpenAICompat,
     OpenAICompatModel,
 )
+from sagent.types.model import ModelCapability
 
 
 class LlamaCpp(OpenAICompat):
@@ -32,34 +33,8 @@ class LlamaCpp(OpenAICompat):
     DEFAULT_UTILITY_MODEL: ClassVar[str] = "qwen3.6-27b-12gb"
     ENV_VAR: ClassVar[str] = "LLAMA_CPP_API_KEY"
     BASE_URL: ClassVar[str] = "http://127.0.0.1:8081/v1"
-    KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
-        "qwen3.6-27b-12gb": ModelProfile(
-            max_request_tokens=16_384,
-            max_response_tokens=1_024,
-            pricing=Pricing(),
-            # Local llama-server: no provider-imposed image/wire caps.
-            # 0 = unlimited (consistent with SelfHosted), not OpenAI's 20 MB.
-            max_image_dim=0,
-            max_image_bytes=0,
-            max_request_bytes=0,
-        ),
-        "qwen3.6-27b-mtp-64k": ModelProfile(
-            max_request_tokens=65_536,
-            max_response_tokens=4_096,
-            pricing=Pricing(),
-            max_image_dim=0,
-            max_image_bytes=0,
-            max_request_bytes=0,
-        ),
-        "local": ModelProfile(
-            max_request_tokens=32_768,
-            max_response_tokens=4_096,
-            pricing=Pricing(),
-            max_image_dim=0,
-            max_image_bytes=0,
-            max_request_bytes=0,
-        ),
-    }
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = llamacpp_catalog.MODELS
+    """Per-model capability; transport limits live on ``TRANSPORT``."""
 
     def __init__(
         self,

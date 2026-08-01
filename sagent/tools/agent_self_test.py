@@ -2,25 +2,26 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import override
+from types import MappingProxyType
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from sagent import providers as providers_module
 from sagent.agent.agent import Agent
-from sagent.providers.lib.cost import ModelProfile
 from sagent.testing import MockModelCaps
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.core import current_agent_var, tool_state_var
+from sagent.types.cost import TokenCost
 from sagent.types.model import (
+    Limits,
+    ModelCapability,
+    ModelRecipe,
     ModelRequest,
     ModelResponse,
-    ModelSpec,
-    Pricing,
     TokenCount,
 )
 from sagent.types.providers import ProviderOptions
@@ -41,11 +42,6 @@ class StubProviderModel(MockModelCaps):
     max_request_tokens: int = 100_000
     responses: list[AssistantMessage] = field(default_factory=list)
     _idx: int = field(default=0, init=False)
-
-    @property
-    @override
-    def pricing(self) -> Pricing:
-        return Pricing()
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
         return await self.stream(request)
@@ -68,16 +64,16 @@ class StubProviderModel(MockModelCaps):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _CatalogStub:
-    """Stand-in provider class exposing only a ``KNOWN_MODELS`` catalog."""
+    """Stand-in provider class exposing only a ``CAPABILITIES`` catalog."""
 
-    KNOWN_MODELS: dict[str, ModelProfile]
+    CAPABILITIES: Mapping[str, ModelCapability]
 
 
-def _make_agent(*, spec: ModelSpec | None = None) -> Agent:
+def _make_agent(*, spec: ModelRecipe | None = None) -> Agent:
     return Agent(
         model=StubProviderModel(),
         tools=[],
-        model_spec=spec,
+        model_recipe=spec,
     )
 
 
@@ -282,19 +278,26 @@ async def test_exceeds_cap_suggests_window_variant_when_one_exists() -> None:
     names the ``+1m`` sibling so the wrong path self-corrects.
     """
     catalog = _CatalogStub(
-        KNOWN_MODELS={
-            "big-base": ModelProfile(
-                max_request_tokens=200_000, max_response_tokens=8_000
-            ),
-            "big-base+1m": ModelProfile(
-                max_request_tokens=1_000_000, max_response_tokens=8_000
+        CAPABILITIES={
+            "big-base": ModelCapability(
+                model_id="big-base",
+                context_limits=MappingProxyType(
+                    {
+                        "": Limits(
+                            max_request_tokens=200_000, max_response_tokens=8_000
+                        ),
+                        "+1m": Limits(
+                            max_request_tokens=1_000_000, max_response_tokens=8_000
+                        ),
+                    }
+                ),
             ),
         }
     )
     agent = Agent(
         model=StubProviderModel(model_id="big-base"),
         tools=[],
-        model_spec=ModelSpec(
+        model_recipe=ModelRecipe(
             provider="StubCat", auth="env", model_id="big-base", account=""
         ),
     )
@@ -364,7 +367,7 @@ async def test_model_change_auth_without_model_id_preserves_current_model() -> N
     foot-gun.
     """
     agent = _make_agent(
-        spec=ModelSpec(provider="StubP", auth="env", model_id="stub-1", account=""),
+        spec=ModelRecipe(provider="StubP", auth="env", model_id="stub-1", account=""),
     )
     t = AgentSelf()
     with (
@@ -376,17 +379,17 @@ async def test_model_change_auth_without_model_id_preserves_current_model() -> N
         bp.return_value = MagicMock(model=MagicMock(return_value=StubProviderModel()))
         result = await t.run({"auth": "new"})
     assert not result.is_error, result.content
-    assert agent.model_spec is not None
-    assert agent.model_spec.auth == "new"
-    assert agent.model_spec.model_id == "stub-1", (
-        f"auth-only swap must preserve model_id; got {agent.model_spec.model_id!r}"
+    assert agent.model_recipe is not None
+    assert agent.model_recipe.auth == "new"
+    assert agent.model_recipe.model_id == "stub-1", (
+        f"auth-only swap must preserve model_id; got {agent.model_recipe.model_id!r}"
     )
 
 
 @pytest.mark.asyncio
 async def test_diagnostics_returns_lines() -> None:
     agent = _make_agent(
-        spec=ModelSpec(provider="StubP", auth="env", model_id="stub-1", account=""),
+        spec=ModelRecipe(provider="StubP", auth="env", model_id="stub-1", account=""),
     )
     t = AgentSelf()
     with _active(agent):
@@ -444,12 +447,12 @@ async def test_diagnostics_reports_live_cost_tracker_state() -> None:
     response = ModelResponse(
         message=AssistantMessage(text="ok"),
         tokens=TokenCount(
-            input_tokens=10_000,
-            output_tokens=30,
-            cache_creation_tokens=7,
-            cache_read_tokens=3,
+            request=10_000,
+            response=30,
+            cache_write=7,
+            cache_read=3,
         ),
-        total_cost=0.42,
+        spend=TokenCost(request=0.42),
     )
     agent.cost_tracker.record_tokens(response, model_id="stub-1")
     agent.cost_tracker.record_cost(response)
@@ -484,12 +487,12 @@ async def test_model_options_unsupported_key_errors() -> None:
 class TierStubModel(StubProviderModel):
     """``StubProviderModel`` advertising a non-empty service-tier set."""
 
-    valid_service_tiers: tuple[str, ...] = ("auto", "default", "flex", "priority")
+    service_tiers: tuple[str, ...] = ("auto", "default", "flex", "priority")
 
 
 @pytest.mark.asyncio
 async def test_service_tier_unsupported_when_model_lacks_capability() -> None:
-    agent = _make_agent()  # StubProviderModel.valid_service_tiers = ()
+    agent = _make_agent()  # StubProviderModel.spec.valid_service_tiers = ()
     t = AgentSelf()
     with _active(agent):
         result = await t.run({"model_options": {"service_tier": "priority"}})
@@ -545,7 +548,7 @@ async def test_service_tier_listed_in_supported_diagnostics() -> None:
 class LatencyStubModel(StubProviderModel):
     """``StubProviderModel`` advertising a fast-latency mode."""
 
-    valid_latency_modes: tuple[str, ...] = ("fast",)
+    latency_modes: tuple[str, ...] = ("fast",)
 
 
 @pytest.mark.asyncio
@@ -608,7 +611,7 @@ async def test_max_response_tokens_within_cap_applied() -> None:
 @pytest.mark.asyncio
 async def test_account_empty_string_errors() -> None:
     agent = _make_agent(
-        spec=ModelSpec(
+        spec=ModelRecipe(
             provider="OpenAISubscription",
             auth="credentials",
             model_id="gpt-5.5",
@@ -625,7 +628,7 @@ async def test_account_empty_string_errors() -> None:
 @pytest.mark.asyncio
 async def test_provider_change_without_auth_uses_target_default() -> None:
     agent = _make_agent(
-        spec=ModelSpec(
+        spec=ModelRecipe(
             provider="OpenAISubscription",
             auth="credentials",
             model_id="gpt-5.5",
@@ -650,7 +653,7 @@ async def test_provider_change_without_auth_uses_target_default() -> None:
 @pytest.mark.asyncio
 async def test_account_default_string_is_preserved() -> None:
     agent = _make_agent(
-        spec=ModelSpec(
+        spec=ModelRecipe(
             provider="OpenAISubscription",
             auth="credentials",
             model_id="gpt-5.5",
@@ -683,7 +686,7 @@ async def test_model_swap_shrinks_budget_to_new_model_window() -> None:
     rescaling it down to the new model's window.
     """
     agent = _make_agent(
-        spec=ModelSpec(provider="StubP", auth="env", model_id="big", account=""),
+        spec=ModelRecipe(provider="StubP", auth="env", model_id="big", account=""),
     )
     # Agent's default budget tracks its current 100k-window model.
     assert agent.budget.max_request_tokens == 100_000
@@ -699,7 +702,7 @@ async def test_model_swap_shrinks_budget_to_new_model_window() -> None:
         with _active(agent):
             result = await t.run({"model_id": "small"})
     assert not result.is_error, result.content
-    assert agent.model.model_id == "small"
+    assert agent.model.spec.tagged_model_id == "small"
     assert agent.budget.max_request_tokens <= 50_000
 
 
@@ -713,7 +716,7 @@ async def test_model_swap_with_explicit_budget_lands_in_one_step() -> None:
     the new model's window.
     """
     agent = _make_agent(
-        spec=ModelSpec(provider="StubP", auth="env", model_id="big", account=""),
+        spec=ModelRecipe(provider="StubP", auth="env", model_id="big", account=""),
     )
     fake_provider = MagicMock()
     fake_provider.model.return_value = StubProviderModel(
@@ -727,7 +730,7 @@ async def test_model_swap_with_explicit_budget_lands_in_one_step() -> None:
         with _active(agent):
             result = await t.run({"model_id": "small", "max_request_tokens": 20_000})
     assert not result.is_error, result.content
-    assert agent.model.model_id == "small"
+    assert agent.model.spec.tagged_model_id == "small"
     assert agent.max_request_tokens == 20_000
 
 
@@ -751,7 +754,7 @@ async def test_model_swap_clears_effort_and_reports_unset() -> None:
     agent = Agent(
         model=EffortStubModel(model_id="rich-stub"),
         tools=[],
-        model_spec=ModelSpec(
+        model_recipe=ModelRecipe(
             provider="OpenAISubscription",
             auth="credentials",
             model_id="rich-stub",
@@ -779,7 +782,7 @@ async def test_model_swap_clears_effort_and_reports_unset() -> None:
 @pytest.mark.asyncio
 async def test_model_id_change_unknown_provider_errors() -> None:
     agent = _make_agent(
-        spec=ModelSpec(
+        spec=ModelRecipe(
             provider="UnknownProvider",
             auth="env",
             model_id="x",
@@ -826,7 +829,7 @@ async def test_provider_switch_rejected_when_outside_allow_list() -> None:
     ``build_provider`` call. Regression guard for the write surface
     of the allow-list contract (the read surface is the catalog).
     """
-    spec = ModelSpec(
+    spec = ModelRecipe(
         provider="OpenAISubscription",
         auth="credentials",
         model_id="gpt-stub",
@@ -867,12 +870,12 @@ async def test_model_swap_clears_all_capabilities_and_reports_each_unset() -> No
     @dataclass(slots=True, kw_only=True)
     class RichStubModel(StubProviderModel):
         supports_thinking: bool = True
-        valid_service_tiers: tuple[str, ...] = ("priority",)
+        service_tiers: tuple[str, ...] = ("priority",)
 
     agent = Agent(
         model=RichStubModel(model_id="rich-stub"),
         tools=[],
-        model_spec=ModelSpec(
+        model_recipe=ModelRecipe(
             provider="OpenAISubscription",
             auth="credentials",
             model_id="rich-stub",

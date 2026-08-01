@@ -14,13 +14,14 @@ import pytest
 from sagent.agent.agent import ActivityTracker, Agent
 from sagent.agent.cost_tracker import CostTracker
 from sagent.repl.status_pane import render_status_pane
+from sagent.types.cost import TokenCost
 from sagent.types.model import ContextBudget, TokenCount
 
 
 @dataclass(slots=True, kw_only=True)
 class _FakeCostTracker:
     total: TokenCount = field(default_factory=TokenCount)
-    total_cost_usd: float = 0.0
+    spend: TokenCost = field(default_factory=TokenCost)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -75,30 +76,28 @@ def _agent(**overrides: object) -> _FakeAgent:
             "cache_read_tokens",
         }:
             a.cost_tracker.total = TokenCount(
-                input_tokens=cast(
+                request=cast(
                     int,
-                    overrides.get("input_tokens", a.cost_tracker.total.input_tokens),
+                    overrides.get("input_tokens", a.cost_tracker.total.request),
                 ),
-                output_tokens=cast(
+                response=cast(
                     int,
-                    overrides.get("output_tokens", a.cost_tracker.total.output_tokens),
+                    overrides.get("output_tokens", a.cost_tracker.total.response),
                 ),
-                cache_creation_tokens=cast(
+                cache_write=cast(
                     int,
                     overrides.get(
                         "cache_creation_tokens",
-                        a.cost_tracker.total.cache_creation_tokens,
+                        a.cost_tracker.total.cache_write,
                     ),
                 ),
-                cache_read_tokens=cast(
+                cache_read=cast(
                     int,
-                    overrides.get(
-                        "cache_read_tokens", a.cost_tracker.total.cache_read_tokens
-                    ),
+                    overrides.get("cache_read_tokens", a.cost_tracker.total.cache_read),
                 ),
             )
         elif k == "total_cost_usd":
-            a.cost_tracker.total_cost_usd = cast(float, v)
+            a.cost_tracker.spend = TokenCost(request=cast(float, v))
         elif k == "elapsed_seconds":
             a.activity.elapsed_seconds = cast(float, v)
         elif k == "active":

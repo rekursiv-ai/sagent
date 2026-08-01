@@ -16,9 +16,14 @@ from sagent.providers.google import (
     _build_response,
     _strip_additional_properties,
 )
+from sagent.types.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenPrice,
+)
 from sagent.types.model import (
     ModelRequest,
-    Pricing,
+    ModelSpec,
     PromptTooLongError,
     RequestTooLargeError,
     StreamInterruptedError,
@@ -78,8 +83,13 @@ def _make_request(messages: list[ModelContextEvent], **kw: object) -> ModelReque
     return ModelRequest(messages=messages)
 
 
+def _wire(request: ModelRequest) -> MutableJSON:
+    """Build the wire body against a thinking-capable catalog row."""
+    return _build_request(request, Google.from_key("k").model("gemini-2.5-pro").spec)
+
+
 def test_build_request_user_message_text_part() -> None:
-    body = _build_request(_make_request([UserMessage(text="hi")]))
+    body = _wire(_make_request([UserMessage(text="hi")]))
     contents = cast(list[MutableJSON], body["contents"])
     assert contents == [{"role": "user", "parts": [{"text": "hi"}]}]
 
@@ -89,7 +99,7 @@ def test_build_request_assistant_emits_function_call() -> None:
         text="thinking",
         tool_calls=(ToolCall(id="ext-1", name="Bash", args={"cmd": "ls"}),),
     )
-    body = _build_request(_make_request([asst]))
+    body = _wire(_make_request([asst]))
     contents = cast(list[MutableJSON], body["contents"])
     assert contents[0]["role"] == "model"
     parts = cast(list[MutableJSON], contents[0]["parts"])
@@ -106,7 +116,7 @@ def test_build_request_tool_result_emits_function_response_with_name() -> None:
         tool_calls=(ToolCall(id="ext-1", name="MyTool", args={}),),
     )
     res = ToolResult(call_id="ext-1", content="done")
-    body = _build_request(_make_request([asst, res]))
+    body = _wire(_make_request([asst, res]))
     contents = cast(list[MutableJSON], body["contents"])
     # Last content is the user message holding the functionResponse.
     user_msg = contents[-1]
@@ -133,7 +143,7 @@ def test_user_after_tool_results_coalesces_into_same_wire_content() -> None:
     )
     tool_result = ToolResult(call_id="c1", content=DETACHED_PLACEHOLDER)
     user_redirect = UserMessage(text="actually do something else")
-    body = _build_request(_make_request([asst, tool_result, user_redirect]))
+    body = _wire(_make_request([asst, tool_result, user_redirect]))
     contents = cast(list[MutableJSON], body["contents"])
     # 2 contents: model(functionCall) + user(functionResponse + text).
     assert len(contents) == 2, [c["role"] for c in contents]
@@ -148,7 +158,7 @@ def test_user_after_tool_results_coalesces_into_same_wire_content() -> None:
 def test_build_request_tool_result_error_prefix() -> None:
     asst = AssistantMessage(tool_calls=(ToolCall(id="x", name="N", args={}),))
     res = ToolResult(call_id="x", content="boom", is_error=True)
-    body = _build_request(_make_request([asst, res]))
+    body = _wire(_make_request([asst, res]))
     contents = cast(list[MutableJSON], body["contents"])
     parts = cast(list[MutableJSON], contents[-1]["parts"])
     fr = cast(MutableJSON, parts[0]["functionResponse"])
@@ -156,14 +166,14 @@ def test_build_request_tool_result_error_prefix() -> None:
 
 
 def test_build_request_system_instruction() -> None:
-    body = _build_request(_make_request([UserMessage(text="hi")], system="be terse"))
+    body = _wire(_make_request([UserMessage(text="hi")], system="be terse"))
     sys_inst = cast(MutableJSON, body["systemInstruction"])
     parts = cast(list[MutableJSON], sys_inst["parts"])
     assert parts == [{"text": "be terse"}]
 
 
 def test_build_request_empty_user_emits_placeholder() -> None:
-    body = _build_request(_make_request([UserMessage(text="")]))
+    body = _wire(_make_request([UserMessage(text="")]))
     contents = cast(list[MutableJSON], body["contents"])
     parts = cast(list[MutableJSON], contents[0]["parts"])
     assert parts == [{"text": ""}]
@@ -198,8 +208,8 @@ async def test_google_stream_parses_text_tool_call_and_finish_reason() -> None:
     assert dict(tc.args) == {"cmd": "ls"}
     # STOP + tool calls → upgraded to model_tool_use.
     assert resp.stop_reason == "model_tool_use"
-    assert resp.tokens.input_tokens == 10
-    assert resp.tokens.output_tokens == 5
+    assert resp.tokens.request == 10
+    assert resp.tokens.response == 5
     assert resp.message_id.startswith("gemini_")
     assert resp.request_id == resp.message_id
 
@@ -332,7 +342,15 @@ async def test_google_stream_max_tokens_finish_reason() -> None:
 
 def test_google_build_response_cache_tokens_split_input_cost() -> None:
     """``cache_read`` is subtracted from input before the request-rate charge."""
-    pricing = Pricing(request=1.0, response=2.0, cache_read=0.5)
+    spec = ModelSpec(
+        prices=PriceCatalog(
+            {
+                PriceCatalogProduct(): TokenPrice(
+                    request=1.0, response=2.0, cache_read=0.5
+                )
+            }
+        )
+    )
     resp = _build_response(
         text="",
         tool_calls=[],
@@ -345,14 +363,16 @@ def test_google_build_response_cache_tokens_split_input_cost() -> None:
             },
         ),
         finish_reason="STOP",
-        pricing=pricing,
+        spec=spec,
     )
-    assert resp.tokens.cache_read_tokens == 300
+    assert resp.tokens.cache_read == 300
     # ``promptTokenCount`` is cache-inclusive; stored input drops the cached
     # portion so it stays disjoint from ``cache_read_tokens``.
-    assert resp.tokens.input_tokens == 700
+    assert resp.tokens.request == 700
     # (1000-300)*1 + 300*0.5 = 850 / 1M = 0.00085.
-    assert resp.input_cost == pytest.approx(0.00085)
+    assert (
+        resp.spend.request + resp.spend.cache_write + resp.spend.cache_read
+    ) == pytest.approx(0.00085)
 
 
 def test_google_from_key() -> None:
@@ -426,9 +446,7 @@ def test_legacy_gemini_models_do_not_support_thinking() -> None:
 
 
 def test_build_request_adaptive_thinking_uses_dynamic_budget() -> None:
-    body = _build_request(
-        ModelRequest(messages=[UserMessage(text="x")], thinking="adaptive")
-    )
+    body = _wire(ModelRequest(messages=[UserMessage(text="x")], thinking="adaptive"))
     gen_config = cast(MutableJSON, body["generationConfig"])
     assert gen_config["thinkingConfig"] == {
         "includeThoughts": True,
@@ -437,9 +455,7 @@ def test_build_request_adaptive_thinking_uses_dynamic_budget() -> None:
 
 
 def test_build_request_enabled_thinking_uses_dynamic_budget() -> None:
-    body = _build_request(
-        ModelRequest(messages=[UserMessage(text="x")], thinking="enabled")
-    )
+    body = _wire(ModelRequest(messages=[UserMessage(text="x")], thinking="enabled"))
     gen_config = cast(MutableJSON, body["generationConfig"])
     assert gen_config["thinkingConfig"] == {
         "includeThoughts": True,
@@ -448,7 +464,7 @@ def test_build_request_enabled_thinking_uses_dynamic_budget() -> None:
 
 
 def test_build_request_effort_min_sets_small_budget() -> None:
-    body = _build_request(ModelRequest(messages=[UserMessage(text="x")], effort="min"))
+    body = _wire(ModelRequest(messages=[UserMessage(text="x")], effort="min"))
     gen_config = cast(MutableJSON, body["generationConfig"])
     assert gen_config["thinkingConfig"] == {
         "includeThoughts": True,
@@ -457,7 +473,7 @@ def test_build_request_effort_min_sets_small_budget() -> None:
 
 
 def test_build_request_effort_max_sets_largest_budget() -> None:
-    body = _build_request(ModelRequest(messages=[UserMessage(text="x")], effort="max"))
+    body = _wire(ModelRequest(messages=[UserMessage(text="x")], effort="max"))
     gen_config = cast(MutableJSON, body["generationConfig"])
     assert gen_config["thinkingConfig"] == {
         "includeThoughts": True,
@@ -467,22 +483,18 @@ def test_build_request_effort_max_sets_largest_budget() -> None:
 
 def test_build_request_invalid_effort_raises_value_error() -> None:
     with pytest.raises(ValueError, match="Invalid Google effort"):
-        _build_request(ModelRequest(messages=[UserMessage(text="x")], effort="turbo"))
+        _wire(ModelRequest(messages=[UserMessage(text="x")], effort="turbo"))
 
 
 def test_build_request_thinking_omits_temperature() -> None:
-    body = _build_request(
-        ModelRequest(messages=[UserMessage(text="x")], thinking="adaptive")
-    )
+    body = _wire(ModelRequest(messages=[UserMessage(text="x")], thinking="adaptive"))
     gen_config = cast(MutableJSON, body["generationConfig"])
     assert "thinkingConfig" in gen_config
     assert "temperature" not in gen_config
 
 
 def test_build_request_without_thinking_keeps_temperature() -> None:
-    body = _build_request(
-        ModelRequest(messages=[UserMessage(text="x")], temperature=0.3)
-    )
+    body = _wire(ModelRequest(messages=[UserMessage(text="x")], temperature=0.3))
     gen_config = cast(MutableJSON, body["generationConfig"])
     assert gen_config["temperature"] == 0.3
 
@@ -659,7 +671,7 @@ def test_build_request_tools_strip_additional_properties() -> None:
         messages=[UserMessage(text="hi")],
         tools=cast("list[Tool]", [tool]),
     )
-    body = _build_request(req)
+    body = _wire(req)
     tools_section = cast(list[MutableJSON], body["tools"])
     fns = cast(list[MutableJSON], tools_section[0]["functionDeclarations"])
     schema = cast(MutableJSON, fns[0]["parameters"])
@@ -682,7 +694,7 @@ def test_build_request_echoes_thought_signature() -> None:
             ),
         ),
     )
-    body = _build_request(_make_request([asst]))
+    body = _wire(_make_request([asst]))
     parts = cast(
         list[MutableJSON], cast(list[MutableJSON], body["contents"])[0]["parts"]
     )
@@ -696,7 +708,7 @@ def test_build_request_omits_empty_thought_signature() -> None:
         text="hi",
         tool_calls=(ToolCall(id="e", name="Bash", args={}),),
     )
-    body = _build_request(_make_request([asst]))
+    body = _wire(_make_request([asst]))
     parts = cast(
         list[MutableJSON], cast(list[MutableJSON], body["contents"])[0]["parts"]
     )
@@ -716,7 +728,7 @@ def test_build_request_preserves_per_call_signature_order() -> None:
             ToolCall(id="b", name="Bash", args={"i": 2}, thought_signature="sig-b"),
         ),
     )
-    body = _build_request(_make_request([asst]))
+    body = _wire(_make_request([asst]))
     parts = cast(
         list[MutableJSON], cast(list[MutableJSON], body["contents"])[0]["parts"]
     )
@@ -738,7 +750,7 @@ def test_build_request_tool_result_carries_no_signature() -> None:
         ),
     )
     res = ToolResult(call_id="c1", content="done")
-    body = _build_request(_make_request([asst, res]))
+    body = _wire(_make_request([asst, res]))
     contents = cast(list[MutableJSON], body["contents"])
     user_parts = cast(list[MutableJSON], contents[1]["parts"])
     assert "functionResponse" in user_parts[0]

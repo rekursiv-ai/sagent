@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from types import MappingProxyType
 
 import asyncio
 import sys
@@ -10,10 +11,16 @@ import sys
 from sagent.agent import Agent
 from sagent.lib import token_count
 from sagent.tools import tool
+from sagent.types.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenPrice,
+)
 from sagent.types.model import (
+    Limits,
     ModelRequest,
     ModelResponse,
-    Pricing,
+    ModelSpec,
     TokenCount,
     UsageSnapshot,
 )
@@ -42,26 +49,29 @@ def echo(text: str) -> str:
 
 
 class ScriptedModel:
-    """Minimal offline model used to demonstrate Sagent's model contract."""
+    """Minimal offline model used to demonstrate Sagent's model contract.
 
-    model_id = "scripted-offline"
-    max_request_tokens = 16_384
-    max_response_tokens = 1024
-    supports_streaming = False
-    supports_thinking = False
-    valid_thinking_states: tuple[str, ...] = ("off-hide",)
-    supports_effort = False
-    valid_efforts: tuple[str, ...] = ()
-    supports_cache_control = False
+    Everything the agent asks about capability comes from one ``spec``;
+    an implementation declares limits and prices, not a flag per question.
+    """
+
+    spec = ModelSpec(
+        model_id="scripted-offline",
+        context_limits=Limits(max_request_tokens=16_384, max_response_tokens=1_024),
+        # An offline model bills nothing, but an empty catalog would raise.
+        prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+        supported_thinking_efforts=MappingProxyType({}),
+        supported_thinking_budgets=frozenset(),
+        supported_thinking_outputs=frozenset(),
+        fast=False,
+        manages_context=False,
+        prompt_cache_breakpoints=False,
+        retries_internally=False,
+        account_auth=False,
+    )
     valid_service_tiers: tuple[str, ...] = ()
     valid_latency_modes: tuple[str, ...] = ()
-    supports_context_management = False
-    supports_persistent_retry = False
-    supports_account_auth = False
-    max_image_dim = 0
-    max_image_bytes = 0
-    max_request_bytes = 0
-    pricing = Pricing()
+    valid_thinking_states: tuple[str, ...] = ("off-hide",)
 
     def approx_text_tokens(self, text: str) -> int:
         """Offline ``len(text) // 4`` heuristic; minimum 1."""
@@ -131,7 +141,7 @@ class ScriptedModel:
         if any(isinstance(msg, ToolResult) for msg in request.messages):
             return ModelResponse(
                 message=AssistantMessage(text="Echo said: hello"),
-                tokens=TokenCount(input_tokens=12, output_tokens=4),
+                tokens=TokenCount(request=12, response=4),
             )
         return ModelResponse(
             message=AssistantMessage(
@@ -139,7 +149,7 @@ class ScriptedModel:
                     ToolCall(id="echo-1", name="Echo", args={"text": "hello"}),
                 ),
             ),
-            tokens=TokenCount(input_tokens=8, output_tokens=4),
+            tokens=TokenCount(request=8, response=4),
             stop_reason="model_tool_use",
         )
 

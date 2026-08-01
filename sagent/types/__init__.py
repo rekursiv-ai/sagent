@@ -12,8 +12,13 @@ Callers must reach into a specific submodule:
   vocabulary, including provider-visible messages and tape events.
 - ``sagent.types.tape`` -- tape mechanics:
   refs, referrable events, context splices, and splice validators.
-- ``sagent.types.model`` -- ``Model`` Protocol plus
-  request/response/budget/pricing/spec types.
+- ``sagent.types.cost`` -- token count / price / cost
+  calculus and the price catalog.
+- ``sagent.types.capability`` -- ``ModelCapability``
+  and its narrowed ``ModelRecipe``.
+- ``sagent.types.model`` -- ``ModelCapability`` and its
+  narrowed ``ModelSpec``, the ``Model`` Protocol, and request/response
+  types.
 - ``sagent.types.providers`` -- provider Protocols.
 - ``sagent.types.tools`` -- ``Tool`` Protocol.
 - ``sagent.types.compactor`` -- compaction Protocols.
@@ -22,6 +27,7 @@ Callers must reach into a specific submodule:
 
 from sagent.types import (
     compactor,
+    cost,
     exceptions,
     model,
     providers,
@@ -33,6 +39,7 @@ from sagent.types import (
 
 __all__ = [
     "compactor",
+    "cost",
     "exceptions",
     "model",
     "providers",
