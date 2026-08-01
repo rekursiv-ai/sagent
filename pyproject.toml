@@ -1,6 +1,6 @@
 [project]
 name = "sagent"
-version = "0.1.13"
+version = "0.1.12"
 description = "Python-first Coding Agent API and CLI."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -33,7 +33,7 @@ dependencies = [
     # ~670 cascading Unknown warnings from an untyped 0.1.0.
     # [extract] pulls trafilatura + defusedxml, which wesearch.web uses for
     # article extraction and RSS/Atom parsing on sagent's behalf.
-    "wesearch[extract]>=0.1.6",
+    "wesearch[extract]>=0.1.5",
     # web client / scraping
     "httpx>=0.27",
     # web server / api
