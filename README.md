@@ -59,8 +59,8 @@
 
 # Ubuntu/Debian:
 #   # Required for quick install.
-#   sudo apt-get install -y curl &&
-#       curl -LsSf https://astral.sh/uv/install.sh | sh
+#   sudo apt-get install -y curl
+#   curl -LsSf https://astral.sh/uv/install.sh | sh
 #   # Optional for improved performance.
 #   sudo apt-get install -y ripgrep fd-find
 
