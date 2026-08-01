@@ -86,7 +86,7 @@ from sagent.lib.userdirs import data_dir
 from sagent.providers import build_provider
 from sagent.tools.core import agent_registry
 from sagent.tools.slack import Slack
-from sagent.types.model import ModelSpec
+from sagent.types.model import ModelRecipe
 from sagent.types.runtime import (
     AssistantMessage,
     ModelResponseError,
@@ -248,7 +248,7 @@ class SlackAdapter:
         app_token: str,
         bot_token: str,
         model: Model,
-        model_spec: ModelSpec,
+        model_recipe: ModelRecipe,
         persona_dir: Path,
         session_dir: Path,
         compactor: SummaryCompactor | None,
@@ -266,7 +266,7 @@ class SlackAdapter:
         self._bot_token = bot_token
         self._slack = Slack(token=bot_token)
         self._model = model
-        self._model_spec = model_spec
+        self._model_recipe = model_recipe
         self._persona_dir = persona_dir
         self._session_dir = session_dir
         self._compactor = compactor
@@ -640,7 +640,7 @@ class SlackAdapter:
             name=label,
             description=f"Persistent agent: {label}",
             model=self._model,
-            model_spec=self._model_spec,
+            model_recipe=self._model_recipe,
             system=system_text,
             tools=tools,
             compactor=self._compactor,
@@ -1012,16 +1012,16 @@ async def _run(args: argparse.Namespace) -> None:
     app_token, bot_token = _resolve_tokens(args)
     provider = build_provider(args.provider, args.auth, account=args.account)
     model = provider.model(args.model)
-    model_spec = ModelSpec(
+    model_recipe = ModelRecipe(
         provider=args.provider,
         auth=args.auth,
-        model_id=model.model_id,
+        model_id=model.spec.tagged_model_id,
         account=args.account,
     )
     compactor = SummaryCompactor() if args.compact else None
     persona_dir = Path(args.persona_dir)
 
-    _ = sys.stderr.write(f"[{args.provider}] {model.model_id}\n")
+    _ = sys.stderr.write(f"[{args.provider}] {model.spec.tagged_model_id}\n")
     _ = sys.stderr.write(f"[personas] {persona_dir}\n")
 
     session_root = Path(args.session_dir)
@@ -1040,7 +1040,7 @@ async def _run(args: argparse.Namespace) -> None:
         app_token=app_token,
         bot_token=bot_token,
         model=model,
-        model_spec=model_spec,
+        model_recipe=model_recipe,
         persona_dir=persona_dir,
         session_dir=session_dir,
         compactor=compactor,

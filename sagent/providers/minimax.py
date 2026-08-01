@@ -18,13 +18,15 @@ uses the standard ``tool_calls`` block.
 
 from __future__ import annotations
 
-from typing import ClassVar, Final
+from collections.abc import Mapping
+from typing import ClassVar
 
-from sagent.providers.lib.cost import ModelProfile, Pricing
+from sagent.providers import minimax_catalog
 from sagent.providers.openai_compat import (
     OpenAICompat,
     OpenAICompatModel,
 )
+from sagent.types.model import ModelCapability
 
 
 class _MiniMaxModel(OpenAICompatModel):
@@ -37,9 +39,6 @@ class _MiniMaxModel(OpenAICompatModel):
 # request-body byte ceiling; images are preprocessed server-side. Use the
 # 0=unlimited sentinel rather than borrowing OpenAI's caps (verified Jun 2026;
 # https://platform.minimax.io/docs/api-reference/text-openai-api).
-_IMAGE_DIM: Final = 0
-_IMAGE_BYTES: Final = 0
-_REQUEST_BYTES: Final = 0
 
 
 class MiniMax(OpenAICompat):
@@ -54,83 +53,7 @@ class MiniMax(OpenAICompat):
     #
     # To add a new model: check the MiniMax platform docs for the
     # model's context window and max output tokens.
-    KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
-        "MiniMax-M2.7": ModelProfile(
-            max_request_tokens=204_800,
-            max_response_tokens=32_768,
-            pricing=Pricing(
-                request=0.30,
-                response=1.20,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "MiniMax-M2.7-highspeed": ModelProfile(
-            max_request_tokens=204_800,
-            max_response_tokens=32_768,
-            pricing=Pricing(
-                request=0.60,
-                response=2.40,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "MiniMax-M2.5": ModelProfile(
-            max_request_tokens=204_800,
-            max_response_tokens=32_768,
-            pricing=Pricing(
-                request=0.30,
-                response=1.20,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "MiniMax-M1": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=16_384,
-            pricing=Pricing(
-                request=0.40,
-                response=2.20,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "MiniMax-Text-01": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=16_384,
-            pricing=Pricing(
-                request=0.20,
-                response=1.10,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "abab6.5s-chat": ModelProfile(
-            max_request_tokens=245_000,
-            max_response_tokens=16_384,
-            pricing=Pricing(
-                request=0.15,
-                response=0.15,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "abab6.5-chat": ModelProfile(
-            max_request_tokens=245_000,
-            max_response_tokens=16_384,
-            pricing=Pricing(
-                request=1.50,
-                response=1.50,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-    }
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = minimax_catalog.MODELS
+    """Per-model capability; transport limits live on ``TRANSPORT``."""
+
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _MiniMaxModel

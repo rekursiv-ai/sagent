@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import ClassVar
 
 import asyncio
@@ -9,8 +11,13 @@ import os
 import sys
 
 from sagent.agent import Agent
-from sagent.providers.lib.cost import ModelProfile, Pricing
 from sagent.providers.openai_compat import OpenAICompat
+from sagent.types.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenPrice,
+)
+from sagent.types.model import Limits, ModelCapability
 from sagent.types.runtime import AssistantMessage, UserMessage
 
 
@@ -21,13 +28,18 @@ class LocalOpenAI(OpenAICompat):
     DEFAULT_UTILITY_MODEL = DEFAULT_MODEL
     ENV_VAR = "LOCAL_OPENAI_API_KEY"
     BASE_URL = os.environ.get("LOCAL_OPENAI_BASE_URL", "http://localhost:8000/v1")
-    KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
-        DEFAULT_MODEL: ModelProfile(
-            max_request_tokens=128_000,
-            max_response_tokens=8_192,
-            pricing=Pricing(),
-        ),
-    }
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = MappingProxyType(
+        {
+            DEFAULT_MODEL: ModelCapability(
+                model_id=DEFAULT_MODEL,
+                context_limits=Limits(
+                    max_request_tokens=128_000, max_response_tokens=8_192
+                ),
+                # A local server bills nothing, but a missing row would raise.
+                prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+            )
+        }
+    )
 
 
 async def main() -> None:

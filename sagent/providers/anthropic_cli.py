@@ -37,17 +37,18 @@ import shutil
 import subprocess
 import tempfile
 
-from sagent.lib import token_count
+from sagent import types
 from sagent.lib.custom_json import JSON, MutableJSON, int_val, validate_json_schema
+from sagent.providers import anthropic_catalog
 from sagent.providers.anthropic import Anthropic
 from sagent.providers.lib.cli_respawn import respawn_for_cadence
-from sagent.providers.lib.cost import ModelProfile, Pricing
 from sagent.providers.lib.errors import (
     error_status_code,
     is_request_too_large,
 )
 from sagent.providers.lib.hotspare import HotSpare
 from sagent.providers.lib.mcp_bridge import ToolsBridge
+from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.lib.oauth import (
     credentials_path,
     resolve_account,
@@ -58,12 +59,13 @@ from sagent.providers.lib.subproc import (
     Subproc,
     SubprocessTransportError,
 )
-from sagent.thinking import ThinkingCapability, valid_thinking_states
+from sagent.types.cost import TokenCost
 from sagent.types.model import (
+    ModelCapability,
     ModelRequest,
     ModelResponse,
+    ModelSpec,
     TokenCount,
-    UsageSnapshot,
     base_model_id,
     latency_from_model_id,
 )
@@ -347,13 +349,16 @@ class AnthropicCLICredentials(TypedDict):
 class AnthropicCLI(Anthropic):
     """Provider that drives the user's installed ``claude`` CLI subprocess.
 
-    Inherits ``KNOWN_MODELS`` (limits, pricing, tokenizer density) from
+    Inherits ``CAPABILITIES`` (limits, pricing, tokenizer density) from
     :class:`Anthropic`. The default account uses the CLI's native login
     (including macOS Keychain storage); named accounts use the file variant
     produced by ``providers.lib.oauth.credentials_path``.
     Cost figures are computed from the per-turn ``modelUsage`` summary
     the CLI emits on the terminal ``result`` event.
     """
+
+    TRANSPORT: ClassVar[ModelCapability] = anthropic_catalog.CLI
+    """The subprocess exposes no effort, latency, cache, or redaction knob."""
 
     supported_options: ClassVar[frozenset[str]] = frozenset()
     """``from_credentials`` (the CLI wrapper) takes no construction options.
@@ -551,31 +556,27 @@ class AnthropicCLI(Anthropic):
           model: Backend wrapping a managed ``claude`` subprocess.
 
         Raises:
-          ValueError: If the resolved id is not in ``KNOWN_MODELS``, or
+          ValueError: If the resolved id is not in ``CAPABILITIES``, or
               it carries a ``+fast`` tag (the CLI has no fast path).
 
         """
-        mid = model_id if model_id is not None else self.DEFAULT_MODEL
-        profile = self.KNOWN_MODELS.get(mid) or self.KNOWN_MODELS.get(
-            base_model_id(mid),
-        )
-        if profile is None:
-            known = ", ".join(sorted(self.KNOWN_MODELS))
-            raise ValueError(
-                f"Unknown model {mid!r} for AnthropicCLI. Known models: {known}",
-            )
+        mid = model_id if model_id is not None else "default"
         if latency_from_model_id(mid) is not None:
             raise ValueError(
                 f"Model {mid!r}: fast mode (+fast) is unsupported via the CLI",
             )
+        spec = types.providers.resolve(
+            mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT
+        )
         return _AnthropicCLIModel(
             provider=self,
-            model_id=mid,
-            profile=profile,
+            # ``mid`` may be a role name; the spec carries the resolved id.
+            model_id=spec.tagged_model_id,
+            spec=spec,
             max_request_tokens=(
                 max_request_tokens
                 if max_request_tokens is not None
-                else profile.max_request_tokens
+                else spec.context_limits.max_request_tokens
             ),
             extra_mcp_servers=extra_mcp_servers,
             session_id=session_id,
@@ -591,7 +592,7 @@ class AnthropicCLI(Anthropic):
           model: Utility model backend.
 
         """
-        return self.model(self.DEFAULT_UTILITY_MODEL)
+        return self.model("utility")
 
     @property
     def account(self) -> str | None:
@@ -599,24 +600,26 @@ class AnthropicCLI(Anthropic):
         return self._account
 
 
-class _AnthropicCLIModel:
+class _AnthropicCLIModel(ModelDefaults):
     """``claude`` CLI subprocess wrapped as a sagent ``Model``.
 
     Args:
       provider: Owning :class:`AnthropicCLI`.
       model_id: Claude model id passed via ``--model``.
-      profile: Resolved :class:`ModelProfile` for limits + pricing.
       max_request_tokens: Per-request input cap.
 
     """
+
+    spec: ModelSpec = ModelSpec()
+    """What this model can do; replaced from the catalog at construction."""
 
     def __init__(
         self,
         *,
         provider: AnthropicCLI,
         model_id: str,
-        profile: ModelProfile,
         max_request_tokens: int,
+        spec: ModelSpec | None = None,
         extra_mcp_servers: dict[str, dict[str, object]] | None = None,
         session_id: str | None = None,
         subprocess_read_timeout_sec: float | None = None,
@@ -624,8 +627,8 @@ class _AnthropicCLIModel:
     ) -> None:
         self._provider = provider
         self._model_id = model_id
-        self._profile = profile
         self._max_request_tokens = max_request_tokens
+        self.spec = spec or ModelSpec()
         # Cap (seconds) on waiting for the CLI to fetch the MCP catalog
         # before feeding the first user line. See ``AnthropicCLI.model``.
         self._mcp_connect_timeout_sec = mcp_connect_timeout_sec
@@ -804,7 +807,7 @@ class _AnthropicCLIModel:
     @property
     def max_response_tokens(self) -> int:
         """Per-request output token cap from the profile."""
-        return self._profile.max_response_tokens
+        return self.spec.context_limits.max_response_tokens
 
     @property
     def supports_streaming(self) -> bool:
@@ -813,40 +816,23 @@ class _AnthropicCLIModel:
 
     @property
     def supports_thinking(self) -> bool:
-        """Whether the active profile supports extended thinking."""
-        return self._profile.supports_thinking
-
-    @property
-    def valid_thinking_states(self) -> tuple[str, ...]:
-        """CLI transport returns readable thinking; redaction is inert here.
-
-        The subprocess cannot send the redact-thinking beta header, so
-        ``redact_thinking`` has no effect and no ``redact-hide`` mode is
-        offered.
-        """
-        return valid_thinking_states(
-            ThinkingCapability(supports_thinking=self.supports_thinking),
-        )
+        """Whether the active spec supports extended thinking."""
+        return bool(self.spec.supported_thinking_budgets)
 
     @property
     def supports_effort(self) -> bool:
         """``False``: the CLI does not expose the effort knob on stream-json."""
-        return False
+        return bool(self.spec.supported_thinking_efforts)
 
     @property
     def valid_efforts(self) -> tuple[str, ...]:
         """No effort knob on the CLI transport."""
-        return ()
+        return tuple(self.spec.supported_thinking_efforts.values())
 
     @property
     def supports_cache_control(self) -> bool:
         """``False``: prompt cache is the CLI's concern, not ours."""
-        return False
-
-    @property
-    def valid_service_tiers(self) -> tuple[str, ...]:
-        """The CLI manages tier selection itself; no per-request knob."""
-        return ()
+        return self.spec.prompt_cache_breakpoints
 
     @property
     def valid_latency_modes(self) -> tuple[str, ...]:
@@ -861,7 +847,7 @@ class _AnthropicCLIModel:
     @property
     def supports_persistent_retry(self) -> bool:
         """``False``: persistent retry conflicts with subprocess lifecycle."""
-        return False
+        return self.spec.retries_internally
 
     @property
     def supports_account_auth(self) -> bool:
@@ -869,49 +855,30 @@ class _AnthropicCLIModel:
         return True
 
     @property
-    def pricing(self) -> Pricing:
-        """Per-million-token pricing for the active profile."""
-        return self._profile.pricing
-
-    @property
     def max_image_dim(self) -> int:
         """Maximum image edge (pixels) accepted, from the model profile."""
-        return self._profile.max_image_dim
+        return self.spec.context_limits.max_image_edge_px
 
     @property
     def max_image_bytes(self) -> int:
         """Maximum size (bytes) of a single image, from the model profile."""
-        return self._profile.max_image_bytes
+        return self.spec.context_limits.max_image_bytes
 
     @property
     def max_request_bytes(self) -> int:
         """Maximum request-body size (bytes), from the model profile."""
-        return self._profile.max_request_bytes
+        return self.spec.context_limits.max_request_bytes
 
+    @override
     def approx_text_tokens(self, text: str) -> int:
         """Local estimate via ``chars_per_token``."""
-        return int(len(text) / self._profile.chars_per_token)
+        return int(len(text) / self.spec.chars_per_token)
 
+    @override
     def approx_image_tokens(self, data: bytes) -> int:
         """Local estimate from image dimensions (``width*height/750``)."""
         dims = image_lib.get_dimensions(data)
         return dims[0] * dims[1] // 750 if dims is not None else 0
-
-    def approx_request_tokens(self, request: ModelRequest) -> int:
-        """Walk-and-sum every wire-bearing surface of ``request``."""
-        return token_count.approx_request_tokens(request, self)
-
-    async def actual_text_tokens(self, text: str) -> int:
-        """Subprocess transport has no tokenizer access; falls back to approx."""
-        return self.approx_text_tokens(text)
-
-    async def actual_image_tokens(self, data: bytes) -> int:
-        """Subprocess transport has no tokenizer access; falls back to approx."""
-        return self.approx_image_tokens(data)
-
-    async def actual_request_tokens(self, request: ModelRequest) -> int:
-        """Subprocess transport has no tokenizer access; falls back to approx."""
-        return self.approx_request_tokens(request)
 
     def is_context_overflow(self, error: Exception) -> bool:
         """Classify whether an error means the prompt exceeded the token window.
@@ -935,6 +902,7 @@ class _AnthropicCLIModel:
             "prompt is too long" in msg or "context window" in msg or "too_long" in msg
         )
 
+    @override
     def is_retryable_provider_error(self, error: Exception) -> bool:
         """Session-persistent mode flags transient ``is_error`` results
         as retryable so ``send_with_retry`` performs an in-place retry
@@ -962,22 +930,7 @@ class _AnthropicCLIModel:
             return self._session_id is not None
         return False
 
-    def usage_snapshot(self) -> UsageSnapshot | None:
-        """No rate-limit telemetry over the CLI subprocess transport."""
-        return None
-
-    async def buffer(self, request: ModelRequest) -> ModelResponse:
-        """Run the request through the streaming path with no callbacks.
-
-        Args:
-          request: Fully-built model request.
-
-        Returns:
-          response: Translated model response.
-
-        """
-        return await self.stream(request, None)
-
+    @override
     async def stream(
         self,
         request: ModelRequest,
@@ -1208,6 +1161,7 @@ class _AnthropicCLIModel:
             self._turn_count += 1
             return response
 
+    @override
     async def close(self) -> None:
         """Tear down the subprocess pool and the MCP bridge."""
         if self._hot_spare is not None:
@@ -2219,7 +2173,7 @@ def _build_model_response(
     the ``Model`` contract (and every direct-API provider) reports
     per-request numbers. Mixing the two poisons context-size consumers:
     the Agent's proactive compaction gate anchors on
-    ``tokens.input_tokens + cache_*`` as "how full is the window" and a
+    ``tokens.request + cache_*`` as "how full is the window" and a
     69-round turn summing to 5.6M against a 200k window trips it
     spuriously (live 2026-06-09). Normalization at this boundary:
 
@@ -2288,10 +2242,10 @@ def _build_model_response(
             tool_calls=(),
         ),
         tokens=TokenCount(
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_creation_tokens=cache_creation,
-            cache_read_tokens=cache_read,
+            request=input_tokens,
+            response=output_tokens,
+            cache_write=cache_creation,
+            cache_read=cache_read,
         ),
         stop_reason=normalize_stop_reason(
             stop_reason,
@@ -2300,7 +2254,8 @@ def _build_model_response(
         ),
         message_id=message_id,
         request_id=message_id,
-        input_cost=0.0,
-        output_cost=0.0,
-        total_cost=total_cost,
+        # The CLI reports one server-computed total per turn with no bucket
+        # breakdown. Booking it to ``request`` keeps ``spend.total`` exact;
+        # the per-bucket split is simply not observable on this transport.
+        spend=TokenCost(request=total_cost),
     )

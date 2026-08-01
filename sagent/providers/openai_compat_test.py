@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import ClassVar, cast
 
 import json
@@ -10,7 +12,6 @@ import httpx
 import pytest
 
 from sagent.lib.custom_json import MutableJSON
-from sagent.providers.lib.cost import ModelProfile
 from sagent.providers.openai_compat import (
     OpenAICompat,
     OpenAICompatModel,
@@ -19,9 +20,16 @@ from sagent.providers.openai_compat import (
     build_messages,
     consume_stream,
 )
+from sagent.types.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenPrice,
+)
 from sagent.types.model import (
+    Limits,
+    ModelCapability,
     ModelRequest,
-    Pricing,
+    ModelSpec,
     PromptTooLongError,
     RequestTooLargeError,
     StreamInterruptedError,
@@ -36,6 +44,26 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
+
+
+def _free_spec() -> ModelSpec:
+    """A spec whose every rate is zero -- cost is not what these assert."""
+    return ModelSpec(
+        prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+    )
+
+
+def _priced_spec() -> ModelSpec:
+    """$1/$2 per Mtok, with the usual 1.25x cache-write multiplier."""
+    return ModelSpec(
+        prices=PriceCatalog(
+            {
+                PriceCatalogProduct(): TokenPrice(
+                    request=1.0, response=2.0, cache_write=1.25
+                )
+            }
+        )
+    )
 
 
 def _make_request(
@@ -161,11 +189,11 @@ async def test_consume_stream_input_tokens_exclude_cache_read() -> None:
     resp = await consume_stream(
         _sse_response(events),
         publish=None,
-        pricing=Pricing(),
+        spec=_free_spec(),
         reasoning_field=None,
     )
-    assert resp.tokens.input_tokens == 600
-    assert resp.tokens.cache_read_tokens == 400
+    assert resp.tokens.request == 600
+    assert resp.tokens.cache_read == 400
 
 
 @pytest.mark.asyncio
@@ -187,18 +215,15 @@ async def test_consume_stream_tracks_and_bills_cache_write_tokens() -> None:
     resp = await consume_stream(
         _sse_response(events),
         publish=None,
-        pricing=Pricing(
-            request=1.0,
-            response=6.0,
-            cache_write=1.25,
-            cache_read=0.1,
-        ),
+        spec=_priced_spec(),
         reasoning_field=None,
     )
-    assert resp.tokens.input_tokens == 3
-    assert resp.tokens.cache_creation_tokens == 1306
-    assert resp.tokens.cache_read_tokens == 0
-    assert resp.input_cost == pytest.approx((3 + 1306 * 1.25) / 1_000_000)
+    assert resp.tokens.request == 3
+    assert resp.tokens.cache_write == 1306
+    assert resp.tokens.cache_read == 0
+    assert (
+        resp.spend.request + resp.spend.cache_write + resp.spend.cache_read
+    ) == pytest.approx((3 + 1306 * 1.25) / 1_000_000)
 
 
 def _sse_response(events: list[MutableJSON]) -> httpx.Response:
@@ -240,13 +265,13 @@ async def test_consume_stream_text_and_usage() -> None:
     resp = await consume_stream(
         r,
         publish=_sink,
-        pricing=Pricing(),
+        spec=_free_spec(),
         reasoning_field=None,
     )
     assert resp.message.text == "hello"
     assert "".join(text_acc) == "hello"
-    assert resp.tokens.input_tokens == 4
-    assert resp.tokens.output_tokens == 2
+    assert resp.tokens.request == 4
+    assert resp.tokens.response == 2
     assert resp.stop_reason == "model_finished"
     assert resp.message_id == "stream-1"
 
@@ -268,7 +293,7 @@ async def test_consume_stream_preserves_chat_refusal_text() -> None:
     resp = await consume_stream(
         _sse_response(events),
         publish=None,
-        pricing=Pricing(),
+        spec=_free_spec(),
         reasoning_field=None,
     )
     assert resp.message.text == "I can’t help with that."
@@ -322,7 +347,7 @@ async def test_consume_stream_tool_call_accumulates() -> None:
     resp = await consume_stream(
         _sse_response(events),
         publish=None,
-        pricing=Pricing(),
+        spec=_free_spec(),
         reasoning_field=None,
     )
     assert len(resp.message.tool_calls) == 1
@@ -362,7 +387,7 @@ async def test_consume_stream_reasoning_captured() -> None:
     resp = await consume_stream(
         _sse_response(events),
         publish=_sink,
-        pricing=Pricing(),
+        spec=_free_spec(),
         reasoning_field="reasoning_content",
     )
     assert thinking_chunks == ["think ", "more"]
@@ -381,7 +406,7 @@ async def test_consume_stream_skips_malformed_data() -> None:
     resp = await consume_stream(
         _sse_response_body(body),
         publish=None,
-        pricing=Pricing(),
+        spec=_free_spec(),
         reasoning_field=None,
     )
     assert resp.message.text == "ok"
@@ -398,39 +423,46 @@ async def test_consume_stream_eof_without_done_raises_interrupted() -> None:
         await consume_stream(
             _sse_response_body(body),
             publish=None,
-            pricing=Pricing(request=1.0, response=2.0),
+            spec=_priced_spec(),
             reasoning_field=None,
         )
     response = exc_info.value.response
     assert response.message.text == "partial"
     assert response.message_id == "stream-1"
-    assert response.tokens.input_tokens == 4
-    assert response.tokens.output_tokens == 2
+    assert response.tokens.request == 4
+    assert response.tokens.response == 2
     assert response.total_cost == pytest.approx(0.000008)
+
+
+def _stub_limits(request: int) -> Limits:
+    return Limits(
+        max_request_tokens=request,
+        max_response_tokens=200,
+        max_request_bytes=20 * 1024 * 1024,
+        max_image_edge_px=2048,
+        max_image_bytes=20 * 1024 * 1024,
+    )
 
 
 class _DummyProvider(OpenAICompat):
     DEFAULT_MODEL: ClassVar[str] = "stub-1"
     ENV_VAR: ClassVar[str] = "DUMMY_PROV_KEY"
     BASE_URL: ClassVar[str] = "https://stub.test/v1"
-    KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
-        "stub-1": ModelProfile(
-            max_request_tokens=1000,
-            max_response_tokens=200,
-            pricing=Pricing(),
-            max_image_dim=2048,
-            max_image_bytes=20 * 1024 * 1024,
-            max_request_bytes=20 * 1024 * 1024,
-        ),
-        "stub-1+1m": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=200,
-            pricing=Pricing(),
-            max_image_dim=2048,
-            max_image_bytes=20 * 1024 * 1024,
-            max_request_bytes=20 * 1024 * 1024,
-        ),
-    }
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = MappingProxyType(
+        {
+            "stub-1": ModelCapability(
+                model_id="stub-1",
+                context_limits=MappingProxyType(
+                    {"": _stub_limits(1000), "+1m": _stub_limits(1_000_000)}
+                ),
+                prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+                # Plain chat-completions: no reasoning knob at all.
+                supported_thinking_efforts=MappingProxyType({}),
+                supported_thinking_budgets=frozenset(),
+                supported_thinking_outputs=frozenset(),
+            )
+        }
+    )
 
 
 def test_provider_from_env_missing_key_raises(monkeypatch: pytest.MonkeyPatch) -> None:

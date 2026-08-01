@@ -13,7 +13,7 @@ from sagent.tools.core import (
     current_agent_var,
     tool_state_var,
 )
-from sagent.types.model import Pricing
+from sagent.types.cost import PriceCatalogProduct, TokenPrice
 from sagent.types.runtime import (
     AssistantMessage,
     Halt,
@@ -28,23 +28,22 @@ from sagent.types.runtime import (
 def test_mock_model_caps_static_flags() -> None:
     """Capability flags expose the documented defaults."""
     m = MockModelCaps()
-    assert m.max_response_tokens == 8_192
+    assert m.spec.context_limits.max_response_tokens == 8_192
     assert m.supports_streaming is True
-    assert m.supports_thinking is False
-    assert m.supports_effort is False
-    assert m.supports_cache_control is False
-    assert m.supports_context_management is False
-    assert m.supports_persistent_retry is False
-    assert m.supports_account_auth is False
-    assert m.max_image_dim == 8_000
-    assert m.max_image_bytes == 5 * 1024 * 1024
+    assert bool(m.spec.supported_thinking_budgets) is False
+    assert bool(m.spec.supported_thinking_efforts) is False
+    assert m.spec.prompt_cache_breakpoints is False
+    assert m.spec.manages_context is False
+    assert m.spec.retries_internally is False
+    assert m.spec.account_auth is False
+    assert m.spec.context_limits.max_image_edge_px == 8_000
+    assert m.spec.context_limits.max_image_bytes == 5 * 1024 * 1024
 
 
 def test_mock_model_caps_pricing_zero() -> None:
-    """Pricing defaults to all-zero."""
+    """Every rate defaults to zero, so mocks never fabricate spend."""
     m = MockModelCaps()
-    assert isinstance(m.pricing, Pricing)
-    assert m.pricing.request == 0.0
+    assert m.spec.prices[PriceCatalogProduct()] == TokenPrice()
 
 
 def test_mock_model_caps_estimate_text() -> None:

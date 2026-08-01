@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import cast
 from unittest.mock import MagicMock, patch
 
@@ -47,7 +48,17 @@ from sagent.repl.run_repl import (
     install_input_queue_committer,
     run_repl,
 )
-from sagent.types.model import ModelSpec
+from sagent.types.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenPrice,
+)
+from sagent.types.model import (
+    Limits,
+    ModelRecipe,
+    ModelSpec,
+    ThinkingEffort,
+)
 from sagent.types.runtime import (
     DETACHED_PLACEHOLDER,
     AgentIdle,
@@ -88,7 +99,7 @@ _DEFAULT_PROV = "Anthropic"
 _DEFAULT_AUTH = "api"
 _DEFAULT_MODEL = "claude-opus-4-7"
 _DEFAULT_ACCOUNT: str | None = None
-_DEFAULT_SPEC = ModelSpec(
+_DEFAULT_SPEC = ModelRecipe(
     provider=_DEFAULT_PROV,
     auth=_DEFAULT_AUTH,
     model_id=_DEFAULT_MODEL,
@@ -98,7 +109,7 @@ _DEFAULT_SPEC = ModelSpec(
 
 def _parse(*tokens: str) -> tuple[str, str, str | None, str] | str:
     """Parse + resolve helper: composes the slash-syntax parser with
-    the Agent's resolver and projects the resolved ``ModelSpec`` back
+    the Agent's resolver and projects the resolved ``ModelRecipe`` back
     into the legacy ``(provider, auth, account, model_id)`` tuple.
     """
     parsed = _parse_model_args(list(tokens))
@@ -348,7 +359,7 @@ def test_provider_switch_uses_last_used_when_known(
 ) -> None:
     """``/model provider=Google`` prefers the last-used Google model over the default.
 
-    The current spec's ``claude-opus-4-7`` is not in ``Google.KNOWN_MODELS``
+    The current spec's ``claude-opus-4-7`` is not in ``Google.CAPABILITIES``
     so cross-provider preservation falls through. With a recorded last-used
     Google model in ``~/.sagent/last-models.json``, the resolver picks
     that up. ``Google.DEFAULT_MODEL`` is the cold-start fallback.
@@ -379,12 +390,24 @@ class _FakeModel:
     _provider: object | None = None
 
     @property
-    def valid_thinking_states(self) -> tuple[str, ...]:
-        return thinking.valid_thinking_states(
-            thinking.ThinkingCapability(
-                supports_thinking=self.supports_thinking,
-                supports_redaction=self.supports_redaction,
+    def spec(self) -> ModelSpec:
+        return ModelSpec(
+            model_id=self.model_id,
+            context_limits=Limits(
+                max_request_tokens=200_000, max_response_tokens=8_192
             ),
+            supported_thinking_efforts=MappingProxyType(
+                {cast("ThinkingEffort", e): e for e in self.valid_efforts}
+            ),
+            supported_thinking_budgets=(
+                frozenset({"auto", "fixed"}) if self.supports_thinking else frozenset()
+            ),
+            supported_thinking_outputs=(
+                frozenset({"text", "redacted"})
+                if self.supports_redaction
+                else frozenset({"text"})
+            ),
+            prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
         )
 
 
@@ -414,16 +437,18 @@ class _RuntimeHolder:
 @dataclass(slots=True, kw_only=True)
 class _FakeAgent:
     model: _FakeModel = field(default_factory=_FakeModel)
-    model_spec: ModelSpec | None = field(
-        default_factory=lambda: ModelSpec(
+    model_recipe: ModelRecipe | None = field(
+        default_factory=lambda: ModelRecipe(
             provider="Anthropic", auth="api", model_id="claude-opus-4-7"
         ),
     )
     runtime: _FakeRuntime = field(default_factory=_FakeRuntime)
     work: object = None
-    swap_calls: list[tuple[_FakeModel, ModelSpec | None]] = field(default_factory=list)
+    swap_calls: list[tuple[_FakeModel, ModelRecipe | None]] = field(
+        default_factory=list
+    )
     change_model_calls: list[dict[str, object]] = field(default_factory=list)
-    change_model_result: ModelSpec | None = None
+    change_model_result: ModelRecipe | None = None
     change_model_side_effect: BaseException | None = None
     relogin_calls: int = 0
     relogin_side_effect: BaseException | None = None
@@ -445,10 +470,10 @@ class _FakeAgent:
         # tested directly in agent_test.py (test_effort_setter_*); this
         # mirror only lets the REPL-adapter tests drive a faithful agent.
         if value is not None:
-            valid = self.model.valid_efforts
+            valid = self.model.spec.supported_thinking_efforts
             if not valid:
                 raise ValueError(
-                    f"Model {self.model.model_id!r} does not support effort."
+                    f"Model {self.model.spec.tagged_model_id!r} does not support effort."
                 )
             if value not in valid:
                 quoted = ", ".join(repr(e) for e in valid)
@@ -473,10 +498,10 @@ class _FakeAgent:
         self.thinking = thinking
         self.show_thinking = show_thinking
 
-    def swap_model(self, model: _FakeModel, *, spec: ModelSpec | None = None) -> None:
+    def swap_model(self, model: _FakeModel, *, spec: ModelRecipe | None = None) -> None:
         self.swap_calls.append((model, spec))
         self.model = model
-        self.model_spec = spec
+        self.model_recipe = spec
 
     def change_model(
         self,
@@ -485,7 +510,7 @@ class _FakeAgent:
         auth: str | None = None,
         model_id: str | None = None,
         account: str | None = None,
-    ) -> ModelSpec:
+    ) -> ModelRecipe:
         """Fake delegate matching ``Agent.change_model``."""
         self.change_model_calls.append(
             {
@@ -499,7 +524,7 @@ class _FakeAgent:
             raise self.change_model_side_effect
         if self.change_model_result is not None:
             return self.change_model_result
-        spec = self.model_spec
+        spec = self.model_recipe
         assert spec is not None
         return dataclasses.replace(
             spec,
@@ -537,7 +562,7 @@ def _as_queue_agent(a: _QueueAgent) -> Agent:
 
 
 def test_do_switch_model_no_spec_writes_error() -> None:
-    agent = _FakeAgent(model_spec=None)
+    agent = _FakeAgent(model_recipe=None)
     printer = RecordingPrinter()
     do_switch_model(_as_agent(agent), "", printer)
     assert any("no model spec" in line for line in printer.slash_blocks)
@@ -597,7 +622,7 @@ def test_do_switch_model_infer_provider_overrides_provider_and_auth() -> None:
     """
     agent = _FakeAgent()
     printer = RecordingPrinter()
-    agent.change_model_result = ModelSpec(
+    agent.change_model_result = ModelRecipe(
         provider="Google", auth="sub", model_id="gemini-3-pro"
     )
     with patch(
@@ -634,7 +659,7 @@ def test_do_switch_model_change_model_error_writes_to_printer() -> None:
 
 def test_do_switch_thinking_full_state_sets_adaptive_show() -> None:
     agent = _FakeAgent(
-        model_spec=ModelSpec(
+        model_recipe=ModelRecipe(
             provider="Anthropic",
             auth="env",
             model_id="claude-opus-4-7",
@@ -650,7 +675,7 @@ def test_do_switch_thinking_full_state_sets_adaptive_show() -> None:
 
 def test_do_switch_thinking_same_state_skips_model_change() -> None:
     agent = _FakeAgent(
-        model_spec=ModelSpec(
+        model_recipe=ModelRecipe(
             provider="Anthropic",
             auth="env",
             model_id="claude-opus-4-7",
@@ -669,7 +694,7 @@ def test_do_switch_thinking_same_state_skips_model_change() -> None:
 
 def test_do_switch_thinking_hide_preserves_adaptive_mode() -> None:
     agent = _FakeAgent(
-        model_spec=ModelSpec(
+        model_recipe=ModelRecipe(
             provider="Anthropic",
             auth="env",
             model_id="claude-opus-4-7",
@@ -686,7 +711,7 @@ def test_do_switch_thinking_hide_preserves_adaptive_mode() -> None:
 
 def test_do_switch_thinking_redact_enables_redaction_and_hides() -> None:
     agent = _FakeAgent(
-        model_spec=ModelSpec(
+        model_recipe=ModelRecipe(
             provider="Anthropic",
             auth="env",
             model_id="claude-opus-4-7",
@@ -731,7 +756,9 @@ def test_do_switch_thinking_show_errors_from_off() -> None:
 def test_do_switch_thinking_no_rebuild_without_provider_support() -> None:
     """A provider without the redact option changes state locally, no rebuild."""
     agent = _FakeAgent(
-        model_spec=ModelSpec(provider="Google", auth="env", model_id="gemini-3-pro"),
+        model_recipe=ModelRecipe(
+            provider="Google", auth="env", model_id="gemini-3-pro"
+        ),
     )
     printer = RecordingPrinter()
     do_switch_thinking(_as_agent(agent), "adaptive-show", printer)
@@ -744,7 +771,9 @@ def test_do_switch_thinking_no_rebuild_without_provider_support() -> None:
 def test_do_switch_thinking_rejects_redact_without_provider_support() -> None:
     agent = _FakeAgent(
         model=_FakeModel(model_id="gemini-3-pro", supports_redaction=False),
-        model_spec=ModelSpec(provider="Google", auth="env", model_id="gemini-3-pro"),
+        model_recipe=ModelRecipe(
+            provider="Google", auth="env", model_id="gemini-3-pro"
+        ),
     )
     printer = RecordingPrinter()
     do_switch_thinking(_as_agent(agent), "redact", printer)
@@ -755,7 +784,7 @@ def test_do_switch_thinking_rejects_redact_without_provider_support() -> None:
 
 def test_do_switch_thinking_rebuild_failure_preserves_state() -> None:
     agent = _FakeAgent(
-        model_spec=ModelSpec(
+        model_recipe=ModelRecipe(
             provider="Anthropic",
             auth="env",
             model_id="claude-opus-4-7",
@@ -824,7 +853,7 @@ def test_do_switch_effort_none_sets_literal_not_clears() -> None:
 def test_do_switch_thinking_bare_lists_state_and_options() -> None:
     """Bare ``/thinking`` prints current state plus provider's valid options."""
     agent = _FakeAgent(
-        model_spec=ModelSpec(
+        model_recipe=ModelRecipe(
             provider="Anthropic", auth="env", model_id="claude-opus-4-7"
         ),
         thinking_state="adaptive-hide",
@@ -842,7 +871,9 @@ def test_do_switch_thinking_bare_options_provider_specific() -> None:
     """A no-redaction provider omits ``redact-hide`` from the listed options."""
     agent = _FakeAgent(
         model=_FakeModel(model_id="gemini-3-pro", supports_redaction=False),
-        model_spec=ModelSpec(provider="Google", auth="env", model_id="gemini-3-pro"),
+        model_recipe=ModelRecipe(
+            provider="Google", auth="env", model_id="gemini-3-pro"
+        ),
     )
     printer = RecordingPrinter()
     do_switch_thinking(_as_agent(agent), "", printer)
@@ -853,7 +884,7 @@ def test_do_switch_thinking_bare_options_provider_specific() -> None:
 
 def test_do_switch_thinking_show_errors_from_redact() -> None:
     agent = _FakeAgent(
-        model_spec=ModelSpec(
+        model_recipe=ModelRecipe(
             provider="Anthropic",
             auth="env",
             model_id="claude-opus-4-7",
@@ -869,7 +900,7 @@ def test_do_switch_thinking_show_errors_from_redact() -> None:
 
 @pytest.mark.asyncio
 async def test_do_login_no_spec_writes_error() -> None:
-    agent = _FakeAgent(model_spec=None)
+    agent = _FakeAgent(model_recipe=None)
     printer = RecordingPrinter()
     await do_login(_as_agent(agent), printer)
     assert any("no model spec" in line for line in printer.slash_blocks)

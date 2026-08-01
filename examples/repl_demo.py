@@ -43,15 +43,8 @@ class _OfflineEcho(MockModelCaps):
 
     max_image_dim: int = 2000
 
-    @property
-    def max_request_tokens(self) -> int:
-        """Maximum request tokens."""
-        return 100_000
-
-    @property
-    def model_id(self) -> str:
-        """Stable identifier for this offline model."""
-        return "offline-echo"
+    model_id: str = "offline-echo"
+    max_request_tokens: int = 100_000
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
         """Echo the last user message in a single buffered response.
@@ -99,7 +92,7 @@ class _OfflineEcho(MockModelCaps):
         text = self._last_user(request)
         return ModelResponse(
             message=AssistantMessage(text=f"echo: {text}"),
-            tokens=TokenCount(input_tokens=len(text), output_tokens=len(text)),
+            tokens=TokenCount(request=len(text), response=len(text)),
             stop_reason="model_finished",
         )
 
@@ -120,7 +113,7 @@ def main() -> None:
         provider = build_provider(args.provider, args.auth, account=args.account)
         model = provider.model(args.model)
 
-    sys.stderr.write(f"{model.model_id}\n")
+    sys.stderr.write(f"{model.spec.tagged_model_id}\n")
 
     agent = Agent(model=model)
     asyncio.run(run_repl(agent))

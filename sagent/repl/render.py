@@ -105,6 +105,14 @@ HALT_MESSAGE_CONTEXT: Final = (
 )
 
 
+_SUSPENSION_REASON_CHARS: Final = 120
+"""Cap on the provider reason in the one-line suspension banner.
+
+An unbounded message wraps across the pane and pushes the resume time
+out of view -- the one thing the banner exists to show.
+"""
+
+
 def service_suspended_text(event: ModelServiceSuspended) -> str:
     """Render concise service-suspension text for parent and child panes.
 
@@ -122,13 +130,21 @@ def service_suspended_text(event: ModelServiceSuspended) -> str:
 
     """
     label = "rate-limited" if event.server_supplied else "temporarily blocked"
+    # The provider's own message is the only thing that distinguishes a
+    # wait worth sitting through from one that never clears (e.g. "Usage
+    # credits are required for fast mode."). Dropping it left the user
+    # watching escalating backoffs with no way to learn why.
+    reason = " ".join(event.error.message.split())
+    if len(reason) > _SUSPENSION_REASON_CHARS:
+        reason = reason[: _SUSPENSION_REASON_CHARS - 1].rstrip() + "\u2026"
+    detail = f"{label}: {reason}" if reason else label
     remaining = event.retry_at - time.time()
     if remaining < 60.0:
         seconds = max(0, round(remaining))
-        return f"[model service suspended: {label}; resumes in {seconds}s]"
+        return f"[model service suspended: {detail}; resumes in {seconds}s]"
     clock = time.strftime("%H:%M:%S", time.localtime(event.retry_at))
     return (
-        f"[model service suspended: {label}; "
+        f"[model service suspended: {detail}; "
         f"resumes at {clock} (in {humanize_duration(remaining)})]"
     )
 

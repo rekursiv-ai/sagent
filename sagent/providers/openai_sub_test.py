@@ -21,7 +21,6 @@ import pytest
 from sagent.agent.retry import is_rate_limited, is_retryable
 from sagent.lib.custom_json import JSONValue
 from sagent.providers import OpenAI, openai_sub
-from sagent.providers.lib.cost import ModelProfile, Pricing
 from sagent.providers.lib.errors import (
     StreamingResponseNotReadError,
     find_response_not_read,
@@ -39,10 +38,21 @@ from sagent.providers.openai_sub import (
     _jwt_exp,
     _jwt_payload,
     _parse_tool_arguments,
-    _subscription_profile,
+    _subscription_limits,
+)
+from sagent.types.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenPrice,
 )
 from sagent.types.exceptions import AuthRefreshError, UserFacingError
-from sagent.types.model import ModelRequest, StreamInterruptedError
+from sagent.types.model import (
+    Limits,
+    ModelCapability,
+    ModelRequest,
+    ModelSpec,
+    StreamInterruptedError,
+)
 from sagent.types.runtime import (
     AssistantMessage,
     BytesMessage,
@@ -52,6 +62,22 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
+
+
+def _free_spec() -> ModelSpec:
+    """A spec whose every rate is zero -- cost is not what these assert."""
+    return ModelSpec(
+        prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+    )
+
+
+def _priced_spec() -> ModelSpec:
+    """$1/Mtok request with the usual 1.25x cache-write multiplier."""
+    return ModelSpec(
+        prices=PriceCatalog(
+            {PriceCatalogProduct(): TokenPrice(request=1.0, cache_write=1.25)}
+        )
+    )
 
 
 # Minimal ``Tool``-shaped stub for the builders (Protocol consumers).
@@ -260,36 +286,43 @@ def _stub_request_messages(
     return ModelRequest(messages=list(items))
 
 
-def test_subscription_profile_clamps_request_tokens() -> None:
-    p = ModelProfile(max_request_tokens=1_000_000, max_response_tokens=1_000_000)
-    clamped = _subscription_profile(p)
+def test_subscription_limits_clamp_request_tokens() -> None:
+    cap = ModelCapability(
+        context_limits=Limits(
+            max_request_tokens=1_000_000, max_response_tokens=1_000_000
+        )
+    )
+    clamped = _subscription_limits(cap)
     # Wire contract is 272_000 / 32_000 -- see openai_sub._SUBSCRIPTION_MAX_*.
     assert clamped.max_request_tokens == 272_000
     assert clamped.max_response_tokens == 32_000
-    assert clamped.pricing == p.pricing
 
 
-def test_subscription_profile_keeps_small_limits() -> None:
-    p = ModelProfile(max_request_tokens=100_000, max_response_tokens=10_000)
-    clamped = _subscription_profile(p)
+def test_subscription_limits_keep_small_windows() -> None:
+    cap = ModelCapability(
+        context_limits=Limits(max_request_tokens=100_000, max_response_tokens=10_000)
+    )
+    clamped = _subscription_limits(cap)
     assert clamped.max_request_tokens == 100_000
     assert clamped.max_response_tokens == 10_000
 
 
-def test_subscription_profile_inherits_size_caps_from_parent() -> None:
+def test_subscription_limits_inherit_size_caps_from_parent() -> None:
     # Only the token windows are subscription-specific; the image/wire byte
     # caps are a property of the underlying model and must flow through
     # unchanged, not be overwritten by a stale local constant. A divergent
-    # parent profile proves inheritance rather than a hardcoded match.
-    p = ModelProfile(
-        max_request_tokens=1_000_000,
-        max_response_tokens=1_000_000,
-        max_image_dim=4096,
-        max_image_bytes=7_000_000,
-        max_request_bytes=33_000_000,
+    # parent capability proves inheritance rather than a hardcoded match.
+    cap = ModelCapability(
+        context_limits=Limits(
+            max_request_tokens=1_000_000,
+            max_response_tokens=1_000_000,
+            max_image_edge_px=4096,
+            max_image_bytes=7_000_000,
+            max_request_bytes=33_000_000,
+        )
     )
-    clamped = _subscription_profile(p)
-    assert clamped.max_image_dim == 4096
+    clamped = _subscription_limits(cap)
+    assert clamped.max_image_edge_px == 4096
     assert clamped.max_image_bytes == 7_000_000
     assert clamped.max_request_bytes == 33_000_000
 
@@ -725,7 +758,7 @@ def test_subscription_default_model_is_openai_default_without_1m() -> None:
     assert OpenAISubscription.DEFAULT_MODEL == "gpt-5.6-sol"
     assert OpenAI.DEFAULT_MODEL == "gpt-5.6-sol+1m"
     # The narrowed default must resolve against the narrowed catalog.
-    assert OpenAISubscription.DEFAULT_MODEL in OpenAISubscription.KNOWN_MODELS
+    assert OpenAISubscription.DEFAULT_MODEL in OpenAISubscription.CAPABILITIES
 
 
 def test_subscription_default_utility_model_inherits_from_openai() -> None:
@@ -755,7 +788,7 @@ def test_subscription_rejects_1m_ids() -> None:
     p = _make_provider()
     with pytest.raises(ValueError, match="Unknown model"):
         _ = p.model("gpt-5.6-sol+1m")
-    assert not any(name.endswith("+1m") for name in OpenAISubscription.KNOWN_MODELS)
+    assert not any(name.endswith("+1m") for name in OpenAISubscription.CAPABILITIES)
 
 
 def test_subscription_model_supports_thinking_via_reasoning_effort() -> None:
@@ -764,33 +797,34 @@ def test_subscription_model_supports_thinking_via_reasoning_effort() -> None:
     assert m.supports_account_auth is True
 
 
-def test_subscription_effort_prefixes_match_api_key_path() -> None:
+def test_subscription_effort_matches_api_key_path() -> None:
     """Both OpenAI transports must agree on which ids are reasoning models.
 
-    The subscription path previously used a bare ``"o"`` prefix, which
-    over-matches ids the API-key ``_OpenAIModel`` rejects (e.g. a future
-    ``omni-*``). The two share one ``KNOWN_MODELS`` catalog, so a divergence is a
-    contract bug. ``omni-foo`` must be a non-effort model on BOTH paths.
+    They share one capability catalog, so a divergence is a contract bug.
+    Prefix guessing (which over-matched a hypothetical ``omni-*``) is gone;
+    an id absent from the catalog is not resolvable on either path.
     """
-    sub = _make_provider().model("gpt-5.5")
-    api = OpenAI.from_key("k").model("gpt-5.5")
+    sub_p = _make_provider()
+    api_p = OpenAI.from_key("k")
     for model_id in ("o1", "o3-mini", "gpt-5.5"):
-        assert sub._is_effort_model(model_id) == api._is_effort_model(model_id)
-    # The over-match the bare "o" prefix introduced -- both must say False.
-    assert sub._is_effort_model("omni-foo") is False
-    assert api._is_effort_model("omni-foo") is False
+        assert sub_p.model(model_id).supports_effort is (
+            api_p.model(model_id).supports_effort
+        )
+    for provider in (sub_p, api_p):
+        with pytest.raises(ValueError, match="Unknown model"):
+            _ = provider.model("omni-foo")
 
 
 def test_subscription_valid_service_tiers_priority_only() -> None:
     # Codex ``/fast`` slash command sets service_tier="priority"; the
     # subscription endpoint accepts no other values.
     m = _make_provider().model("gpt-5.5")
-    assert m.valid_service_tiers == ("priority",)
+    assert m.spec.valid_service_tiers == ("priority",)
 
 
 def test_subscription_valid_latency_modes_fast() -> None:
     m = _make_provider().model("gpt-5.5")
-    assert m.valid_latency_modes == ("fast",)
+    assert m.spec.valid_latency_modes == ("fast",)
 
 
 @pytest.mark.anyio
@@ -953,7 +987,7 @@ async def test_subscription_stream_maps_sagent_max_effort_to_openai_high() -> No
 
 @pytest.mark.parametrize(
     ("effort", "wire_effort"),
-    [("none", "none"), ("xhigh", "xhigh"), ("max", "max")],
+    [("off", "none"), ("xhigh", "xhigh"), ("max", "max")],
 )
 @pytest.mark.anyio
 async def test_subscription_stream_preserves_gpt_56_effort(
@@ -968,15 +1002,15 @@ async def test_subscription_stream_preserves_gpt_56_effort(
 
 
 @pytest.mark.anyio
-async def test_subscription_stream_maps_sagent_none_effort_to_openai_minimal() -> None:
-    """Responses transport funnels through the shared effort mapper.
+async def test_subscription_stream_maps_sagent_off_effort_to_openai_minimal() -> None:
+    """Responses transport reads the wire value from the same catalog.
 
-    Locks the cross-transport contract: ``none`` must map to ``minimal`` here
-    exactly as it does in the chat-completions ``_build_body`` path, so the two
-    OpenAI transports never disagree on the wire vocabulary.
+    Locks the cross-transport contract: ``off`` maps to ``minimal`` here
+    exactly as it does in the chat-completions ``_build_body`` path, so the
+    two OpenAI transports never disagree on the wire vocabulary.
     """
     effort = await _reasoning_effort_for(
-        ModelRequest(messages=[UserMessage(text="hi")], effort="none")
+        ModelRequest(messages=[UserMessage(text="hi")], effort="off")
     )
     assert effort == "minimal"
 
@@ -1521,7 +1555,7 @@ class TestStreamIdleTimeout:
             await asyncio.wait_for(
                 _consume_stream(
                     stream,
-                    pricing=Pricing(),
+                    spec=_free_spec(),
                     publish=None,
                 ),
                 timeout=0.2,
@@ -1553,7 +1587,7 @@ class TestStreamIdleTimeout:
         response = await asyncio.wait_for(
             _consume_stream(
                 stream,
-                pricing=Pricing(),
+                spec=_free_spec(),
                 publish=None,
             ),
             timeout=0.2,
@@ -1575,7 +1609,7 @@ class TestStreamIdleTimeout:
         with pytest.raises(StreamInterruptedError) as raised:
             await _consume_stream(
                 stream,
-                pricing=Pricing(),
+                spec=_free_spec(),
                 publish=None,
             )
 
@@ -1595,7 +1629,7 @@ class TestStreamIdleTimeout:
         with pytest.raises(UserFacingError) as raised:
             await _consume_stream(
                 stream,
-                pricing=Pricing(),
+                spec=_free_spec(),
                 publish=None,
             )
 
@@ -1642,7 +1676,7 @@ class TestStreamIdleTimeout:
 
         stream = _ClosableStream([_ResponseErrorEvent()])
         with pytest.raises(UserFacingError):
-            await _consume_stream(stream, pricing=Pricing(), publish=None)
+            await _consume_stream(stream, spec=_free_spec(), publish=None)
         assert stream.closed, "error-event path leaked the stream (aclose never called)"
 
     @pytest.mark.anyio
@@ -1658,7 +1692,7 @@ class TestStreamIdleTimeout:
         with pytest.raises(UserFacingError) as raised:
             await _consume_stream(
                 stream,
-                pricing=Pricing(),
+                spec=_free_spec(),
                 publish=None,
             )
 
@@ -1689,7 +1723,7 @@ class TestStreamIdleTimeout:
 
         response = await _consume_stream(
             stream,
-            pricing=Pricing(),
+            spec=_free_spec(),
             publish=None,
         )
 
@@ -1716,7 +1750,7 @@ class TestStreamIdleTimeout:
 
         response = await _consume_stream(
             stream,
-            pricing=Pricing(),
+            spec=_free_spec(),
             publish=None,
         )
 
@@ -1742,12 +1776,16 @@ class TestStreamIdleTimeout:
         )
         response = await _consume_stream(
             _DelayedStream([event], delay_sec=0.0),
-            pricing=Pricing(request=1.0, response=6.0, cache_write=1.25),
+            spec=_priced_spec(),
             publish=None,
         )
-        assert response.tokens.input_tokens == 3
-        assert response.tokens.cache_creation_tokens == 1306
-        assert response.input_cost == pytest.approx((3 + 1306 * 1.25) / 1_000_000)
+        assert response.tokens.request == 3
+        assert response.tokens.cache_write == 1306
+        assert (
+            response.spend.request
+            + response.spend.cache_write
+            + response.spend.cache_read
+        ) == pytest.approx((3 + 1306 * 1.25) / 1_000_000)
 
     @pytest.mark.anyio
     async def test_stream_preserves_and_replays_encrypted_reasoning(
@@ -1766,7 +1804,7 @@ class TestStreamIdleTimeout:
                 [_ReasoningOutputDoneEvent(), _CompletedEvent()],
                 delay_sec=0.0,
             ),
-            pricing=Pricing(),
+            spec=_priced_spec(),
             publish=None,
         )
         encrypted = next(
@@ -1805,7 +1843,7 @@ class TestStreamIdleTimeout:
                 ],
                 delay_sec=0.0,
             ),
-            pricing=Pricing(),
+            spec=_priced_spec(),
             publish=None,
         )
         assert response.message.text == "I can’t help with that."
@@ -1849,7 +1887,7 @@ class TestStreamIdleTimeout:
 
         response = await _consume_stream(
             stream,
-            pricing=Pricing(),
+            spec=_priced_spec(),
             publish=_sink,
         )
 
@@ -1865,7 +1903,7 @@ class TestStreamIdleTimeout:
         task = asyncio.create_task(
             _consume_stream(
                 stream,
-                pricing=Pricing(),
+                spec=_priced_spec(),
                 publish=None,
             ),
         )
@@ -1987,3 +2025,11 @@ if __name__ == "__main__":
     from sagent.lib.testing.main import test_main
 
     test_main(__file__)
+
+
+def test_subscription_rejects_unmappable_effort_rather_than_billing_high() -> None:
+    """An unknown effort must raise, not silently run at the priciest level."""
+    m = _make_provider().model("gpt-5.5")
+    req = ModelRequest(messages=[UserMessage(text="x")], effort="bogus")
+    with pytest.raises(ValueError, match="Unknown effort"):
+        _ = m._reasoning_effort(req)

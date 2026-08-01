@@ -41,7 +41,8 @@ from wrapt import lazy_import
 from sagent.agent.context import resolve_context
 from sagent.agent.state import ReadCacheEntry, ToolState
 from sagent.lib.custom_json import float_val, int_val
-from sagent.types.model import Model, ModelSpec, TokenCount
+from sagent.types.cost import TokenCost
+from sagent.types.model import Model, ModelRecipe, TokenCount
 from sagent.types.providers import ProviderOptions
 from sagent.types.runtime import (
     CANCELLED_PLACEHOLDER,
@@ -767,6 +768,19 @@ def restore_tool_state(state: ToolState, snapshot: Mapping[str, object]) -> None
         )
 
 
+def _spend_from_json(raw: object) -> TokenCost:
+    """Decode the per-bucket spend block."""
+    if not isinstance(raw, Mapping):
+        return TokenCost()
+    buckets = cast(Mapping[str, object], raw)
+    return TokenCost(
+        request=float_val(buckets.get("request"), 0.0),
+        response=float_val(buckets.get("response"), 0.0),
+        cache_write=float_val(buckets.get("cache_write"), 0.0),
+        cache_read=float_val(buckets.get("cache_read"), 0.0),
+    )
+
+
 @dataclasses.dataclass(slots=True, kw_only=True)
 class SessionMeta:
     """Session-level metadata persisted in ``kind: meta`` records."""
@@ -795,8 +809,8 @@ class SessionMeta:
     tokens: TokenCount = dataclasses.field(default_factory=TokenCount)
     """Aggregate token counts across the session."""
 
-    total_cost_usd: float = 0.0
-    """Running cost in USD."""
+    spend: TokenCost = dataclasses.field(default_factory=TokenCost)
+    """Running cost in USD, per token bucket."""
 
     num_tool_call_rounds: int = 0
     """Count of completed tool-call rounds."""
@@ -829,12 +843,17 @@ class SessionMeta:
             "name": self.name,
             "status": self.status,
             "tokens": {
-                "input_tokens": self.tokens.input_tokens,
-                "output_tokens": self.tokens.output_tokens,
-                "cache_creation_tokens": self.tokens.cache_creation_tokens,
-                "cache_read_tokens": self.tokens.cache_read_tokens,
+                "input_tokens": self.tokens.request,
+                "output_tokens": self.tokens.response,
+                "cache_creation_tokens": self.tokens.cache_write,
+                "cache_read_tokens": self.tokens.cache_read,
             },
-            "total_cost_usd": self.total_cost_usd,
+            "spend": {
+                "request": self.spend.request,
+                "response": self.spend.response,
+                "cache_write": self.spend.cache_write,
+                "cache_read": self.spend.cache_read,
+            },
             "num_tool_call_rounds": self.num_tool_call_rounds,
             "compact_count": self.compact_count,
             "bash_cwd": self.bash_cwd,
@@ -867,12 +886,12 @@ class SessionMeta:
             name=str(d.get("name") or ""),
             status=str(d.get("status") or ""),
             tokens=TokenCount(
-                input_tokens=int_val(tokens_d.get("input_tokens"), 0),
-                output_tokens=int_val(tokens_d.get("output_tokens"), 0),
-                cache_creation_tokens=int_val(tokens_d.get("cache_creation_tokens"), 0),
-                cache_read_tokens=int_val(tokens_d.get("cache_read_tokens"), 0),
+                request=int_val(tokens_d.get("input_tokens"), 0),
+                response=int_val(tokens_d.get("output_tokens"), 0),
+                cache_write=int_val(tokens_d.get("cache_creation_tokens"), 0),
+                cache_read=int_val(tokens_d.get("cache_read_tokens"), 0),
             ),
-            total_cost_usd=float_val(d.get("total_cost_usd"), 0.0),
+            spend=_spend_from_json(d.get("spend")),
             num_tool_call_rounds=int_val(d.get("num_tool_call_rounds"), 0),
             compact_count=int_val(d.get("compact_count"), 0),
             bash_cwd=str(d.get("bash_cwd") or ""),
@@ -1163,7 +1182,7 @@ def append_persistent_agent_lifecycle(
     """Append one parent-side persistent-agent lifecycle record."""
     if parent_agent.session_dir is None:
         return
-    spec = child.model_spec
+    spec = child.model_recipe
     append_session(
         parent_agent.session_dir / "session.jsonl",
         persistent_agents=[
@@ -1175,7 +1194,7 @@ def append_persistent_agent_lifecycle(
                 provider=spec.provider if spec else type(child.model).__name__,
                 auth=spec.auth if spec else "",
                 account=spec.account if spec else None,
-                model_id=child.model.model_id,
+                model_id=child.model.spec.tagged_model_id,
                 tools=tuple(tool.name for tool in child.tools),
                 system=child.base_system_spec,
                 notify_on_asleep=notify_on_asleep,
@@ -1318,17 +1337,17 @@ def install_session_persistence(agent: Agent, session_dir: Path) -> Callable[[],
         write_meta = tape_delta or status_changed or not meta_written
         tool_state = serialize_tool_state(agent.tool_state)
         write_tool_state = tool_state != last_tool_state
-        spec = agent.model_spec
+        spec = agent.model_recipe
         meta = SessionMeta(
             session_id=agent.session_id,
-            model_id=agent.model.model_id,
+            model_id=agent.model.spec.tagged_model_id,
             provider=spec.provider if spec else "",
             auth=spec.auth if spec else "",
             account=(spec.account or "") if spec else "",
             name=agent.name,
             status=agent.status,
             tokens=agent.total_tokens,
-            total_cost_usd=agent.total_cost_usd,
+            spend=agent.cost_tracker.spend,
             num_tool_call_rounds=agent.num_tool_call_rounds,
             compact_count=agent.compaction_state.compact_count,
             bash_cwd=agent.tool_state.bash_cwd,
@@ -1448,7 +1467,6 @@ def load_persistent_agents(session_dir: Path) -> list[PersistentAgentRecord]:
 
 def load_session(
     session_dir: Path,
-    defaults: dict[str, object],
 ) -> tuple[SessionMeta, list[TapeRecord], ToolState] | None:
     """Load the most recent state from ``session.jsonl``.
 
@@ -1468,14 +1486,12 @@ def load_session(
 
     Args:
       session_dir: Directory containing ``session.jsonl``.
-      defaults: Reserved; currently unused (kept for call-site stability).
 
     Returns:
       loaded: ``(meta, tape, tool_state)`` on success, or ``None`` if
           the session file is missing or unreadable.
 
     """
-    del defaults
     session_file = session_dir / "session.jsonl"
     if not session_file.exists():
         return None
@@ -1790,7 +1806,7 @@ def _preserve_corrupt_session(session_file: Path) -> None:
 
 def restore_model(
     meta: SessionMeta,
-) -> tuple[Model, ModelSpec] | None:
+) -> tuple[Model, ModelRecipe] | None:
     """Rebuild model + spec from persisted ``provider``/``auth``/``model_id``.
 
     Args:
@@ -1808,10 +1824,10 @@ def restore_model(
             meta.provider, meta.auth, account=meta.account or None
         )
         model = provider.model(meta.model_id)
-        spec = ModelSpec(
+        spec = ModelRecipe(
             provider=meta.provider,
             auth=meta.auth,
-            model_id=model.model_id,
+            model_id=model.spec.tagged_model_id,
             account=meta.account or None,
         )
         logger.info("Restored model %s/%s", meta.provider, meta.model_id)

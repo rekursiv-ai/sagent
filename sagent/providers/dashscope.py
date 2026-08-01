@@ -20,15 +20,20 @@ switch behavior (mapped to ``enable_thinking`` in the body).
 
 from __future__ import annotations
 
-from typing import ClassVar, Final, override
+from collections.abc import Mapping
+from typing import ClassVar, cast, override
 
 from sagent.lib.custom_json import MutableJSON
-from sagent.providers.lib.cost import ModelProfile, Pricing
+from sagent.providers import dashscope_catalog
 from sagent.providers.openai_compat import (
     OpenAICompat,
     OpenAICompatModel,
 )
-from sagent.types.model import ModelRequest
+from sagent.types.model import (
+    ModelCapability,
+    ModelRequest,
+    ThinkingEffort,
+)
 
 
 # Non-reasoning variants that share a thinking prefix but reject the
@@ -88,38 +93,26 @@ class _DashScopeModel(OpenAICompatModel):
         discard the level entirely.
         """
         body.pop("reasoning_effort", None)
-        # Gate on the SAME predicate ``supports_effort`` exposes: a model that is
-        # not an effort model (no thinking prefix, or a non-reasoning
-        # ``-instruct``/``-coder`` variant, or one with no prefix at all like
-        # ``qwen-turbo``) must never receive ``enable_thinking``/``thinking_budget``.
-        # Using one predicate keeps this wire-side guard from drifting away from
-        # ``_is_effort_model``.
-        if not self._is_effort_model(self._model_id):
+        # A row that advertises no effort is claiming the model REJECTS the
+        # knob (the ``-instruct`` / ``-coder`` / ``-turbo`` ids); never send one.
+        if request.effort is None or not self.spec.supported_thinking_efforts:
             return body
-        effort = request.effort
-        if effort is not None:
-            body["enable_thinking"] = effort != "none"
-            # Map sagent's effort levels onto Qwen's ``thinking_budget`` (max
-            # reasoning tokens). ``none`` is absent: it toggles
-            # ``enable_thinking=False`` instead, so no budget applies. Mirrors
-            # Google's per-level budget table so the effort knob drives
-            # reasoning depth rather than collapsing to an on/off bool.
-            budget = {
-                "minimal": 1_024,
-                "low": 4_096,
-                "medium": 8_192,
-                "high": 16_384,
-                "xhigh": 24_576,
-                "max": 32_768,
-            }.get(effort)
-            if budget is not None:
-                body["thinking_budget"] = budget
-        # The *-thinking suffix models are always-on reasoning: they reject the
-        # ``enable_thinking`` toggle, and forwarding a ``thinking_budget`` they
-        # may not accept is the same wire hazard -- drop both knobs.
-        if self._model_id.endswith(("-thinking", "-thinking-2507")):
-            body.pop("enable_thinking", None)
-            body.pop("thinking_budget", None)
+        # The catalog holds the wire budget as data. An inline ladder here
+        # drifted from it -- ``xhigh`` billed 24_576 reasoning tokens where
+        # the row (and the UI reading it) said 20_480.
+        budget = self.spec.supported_thinking_efforts.get(
+            cast("ThinkingEffort", request.effort)
+        )
+        if budget is None:
+            valid = ", ".join(self.spec.supported_thinking_efforts)
+            raise ValueError(
+                f"Unknown effort {request.effort!r} for {self._model_id}."
+                f" Valid efforts: {valid}",
+            )
+        # Qwen spells "no reasoning" as a toggle, not a zero budget.
+        body["enable_thinking"] = budget != "0"
+        if budget != "0":
+            body["thinking_budget"] = int(budget)
         return body
 
 
@@ -129,9 +122,6 @@ class _DashScopeModel(OpenAICompatModel):
 # request-body byte ceiling. Use the 0=unlimited sentinel rather than borrowing
 # OpenAI's caps (verified Jun 2026;
 # https://www.alibabacloud.com/help/en/model-studio/vision).
-_IMAGE_DIM: Final = 0
-_IMAGE_BYTES: Final = 0
-_REQUEST_BYTES: Final = 0
 
 
 class DashScope(OpenAICompat):
@@ -148,127 +138,7 @@ class DashScope(OpenAICompat):
     #
     # To add a new model: check the Alibaba Cloud Model Studio docs
     # for context window and max output tokens.
-    KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
-        "qwen3.6-max-preview": ModelProfile(
-            max_request_tokens=262_144,
-            max_response_tokens=65_536,
-            pricing=Pricing(
-                request=1.60,
-                response=6.40,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "qwen3.6-plus": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=65_536,
-            pricing=Pricing(
-                request=0.50,
-                response=3.00,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "qwen3.6-flash": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=65_536,
-            pricing=Pricing(
-                request=0.05,
-                response=0.20,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "qwen3-235b-a22b-instruct-2507": ModelProfile(
-            max_request_tokens=262_144,
-            max_response_tokens=65_536,
-            pricing=Pricing(
-                request=0.70,
-                response=2.80,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "qwen3-235b-a22b-thinking-2507": ModelProfile(
-            max_request_tokens=262_144,
-            max_response_tokens=32_768,
-            pricing=Pricing(
-                request=0.70,
-                response=8.40,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "qwen3-30b-a3b-instruct-2507": ModelProfile(
-            max_request_tokens=262_144,
-            max_response_tokens=65_536,
-            pricing=Pricing(
-                request=0.20,
-                response=0.80,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "qwen3-32b": ModelProfile(
-            max_request_tokens=262_144,
-            max_response_tokens=65_536,
-            pricing=Pricing(
-                request=0.40,
-                response=1.20,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "qwen3-coder-480b-a35b-instruct": ModelProfile(
-            max_request_tokens=262_144,
-            max_response_tokens=65_536,
-            pricing=Pricing(
-                request=1.00,
-                response=5.00,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "qwen-plus": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=32_768,
-            pricing=Pricing(
-                request=0.40,
-                response=1.20,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "qwen-max": ModelProfile(
-            max_request_tokens=262_144,
-            max_response_tokens=65_536,
-            pricing=Pricing(
-                request=1.60,
-                response=6.40,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "qwen-turbo": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=32_768,
-            pricing=Pricing(
-                request=0.05,
-                response=0.20,
-            ),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-    }
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = dashscope_catalog.MODELS
+    """Per-model capability; transport limits live on ``TRANSPORT``."""
+
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _DashScopeModel

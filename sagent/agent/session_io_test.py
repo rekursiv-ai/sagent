@@ -42,10 +42,16 @@ from sagent.agent.session_io import (
     unpersisted_session_error,
 )
 from sagent.tools.core import ReadCacheEntry, ToolState
+from sagent.types.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenPrice,
+)
 from sagent.types.model import (
+    Limits,
     ModelRequest,
     ModelResponse,
-    Pricing,
+    ModelSpec,
     UsageSnapshot,
 )
 from sagent.types.providers import ProviderOptions
@@ -96,8 +102,8 @@ class _NoopModel:
     supports_effort: bool = False
     valid_efforts: tuple[str, ...] = ()
     supports_cache_control: bool = False
-    valid_service_tiers: tuple[str, ...] = ()
-    valid_latency_modes: tuple[str, ...] = ()
+    service_tiers: tuple[str, ...] = ()
+    latency_modes: tuple[str, ...] = ()
     supports_context_management: bool = False
     supports_persistent_retry: bool = False
     supports_account_auth: bool = False
@@ -106,8 +112,15 @@ class _NoopModel:
     max_request_bytes: int = 32 * 1024 * 1024
 
     @property
-    def pricing(self) -> Pricing:
-        return Pricing()
+    def spec(self) -> ModelSpec:
+        return ModelSpec(
+            model_id=self.model_id,
+            context_limits=Limits(
+                max_request_tokens=self.max_request_tokens,
+                max_response_tokens=self.max_response_tokens,
+            ),
+            prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+        )
 
     def approx_text_tokens(self, text: str) -> int:
         return max(1, len(text) // 4)
@@ -210,7 +223,7 @@ def _round_trip_history(
         meta=meta.serialize(),
         tape_delta=_records_from(entries),
     )
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     _, tape, _ = loaded
     return _history_from_tape(tape)
@@ -291,7 +304,7 @@ def test_tool_result_splice_update_persists_through_reload(tmp_path: Path) -> No
     append_session(session_file, tape_delta=[splice])
 
     # Step 3: reload + resolve and assert the spliced content wins.
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     _, tape, _ = loaded
     messages = resolve_context(tape).messages
@@ -477,7 +490,7 @@ def test_is_barrier_splice_is_session_scoped() -> None:
 
 
 def test_load_session_missing_returns_none(tmp_path: Path) -> None:
-    assert load_session(tmp_path, {}) is None
+    assert load_session(tmp_path) is None
 
 
 def test_append_context_repair_masks_current_view(tmp_path: Path) -> None:
@@ -498,7 +511,7 @@ def test_append_context_repair_masks_current_view(tmp_path: Path) -> None:
         tool_state_snapshot=serialize_tool_state(state),
     )
 
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     _, tape, _ = loaded
     assert (
@@ -517,7 +530,7 @@ def test_append_context_repair_masks_current_view(tmp_path: Path) -> None:
         strategy="manual_repair",
     )
 
-    loaded_after = load_session(tmp_path, {})
+    loaded_after = load_session(tmp_path)
     assert loaded_after is not None
     _, repaired_tape, repaired_state = loaded_after
     messages = resolve_context(repaired_tape).messages
@@ -555,7 +568,7 @@ def test_clear_barrier_drops_prior_history(tmp_path: Path) -> None:
         session_file,
         tape_delta=[ReferrableTapeEvent(ref=new_ref, event=UserMessage(text="new"))],
     )
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     _, tape, _ = loaded
     history = _history_from_tape(tape)
@@ -573,7 +586,7 @@ def test_meta_latest_wins(tmp_path: Path) -> None:
         session_file,
         meta=SessionMeta(session_id="new", model_id="m").serialize(),
     )
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     meta, _, _ = loaded
     assert meta.session_id == "new"
@@ -599,7 +612,7 @@ def test_tool_state_post_clear_wins(tmp_path: Path) -> None:
         ],
     )
     append_session(session_file, tool_state_snapshot=serialize_tool_state(s2))
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     _, _, state = loaded
     assert state.bash_cwd == "/new"
@@ -697,7 +710,7 @@ def test_append_session_crash_during_write_preserves_prior_state(
     # Prior records are byte-for-byte intact; only an unterminated tail
     # was appended, and the loader recovers the prior committed state.
     assert session_file.read_bytes().startswith(prior_bytes)
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     meta, tape, _ = loaded
     assert meta.model_id == "m"
@@ -726,7 +739,7 @@ def test_load_session_orders_loaded_tape_by_ordinal(tmp_path: Path) -> None:
         },
     )
 
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     _, tape, _ = loaded
     assert [record.ref.ordinal for record in tape] == [0, 1, 2]
@@ -773,7 +786,7 @@ def test_legacy_override_with_gap_preserves_unmasked_ref(tmp_path: Path) -> None
         },
     )
 
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
 
     assert loaded is not None
     _, tape, _ = loaded
@@ -861,7 +874,7 @@ async def test_load_session_with_repair_preserves_meta_bash_cwd(
         ],
     )
 
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
 
     assert loaded is not None
     _, tape, state = loaded
@@ -899,7 +912,7 @@ def test_out_of_order_barrier_resets_prior_tool_state(tmp_path: Path) -> None:
         },
     )
 
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     _, _, state = loaded
     assert state.invoked_skills == set()
@@ -925,7 +938,7 @@ def test_load_session_dangling_repair_resets_prior_tool_state(tmp_path: Path) ->
         tool_state_snapshot=serialize_tool_state(state),
     )
 
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     _, tape, repaired_state = loaded
     validate_context(resolve_context(tape).messages)
@@ -967,7 +980,7 @@ def test_load_session_repairs_orphan_tool_result(tmp_path: Path) -> None:
             ),
         ],
     )
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     _, tape, _ = loaded
     resolved = resolve_context(tape).messages
@@ -1020,7 +1033,7 @@ def test_load_session_repairs_orphan_tool_result_from_splice_payload(
         ],
     )
 
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     _, tape, _ = loaded
     resolved = resolve_context(tape).messages
@@ -1106,7 +1119,7 @@ def test_append_session_writes_model_service_suspended_event(tmp_path: Path) -> 
 def test_load_session_decodes_model_service_suspended_event(tmp_path: Path) -> None:
     append_session(tmp_path / "session.jsonl", runtime_events=[_service_suspended()])
 
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
 
     assert loaded is not None
     meta, _, _ = loaded
@@ -1118,7 +1131,7 @@ def test_model_service_suspended_account_none_round_trips(tmp_path: Path) -> Non
         tmp_path / "session.jsonl", runtime_events=[_service_suspended(None)]
     )
 
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
 
     assert loaded is not None
     meta, _, _ = loaded
@@ -1163,7 +1176,7 @@ def test_append_session_writes_notice_message_event(tmp_path: Path) -> None:
 def test_load_session_decodes_notice_message_event(tmp_path: Path) -> None:
     append_session(tmp_path / "session.jsonl", runtime_events=[_notice()])
 
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
 
     assert loaded is not None
     meta, _, _ = loaded
@@ -1174,7 +1187,7 @@ def test_notice_message_without_error_round_trips(tmp_path: Path) -> None:
     notice = NoticeMessage(text="[heads up]", tier="advisory")
     append_session(tmp_path / "session.jsonl", runtime_events=[notice])
 
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
 
     assert loaded is not None
     meta, _, _ = loaded
@@ -1449,7 +1462,7 @@ def test_load_session_skips_unknown_history_type(tmp_path: Path) -> None:
         {"kind": "history", "type": "mystery", "text": "x"},
     )
 
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     _, tape, _ = loaded
     history = _history_from_tape(tape)
@@ -1475,7 +1488,7 @@ def test_load_session_drops_attachment_with_bad_mime_or_data(tmp_path: Path) -> 
             ],
         },
     )
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     _, tape, _ = loaded
     history = _history_from_tape(tape)
@@ -1506,7 +1519,7 @@ def test_load_session_drops_attachment_with_unknown_mime_prefix(
             ],
         },
     )
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     _, tape, _ = loaded
     entry = _history_from_tape(tape)[0]
@@ -1550,7 +1563,7 @@ def test_repair_dangling_tape_handles_legacy_consecutive_assistants(
             },
         ),
     )
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     _, tape, _ = loaded
     history = _history_from_tape(tape)
@@ -1593,7 +1606,7 @@ def test_repair_dangling_tape_handles_legacy_duplicate_tool_call_id(
             },
         ),
     )
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
 
 
@@ -1636,7 +1649,7 @@ def test_load_session_drops_non_list_attachments_and_thinking(
             "thinking_blocks": "not-a-list",
         },
     )
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     _, tape, _ = loaded
     history = _history_from_tape(tape)
@@ -1660,7 +1673,7 @@ def test_load_session_drops_non_dict_tool_calls(tmp_path: Path) -> None:
         "tool_calls": [bad_tc, good_tc],
     }
     _write_jsonl(session_file, record)
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     _, tape, _ = loaded
     history = _history_from_tape(tape)
@@ -1682,7 +1695,7 @@ def test_load_session_skips_blank_lines_and_non_dict_records(tmp_path: Path) -> 
             json.dumps({"kind": "history", "type": "user", "text": "hi"}) + "\n"
         )
 
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     _, tape, _ = loaded
     history = _history_from_tape(tape)
@@ -1702,7 +1715,7 @@ def test_load_session_preserves_and_skips_corrupt_lines(tmp_path: Path) -> None:
             json.dumps({"kind": "history", "type": "user", "text": "after"}) + "\n"
         )
 
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     _, tape, _ = loaded
     history = _history_from_tape(tape)
@@ -1725,7 +1738,7 @@ def test_load_session_returns_none_when_file_unreadable(tmp_path: Path) -> None:
         raise OSError("permission denied")
 
     with patch.object(Path, "open", _boom):
-        assert load_session(tmp_path, {}) is None
+        assert load_session(tmp_path) is None
 
 
 def test_load_session_uses_meta_bash_cwd_when_no_snapshot(tmp_path: Path) -> None:
@@ -1735,7 +1748,7 @@ def test_load_session_uses_meta_bash_cwd_when_no_snapshot(tmp_path: Path) -> Non
         session_file,
         meta=SessionMeta(session_id="x", bash_cwd="/from/meta").serialize(),
     )
-    loaded = load_session(tmp_path, {})
+    loaded = load_session(tmp_path)
     assert loaded is not None
     _, _, state = loaded
     assert state.bash_cwd == "/from/meta"
@@ -1805,7 +1818,7 @@ def test_restore_model_success_path() -> None:
     """A working provider builds a model and spec."""
 
     class _FakeModel:
-        model_id: str = "fake-m"
+        spec: ModelSpec = ModelSpec(model_id="fake-m")
 
     class _FakeProvider:
         def model(self, model_id: str) -> _FakeModel:

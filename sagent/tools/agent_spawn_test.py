@@ -39,7 +39,11 @@ from sagent.tools.core import (
     max_depth_var,
     tool_state_var,
 )
-from sagent.types.model import ModelRequest, ModelResponse, ModelSpec
+from sagent.types.model import (
+    ModelRecipe,
+    ModelRequest,
+    ModelResponse,
+)
 from sagent.types.runtime import (
     AgentIdle,
     AgentSendMessage,
@@ -514,9 +518,9 @@ async def test_run_unknown_tool_name_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_missing_model_spec_when_asking_for_change() -> None:
+async def test_run_missing_model_recipe_when_asking_for_change() -> None:
     parent = _make_parent()
-    parent.model_spec = None
+    parent.model_recipe = None
     with _parent_context(parent):
         t = AgentSpawn()
         # LLM asks for a partial model change, parent has no spec to
@@ -646,11 +650,11 @@ def test_resolve_model_rebuilds_fresh_transport_when_spec_matches() -> None:
     MUST rebuild via ``build_provider(...).model(...)`` so each child owns
     an independent transport.
     """
-    spec = ModelSpec(provider="StubP", auth="env", model_id="stub", account=None)
+    spec = ModelRecipe(provider="StubP", auth="env", model_id="stub", account=None)
     parent = Agent(
         model=StubProviderModel(model_id="stub"),
         tools=[],
-        model_spec=spec,
+        model_recipe=spec,
     )
     fake_provider = MagicMock()
     fake_provider.model.side_effect = _stub_provider_model
@@ -680,11 +684,11 @@ def test_resolve_model_each_child_gets_distinct_transport() -> None:
     independent so N children run concurrently on N processes rather than
     serializing through one.
     """
-    spec = ModelSpec(provider="StubP", auth="env", model_id="stub", account=None)
+    spec = ModelRecipe(provider="StubP", auth="env", model_id="stub", account=None)
     parent = Agent(
         model=StubProviderModel(model_id="stub"),
         tools=[],
-        model_spec=spec,
+        model_recipe=spec,
     )
     fake_provider = MagicMock()
     fake_provider.model.side_effect = _stub_provider_model
@@ -711,12 +715,12 @@ def test_resolve_model_each_child_gets_distinct_transport() -> None:
 def test_resolve_model_no_spec_falls_back_to_parent_model() -> None:
     """A spec-less parent (test harness / raw-Model inject) can't rebuild.
 
-    Without a ``model_spec`` there is nothing to hand ``build_provider``,
+    Without a ``model_recipe`` there is nothing to hand ``build_provider``,
     so aliasing ``parent.model`` is the only option and is correct here --
     the reuse hazard only exists when a rebuildable spec is present.
     """
-    parent = _make_parent()  # constructed with no model_spec
-    assert parent.model_spec is None
+    parent = _make_parent()  # constructed with no model_recipe
+    assert parent.model_recipe is None
     t = AgentSpawn()
     resolved = t._resolve_model(
         provider=None,
@@ -734,7 +738,7 @@ def test_resolve_model_no_spec_falls_back_to_parent_model() -> None:
 class _FastModel(StubProviderModel):
     """Stub model advertising a fast latency path."""
 
-    valid_latency_modes: tuple[str, ...] = ("fast",)
+    latency_modes: tuple[str, ...] = ("fast",)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -791,7 +795,7 @@ async def test_run_redirects_latency_option_to_fast_model_tag() -> None:
 
 def test_resolve_model_provider_change_without_auth_uses_target_default() -> None:
     parent = _make_parent()
-    parent.model_spec = ModelSpec(
+    parent.model_recipe = ModelRecipe(
         provider="OpenAISubscription",
         auth="credentials",
         model_id="gpt-5.5",
@@ -812,7 +816,7 @@ def test_resolve_model_provider_change_without_auth_uses_target_default() -> Non
         )
     assert isinstance(resolved, tuple)
     _, spec = resolved
-    assert spec == ModelSpec(
+    assert spec == ModelRecipe(
         provider="Google",
         auth="env",
         model_id="gemini-3-pro",
@@ -823,7 +827,7 @@ def test_resolve_model_provider_change_without_auth_uses_target_default() -> Non
 
 def test_resolve_model_rejects_empty_account() -> None:
     parent = _make_parent()
-    parent.model_spec = ModelSpec(
+    parent.model_recipe = ModelRecipe(
         provider="OpenAISubscription",
         auth="credentials",
         model_id="gpt-5.5",
@@ -1457,7 +1461,7 @@ async def test_persistent_spawn_writes_parent_lifecycle_record(tmp_path: Path) -
             model_id="gpt-5.5",
             responses=[AssistantMessage(text="done")],
         ),
-        model_spec=ModelSpec(
+        model_recipe=ModelRecipe(
             provider="OpenAISubscription",
             auth="credentials",
             model_id="gpt-5.5",
@@ -1789,12 +1793,12 @@ def test_resolve_model_parent_provider_always_allowed() -> None:
     in the allow list -- inheritance must keep working. The child gets a
     FRESH transport built from the inherited spec, never the parent's alias.
     """
-    spec = ModelSpec(provider="StubP", auth="env", model_id="stub", account=None)
+    spec = ModelRecipe(provider="StubP", auth="env", model_id="stub", account=None)
     parent_model = StubProviderModel(model_id="stub")
     parent = Agent(
         model=parent_model,
         tools=[],
-        model_spec=spec,
+        model_recipe=spec,
     )
     fake_provider = MagicMock()
     fake_provider.model.side_effect = _stub_provider_model

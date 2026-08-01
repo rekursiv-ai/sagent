@@ -981,8 +981,8 @@ class _OverrideAware(MockModelCaps):
 
 def test_override_aware_constructs_cleanly() -> None:
     m = _OverrideAware()
-    assert m.model_id == "ov"
-    assert m.max_request_tokens == 1_000
+    assert m.spec.tagged_model_id == "ov"
+    assert m.spec.context_limits.max_request_tokens == 1_000
 
 
 # --- verify_summary flag --------------------------------------------------

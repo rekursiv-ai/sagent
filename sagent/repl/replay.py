@@ -114,7 +114,7 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
             show_thinking=show_thinking,
         )
     parts = ["resumed", f"{rendered_messages} messages"]
-    cost = float(agent.total_cost_usd)
+    cost = agent.cost_tracker.spend.total
     if cost > 0:
         parts.append(f"${cost:.2f}")
     parts.extend(_mode_parts(agent))
@@ -124,7 +124,7 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
 def _mode_parts(agent: Agent) -> list[str]:
     """Return model and non-default mode fragments for the resume footer."""
     parts: list[str] = []
-    spec = agent.model_spec
+    spec = agent.model_recipe
     if spec is not None:
         parts.append(f"{spec.provider}/{spec.model_id}")
         parts.append(f"auth={spec.auth}")

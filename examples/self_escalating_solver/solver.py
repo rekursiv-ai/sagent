@@ -35,7 +35,7 @@ import tempfile
 from sagent.agent import Agent
 from sagent.lib.custom_json import JSON, json_freeze
 from sagent.tools import AgentSelf
-from sagent.types.model import Model, ModelSpec
+from sagent.types.model import Model, ModelRecipe
 from sagent.types.runtime import (
     AssistantMessage,
     ToolResult,
@@ -269,12 +269,12 @@ async def run_condition(
     *,
     system_prompt: str,
     allow_upgrade: bool,
-    model_spec: ModelSpec | None = None,
+    model_recipe: ModelRecipe | None = None,
     max_budget: float = 0.50,
 ) -> dict[str, Any]:
     """Run one arm on the task; return a captured, grader-graded result dict.
 
-    ``model`` is a pre-built sagent Model. ``model_spec`` (a ``ModelSpec``) is
+    ``model`` is a pre-built sagent Model. ``model_recipe`` (a ``ModelRecipe``) is
     REQUIRED for the self-mutate arm — it's the recipe AgentSelf swaps from, and
     it's what lets the swap cross providers (Google → Anthropic).
     """
@@ -284,7 +284,7 @@ async def run_condition(
         model=model,
         system=system_prompt,
         tools=tools,
-        model_spec=model_spec,
+        model_recipe=model_recipe,
         name=condition,
         max_budget_usd=max_budget,
     )
@@ -295,7 +295,7 @@ async def run_condition(
     except Exception as e:
         err = f"{type(e).__name__}: {str(e)[:100]}"
 
-    timeline = _build_timeline(agent.history, tool, model.model_id)
+    timeline = _build_timeline(agent.history, tool, model.spec.tagged_model_id)
     swaps = [s for s in timeline if s["kind"] == "swap"]
     verdicts = [c["verdict"] for c in tool.calls if c["verdict"]]
     first_verdict = verdicts[0] if verdicts else None
@@ -309,7 +309,7 @@ async def run_condition(
     )
     return {
         "condition": condition,
-        "models": [model.model_id] + [s["to"] for s in swaps],
+        "models": [model.spec.tagged_model_id] + [s["to"] for s in swaps],
         "timeline": timeline,
         "n_runs": len(tool.calls),
         "n_checks": len(verdicts),
@@ -318,6 +318,6 @@ async def run_condition(
         "final_verdict": final_verdict,
         "correct": correct,
         "self_report": self_report,  # kept only to show fabrication honestly
-        "cost_usd": round(float(agent.total_cost_usd), 5),
+        "cost_usd": round(agent.cost_tracker.spend.total, 5),
         "error": err,
     }

@@ -16,7 +16,8 @@ Usage::
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar, Final, Protocol, cast
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Protocol, cast, override
 
 import asyncio
 import base64
@@ -48,13 +49,10 @@ else:
     AsyncStream = lazy_import("anthropic._streaming", "AsyncStream")
     image_lib = lazy_import("sagent.lib.image")
 
-from sagent.lib import debug_log, token_count
+from sagent import types
+from sagent.lib import debug_log
 from sagent.lib.custom_json import MutableJSON, MutableJSONValue, json_unfreeze
-from sagent.providers.lib.cost import (
-    ModelProfile,
-    Pricing,
-    compute_cost,
-)
+from sagent.providers import anthropic_catalog
 from sagent.providers.lib.errors import (
     StreamingResponseNotReadError,
     error_status_code,
@@ -63,20 +61,21 @@ from sagent.providers.lib.errors import (
     raise_if_request_too_large,
 )
 from sagent.providers.lib.id_remap import IdRemapper
+from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.lib.usage import anthropic_usage
-from sagent.thinking import ThinkingCapability, valid_thinking_states
 from sagent.types.model import (
+    ModelCapability,
     ModelRequest,
     ModelResponse,
+    ModelSpec,
     PromptTooLongError,
     StreamInterruptedError,
+    ThinkingEffort,
     TokenCount,
     UsageSnapshot,
     base_model_id,
-    latency_from_model_id,
     split_model_id,
-    strip_latency_tags,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -255,77 +254,6 @@ def build_context_management(
     return {"edits": edits} if edits else None
 
 
-# Model limits and pricing.
-# Limits & pricing: https://docs.anthropic.com/en/docs/about-claude/models
-# Cross-ref: https://github.com/taylorwilsdon/llm-context-limits
-# Model list: anthropic.Anthropic().models.list()
-#
-# To add a new model: check the Anthropic docs for context window
-# and max output tokens, then add a ModelProfile + pricing entry.
-# Opus 4.8 fast mode is $10/$50 per MTok (2x standard). Opus 4.6 and
-# 4.7 fast mode is $30/$150 per MTok (6x standard). All Opus models
-# share the same standard rate so we keep one base ``_OPUS`` and split
-# only the fast-mode rates. ``_OPUS`` (4.8 fast rates) is also reused by
-# non-fast Opus models (e.g. 4.5); that is safe because billing keys on
-# the server's ``usage.speed=="fast"`` and those models have
-# ``valid_latency_modes=()`` so they never request -- nor are billed --
-# fast.
-# Source: https://docs.anthropic.com/en/docs/build-with-claude/fast-mode
-_OPUS = Pricing(
-    request=5.0,
-    response=25.0,
-    cache_write=6.25,
-    cache_read=0.5,
-    fast_request=10.0,
-    fast_response=50.0,
-)
-_OPUS_FAST_4_6_7 = Pricing(
-    request=5.0,
-    response=25.0,
-    cache_write=6.25,
-    cache_read=0.5,
-    fast_request=30.0,
-    fast_response=150.0,
-)
-_FABLE = Pricing(
-    request=10.0,
-    response=50.0,
-    cache_write=12.5,
-    cache_read=1.0,
-)
-_SONNET = Pricing(
-    request=3.0,
-    response=15.0,
-    cache_write=3.75,
-    cache_read=0.3,
-)
-_HAIKU = Pricing(
-    request=1.0,
-    response=5.0,
-    cache_write=1.25,
-    cache_read=0.1,
-)
-
-
-# Image / wire byte limits, per Anthropic's Vision + API-overview docs
-# (https://platform.claude.com/docs/en/build-with-claude/vision,
-# https://platform.claude.com/docs/en/api/overview#request-size-limits;
-# verified Jun 2026):
-#   - Per-image hard limit: 5 MB (request rejected above this).
-#   - Per-request hard limit: 32 MB for standard endpoints.
-#   - ``max_image_dim`` is set to each model's NATIVE resolution -- the long
-#     edge above which the server downscales the image for free. Pre-resizing
-#     to exactly this caps wire bytes and token cost without losing fidelity
-#     the model would have kept; larger values (e.g. the 8000x8000 hard-reject
-#     ceiling) never trigger a useful client resize. Two tiers:
-#       * High-resolution models (Opus 4.7+, Fable 5, Mythos 5): 2576 px.
-#       * Prior models (Opus 4.6/4.5, Sonnet 4.6/4.5, Haiku 4.5): 1568 px.
-_IMAGE_BYTES: Final = 5 * 1024 * 1024
-_REQUEST_BYTES: Final = 32 * 1024 * 1024
-_NATIVE_DIM_HIRES: Final = 2576
-_NATIVE_DIM_STD: Final = 1568
-
-
 class Anthropic:
     """Anthropic provider - API key auth.
 
@@ -360,220 +288,21 @@ class Anthropic:
     #   - opus-4-5 / sonnet-4-5 / haiku-4-5: ``enabled`` only (``adaptive``
     #     400s 'not supported'), readable text. Efforts: opus-4-5
     #     low,medium,high; sonnet-4-5 / haiku-4-5 none.
-    KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
-        "claude-fable-5": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=128_000,
-            pricing=_FABLE,
-            readable_thinking=False,
-            enabled_thinking_mode=False,
-            valid_efforts=("low", "medium", "high", "xhigh", "max"),
-            chars_per_token=2.83,
-            max_image_dim=_NATIVE_DIM_HIRES,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "claude-fable-5+1m": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=128_000,
-            pricing=_FABLE,
-            readable_thinking=False,
-            enabled_thinking_mode=False,
-            valid_efforts=("low", "medium", "high", "xhigh", "max"),
-            chars_per_token=2.83,
-            max_image_dim=_NATIVE_DIM_HIRES,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "claude-opus-5": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=128_000,
-            pricing=_OPUS,
-            readable_thinking=False,
-            enabled_thinking_mode=False,
-            valid_efforts=("low", "medium", "high", "xhigh", "max"),
-            chars_per_token=2.83,
-            max_image_dim=_NATIVE_DIM_HIRES,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "claude-opus-5+1m": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=128_000,
-            pricing=_OPUS,
-            readable_thinking=False,
-            enabled_thinking_mode=False,
-            valid_efforts=("low", "medium", "high", "xhigh", "max"),
-            chars_per_token=2.83,
-            max_image_dim=_NATIVE_DIM_HIRES,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "claude-opus-4-8": ModelProfile(
-            max_request_tokens=200_000,
-            max_response_tokens=128_000,
-            pricing=_OPUS,
-            readable_thinking=False,
-            enabled_thinking_mode=False,
-            valid_efforts=("low", "medium", "high", "xhigh", "max"),
-            chars_per_token=2.83,
-            max_image_dim=_NATIVE_DIM_HIRES,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "claude-opus-4-8+1m": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=128_000,
-            pricing=_OPUS,
-            readable_thinking=False,
-            enabled_thinking_mode=False,
-            valid_efforts=("low", "medium", "high", "xhigh", "max"),
-            chars_per_token=2.83,
-            max_image_dim=_NATIVE_DIM_HIRES,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "claude-opus-4-7": ModelProfile(
-            max_request_tokens=200_000,
-            max_response_tokens=128_000,
-            pricing=_OPUS_FAST_4_6_7,
-            readable_thinking=False,
-            enabled_thinking_mode=False,
-            valid_efforts=("low", "medium", "high", "xhigh", "max"),
-            chars_per_token=2.83,
-            max_image_dim=_NATIVE_DIM_HIRES,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "claude-opus-4-7+1m": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=128_000,
-            pricing=_OPUS_FAST_4_6_7,
-            readable_thinking=False,
-            enabled_thinking_mode=False,
-            valid_efforts=("low", "medium", "high", "xhigh", "max"),
-            chars_per_token=2.83,
-            max_image_dim=_NATIVE_DIM_HIRES,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "claude-opus-4-6": ModelProfile(
-            max_request_tokens=200_000,
-            max_response_tokens=128_000,
-            pricing=_OPUS_FAST_4_6_7,
-            valid_efforts=("low", "medium", "high", "max"),
-            chars_per_token=3.66,
-            max_image_dim=_NATIVE_DIM_STD,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "claude-opus-4-6+1m": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=128_000,
-            pricing=_OPUS_FAST_4_6_7,
-            valid_efforts=("low", "medium", "high", "max"),
-            chars_per_token=3.66,
-            max_image_dim=_NATIVE_DIM_STD,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "claude-opus-4-5": ModelProfile(
-            max_request_tokens=200_000,
-            max_response_tokens=128_000,
-            pricing=_OPUS,
-            adaptive_thinking_mode=False,
-            valid_efforts=("low", "medium", "high"),
-            chars_per_token=3.66,
-            max_image_dim=_NATIVE_DIM_STD,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "claude-opus-4-5+1m": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=128_000,
-            pricing=_OPUS,
-            adaptive_thinking_mode=False,
-            valid_efforts=("low", "medium", "high"),
-            chars_per_token=3.66,
-            max_image_dim=_NATIVE_DIM_STD,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "claude-sonnet-5": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=128_000,
-            pricing=_SONNET,
-            readable_thinking=False,
-            enabled_thinking_mode=False,
-            valid_efforts=("low", "medium", "high", "xhigh", "max"),
-            chars_per_token=2.83,
-            max_image_dim=_NATIVE_DIM_HIRES,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "claude-sonnet-5+1m": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=128_000,
-            pricing=_SONNET,
-            readable_thinking=False,
-            enabled_thinking_mode=False,
-            valid_efforts=("low", "medium", "high", "xhigh", "max"),
-            chars_per_token=2.83,
-            max_image_dim=_NATIVE_DIM_HIRES,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "claude-sonnet-4-6": ModelProfile(
-            max_request_tokens=200_000,
-            max_response_tokens=128_000,
-            pricing=_SONNET,
-            valid_efforts=("low", "medium", "high", "max"),
-            chars_per_token=3.66,
-            max_image_dim=_NATIVE_DIM_STD,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "claude-sonnet-4-6+1m": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=128_000,
-            pricing=_SONNET,
-            valid_efforts=("low", "medium", "high", "max"),
-            chars_per_token=3.66,
-            max_image_dim=_NATIVE_DIM_STD,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "claude-sonnet-4-5": ModelProfile(
-            max_request_tokens=200_000,
-            max_response_tokens=128_000,
-            pricing=_SONNET,
-            adaptive_thinking_mode=False,
-            chars_per_token=4.83,
-            max_image_dim=_NATIVE_DIM_STD,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "claude-sonnet-4-5+1m": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=128_000,
-            pricing=_SONNET,
-            adaptive_thinking_mode=False,
-            chars_per_token=4.83,
-            max_image_dim=_NATIVE_DIM_STD,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "claude-haiku-4-5": ModelProfile(
-            max_request_tokens=200_000,
-            max_response_tokens=64_000,
-            pricing=_HAIKU,
-            adaptive_thinking_mode=False,
-            chars_per_token=4.83,
-            max_image_dim=_NATIVE_DIM_STD,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-    }
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = anthropic_catalog.MODELS
+    """Per-model capability, shared by every Anthropic transport."""
+
+    TRANSPORT: ClassVar[ModelCapability] = anthropic_catalog.API
+    """What this transport lets through; subclasses declare their own."""
+
+    @property
+    def ROLES(self) -> Mapping[types.providers.ModelRole, str]:  # noqa: N802
+        """Role name to base id; ``utility`` falls back to the default."""
+        return MappingProxyType(
+            {
+                "default": self.DEFAULT_MODEL,
+                "utility": self.DEFAULT_UTILITY_MODEL or self.DEFAULT_MODEL,
+            }
+        )
 
     def __init__(
         self,
@@ -657,46 +386,32 @@ class Anthropic:
         """Create a model backend.
 
         Args:
-          model_id: Model ID. ``None`` uses ``DEFAULT_MODEL``.
+          model_id: Catalog id with optional tags, or a role name.
           max_request_tokens: Override max input tokens. ``None`` uses profile default.
 
         Returns:
           model: Anthropic model backend.
 
         Raises:
-          ValueError: If ``model_id`` is not in ``KNOWN_MODELS``, or it
-              carries a ``+fast`` tag on a model without fast mode.
+          UnknownModelError: ``model_id`` is not in ``CAPABILITIES``.
+          UnsupportedTagError: The id asks for a context or fast tier the
+              model does not offer.
 
         """
-        mid = model_id if model_id is not None else self.DEFAULT_MODEL
-        # Try exact match first, then the context-tagged id (``+1m``
-        # variants carry their own profile), then the base id. Fail
-        # fast on unknown model IDs.
-        profile = (
-            self.KNOWN_MODELS.get(mid)
-            or self.KNOWN_MODELS.get(strip_latency_tags(mid))
-            or self.KNOWN_MODELS.get(base_model_id(mid))
+        mid = model_id if model_id is not None else "default"
+        spec = types.providers.resolve(
+            mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT
         )
-        if profile is None:
-            known = ", ".join(sorted(self.KNOWN_MODELS))
-            raise ValueError(
-                f"Unknown model {mid!r} for Anthropic. Known models: {known}",
-            )
-        if latency_from_model_id(mid) is not None and not supports_fast_mode(mid):
-            fast = ", ".join(sorted(_FAST_MODE_MODELS))
-            raise ValueError(
-                f"Model {mid!r} does not support fast mode (+fast). "
-                f"Fast-capable models: {fast}",
-            )
         return _AnthropicModel(
             provider=self,
-            model_id=mid,
-            profile=profile,
+            # ``mid`` may be a role name; the spec carries the resolved id.
+            model_id=spec.tagged_model_id,
             max_request_tokens=(
                 max_request_tokens
                 if max_request_tokens is not None
-                else profile.max_request_tokens
+                else spec.context_limits.max_request_tokens
             ),
+            spec=spec,
         )
 
     def utility_model(self) -> _AnthropicModel:
@@ -706,7 +421,7 @@ class Anthropic:
           model: Backend for ``DEFAULT_UTILITY_MODEL``.
 
         """
-        return self.model(self.DEFAULT_UTILITY_MODEL)
+        return self.model("utility")
 
     # -- Hooks (subclasses override) -----------------------------------
 
@@ -959,20 +674,23 @@ def _request_id(e: BaseException) -> str | None:
     return None
 
 
-class _AnthropicModel:
+class _AnthropicModel(ModelDefaults):
     """Claude model backend - translates ModelRequest/ModelResponse."""
+
+    spec: ModelSpec = ModelSpec()
+    """What this model can do; replaced from the catalog at construction."""
 
     def __init__(
         self,
         provider: Anthropic,
         model_id: str,
-        profile: ModelProfile,
         max_request_tokens: int = 200_000,
+        spec: ModelSpec | None = None,
     ) -> None:
         self._provider = provider
         self._model_id = model_id
-        self._profile = profile
         self._max_request_tokens = max_request_tokens
+        self.spec = spec or ModelSpec()
         self._last_response_time = time.time()
         self._last_usage: UsageSnapshot | None = None
 
@@ -994,7 +712,7 @@ class _AnthropicModel:
     @property
     def max_response_tokens(self) -> int:
         """Maximum output tokens the model can generate."""
-        return self._profile.max_response_tokens
+        return self.spec.context_limits.max_response_tokens
 
     @property
     def supports_streaming(self) -> bool:
@@ -1004,58 +722,22 @@ class _AnthropicModel:
     @property
     def supports_thinking(self) -> bool:
         """Whether the model supports extended thinking."""
-        return self._profile.supports_thinking
-
-    @property
-    def valid_thinking_states(self) -> tuple[str, ...]:
-        """Anthropic API/subscription thinking states, per model capability.
-
-        Redaction rides ``adaptive`` and is a per-request toggle the
-        selected state controls (``-show`` states force ``redact_thinking``
-        off at model rebuild; ``redact-hide`` forces it on), so the
-        transport exposes the redacted mode wherever ``adaptive`` works.
-        The per-model profile decides the rest (all measured via API key):
-
-        - opus-4-8 / opus-4-7: ``adaptive`` only, no readable text -> only
-          ``adaptive-hide`` / ``off-hide`` / ``redact-hide``.
-        - opus-4-6 / sonnet-4-6: both modes, readable text -> all six.
-        - 4-5 generation: ``enabled`` only (``adaptive`` 400s) -> ``on-*``
-          and ``off-hide`` (no ``adaptive-*``, no ``redact-hide``).
-        """
-        return valid_thinking_states(
-            ThinkingCapability(
-                supports_thinking=self.supports_thinking,
-                readable_text=self._profile.readable_thinking,
-                supports_adaptive_mode=self._profile.adaptive_thinking_mode,
-                supports_enabled_mode=self._profile.enabled_thinking_mode,
-                supports_redaction=True,
-            ),
-        )
+        return bool(self.spec.supported_thinking_budgets)
 
     @property
     def supports_effort(self) -> bool:
         """Whether the model accepts an effort hint."""
-        return bool(self._profile.valid_efforts)
+        return bool(self.spec.supported_thinking_efforts)
 
     @property
     def valid_efforts(self) -> tuple[str, ...]:
         """Per-model ``output_config.effort`` levels (measured)."""
-        return self._profile.valid_efforts
+        return tuple(self.spec.supported_thinking_efforts.values())
 
     @property
     def supports_cache_control(self) -> bool:
         """Whether the provider supports prompt caching."""
-        return True
-
-    @property
-    def valid_service_tiers(self) -> tuple[str, ...]:
-        """Anthropic Messages API accepts ``auto`` (default) or ``standard_only``.
-
-        ``auto`` uses Priority Tier capacity when available, falling back
-        to standard; ``standard_only`` opts a single request out of any
-        Priority commitment. See https://platform.claude.com/docs/en/api/service-tiers.
-        """
-        return ("auto", "standard_only")
+        return self.spec.prompt_cache_breakpoints
 
     @property
     def valid_latency_modes(self) -> tuple[str, ...]:
@@ -1067,7 +749,7 @@ class _AnthropicModel:
         OpenAI, by contrast, has no separate field; there ``latency="fast"``
         resolves to ``service_tier="priority"``.
         """
-        return ("fast",) if supports_fast_mode(self._model_id) else ()
+        return ("fast",) if self.spec.serves_fast else ()
 
     @property
     def supports_context_management(self) -> bool:
@@ -1077,13 +759,14 @@ class _AnthropicModel:
     @property
     def supports_persistent_retry(self) -> bool:
         """Whether the provider retries internally on transient failures."""
-        return True
+        return self.spec.retries_internally
 
     @property
     def supports_account_auth(self) -> bool:
         """Whether the provider uses account-based authentication."""
         return self._provider.subscription
 
+    @override
     def approx_text_tokens(self, text: str) -> int:
         """Local estimate via ``chars_per_token``.
 
@@ -1094,13 +777,9 @@ class _AnthropicModel:
           tokens: Approximate input token count.
 
         """
-        return int(len(text) / self._profile.chars_per_token)
+        return int(len(text) / self.spec.chars_per_token)
 
-    @property
-    def pricing(self) -> Pricing:
-        """Per-million-token pricing schedule for this model."""
-        return self._profile.pricing
-
+    @override
     def approx_image_tokens(self, data: bytes) -> int:
         """Local estimate from image dimensions (Anthropic's formula).
 
@@ -1117,24 +796,7 @@ class _AnthropicModel:
         dims = image_lib.get_dimensions(data)
         return dims[0] * dims[1] // 750 if dims is not None else 0
 
-    def approx_request_tokens(self, request: ModelRequest) -> int:
-        """Walk-and-sum every wire-bearing surface of ``request``."""
-        return token_count.approx_request_tokens(request, self)
-
-    async def actual_text_tokens(self, text: str) -> int:
-        """Delegate to the local heuristic.
-
-        Anthropic's ``messages.count_tokens`` endpoint operates on
-        full message lists, not bare strings, so a single-string
-        roundtrip would cost a request and a tail-padded tokenization
-        guess. Local heuristic is the practical truth source here.
-        """
-        return self.approx_text_tokens(text)
-
-    async def actual_image_tokens(self, data: bytes) -> int:
-        """Delegate to the local heuristic (Anthropic's published formula)."""
-        return self.approx_image_tokens(data)
-
+    @override
     async def actual_request_tokens(self, request: ModelRequest) -> int:
         """Call the server's ``messages.count_tokens`` for an exact count."""
         messages = _build_messages(request, self.max_image_dim, self.max_image_bytes)
@@ -1157,17 +819,17 @@ class _AnthropicModel:
     @property
     def max_image_dim(self) -> int:
         """Maximum image edge (pixels) accepted, from the model profile."""
-        return self._profile.max_image_dim
+        return self.spec.context_limits.max_image_edge_px
 
     @property
     def max_image_bytes(self) -> int:
         """Maximum size (bytes) of a single image, from the model profile."""
-        return self._profile.max_image_bytes
+        return self.spec.context_limits.max_image_bytes
 
     @property
     def max_request_bytes(self) -> int:
         """Maximum request-body size (bytes), from the model profile."""
-        return self._profile.max_request_bytes
+        return self.spec.context_limits.max_request_bytes
 
     def is_context_overflow(self, error: Exception) -> bool:
         """Classify an error as a token-context-window overflow.
@@ -1201,10 +863,12 @@ class _AnthropicModel:
             return False
         return _is_prompt_too_long_text(str(error), error_body=_api_status_body(error))
 
+    @override
     async def close(self) -> None:
         """Close the shared provider SDK owned by this model."""
         await self._provider.close_sdk()
 
+    @override
     def is_retryable_provider_error(self, error: Exception) -> bool:
         """Statusless Anthropic errors that still declare retryability.
 
@@ -1265,11 +929,24 @@ class _AnthropicModel:
                 }
                 for t in request.tools
             ]
-        if request.effort is not None:
-            kwargs["output_config"] = {"effort": request.effort}
+        # A row advertising no effort is claiming the model rejects
+        # ``output_config`` (the 4-5 generation); sending one earns a 400.
+        # Dropping rather than raising matches every other transport: the
+        # agent already clears an effort the model does not accept.
+        if request.effort is not None and self.spec.supported_thinking_efforts:
+            effort = self.spec.supported_thinking_efforts.get(
+                cast("ThinkingEffort", request.effort)
+            )
+            if effort is None:
+                valid = ", ".join(self.spec.supported_thinking_efforts)
+                raise ValueError(
+                    f"Unknown effort {request.effort!r} for {self._model_id}."
+                    f" Valid efforts: {valid}",
+                )
+            kwargs["output_config"] = {"effort": effort}
         if (
             request.service_tier is not None
-            and request.service_tier in self.valid_service_tiers
+            and request.service_tier in self.spec.valid_service_tiers
         ):
             kwargs["service_tier"] = request.service_tier
         body = self._provider.extra_body(
@@ -1312,25 +989,7 @@ class _AnthropicModel:
             kwargs["extra_headers"] = headers
         return kwargs
 
-    async def buffer(self, request: ModelRequest) -> ModelResponse:
-        """Send a request via the streaming path with no callbacks.
-
-        The Anthropic SDK rejects non-streaming requests whose prompt
-        size may exceed a 10-minute wall, so the buffered path always
-        routes through ``stream`` to keep large compaction calls valid.
-
-        Args:
-          request: Fully-built model request.
-
-        Returns:
-          response: Parsed ``ModelResponse`` with usage and cost filled in.
-
-        Raises:
-          PromptTooLongError: Server reports context overflow.
-
-        """
-        return await self.stream(request, None)
-
+    @override
     async def stream(
         self,
         request: ModelRequest,
@@ -1411,7 +1070,7 @@ class _AnthropicModel:
                     provider_name="Anthropic", cause=not_read
                 ) from e
             raise
-        resp = _parse_response(raw, self._profile.pricing)
+        resp = _parse_response(raw, self.spec)
         self._last_response_time = time.time()
         # Clear stale usage when a path yields no headers, so ``usage_snapshot``
         # never reports a prior request's windows for the current one.
@@ -1420,6 +1079,7 @@ class _AnthropicModel:
         _guard_stream_interrupt(resp, kind="stream", model_id=self._model_id)
         return resp
 
+    @override
     def usage_snapshot(self) -> UsageSnapshot | None:
         """Return normalized usage from the latest response's unified headers."""
         return self._last_usage
@@ -1816,7 +1476,7 @@ def _is_valid_tool_name(name: str) -> bool:
     return name.isidentifier()
 
 
-def _parse_response(raw: anthropic.types.Message, pricing: Pricing) -> ModelResponse:
+def _parse_response(raw: anthropic.types.Message, spec: ModelSpec) -> ModelResponse:
     """Convert Anthropic Message to ModelResponse with AssistantMessage."""
     text_parts: list[str] = []
     tool_calls: list[ToolCall] = []
@@ -1866,30 +1526,24 @@ def _parse_response(raw: anthropic.types.Message, pricing: Pricing) -> ModelResp
     # back to standard speed reports ``usage.speed == "standard"`` and is
     # billed at standard rates.
     served_fast = getattr(raw.usage, "speed", None) == "fast"
-    in_cost, out_cost, total_cost = compute_cost(
-        pricing,
-        raw.usage.input_tokens,
-        raw.usage.output_tokens,
-        cache_write,
-        cache_read,
-        fast=served_fast,
+    tokens = TokenCount(
+        request=raw.usage.input_tokens,
+        response=raw.usage.output_tokens,
+        cache_write=cache_write,
+        cache_read=cache_read,
     )
+    spend = spec.spend(tokens, served_fast=served_fast)
     debug_log.trace(
         "api_response",
         kind="anthropic",
         usage_speed=getattr(raw.usage, "speed", None),
         billed_fast=served_fast,
-        input_cost=in_cost,
-        output_cost=out_cost,
+        input_cost=spend.request + spend.cache_write + spend.cache_read,
+        output_cost=spend.response,
     )
     return ModelResponse(
         message=message,
-        tokens=TokenCount(
-            input_tokens=raw.usage.input_tokens,
-            output_tokens=raw.usage.output_tokens,
-            cache_creation_tokens=cache_write,
-            cache_read_tokens=cache_read,
-        ),
+        tokens=tokens,
         stop_reason=normalize_stop_reason(
             raw.stop_reason,
             kind="anthropic",
@@ -1898,7 +1552,5 @@ def _parse_response(raw: anthropic.types.Message, pricing: Pricing) -> ModelResp
         stop_sequence=raw.stop_sequence,
         message_id=raw.id or "",
         request_id=getattr(raw, "_request_id", "") or "",
-        input_cost=in_cost,
-        output_cost=out_cost,
-        total_cost=total_cost,
+        spend=spend,
     )

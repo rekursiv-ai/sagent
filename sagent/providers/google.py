@@ -13,7 +13,8 @@ Usage::
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, ClassVar, Final, cast
+from types import MappingProxyType
+from typing import TYPE_CHECKING, ClassVar, Final, cast, override
 
 import asyncio
 import base64
@@ -34,32 +35,30 @@ else:
     httpx = lazy_import("httpx")  # 100ms cold
     image_lib = lazy_import("sagent.lib.image")
 
-from sagent.lib import token_count
+from sagent import types
 from sagent.lib.custom_json import (
     MutableJSON,
     MutableJSONValue,
     int_val,
     json_unfreeze,
 )
-from sagent.providers.lib.cost import (
-    ModelProfile,
-    Pricing,
-    compute_cost,
-)
+from sagent.providers import google_catalog
 from sagent.providers.lib.errors import (
     error_status_code,
     is_request_too_large,
     raise_if_request_too_large,
 )
+from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.lib.stop_reason import normalize_stop_reason
-from sagent.thinking import ThinkingCapability, valid_thinking_states
 from sagent.types.model import (
+    ModelCapability,
     ModelRequest,
     ModelResponse,
+    ModelSpec,
     PromptTooLongError,
     StreamInterruptedError,
+    ThinkingEffort,
     TokenCount,
-    UsageSnapshot,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -76,14 +75,6 @@ logger = logging.getLogger(__name__)
 
 _STREAM_IDLE_TIMEOUT = 600.0  # config-globals: ignore -- stream idle timeout dial
 _API_BASE: Final = "https://generativelanguage.googleapis.com/v1beta"
-_GOOGLE_THINKING_BUDGETS: Final = {
-    "min": 1_024,
-    "low": 4_096,
-    "medium": 8_192,
-    "high": 16_384,
-    "xhigh": 20_480,
-    "max": 24_576,
-}
 
 
 # Image / wire byte limits shared by every Gemini model (verified Jun 2026):
@@ -95,9 +86,6 @@ _GOOGLE_THINKING_BUDGETS: Final = {
 #   - The only documented limit is the 20 MB TOTAL inline request size
 #     (text + system + inline bytes), so ``max_request_bytes=20 MB``; the
 #     byte-aware compaction gate enforces it across the whole request.
-_IMAGE_DIM: Final = 0
-_IMAGE_BYTES: Final = 0
-_REQUEST_BYTES: Final = 20 * 1024 * 1024
 
 
 class Google:
@@ -109,74 +97,21 @@ class Google:
     # Model limits and pricing.
     # Limits: https://ai.google.dev/gemini-api/docs/models
     # Pricing: https://ai.google.dev/gemini-api/docs/pricing
-    KNOWN_MODELS: ClassVar[dict[str, ModelProfile]] = {
-        "gemini-3-flash-preview": ModelProfile(
-            max_request_tokens=1_048_576,
-            max_response_tokens=65_536,
-            pricing=Pricing(request=0.50, response=3.00, cache_read=0.05),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "gemini-3.1-pro-preview": ModelProfile(
-            max_request_tokens=1_048_576,
-            max_response_tokens=65_536,
-            pricing=Pricing(request=2.00, response=12.00, cache_read=0.20),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "gemini-2.0-flash": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=65_536,
-            pricing=Pricing(request=0.10, response=0.40, cache_read=0.025),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "gemini-2.5-flash-lite": ModelProfile(
-            max_request_tokens=1_048_576,
-            max_response_tokens=65_536,
-            pricing=Pricing(request=0.10, response=0.40, cache_read=0.025),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "gemini-2.5-flash": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=65_536,
-            pricing=Pricing(request=0.30, response=2.50, cache_read=0.075),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "gemini-2.5-pro": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=65_536,
-            pricing=Pricing(request=1.25, response=10.0, cache_read=0.31),
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "gemini-1.5-flash": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=65_536,
-            pricing=Pricing(request=0.075, response=0.3, cache_read=0.01875),
-            supports_thinking=False,
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-        "gemini-1.5-pro": ModelProfile(
-            max_request_tokens=1_000_000,
-            max_response_tokens=65_536,
-            pricing=Pricing(request=1.25, response=5.0, cache_read=0.3125),
-            supports_thinking=False,
-            max_image_dim=_IMAGE_DIM,
-            max_image_bytes=_IMAGE_BYTES,
-            max_request_bytes=_REQUEST_BYTES,
-        ),
-    }
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = google_catalog.MODELS
+    """Per-model capability, shared by every Gemini transport."""
+
+    TRANSPORT: ClassVar[ModelCapability] = google_catalog.API
+    """What this transport lets through; subclasses declare their own."""
+
+    @property
+    def ROLES(self) -> Mapping[types.providers.ModelRole, str]:  # noqa: N802
+        """Role name to base id; ``utility`` falls back to the default."""
+        return MappingProxyType(
+            {
+                "default": self.DEFAULT_MODEL,
+                "utility": self.DEFAULT_UTILITY_MODEL or self.DEFAULT_MODEL,
+            }
+        )
 
     def __init__(self, *, api_key: str) -> None:
         self.api_key = api_key
@@ -225,25 +160,23 @@ class Google:
           model: Gemini model backend.
 
         Raises:
-          ValueError: If ``model_id`` is not in ``KNOWN_MODELS``.
+          ValueError: If ``model_id`` is not in ``CAPABILITIES``.
 
         """
-        mid = model_id if model_id is not None else self.DEFAULT_MODEL
-        profile = self.KNOWN_MODELS.get(mid)
-        if profile is None:
-            known = ", ".join(sorted(self.KNOWN_MODELS))
-            raise ValueError(
-                f"Unknown model {mid!r} for Google. Known models: {known}",
-            )
+        mid = model_id if model_id is not None else "default"
+        spec = types.providers.resolve(
+            mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT
+        )
         return _GeminiModel(
             provider=self,
-            model_id=mid,
-            profile=profile,
+            # ``mid`` may be a role name; the spec carries the resolved id.
+            model_id=spec.tagged_model_id,
             max_request_tokens=(
                 max_request_tokens
                 if max_request_tokens is not None
-                else profile.max_request_tokens
+                else spec.context_limits.max_request_tokens
             ),
+            spec=spec,
         )
 
     def utility_model(self) -> _GeminiModel:
@@ -253,23 +186,26 @@ class Google:
           model: Backend for ``DEFAULT_UTILITY_MODEL``.
 
         """
-        return self.model(self.DEFAULT_UTILITY_MODEL)
+        return self.model("utility")
 
 
-class _GeminiModel:
+class _GeminiModel(ModelDefaults):
     """Gemini model backend."""
+
+    spec: ModelSpec = ModelSpec()
+    """What this model can do; replaced from the catalog at construction."""
 
     def __init__(
         self,
         provider: Google,
         model_id: str,
-        profile: ModelProfile,
         max_request_tokens: int,
+        spec: ModelSpec | None = None,
     ) -> None:
         self._provider = provider
         self._model_id = model_id
-        self._profile = profile
         self._max_request_tokens = max_request_tokens
+        self.spec = spec or ModelSpec()
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
 
@@ -282,6 +218,7 @@ class _GeminiModel:
                 self._client = httpx.AsyncClient()
             return self._client
 
+    @override
     async def close(self) -> None:
         """Close the reusable HTTP client."""
         if self._client is not None:
@@ -301,7 +238,7 @@ class _GeminiModel:
     @property
     def max_response_tokens(self) -> int:
         """Maximum output tokens the model can generate."""
-        return self._profile.max_response_tokens
+        return self.spec.context_limits.max_response_tokens
 
     @property
     def supports_streaming(self) -> bool:
@@ -311,36 +248,22 @@ class _GeminiModel:
     @property
     def supports_thinking(self) -> bool:
         """Whether the model supports extended thinking."""
-        return self._profile.supports_thinking
-
-    @property
-    def valid_thinking_states(self) -> tuple[str, ...]:
-        """Gemini surfaces readable thought parts; no server-side redaction."""
-        return valid_thinking_states(
-            ThinkingCapability(supports_thinking=self.supports_thinking),
-        )
+        return bool(self.spec.supported_thinking_budgets)
 
     @property
     def supports_effort(self) -> bool:
         """Whether the model accepts an effort hint."""
-        return self._profile.supports_thinking
+        return bool(self.spec.supported_thinking_efforts)
 
     @property
     def valid_efforts(self) -> tuple[str, ...]:
         """Gemini effort levels (mapped to ``thinkingBudget``)."""
-        if not self.supports_effort:
-            return ()
-        return ("min", "low", "medium", "high", "xhigh", "max")
+        return tuple(self.spec.supported_thinking_efforts)
 
     @property
     def supports_cache_control(self) -> bool:
         """Whether the provider supports prompt caching."""
-        return False
-
-    @property
-    def valid_service_tiers(self) -> tuple[str, ...]:
-        """Gemini API has no equivalent of OpenAI's processing tier."""
-        return ()
+        return self.spec.prompt_cache_breakpoints
 
     @property
     def valid_latency_modes(self) -> tuple[str, ...]:
@@ -355,22 +278,19 @@ class _GeminiModel:
     @property
     def supports_persistent_retry(self) -> bool:
         """Whether the provider retries internally on transient failures."""
-        return False
+        return self.spec.retries_internally
 
     @property
     def supports_account_auth(self) -> bool:
         """Whether the provider uses account-based authentication."""
-        return False
+        return self.spec.account_auth
 
+    @override
     def approx_text_tokens(self, text: str) -> int:
         """Local estimate via ``len(text) // 4`` (Gemini's heuristic)."""
         return len(text) // 4
 
-    @property
-    def pricing(self) -> Pricing:
-        """Per-million-token pricing schedule for this model."""
-        return self._profile.pricing
-
+    @override
     def approx_image_tokens(self, data: bytes) -> int:
         """Local estimate via Gemini's tile formula (``tiles * 258``)."""
         # Tile size undocumented; using OpenAI's 512x512 as proxy.
@@ -380,22 +300,13 @@ class _GeminiModel:
         tiles = math.ceil(dims[0] / 512) * math.ceil(dims[1] / 512)
         return tiles * 258
 
-    def approx_request_tokens(self, request: ModelRequest) -> int:
-        """Walk-and-sum every wire-bearing surface of ``request``."""
-        return token_count.approx_request_tokens(request, self)
-
-    async def actual_text_tokens(self, text: str) -> int:
-        """Delegate to the local heuristic; a single-string roundtrip would cost more than the gain."""
-        return self.approx_text_tokens(text)
-
-    async def actual_image_tokens(self, data: bytes) -> int:
-        """Delegate to the local heuristic (Google's published tile formula)."""
-        return self.approx_image_tokens(data)
-
+    @override
     async def actual_request_tokens(self, request: ModelRequest) -> int:
         """Call ``:countTokens`` for the exact server-side count."""
         url = f"{_API_BASE}/models/{self._model_id}:countTokens"
-        body = _build_request(request, self.max_image_dim, self.max_image_bytes)
+        body = _build_request(
+            request, self.spec, self.max_image_dim, self.max_image_bytes
+        )
         client = await self._get_client()
         r = await client.post(
             url,
@@ -416,17 +327,17 @@ class _GeminiModel:
     @property
     def max_image_dim(self) -> int:
         """Maximum image edge (pixels) accepted, from the model profile."""
-        return self._profile.max_image_dim
+        return self.spec.context_limits.max_image_edge_px
 
     @property
     def max_image_bytes(self) -> int:
         """Maximum size (bytes) of a single image, from the model profile."""
-        return self._profile.max_image_bytes
+        return self.spec.context_limits.max_image_bytes
 
     @property
     def max_request_bytes(self) -> int:
         """Maximum request-body size (bytes), from the model profile."""
-        return self._profile.max_request_bytes
+        return self.spec.context_limits.max_request_bytes
 
     def is_context_overflow(self, error: Exception) -> bool:
         """Classify an error as a token context-window overflow.
@@ -447,44 +358,7 @@ class _GeminiModel:
         msg = str(error).lower()
         return "too large" in msg or "too long" in msg or "exceeds the maximum" in msg
 
-    def is_retryable_provider_error(self, error: Exception) -> bool:
-        """Classify an error using Google-specific retry heuristics.
-
-        Args:
-          error: Exception raised by the provider call.
-
-        Returns:
-          retryable: Always ``False`` (status-code dispatch covers retries).
-
-        """
-        del error
-        return False
-
-    def usage_snapshot(self) -> UsageSnapshot | None:
-        """Gemini exposes no per-window rate-limit telemetry."""
-        return None
-
-    async def buffer(self, request: ModelRequest) -> ModelResponse:
-        """Send a request via the streaming path with no callbacks.
-
-        The non-streaming ``:generateContent`` endpoint has a hard 120 s
-        client timeout that fails on large compaction prompts; routing
-        through ``:streamGenerateContent`` uses an idle-based timeout
-        that scales with response time.
-
-        Args:
-          request: Fully-built model request.
-
-        Returns:
-          response: Parsed ``ModelResponse`` with usage and cost filled in.
-
-        Raises:
-          PromptTooLongError: Server reports context overflow.
-          ValueError: Server returns ``400`` for non-overflow reasons.
-
-        """
-        return await self.stream(request, None)
-
+    @override
     async def stream(
         self,
         request: ModelRequest,
@@ -505,7 +379,9 @@ class _GeminiModel:
 
         """
         url = f"{_API_BASE}/models/{self._model_id}:streamGenerateContent?alt=sse"
-        body = _build_request(request, self.max_image_dim, self.max_image_bytes)
+        body = _build_request(
+            request, self.spec, self.max_image_dim, self.max_image_bytes
+        )
         client = await self._get_client()
         async with client.stream(
             "POST",
@@ -533,7 +409,7 @@ class _GeminiModel:
             return await _consume_gemini_stream(
                 r,
                 publish=publish,
-                pricing=self._profile.pricing,
+                spec=self.spec,
             )
 
 
@@ -559,6 +435,7 @@ def _strip_additional_properties(schema: MutableJSONValue) -> MutableJSONValue:
 
 def _build_request(
     request: ModelRequest,
+    spec: ModelSpec,
     max_image_dim: int = 0,
     max_image_bytes: int = 0,
 ) -> MutableJSON:
@@ -651,7 +528,7 @@ def _build_request(
                     pending_tool_parts.append(block)
     _flush_tool_parts(contents, pending_tool_parts)
 
-    thinking_config = _thinking_config(request)
+    thinking_config = _thinking_config(request, spec)
     gen_config: MutableJSON = {}
     if thinking_config is None:
         gen_config["temperature"] = request.temperature
@@ -694,16 +571,25 @@ def _build_request(
     return body
 
 
-def _thinking_config(request: ModelRequest) -> MutableJSON | None:
+def _thinking_config(request: ModelRequest, spec: ModelSpec) -> MutableJSON | None:
     """Return Gemini thinking config for a sagent request."""
+    if not spec.supported_thinking_budgets:
+        # gemini-1.5 rejects ``thinkingConfig`` outright. A private budget
+        # table sent one anyway for any effort the caller passed, on a row
+        # whose whole point is that the knob does not exist.
+        return None
     if request.effort is not None:
-        budget = _GOOGLE_THINKING_BUDGETS.get(request.effort)
+        # The catalog holds the wire budget as data; a parallel ladder here
+        # drifted from it, so the reader saw one number and the server another.
+        budget = spec.supported_thinking_efforts.get(
+            cast("ThinkingEffort", request.effort)
+        )
         if budget is None:
-            valid = ", ".join(sorted(_GOOGLE_THINKING_BUDGETS))
+            valid = ", ".join(spec.supported_thinking_efforts)
             raise ValueError(
                 f"Invalid Google effort {request.effort!r}. Valid efforts: {valid}.",
             )
-        return {"includeThoughts": True, "thinkingBudget": budget}
+        return {"includeThoughts": True, "thinkingBudget": int(budget)}
     if request.thinking in ("adaptive", "enabled"):
         return {"includeThoughts": True, "thinkingBudget": -1}
     return None
@@ -747,7 +633,7 @@ async def _consume_gemini_stream(
     r: httpx.Response,
     *,
     publish: Callable[[RuntimeEvent], None] | None = None,
-    pricing: Pricing,
+    spec: ModelSpec,
     chunk_unwrap: Callable[[MutableJSON], MutableJSON] | None = None,
 ) -> ModelResponse:
     """Parse SSE stream from :streamGenerateContent?alt=sse.
@@ -840,7 +726,7 @@ async def _consume_gemini_stream(
         tool_calls=tool_calls,
         usage=usage,
         finish_reason=finish_reason,
-        pricing=pricing,
+        spec=spec,
     )
     if finish_reason is None:
         raise StreamInterruptedError(response)
@@ -855,7 +741,7 @@ def _build_response(
     tool_calls: list[ToolCall],
     usage: MutableJSON,
     finish_reason: str | None,
-    pricing: Pricing,
+    spec: ModelSpec,
 ) -> ModelResponse:
     """Build a ``ModelResponse`` from Gemini's parsed stream fields."""
     output_tokens = int_val(usage.get("candidatesTokenCount"), 0)
@@ -863,10 +749,9 @@ def _build_response(
     # ``promptTokenCount`` is cache-inclusive; store the non-cached remainder so
     # ``TokenCount.input_tokens`` is disjoint from ``cache_read_tokens``.
     input_tokens = max(0, int_val(usage.get("promptTokenCount"), 0) - cache_read)
-    in_cost, out_cost, total_cost = compute_cost(
-        pricing,
-        input_tokens,
-        output_tokens,
+    tokens = TokenCount(
+        request=input_tokens,
+        response=output_tokens,
         cache_read=cache_read,
     )
     # Gemini doesn't expose a stable message id - synthesize one.
@@ -880,11 +765,7 @@ def _build_response(
             else (),
             tool_calls=tuple(tool_calls),
         ),
-        tokens=TokenCount(
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_read_tokens=cache_read,
-        ),
+        tokens=tokens,
         stop_reason=normalize_stop_reason(
             finish_reason,
             kind="google",
@@ -892,7 +773,5 @@ def _build_response(
         ),
         message_id=message_id,
         request_id=message_id,
-        input_cost=in_cost,
-        output_cost=out_cost,
-        total_cost=total_cost,
+        spend=spec.spend(tokens),
     )

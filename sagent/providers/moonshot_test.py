@@ -42,7 +42,7 @@ def test_moonshot_unknown_model_raises() -> None:
 
 def test_moonshot_known_models_have_pricing_and_limits() -> None:
     p = Moonshot.from_key("k")
-    for mid in Moonshot.KNOWN_MODELS:
+    for mid in Moonshot.CAPABILITIES:
         m = p.model(mid)
         assert m.max_request_tokens > 0
         assert m.max_response_tokens > 0

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, cast
 from sagent.compaction.files import MICROCOMPACTED_ARGS_KEY
 from sagent.repl.render import RecordingPrinter
 from sagent.repl.replay import replay_messages
+from sagent.types.cost import TokenCost
 from sagent.types.runtime import (
     AssistantMessage,
     CompactComplete,
@@ -41,13 +42,24 @@ class _StubTool:
 
 
 @dataclass(slots=True, kw_only=True)
-class _StubModelSpec:
-    """Minimum ``ModelSpec`` surface ``replay_messages`` consumes."""
+class _StubModelRecipe:
+    """Minimum ``ModelRecipe`` surface ``replay_messages`` consumes."""
 
     provider: str
     auth: str
     model_id: str
     account: str | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class _StubCostTracker:
+    """Only the spend surface ``replay_messages`` reads."""
+
+    spend: TokenCost = field(default_factory=TokenCost)
+
+
+def _StubCostTracker_factory() -> _StubCostTracker:  # noqa: N802
+    return _StubCostTracker()
 
 
 @dataclass(slots=True, kw_only=True)
@@ -64,9 +76,9 @@ class _StubAgent:
     tools_map: Mapping[str, _StubTool] = field(
         default_factory=lambda: cast("Mapping[str, _StubTool]", {}),
     )
-    total_cost_usd: float = 0.0
+    cost_tracker: _StubCostTracker = field(default_factory=_StubCostTracker_factory)
     show_thinking: bool = True
-    model_spec: _StubModelSpec | None = None
+    model_recipe: _StubModelRecipe | None = None
     thinking: str | None = None
     effort: str | None = None
     cache_ttl: str = "5m"
@@ -81,7 +93,7 @@ def _agent(
     tools_map: Mapping[str, _StubTool] | None = None,
     total_cost_usd: float = 0.0,
     show_thinking: bool = True,
-    model_spec: _StubModelSpec | None = None,
+    model_recipe: _StubModelRecipe | None = None,
     thinking: str | None = None,
     effort: str | None = None,
     cache_ttl: str = "5m",
@@ -97,9 +109,9 @@ def _agent(
         history=list(history) if history else [],
         tape=list(tape) if tape is not None else cast("list[object]", history_records),
         tools_map=tools_map or {},
-        total_cost_usd=total_cost_usd,
+        cost_tracker=_StubCostTracker(spend=TokenCost(request=total_cost_usd)),
         show_thinking=show_thinking,
-        model_spec=model_spec,
+        model_recipe=model_recipe,
         thinking=thinking,
         effort=effort,
         cache_ttl=cache_ttl,
@@ -251,7 +263,7 @@ def test_replay_footer_includes_model_and_modes() -> None:
     replay_messages(
         _agent(
             history=history,
-            model_spec=_StubModelSpec(
+            model_recipe=_StubModelRecipe(
                 provider="OpenAISubscription",
                 auth="credentials",
                 model_id="gpt-5.5",

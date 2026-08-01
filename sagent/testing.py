@@ -21,6 +21,8 @@ from __future__ import annotations
 from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import cast
 
 import itertools
 import time
@@ -34,7 +36,18 @@ from sagent.tools.core import (
     current_agent_var,
     tool_state_var,
 )
-from sagent.types.model import ModelRequest, Pricing, UsageSnapshot
+from sagent.types.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenPrice,
+)
+from sagent.types.model import (
+    Limits,
+    ModelRequest,
+    ModelSpec,
+    ThinkingEffort,
+    UsageSnapshot,
+)
 from sagent.types.runtime import (
     AssistantMessage,
     Halt,
@@ -65,25 +78,53 @@ class MockModelCaps:
     actually exercise.
     """
 
+    model_id: str = "mock-model"
+    max_request_tokens: int = 200_000
     max_response_tokens: int = 8_192
     supports_streaming: bool = True
-    supports_thinking: bool = False
-    valid_thinking_states: tuple[str, ...] = ("off-hide",)
-    supports_effort: bool = False
-    valid_efforts: tuple[str, ...] = ()
-    supports_cache_control: bool = False
-    valid_service_tiers: tuple[str, ...] = ()
-    valid_latency_modes: tuple[str, ...] = ()
-    supports_context_management: bool = False
     supports_persistent_retry: bool = False
-    supports_account_auth: bool = False
-    max_image_dim: int = 8000
-    max_image_bytes: int = 5 * 1024 * 1024
-    max_request_bytes: int = 32 * 1024 * 1024
+    supports_thinking: bool = False
+    valid_efforts: tuple[str, ...] = ()
+    latency_modes: tuple[str, ...] = ()
+    service_tiers: tuple[str, ...] = ()
 
     @property
-    def pricing(self) -> Pricing:
-        return Pricing()
+    def spec(self) -> ModelSpec:
+        """Derive the spec from this mock's configured limits."""
+        return ModelSpec(
+            model_id=self.model_id,
+            context_limits=Limits(
+                max_request_tokens=self.max_request_tokens,
+                max_response_tokens=self.max_response_tokens,
+                max_request_bytes=32 * 1024 * 1024,
+                max_image_edge_px=8000,
+                max_image_bytes=5 * 1024 * 1024,
+            ),
+            prices=PriceCatalog(
+                {PriceCatalogProduct(): TokenPrice()}
+                | (
+                    {PriceCatalogProduct(fast=True): TokenPrice()}
+                    if self.latency_modes
+                    else {}
+                )
+            ),
+            supported_thinking_efforts=MappingProxyType(
+                {cast("ThinkingEffort", e): e for e in self.valid_efforts}
+            ),
+            supported_thinking_budgets=(
+                frozenset({"auto", "fixed"}) if self.supports_thinking else frozenset()
+            ),
+            supported_thinking_outputs=(
+                frozenset({"text"}) if self.supports_thinking else frozenset()
+            ),
+            fast=bool(self.latency_modes),
+            manages_context=False,
+            prompt_cache_breakpoints=False,
+            retries_internally=self.supports_persistent_retry,
+            account_auth=False,
+            latency_modes=frozenset(self.latency_modes),
+            service_tiers=frozenset(self.service_tiers),
+        )
 
     def approx_text_tokens(self, text: str) -> int:
         return len(text) // 4

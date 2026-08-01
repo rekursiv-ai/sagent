@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import override
 
 import pytest
 
@@ -14,7 +13,7 @@ from sagent.tools.advisor import (
     Advisor,
     _AdvisorModel,
 )
-from sagent.types.model import ModelRequest, ModelResponse, Pricing
+from sagent.types.model import ModelRequest, ModelResponse
 from sagent.types.runtime import (
     AssistantMessage,
     ModelResponsePartial,
@@ -31,11 +30,6 @@ class StubProviderModel(MockModelCaps):
     max_request_tokens: int = 100_000
     received: list[ModelRequest] = field(default_factory=list)
     text: str = "advice"
-
-    @property
-    @override
-    def pricing(self) -> Pricing:
-        return Pricing()
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
         return await self.stream(request)

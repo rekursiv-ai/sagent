@@ -725,7 +725,7 @@ def _build_provider_model_fallback(
             continue
         sys.stderr.write(
             f"[provider] {original_provider} unavailable: {error}\n"
-            f"[provider] falling back to {fallback_provider} ({model.model_id}).\n"
+            f"[provider] falling back to {fallback_provider} ({model.spec.tagged_model_id}).\n"
             f"[provider] To use {original_provider}, run: "
             f"sagent --provider {original_provider} login\n"
         )
@@ -860,11 +860,11 @@ def _validate_cli_thinking_state(
     """Validate a resolved CLI thinking state against model/provider support."""
     if state is None:
         return
-    valid = model.valid_thinking_states
+    valid = model.spec.valid_thinking_states
     if state not in valid:
         options = ", ".join(valid)
         raise ValueError(
-            f"thinking state {state!r} not supported by {model.model_id!r};"
+            f"thinking state {state!r} not supported by {model.spec.tagged_model_id!r};"
             f" options: {options}"
         )
 
@@ -898,10 +898,10 @@ def _provider_knows_model(provider_name: str, model_id: str) -> bool:
     cls = getattr(providers, provider_name, None)
     if cls is None:
         return False
-    known = getattr(cls, "KNOWN_MODELS", None)
-    if not isinstance(known, dict):
+    known = getattr(cls, "CAPABILITIES", None)
+    if not isinstance(known, Mapping):
         return False
-    return model_id in known or types.model.strip_latency_tags(model_id) in known
+    return types.model.base_model_id(model_id) in known
 
 
 async def _resume_persistent_agents(
@@ -934,7 +934,7 @@ async def _resume_persistent_agents(
                 f"[resume-persistent] skipping {record.label!r}: missing session_dir.\n"
             )
             continue
-        loaded_child = load_session(Path(record.session_dir), {})
+        loaded_child = load_session(Path(record.session_dir))
         if loaded_child is not None:
             child.resume(*loaded_child)
         label = _resume_label(record.label)
@@ -972,10 +972,10 @@ def _build_persistent_child(
     agent = Agent(
         name=record.label,
         model=model,
-        model_spec=types.model.ModelSpec(
+        model_recipe=types.model.ModelRecipe(
             provider=record.provider,
             auth=record.auth,
-            model_id=model.model_id,
+            model_id=model.spec.tagged_model_id,
             account=record.account,
         ),
         system=_augment_system_for_persistent(record.system, parent_label=parent_label),
@@ -1392,7 +1392,7 @@ def main() -> int:
     session_dir = None if args.ephemeral else _resolve_session_dir(args)
     loaded_session = None
     if session_dir is not None:
-        loaded_session = load_session(Path(session_dir), {})
+        loaded_session = load_session(Path(session_dir))
         if loaded_session is not None:
             _apply_resume_model_defaults(args, loaded_session[0])
     # The provider is "explicit" when the user passed ``--provider`` or a
@@ -1418,10 +1418,10 @@ def main() -> int:
     except (AttributeError, FileNotFoundError, RuntimeError, ValueError) as e:
         sys.stderr.write(f"Error: {e}\n")
         return 1
-    model_spec = types.model.ModelSpec(
+    model_recipe = types.model.ModelRecipe(
         provider=args.provider,
         auth=resolved_auth,
-        model_id=model.model_id,
+        model_id=model.spec.tagged_model_id,
         account=args.account,
     )
     if loaded_session is not None:
@@ -1429,10 +1429,10 @@ def main() -> int:
         loaded_session = (
             dataclasses.replace(
                 meta,
-                provider=model_spec.provider,
-                auth=model_spec.auth,
-                model_id=model_spec.model_id,
-                account=model_spec.account or "",
+                provider=model_recipe.provider,
+                auth=model_recipe.auth,
+                model_id=model_recipe.model_id,
+                account=model_recipe.account or "",
             ),
             history,
             tool_state,
@@ -1441,7 +1441,7 @@ def main() -> int:
 
     headless = not sys.stdin.isatty()
     if not headless:
-        sys.stderr.write(f"[{args.provider}] {model.model_id}\n")
+        sys.stderr.write(f"[{args.provider}] {model.spec.tagged_model_id}\n")
 
     tool_names = args.tools or DEFAULT_TOOLS
     agent_tools = resolve_tools(tool_names, allow_providers=allow_providers)
@@ -1451,13 +1451,13 @@ def main() -> int:
             Advisor(model=advisor_model, max_uses=args.advisor_max_uses),
         )
         if not headless:
-            sys.stderr.write(f"[advisor] {advisor_model.model_id}\n")
+            sys.stderr.write(f"[advisor] {advisor_model.spec.tagged_model_id}\n")
 
     custom_system = args.system
 
     def _system() -> str:
         return build_system(
-            model.model_id,
+            model.spec.tagged_model_id,
             custom=custom_system,
             include_memory=not args.ephemeral,
         )
@@ -1466,7 +1466,7 @@ def main() -> int:
         name=args.name,
         description="Interactive CLI agent.",
         model=model,
-        model_spec=model_spec,
+        model_recipe=model_recipe,
         system=_system,
         tools=agent_tools,
         compactor=compactor,

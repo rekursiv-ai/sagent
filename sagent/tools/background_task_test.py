@@ -26,7 +26,11 @@ from sagent.tools.background_task import (
     cancel_persistent_subagent,
 )
 from sagent.tools.core import current_agent_var
-from sagent.types.model import ModelRequest, ModelResponse, ModelSpec
+from sagent.types.model import (
+    ModelRecipe,
+    ModelRequest,
+    ModelResponse,
+)
 from sagent.types.runtime import (
     RUNNING_PREFIX,
     AssistantMessage,
@@ -69,7 +73,7 @@ class _RecordingAgent(Agent):
     def __init__(self, *, session_dir: Path | None = None) -> None:
         super().__init__(
             model=_StubModel(),
-            model_spec=ModelSpec(
+            model_recipe=ModelRecipe(
                 provider="OpenAISubscription",
                 auth="credentials",
                 model_id="stub",

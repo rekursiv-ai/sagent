@@ -29,7 +29,15 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Literal, Protocol, cast, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    ClassVar,
+    Literal,
+    Protocol,
+    cast,
+    override,
+    runtime_checkable,
+)
 
 import asyncio
 import json
@@ -41,14 +49,19 @@ import uuid
 from sagent.lib import token_count
 from sagent.lib.custom_json import MutableJSON, MutableJSONValue, json_unfreeze
 from sagent.providers.lib.id_remap import IdRemapper
+from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.lib.stop_reason import normalize_stop_reason
-from sagent.thinking import ThinkingCapability, valid_thinking_states
+from sagent.types.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenPrice,
+)
 from sagent.types.model import (
+    Limits,
     ModelRequest,
     ModelResponse,
-    Pricing,
+    ModelSpec,
     TokenCount,
-    UsageSnapshot,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -473,11 +486,21 @@ class _HfEstimator:
         return self.image_fallback.approx_image_tokens(data)
 
 
-class SelfHostedModel:
+class SelfHostedModel(ModelDefaults):
     """``Model`` backend for a self-hosted HuggingFace model."""
 
     def __init__(self, *, provider: _ProviderLike) -> None:
         self._provider = provider
+        # In-process weights: every rate is genuinely zero, and the window
+        # comes from the loaded model, not a published catalog.
+        self.spec = ModelSpec(
+            model_id=provider.hosted_model_id,
+            context_limits=Limits(
+                max_request_tokens=provider.hosted_max_request_tokens,
+                max_response_tokens=provider.hosted_max_response_tokens,
+            ),
+            prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+        )
 
     @property
     def max_request_tokens(self) -> int:
@@ -508,13 +531,6 @@ class SelfHostedModel:
         return False
 
     @property
-    def valid_thinking_states(self) -> tuple[str, ...]:
-        """Self-hosted generation surfaces no thinking; only ``off-hide``."""
-        return valid_thinking_states(
-            ThinkingCapability(supports_thinking=self.supports_thinking),
-        )
-
-    @property
     def supports_effort(self) -> bool:
         """Return whether effort control is supported."""
         return True
@@ -528,11 +544,6 @@ class SelfHostedModel:
     def supports_cache_control(self) -> bool:
         """Return whether cache control is supported."""
         return False
-
-    @property
-    def valid_service_tiers(self) -> tuple[str, ...]:
-        """Self-hosted backends have no processing-tier concept."""
-        return ()
 
     @property
     def valid_latency_modes(self) -> tuple[str, ...]:
@@ -554,15 +565,12 @@ class SelfHostedModel:
         """Return whether account auth is supported."""
         return False
 
+    @override
     def approx_text_tokens(self, text: str) -> int:
         """Local estimate via ``len(text) // 4``."""
         return len(text) // 4
 
-    @property
-    def pricing(self) -> Pricing:
-        """Per-million-token pricing (zero for self-hosted models)."""
-        return Pricing()
-
+    @override
     def approx_image_tokens(self, data: bytes) -> int:
         """Local estimate via vision-encoder patch geometry.
 
@@ -572,20 +580,14 @@ class SelfHostedModel:
         dims = image_lib.get_dimensions(data)
         return dims[0] * dims[1] // (32 * 32) if dims is not None else 0
 
-    def approx_request_tokens(self, request: ModelRequest) -> int:
-        """Walk-and-sum every wire-bearing surface of ``request``."""
-        return token_count.approx_request_tokens(request, self)
-
+    @override
     async def actual_text_tokens(self, text: str) -> int:
         """Local HF tokenizer count -- the true tokenization for this model."""
         return len(
             self._provider.tokenizer.encode(text, add_special_tokens=False),
         )
 
-    async def actual_image_tokens(self, data: bytes) -> int:
-        """Delegate to the local heuristic (vision-encoder patch math)."""
-        return self.approx_image_tokens(data)
-
+    @override
     async def actual_request_tokens(self, request: ModelRequest) -> int:
         """Walker driven by the HF tokenizer for text + provider's image formula."""
         return token_count.approx_request_tokens(
@@ -633,15 +635,7 @@ class SelfHostedModel:
         del error
         return False
 
-    def is_retryable_provider_error(self, error: Exception) -> bool:
-        """In-process generate calls have no transient retry surface."""
-        del error
-        return False
-
-    def usage_snapshot(self) -> UsageSnapshot | None:
-        """In-process generation has no rate-limit telemetry."""
-        return None
-
+    @override
     async def buffer(self, request: ModelRequest) -> ModelResponse:
         """Render messages via chat template, generate, and parse tool calls.
 
@@ -720,8 +714,8 @@ class SelfHostedModel:
                 tool_calls=tuple(tool_calls),
             ),
             tokens=TokenCount(
-                input_tokens=int(input_ids.shape[-1]),
-                output_tokens=output_tokens,
+                request=int(input_ids.shape[-1]),
+                response=output_tokens,
             ),
             stop_reason=normalize_stop_reason(
                 finish_reason,
@@ -730,6 +724,7 @@ class SelfHostedModel:
             ),
         )
 
+    @override
     async def stream(
         self,
         request: ModelRequest,
