@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from sagent.lib.custom_json import MutableJSON, MutableJSONValue
-from sagent.providers.google import (
+from sagent.providers.google.api import (
     Google,
     _build_request,
     _build_response,
@@ -270,7 +270,7 @@ async def test_google_stream_logs_and_skips_malformed_json_chunk(
     m = p.model("gemini-2.5-flash")
     m._client = httpx.AsyncClient(transport=transport)
     with (
-        caplog.at_level(logging.WARNING, logger="sagent.providers.google"),
+        caplog.at_level(logging.WARNING, logger="sagent.providers.google.api"),
         pytest.raises(StreamInterruptedError) as raised,
     ):
         await m.stream(ModelRequest(messages=[UserMessage(text="x")]))

@@ -39,9 +39,9 @@ import sys
 import httpx
 
 from sagent import providers
-from sagent.providers.anthropic import Anthropic
-from sagent.providers.google import Google
-from sagent.providers.openai import OpenAI
+from sagent.providers.anthropic.api import Anthropic
+from sagent.providers.google.api import Google
+from sagent.providers.openai.api import OpenAI
 from sagent.types.model import Limits, ModelCapability
 
 

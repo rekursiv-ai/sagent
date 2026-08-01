@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from sagent.providers.openai_sub import OpenAISubscription
+from sagent.providers.openai.sub import OpenAISubscription
 from sagent.types.model import ModelRequest
 from sagent.types.runtime import UserMessage
 

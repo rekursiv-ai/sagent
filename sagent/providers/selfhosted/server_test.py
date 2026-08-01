@@ -12,7 +12,7 @@ from typing import cast
 import json
 
 from sagent.lib.custom_json import MutableJSON
-from sagent.providers.selfhosted import (
+from sagent.providers.selfhosted.server import (
     SelfHostedModel,
     _attention_mask,
     _build_chat_messages,

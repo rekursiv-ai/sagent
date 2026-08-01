@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from sagent.lib.custom_json import MutableJSON
-from sagent.providers.openai_compat import (
+from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
     _extract_usage,

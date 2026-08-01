@@ -8,7 +8,7 @@ import pytest
 
 from sagent.agent.agent import Agent
 from sagent.lib.custom_json import MutableJSON
-from sagent.providers.dashscope import DashScope, _DashScopeModel
+from sagent.providers.dashscope.api import DashScope, _DashScopeModel
 from sagent.types.model import ModelRequest
 
 

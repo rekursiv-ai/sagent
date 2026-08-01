@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from sagent.providers.moonshot import Moonshot
+from sagent.providers.moonshot.api import Moonshot
 
 
 def test_moonshot_from_key() -> None:

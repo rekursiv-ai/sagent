@@ -39,8 +39,8 @@ import tempfile
 
 from sagent import types
 from sagent.lib.custom_json import JSON, MutableJSON, int_val, validate_json_schema
-from sagent.providers import anthropic_catalog
-from sagent.providers.anthropic import Anthropic
+from sagent.providers.anthropic import catalog as anthropic_catalog
+from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.lib.cli_respawn import respawn_for_cadence
 from sagent.providers.lib.errors import (
     error_status_code,

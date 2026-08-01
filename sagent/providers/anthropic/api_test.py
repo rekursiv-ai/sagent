@@ -14,7 +14,7 @@ import pytest
 
 from sagent.agent.retry import error_status, is_retryable
 from sagent.lib.custom_json import MutableJSON
-from sagent.providers.anthropic import (
+from sagent.providers.anthropic.api import (
     Anthropic,
     _AnthropicModel,
     _assistant_blocks,
@@ -961,7 +961,7 @@ async def test_anthropic_stream_request_too_large_raises_typed_error() -> None:
     with (
         patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
         patch(
-            "sagent.providers.anthropic._stream_impl",
+            "sagent.providers.anthropic.api._stream_impl",
             AsyncMock(side_effect=err),
         ),
         pytest.raises(RequestTooLargeError) as raised,
@@ -1047,7 +1047,7 @@ async def test_anthropic_stream_uses_structured_overflow_body() -> None:
     with (
         patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
         patch(
-            "sagent.providers.anthropic._stream_impl",
+            "sagent.providers.anthropic.api._stream_impl",
             AsyncMock(side_effect=err),
         ),
         pytest.raises(PromptTooLongError),
@@ -1139,7 +1139,7 @@ async def test_anthropic_stream_wraps_bare_response_not_read() -> None:
     with (
         patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
         patch(
-            "sagent.providers.anthropic._stream_impl",
+            "sagent.providers.anthropic.api._stream_impl",
             AsyncMock(side_effect=httpx.ResponseNotRead()),
         ),
         pytest.raises(StreamingResponseNotReadError),
@@ -1158,7 +1158,7 @@ async def test_anthropic_stream_wraps_chained_response_not_read() -> None:
     with (
         patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
         patch(
-            "sagent.providers.anthropic._stream_impl",
+            "sagent.providers.anthropic.api._stream_impl",
             AsyncMock(side_effect=wrapped),
         ),
         pytest.raises(StreamingResponseNotReadError),
@@ -1182,7 +1182,7 @@ async def test_anthropic_stream_preserves_retryable_status_over_response_not_rea
     with (
         patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
         patch(
-            "sagent.providers.anthropic._stream_impl",
+            "sagent.providers.anthropic.api._stream_impl",
             AsyncMock(side_effect=err),
         ),
         pytest.raises(anthropic_sdk.APIStatusError) as raised,

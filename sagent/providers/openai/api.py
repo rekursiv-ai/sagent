@@ -15,8 +15,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import ClassVar, Final, override
 
-from sagent.providers import openai_catalog
-from sagent.providers.openai_compat import (
+from sagent.providers.openai import catalog as openai_catalog
+from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
 )

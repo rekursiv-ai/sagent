@@ -16,9 +16,9 @@ import re
 import pytest
 
 from sagent.lib.custom_json import MutableJSON
-from sagent.providers import anthropic_cli
-from sagent.providers.anthropic import Anthropic
-from sagent.providers.anthropic_cli import (
+from sagent.providers.anthropic import cli as anthropic_cli
+from sagent.providers.anthropic.api import Anthropic
+from sagent.providers.anthropic.cli import (
     AnthropicCLI,
     AnthropicCLIRetryableError,
     _anthropic_subprocess_env,
@@ -113,15 +113,15 @@ def test_from_cli_requires_credentials(
 ) -> None:
     """Legacy CLIs without auth status still require the credentials file."""
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli._CREDS_PATH",
+        "sagent.providers.anthropic.cli._CREDS_PATH",
         tmp_path / "missing.json",
     )
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which",
+        "sagent.providers.anthropic.cli.shutil.which",
         _which_claude_stub,
     )
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli._claude_auth_status",
+        "sagent.providers.anthropic.cli._claude_auth_status",
         _auth_status_unknown,
     )
     with pytest.raises(FileNotFoundError, match="no credentials"):
@@ -133,15 +133,15 @@ def test_from_cli_accepts_native_login_without_credentials_file(
 ) -> None:
     """The native Keychain login is authoritative without the legacy file."""
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli._CREDS_PATH",
+        "sagent.providers.anthropic.cli._CREDS_PATH",
         tmp_path / "missing.json",
     )
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which",
+        "sagent.providers.anthropic.cli.shutil.which",
         _which_claude_stub,
     )
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli._claude_auth_status",
+        "sagent.providers.anthropic.cli._claude_auth_status",
         _auth_status_logged_in,
     )
 
@@ -155,15 +155,15 @@ def test_from_cli_treats_explicit_default_account_as_native_login(
 ) -> None:
     """``--account default`` must not bypass the macOS Keychain login."""
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli._CREDS_PATH",
+        "sagent.providers.anthropic.cli._CREDS_PATH",
         tmp_path / "missing.json",
     )
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which",
+        "sagent.providers.anthropic.cli.shutil.which",
         _which_claude_stub,
     )
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli._claude_auth_status",
+        "sagent.providers.anthropic.cli._claude_auth_status",
         _auth_status_logged_in,
     )
 
@@ -177,11 +177,11 @@ def test_from_cli_missing_named_account_does_not_suggest_native_login(
 ) -> None:
     """Native login cannot create Sagent's legacy named credential file."""
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli._CREDS_PATH",
+        "sagent.providers.anthropic.cli._CREDS_PATH",
         tmp_path / ".credentials.json",
     )
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which",
+        "sagent.providers.anthropic.cli.shutil.which",
         _which_claude_stub,
     )
 
@@ -197,13 +197,13 @@ def test_from_cli_rejects_native_logged_out_state_even_with_stale_file(
 ) -> None:
     """A stale legacy JSON file must not override an explicit logged-out state."""
     creds = _write_creds(tmp_path)
-    monkeypatch.setattr("sagent.providers.anthropic_cli._CREDS_PATH", creds)
+    monkeypatch.setattr("sagent.providers.anthropic.cli._CREDS_PATH", creds)
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which",
+        "sagent.providers.anthropic.cli.shutil.which",
         _which_claude_stub,
     )
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli._claude_auth_status",
+        "sagent.providers.anthropic.cli._claude_auth_status",
         _auth_status_logged_out,
     )
 
@@ -242,7 +242,7 @@ def test_claude_auth_status_scrubs_non_subscription_auth_and_reads_boolean(
     monkeypatch.setenv("CLAUDE_CODE_USE_MANTLE", "1")
     monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
     monkeypatch.setenv("CLAUDE_CODE_USE_FOUNDRY", "1")
-    monkeypatch.setattr("sagent.providers.anthropic_cli.subprocess.run", fake_run)
+    monkeypatch.setattr("sagent.providers.anthropic.cli.subprocess.run", fake_run)
 
     assert _claude_auth_status("/opt/homebrew/bin/claude") is True
     assert captured["args"] == (
@@ -302,7 +302,7 @@ def test_claude_auth_status_requires_subscription_method(
         )
 
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.subprocess.run",
+        "sagent.providers.anthropic.cli.subprocess.run",
         fake_run,
     )
 
@@ -325,12 +325,12 @@ def test_login_runs_native_claudeai_flow_with_scrubbed_env(
     monkeypatch.setenv("ANTHROPIC_API_KEY", "secret-test-key")
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "secret-oauth-token")
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which",
+        "sagent.providers.anthropic.cli.shutil.which",
         fake_which,
     )
-    monkeypatch.setattr("sagent.providers.anthropic_cli.subprocess.run", fake_run)
+    monkeypatch.setattr("sagent.providers.anthropic.cli.subprocess.run", fake_run)
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli._claude_auth_status",
+        "sagent.providers.anthropic.cli._claude_auth_status",
         _auth_status_logged_in,
     )
 
@@ -364,11 +364,11 @@ def test_login_reports_native_cli_failure(
         return MagicMock(returncode=7)
 
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which",
+        "sagent.providers.anthropic.cli.shutil.which",
         fake_which,
     )
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.subprocess.run",
+        "sagent.providers.anthropic.cli.subprocess.run",
         fake_run,
     )
 
@@ -382,7 +382,7 @@ def test_from_cli_with_credentials(
     """``from_credentials`` returns a configured provider when both creds + CLI exist."""
     creds = _write_creds(tmp_path)
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli._CREDS_PATH",
+        "sagent.providers.anthropic.cli._CREDS_PATH",
         creds,
     )
 
@@ -391,7 +391,7 @@ def test_from_cli_with_credentials(
         return "/usr/bin/claude"
 
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which",
+        "sagent.providers.anthropic.cli.shutil.which",
         _which_claude,
     )
     provider = AnthropicCLI.from_credentials()
@@ -411,7 +411,7 @@ def test_from_cli_rejects_malformed_credentials(
     creds = tmp_path / ".credentials.json"
     creds.write_text("", encoding="utf-8")
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli._CREDS_PATH",
+        "sagent.providers.anthropic.cli._CREDS_PATH",
         creds,
     )
 
@@ -420,7 +420,7 @@ def test_from_cli_rejects_malformed_credentials(
         return "/usr/bin/claude"
 
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which",
+        "sagent.providers.anthropic.cli.shutil.which",
         _which_claude,
     )
     with pytest.raises(ValueError, match="Invalid credentials"):
@@ -433,7 +433,7 @@ def test_from_cli_rejects_credentials_missing_oauth_fields(
     creds = tmp_path / ".credentials.json"
     creds.write_text(json.dumps({"claudeAiOauth": {}}), encoding="utf-8")
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli._CREDS_PATH",
+        "sagent.providers.anthropic.cli._CREDS_PATH",
         creds,
     )
 
@@ -442,7 +442,7 @@ def test_from_cli_rejects_credentials_missing_oauth_fields(
         return "/usr/bin/claude"
 
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which",
+        "sagent.providers.anthropic.cli.shutil.which",
         _which_claude,
     )
     with pytest.raises(ValueError, match="Invalid credentials"):
@@ -455,7 +455,7 @@ def test_from_cli_rejects_missing_executable(
     """``from_credentials`` fails fast if ``claude`` is not on ``PATH``."""
     creds = _write_creds(tmp_path)
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli._CREDS_PATH",
+        "sagent.providers.anthropic.cli._CREDS_PATH",
         creds,
     )
 
@@ -464,7 +464,7 @@ def test_from_cli_rejects_missing_executable(
         return None
 
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which",
+        "sagent.providers.anthropic.cli.shutil.which",
         _which_missing,
     )
     with pytest.raises(RuntimeError, match="not on PATH"):
@@ -850,13 +850,13 @@ async def test_stateless_named_account_uses_isolated_file_home(
     named = tmp_path / ".credentials-work.json"
     named.write_text(json.dumps(_CRED_PAYLOAD), encoding="utf-8")
     isolated = tmp_path / "isolated-home"
-    monkeypatch.setattr("sagent.providers.anthropic_cli._CREDS_PATH", base)
+    monkeypatch.setattr("sagent.providers.anthropic.cli._CREDS_PATH", base)
 
     def fake_mkdtemp(**_kwargs: object) -> str:
         return str(isolated)
 
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.tempfile.mkdtemp",
+        "sagent.providers.anthropic.cli.tempfile.mkdtemp",
         fake_mkdtemp,
     )
     captured: dict[str, object] = {}
@@ -1102,11 +1102,11 @@ async def test_session_persistent_stream_returns_empty_when_history_cleared(
     """
     _write_creds(tmp_path)
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli._CREDS_PATH",
+        "sagent.providers.anthropic.cli._CREDS_PATH",
         tmp_path / ".credentials.json",
     )
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which",
+        "sagent.providers.anthropic.cli.shutil.which",
         _which_claude_stub,
     )
 
@@ -1115,7 +1115,7 @@ async def test_session_persistent_stream_returns_empty_when_history_cleared(
         return "/usr/bin/claude"
 
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which",
+        "sagent.providers.anthropic.cli.shutil.which",
         _which_claude,
     )
     # Point HOME at tmp_path so the JSONL-cleanup glob is sandboxed.
@@ -1180,15 +1180,15 @@ async def test_session_persistent_advances_sent_index_per_entry_on_partial_failu
     """
     _write_creds(tmp_path)
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli._CREDS_PATH",
+        "sagent.providers.anthropic.cli._CREDS_PATH",
         tmp_path / ".credentials.json",
     )
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which",
+        "sagent.providers.anthropic.cli.shutil.which",
         _which_claude_stub,
     )
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which",
+        "sagent.providers.anthropic.cli.shutil.which",
         _which_claude_stub,
     )
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -1491,11 +1491,11 @@ async def test_session_persistent_delivers_detached_result_as_trailing_entry(
     """
     _write_creds(tmp_path)
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli._CREDS_PATH",
+        "sagent.providers.anthropic.cli._CREDS_PATH",
         tmp_path / ".credentials.json",
     )
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which",
+        "sagent.providers.anthropic.cli.shutil.which",
         _which_claude_stub,
     )
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -1701,11 +1701,11 @@ def test_is_retryable_provider_error_session_persistent_only(
     """
     _write_creds(tmp_path)
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli._CREDS_PATH",
+        "sagent.providers.anthropic.cli._CREDS_PATH",
         tmp_path / ".credentials.json",
     )
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which",
+        "sagent.providers.anthropic.cli.shutil.which",
         _which_claude_stub,
     )
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -2644,9 +2644,9 @@ def test_interrupt_active_proc_returns_false_when_no_active_subprocess(
 ) -> None:
     """No active hot-spare ⇒ ``_interrupt_active_proc`` returns False without raising."""
     creds = _write_creds(tmp_path)
-    monkeypatch.setattr("sagent.providers.anthropic_cli._CREDS_PATH", creds)
+    monkeypatch.setattr("sagent.providers.anthropic.cli._CREDS_PATH", creds)
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which",
+        "sagent.providers.anthropic.cli.shutil.which",
         _which_claude_stub,
     )
     provider = AnthropicCLI.from_credentials()
@@ -2662,9 +2662,9 @@ def test_interrupt_active_proc_signals_active_subprocess(
 ) -> None:
     """Active hot-spare ⇒ ``_interrupt_active_proc`` forwards to ``Subproc.interrupt``."""
     creds = _write_creds(tmp_path)
-    monkeypatch.setattr("sagent.providers.anthropic_cli._CREDS_PATH", creds)
+    monkeypatch.setattr("sagent.providers.anthropic.cli._CREDS_PATH", creds)
     monkeypatch.setattr(
-        "sagent.providers.anthropic_cli.shutil.which",
+        "sagent.providers.anthropic.cli.shutil.which",
         _which_claude_stub,
     )
     provider = AnthropicCLI.from_credentials()

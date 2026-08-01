@@ -34,7 +34,7 @@ import uuid as _uuid
 
 import pytest
 
-from sagent.providers.anthropic_cli import (
+from sagent.providers.anthropic.cli import (
     AnthropicCLI,
     _claude_auth_status,
 )

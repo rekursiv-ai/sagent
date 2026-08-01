@@ -52,7 +52,7 @@ else:
 from sagent import types
 from sagent.lib import debug_log
 from sagent.lib.custom_json import MutableJSON, MutableJSONValue, json_unfreeze
-from sagent.providers import anthropic_catalog
+from sagent.providers.anthropic import catalog as anthropic_catalog
 from sagent.providers.lib.errors import (
     StreamingResponseNotReadError,
     error_status_code,

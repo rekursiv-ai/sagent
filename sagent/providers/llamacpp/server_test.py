@@ -8,8 +8,8 @@ import shutil
 
 import pytest
 
-from sagent.providers import llamacpp as llamacpp_mod
-from sagent.providers.llamacpp import (
+from sagent.providers.llamacpp import server as llamacpp_mod
+from sagent.providers.llamacpp.server import (
     LlamaCpp,
     _free_port,
     _looks_like_path,

@@ -18,8 +18,8 @@ import time
 import urllib.error
 import urllib.request
 
-from sagent.providers import llamacpp_catalog
-from sagent.providers.openai_compat import (
+from sagent.providers.llamacpp import catalog as llamacpp_catalog
+from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
 )

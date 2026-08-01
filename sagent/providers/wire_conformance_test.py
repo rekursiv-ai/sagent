@@ -26,13 +26,13 @@ from typing import TYPE_CHECKING, ClassVar, Protocol
 import pytest
 
 from sagent.providers import PROVIDER_NAMES
-from sagent.providers.anthropic import Anthropic, _AnthropicModel
-from sagent.providers.dashscope import DashScope
-from sagent.providers.google import Google, _build_request
-from sagent.providers.minimax import MiniMax
-from sagent.providers.moonshot import Moonshot
-from sagent.providers.openai import OpenAI
-from sagent.providers.openai_compat import OpenAICompatModel
+from sagent.providers.anthropic.api import Anthropic, _AnthropicModel
+from sagent.providers.dashscope.api import DashScope
+from sagent.providers.google.api import Google, _build_request
+from sagent.providers.minimax.api import MiniMax
+from sagent.providers.moonshot.api import Moonshot
+from sagent.providers.openai.api import OpenAI
+from sagent.providers.openai.compat import OpenAICompatModel
 from sagent.types.model import (
     ALL_THINKING_EFFORTS,
     Limits,
