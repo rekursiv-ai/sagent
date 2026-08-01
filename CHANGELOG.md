@@ -4,6 +4,14 @@ All notable Sagent changes are documented here.
 
 ## Unreleased
 
+## 0.1.14 - 2026-08-01
+
+### Changed
+
+- Requires wesearch 0.1.7 or newer.
+- README carries a one-line description below the badges; PyPI renders the
+  README, so the project page had been showing the previous text.
+
 ## 0.1.13 - 2026-08-01
 
 ### Changed
