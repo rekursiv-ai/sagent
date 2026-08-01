@@ -3025,7 +3025,7 @@ wheels = [
 
 [[package]]
 name = "sagent"
-version = "0.1.12"
+version = "0.1.13"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -3148,7 +3148,7 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'selfhosted'", specifier = ">=5.8.0" },
     { name = "uvicorn", specifier = ">=0.30.0" },
     { name = "webp", specifier = ">=0.4.0" },
-    { name = "wesearch", extras = ["extract"], specifier = ">=0.1.5" },
+    { name = "wesearch", extras = ["extract"], specifier = ">=0.1.6" },
     { name = "wrapt" },
 ]
 provides-extras = ["slack", "selfhosted"]
@@ -3865,7 +3865,7 @@ wheels = [
 
 [[package]]
 name = "wesearch"
-version = "0.1.5"
+version = "0.1.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "beautifulsoup4", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -3875,9 +3875,9 @@ dependencies = [
     { name = "zendriver", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "zstandard", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f9/c4/c57800d8f2ae84e63846b503eb2bd550877cf9adae0be253935e297fea2f/wesearch-0.1.5.tar.gz", hash = "sha256:9cc1e0a4b20d15c543e1f3e060419dce79ff08a86cea8b6917cac29ecfd68fba", size = 330235, upload-time = "2026-07-29T02:15:27.419Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f7/98/2fc1da2ec1efad9b8af67769c7f8c427d36364810b887d1f02d986f768c4/wesearch-0.1.6.tar.gz", hash = "sha256:50128d814e7af1457371786d1de371991c9c6bbb9aa594c5feeeb9683b398107", size = 331164, upload-time = "2026-08-01T16:59:40.225Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d5/f5/9f648c7aa1268f96d881029fd95b1698d51613505ddaef452a42b8fb115c/wesearch-0.1.5-py3-none-any.whl", hash = "sha256:3e1dd52d34bdf5f8d958b5b03d25dce82cab8caf371c02100b8ea292d451cc21", size = 175402, upload-time = "2026-07-29T02:15:26.227Z" },
+    { url = "https://files.pythonhosted.org/packages/1c/c1/1090bf0a6d6e872255b7721e2fd54a4d3dd51cafc91b8fe02150e2d9ccd9/wesearch-0.1.6-py3-none-any.whl", hash = "sha256:f25f810271ee661abf92430e46530b9e526daa3774020fcbad869d09338aff2f", size = 175804, upload-time = "2026-08-01T16:59:38.684Z" },
 ]
 
 [package.optional-dependencies]
