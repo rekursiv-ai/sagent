@@ -4,6 +4,23 @@ All notable Sagent changes are documented here.
 
 ## Unreleased
 
+## 0.1.13 - 2026-08-01
+
+### Changed
+
+- Requires wesearch 0.1.6 or newer.
+- Model metadata moved into per-provider capability catalogs, and the
+  provider modules are grouped into one subpackage per family.
+
+### Fixed
+
+- Every effort a model advertises now reaches the wire, and a model that
+  advertises none no longer receives a thinking knob it would reject.
+- Entitlement errors are classified as fatal rather than retried, and the
+  provider's message is surfaced in the suspension banner.
+
+## 0.1.12 - 2026-07-29
+
 - Fixed CLI subscription authentication: `AnthropicCLI` now recognizes Claude
   Code's native macOS login, `OpenAISubscription` honors `$CODEX_HOME`, and
   zero-flag startup only tries allowed subscription providers.
