@@ -93,6 +93,39 @@ jobs:
           fi
           echo "enabled=true" >> "$GITHUB_OUTPUT"
 
+      # The target checkout comes first because it carries the import ledger the
+      # merge baseline is read from, and because the trusted helper is installed
+      # out of it before any public tree exists on disk. It keeps
+      # persist-credentials: false, so the import token is used for this fetch
+      # and never written into target/.git/config where the later step that
+      # executes imported public code could read it.
+      - uses: actions/checkout@v5
+        if: steps.settings.outputs.enabled == 'true'
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          token: ${{ secrets.COPYBARISTA_IMPORT_TOKEN }}
+          ref: main
+          path: target
+          persist-credentials: false
+          # Full history: the baseline resolver walks this branch for the newest
+          # landed import commit. A shallow clone sees one commit, so every
+          # import would silently fall back to the pushed commit's parent -- the
+          # exact wrong baseline this resolution exists to avoid.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        if: steps.settings.outputs.enabled == 'true'
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        if: steps.settings.outputs.enabled == 'true'
+
+      - name: Capture trusted import helper
+        if: steps.settings.outputs.enabled == 'true'
+        run: |
+          install -m 600 \
+            "target/$COPYBARISTA_TOOL_PROJECT_PATH/scripts/sync_import_change.py" \
+            "$TRUSTED_IMPORT_SCRIPT"
+
       - id: refs
         name: Resolve public refs
         if: steps.settings.outputs.enabled == 'true'
@@ -107,7 +140,21 @@ jobs:
               head_ref="${GITHUB_SHA}"
             fi
           else
-            base_ref="${{ github.event.before }}"
+            # A push carries no explicit base, so read the baseline from the
+            # target's own import ledger: the public commit it last absorbed.
+            # github.event.before is only the pushed commit's PARENT, and the
+            # two diverge the moment an import fails or goes unlanded -- the
+            # parent marches on while the target stays pinned, so a
+            # parent-based baseline feeds the three-way merge a wrong common
+            # ancestor and manufactures conflicts. It survives only as the
+            # bootstrap for a target that has never landed an import.
+            base_ref="$(uv --quiet run --no-project python \
+              "$TRUSTED_IMPORT_SCRIPT" \
+              --print-synced-base \
+              --target-dir target \
+              --base-branch main \
+              --sync-label "$COPYBARISTA_SYNC_LABEL" \
+              --fallback-sha "${{ github.event.before }}")"
             head_ref="${GITHUB_SHA}"
           fi
           if [ -z "$base_ref" ] || [ "$base_ref" = "0000000000000000000000000000000000000000" ]; then
@@ -133,31 +180,10 @@ jobs:
         with:
           ref: ${{ steps.refs.outputs.head_ref }}
           path: public-head
-      - uses: actions/checkout@v5
-        if: steps.settings.outputs.enabled == 'true'
-        with:
-          repository: ${{ env.TARGET_REPO }}
-          token: ${{ secrets.COPYBARISTA_IMPORT_TOKEN }}
-          ref: main
-          path: target
-          persist-credentials: false
-      - uses: actions/setup-python@v5
-        if: steps.settings.outputs.enabled == 'true'
-        with:
-          python-version: "3.12"
-      - uses: astral-sh/setup-uv@v6
-        if: steps.settings.outputs.enabled == 'true'
 
       - name: Install system packages
         if: steps.settings.outputs.enabled == 'true'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep fd-find
-      - name: Capture trusted import helper
-        if: steps.settings.outputs.enabled == 'true'
-        run: |
-          install -m 600 \
-            "target/$COPYBARISTA_TOOL_PROJECT_PATH/scripts/sync_import_change.py" \
-            "$TRUSTED_IMPORT_SCRIPT"
-
       - name: Import public tree into target repository
         if: steps.settings.outputs.enabled == 'true'
         run: |
