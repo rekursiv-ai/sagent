@@ -112,11 +112,11 @@ jobs:
           # import would silently fall back to the pushed commit's parent -- the
           # exact wrong baseline this resolution exists to avoid.
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         if: steps.settings.outputs.enabled == 'true'
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
         if: steps.settings.outputs.enabled == 'true'
 
       - name: Capture trusted import helper
@@ -250,7 +250,7 @@ jobs:
 
       - name: Upload import report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: copybarista-import-report
           path: ${{ env.IMPORT_REPORT }}
