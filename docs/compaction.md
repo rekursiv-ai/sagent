@@ -28,7 +28,7 @@ agent = Agent(
 max_request_tokens - max_response_tokens - buffer_tokens
 ```
 
-The default buffer is 13,000 tokens.
+The default buffer scales with the model's input window instead of being a fixed token count: `default_buffer_tokens(max_request_tokens)` returns `max_request_tokens // 15`, floored at 8,000 tokens and capped at half the window. A 200,000-token window reserves 13,333 tokens; a 400,000-token window reserves 26,666.
 
 During compaction, Sagent asks a utility model to summarize prior conversation into a continuation message. When `session_dir` exists, Sagent writes a pre-compaction transcript before replacing history.
 
