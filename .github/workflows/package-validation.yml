@@ -34,14 +34,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep fd-find
       - name: Validate package
         run: |
+          # Lint/type/test checks come from this package's own .pre-commit-config.yaml.
+          # Restating each tool here means a newly added hook silently goes unrun.
           uv sync --frozen --all-groups --extra slack
-          uv run ruff check --no-fix --no-cache .
-          uv run ruff format --check --no-cache .
-          uv run codespell .
-          uv run ty check
-          uv run basedpyright --threads=6 sagent
-          uv run pytest
-          uv run pytest -m ci_smoke -o addopts="--durations=20"
+          uv run pre-commit run --all-files --hook-stage pre-commit
+          uv run pre-commit run --all-files --hook-stage pre-push
           uv run python -c "import sagent"
           uv build
           uv run python sagent/bin/check_wheel.py

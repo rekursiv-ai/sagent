@@ -206,13 +206,8 @@ jobs:
             --report "$IMPORT_REPORT" \
             --refresh-public-lockfile \
             --validation-command 'uv sync --frozen --all-groups --extra slack' \
-            --validation-command 'uv run ruff check --no-fix --no-cache .' \
-            --validation-command 'uv run ruff format --check --no-cache .' \
-            --validation-command 'uv run codespell .' \
-            --validation-command 'uv run ty check' \
-            --validation-command 'uv run basedpyright --threads=6 sagent' \
-            --validation-command 'uv run pytest' \
-            --validation-command 'uv run pytest -m ci_smoke -o addopts="--durations=20"' \
+            --validation-command 'uv run pre-commit run --all-files --hook-stage pre-commit' \
+            --validation-command 'uv run pre-commit run --all-files --hook-stage pre-push' \
             --validation-command 'uv run python -c "import sagent"' \
             --validation-command 'uv build' \
             --validation-command 'uv run python sagent/bin/check_wheel.py' \
