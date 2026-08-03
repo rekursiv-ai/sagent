@@ -17,6 +17,9 @@ This file gives maintainers a public moderation policy before the repository acc
 - Personal attacks or sustained disruption.
 - Publishing private information without consent.
 
+Disclose security issues privately through the process in `SECURITY.md`, not in
+a public issue.
+
 ## Enforcement
 
 Project maintainers may moderate discussions, close issues, or restrict participation when necessary to keep the project safe and productive. Report concerns privately to hello@rekursiv.ai.

@@ -26,8 +26,7 @@ which builds, validates, and uploads to PyPI via OIDC trusted publishing
 2. **Bump the version** in `pyproject.toml` (source of truth). Must
    increase; PyPI rejects re-uploads.
 
-3. **Refresh the lockfile and validate locally** (same checks CI runs,
-   CONTRIBUTING.md:18-30):
+3. **Refresh the lockfile and validate locally** (same checks CI runs):
 
    `uv lock` first: the lockfile pins this package's own version, so
    building without it publishes an artifact whose lock still names the
@@ -37,7 +36,7 @@ which builds, validates, and uploads to PyPI via OIDC trusted publishing
    ```bash
    uv lock
    uv build
-   uv run python sagent/bin/check_wheel.py
+   uv run python -c "import sagent; print(sagent.__file__)"
    ```
 
 4. **Commit and merge to `main`.** Confirm the published version:
