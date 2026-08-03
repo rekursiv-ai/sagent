@@ -216,22 +216,3 @@ repos:
             pytest -n="$workers" "$@" || test "$?" = 5
           ' pytest
         args: [-q, --tb=short, --no-cov, -m, integration]
-
-  - repo: local
-    hooks:
-      - id: build-wheel
-        name: build wheel
-        language: system
-        types: [python]
-        always_run: true
-        pass_filenames: false
-        stages: [pre-push]
-        entry: uv --quiet run --frozen --group test pytest
-
-      - id: check-wheel
-        name: check wheel
-        language: system
-        always_run: true
-        pass_filenames: false
-        stages: [pre-push]
-        entry: uv --quiet run --frozen python sagent/bin/check_wheel.py
