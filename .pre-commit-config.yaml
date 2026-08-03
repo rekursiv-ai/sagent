@@ -211,8 +211,11 @@ repos:
             workers=$((workers / 2));
             ((workers < 2)) && workers=2;
             ((workers > 32)) && workers=32;
+            cov=();
             uv --quiet run --frozen --group test \
-            pytest -n="$workers" "$@" || test "$?" = 5
+              python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
+            uv --quiet run --frozen --group test \
+            pytest -n="$workers" "${cov[@]}" "$@" || test "$?" = 5
           ' pytest
         args: [-q, --tb=short, -m, "slow and not cluster and not cuda and not integration and not performance"]
 
@@ -231,8 +234,11 @@ repos:
             workers=$((workers / 2));
             ((workers < 2)) && workers=2;
             ((workers > 32)) && workers=32;
+            cov=();
             uv --quiet run --frozen --group test \
-            pytest -n="$workers" "$@" || test "$?" = 5
+              python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
+            uv --quiet run --frozen --group test \
+            pytest -n="$workers" "${cov[@]}" "$@" || test "$?" = 5
           ' pytest
         args: [-q, --tb=short, --durations=20, -m, ci_smoke]
 
@@ -242,16 +248,27 @@ repos:
         always_run: true
         pass_filenames: false
         stages: [pre-push]
+        # Opt-in: the `integration` marker means "needs networking or a real
+        # database" in every package that defines it, and no hosted runner has
+        # either -- trackinizer's failed on `extension "vector" is not
+        # available`. The monorepo gates this in its root conftest; exported
+        # packages ship no conftest, so the gate lives here. Set
+        # RUN_INTEGRATION=1 in a job that has provisioned the services.
+        #
         # Tolerate pytest exit 5 (no tests collected): this package may ship no
         # integration-marked tests, which is not a failure. Regular pytest above
         # stays strict so an empty collection there still fails.
         entry: >-
           bash -c '
+            [ -n "${RUN_INTEGRATION:-}" ] || exit 0;
             workers=$(nproc);
             workers=$((workers / 2));
             ((workers < 2)) && workers=2;
             ((workers > 32)) && workers=32;
+            cov=();
             uv --quiet run --frozen --group test \
-            pytest -n="$workers" "$@" || test "$?" = 5
+              python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
+            uv --quiet run --frozen --group test \
+            pytest -n="$workers" "${cov[@]}" "$@" || test "$?" = 5
           ' pytest
         args: [-q, --tb=short, -m, integration]
