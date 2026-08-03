@@ -48,9 +48,12 @@ repos:
       - id: check-added-large-files
         stages: [pre-commit]
         args: [--maxkb=500, --enforce-all]
+        # No leading `|` inside the group: an empty first alternative matches
+        # every path at position zero, which silently excluded the whole tree
+        # and disabled this gate entirely.
         exclude: |
           (?x)^(
-            |typings/
+            typings/
             |uv\.lock
           )
 
@@ -196,6 +199,26 @@ repos:
             pytest -n="$workers" "$@" || test "$?" = 5
           ' pytest
         args: [-q, --tb=short, --no-cov, -m, "slow and not cluster and not cuda and not integration and not performance"]
+
+      - id: pytest-ci-smoke
+        name: pytest (ci_smoke)
+        language: system
+        always_run: true
+        pass_filenames: false
+        stages: [pre-push]
+        # Slower package/CLI smoke tests, deselected by the default marker
+        # filter. Tolerate pytest exit 5 (no tests collected): a package may
+        # ship none, which is not a failure.
+        entry: >-
+          bash -c '
+            workers=$(nproc);
+            workers=$((workers / 2));
+            ((workers < 2)) && workers=2;
+            ((workers > 32)) && workers=32;
+            uv --quiet run --frozen --group test \
+            pytest -n="$workers" "$@" || test "$?" = 5
+          ' pytest
+        args: [-q, --tb=short, --no-cov, --durations=20, -m, ci_smoke]
 
       - id: pytest-integration
         name: pytest (integration)
