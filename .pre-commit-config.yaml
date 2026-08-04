@@ -163,10 +163,11 @@ repos:
         stages: [pre-push]
         entry: >-
           bash -c '
-            workers=$(nproc);
-            workers=$((workers / 2));
-            ((workers < 2)) && workers=2;
+            cpu=/sys/devices/system/cpu;
+            top=$(sort -rn $cpu/cpu*/cpufreq/cpuinfo_max_freq 2>/dev/null | head -1);
+            workers=$([ -n "$top" ] && grep -lx "$top" $cpu/cpu*/cpufreq/cpuinfo_max_freq | xargs -n1 dirname | xargs -n1 dirname | xargs -I@ cat @/topology/core_id | sort -u | wc -l || sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo $(( $(getconf _NPROCESSORS_ONLN) / 2 )));
             ((workers > 32)) && workers=32;
+            ((workers < 2)) && workers=2;
             exec env NODE_OPTIONS=--max-old-space-size=2048 \
             uv --quiet run --frozen --group typecheck \
             basedpyright --threads="$workers"
@@ -188,10 +189,11 @@ repos:
         # so it is fail-safe.
         entry: &pytest-entry >-
           bash -c '
-            workers=$(nproc);
-            workers=$((workers / 2));
-            ((workers < 2)) && workers=2;
+            cpu=/sys/devices/system/cpu;
+            top=$(sort -rn $cpu/cpu*/cpufreq/cpuinfo_max_freq 2>/dev/null | head -1);
+            workers=$([ -n "$top" ] && grep -lx "$top" $cpu/cpu*/cpufreq/cpuinfo_max_freq | xargs -n1 dirname | xargs -n1 dirname | xargs -I@ cat @/topology/core_id | sort -u | wc -l || sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo $(( $(getconf _NPROCESSORS_ONLN) / 2 )));
             ((workers > 32)) && workers=32;
+            ((workers < 2)) && workers=2;
             exec uv --quiet run --frozen --group test \
             pytest -n="$workers" "$@"
           ' pytest
@@ -207,10 +209,11 @@ repos:
         # tests for this marker, which is not a failure. Regular pytest stays strict.
         entry: >-
           bash -c '
-            workers=$(nproc);
-            workers=$((workers / 2));
-            ((workers < 2)) && workers=2;
+            cpu=/sys/devices/system/cpu;
+            top=$(sort -rn $cpu/cpu*/cpufreq/cpuinfo_max_freq 2>/dev/null | head -1);
+            workers=$([ -n "$top" ] && grep -lx "$top" $cpu/cpu*/cpufreq/cpuinfo_max_freq | xargs -n1 dirname | xargs -n1 dirname | xargs -I@ cat @/topology/core_id | sort -u | wc -l || sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo $(( $(getconf _NPROCESSORS_ONLN) / 2 )));
             ((workers > 32)) && workers=32;
+            ((workers < 2)) && workers=2;
             cov=();
             uv --quiet run --frozen --group test \
               python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
@@ -230,10 +233,11 @@ repos:
         # ship none, which is not a failure.
         entry: >-
           bash -c '
-            workers=$(nproc);
-            workers=$((workers / 2));
-            ((workers < 2)) && workers=2;
+            cpu=/sys/devices/system/cpu;
+            top=$(sort -rn $cpu/cpu*/cpufreq/cpuinfo_max_freq 2>/dev/null | head -1);
+            workers=$([ -n "$top" ] && grep -lx "$top" $cpu/cpu*/cpufreq/cpuinfo_max_freq | xargs -n1 dirname | xargs -n1 dirname | xargs -I@ cat @/topology/core_id | sort -u | wc -l || sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo $(( $(getconf _NPROCESSORS_ONLN) / 2 )));
             ((workers > 32)) && workers=32;
+            ((workers < 2)) && workers=2;
             cov=();
             uv --quiet run --frozen --group test \
               python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
@@ -263,10 +267,11 @@ repos:
         entry: >-
           bash -c '
             command -v pg_config >/dev/null 2>&1 || exit 0;
-            workers=$(nproc);
-            workers=$((workers / 2));
-            ((workers < 2)) && workers=2;
+            cpu=/sys/devices/system/cpu;
+            top=$(sort -rn $cpu/cpu*/cpufreq/cpuinfo_max_freq 2>/dev/null | head -1);
+            workers=$([ -n "$top" ] && grep -lx "$top" $cpu/cpu*/cpufreq/cpuinfo_max_freq | xargs -n1 dirname | xargs -n1 dirname | xargs -I@ cat @/topology/core_id | sort -u | wc -l || sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo $(( $(getconf _NPROCESSORS_ONLN) / 2 )));
             ((workers > 32)) && workers=32;
+            ((workers < 2)) && workers=2;
             cov=();
             uv --quiet run --frozen --group test \
               python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
