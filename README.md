@@ -347,7 +347,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for local validation and public contribut
 If you find our work useful, please consider citing:
 
 ```bibtex
-@misc{rekursiv2026sagent,
+@misc{rekursivai2026sagent,
       title={Sagent - A coding-agent CLI and strongly-typed Python library -- self-mutating, hot-swapping, multi-provider, with async tool calls and bidirectional recursive spawn.},
       author={Joshua V. Dillon and Dan Kondratyuk},
       year={2026},
