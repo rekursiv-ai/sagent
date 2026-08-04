@@ -8,21 +8,26 @@ from typing import Annotated, cast
 
 import asyncio
 import os
+import threading
 import time
 
 import pytest
 
+from sagent.agent.state import (
+    ReadCacheEntry,
+    ToolState,
+    get_tool_state,
+    tool_state_context,
+)
 from sagent.testing import with_fake_agent
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
-    ReadCacheEntry,
-    ToolState,
     _ToolImpl,
     changed_files_context,
     get_file_write_lock,
-    get_tool_state,
     has_been_read,
     load_tool_description,
+    locked_file_write,
     mark_read,
     opt_int,
     opt_str,
@@ -35,7 +40,6 @@ from sagent.tools.core import (
     set_recipe,
     to_result,
     tool,
-    tool_state_context,
     truncate,
 )
 from sagent.types.runtime import ToolResult
@@ -437,9 +441,22 @@ def test_module_mark_read_and_has_been_read(tmp_path: Path) -> None:
 def test_get_file_write_lock_same_path_returns_same_lock(tmp_path: Path) -> None:
     p = tmp_path / "x.txt"
     p.write_text("v")
-    lk1 = get_file_write_lock(str(p))
-    lk2 = get_file_write_lock(str(p))
-    assert lk1 is lk2
+    assert get_file_write_lock(str(p)) is get_file_write_lock(str(p))
+
+
+def test_get_file_write_lock_is_shared_across_loops(tmp_path: Path) -> None:
+    """One path is one lock everywhere, or two agents can both mutate it."""
+    p = tmp_path / "x.txt"
+    p.write_text("v")
+
+    held: list[threading.Lock] = []
+
+    async def take() -> None:
+        held.append(get_file_write_lock(str(p)))
+
+    asyncio.run(take())
+    asyncio.run(take())
+    assert held[0] is held[1]
 
 
 def test_get_file_write_lock_diff_paths_distinct(tmp_path: Path) -> None:
@@ -769,17 +786,18 @@ def test_read_cache_entry_is_namedtuple() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_file_write_lock_serializes(tmp_path: Path) -> None:
+async def test_locked_file_write_serializes(tmp_path: Path) -> None:
     p = tmp_path / "x.txt"
     p.write_text("v")
-    lock = get_file_write_lock(str(p))
     order: list[str] = []
 
+    def mutate(label: str) -> None:
+        order.append(f"in:{label}")
+        time.sleep(0.01)
+        order.append(f"out:{label}")
+
     async def t(label: str) -> None:
-        async with lock:
-            order.append(f"in:{label}")
-            await asyncio.sleep(0)
-            order.append(f"out:{label}")
+        await locked_file_write(str(p), lambda: mutate(label))
 
     await asyncio.gather(t("a"), t("b"))
     assert order in (

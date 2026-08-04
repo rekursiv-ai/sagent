@@ -114,6 +114,7 @@ from sagent.providers.lib.oauth import (
     parse_manual_auth_code,
     pkce_pair,
 )
+from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.openai import catalog as openai_catalog
 from sagent.providers.openai.api import OpenAI, _OpenAIModel
@@ -283,9 +284,45 @@ class OpenAISubscription(OpenAI):
         self._account = account  # local credential slot name
         self._expires_at = expires_at
         self._refresh_buffer_sec = refresh_buffer_sec
-        self._sdk: openai.AsyncOpenAI | None = None
-        self._sdk_token: str | None = None
-        self._lock = asyncio.Lock()
+        # Client and its token cached together, per loop: the client's
+        # pool belongs to the loop that opened it, and a token outliving
+        # its client would authenticate a connection that no longer
+        # exists. The guarding lock is per loop for the same reason -- it
+        # binds to the loop that first contends on it.
+        self._authed: PerLoop[tuple[openai.AsyncOpenAI, str] | None] = PerLoop(
+            lambda: None
+        )
+        self._lock: PerLoop[asyncio.Lock] = PerLoop(asyncio.Lock)
+
+    @property
+    def _sdk(self) -> openai.AsyncOpenAI | None:
+        """The running loop's SDK client, if one has been opened."""
+        cached = self._authed.peek()
+        return cached[0] if cached else None
+
+    @_sdk.setter
+    def _sdk(self, value: openai.AsyncOpenAI | None) -> None:
+        """Install or clear this loop's SDK client, keeping its token paired."""
+        cached = self._authed.peek()
+        if value is None:
+            self._authed.clear()
+        else:
+            self._authed.set((value, cached[1] if cached else ""))
+
+    @property
+    def _sdk_token(self) -> str | None:
+        """The token this loop's cached client authenticates with."""
+        cached = self._authed.peek()
+        return cached[1] if cached else None
+
+    @_sdk_token.setter
+    def _sdk_token(self, value: str | None) -> None:
+        """Repoint the cached token, forcing a rotation on next use."""
+        cached = self._authed.peek()
+        if cached is not None and value is not None:
+            self._authed.set((cached[0], value))
+        else:
+            self._authed.clear()
 
     @classmethod
     @override
@@ -534,16 +571,17 @@ class OpenAISubscription(OpenAI):
 
         """
         token = await self._ensure_valid()
-        if self._sdk is not None and token == self._sdk_token:
-            return self._sdk
-        async with self._lock:
+        cached = self._authed.peek()
+        if cached is not None and cached[1] == token:
+            return cached[0]
+        async with self._lock.get():
             if self.expired:
                 await self._refresh()
             token = self._access_token
-            if self._sdk is not None and token == self._sdk_token:
-                return self._sdk
-            old = self._sdk
-            self._sdk = openai.AsyncOpenAI(
+            cached = self._authed.peek()
+            if cached is not None and cached[1] == token:
+                return cached[0]
+            sdk = openai.AsyncOpenAI(
                 api_key=token,
                 base_url=_BASE_URL,
                 default_headers={
@@ -554,25 +592,23 @@ class OpenAISubscription(OpenAI):
                     "originator": "codex",
                 },
             )
-            self._sdk_token = token
-            if old is not None:
-                await old.close()
-            return self._sdk
+            self._authed.set((sdk, token))
+            if cached is not None:
+                await cached[0].close()
+            return sdk
 
     async def close_sdk(self) -> None:
         """Close and clear the shared OAuth SDK client.
 
-        Idempotent: a no-op when no SDK has been created. Called from
-        ``_OpenAISubModel.close`` (the model delegates teardown of the
-        provider-owned SDK).
+        Idempotent: a no-op when no SDK has been created. This loop's
+        client only -- a pool belongs to the loop that opened it, so
+        closing another loop's from here would break a pool still in use.
         """
-        async with self._lock:
-            if self._sdk is None:
-                return
-            sdk = self._sdk
-            self._sdk = None
-            self._sdk_token = None
-        await sdk.close()
+        async with self._lock.get():
+            cached = self._authed.peek()
+            self._authed.clear()
+        if cached is not None:
+            await cached[0].close()
 
     async def _adopt_fresher_disk_creds(self) -> bool:
         """Adopt a DIFFERENT, still-valid sibling-written disk token.
@@ -643,7 +679,7 @@ class OpenAISubscription(OpenAI):
         if not self.expired:
             return self._access_token
         cred_path = credentials_path(_default_credentials_path(), self._account)
-        async with self._lock, credential_file_lock(cred_path):
+        async with self._lock.get(), credential_file_lock(cred_path):
             if not self.expired:
                 return self._access_token
             if await self._adopt_fresher_disk_creds():
@@ -658,7 +694,7 @@ class OpenAISubscription(OpenAI):
         sibling can't refresh between our disk-check and POST.
         """
         cred_path = credentials_path(_default_credentials_path(), self._account)
-        async with self._lock, credential_file_lock(cred_path):
+        async with self._lock.get(), credential_file_lock(cred_path):
             # Adopt a sibling's fresher creds only if they are actually valid;
             # an adopted-but-expired token would 401 again on retry, so fall
             # through to ``_refresh`` (the same rule ``_ensure_valid`` uses).
@@ -827,8 +863,16 @@ class OpenAISubscription(OpenAI):
         existing: MutableJSON = {}
         if p.exists():
             with contextlib.suppress(json.JSONDecodeError, OSError):
-                existing = json.loads(p.read_text(encoding="utf-8"))
-        tokens = cast(MutableJSON, existing.get("tokens", {}))
+                decoded: object = json.loads(p.read_text(encoding="utf-8"))
+                # Shape-checked, not just parse-checked: valid JSON of the
+                # wrong shape (a list, or ``tokens`` as a list) would raise
+                # below and leave the caller unable to persist a re-login.
+                if isinstance(decoded, dict):
+                    existing = cast(MutableJSON, decoded)
+        raw_tokens = existing.get("tokens")
+        tokens: MutableJSON = (
+            cast(MutableJSON, raw_tokens) if isinstance(raw_tokens, dict) else {}
+        )
         tokens["access_token"] = creds["access_token"]
         tokens["refresh_token"] = creds["refresh_token"]
         tokens["account_id"] = creds["account_id"]
@@ -862,18 +906,6 @@ class _OpenAISubModel(_OpenAIModel):
     def supports_thinking(self) -> bool:
         """Whether the model accepts a thinking/reasoning request."""
         return self.supports_effort
-
-    @property
-    @override
-    def valid_latency_modes(self) -> tuple[str, ...]:
-        """``latency="fast"`` maps to ``service_tier="priority"``.
-
-        Mirrors the Codex ``/fast`` slash command, which selects the
-        ``priority`` processing tier. Unlike Anthropic fast mode (a
-        separate ``speed="fast"`` inference-acceleration field), OpenAI's
-        fast path is purely a queue-priority tier.
-        """
-        return ("fast",)
 
     @property
     @override
@@ -970,7 +1002,7 @@ class _OpenAISubModel(_OpenAIModel):
             "tools": _build_tools(request.tools) if request.tools else openai.omit,
             "reasoning": reasoning,
         }
-        tier = self.effective_service_tier(request)
+        tier = self._effective_service_tier(request)
         if tier is not None:
             create_kwargs["service_tier"] = tier
         debug_log.trace(
@@ -1006,7 +1038,6 @@ class _OpenAISubModel(_OpenAIModel):
             if not_read is not None:
                 raise StreamingResponseNotReadError(
                     provider_name="OpenAI subscription",
-                    cause=not_read,
                 ) from exc
             raise_if_request_too_large(error_status_code(exc), str(exc), cause=exc)
             if self.is_context_overflow(exc):

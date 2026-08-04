@@ -49,6 +49,7 @@ from sagent.providers.lib.errors import (
     raise_if_request_too_large,
 )
 from sagent.providers.lib.model_base import ModelDefaults
+from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.types.model import (
     ModelCapability,
@@ -206,24 +207,47 @@ class _GeminiModel(ModelDefaults):
         self._model_id = model_id
         self._max_request_tokens = max_request_tokens
         self.spec = spec or ModelSpec()
-        self._client: httpx.AsyncClient | None = None
-        self._client_lock = asyncio.Lock()
+        # Per loop: an httpx.AsyncClient holds a connection pool owned by
+        # the loop that opened it, and the guarding lock binds to the loop
+        # that first contends on it. Sharing either across loops raises
+        # "bound to a different event loop" or hangs a waiter.
+        self._clients: PerLoop[httpx.AsyncClient | None] = PerLoop(lambda: None)
+        self._client_lock: PerLoop[asyncio.Lock] = PerLoop(asyncio.Lock)
+
+    @property
+    def _client(self) -> httpx.AsyncClient | None:
+        """The running loop's HTTP client, if one has been opened."""
+        return self._clients.peek()
+
+    @_client.setter
+    def _client(self, value: httpx.AsyncClient) -> None:
+        """Install a client for this loop, replacing any existing one."""
+        self._clients.set(value)
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Return a reused ``AsyncClient``. Lazy-created."""
-        if self._client is not None:
-            return self._client
-        async with self._client_lock:
-            if self._client is None:
-                self._client = httpx.AsyncClient()
-            return self._client
+        client = self._clients.get()
+        if client is not None:
+            return client
+        async with self._client_lock.get():
+            client = self._clients.get()
+            if client is None:
+                client = httpx.AsyncClient()
+                self._clients.set(client)
+            return client
 
     @override
     async def close(self) -> None:
-        """Close the reusable HTTP client."""
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        """Close this loop's HTTP client.
+
+        This loop's only: a pool belongs to the loop that opened it, so
+        closing another loop's client from here breaks a pool that loop
+        is still using rather than releasing it.
+        """
+        client = self._clients.peek()
+        self._clients.clear()
+        if client is not None:
+            await client.aclose()
 
     @property
     def max_request_tokens(self) -> int:
@@ -264,11 +288,6 @@ class _GeminiModel(ModelDefaults):
     def supports_cache_control(self) -> bool:
         """Whether the provider supports prompt caching."""
         return self.spec.prompt_cache_breakpoints
-
-    @property
-    def valid_latency_modes(self) -> tuple[str, ...]:
-        """Gemini API exposes no fast-latency path."""
-        return ()
 
     @property
     def supports_context_management(self) -> bool:
@@ -318,6 +337,10 @@ class _GeminiModel(ModelDefaults):
             timeout=60.0,
         )
         if 400 <= r.status_code < 500:
+            # Byte limit first, uniform with the streaming path: a 413 must
+            # route to byte-overflow recovery, not be mis-read as token
+            # overflow because its body happens to say "too large".
+            raise_if_request_too_large(r.status_code, r.text)
             msg = r.text.lower()
             if "too large" in msg or "too long" in msg or "exceeds the maximum" in msg:
                 raise PromptTooLongError(r.text)

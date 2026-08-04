@@ -35,6 +35,15 @@ from sagent.agent.session_io import (
     PersistentAgentState,
     append_persistent_agent_lifecycle,
 )
+from sagent.agent.state import (
+    agent_counter_var,
+    agent_label_var,
+    agent_path_var,
+    agent_registry,
+    current_agent_var,
+    get_tool_state,
+    max_depth_var,
+)
 from sagent.lib.custom_json import JSON, bool_val, json_freeze
 from sagent.providers import (
     PROVIDER_NAMES,
@@ -44,14 +53,7 @@ from sagent.providers import (
 from sagent.thinking import ThinkingState
 from sagent.tools.agent_self import plan_model_options
 from sagent.tools.core import (
-    agent_counter_var,
-    agent_label_var,
-    agent_path_var,
-    agent_registry,
-    current_agent_var,
-    get_tool_state,
     load_tool_description,
-    max_depth_var,
     opt_int,
     opt_str,
     provider_not_allowed_result,

@@ -18,7 +18,15 @@ import time
 import pytest
 
 from sagent.agent.agent import Agent
-from sagent.agent.state import agent_registry
+from sagent.agent.state import (
+    agent_counter_var,
+    agent_label_var,
+    agent_path_var,
+    agent_registry,
+    current_agent_var,
+    max_depth_var,
+    tool_state_var,
+)
 from sagent.providers import PROVIDER_NAMES
 from sagent.testing import MockModelCaps
 from sagent.tools import agent_spawn as _agent_spawn_mod
@@ -31,14 +39,6 @@ from sagent.tools.agent_spawn import (
     _pick_field,
 )
 from sagent.tools.background_task import BackgroundTask
-from sagent.tools.core import (
-    agent_counter_var,
-    agent_label_var,
-    agent_path_var,
-    current_agent_var,
-    max_depth_var,
-    tool_state_var,
-)
 from sagent.types.model import (
     ModelRecipe,
     ModelRequest,

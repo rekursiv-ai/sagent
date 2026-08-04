@@ -30,12 +30,12 @@ import time
 from sagent.agent import runtime as agent_runtime
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.cost_tracker import CostTracker
-from sagent.lib import token_count
-from sagent.tools.core import (
+from sagent.agent.state import (
     ToolState,
     current_agent_var,
     tool_state_var,
 )
+from sagent.lib import token_count
 from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,

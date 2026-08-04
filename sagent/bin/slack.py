@@ -75,6 +75,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 import httpx
 
 from sagent.agent import Agent
+from sagent.agent.state import agent_registry
 from sagent.bin.cli import (
     DEFAULT_TOOLS,
     parse_agent_args,
@@ -84,7 +85,6 @@ from sagent.compaction.summary import SummaryCompactor
 from sagent.lib.custom_json import MutableJSON
 from sagent.lib.userdirs import data_dir
 from sagent.providers import build_provider
-from sagent.tools.core import agent_registry
 from sagent.tools.slack import Slack
 from sagent.types.model import ModelRecipe
 from sagent.types.runtime import (

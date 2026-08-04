@@ -10,11 +10,9 @@ from typing import Final
 import asyncio
 import time
 
+from sagent.agent.state import get_tool_state
 from sagent.lib.custom_json import JSON, bool_val, int_val, json_freeze
-from sagent.tools.core import (
-    get_tool_state,
-    load_tool_description,
-)
+from sagent.tools.core import load_tool_description
 from sagent.tools.lib.bash import (
     Node,
     match_pipeline,

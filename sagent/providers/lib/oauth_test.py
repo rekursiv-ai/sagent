@@ -6,14 +6,18 @@ from pathlib import Path
 
 import asyncio
 import base64
+import contextlib
 import fcntl
 import hashlib
 import os
+import urllib.error
+import urllib.request
 
 import pytest
 
 from sagent.providers.lib.oauth import (
     AuthCodeListener,
+    _path_lock_for,
     credential_file_lock,
     credentials_path,
     parse_manual_auth_code,
@@ -215,6 +219,93 @@ async def test_credential_file_lock_blocks_on_external_holder(
         await task
     finally:
         os.close(fd)
+
+
+@pytest.mark.real_sleep
+@pytest.mark.asyncio
+async def test_cancelled_acquire_leaves_no_orphaned_lock(tmp_path: Path) -> None:
+    """Cancelling a blocked acquire must not strand the ``flock``.
+
+    Carries ``real_sleep``: the suite no-ops ``asyncio.sleep``
+    (``sagent/conftest.py:65``), and without a real suspension the
+    waiter is cancelled before it ever reaches the blocking ``flock``,
+    so the test passes against the defect.
+
+    ``asyncio.to_thread`` cannot cancel the worker it dispatched: the
+    thread goes on to acquire, while the cancelled coroutine never
+    reaches the release in its ``finally``. The lock is then held by
+    nobody and no process can ever take it again.
+    """
+    cred = tmp_path / "creds.json"
+    lock_path = cred.with_suffix(".json.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    blocker = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(blocker, fcntl.LOCK_EX)
+
+        async def waiter() -> None:
+            async with credential_file_lock(cred):
+                pass
+
+        task = asyncio.create_task(waiter())
+        await asyncio.sleep(0.05)  # let it reach the blocking flock
+        _ = task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        fcntl.flock(blocker, fcntl.LOCK_UN)
+        await asyncio.sleep(0.05)  # let any orphan thread take it
+    finally:
+        os.close(blocker)
+    probe = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(probe)
+
+
+def test_path_lock_identity_survives_sidecar_creation(tmp_path: Path) -> None:
+    """One credential file must map to one ``_PathLock``, always.
+
+    The key resolves only when the path already exists, but the first
+    acquisition is what creates it -- so acquisition two can land on a
+    different lock, and the in-process half stops excluding anything.
+    """
+    lock_path = tmp_path / "link" / "creds.json.lock"
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    first = _path_lock_for(lock_path)
+    _ = first.open_fd()
+    assert _path_lock_for(lock_path) is first
+
+
+def test_resolve_account_rejects_a_trailing_newline() -> None:
+    r"""``$`` matches before a final newline; the grammar admits no newline.
+
+    An accepted ``"work\n"`` reaches ``credentials_path`` and yields a
+    credential filename containing a line break.
+    """
+    with pytest.raises(ValueError, match="Invalid account name"):
+        _ = resolve_account("work\n")
+
+
+def test_callback_without_a_code_is_an_error() -> None:
+    """A state-matching callback carrying no ``code`` is not a success.
+
+    ``parse_manual_auth_code`` rejects the same input; the HTTP path
+    reports "Authentication complete" and hands back an empty code.
+    """
+    listener = AuthCodeListener("expected")
+    listener.start()
+    with pytest.raises(urllib.error.HTTPError) as raised:
+        urllib.request.urlopen(  # noqa: S310 -- fixed http:// localhost callback
+            f"{listener.redirect_uri}?state=expected",
+            timeout=5,
+        ).close()
+    assert raised.value.code == 400
+    raised.value.close()
+    with pytest.raises(RuntimeError, match="code"):
+        _ = listener.wait(1.0)
+    listener.stop()
 
 
 if __name__ == "__main__":

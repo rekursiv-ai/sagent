@@ -9,6 +9,7 @@ from typing import Final, cast
 import asyncio
 import json
 
+from sagent.agent.state import current_agent_var, get_tool_state
 from sagent.lib.custom_json import (
     JSON,
     MutableJSON,
@@ -17,9 +18,7 @@ from sagent.lib.custom_json import (
     json_freeze,
 )
 from sagent.tools.core import (
-    current_agent_var,
     file_lock_key,
-    get_tool_state,
     load_tool_description,
     mark_read,
     resolve_tool_path,

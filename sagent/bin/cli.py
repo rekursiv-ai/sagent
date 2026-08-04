@@ -1173,11 +1173,20 @@ async def _with_resumed_persistent(
 async def _with_signals(
     agent: Agent,
     coro: Coroutine[object, object, None],
+    *,
+    provider: types.providers.Provider | None = None,
 ) -> None:
     """Install SIGINT/SIGTERM handlers around ``coro`` for graceful + escape exit.
 
     First signal: push ``Quit()`` to ``agent.inbox`` so the runtime
     drains cleanly. Second signal: ``os._exit(1)``.
+
+    Args:
+      agent: Agent whose inbox receives ``Quit()``.
+      coro: The work to run under the handlers.
+      provider: Provider to close on exit. It owns the client its models
+          share, so teardown belongs to whoever built it -- here.
+
     """
     loop = asyncio.get_running_loop()
     handler = _quit_handler(agent)
@@ -1190,6 +1199,11 @@ async def _with_signals(
         for sig in (signal.SIGINT, signal.SIGTERM):
             with contextlib.suppress(NotImplementedError, RuntimeError):
                 _ = loop.remove_signal_handler(sig)
+        # Awaited here, inside the loop: the provider owns the client its
+        # models share, and ``asyncio.run`` cancels stray tasks at their
+        # first suspension, so a fire-and-forget close never finishes.
+        if isinstance(provider, types.providers.ProviderCloseable):
+            await provider.close_sdk()
 
 
 def _parse_stream_json(raw: str) -> str:
@@ -1503,6 +1517,7 @@ def main() -> int:
                     resume_persistent=args.resume_persistent,
                     allow_providers=allow_providers,
                 ),
+                provider=provider,
             ),
         )
     else:
@@ -1520,6 +1535,7 @@ def main() -> int:
                     resume_persistent=args.resume_persistent,
                     allow_providers=allow_providers,
                 ),
+                provider=provider,
             )
         )
     return 0

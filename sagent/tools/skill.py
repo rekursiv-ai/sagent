@@ -24,14 +24,11 @@ import dataclasses
 import logging
 import re
 
+from sagent.agent.state import ToolState, get_tool_state
 from sagent.lib.custom_json import JSON, json_freeze
 from sagent.lib.dotsagent import parse_frontmatter, walk_up
 from sagent.lib.userdirs import data_dir
-from sagent.tools.core import (
-    ToolState,
-    get_tool_state,
-    load_tool_description,
-)
+from sagent.tools.core import load_tool_description
 from sagent.tools.prompt_text import escape_prompt_text
 from sagent.types.runtime import (
     ModelContextEvent,

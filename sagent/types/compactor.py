@@ -16,10 +16,10 @@ from sagent.types.tape import ContextSplice, TapeRecord, TapeRef
 
 
 if TYPE_CHECKING:
-    # ``ToolState`` lives in ``tools/core.py``; forward-referencing it on
-    # ``CompactRestorable.post_compact_restore`` keeps the tools layer
+    # ``ToolState`` lives in ``agent/state.py``; forward-referencing it on
+    # ``CompactRestorable.post_compact_restore`` keeps the agent layer
     # out of the types tree.
-    from sagent.tools.core import ToolState
+    from sagent.agent.state import ToolState
 
 
 __all__ = [

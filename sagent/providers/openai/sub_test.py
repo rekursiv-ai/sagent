@@ -854,7 +854,7 @@ async def test_subscription_close_releases_sdk_and_http_client() -> None:
 
 def test_subscription_fast_latency_resolves_to_priority_tier() -> None:
     m = _make_provider().model("gpt-5.5")
-    tier = m.effective_service_tier(
+    tier = m._effective_service_tier(
         ModelRequest(messages=[UserMessage(text="x")], latency="fast")
     )
     assert tier == "priority"

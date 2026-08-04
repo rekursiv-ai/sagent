@@ -25,25 +25,14 @@ import inspect
 import locale
 import logging
 import re
+import threading
 import time
 import typing
 
 import yaml
 
 from sagent.agent.state import (
-    AgentLike,
-    ReadCacheEntry,
-    ToolState,
-    agent_counter_var,
-    agent_label_var,
-    agent_path_var,
-    agent_registry,
-    cost_root_var,
-    current_agent_var,
     get_tool_state,
-    max_depth_var,
-    tool_state_context,
-    tool_state_var,
 )
 from sagent.lib.custom_json import JSON, int_val, json_freeze
 from sagent.types.runtime import ToolResult
@@ -143,7 +132,13 @@ def _read_asset(path: str | Path, *, visited: set[str], depth: int) -> str:
     def _replace(m: re.Match[str]) -> str:
         return _read_asset(m.group(1).strip(), visited=visited, depth=depth + 1)
 
-    return _RE_INCLUDE.sub(_replace, text)
+    try:
+        return _RE_INCLUDE.sub(_replace, text)
+    finally:
+        # Discard on the way out: ``visited`` tracks the ANCESTOR chain, so
+        # a cycle is a file including itself. Keeping every file ever seen
+        # would report the second of two sibling includes as a cycle.
+        visited.discard(key)
 
 
 def recipe_dict(key: str) -> dict[str, str]:
@@ -535,7 +530,11 @@ class _ToolImpl:
         self.description = description or fn.__doc__ or ""
         hints = get_type_hints(fn, include_extras=True)
         hints.pop("return", None)
-        self.directive_schema = schema or json_freeze(_build_schema(fn, hints))
+        # ``is None``, not truthiness: an explicit empty schema is a
+        # legitimate override (a no-argument tool) and must survive.
+        self.directive_schema = (
+            json_freeze(_build_schema(fn, hints)) if schema is None else schema
+        )
         self.clearable_results = clearable_results
         self.emit_tool_summary = False
 
@@ -705,7 +704,7 @@ def has_been_read(path: str) -> bool:
     return get_tool_state().has_been_read(path)
 
 
-# Process-wide registry of asyncio.Lock keyed by resolved file path.
+# Process-wide registry of threading.Lock keyed by resolved file path.
 # Mutating tools (Edit, Write, etc.) serialize their read-modify-write
 # critical sections through this registry so concurrent coroutines -
 # e.g. parallel subagents dispatching Edit on the same file - can't
@@ -715,14 +714,18 @@ def has_been_read(path: str) -> bool:
 # Same path → same lock → serialized across all mutating tools.
 # Different paths → different locks → parallel.
 #
-# asyncio.Lock is safe because sagent runs on a single event loop; the
-# lock yields the coroutine (doesn't block the loop) so other work
-# continues while a mutation is in flight in the thread pool.
+# threading.Lock, not asyncio.Lock: the exclusion is process-wide, and an
+# asyncio.Lock is only ever exclusive within one loop. Scoping this per
+# loop does not make it loop-safe, it deletes the guarantee -- two agents
+# on two loops would both enter. The lock is acquired inside the worker
+# thread that performs the mutation (see ``locked_file_write``), so it
+# blocks a pool thread and never an event loop.
 #
 # Dict growth is unbounded across a session but each entry is tiny
 # (~200 bytes); hundreds of distinct files edited per session is
 # bounded-memory trivia. No cleanup needed.
-_file_write_locks: dict[str, asyncio.Lock] = {}
+_file_write_locks: dict[str, threading.Lock] = {}
+_file_write_locks_guard = threading.Lock()
 
 
 def file_lock_key(path: str) -> str:
@@ -743,25 +746,58 @@ def file_lock_key(path: str) -> str:
     return str(Path(path).resolve())
 
 
-def get_file_write_lock(path: str) -> asyncio.Lock:
+def get_file_write_lock(path: str) -> threading.Lock:
     """Return the shared write lock for ``path``.
+
+    Shared per path, process-wide: same path is the same lock on every
+    loop and every thread, which is what serializes mutations.
+
+    Acquire it via :func:`locked_file_write` rather than directly --
+    holding a sync lock across an ``await`` blocks the event loop that
+    must deliver the worker's completion.
 
     Args:
       path: File path (resolved internally).
 
     Returns:
-      lock: Shared asyncio.Lock for the resolved path.
+      lock: Shared lock for the resolved path.
 
     """
     # Avoid ``setdefault`` here - it eagerly constructs a new Lock on
     # every call even when the key already exists, and throws it
     # away. Edit/Write hit this on every mutation; cheap to skip.
     resolved = file_lock_key(path)
-    lock = _file_write_locks.get(resolved)
-    if lock is None:
-        lock = asyncio.Lock()
-        _file_write_locks[resolved] = lock
-    return lock
+    with _file_write_locks_guard:
+        lock = _file_write_locks.get(resolved)
+        if lock is None:
+            lock = threading.Lock()
+            _file_write_locks[resolved] = lock
+        return lock
+
+
+async def locked_file_write[T](path: str, mutate: Callable[[], T]) -> T:
+    """Run ``mutate`` in a worker thread, holding ``path``'s write lock.
+
+    The lock is taken inside the worker, so a blocked mutation parks a
+    pool thread and the event loop keeps running. Taking it on the loop
+    instead would deadlock: the loop would be blocked and so could never
+    deliver the completion that releases it.
+
+    Args:
+      path: File path being mutated.
+      mutate: Synchronous read-modify-write to run under the lock.
+
+    Returns:
+      result: Whatever ``mutate`` returned.
+
+    """
+    lock = get_file_write_lock(path)
+
+    def _locked() -> T:
+        with lock:
+            return mutate()
+
+    return await asyncio.to_thread(_locked)
 
 
 def changed_files_context(max_diff_lines: int = 500) -> str:
@@ -807,31 +843,28 @@ def changed_files_context(max_diff_lines: int = 500) -> str:
     return "<system-reminder>\n" + "\n".join(parts) + "\n</system-reminder>"
 
 
+# Only names this module DEFINES. Re-exporting what ``agent.state`` owns
+# gave every such symbol two import paths; reach into the owner instead.
 __all__ = (
     "TOOL_RESULT_MAX_CHARS",
-    "AgentLike",
-    "ReadCacheEntry",
-    "ToolState",
-    "agent_counter_var",
-    "agent_label_var",
-    "agent_path_var",
-    "agent_registry",
     "changed_files_context",
-    "cost_root_var",
-    "current_agent_var",
     "file_lock_key",
     "get_file_write_lock",
-    "get_tool_state",
     "has_been_read",
     "load_tool_description",
+    "locked_file_write",
     "mark_read",
-    "max_depth_var",
     "opt_int",
     "opt_str",
+    "provider_not_allowed_result",
+    "read_asset",
+    "recipe_dict",
+    "recipe_list",
+    "resolve_recipe",
+    "resolve_tool_path",
+    "run_sync",
     "set_recipe",
     "to_result",
     "tool",
-    "tool_state_context",
-    "tool_state_var",
     "truncate",
 )

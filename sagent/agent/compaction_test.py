@@ -15,9 +15,9 @@ from sagent.agent.compaction import (
     inject_background_status,
     post_compact_enrich,
 )
+from sagent.agent.state import ToolState
 from sagent.compaction.history import append_to_first_user
 from sagent.lib.custom_json import JSON
-from sagent.tools.core import ToolState
 from sagent.types.model import ContextBudget
 from sagent.types.runtime import (
     AssistantMessage,

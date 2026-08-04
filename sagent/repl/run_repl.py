@@ -36,6 +36,7 @@ from rich.console import Console
 
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.session_io import unpersisted_session_error
+from sagent.agent.state import agent_registry
 from sagent.providers import (
     infer_provider,
     supported_provider_options,
@@ -53,7 +54,6 @@ from sagent.repl.render import make_render_observer
 from sagent.repl.replay import replay_messages
 from sagent.repl.status_pane import render_status_pane
 from sagent.thinking import ThinkingState, resolve_thinking_command
-from sagent.tools.core import agent_registry
 from sagent.types.exceptions import log_exception_or_warning
 from sagent.types.runtime import (
     AgentIdle,

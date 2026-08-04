@@ -26,9 +26,9 @@ from wrapt import lazy_import
 
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.session_io import append_persistent_agent_lifecycle
-from sagent.agent.state import agent_registry
+from sagent.agent.state import agent_registry, current_agent_var
 from sagent.lib.custom_json import JSON, json_freeze
-from sagent.tools.core import current_agent_var, load_tool_description
+from sagent.tools.core import load_tool_description
 from sagent.types.runtime import (
     CANCELLED_PLACEHOLDER,
     DetachedResult,
@@ -40,7 +40,8 @@ from sagent.types.runtime import (
 
 if TYPE_CHECKING:
     from sagent.agent import Agent
-    from sagent.tools.core import AgentLike
+    from sagent.agent.state import AgentLike
+
 
 agent_lib = lazy_import("sagent.agent")
 

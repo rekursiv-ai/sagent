@@ -67,7 +67,13 @@ class ModelDefaults(_Transport, Protocol):
         return self.approx_request_tokens(request)
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
-        """Non-streaming send: ``stream`` with no publisher."""
+        """Non-streaming send: ``stream`` with no publisher.
+
+        Routed through ``stream`` rather than a vendor's non-streaming
+        endpoint on purpose: those carry a fixed client timeout that
+        large compaction prompts exceed, while the streaming path uses
+        an idle-based one.
+        """
         return await self.stream(request, None)
 
     def is_retryable_provider_error(self, error: Exception) -> bool:

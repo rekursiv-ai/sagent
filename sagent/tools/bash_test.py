@@ -11,6 +11,7 @@ import warnings
 
 import pytest
 
+from sagent.agent.state import ToolState
 from sagent.lib.tool_validation import validate_tool_input
 from sagent.testing import with_fake_agent
 from sagent.tools.bash import (
@@ -26,7 +27,6 @@ from sagent.tools.bash import (
     _trim_bash_output,
     reap_background_processes,
 )
-from sagent.tools.core import ToolState
 from sagent.tools.lib.bash import Node
 from sagent.types.runtime import ToolResult
 

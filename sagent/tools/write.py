@@ -5,16 +5,15 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
-import asyncio
 import re
 
+from sagent.agent.state import get_tool_state
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import JSON, json_freeze
 from sagent.tools.core import (
     file_lock_key,
-    get_file_write_lock,
-    get_tool_state,
     load_tool_description,
+    locked_file_write,
     resolve_tool_path,
 )
 from sagent.types.runtime import ToolResult
@@ -111,8 +110,7 @@ class Write:
         content = str(args.get("content", ""))
         # Shared registry with Edit: same path → same lock → a concurrent
         # Edit and Write on the same file serialize against each other.
-        async with get_file_write_lock(file_path):
-            return await asyncio.to_thread(self._run, file_path, content)
+        return await locked_file_write(file_path, lambda: self._run(file_path, content))
 
     def _run(self, file_path: str, content: str) -> ToolResult:
         """Run the write synchronously with stale-file and mode-preservation checks."""

@@ -14,7 +14,7 @@ import asyncio
 from examples.agent_maze.engine import Engine
 from examples.agent_maze.tools import CommsTool, SpawnTool
 from examples.agent_maze.world import make_spawn_level
-from sagent.tools.core import agent_label_var, agent_registry
+from sagent.agent.state import agent_label_var, agent_registry
 
 
 class _Inbox:

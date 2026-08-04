@@ -23,6 +23,7 @@ import pytest
 pytest.importorskip("slack_sdk")
 
 from sagent.agent import Agent as RealAgent
+from sagent.agent.state import agent_registry
 from sagent.bin.slack import (
     SlackAdapter,
     _AgentSlack,
@@ -45,7 +46,6 @@ from sagent.bin.slack import (
 )
 from sagent.lib.custom_json import MutableJSON
 from sagent.testing import FakeAgent
-from sagent.tools.core import agent_registry
 from sagent.tools.slack import Slack
 from sagent.types.model import ModelRecipe
 from sagent.types.runtime import (

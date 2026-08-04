@@ -12,9 +12,9 @@ import pytest
 
 from sagent import providers as providers_module
 from sagent.agent.agent import Agent
+from sagent.agent.state import current_agent_var, tool_state_var
 from sagent.testing import MockModelCaps
 from sagent.tools.agent_self import AgentSelf
-from sagent.tools.core import current_agent_var, tool_state_var
 from sagent.types.cost import TokenCost
 from sagent.types.model import (
     Limits,
