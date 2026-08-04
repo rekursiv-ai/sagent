@@ -342,6 +342,20 @@ An AI assistant that confidently performs a task you didn't ask for while ignori
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local validation and public contribution flow.
 
+## Citing
+
+If you find our work useful, please consider citing:
+
+```bibtex
+@misc{rekursiv2026sagent,
+      title={Sagent - A coding-agent CLI and strongly-typed Python library -- self-mutating, hot-swapping, multi-provider, with async tool calls and bidirectional recursive spawn.},
+      author={Joshua V. Dillon and Dan Kondratyuk},
+      year={2026},
+      howpublished={Github},
+      url={https://github.com/rekursiv-ai/sagent},
+}
+```
+
 ## License
 
 Apache License 2.0
