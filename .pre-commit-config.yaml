@@ -248,19 +248,21 @@ repos:
         always_run: true
         pass_filenames: false
         stages: [pre-push]
-        # Opt-in: the `integration` marker means "needs networking or a real
-        # database" in every package that defines it, and no hosted runner has
-        # either -- trackinizer's failed on `extension "vector" is not
-        # available`. The monorepo gates this in its root conftest; exported
-        # packages ship no conftest, so the gate lives here. Set
-        # RUN_INTEGRATION=1 in a job that has provisioned the services.
+        # Gated on the CAPABILITY, not an env var: these tests need a real
+        # Postgres, so skip when `pg_config` is absent and RUN it when the
+        # toolchain is there. An RUN_INTEGRATION=1 opt-in meant the pgvector
+        # this image installs was provisioned and never exercised.
+        #
+        # `pg_config` present but pgvector missing still fails loudly ("extension
+        # \"vector\" is not available") -- that is a broken provision, not a
+        # machine without a database, and should not be silently skipped.
         #
         # Tolerate pytest exit 5 (no tests collected): this package may ship no
         # integration-marked tests, which is not a failure. Regular pytest above
         # stays strict so an empty collection there still fails.
         entry: >-
           bash -c '
-            [ -n "${RUN_INTEGRATION:-}" ] || exit 0;
+            command -v pg_config >/dev/null 2>&1 || exit 0;
             workers=$(nproc);
             workers=$((workers / 2));
             ((workers < 2)) && workers=2;
