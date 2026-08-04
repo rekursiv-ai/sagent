@@ -33,7 +33,9 @@ jobs:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
       - name: Install system packages
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep fd-find
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ripgrep fd-find
       - name: Validate package
         run: |
           # Lint/type/test checks come from this package's own .pre-commit-config.yaml.
