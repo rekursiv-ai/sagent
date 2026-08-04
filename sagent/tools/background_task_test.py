@@ -18,14 +18,13 @@ from sagent.agent.background import (
     BackgroundAwareTool,
     BackgroundTaskEntry,
 )
-from sagent.agent.state import agent_registry
+from sagent.agent.state import agent_registry, current_agent_var
 from sagent.lib.custom_json import json_freeze
 from sagent.testing import FakeAgent, MockModelCaps, with_fake_agent
 from sagent.tools.background_task import (
     BackgroundTask,
     cancel_persistent_subagent,
 )
-from sagent.tools.core import current_agent_var
 from sagent.types.model import (
     ModelRecipe,
     ModelRequest,

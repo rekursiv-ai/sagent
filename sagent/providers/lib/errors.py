@@ -135,7 +135,7 @@ def raise_if_request_too_large(
 class StreamingResponseNotReadError(UserFacingError):
     """Provider SDK hid a streaming HTTP error body before sagent saw it."""
 
-    def __init__(self, *, provider_name: str, cause: httpx.ResponseNotRead) -> None:
+    def __init__(self, *, provider_name: str) -> None:
         super().__init__(
             f"{provider_name} streaming request failed before sagent could read "
             "the provider error body. The underlying HTTP error was hidden by "
@@ -143,7 +143,6 @@ class StreamingResponseNotReadError(UserFacingError):
             "after running /compact, use /clear for a fresh session, or switch "
             "providers with /model."
         )
-        self.__cause__ = cause
 
 
 def find_response_not_read(exc: BaseException) -> httpx.ResponseNotRead | None:

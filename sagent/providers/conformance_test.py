@@ -71,6 +71,56 @@ def _protocol_members(proto: type) -> set[str]:
     }
 
 
+def _public_members(cls: type) -> set[str]:
+    """Every public member ``cls`` exposes, inherited included.
+
+    Resolves each name through the MRO and tests the RAW attribute, not
+    ``getattr(cls, name)``: a ``property`` fetched off the class is a
+    descriptor object and ``callable()`` on it is False, so a
+    callable-only predicate silently skips every property. That blind
+    spot is how eight dead ``valid_latency_modes`` overrides outlived
+    the callers that once read them.
+
+    Args:
+      cls: Class to inspect.
+
+    Returns:
+      names: Public method and property names, own or inherited.
+
+    """
+    found: set[str] = set()
+    for name in dir(cls):
+        if name.startswith("_"):
+            continue
+        for base in cls.__mro__:
+            if name in vars(base):
+                val = vars(base)[name]
+                if callable(val) or isinstance(val, property):
+                    found.add(name)
+                break
+    return found
+
+
+def _peer_surface(cls: type) -> set[str]:
+    """Public surface every OTHER model class also exposes.
+
+    The contract is uniformity, so the yardstick is the peers, not the
+    protocol: a member all nine models share is the shared shape (the
+    ``spec``-derived capability accessors), while one only some carry is
+    the latent deviation callers learn to ``getattr``-probe for.
+
+    Args:
+      cls: Class being checked; excluded from the intersection.
+
+    Returns:
+      names: Members common to all peers.
+
+    """
+    peers = [_public_members(c) for c in _MODEL_CLASSES if c is not cls]
+    shared: set[str] = peers[0].intersection(*peers[1:])
+    return shared | _MODEL_MEMBERS
+
+
 _MODEL_MEMBERS = _protocol_members(Model)
 _PROVIDER_MEMBERS = _protocol_members(Provider)
 
@@ -96,16 +146,31 @@ def test_model_class_has_no_extra_public_surface_vs_peers(model_cls: type) -> No
     contract is the union ceiling -- extra public surface must either be
     promoted to the protocol (so all implement it) or made private.
     """
-    own_public = {
-        name
-        for name in vars(model_cls)
-        if not name.startswith("_") and callable(getattr(model_cls, name, None))
-    }
-    extra = own_public - _MODEL_MEMBERS
+    extra = _public_members(model_cls) - _peer_surface(model_cls)
     assert not extra, (
         f"{model_cls.__name__} exposes public members not in the Model "
         f"contract: {sorted(extra)} -- promote to the protocol or make private"
     )
+
+
+def test_extra_surface_check_sees_properties() -> None:
+    """The surface check must catch a stray ``@property``, not just methods.
+
+    ``callable()`` on a class attribute is False for a ``property``
+    descriptor, so a property-shaped deviation used to pass unseen --
+    which is how eight dead ``valid_latency_modes`` overrides survived
+    after every caller moved to ``spec``. Asserts the predicate itself,
+    since a green suite is exactly what the blind spot produced.
+    """
+
+    class _Deviant:
+        @property
+        def stray_property(self) -> int:
+            return 0
+
+        def stray_method(self) -> None: ...
+
+    assert _public_members(_Deviant) >= {"stray_property", "stray_method"}
 
 
 def test_close_is_required_and_async_on_every_model() -> None:

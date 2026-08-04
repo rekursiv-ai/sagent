@@ -7,12 +7,12 @@ import asyncio
 import pytest
 
 from sagent.agent.background import BackgroundTaskEntry
-from sagent.testing import FakeAgent, MockModelCaps, with_fake_agent
-from sagent.tools.core import (
+from sagent.agent.state import (
     ToolState,
     current_agent_var,
     tool_state_var,
 )
+from sagent.testing import FakeAgent, MockModelCaps, with_fake_agent
 from sagent.types.cost import PriceCatalogProduct, TokenPrice
 from sagent.types.runtime import (
     AssistantMessage,

@@ -21,6 +21,7 @@ from sagent import (
     providers as providers_module,
     types,
 )
+from sagent.agent.state import current_agent_var
 from sagent.lib.custom_json import JSON, json_freeze
 from sagent.providers import (
     PROVIDER_NAMES,
@@ -29,7 +30,6 @@ from sagent.providers import (
     infer_provider,
 )
 from sagent.tools.core import (
-    current_agent_var,
     load_tool_description,
     provider_not_allowed_result,
 )

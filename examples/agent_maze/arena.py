@@ -28,7 +28,7 @@ from examples.agent_maze.tools import (
 )
 from examples.agent_maze.world import SpawnMeta
 from sagent.agent import Agent
-from sagent.tools.core import agent_label_var
+from sagent.agent.state import agent_label_var
 from sagent.types.model import Model
 from sagent.types.runtime import UserMessage
 

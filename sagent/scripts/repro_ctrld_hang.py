@@ -27,10 +27,9 @@ import time
 from sagent import types
 from sagent.agent import agent_test
 from sagent.agent.agent import Agent
-from sagent.agent.state import agent_registry
+from sagent.agent.state import agent_registry, current_agent_var
 from sagent.repl.run_repl import _background_tasks_for_repl_cancel
 from sagent.tools.agent_spawn import AgentSpawn
-from sagent.tools.core import current_agent_var
 
 
 class BlockingModel(agent_test.StubModel):

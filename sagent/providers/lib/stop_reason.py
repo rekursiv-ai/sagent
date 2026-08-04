@@ -3,7 +3,7 @@
 Each LLM backend reports response termination differently:
 
 - Anthropic: ``end_turn`` / ``tool_use`` / ``pause_turn`` / ``stop_sequence``
-  / ``max_tokens`` / ``refusal`` / ``model_context_window_exceeded``.
+  / ``max_tokens`` / ``refusal``.
 - OpenAI (and OpenAI-compat: Kimi, Qwen, MiniMax, local llama.cpp):
   ``stop`` / ``length`` / ``tool_calls`` / ``function_call`` / ``content_filter``.
 - Google Gemini: ``STOP`` / ``MAX_TOKENS`` / ``SAFETY`` / ``RECITATION`` /
@@ -101,8 +101,8 @@ def normalize_stop_reason(
 
     """
     if kind == "anthropic":
-        return _ANTHROPIC_MAP.get(raw or "end_turn", raw or "model_finished")
-    if kind == "openai":
+        translated = _ANTHROPIC_MAP.get(raw or "end_turn", raw or "model_finished")
+    elif kind == "openai":
         translated = _OPENAI_MAP.get(raw or "", raw or "model_finished")
     else:
         translated = _GOOGLE_MAP.get(raw or "", raw or "model_finished")

@@ -11,17 +11,16 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Final
 
-import asyncio
 import difflib
 import re
 
+from sagent.agent.state import get_tool_state
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import JSON, bool_val, json_freeze
 from sagent.tools.core import (
     file_lock_key,
-    get_file_write_lock,
-    get_tool_state,
     load_tool_description,
+    locked_file_write,
     resolve_tool_path,
 )
 from sagent.tools.lib.bash import Node, unwrap_cd_prefix
@@ -118,14 +117,10 @@ class Edit:
         new_string = str(args.get("new_string", ""))
         replace_all = bool_val(args.get("replace_all"), False)
         # Serialize against any other mutating tool on the same file.
-        async with get_file_write_lock(file_path):
-            return await asyncio.to_thread(
-                self._run,
-                file_path,
-                old_string,
-                new_string,
-                replace_all,
-            )
+        return await locked_file_write(
+            file_path,
+            lambda: self._run(file_path, old_string, new_string, replace_all),
+        )
 
     def serialize_key(self, args: Mapping[str, object]) -> str | None:
         """Serialize same-file Read/Edit/Write within a cohort.

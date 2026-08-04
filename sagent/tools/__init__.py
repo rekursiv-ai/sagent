@@ -22,6 +22,11 @@ just checks for the ``bash_match`` protocol.
 
 from __future__ import annotations
 
+from sagent.agent.state import (
+    ToolState,
+    get_tool_state,
+    tool_state_context,
+)
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.agent_spawn import AgentSpawn
@@ -29,15 +34,12 @@ from sagent.tools.background_task import BackgroundTask
 from sagent.tools.bash import Bash
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
-    ToolState,
     changed_files_context,
-    get_tool_state,
     has_been_read,
     mark_read,
     opt_int,
     opt_str,
     tool,
-    tool_state_context,
 )
 from sagent.tools.edit import Edit
 from sagent.tools.glob_tool import Glob

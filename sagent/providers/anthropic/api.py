@@ -62,6 +62,7 @@ from sagent.providers.lib.errors import (
 )
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.model_base import ModelDefaults
+from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.lib.usage import anthropic_usage
 from sagent.types.model import (
@@ -127,17 +128,6 @@ _DEFAULT_API_TARGET_INPUT_TOKENS = (
     40_000  # config-globals: ignore -- target input-token dial
 )
 
-# Models whose Pricing carries non-zero fast-mode rates AND whose API
-# accepts ``speed="fast"``. Same set on both API-key and subscription
-# transports; the CLI transport can't pass the knob.
-_FAST_MODE_MODELS = frozenset(
-    {
-        "claude-opus-5",
-        "claude-opus-4-8",
-        "claude-opus-4-7",
-        "claude-opus-4-6",
-    }
-)
 _DEFAULT_1M_MODELS = frozenset({"claude-fable-5", "claude-sonnet-5", "claude-opus-5"})
 
 
@@ -151,8 +141,21 @@ def supports_fast_mode(model_id: str) -> bool:
     differs from OpenAI, which has no separate fast field -- its fast path
     is just ``service_tier="priority"``. The cross-provider ``latency``
     hint hides that asymmetry from callers.
+
+    Derived from the catalog rather than a second hand-kept list: a
+    private allow-list drifts silently, and had -- it still named 4-7
+    (fast withdrawn 2026-07-24) and 4-6 (never shipped it), so both were
+    sent a ``speed="fast"`` the API rejects.
+
+    Args:
+      model_id: Catalog id, with or without option tags.
+
+    Returns:
+      supported: True when this model serves and bills fast mode.
+
     """
-    return base_model_id(model_id) in _FAST_MODE_MODELS
+    capability = anthropic_catalog.MODELS.get(base_model_id(model_id))
+    return capability is not None and capability.serves_fast
 
 
 # Models that support server-side ``clear_tool_uses_20250919``. Per
@@ -314,8 +317,13 @@ class Anthropic:
         self._api_key = api_key
         self._server_side_context_management = server_side_context_management
         self._redact_thinking = redact_thinking
-        self._lock = asyncio.Lock()
-        self._sdk: anthropic.AsyncAnthropic | None = None
+        # Per loop, not per provider: an asyncio.Lock binds to the loop
+        # that first contends on it, and an AsyncAnthropic holds a
+        # connection pool owned by the loop that opened it. A provider
+        # driven from a second loop otherwise raises "bound to a different
+        # event loop" -- or hangs, for the waiter left on a foreign loop.
+        self._lock: PerLoop[asyncio.Lock] = PerLoop(asyncio.Lock)
+        self._sdks: PerLoop[anthropic.AsyncAnthropic | None] = PerLoop(lambda: None)
 
     @property
     def server_side_context_management(self) -> bool:
@@ -430,6 +438,16 @@ class Anthropic:
         """Whether this provider bills against a subscription."""
         return False
 
+    @property
+    def _sdk(self) -> anthropic.AsyncAnthropic | None:
+        """The running loop's SDK client, if one has been opened."""
+        return self._sdks.peek()
+
+    @_sdk.setter
+    def _sdk(self, value: anthropic.AsyncAnthropic | None) -> None:
+        """Install or clear this loop's SDK client."""
+        self._sdks.set(value)
+
     async def get_sdk(self) -> anthropic.AsyncAnthropic:
         """Get or create the underlying Anthropic SDK client.
 
@@ -437,23 +455,31 @@ class Anthropic:
           client: Shared ``AsyncAnthropic`` instance.
 
         """
-        async with self._lock:
-            if self._sdk is None:
-                self._sdk = anthropic.AsyncAnthropic(api_key=self._api_key)
-            return self._sdk
+        async with self._lock.get():
+            sdk = self._sdks.get()
+            if sdk is None:
+                sdk = anthropic.AsyncAnthropic(api_key=self._api_key)
+                self._sdks.set(sdk)
+            return sdk
 
     async def close_sdk(self) -> None:
-        """Close and clear the shared Anthropic SDK client."""
-        async with self._lock:
-            if self._sdk is None:
-                return
-            sdk = self._sdk
-            self._sdk = None
+        """Close and clear this loop's SDK client.
+
+        This loop's only: a client's connection pool belongs to the loop
+        that opened it, so closing another loop's client from here breaks
+        a pool that loop is still using rather than releasing it. Each
+        loop closes what it opened; the rest die with their loops.
+        """
+        sdk = self._sdks.peek()
+        self._sdks.clear()
+        if sdk is None:
+            return
         close = getattr(sdk, "close", None)
-        if close is not None:
-            result = close()
-            if asyncio.iscoroutine(result):
-                await result
+        if close is None:
+            return
+        result = close()
+        if asyncio.iscoroutine(result):
+            await result
 
     def build_system(
         self,
@@ -740,18 +766,6 @@ class _AnthropicModel(ModelDefaults):
         return self.spec.prompt_cache_breakpoints
 
     @property
-    def valid_latency_modes(self) -> tuple[str, ...]:
-        """``latency="fast"`` maps to ``speed="fast"`` on supported Opus models.
-
-        Anthropic fast mode is a distinct inference-acceleration field
-        (sent via ``extra_body`` plus the ``fast-mode-2026-02-01`` beta),
-        orthogonal to ``service_tier`` -- both can be set on one request.
-        OpenAI, by contrast, has no separate field; there ``latency="fast"``
-        resolves to ``service_tier="priority"``.
-        """
-        return ("fast",) if self.spec.serves_fast else ()
-
-    @property
     def supports_context_management(self) -> bool:
         """Whether the provider manages context overflow internally."""
         return self._provider.server_side_context_management
@@ -865,8 +879,14 @@ class _AnthropicModel(ModelDefaults):
 
     @override
     async def close(self) -> None:
-        """Close the shared provider SDK owned by this model."""
-        await self._provider.close_sdk()
+        """Release this model's own resources -- it holds none.
+
+        The SDK client belongs to the provider and is shared by every
+        model built from it (``sagent --advisor`` builds two). Closing it
+        from one model's teardown strands the others mid-call, so the
+        provider's owner closes it via ``close_sdk``.
+        """
+        return
 
     @override
     def is_retryable_provider_error(self, error: Exception) -> bool:
@@ -1066,9 +1086,7 @@ class _AnthropicModel(ModelDefaults):
             # fatal); re-wrap into a user-facing error with remediation.
             not_read = find_response_not_read(e)
             if not_read is not None:
-                raise StreamingResponseNotReadError(
-                    provider_name="Anthropic", cause=not_read
-                ) from e
+                raise StreamingResponseNotReadError(provider_name="Anthropic") from e
             raise
         resp = _parse_response(raw, self.spec)
         self._last_response_time = time.time()

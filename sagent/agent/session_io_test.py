@@ -41,7 +41,7 @@ from sagent.agent.session_io import (
     serialize_tool_state,
     unpersisted_session_error,
 )
-from sagent.tools.core import ReadCacheEntry, ToolState
+from sagent.agent.state import ReadCacheEntry, ToolState
 from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,

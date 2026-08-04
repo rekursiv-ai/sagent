@@ -13,12 +13,9 @@ import shutil
 import subprocess
 import sys
 
+from sagent.agent.state import get_tool_state
 from sagent.lib.custom_json import JSON, bool_val, int_val, json_freeze
-from sagent.tools.core import (
-    get_tool_state,
-    load_tool_description,
-    run_sync,
-)
+from sagent.tools.core import load_tool_description, run_sync
 from sagent.tools.lib.bash import (
     Node,
     match_pipeline,

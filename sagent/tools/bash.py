@@ -21,11 +21,10 @@ import signal
 import subprocess
 import time
 
+from sagent.agent.state import ToolState, get_tool_state
 from sagent.lib.custom_json import JSON, bool_val, int_val, json_freeze
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
-    ToolState,
-    get_tool_state,
     load_tool_description,
     truncate,
 )

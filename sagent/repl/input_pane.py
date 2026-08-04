@@ -51,6 +51,7 @@ from rich.text import Text
 from wrapt import lazy_import
 
 from sagent.agent.background import BackgroundTaskEntry
+from sagent.agent.state import agent_label_var, agent_registry
 from sagent.repl.input_queues import InputQueues
 from sagent.repl.slash import (
     QUIT_WORDS,
@@ -74,7 +75,6 @@ from sagent.repl.slash import (
     parse_slash,
 )
 from sagent.tools.background_task import cancel_persistent_subagent
-from sagent.tools.core import agent_label_var, agent_registry
 from sagent.types.exceptions import (
     UserFacingError,
     log_exception_or_warning,

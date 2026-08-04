@@ -30,6 +30,7 @@ __all__ = [
     "AuthReloadable",
     "ModelRole",
     "Provider",
+    "ProviderCloseable",
     "ProviderOptions",
     "UnknownModelError",
     "UnsupportedTagError",
@@ -181,6 +182,24 @@ class Provider(Protocol):
           model: A low-cost ``Model`` for internal use (summarizers, etc.).
 
         """
+        ...
+
+
+@runtime_checkable
+class ProviderCloseable(Protocol):
+    """Provider that owns a client its models share.
+
+    Teardown belongs here, not on ``Model.close``: one provider can back
+    several models (``sagent --advisor`` builds two), so a model closing
+    the shared client strands its siblings. Whoever built the provider
+    closes it, once.
+
+    API-family providers holding an SDK or HTTP client satisfy this;
+    CLI-family providers own their resources per model and don't.
+    """
+
+    async def close_sdk(self) -> None:
+        """Close the client this provider opened on the running loop."""
         ...
 
 

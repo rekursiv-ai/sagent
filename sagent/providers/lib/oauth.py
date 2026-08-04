@@ -15,14 +15,12 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock as _ThreadLock
 from typing import Final, cast, override
 
 import asyncio
 import base64
-import contextlib
 import fcntl
 import hashlib
 import http.server as http_server
@@ -38,7 +36,9 @@ logger = logging.getLogger(__name__)
 
 
 _DEFAULT_ACCOUNT: Final = "default"
-_ACCOUNT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+# ``\Z``, not ``$``: ``$`` also matches before a trailing newline, so
+# ``"work\n"`` would pass and reach the filesystem as a credential name.
+_ACCOUNT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")
 
 
 def resolve_account(account: str | None) -> str:
@@ -180,6 +180,11 @@ class AuthCodeHandler(http_server.BaseHTTPRequestHandler):
             listener._error = err  # noqa: SLF001 -- handler callback pokes listener internals
         elif state != listener._expected_state:  # noqa: SLF001 -- handler callback pokes listener internals
             listener._error = "state mismatch"  # noqa: SLF001 -- handler callback pokes listener internals
+        elif not code:
+            # Matching state with no code is not a success: the flow has
+            # nothing to exchange. ``parse_manual_auth_code`` rejects the
+            # same input, so the two entry points agree.
+            listener._error = "authorization code missing"  # noqa: SLF001 -- handler callback pokes listener internals
         else:
             listener._code = code  # noqa: SLF001 -- handler callback pokes listener internals
         ok = not listener._error  # noqa: SLF001 -- handler callback pokes listener internals
@@ -317,27 +322,38 @@ def pkce_pair() -> tuple[str, str]:
 
 @dataclass(slots=True, kw_only=True)
 class _PathLock:
-    """Per-path lock pair: asyncio (in-process) + lazily-opened fcntl fd."""
+    """Per-path lock: one ``fcntl`` open file description per acquisition."""
 
     path: Path
-    async_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    _fd: int | None = None
 
     def open_fd(self) -> int:
-        """Open the sidecar lockfile lazily; reuse the fd across acquisitions."""
-        if self._fd is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self._fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
-        return self._fd
+        """Open a fresh description of the sidecar lockfile.
+
+        Fresh, not cached: ``flock`` excludes per open file description,
+        so two acquisitions sharing one fd do not exclude each other and
+        either can release the other's lock. A description per
+        acquisition makes ``flock`` total -- across processes, threads,
+        loops, and coroutines alike -- so no second in-process lock is
+        needed on top.
+
+        Returns:
+          fd: New descriptor; the caller closes it to release.
+
+        """
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        return os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
 
 
 _LOCK_REGISTRY: dict[str, _PathLock] = {}
-_LOCK_REGISTRY_GUARD = _ThreadLock()
+_LOCK_REGISTRY_GUARD = threading.Lock()
 
 
 def _path_lock_for(lock_path: Path) -> _PathLock:
     """Return the singleton ``_PathLock`` for ``lock_path``, creating it once."""
-    key = str(lock_path.resolve() if lock_path.exists() else lock_path)
+    # Resolved unconditionally: ``resolve`` is non-strict, and keying a
+    # not-yet-created path raw would change the key the moment the first
+    # acquisition creates it -- one file, two locks.
+    key = str(lock_path.resolve())
     with _LOCK_REGISTRY_GUARD:
         existing = _LOCK_REGISTRY.get(key)
         if existing is not None:
@@ -381,12 +397,13 @@ async def credential_file_lock(cred_path: Path) -> AsyncGenerator[None]:
 
     """
     lock_path = cred_path.with_suffix(cred_path.suffix + ".lock")
-    path_lock = _path_lock_for(lock_path)
-    async with path_lock.async_lock:
-        fd = path_lock.open_fd()
+    fd = _path_lock_for(lock_path).open_fd()
+    try:
+        # Acquire inside the worker so cancellation cannot strand the lock:
+        # ``to_thread`` cannot stop a thread it dispatched, so a cancelled
+        # caller would leave the worker holding a lock nobody releases.
+        # Closing the descriptor releases it unconditionally.
         await asyncio.to_thread(fcntl.flock, fd, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            with contextlib.suppress(OSError):
-                fcntl.flock(fd, fcntl.LOCK_UN)
+        yield
+    finally:
+        os.close(fd)

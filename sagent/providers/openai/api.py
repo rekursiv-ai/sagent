@@ -13,7 +13,7 @@ Usage::
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import ClassVar, Final, override
+from typing import ClassVar, Final
 
 from sagent.providers.openai import catalog as openai_catalog
 from sagent.providers.openai.compat import (
@@ -30,20 +30,6 @@ __all__ = [
 
 class _OpenAIModel(OpenAICompatModel):
     """OpenAI chat-completions backend - o-series accepts effort."""
-
-    @property
-    @override
-    def valid_latency_modes(self) -> tuple[str, ...]:
-        """``latency="fast"`` maps to ``service_tier="priority"``.
-
-        OpenAI has no separate fast-mode field: its fast path is the
-        ``priority`` processing tier (lower queue latency at higher cost).
-        This contrasts with Anthropic, whose fast mode is a distinct
-        ``speed="fast"`` inference-acceleration field, orthogonal to its
-        ``service_tier``. The cross-provider ``latency`` hint papers over
-        that difference; see ``effective_service_tier``.
-        """
-        return ("fast",)
 
 
 # Conservative compatibility caps retained for pre-GPT-5.6 profiles:

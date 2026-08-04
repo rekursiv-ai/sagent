@@ -46,11 +46,21 @@ def test_find_response_not_read_handles_cyclic_chain() -> None:
     assert find_response_not_read(a) is None
 
 
-def test_streaming_response_not_read_error_carries_cause() -> None:
-    cause = httpx.ResponseNotRead()
-    err = StreamingResponseNotReadError(provider_name="Anthropic", cause=cause)
-    assert err.__cause__ is cause
-    assert "Anthropic" in str(err)
+def test_streaming_response_not_read_error_chains_its_raise_cause() -> None:
+    """``raise ... from`` sets the cause; the class must not fight it.
+
+    A constructor that also assigned ``__cause__`` always lost to the
+    ``from`` clause every call site uses, so the kwarg was dead weight.
+    """
+    original = httpx.ResponseNotRead()
+
+    def _raise() -> None:
+        raise StreamingResponseNotReadError(provider_name="Anthropic") from original
+
+    with pytest.raises(StreamingResponseNotReadError) as raised:
+        _raise()
+    assert raised.value.__cause__ is original
+    assert "Anthropic" in str(raised.value)
 
 
 def test_is_request_too_large_status_413() -> None:

@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from sagent.agent.state import ToolState
 from sagent.testing import with_fake_agent
 from sagent.tools import skill as sk
-from sagent.tools.core import ToolState
 from sagent.tools.skill import (
     Skill,
     SkillInfo,

@@ -329,11 +329,6 @@ class _GoogleCLIModel(ModelDefaults):
         return self.spec.prompt_cache_breakpoints
 
     @property
-    def valid_latency_modes(self) -> tuple[str, ...]:
-        """The Gemini CLI exposes no per-request latency knob."""
-        return ()
-
-    @property
     def supports_context_management(self) -> bool:
         """``True``: the CLI itself rolls history under quota pressure."""
         return True

@@ -1193,17 +1193,38 @@ async def test_anthropic_stream_preserves_retryable_status_over_response_not_rea
 
 
 @pytest.mark.asyncio
-async def test_anthropic_model_close_closes_shared_sdk() -> None:
+async def test_anthropic_provider_close_sdk_closes_shared_sdk() -> None:
+    """The provider owns the client, so the provider closes it."""
     p = Anthropic.from_key("k")
-    m = p.model("claude-opus-4-7")
     fake_sdk = MagicMock()
     fake_sdk.close = AsyncMock()
     p._sdk = fake_sdk
 
-    await m.close()
+    await p.close_sdk()
 
     fake_sdk.close.assert_awaited_once()
     assert p._sdk is None
+
+
+@pytest.mark.asyncio
+async def test_closing_one_model_leaves_a_sibling_model_usable() -> None:
+    """The SDK belongs to the provider, so one model may not destroy it.
+
+    ``sagent --advisor`` builds both models from one provider
+    (``bin/cli.py``), and ``Agent.shutdown`` closes only its own model.
+    Tearing down the shared client there strands the advisor mid-call.
+    """
+    p = Anthropic.from_key("k")
+    model = p.model("claude-opus-4-7")
+    _advisor = p.model("claude-sonnet-4-5")
+    fake_sdk = MagicMock()
+    fake_sdk.close = AsyncMock()
+    p._sdk = fake_sdk
+
+    await model.close()
+
+    fake_sdk.close.assert_not_awaited()
+    assert p._sdk is fake_sdk
 
 
 def test_anthropic_model_is_retryable_provider_error_rate_limit() -> None:
