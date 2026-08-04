@@ -29,6 +29,8 @@ jobs:
   import-change:
     name: Import public changes to source
     runs-on: ubuntu-latest
+    # Bounded so a hung step fails in minutes, not at the 6h default.
+    timeout-minutes: 45
     env:
       DISPATCH_PUBLIC_BASE_REF: ${{ inputs.public_base_ref }}
       DISPATCH_PUBLIC_HEAD_REF: ${{ inputs.public_head_ref }}
@@ -99,7 +101,7 @@ jobs:
       # persist-credentials: false, so the import token is used for this fetch
       # and never written into target/.git/config where the later step that
       # executes imported public code could read it.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         if: steps.settings.outputs.enabled == 'true'
         with:
           repository: ${{ env.TARGET_REPO }}
@@ -112,11 +114,11 @@ jobs:
           # import would silently fall back to the pushed commit's parent -- the
           # exact wrong baseline this resolution exists to avoid.
           fetch-depth: 0
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         if: steps.settings.outputs.enabled == 'true'
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         if: steps.settings.outputs.enabled == 'true'
 
       - name: Capture trusted import helper
@@ -170,12 +172,12 @@ jobs:
           echo "base_ref=$base_ref" >> "$GITHUB_OUTPUT"
           echo "head_ref=$head_ref" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         if: steps.settings.outputs.enabled == 'true'
         with:
           ref: ${{ steps.refs.outputs.base_ref }}
           path: public-base
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         if: steps.settings.outputs.enabled == 'true'
         with:
           ref: ${{ steps.refs.outputs.head_ref }}
@@ -245,7 +247,7 @@ jobs:
 
       - name: Upload import report
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: copybarista-import-report
           path: ${{ env.IMPORT_REPORT }}
