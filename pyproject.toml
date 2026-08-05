@@ -33,7 +33,9 @@ dependencies = [
     # ~670 cascading Unknown warnings from an untyped 0.1.0.
     # [extract] pulls trafilatura + defusedxml, which wesearch.web uses for
     # article extraction and RSS/Atom parsing on sagent's behalf.
-    "wesearch[extract]>=0.1.7",
+    # 0.1.8 exports `public_host`, which tools/web_fetch.py threads into
+    # fetch_web as the SSRF host validator.
+    "wesearch[extract]>=0.1.8",
     # web client / scraping
     "httpx>=0.27",
     # web server / api

@@ -4,16 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from typing import Any, Final, Literal, cast, get_args
-from urllib.parse import urlparse
 
 import asyncio
-import ipaddress
-import socket
 
 from wesearch.errors import BotDetectionError, FetchError
 from wesearch.fetch import (
     Transport,
-    ValidatedHost,
+    public_host,
 )
 from wesearch.web import fetch_web
 
@@ -221,7 +218,7 @@ class WebFetch:
                 json_body=json_body,
                 form_body=form_body,
                 transport=transport,
-                validated_hosts=_validated_host,
+                validated_hosts=public_host,
             )
         except BotDetectionError as e:
             # fetch() classified the block at the boundary: surface the SPECIFIC
@@ -268,57 +265,6 @@ def _request_bodies(
     return None, {
         str(k): str(v) for k, v in cast(dict[str, Any], unfrozen_form).items()
     }
-
-
-def _validated_host(hostname: str) -> ValidatedHost:
-    """Return a host/IP pair after SSRF validation.
-
-    ``hostname`` is the bare host the ``validated_hosts`` resolver contract
-    passes (never a netloc-with-port). Pins the connect IP to defeat DNS
-    rebinding. Prefers an IPv4 address when the host resolves to both families:
-    ``getaddrinfo`` commonly lists AAAA (v6) first, but many hosts/networks have
-    no working v6 route, and pinning to a single unreachable v6 address turns a
-    servable page into a status-0 connection failure (unlike an un-pinned
-    client, which Happy-Eyeballs to v4). Falls back to v6 only when that is the
-    sole family.
-    """
-    parsed = urlparse(f"//{hostname}")
-    host = parsed.hostname
-    if not host:
-        raise ValueError("URL has no host.")
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except (socket.gaierror, UnicodeError) as e:
-        raise ValueError(f"DNS resolution failed for {host!r}: {e}") from e
-    ips = [str(info[4][0]) for info in infos]
-    for candidate in ips:
-        err = _ip_is_safe(host, candidate)
-        if err is not None:
-            raise ValueError(err)
-    # Prefer the first IPv4; else the first address of any family.
-    ip = next((a for a in ips if ":" not in a), ips[0] if ips else "")
-    # Return the BARE host (never the raw netloc-with-port): the transport
-    # re-appends any port via _host_header, so returning a port here would
-    # double it on the wire.
-    return ValidatedHost(host=host, ip=ip)
-
-
-def _ip_is_safe(host: str, raw_ip: str) -> str | None:
-    """Return an error string if ``raw_ip`` is unsafe to fetch, else None."""
-    try:
-        ip = ipaddress.ip_address(raw_ip)
-    except ValueError:
-        return None
-    if (
-        ip.is_loopback
-        or ip.is_link_local
-        or ip.is_private
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    ):
-        return f"Refusing to fetch {host!r} (resolves to non-public address {ip})."
-    return None
 
 
 _NUDGE: Final = "curl/wget via Bash is a bad UX. Use the WebFetch tool."
