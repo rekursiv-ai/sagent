@@ -9,6 +9,7 @@ import asyncio
 import socket
 
 from wesearch.errors import CloudflareChallengeError, FetchError
+from wesearch.fetch import public_host
 from wesearch.web import WebFetchResult
 
 import pytest
@@ -18,7 +19,6 @@ from sagent.tools.web_fetch import (
     WebFetch,
     _match_http_fetch,
     _request_bodies,
-    _validated_host,
 )
 from sagent.types.runtime import ToolResult
 
@@ -34,14 +34,6 @@ def _addrinfo(ip: str) -> list[AddrInfo]:
     """Build a ``socket.getaddrinfo``-shaped result for a single IP."""
     fam = socket.AF_INET6 if ":" in ip else socket.AF_INET
     return [(fam, 0, 0, "", (ip, 0))]
-
-
-def _addrinfo_multi(*ips: str) -> list[AddrInfo]:
-    """A ``getaddrinfo`` result over several IPs, in the given order."""
-    out: list[AddrInfo] = []
-    for ip in ips:
-        out.extend(_addrinfo(ip))
-    return out
 
 
 def _result(text: str, *, kind: str = "html") -> WebFetchResult:
@@ -77,7 +69,7 @@ def test_prompt_empty() -> None:
 
 
 def test_run_passes_validated_host_resolver_to_fetch_web() -> None:
-    """``run`` applies SSRF by threading ``_validated_host`` into ``fetch_web``."""
+    """``run`` applies SSRF by threading ``public_host`` into ``fetch_web``."""
     captured: dict[str, object] = {}
 
     def fake_fetch_web(url: str, **kwargs: object) -> WebFetchResult:
@@ -91,7 +83,7 @@ def test_run_passes_validated_host_resolver_to_fetch_web() -> None:
     ):
         result = asyncio.run(WebFetch().run({"url": "https://example.com"}))
     assert not result.is_error
-    assert captured["validated_hosts"] is _validated_host
+    assert captured["validated_hosts"] is public_host
 
 
 def test_run_appends_truncation_notice_when_body_exceeds_limit() -> None:
@@ -118,75 +110,6 @@ def test_run_appends_truncation_notice_when_body_exceeds_limit() -> None:
         result = asyncio.run(WebFetch().run({"url": "https://example.com"}))
     assert not result.is_error
     assert "(truncated, 500 chars omitted)" in result.content
-
-
-def test_validated_host_rejects_dns_failure() -> None:
-    with (
-        patch("socket.getaddrinfo", side_effect=socket.gaierror("nope")),
-        pytest.raises(ValueError, match="DNS"),
-    ):
-        _validated_host("does-not-exist.invalid")
-
-
-def test_validated_host_rejects_localhost() -> None:
-    with (
-        patch("socket.getaddrinfo", return_value=_addrinfo("127.0.0.1")),
-        pytest.raises(ValueError, match="non-public"),
-    ):
-        _validated_host("localhost")
-
-
-def test_validated_host_accepts_public_address() -> None:
-    with patch("socket.getaddrinfo", return_value=_addrinfo("8.8.8.8")):
-        validated = _validated_host("example.com")
-    assert validated.ip == "8.8.8.8"
-
-
-def test_validated_host_rejects_any_private_resolution() -> None:
-    with (
-        patch(
-            "socket.getaddrinfo",
-            return_value=_addrinfo_multi("8.8.8.8", "127.0.0.1"),
-        ),
-        pytest.raises(ValueError, match="non-public"),
-    ):
-        _validated_host("example.com")
-
-
-def test_validated_host_prefers_ipv4_when_resolver_lists_ipv6_first() -> None:
-    # RED: getaddrinfo often returns AAAA (v6) first, but many hosts/networks
-    # have no working v6 route. Pinning to infos[0] (v6) then connecting fails
-    # with status 0 on a page that plainly serves over v4. _validated_host must
-    # pick a v4 address when one exists rather than blindly taking infos[0].
-    with patch(
-        "socket.getaddrinfo",
-        return_value=_addrinfo_multi("2606:4700:20::ac43:4403", "104.26.13.77"),
-    ) as resolve:
-        vh = _validated_host("docs.astral.sh")
-    assert vh.ip == "104.26.13.77"
-    assert resolve.call_count == 1
-
-
-def test_validated_host_uses_ipv6_when_only_family() -> None:
-    # v6-only host: pin the v6 address (bracketing is the transport's job).
-    with patch(
-        "socket.getaddrinfo",
-        return_value=_addrinfo("2606:4700:20::1"),
-    ):
-        vh = _validated_host("v6only.example")
-    assert vh.ip == "2606:4700:20::1"
-
-
-def test_validated_host_returns_bare_host_not_netloc() -> None:
-    # The validated_hosts contract returns the BARE hostname (the transport
-    # re-appends any port via _host_header). Returning the raw netloc-with-port
-    # would double the port on the wire. So .host must never carry a port.
-    with patch(
-        "socket.getaddrinfo",
-        return_value=_addrinfo("1.2.3.4"),
-    ):
-        vh = _validated_host("example.com:8443")
-    assert vh.host == "example.com"
 
 
 def test_match_http_fetch_simple_curl() -> None:
