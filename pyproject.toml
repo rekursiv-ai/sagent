@@ -1,6 +1,6 @@
 [project]
 name = "sagent"
-version = "0.1.14"
+version = "0.1.15"
 description = "Python-first Coding Agent API and CLI."
 readme = "README.md"
 requires-python = ">=3.12"

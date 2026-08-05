@@ -4,6 +4,18 @@ All notable Sagent changes are documented here.
 
 ## Unreleased
 
+## 0.1.15 - 2026-08-04
+
+### Changed
+
+- Requires wesearch 0.1.8 or newer.
+
+### Fixed
+
+- `WebFetch` validates the target host against wesearch's `public_host`,
+  so a URL resolving to a private or link-local address is refused rather
+  than fetched from inside the network the agent runs in.
+
 ## 0.1.14 - 2026-08-01
 
 ### Changed
