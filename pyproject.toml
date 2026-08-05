@@ -143,7 +143,7 @@ exclude = [".github/**", ".codespell-ignore"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-python_files = "*_test.py"
+python_files = ["*_test.py", "test_*.py"]
 markers = [
     "ci_smoke: slower package/CLI smoke tests run explicitly in CI",
     "cuda: tests that require a real CUDA device (skipped in hosted CI)",
@@ -248,7 +248,6 @@ ignore = [
 
     # Standard style relaxations.
     "A002",    # Builtin argument shadowing.
-    "BLE001",  # Blind exception (heterogeneous provider/cleanup handlers).
     "E501",    # Line too long. (Will be fixed by formatter.)
     "EM101",   # Raw string in exception.
     "EM102",   # F-string in exception.
@@ -272,6 +271,7 @@ ignore = [
     "TD003",   # Missing TODO link.
     "TRY003",  # Raise vanilla args.
     "TRY300",  # Try consider else.
+    "BLE001",  # Blind exception (heterogeneous provider/cleanup handlers).
 
     # Additional style relaxations.
     # "DJ",    # Django.
@@ -426,6 +426,7 @@ section-order = [
 
 [tool.basedpyright]
 typeCheckingMode = "recommended"
+failOnWarnings = true  # Warnings fail the check (basedpyright default; pinned explicitly).
 # Don't infer types from .venv site-packages source; use bundled/local stubs
 # only. Stops basedpyright analyzing ~48k env files: full-repo run 74s -> 14s.
 # Tradeoff: stub-less libs report Unknown, so they need stubs in typings/
@@ -513,11 +514,13 @@ all = "warn"
 
 [[tool.ty.overrides]]
 include = ["typings/**"]
+
 [tool.ty.overrides.rules]
 all = "ignore"
 
 [[tool.ty.overrides]]
 include = ["*_test.py"]
+
 [tool.ty.overrides.rules]
 invalid-key = "ignore"
 
@@ -536,6 +539,7 @@ formats = "ipynb,py:percent"
 [tool.uv]
 package = true
 environments = ["sys_platform == 'linux'", "sys_platform == 'darwin'"]
+
 [tool.uv.pip]
 compile-bytecode = true
 

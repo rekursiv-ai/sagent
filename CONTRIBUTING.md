@@ -18,6 +18,7 @@ uv run pytest
 Before opening a pull request, run:
 
 ```bash
+uv sync --all-groups
 uv run ruff check --no-fix --no-cache .
 uv run ruff format --check --no-cache .
 uv run codespell .
@@ -26,7 +27,6 @@ uv run basedpyright sagent
 uv run pytest
 uv run python -c "import sagent"
 uv build
-uv run python sagent/bin/check_wheel.py
 ```
 
 ## Public contribution flow
