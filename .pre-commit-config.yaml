@@ -187,6 +187,9 @@ repos:
         # plain --testmon self-deactivates whenever -m is present
         # (tarpas/pytest-testmon#238). On a cache miss testmon runs everything,
         # so it is fail-safe.
+        # COVERAGE_CORE=ctrace: coverage defaults to core=sysmon on 3.14, which
+        # cannot carry the dynamic contexts testmon switches per test. Testmon
+        # builds Coverage with config_file=False, so only the env var reaches it.
         entry: &pytest-entry >-
           bash -c '
             cpu=/sys/devices/system/cpu;
@@ -194,7 +197,7 @@ repos:
             workers=$([ -n "$top" ] && grep -lx "$top" $cpu/cpu*/cpufreq/cpuinfo_max_freq | xargs -n1 dirname | xargs -n1 dirname | xargs -I@ cat @/topology/core_id | sort -u | wc -l || sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo $(( $(getconf _NPROCESSORS_ONLN) / 2 )));
             ((workers > 32)) && workers=32;
             ((workers < 2)) && workers=2;
-            exec uv --quiet run --frozen --group test \
+            exec env COVERAGE_CORE=ctrace uv --quiet run --frozen --group test \
             pytest -n="$workers" "$@"
           ' pytest
         args: [-q, --tb=short, --testmon-forceselect]
