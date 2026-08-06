@@ -115,11 +115,14 @@ typecheck = [
     "basedpyright>=1.10",
     "ty>=0.0.60",
 ]
-dev = [
-    {include-group = "debug"},
+"pre-commit" = [
     {include-group = "lint"},
     {include-group = "test"},
     {include-group = "typecheck"},
+]
+dev = [
+    {include-group = "debug"},
+    {include-group = "pre-commit"},
 ]
 
 [project.urls]

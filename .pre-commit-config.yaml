@@ -1,28 +1,83 @@
-# See:
+# Universal Style and Quality Enforcement
+# Pre-commit/pre-push checks _and_ source-of-truth for Github workflows.
+#
+# Usage:
+#   The `precommit` dependency group supplies every tool the hooks below
+#   invoke. [tool.uv] default-groups is unset, so name it -- an already-synced
+#   .venv makes a bare `uv run` look fine and it is not reproducible on a
+#   fresh checkout.
+#
+#     uv --quiet run --frozen --group pre-commit pre-commit install
+#     uv --quiet run --frozen --group pre-commit pre-commit autoupdate
+#     uv --quiet run --frozen --group pre-commit pre-commit run --all-files
+#
+#   May need: git config --unset-all core.hooksPath
+#     if: [ERROR] Cowardly refusing to install hooks with `core.hooksPath` set.
+#
+#   Stages. `default_stages: [pre-commit]` below means a bare `run` sees only
+#   the pre-commit hooks; the heavy ones (ty-global, basedpyright-global,
+#   pytest*) declare `stages: [pre-push]` and need it named explicitly:
+#     uv --quiet run --frozen --group pre-commit pre-commit run --all-files
+#     uv --quiet run --frozen --group pre-commit pre-commit run --all-files --hook-stage pre-push
+#     uv --quiet run --frozen --group pre-commit pre-commit run --all-files --hook-stage commit-msg
+#
+#   Always pass --files or --all-files. Bare `run` (and the hook `git commit`
+#   fires on a dirty tree) STASHES your changes -- a git mutation, and this
+#   worktree is shared.
+#     uv --quiet run --frozen --group pre-commit pre-commit run \
+#       --files $(git status --short | awk '{print $2}')
+#
+#   One hook at a time, by id (`ruff-check`, `ty`, `pytest`, ...):
+#     uv --quiet run --frozen --group pre-commit pre-commit run ruff-check --all-files
+#     uv --quiet run --frozen --group pre-commit pre-commit run pytest --hook-stage pre-push
+#
+#   Individual tests: the pytest hooks take no test selector, so call pytest
+#   directly.
+#     uv --quiet run --frozen --group pre-commit pytest path/to/thing_test.py
+#     uv --quiet run --frozen --group pre-commit pytest path/to/thing_test.py::test_name
+#     uv --quiet run --frozen --group pre-commit pytest -k some_substring path/to/
+#     uv --quiet run --frozen --group pre-commit pytest -n 6 path/to/
+#   Marker tiers mirror the pytest-slow / -ci-smoke / -integration hooks; the
+#   default `-m` filter lives in pyproject addopts, so ask for them by name:
+#     uv --quiet run --frozen --group pre-commit pytest -m slow path/to/
+#
+#   Skipping. SKIP takes hook ids, comma-separated, and reports "Skipped":
+#     SKIP=ruff-check uv --quiet run --frozen --group pre-commit pre-commit run --all-files
+#     SKIP=pytest,pytest-slow uv --quiet run --frozen --group pre-commit pre-commit run --hook-stage pre-push --all-files
+#
+#   `git commit --no-verify` / `git push --no-verify` bypass every hook. Both
+#   are a last resort, not a way past a red gate -- the gates are house rules
+#   (see AGENTS.md "Never suppress gates"). Fix the code the hook protects.
+#   The legitimate use is an unrelated pre-existing failure blocking an
+#   urgent unrelated commit; say so in the commit message when you do it.
+#
+#
+# On Source of Truthness:
+#
+#   Preferred location for any tool setting, in order:
+#     pyproject.toml  >  .pre-commit-config.yaml  >  .github/workflows/tests.yml
+#
+#   Put a setting as high in this chain as the tool allows. Only drop to a
+#   lower file when the higher one cannot express it (e.g. a CLI-only flag with
+#   no config key). pyproject.toml holds tool config; .pre-commit-config.yaml
+#   is the sole source for how hooks run (thread/worker counts, heap caps);
+#   .github/workflows/tests.yml only invokes the hooks and must not redefine
+#   any of these.
+#
+#
+# Design Philosophy;
+#
+#   Only fail if there's things which cannot be auto-fixed.
+#   Hooks fix files in place; if anything changes, pre-commit reports
+#   "files were modified" and the commit is aborted. Run `git add -u`
+#   then re-commit -- the second attempt always passes.
+#
+# See also:
+#
 #   https://pre-commit.com
 #   https://pre-commit.com/hooks.html
 #   https://learn.scientific-python.org/development/guides/style/
-# uv run pre-commit install
-# uv run pre-commit autoupdate
-# uv run pre-commit run --all-files
-#
-# May need: git config --unset-all core.hooksPath
-# if: [ERROR] Cowardly refusing to install hooks with `core.hooksPath` set.
 
-# Tool settings: single source of truth.
-# Preferred location for any tool setting, in order:
-#   pyproject.toml  >  .pre-commit-config.yaml  >  .github/workflows/tests.yml
-# Put a setting as high in this chain as the tool allows. Only drop to a lower
-# file when the higher one cannot express it (e.g. a CLI-only flag with no
-# config key). pyproject.toml holds tool config; .pre-commit-config.yaml is the
-# sole source for how hooks run (thread/worker counts, heap caps);
-# .github/workflows/tests.yml only invokes the hooks and must not redefine any
-# of these.
-#
-# Philosophy: Only fail if there's things which cannot be auto-fixed.
-# Hooks fix files in place; if anything changes, pre-commit reports
-# "files were modified" and the commit is aborted. Run `git add -u`
-# then re-commit -- the second attempt always passes.
 fail_fast: false
 default_stages: [pre-commit]
 
@@ -47,19 +102,11 @@ repos:
 
       - id: check-added-large-files
         stages: [pre-commit]
-        args: [--maxkb=500, --enforce-all]
-        # No leading `|` inside the group: an empty first alternative matches
-        # every path at position zero, which silently excluded the whole tree
-        # and disabled this gate entirely.
+        args: [--maxkb=750, --enforce-all]
         exclude: |
           (?x)^(
-            typings/
-            |uv\.lock
-            # Vendored User-Agent pools: generated by ops/github/
-            # update_useragents.py and committed on purpose so the published
-            # package ships reviewed static data instead of fetching at
-            # runtime. The monorepo config excludes the same file by its
-            # source path; this is its exported path.
+            uv\.lock
+            |typings/
             |(.*/)?chrome/chrome_(desktop|android)_useragents\.txt
           )
 
@@ -78,9 +125,26 @@ repos:
   - repo: https://github.com/astral-sh/uv-pre-commit
     rev: 0.11.32
     hooks:
+
       - id: uv-lock
         stages: [pre-commit]
         files: ^(pyproject\.toml|uv\.lock)$
+
+  - repo: local
+    hooks:
+
+      - id: codespell
+        name: codespell
+        language: system
+        stages: [pre-commit]
+        types_or: [python, markdown, jupyter, shell]
+        entry: uv --quiet run --frozen --group pre-commit codespell
+        args: [-w]
+        exclude: |
+          (?x)^(
+            typings/
+            |(.*/)?third_party/
+          )
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.0
@@ -93,22 +157,6 @@ repos:
       - id: ruff-format
         stages: [pre-commit]
         types_or: [python, pyi, jupyter]
-
-  - repo: local
-    hooks:
-
-      - id: codespell
-        name: codespell
-        language: system
-        stages: [pre-commit]
-        types_or: [python, markdown, jupyter, shell]
-        entry: uv --quiet run --frozen --group lint codespell
-        args: [-w]
-        exclude: |
-          (?x)^(
-            typings/
-            |(.*/)?third_party/
-          )
 
   # No official ty pre-commit hook yet (https://github.com/astral-sh/ty/issues/269).
   - repo: local
@@ -127,12 +175,7 @@ repos:
         # Compromise: duplication; the exclusion list below must mirror
         # pyproject.toml's ``[tool.ty.src]``.
         types_or: [python, pyi]
-        entry: uv --quiet run --frozen --group typecheck ty check
-        # The comment above is exactly why this list exists. With filenames
-        # passed, ty never applies [tool.ty.src].exclude, so claiming
-        # "exclusions defined in pyproject.toml" was false: configgle excludes
-        # docs/ there, this hook checked it anyway, and every export failed on
-        # reveal_type() calls that are the documentation's whole point.
+        entry: uv --quiet run --frozen --group pre-commit ty check
         exclude: |
           (?x)^(
             typings/
@@ -150,9 +193,18 @@ repos:
         always_run: true
         pass_filenames: false
         stages: [pre-push]
-        entry: uv --quiet run --frozen --group typecheck ty check
+        entry: uv --quiet run --frozen --group pre-commit ty check
         # Exclusions defined in pyproject.toml.
 
+  # Every heavy pre-push hook below shares this one wrapper. It counts physical
+  # cores running at the top clock (P-cores only, on a hybrid CPU), clamps to
+  # [2, 32], exports the result as $WORKERS, then runs the hook's own command
+  # line -- supplied as the single `args` entry. Per-hook differences (env vars,
+  # marker filters, exit-5 tolerance, capability guards) live in that arg, so
+  # the arithmetic exists exactly once.
+  #
+  # Inline rather than a script under ops/: this file is copied verbatim into
+  # public package repos that do not receive ops/.
   - repo: local
     hooks:
       - id: basedpyright-global
@@ -161,17 +213,21 @@ repos:
         always_run: true
         pass_filenames: false
         stages: [pre-push]
-        entry: >-
+        entry: &worker-entry >-
           bash -c '
             cpu=/sys/devices/system/cpu;
             top=$(sort -rn $cpu/cpu*/cpufreq/cpuinfo_max_freq 2>/dev/null | head -1);
-            workers=$([ -n "$top" ] && grep -lx "$top" $cpu/cpu*/cpufreq/cpuinfo_max_freq | xargs -n1 dirname | xargs -n1 dirname | xargs -I@ cat @/topology/core_id | sort -u | wc -l || sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo $(( $(getconf _NPROCESSORS_ONLN) / 2 )));
-            ((workers > 32)) && workers=32;
-            ((workers < 2)) && workers=2;
-            exec env NODE_OPTIONS=--max-old-space-size=2048 \
-            uv --quiet run --frozen --group typecheck \
-            basedpyright --threads="$workers"
-          '
+            WORKERS=$([ -n "$top" ] && grep -lx "$top" $cpu/cpu*/cpufreq/cpuinfo_max_freq | xargs -n1 dirname | xargs -n1 dirname | xargs -I@ cat @/topology/core_id | sort -u | wc -l || sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo $(( $(getconf _NPROCESSORS_ONLN) / 2 )));
+            ((WORKERS > 32)) && WORKERS=32;
+            ((WORKERS < 2)) && WORKERS=2;
+            export WORKERS;
+            exec bash -c "$@"
+          ' bash
+        args:
+          - >-
+            exec env NODE_OPTIONS=--max-old-space-size=2048
+            uv --quiet run --frozen --group pre-commit
+            basedpyright --threads="$WORKERS"
 
   - repo: local
     hooks:
@@ -182,25 +238,20 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         # --testmon-forceselect runs only tests whose covered code changed since
-        # the cached .testmondata baseline. It must be -forceselect, NOT plain
-        # --testmon: pyproject addopts carries a default `-m` marker filter, and
-        # plain --testmon self-deactivates whenever -m is present
-        # (tarpas/pytest-testmon#238). On a cache miss testmon runs everything,
-        # so it is fail-safe.
+        # the cached .testmondata baseline (huge speedup on the full suite).
+        # It must be -forceselect, NOT plain --testmon: this repo's pyproject
+        # addopts carries a default `-m 'not ci_smoke and ...'` marker filter,
+        # and plain --testmon silently self-deactivates whenever -m is present
+        # (tarpas/pytest-testmon#238). -forceselect overrides that. On a cache
+        # miss / new environment testmon runs the whole suite, so it is fail-safe.
         # COVERAGE_CORE=ctrace: coverage defaults to core=sysmon on 3.14, which
         # cannot carry the dynamic contexts testmon switches per test. Testmon
         # builds Coverage with config_file=False, so only the env var reaches it.
-        entry: &pytest-entry >-
-          bash -c '
-            cpu=/sys/devices/system/cpu;
-            top=$(sort -rn $cpu/cpu*/cpufreq/cpuinfo_max_freq 2>/dev/null | head -1);
-            workers=$([ -n "$top" ] && grep -lx "$top" $cpu/cpu*/cpufreq/cpuinfo_max_freq | xargs -n1 dirname | xargs -n1 dirname | xargs -I@ cat @/topology/core_id | sort -u | wc -l || sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo $(( $(getconf _NPROCESSORS_ONLN) / 2 )));
-            ((workers > 32)) && workers=32;
-            ((workers < 2)) && workers=2;
-            exec env COVERAGE_CORE=ctrace uv --quiet run --frozen --group test \
-            pytest -n="$workers" "$@"
-          ' pytest
-        args: [-q, --tb=short, --testmon-forceselect]
+        entry: *worker-entry
+        args:
+          - >-
+            exec env COVERAGE_CORE=ctrace uv --quiet run --frozen --group pre-commit
+            pytest -n="$WORKERS" -q --tb=short --testmon-forceselect
 
       - id: pytest-slow
         name: pytest (slow)
@@ -208,22 +259,25 @@ repos:
         always_run: true
         pass_filenames: false
         stages: [pre-push]
-        # Tolerate pytest exit 5 (no tests collected): this package may ship no
-        # tests for this marker, which is not a failure. Regular pytest stays strict.
-        entry: >-
-          bash -c '
-            cpu=/sys/devices/system/cpu;
-            top=$(sort -rn $cpu/cpu*/cpufreq/cpuinfo_max_freq 2>/dev/null | head -1);
-            workers=$([ -n "$top" ] && grep -lx "$top" $cpu/cpu*/cpufreq/cpuinfo_max_freq | xargs -n1 dirname | xargs -n1 dirname | xargs -I@ cat @/topology/core_id | sort -u | wc -l || sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo $(( $(getconf _NPROCESSORS_ONLN) / 2 )));
-            ((workers > 32)) && workers=32;
-            ((workers < 2)) && workers=2;
+        # --no-cov only when pytest-cov is installed: the flag is an error
+        # without the plugin, and these tiers gain nothing from coverage
+        # (only the testmon hook above needs it).
+        #
+        # Tolerate pytest exit 5 (no tests collected): a tree may ship no tests
+        # for this marker, which is not a failure. The strict `pytest` hook
+        # above still fails on an empty collection, and
+        # ops/github/marker_tiers_test.py fails any tier that goes empty
+        # without being declared empty -- so tolerance here is not fail-open.
+        entry: *worker-entry
+        args:
+          - >-
             cov=();
-            uv --quiet run --frozen --group test \
-              python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
-            uv --quiet run --frozen --group test \
-            pytest -n="$workers" "${cov[@]}" "$@" || test "$?" = 5
-          ' pytest
-        args: [-q, --tb=short, -m, "slow and not cluster and not cuda and not integration and not performance"]
+            uv --quiet run --frozen --group pre-commit
+            python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
+            uv --quiet run --frozen --group pre-commit
+            pytest -n="$WORKERS" "${cov[@]}" -q --tb=short
+            -m "slow and not cluster and not cuda and not integration and not performance"
+            || test "$?" = 5
 
       - id: pytest-ci-smoke
         name: pytest (ci_smoke)
@@ -231,23 +285,18 @@ repos:
         always_run: true
         pass_filenames: false
         stages: [pre-push]
-        # Slower package/CLI smoke tests, deselected by the default marker
-        # filter. Tolerate pytest exit 5 (no tests collected): a package may
-        # ship none, which is not a failure.
-        entry: >-
-          bash -c '
-            cpu=/sys/devices/system/cpu;
-            top=$(sort -rn $cpu/cpu*/cpufreq/cpuinfo_max_freq 2>/dev/null | head -1);
-            workers=$([ -n "$top" ] && grep -lx "$top" $cpu/cpu*/cpufreq/cpuinfo_max_freq | xargs -n1 dirname | xargs -n1 dirname | xargs -I@ cat @/topology/core_id | sort -u | wc -l || sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo $(( $(getconf _NPROCESSORS_ONLN) / 2 )));
-            ((workers > 32)) && workers=32;
-            ((workers < 2)) && workers=2;
+        # Slower package/CLI smoke tests, deselected by the pyproject marker
+        # filter. Tolerate pytest exit 5 (no tests collected) so the hook does
+        # not fail a tree that happens to ship none.
+        entry: *worker-entry
+        args:
+          - >-
             cov=();
-            uv --quiet run --frozen --group test \
-              python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
-            uv --quiet run --frozen --group test \
-            pytest -n="$workers" "${cov[@]}" "$@" || test "$?" = 5
-          ' pytest
-        args: [-q, --tb=short, --durations=20, -m, ci_smoke]
+            uv --quiet run --frozen --group pre-commit
+            python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
+            uv --quiet run --frozen --group pre-commit
+            pytest -n="$WORKERS" "${cov[@]}" -q --tb=short --durations=20
+            -m ci_smoke || test "$?" = 5
 
       - id: pytest-integration
         name: pytest (integration)
@@ -264,21 +313,14 @@ repos:
         # \"vector\" is not available") -- that is a broken provision, not a
         # machine without a database, and should not be silently skipped.
         #
-        # Tolerate pytest exit 5 (no tests collected): this package may ship no
-        # integration-marked tests, which is not a failure. Regular pytest above
-        # stays strict so an empty collection there still fails.
-        entry: >-
-          bash -c '
+        # Tolerate pytest exit 5: see the pytest-slow note above.
+        entry: *worker-entry
+        args:
+          - >-
             command -v pg_config >/dev/null 2>&1 || exit 0;
-            cpu=/sys/devices/system/cpu;
-            top=$(sort -rn $cpu/cpu*/cpufreq/cpuinfo_max_freq 2>/dev/null | head -1);
-            workers=$([ -n "$top" ] && grep -lx "$top" $cpu/cpu*/cpufreq/cpuinfo_max_freq | xargs -n1 dirname | xargs -n1 dirname | xargs -I@ cat @/topology/core_id | sort -u | wc -l || sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo $(( $(getconf _NPROCESSORS_ONLN) / 2 )));
-            ((workers > 32)) && workers=32;
-            ((workers < 2)) && workers=2;
             cov=();
-            uv --quiet run --frozen --group test \
-              python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
-            uv --quiet run --frozen --group test \
-            pytest -n="$workers" "${cov[@]}" "$@" || test "$?" = 5
-          ' pytest
-        args: [-q, --tb=short, -m, integration]
+            uv --quiet run --frozen --group pre-commit
+            python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
+            uv --quiet run --frozen --group pre-commit
+            pytest -n="$WORKERS" "${cov[@]}" -q --tb=short --dist=loadgroup
+            -m integration || test "$?" = 5
