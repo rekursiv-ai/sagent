@@ -215,7 +215,7 @@ jobs:
             --validation-command 'uv run python -c "import sagent"' \
             --validation-command 'rm -rf dist' \
             --validation-command 'uv build --out-dir dist' \
-            --validation-command 'wheel="$(ls dist/sagent-*.whl | head -n 1)"; uv run --isolated --with "$wheel" python -P -c "import sagent; print(sagent.__file__)"' \
+            --validation-command 'wheels=(dist/sagent-*.whl); wheel="${wheels[0]}"; uv run --isolated --with "$wheel" python -P -c "import sagent; print(sagent.__file__)"' \
             --validation-command 'uv run python sagent/bin/check_wheel.py' \
             --open-pr false
 

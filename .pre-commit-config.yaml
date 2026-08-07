@@ -120,6 +120,30 @@ repos:
       - id: check-toml
         stages: [pre-commit]
 
+  # Type-checks `${{ }}` expressions, action inputs, runner labels, and shell in
+  # `run:` blocks. A workflow expression error fails the job in 0 seconds with no
+  # log, so nothing downstream catches it -- `check-yaml` above only proves the
+  # file parses. The upstream hook self-selects on `^\.github/workflows/`.
+  #
+  # `actionlint`, not `actionlint-docker`/`-system`: the golang hook is the only
+  # one that provisions itself. pre-commit bootstraps its own Go toolchain into
+  # the hook env, whereas `-docker` needs a daemon this host does not run and
+  # `-system` needs a manually installed binary -- both fail closed on a fresh
+  # checkout, which is how the tool went uninstalled while the docs cited it.
+  #
+  # SC2016 is suppressed, and only SC2016: the export/import workflows pass
+  # `--validation-command 'wheel="$wheel" ...'` deliberately single-quoted --
+  # those `$` belong to the inner shell that runs the command later, so the
+  # "expressions don't expand" advice inverts the intent. Every other shellcheck
+  # rule stays live; note shellcheck runs only where it is installed, so this
+  # hook is stricter on a CI runner than on a dev box without it.
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+        stages: [pre-commit]
+        args: [-ignore, "SC2016:"]
+
   # Validates uv.lock matches pyproject.toml (no network needed).
   # Run `uv lock` manually when changing dependencies.
   - repo: https://github.com/astral-sh/uv-pre-commit
