@@ -14,6 +14,7 @@ import time
 import pytest
 
 from sagent import sessions
+from sagent.lib.userdirs import data_dir
 from sagent.sessions import (
     SessionInfo,
     _peek_session,
@@ -453,13 +454,12 @@ def _setup_homes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path,
     ``~/.sagent``). Tests of the real-``~/.sagent`` branch set it explicitly.
     """
     claude = tmp_path / "claude"
-    sagent = tmp_path / "xdg" / "sagent"
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    sagent = data_dir("rekursiv-ai") / "sagent"
     monkeypatch.setattr(
         sessions, "_LEGACY_SAGENT_HOME", tmp_path / "nonexistent-sagent"
     )
     monkeypatch.setattr(sessions, "_LEGACY_CLAUDE_HOME", claude)
-    monkeypatch.setattr(sessions, "_SAGENT_HOME", sagent)
-    monkeypatch.setattr(sessions, "_PROJECTS_DIR", sagent / "projects")
     return claude, sagent
 
 
@@ -562,14 +562,12 @@ def test_migrate_real_sagent_home_rejects_descendant_destination(
     # legacy->child would walk the dst it just created and recurse. Must skip.
     legacy = tmp_path / "dot-sagent"
     (legacy / "projects").mkdir(parents=True)
+    # XDG data home INSIDE the legacy home is what makes dst a descendant.
+    monkeypatch.setenv("XDG_DATA_HOME", str(legacy / "xdg"))
     monkeypatch.setattr(sessions, "_LEGACY_SAGENT_HOME", legacy)
     monkeypatch.setattr(sessions, "_LEGACY_CLAUDE_HOME", tmp_path / "missing")
-    monkeypatch.setattr(sessions, "_SAGENT_HOME", legacy / "xdg" / "sagent")
-    monkeypatch.setattr(
-        sessions, "_PROJECTS_DIR", legacy / "xdg" / "sagent" / "projects"
-    )
     sessions.migrate_legacy_home()
-    assert not (legacy / "xdg" / "sagent" / "xdg").exists()
+    assert not (legacy / "xdg" / "rekursiv-ai" / "sagent" / "xdg").exists()
 
 
 def test_migrate_real_sagent_home_common_case(

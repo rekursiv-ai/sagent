@@ -467,7 +467,7 @@ def _kb_newline(event: KeyPressEvent) -> None:
 def _history_strings(buf: object) -> list[str]:
     """Return the sagent input history entries, oldest-first.
 
-    The walk reads ``.sagent_history`` (prompt-toolkit ``FileHistory``).
+    The walk reads the REPL history file (prompt-toolkit ``FileHistory``).
     Accessed via duck-typing so tests can supply ``MagicMock`` buffers
     without a real ``History``.
     """

@@ -546,7 +546,7 @@ def _parse_cli_args(
         "--history",
         default=None,
         metavar="PATH",
-        help="File for input history (default: ~/.sagent_history).",
+        help="File for input history (default: the per-user state directory).",
     )
     parser.add_argument(
         "--advisor",

@@ -15,6 +15,8 @@ import dataclasses
 import inspect
 import sys
 
+from prompt_toolkit.history import FileHistory
+
 import pytest
 
 from sagent import thinking
@@ -1111,6 +1113,74 @@ async def test_run_repl_unwinds_observers_and_before_tool_spawn(
     )
     assert runtime.before_tool_spawn is original_before_tool_spawn, (
         f"run_repl must restore before_tool_spawn; got {runtime.before_tool_spawn}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_repl_creates_history_parent_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing history parent must be created before ``FileHistory`` writes.
+
+    ``FileHistory.store_string`` opens the file with ``"ab"`` and does not
+    create parents, so a missing directory raises ``FileNotFoundError``
+    from ``Buffer.append_to_history`` -- which ``_kb_submit`` calls
+    BEFORE ``buf.reset()``. The message dispatches and the input pane
+    never clears.
+    """
+    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+
+    @dataclass(slots=True, kw_only=True)
+    class _Holder:
+        runtime: agent_runtime.AgentRuntime
+        show_thinking: bool = False
+        name: str = "test"
+        status: str | None = None
+        session_dir: object | None = None
+        background: dict[str, BackgroundTaskEntry] = field(default_factory=dict)
+
+        async def serve_forever(self) -> None:
+            return None
+
+        def shutdown(self, *, force: bool = False) -> None:
+            del force
+
+        def cancel_background(self, key: str) -> None:
+            del key
+
+    @contextlib.contextmanager
+    def _stub_patch_stdout(**_kwargs: object):
+        yield
+
+    def _stub_mock(*_args: object, **_kwargs: object) -> MagicMock:
+        return MagicMock()
+
+    def _stub_replay(_agent: object, _printer: object) -> None:
+        return None
+
+    fake_pump: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
+
+    def _stub_spawn(
+        _agent: object, _source: object, **_kwargs: object
+    ) -> asyncio.Task[None]:
+        return fake_pump
+
+    run_repl_mod = sys.modules["sagent.repl.run_repl"]
+    monkeypatch.setattr(run_repl_mod, "patch_stdout", _stub_patch_stdout)
+    monkeypatch.setattr(run_repl_mod, "Console", _stub_mock)
+    monkeypatch.setattr(run_repl_mod, "PromptSession", _stub_mock)
+    monkeypatch.setattr(run_repl_mod, "PromptToolkitInputSource", _stub_mock)
+    monkeypatch.setattr(run_repl_mod, "replay_messages", _stub_replay)
+    monkeypatch.setattr(run_repl_mod, "spawn_repl_pump", _stub_spawn)
+
+    history_path = tmp_path / "state" / "rekursiv-ai" / "sagent" / "repl-history"
+    await run_repl(cast(Agent, _Holder(runtime=runtime)), history=history_path)
+
+    # The real symptom: prompt-toolkit appending to history must not raise.
+    FileHistory(str(history_path)).append_string("hello")
+    assert history_path.exists(), (
+        f"run_repl must create the history parent; {history_path.parent} missing"
     )
 
 
