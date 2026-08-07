@@ -31,11 +31,10 @@ def data_dir(app: str, platform: str = sys.platform) -> Path:
 
     POSIX systems honor an explicit ``XDG_DATA_HOME``. Without one, macOS uses
     ``Application Support`` and Linux/BSD use ``~/.local/share``. Windows uses
-    ``LOCALAPPDATA``. The
-    Windows branch reads the env var rather than calling
-    ``SHGetKnownFolderPath``, so AppData redirected via group policy
-    is not detected -- acceptable for development tools, not for
-    shipped end-user software.
+    ``LOCALAPPDATA``. The Windows branch reads the env var rather than calling
+    ``SHGetKnownFolderPath``, so AppData redirected via group policy is not
+    detected -- acceptable for development tools, not for shipped end-user
+    software.
 
     Args:
       app: Application name. Used as the leaf directory.
