@@ -94,15 +94,15 @@ def parse_manual_auth_code(value: str, expected_state: str) -> str:
     """Extract an OAuth code from pasted manual-login input.
 
     Args:
-      value: Raw terminal paste. Accepts a code, ``code#state``, or a full
-        redirect URL containing ``code`` and ``state`` query parameters.
+      value: Raw terminal paste. Accepts ``code#state`` or a full redirect URL
+        containing ``code`` and ``state`` query parameters.
       expected_state: State originally sent in the authorization URL.
 
     Returns:
       code: Authorization code to exchange.
 
     Raises:
-      ValueError: If no code is present or a pasted state does not match.
+      ValueError: If no code is present, or state is missing or does not match.
 
     """
     text = value.strip()
@@ -367,8 +367,8 @@ def _path_lock_for(lock_path: Path) -> _PathLock:
 async def credential_file_lock(cred_path: Path) -> AsyncGenerator[None]:
     """Hold an exclusive cross-process lock around an OAuth refresh sequence.
 
-    Wraps an in-process ``asyncio.Lock`` around an ``fcntl.flock`` on a
-    sidecar ``<cred_path>.lock`` file. Refresh-token rotation makes
+    Polls a nonblocking ``fcntl.flock`` on a sidecar ``<cred_path>.lock``
+    file without occupying an executor thread. Refresh-token rotation makes
     concurrent refreshes destructive: the first POST consumes the
     shared refresh_token and the OAuth endpoint revokes it for the
     second POSTer, who then sees a 400/401 and surfaces a re-login
@@ -399,11 +399,14 @@ async def credential_file_lock(cred_path: Path) -> AsyncGenerator[None]:
     lock_path = cred_path.with_suffix(cred_path.suffix + ".lock")
     fd = _path_lock_for(lock_path).open_fd()
     try:
-        # Acquire inside the worker so cancellation cannot strand the lock:
-        # ``to_thread`` cannot stop a thread it dispatched, so a cancelled
-        # caller would leave the worker holding a lock nobody releases.
-        # Closing the descriptor releases it unconditionally.
-        await asyncio.to_thread(fcntl.flock, fd, fcntl.LOCK_EX)
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                # A blocking ``flock`` in ``to_thread`` survives coroutine
+                # cancellation and strands pytest's executor at shutdown.
+                await asyncio.sleep(0.01)
         yield
     finally:
         os.close(fd)

@@ -9,6 +9,7 @@ import base64
 import contextlib
 import fcntl
 import hashlib
+import inspect
 import os
 import urllib.error
 import urllib.request
@@ -102,6 +103,12 @@ def test_parse_manual_auth_code_raw_code_with_state() -> None:
 def test_parse_manual_auth_code_raw_code_no_state_raises() -> None:
     with pytest.raises(ValueError, match="State missing"):
         parse_manual_auth_code("abc", "ignored")
+
+
+def test_parse_manual_auth_code_documents_accepted_manual_inputs() -> None:
+    doc = inspect.getdoc(parse_manual_auth_code)
+    assert doc is not None
+    assert "Accepts ``code#state`` or a full" in doc
 
 
 def test_auth_code_listener_start_twice_raises() -> None:
