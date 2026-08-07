@@ -10,14 +10,12 @@ from __future__ import annotations
 
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
 
-from sagent.lib.userdirs import data_dir
 from sagent.tools.paper_common import (
     format_author_block,
     format_author_line,
     format_block,
     format_record,
     normalize_id_arg,
-    papers_cache_dir,
     parse_optional_ids,
     resolve_id_args,
     short_id,
@@ -46,7 +44,7 @@ def test_normalize_id_arg_error_is_tool_result() -> None:
 
 
 # ---------------------------------------------------------------------------
-# short_id / papers_cache_dir
+# short_id
 # ---------------------------------------------------------------------------
 
 
@@ -59,10 +57,6 @@ def test_short_id_truncates_long() -> None:
     result = short_id(s)
     assert result.startswith("…")
     assert len(result) == 39
-
-
-def test_papers_cache_dir_under_data_dir() -> None:
-    assert papers_cache_dir() == data_dir("sagent") / "papers"
 
 
 # ---------------------------------------------------------------------------

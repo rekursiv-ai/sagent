@@ -26,7 +26,7 @@ import time
 from sagent.lib.userdirs import data_dir
 
 
-_DEFAULT_PATH = data_dir("sagent") / "debug.log"
+_DEFAULT_PATH = data_dir("rekursiv-ai") / "sagent" / "debug.log"
 _MAX_PREVIEW = 200  # config-globals: ignore -- display preview cap
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 

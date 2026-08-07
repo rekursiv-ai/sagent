@@ -24,10 +24,10 @@ from wesearch.paper.ids import id_slug, s2_wire_id
 
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import JSON, json_freeze
+from sagent.lib.userdirs import cache_dir as userdirs_cache_dir
 from sagent.tools.core import load_tool_description
 from sagent.tools.paper_common import (
     normalize_id_arg,
-    papers_cache_dir,
     resolve_id_args,
     summary_ids,
 )
@@ -83,7 +83,9 @@ class PaperFetch:
     )
 
     def __init__(self, *, cache_dir: Path | None = None) -> None:
-        self._cache_dir = cache_dir or papers_cache_dir()
+        self._cache_dir = (
+            cache_dir or userdirs_cache_dir("rekursiv-ai") / "wesearch" / "papers"
+        )
 
     def summary(self, args: Mapping[str, object]) -> str:
         """Return a short display label for this invocation."""
