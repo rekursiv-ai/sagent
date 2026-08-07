@@ -37,6 +37,7 @@ from rich.console import Console
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.session_io import unpersisted_session_error
 from sagent.agent.state import agent_registry
+from sagent.lib.userdirs import state_dir
 from sagent.providers import (
     infer_provider,
     supported_provider_options,
@@ -69,8 +70,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_HISTORY = Path.home() / ".sagent_history"
-
 
 async def run_repl(
     agent: Agent,
@@ -81,10 +80,16 @@ async def run_repl(
 
     Args:
       agent: The agent to drive.
-      history: Path to the input-history file. ``None`` -> ``~/.sagent_history``.
+      history: Path to the input-history file. ``None`` -> the per-user
+        state directory.
 
     """
-    history_path = history or _DEFAULT_HISTORY
+    history_path = history or state_dir("rekursiv-ai") / "sagent" / "repl-history"
+    # ``FileHistory.store_string`` opens with ``"ab"`` and never creates
+    # parents. ``Buffer.append_to_history`` runs BEFORE ``buf.reset()`` in
+    # ``_kb_submit``, so a missing directory makes Enter dispatch the
+    # message and then raise -- leaving the typed text in the input pane.
+    history_path.parent.mkdir(parents=True, exist_ok=True)
     style = PTStyle.from_dict(
         {
             "bottom-toolbar": "fg:ansibrightblack noreverse bg:default",
