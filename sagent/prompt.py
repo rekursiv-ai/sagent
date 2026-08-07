@@ -101,9 +101,7 @@ def _load_env_template() -> str:
 
 
 def _shell_name(shell_path: str) -> str:
-    """Extract 'bash'/'zsh' from $SHELL, else return as-is."""
-    if "zsh" in shell_path:
-        return "zsh"
+    """Extract 'bash' from $SHELL, else return as-is."""
     if "bash" in shell_path:
         return "bash"
     return shell_path
