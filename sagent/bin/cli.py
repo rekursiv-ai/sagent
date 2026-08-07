@@ -1137,7 +1137,11 @@ def _install_repl_logging(
         return
     log_file = os.environ.get("SAGENT_LOG_FILE")
     if log_file is None:
-        base = Path(session_dir) if session_dir is not None else data_dir("sagent")
+        base = (
+            Path(session_dir)
+            if session_dir is not None
+            else data_dir("rekursiv-ai") / "sagent"
+        )
         log_path = base / "repl.log"
     else:
         log_path = Path(log_file)

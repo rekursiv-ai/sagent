@@ -77,7 +77,7 @@ class AgentsMdConfig:
     system_dir: Path = field(default_factory=_default_system_dir)
     """System-wide config root (``/etc/sagent`` or platform equivalent)."""
 
-    user_dir: Path = field(default_factory=lambda: data_dir("sagent"))
+    user_dir: Path = field(default_factory=lambda: data_dir("rekursiv-ai") / "sagent")
     """User config root (``~/.sagent``)."""
 
     additional_dirs: list[Path] = field(default_factory=list)

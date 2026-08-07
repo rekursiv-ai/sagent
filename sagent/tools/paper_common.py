@@ -20,7 +20,6 @@ keep a single import site.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import json
@@ -37,7 +36,6 @@ from wesearch.paper.ids import (
     normalize_id,
 )
 
-from sagent.lib.userdirs import data_dir
 from sagent.types.runtime import ToolResult
 
 
@@ -51,7 +49,6 @@ __all__ = [
     "format_author_line",
     "format_block",
     "format_record",
-    "papers_cache_dir",
     "parse_optional_ids",
     "resolve_id_args",
     "short_id",
@@ -61,11 +58,6 @@ __all__ = [
     "validate_limit",
     "validate_year_range",
 ]
-
-
-def papers_cache_dir() -> Path:
-    """Return the default on-disk cache directory for downloaded PDFs."""
-    return data_dir("sagent") / "papers"
 
 
 def error_result(e: PaperError) -> ToolResult:

@@ -60,7 +60,7 @@ class SkillInfo:
     """Absolute path to the source ``SKILL.md``."""
 
 
-_USER_SKILL_ROOTS: tuple[Path, ...] = (data_dir("sagent") / "skills",)
+_USER_SKILL_ROOTS: tuple[Path, ...] = (data_dir("rekursiv-ai") / "sagent" / "skills",)
 _IMPORT_SKILL_SUBDIRS: Final = {
     "agents": ".agents/skills",
 }

@@ -31,7 +31,7 @@ def test_log_path_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SAGENT_DEBUG_LOG", raising=False)
     p = log_path()
     assert p.name == "debug.log"
-    assert p.parent == data_dir("sagent")
+    assert p.parent == data_dir("rekursiv-ai") / "sagent"
 
 
 def test_log_path_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

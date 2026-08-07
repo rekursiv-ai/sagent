@@ -82,7 +82,7 @@ def _read_key(provider_name: str) -> str | None:
     for e in env_names[provider_name]:
         if os.environ.get(e):
             return os.environ[e]
-    kf = config_dir("sagent") / key_files[provider_name]
+    kf = config_dir("rekursiv-ai") / "sagent" / key_files[provider_name]
     return kf.read_text().strip() if kf.exists() else None
 
 

@@ -30,7 +30,7 @@ from sagent.lib.userdirs import data_dir
 
 logger = logging.getLogger(__name__)
 
-_PATH = data_dir("sagent") / "last-models.json"
+_PATH = data_dir("rekursiv-ai") / "sagent" / "last-models.json"
 
 
 def load() -> dict[str, str]:

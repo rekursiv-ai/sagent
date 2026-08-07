@@ -43,7 +43,7 @@ from sagent.lib.userdirs import data_dir
 
 logger = logging.getLogger(__name__)
 
-_SAGENT_HOME = data_dir("sagent")
+_SAGENT_HOME = data_dir("rekursiv-ai") / "sagent"
 _PROJECTS_DIR = _SAGENT_HOME / "projects"
 # Pre-convention, sagent's home was the hardcoded ``~/.sagent`` (before it
 # followed OS data-dir conventions). For most users that was a real directory.
