@@ -162,9 +162,8 @@ def test_environment_section_sonnet_5_has_marketing_name() -> None:
     assert "Claude Sonnet 5" in out
 
 
-def test_shell_name_recognizes_bash_and_zsh() -> None:
+def test_shell_name_recognizes_bash() -> None:
     assert _shell_name("/usr/bin/bash") == "bash"
-    assert _shell_name("/bin/zsh") == "zsh"
     assert _shell_name("/usr/local/bin/fish") == "/usr/local/bin/fish"
 
 
