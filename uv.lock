@@ -3162,7 +3162,7 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'selfhosted'", specifier = ">=5.8.0" },
     { name = "uvicorn", specifier = ">=0.30.0" },
     { name = "webp", specifier = ">=0.4.0" },
-    { name = "wesearch", extras = ["extract"], specifier = ">=0.1.8" },
+    { name = "wesearch", extras = ["extract"], git = "https://github.com/rekursiv-ai/wesearch?branch=main" },
     { name = "wrapt" },
 ]
 provides-extras = ["slack", "selfhosted"]
@@ -3894,7 +3894,7 @@ wheels = [
 [[package]]
 name = "wesearch"
 version = "0.1.8"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#1bf8dd69698294bb5d173a53ec4714298ec4746a" }
 dependencies = [
     { name = "beautifulsoup4", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "brotli", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -3902,10 +3902,6 @@ dependencies = [
     { name = "wrapt", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "zendriver", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "zstandard", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/50/95/cbd4f1a4ed44b830a18a90eb36dcfdcad47fd9c9f64dc8e5b14af361e041/wesearch-0.1.8.tar.gz", hash = "sha256:f8ae8b3e3cb191e215b67c4b69dab6418b5d0754482d8f852571299456c6b126", size = 345636, upload-time = "2026-08-05T03:06:15.139Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/9d/96/397504a325c54ee392872c799458b5663372269bb0b3aa00973d92fa83d2/wesearch-0.1.8-py3-none-any.whl", hash = "sha256:00a3c18c0ea1627a1d8893ba619e6132ef93c83ec7a6780e2ffa0beb9b05648a", size = 185962, upload-time = "2026-08-05T03:06:13.373Z" },
 ]
 
 [package.optional-dependencies]

@@ -79,9 +79,9 @@ class WebSearch:
                     "type": "string",
                     "enum": get_args(Transport),
                     "description": (
-                        "Retrieval path. 'auto' uses Zendriver for google.com and "
-                        "curl-then-Zendriver elsewhere. Set an explicit transport "
-                        "to stress a path."
+                        "Retrieval path. 'auto' tries curl and escalates to "
+                        "Zendriver when a site bot-blocks it. Set an explicit "
+                        "transport to stress a path."
                     ),
                 },
                 "categories": {

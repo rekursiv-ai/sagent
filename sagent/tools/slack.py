@@ -26,7 +26,7 @@ import json
 import logging
 
 from wesearch.errors import FetchError
-from wesearch.fetch import RequestParams, fetch
+from wesearch.fetch import Content, RequestParams, Retry, fetch
 
 from sagent.lib.custom_json import JSON, MutableJSON, int_val, json_freeze
 from sagent.tools.core import load_tool_description
@@ -35,8 +35,6 @@ from sagent.types.runtime import ToolResult
 
 logger = logging.getLogger(__name__)
 
-_API_BASE: Final = "https://slack.com/api"
-_DEFAULT_TIMEOUT = 30.0  # config-globals: ignore -- request timeout dial, retunable
 
 _OPERATIONS: Final = (
     "send",
@@ -53,6 +51,8 @@ async def _slack_call(
     params: Mapping[str, str | int],
     token: str,
     post: bool = False,
+    *,
+    timeout_sec: float = 30.0,
 ) -> MutableJSON | ToolResult:
     """Call a Slack Web API method and parse the JSON response.
 
@@ -65,12 +65,13 @@ async def _slack_call(
       params: Request parameters (body for POST, query for GET).
       token: Bot user token (``xoxb-...``).
       post: When True, send as ``POST`` with JSON body.
+      timeout_sec: Per-request HTTP timeout.
 
     Returns:
       body: Parsed JSON body on success, or a ``ToolResult`` error.
 
     """
-    url = f"{_API_BASE}/{method}"
+    url = f"https://slack.com/api/{method}"
     headers: dict[str, str] = {"Authorization": f"Bearer {token}"}
     try:
         if post:
@@ -79,10 +80,8 @@ async def _slack_call(
                 fetch,
                 url=url,
                 request=RequestParams(
-                    method="POST",
-                    json=dict(params),
-                    headers=headers,
-                    timeout_sec=_DEFAULT_TIMEOUT,
+                    content=Content(method="POST", json=dict(params), headers=headers),
+                    retry=Retry(timeout_sec=timeout_sec),
                 ),
             )
         else:
@@ -90,9 +89,8 @@ async def _slack_call(
                 fetch,
                 url=url,
                 request=RequestParams(
-                    params=dict(params),
-                    headers=headers,
-                    timeout_sec=_DEFAULT_TIMEOUT,
+                    content=Content(params=dict(params), headers=headers),
+                    retry=Retry(timeout_sec=timeout_sec),
                 ),
             )
     except FetchError as e:
