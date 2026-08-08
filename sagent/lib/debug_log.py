@@ -26,7 +26,6 @@ import time
 from sagent.lib.userdirs import data_dir
 
 
-_DEFAULT_PATH = data_dir("rekursiv-ai") / "sagent" / "debug.log"
 _MAX_PREVIEW = 200  # config-globals: ignore -- display preview cap
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
@@ -39,7 +38,9 @@ def log_path() -> Path:
 
     """
     override = os.environ.get("SAGENT_DEBUG_LOG")
-    return Path(override) if override else _DEFAULT_PATH
+    return (
+        Path(override) if override else data_dir("rekursiv-ai") / "sagent" / "debug.log"
+    )
 
 
 def trace(event: str, **data: object) -> None:
