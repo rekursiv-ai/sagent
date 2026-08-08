@@ -651,7 +651,17 @@ async def test_send_with_retry_no_on_text_still_streams() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_with_retry_retries_on_retryable_error() -> None:
+async def test_send_with_retry_retries_on_retryable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Retry backoff is real time (``RETRY_BASE_SEC`` doubling); this test
+    # asserts the retry OUTCOME, not the wait. Faked per-test, matching the
+    # sibling tests -- never globally, which leaks across the worker.
+    async def _no_wait(delay_sec: float) -> None:
+        del delay_sec
+
+    monkeypatch.setattr(asyncio, "sleep", _no_wait)
+
     err = _HTTPError(_FakeResponse(503))
     model = _ScriptedModel(stream_responses=[err, _resp("recovered")])
     notes: list[str] = []
@@ -699,7 +709,17 @@ async def test_send_with_retry_context_overflow_propagates() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_with_retry_retries_exhausted() -> None:
+async def test_send_with_retry_retries_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Retry backoff is real time (``RETRY_BASE_SEC`` doubling); this test
+    # asserts the retry OUTCOME, not the wait. Faked per-test, matching the
+    # sibling tests -- never globally, which leaks across the worker.
+    async def _no_wait(delay_sec: float) -> None:
+        del delay_sec
+
+    monkeypatch.setattr(asyncio, "sleep", _no_wait)
+
     err = _HTTPError(_FakeResponse(503))
     model = _ScriptedModel(stream_responses=[err, err, err])
     with pytest.raises(RetriesExhaustedError):
@@ -928,11 +948,21 @@ async def test_send_with_retry_interactive_halts_on_long_server_delay(
 
 
 @pytest.mark.asyncio
-async def test_send_with_retry_in_band_warning_retries_to_success() -> None:
+async def test_send_with_retry_in_band_warning_retries_to_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # Issue#316 bug #3: an in-band rate_limit_error on a 200 stream whose
     # representative window is ``allowed_warning`` (a heads-up, not a block)
     # must NOT halt -- it is a transient retryable, so the next attempt
     # succeeds. Before the gate fix this raised RateLimitError (24h halt).
+    # Retry backoff is real time (``RETRY_BASE_SEC`` doubling); this test
+    # asserts the retry OUTCOME, not the wait. Faked per-test, matching the
+    # sibling tests -- never globally, which leaks across the worker.
+    async def _no_wait(delay_sec: float) -> None:
+        del delay_sec
+
+    monkeypatch.setattr(asyncio, "sleep", _no_wait)
+
     err = _HTTPError(
         _FakeResponse(
             200,
@@ -997,8 +1027,19 @@ class _PersistentModel(_ScriptedModel):
 
 
 @pytest.mark.asyncio
-async def test_send_with_retry_persistent_loops_on_429() -> None:
+async def test_send_with_retry_persistent_loops_on_429(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """In persistent mode, 429s loop until success."""
+
+    # Retry backoff is real time (``RETRY_BASE_SEC`` doubling); this test
+    # asserts the retry OUTCOME, not the wait. Faked per-test, matching the
+    # sibling tests -- never globally, which leaks across the worker.
+    async def _no_wait(delay_sec: float) -> None:
+        del delay_sec
+
+    monkeypatch.setattr(asyncio, "sleep", _no_wait)
+
     err = _HTTPError(_FakeResponse(429))
     model = _PersistentModel(
         stream_responses=[err, _resp("ok")],
@@ -1645,8 +1686,19 @@ async def test_send_with_retry_silent_on_short_transient_retry(
 
 
 @pytest.mark.asyncio
-async def test_publish_recoverable_includes_diagnostics_on_retry() -> None:
+async def test_publish_recoverable_includes_diagnostics_on_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """``publish_recoverable`` payloads append ``[status=... body=...]`` for HTTP errors."""
+
+    # Retry backoff is real time (``RETRY_BASE_SEC`` doubling); this test
+    # asserts the retry OUTCOME, not the wait. Faked per-test, matching the
+    # sibling tests -- never globally, which leaks across the worker.
+    async def _no_wait(delay_sec: float) -> None:
+        del delay_sec
+
+    monkeypatch.setattr(asyncio, "sleep", _no_wait)
+
     err = _HTTPError(_FakeResponse(503, text="upstream gone"))
     model = _ScriptedModel(stream_responses=[err, _resp("ok")])
     notes: list[str] = []

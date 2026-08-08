@@ -25,12 +25,6 @@ os.environ.setdefault("PYTHONSAFEPATH", "1")
 __all__ = ["isolate_user_dirs"]
 
 
-@pytest.fixture(params=["asyncio"])
-def anyio_backend(request: pytest.FixtureRequest) -> str:
-    """Explicitly set the anyio backend to asyncio."""
-    return str(request.param)
-
-
 def pytest_configure(config: pytest.Config) -> None:
     """Register custom markers.
 
