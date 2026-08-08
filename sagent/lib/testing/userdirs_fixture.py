@@ -116,6 +116,12 @@ def isolate_user_dirs(
     node = cast(pytest.Item, request.node)
     if node.get_closest_marker("real_user_dirs") is not None:
         return None
+    # Its OWN directory, deliberately NOT a subdirectory of ``tmp_path``.
+    # Placing it under ``tmp_path`` costs one fewer allocation but is wrong: a
+    # large family of tests asserts on the CONTENTS of ``tmp_path`` to prove an
+    # atomic write left no temp file behind, and a ``userdirs`` entry appearing
+    # there fails 15 of them (``temp file leaked: ['userdirs']``). The XDG root
+    # must be invisible to the directory under test.
     root = tmp_path_factory.mktemp("userdirs")
     for variable, leaf in (
         ("XDG_CONFIG_HOME", "config"),
