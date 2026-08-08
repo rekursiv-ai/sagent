@@ -33,8 +33,6 @@ from sagent.types.runtime import ToolResult
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_TIMEOUT_SEC = 10.0  # config-globals: ignore -- playback timeout dial
-
 
 class PlayAudio:
     """Tool: play a WAV file on the host's audio output."""
@@ -163,7 +161,9 @@ def _play_windows(path: Path) -> str | None:
     return None
 
 
-def _play_via_cmd(path: Path, *candidates: list[str]) -> str | None:
+def _play_via_cmd(
+    path: Path, *candidates: list[str], timeout_sec: float = 10.0
+) -> str | None:
     """Try each ``[exe, *flags]`` candidate; run the first one on PATH.
 
     Returns None on success, a reason string otherwise. A missing
@@ -181,7 +181,7 @@ def _play_via_cmd(path: Path, *candidates: list[str]) -> str | None:
                 [exe, *argv[1:], str(path)],
                 capture_output=True,
                 text=True,
-                timeout=_DEFAULT_TIMEOUT_SEC,
+                timeout=timeout_sec,
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as e:

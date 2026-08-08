@@ -9,7 +9,7 @@ import asyncio
 import socket
 
 from wesearch.errors import CloudflareChallengeError, FetchError
-from wesearch.fetch import public_host
+from wesearch.fetch import Policy
 from wesearch.web import WebFetchResult
 
 import pytest
@@ -68,13 +68,19 @@ def test_prompt_empty() -> None:
     assert WebFetch().prompt() == ""
 
 
-def test_run_passes_validated_host_resolver_to_fetch_web() -> None:
-    """``run`` applies SSRF by threading ``public_host`` into ``fetch_web``."""
+def test_run_leaves_the_agent_url_untrusted() -> None:
+    """``run`` states a transport and nothing else; SSRF safety is the default.
+
+    The tool used to pass an SSRF resolver explicitly, which is what cost it
+    every browser transport -- the library rejected that resolver on the browser
+    legs. Holding no policy beyond the transport is the point: this wrapper is
+    thin, and the safe behavior is wesearch's default.
+    """
     captured: dict[str, object] = {}
 
     def fake_fetch_web(url: str, **kwargs: object) -> WebFetchResult:
         del url
-        captured["validated_hosts"] = kwargs.get("validated_hosts")
+        captured["policy"] = kwargs.get("policy")
         return _result("{}")
 
     with patch(
@@ -83,7 +89,9 @@ def test_run_passes_validated_host_resolver_to_fetch_web() -> None:
     ):
         result = asyncio.run(WebFetch().run({"url": "https://example.com"}))
     assert not result.is_error
-    assert captured["validated_hosts"] is public_host
+    policy = captured["policy"]
+    assert isinstance(policy, Policy)
+    assert policy.trust == "untrusted"
 
 
 def test_run_appends_truncation_notice_when_body_exceeds_limit() -> None:
@@ -202,7 +210,8 @@ def test_run_explicit_transport_passes_through() -> None:
 
     def fake_fetch_web(url: str, **kwargs: object) -> WebFetchResult:
         del url
-        captured["transport"] = kwargs.get("transport")
+        policy = kwargs.get("policy")
+        captured["transport"] = getattr(policy, "transport", None)
         return _result("{}")
 
     with patch(

@@ -122,7 +122,11 @@ When `Bash` is constructed with peer tools, it can warn the model when a dedicat
 
 Use `allowed_domains` and `blocked_domains` to scope results.
 
-`WebFetch` fetches HTTP(S) URLs, extracts main content, caches results for 15 minutes, rewrites known Reddit URLs to fetchable forms, and rejects URLs resolving to loopback, private, link-local, multicast, reserved, or unspecified addresses. Redirect targets are checked too.
+`WebFetch` fetches HTTP(S) URLs, extracts main content, and caches results for
+15 minutes. Retrieval itself -- site-specific rewrites, the bot-wall fallback
+ladder, and transport selection -- belongs to `wesearch`, which treats an
+agent-supplied URL as untrusted: every host, including each redirect target,
+must resolve to a public address or the fetch is refused.
 
 ## Paper tools
 

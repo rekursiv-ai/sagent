@@ -546,13 +546,11 @@ environments = ["sys_platform == 'linux'", "sys_platform == 'darwin'"]
 [tool.uv.pip]
 compile-bytecode = true
 
-# No wesearch git source override here: this is the PUBLIC pyproject, and its
-# committed uv.lock ships to the public repo where CI validates against it. A git
-# override pins wesearch to a branch SHA that can predate a released fix (e.g. the
-# 0.1.0 SHA that lacked py.typed, causing ~670 basedpyright warnings), so the
-# public export must resolve wesearch from the PyPI release named in
-# project.dependencies. Any dev-time git override belongs in the monorepo
-# checkout, not in the exported public package.
+[tool.uv.sources]
+# Github installs track wesearch main; PyPI installs use the floor above.
+# Advance the lock with `uv lock --upgrade-package wesearch` -- plain `uv lock`
+# leaves a branch source on its pinned SHA.
+wesearch = { git = "https://github.com/rekursiv-ai/wesearch", branch = "main" }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

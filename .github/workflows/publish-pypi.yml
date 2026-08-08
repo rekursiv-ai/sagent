@@ -33,6 +33,16 @@ jobs:
           uv run python -c "import sagent; print(sagent.__file__)"
           uv run python sagent/bin/check_wheel.py
 
+      # sagent tracks wesearch's main branch via [tool.uv.sources], so nothing
+      # before this point proves the published dependency floor is sufficient.
+      # Resolve the wheel against PyPI alone -- a symbol that exists only on
+      # wesearch main fails HERE, before an irreversible upload, instead of in a
+      # user's `pip install`.
+      - name: Validate against published dependencies
+        run: |
+          wheels=(dist/sagent-*.whl)
+          uv run --isolated --with "${wheels[0]}" python -P -c "import sagent"
+
       - name: Publish package
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:

@@ -27,20 +27,19 @@ import json
 import os
 
 from wesearch.errors import FetchError
-from wesearch.fetch import RequestParams, fetch
+from wesearch.fetch import Content, RequestParams, Retry, fetch
 
 from sagent.lib.custom_json import JSON, MutableJSON, int_val, json_freeze
 from sagent.tools.core import load_tool_description
 from sagent.types.runtime import ToolResult
 
 
-_DEFAULT_TIMEOUT = 30.0  # config-globals: ignore -- request timeout dial
-
-
 async def _gql(
     query: str,
     variables: MutableJSON,
     api_key: str,
+    *,
+    timeout_sec: float = 30.0,
 ) -> MutableJSON | ToolResult:
     """Execute a GraphQL request against Linear's API.
 
@@ -48,6 +47,7 @@ async def _gql(
       query: GraphQL query / mutation text.
       variables: Variable bindings for the query.
       api_key: Linear personal API key (``lin_api_...``).
+      timeout_sec: Per-request HTTP timeout.
 
     Returns:
       data: Parsed ``data`` block on success, or a ``ToolResult`` error.
@@ -62,10 +62,12 @@ async def _gql(
             fetch,
             url="https://api.linear.app/graphql",
             request=RequestParams(
-                method="POST",
-                json={"query": query, "variables": variables},
-                headers=headers,
-                timeout_sec=_DEFAULT_TIMEOUT,
+                content=Content(
+                    method="POST",
+                    json={"query": query, "variables": variables},
+                    headers=headers,
+                ),
+                retry=Retry(timeout_sec=timeout_sec),
             ),
         )
     except FetchError as e:

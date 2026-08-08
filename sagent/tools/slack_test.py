@@ -80,7 +80,7 @@ def test_send_success() -> None:
     assert "Sent." in result.content
     # Verify the POST mode + payload include username/icon_url/thread.
     _, kwargs = mock_fetch.call_args
-    payload_json = kwargs["request"].json
+    payload_json = kwargs["request"].content.json
     assert payload_json["channel"] == "C1"
     assert payload_json["text"] == "hi"
     assert payload_json["thread_ts"] == "thr1"

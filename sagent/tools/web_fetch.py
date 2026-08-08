@@ -8,10 +8,7 @@ from typing import Any, Final, Literal, cast, get_args
 import asyncio
 
 from wesearch.errors import BotDetectionError, FetchError
-from wesearch.fetch import (
-    Transport,
-    public_host,
-)
+from wesearch.fetch import Policy, Transport
 from wesearch.web import fetch_web
 
 import cachetools
@@ -54,9 +51,9 @@ class WebFetch:
                     "type": "string",
                     "enum": get_args(Transport),
                     "description": (
-                        "Retrieval path. 'auto' uses Zendriver for google.com and "
-                        "curl-then-Zendriver elsewhere. Set an explicit transport "
-                        "to stress a path."
+                        "Retrieval path. 'auto' tries curl and escalates to "
+                        "Zendriver when a site bot-blocks it. Set an explicit "
+                        "transport to stress a path."
                     ),
                 },
                 "json": {
@@ -217,8 +214,7 @@ class WebFetch:
                 method=method,
                 json_body=json_body,
                 form_body=form_body,
-                transport=transport,
-                validated_hosts=public_host,
+                policy=Policy(transport=transport),
             )
         except BotDetectionError as e:
             # fetch() classified the block at the boundary: surface the SPECIFIC
