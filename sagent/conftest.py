@@ -13,7 +13,10 @@ from sagent.agent.state import (
     agent_registry,
     fresh_default_tool_state,
 )
-from sagent.lib.testing.userdirs_fixture import isolate_user_dirs
+from sagent.lib.testing.userdirs_fixture import (
+    isolate_user_dirs,
+    pytest_configure as _register_real_user_dirs_marker,
+)
 from sagent.tools.agent_spawn import _persistent_tasks
 
 
@@ -37,6 +40,7 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "real_llm: spawns a real model CLI/binary; runs in a low-parallelism gate",
     )
+    _register_real_user_dirs_marker(config)
 
 
 @pytest.fixture(autouse=True)
