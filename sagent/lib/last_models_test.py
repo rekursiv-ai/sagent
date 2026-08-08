@@ -2,20 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import json
 import threading
 
 import pytest
 
 from sagent.lib import last_models
-
-
-@pytest.fixture(autouse=True)
-def redirect_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Redirect ``last_models._PATH`` into ``tmp_path`` for hermetic tests."""
-    monkeypatch.setattr(last_models, "_PATH", tmp_path / "last-models.json")
+from sagent.lib.userdirs import data_dir
 
 
 def test_record_then_get_roundtrip() -> None:
@@ -48,12 +41,8 @@ def test_record_concurrent_writes_preserve_all_keys() -> None:
     assert not missing, f"lost records under concurrent writes: {missing}"
 
 
-def test_record_skips_when_value_unchanged(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "last-models.json"
-    monkeypatch.setattr(last_models, "_PATH", path)
+def test_record_skips_when_value_unchanged() -> None:
+    path = data_dir("rekursiv-ai") / "sagent" / "last-models.json"
     last_models.record("Prov", "m1")
     mtime_before = path.stat().st_mtime_ns
     last_models.record("Prov", "m1")
@@ -61,9 +50,9 @@ def test_record_skips_when_value_unchanged(
 
 
 def test_load_ignores_non_string_entries() -> None:
-    last_models._PATH.write_text(
-        json.dumps({"ok": "v", "bad_int": 1, "bad_list": ["x"]})
-    )
+    path = data_dir("rekursiv-ai") / "sagent" / "last-models.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"ok": "v", "bad_int": 1, "bad_list": ["x"]}))
     loaded = last_models.load()
     assert loaded == {"ok": "v"}
 
@@ -79,14 +68,11 @@ def test_record_empty_model_id_raises() -> None:
 
 
 def test_record_swallows_locked_down_sagent_dir(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """``record`` is best-effort: a non-writable ``~/.sagent`` must not crash."""
-    ro_root = tmp_path / "ro_home"
-    ro_root.mkdir()
-    monkeypatch.setattr(last_models, "_PATH", ro_root / ".sagent" / "last-models.json")
+    ro_root = data_dir("rekursiv-ai") / "sagent"
+    ro_root.mkdir(parents=True, exist_ok=True)
     ro_root.chmod(0o500)
     try:
         last_models.record("Prov", "m1")

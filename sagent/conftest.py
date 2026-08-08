@@ -15,12 +15,16 @@ from sagent.agent.state import (
     agent_registry,
     fresh_default_tool_state,
 )
+from sagent.lib.testing.userdirs_fixture import isolate_user_dirs
 from sagent.tools.agent_spawn import _persistent_tasks
 
 
 # In the OSS export the flattened top-level ``sagent/types`` masks stdlib
 # ``types``, crashing xdist workers.
 os.environ.setdefault("PYTHONSAFEPATH", "1")
+
+
+__all__ = ["isolate_user_dirs"]
 
 
 @pytest.fixture(params=["asyncio"])

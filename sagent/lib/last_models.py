@@ -30,8 +30,6 @@ from sagent.lib.userdirs import data_dir
 
 logger = logging.getLogger(__name__)
 
-_PATH = data_dir("rekursiv-ai") / "sagent" / "last-models.json"
-
 
 def load() -> dict[str, str]:
     """Return the persisted ``provider → model_id`` map.
@@ -42,13 +40,18 @@ def load() -> dict[str, str]:
 
     """
     try:
-        raw = _PATH.read_text(encoding="utf-8")
+        raw = (data_dir("rekursiv-ai") / "sagent" / "last-models.json").read_text(
+            encoding="utf-8"
+        )
     except (FileNotFoundError, OSError):
         return {}
     try:
         data: object = json.loads(raw)
     except json.JSONDecodeError:
-        logger.warning("Corrupt %s; treating as empty.", _PATH)
+        logger.warning(
+            "Corrupt %s; treating as empty.",
+            data_dir("rekursiv-ai") / "sagent" / "last-models.json",
+        )
         return {}
     if not isinstance(data, dict):
         return {}
@@ -95,8 +98,14 @@ def record(provider: str, model_id: str) -> None:
             f"got provider={provider!r}, model_id={model_id!r}."
         )
     try:
-        _PATH.parent.mkdir(parents=True, exist_ok=True)
-        lock_path = _PATH.with_suffix(_PATH.suffix + ".lock")
+        (data_dir("rekursiv-ai") / "sagent" / "last-models.json").parent.mkdir(
+            parents=True, exist_ok=True
+        )
+        lock_path = (
+            data_dir("rekursiv-ai") / "sagent" / "last-models.json"
+        ).with_suffix(
+            (data_dir("rekursiv-ai") / "sagent" / "last-models.json").suffix + ".lock"
+        )
         fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
@@ -104,8 +113,15 @@ def record(provider: str, model_id: str) -> None:
             if current.get(provider) == model_id:
                 return
             current[provider] = model_id
-            atomic_write_bytes(_PATH, json.dumps(current, indent=2).encode("utf-8"))
+            atomic_write_bytes(
+                data_dir("rekursiv-ai") / "sagent" / "last-models.json",
+                json.dumps(current, indent=2).encode("utf-8"),
+            )
         finally:
             os.close(fd)
     except OSError:
-        logger.warning("Could not persist last-models to %s", _PATH, exc_info=True)
+        logger.warning(
+            "Could not persist last-models to %s",
+            data_dir("rekursiv-ai") / "sagent" / "last-models.json",
+            exc_info=True,
+        )
