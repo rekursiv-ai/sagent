@@ -201,6 +201,10 @@ class WebFetch:
         if cache_key is not None:
             cached = self._cache.get(cache_key)
             if cached is not None:
+                # This TTL also hides a local edit to wesearch.web: the
+                # tool replays pre-change text, so a working extraction fix
+                # reads as a failed one. Verify such a change via fetch_web in
+                # a fresh process, not by re-running this tool.
                 return ToolResult(call_id="", content=cached)
 
         try:
