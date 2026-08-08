@@ -50,10 +50,9 @@ def _drive(contend: Callable[[], Awaitable[None]], runs: int = 3) -> list[str]:
     defect never appears. Successive loops are also the real shape --
     every ``asyncio.run`` is a fresh loop.
 
-    Callers must carry ``@pytest.mark.real_sleep``: this suite patches
-    ``asyncio.sleep`` to a no-op (``conftest.py:65``), and without a real
-    suspension the two holders never overlap, so the lock is never
-    contended and the harness proves nothing.
+    The sleep duration is load-bearing: without a real suspension the two
+    holders never overlap, so the lock is never contended and the harness
+    proves nothing. Do not replace it with a bare yield.
 
     Args:
       contend: Builds the coroutine to run on each loop.
@@ -75,7 +74,6 @@ def _drive(contend: Callable[[], Awaitable[None]], runs: int = 3) -> list[str]:
     return failures
 
 
-@pytest.mark.real_sleep
 def test_contended_lock_does_not_cross_loops() -> None:
     """The failure this exists to prevent, reproduced under contention.
 
@@ -98,7 +96,6 @@ def test_contended_lock_does_not_cross_loops() -> None:
     assert _drive(contend) == []
 
 
-@pytest.mark.real_sleep
 def test_a_shared_lock_fails_the_same_harness() -> None:
     """Proof the harness bites: one shared lock breaks under it.
 
@@ -164,7 +161,6 @@ def test_a_closed_loop_does_not_leak_its_value() -> None:
     assert per.size() == 0
 
 
-@pytest.mark.real_sleep
 def test_a_contended_lock_does_not_pin_its_loop() -> None:
     """Weak keys alone do not bound growth: the value can pin the key.
 

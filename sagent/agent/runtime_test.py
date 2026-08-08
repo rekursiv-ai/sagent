@@ -431,7 +431,6 @@ async def test_simple_text_response() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_before_tool_spawn_user_detaches_tools_before_cohort_start() -> None:
     tool = StubTool(response="tool output", delay_sec=10.0)
     agent, collector = make_agent(
@@ -556,7 +555,6 @@ async def test_tool_error() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_user_message_detaches_running_tools() -> None:
     """User typing mid-cohort stubs unfinished tools."""
     tool_started = asyncio.Event()
@@ -611,7 +609,6 @@ async def test_user_message_detaches_running_tools() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_halt_cancels_model_waits_for_user() -> None:
     """Halt cancels model, blocks until user speaks."""
     model_started = asyncio.Event()
@@ -674,7 +671,6 @@ async def test_halt_cancels_model_waits_for_user() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_halt_with_pending_midstream_input_resumes_without_fresh_input() -> None:
     """Halt consumes already-buffered mid-stream input instead of waiting again."""
     model_started = asyncio.Event()
@@ -755,7 +751,6 @@ async def test_model_error_with_pending_midstream_input_does_not_wait_again() ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_halt_publishes_model_response_cancelled_immediately() -> None:
     """``ModelResponseCancelled`` must fire on Halt, BEFORE next UserMessage.
 
@@ -816,7 +811,6 @@ async def test_halt_publishes_model_response_cancelled_immediately() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_clear_wipes_history() -> None:
     """Clear detaches tools, wipes history, waits for user."""
     first_turn = asyncio.Event()
@@ -1052,7 +1046,6 @@ async def test_discard_detached_removes_registry_entry() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_kill_call_id_cancels_already_detached_tool() -> None:
     """``Kill(call_id=...)`` also clears already-detached tools.
 
@@ -1077,7 +1070,6 @@ async def test_kill_call_id_cancels_already_detached_tool() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_kill_one_tool() -> None:
     """Kill cancels a specific tool task."""
     slow = StubTool(_name="slow", response="done", delay_sec=10.0)
@@ -1125,7 +1117,6 @@ async def test_kill_one_tool() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_detach_and_result_arrives_later() -> None:
     """Detached tool completes; the real result arrives as forward context.
 
@@ -1179,7 +1170,6 @@ async def test_detach_and_result_arrives_later() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_detached_result_preserves_tool_result_metadata() -> None:
     att = BytesMessage(data=b"png", descriptor="image/png")
 
@@ -1274,7 +1264,6 @@ async def test_detached_result_delivered_with_tail_toolresult() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_detached_completion_during_next_cohort_no_interleave() -> None:
     """Detached completion mid-cohort must not interleave a notification.
 
@@ -1402,7 +1391,6 @@ async def test_detached_completion_during_next_cohort_no_interleave() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_clear_cancels_detached_tasks_no_post_clear_leak() -> None:
     r"""Detached tasks must not leak their results into post-``Clear`` history.
 
@@ -1490,7 +1478,6 @@ async def test_clear_cancels_detached_tasks_no_post_clear_leak() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_self_clear_does_not_wedge_deferred_repl_input() -> None:
     """A model self-``Clear`` must not strand REPL deferred (Tab) input.
 
@@ -1578,7 +1565,6 @@ async def test_self_clear_does_not_wedge_deferred_repl_input() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_undetach_gates_model() -> None:
     """Undetach re-gates the model on a detached tool."""
     tool_started = asyncio.Event()
@@ -1631,7 +1617,6 @@ async def test_undetach_gates_model() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_compact_rewrites_history() -> None:
     """Compact replaces history with summary, preserving new items."""
     summary = [UserMessage(text="[summary of prior conversation]")]
@@ -1761,7 +1746,6 @@ def test_widen_barrier_mask_partitions_cross_session_refs() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_late_model_response_complete_during_compaction_is_ignored() -> None:
     compact_started = asyncio.Event()
     release_compact = asyncio.Event()
@@ -1820,7 +1804,6 @@ async def test_late_model_response_complete_during_compaction_is_ignored() -> No
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_user_facing_error_logged_without_traceback(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1873,7 +1856,6 @@ async def test_user_facing_error_logged_without_traceback(
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_plain_exception_logged_with_traceback(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1920,7 +1902,6 @@ async def test_plain_exception_logged_with_traceback(
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_self_pinging_tool_does_not_orphan_tool_use() -> None:
     """Tool that pushes a ``UserMessage`` mid-cohort must not orphan its tool_use.
 
@@ -2020,7 +2001,6 @@ async def test_self_pinging_tool_does_not_orphan_tool_use() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_irrecoverable_error_gates_on_user() -> None:
     """Model failure posts ModelResponseError, waits for user."""
     agent, collector = make_agent(
@@ -2132,7 +2112,6 @@ async def test_streaming_chunks_published() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_model_waits_for_all_tools() -> None:
     """Model doesn't fire until all tool results are in."""
     t1 = StubTool(_name="a", response="r1", delay_sec=0.05)
@@ -2162,7 +2141,6 @@ async def test_model_waits_for_all_tools() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_await_user_blocks_non_user_items() -> None:
     """AwaitUser blocks drain until a UserMessage arrives."""
     agent, _ = make_agent([AssistantMessage(text="after wait")])
@@ -2185,7 +2163,6 @@ async def test_await_user_blocks_non_user_items() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_await_user_baseline_skips_preexisting_user() -> None:
     """M3: AWAIT_USER doesn't release on a UserMessage already queued.
 
@@ -2222,7 +2199,6 @@ async def test_await_user_baseline_skips_preexisting_user() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_await_user_releases_on_agent_send_message() -> None:
     """AWAIT_USER gate releases when an AgentSendMessage arrives.
 
@@ -2252,7 +2228,6 @@ async def test_await_user_releases_on_agent_send_message() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_await_user_releases_on_user_deferred_message() -> None:
     """AWAIT_USER must release on ``UserDeferredMessage`` too.
 
@@ -2284,7 +2259,6 @@ async def test_await_user_releases_on_user_deferred_message() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_await_user_releases_on_agent_send_deferred_message() -> None:
     """AWAIT_USER must release on ``AgentSendDeferredMessage`` too.
 
@@ -2318,7 +2292,6 @@ async def test_await_user_releases_on_agent_send_deferred_message() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_queued_message_waits_for_cohort() -> None:
     """UserQueuedMessage doesn't preempt; model sees it after tools complete."""
     tool_started = asyncio.Event()
@@ -2396,7 +2369,6 @@ async def test_queued_messages_coalesce() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_clear_discards_queued_messages() -> None:
     """Clear wipes queued_texts so they don't leak into fresh conversation."""
     first_turn = asyncio.Event()
@@ -2435,7 +2407,6 @@ async def test_clear_discards_queued_messages() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_clear_discards_deferred_messages() -> None:
     """Clear must wipe ``UserDeferredMessage`` too -- not just queued.
 
@@ -2483,7 +2454,6 @@ async def test_clear_discards_deferred_messages() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_kill_all_tools(caplog: pytest.LogCaptureFixture) -> None:
     """Kill(call_id=None) cancels all tool tasks."""
     tool_started = asyncio.Event()
@@ -2540,7 +2510,6 @@ async def test_kill_all_tools(caplog: pytest.LogCaptureFixture) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_detach_all_tools() -> None:
     """Detach(call_id=None) stubs all running tools."""
     tool_started = asyncio.Event()
@@ -2650,7 +2619,6 @@ async def test_no_cohort_complete_on_text_only_response() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_no_cohort_complete_on_user_preemption() -> None:
     """CohortComplete NOT published when user preempts mid-cohort."""
     tool_started = asyncio.Event()
@@ -2695,7 +2663,6 @@ async def test_no_cohort_complete_on_user_preemption() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_no_cohort_complete_on_halt() -> None:
     """CohortComplete NOT published when halt interrupts cohort."""
     tool_started = asyncio.Event()
@@ -2769,7 +2736,6 @@ async def test_no_cohort_complete_on_halt() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_no_cohort_complete_on_kill_all() -> None:
     """CohortComplete NOT published when all tools killed."""
     tool_started = asyncio.Event()
@@ -2816,7 +2782,6 @@ async def test_no_cohort_complete_on_kill_all() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_no_cohort_complete_on_detach_all() -> None:
     """CohortComplete NOT published when all tools detached."""
     tool_started = asyncio.Event()
@@ -2881,7 +2846,6 @@ async def test_cohort_complete_before_model_fires() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_compact_clears_queued_messages() -> None:
     """Compact discards buffered UserQueuedMessages."""
     first_turn = asyncio.Event()
@@ -3253,7 +3217,6 @@ async def test_compact_fallback_propagates_via_compact_complete() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_failed_compact_unblocks_subsequent_model_switch() -> None:
     """Failed compaction must not block ``ModelSwitch`` forever.
 
@@ -3307,7 +3270,6 @@ async def test_failed_compact_unblocks_subsequent_model_switch() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_compact_while_compacting_is_dropped() -> None:
     """Second Compact while one is already running is dropped (continue)."""
     compact_started = asyncio.Event()
@@ -3554,7 +3516,6 @@ async def test_compact_and_post_suppresses_complete_when_generation_bumped() -> 
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_compact_cancels_running_model_call() -> None:
     """A Compact event while the model is streaming cancels the model call."""
     model_started = asyncio.Event()
@@ -3658,7 +3619,6 @@ async def test_undetach_all_re_gates_every_detached() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_quit_cancels_active_compaction_and_running_tools() -> None:
     """Quit while compaction + tools are alive cancels both cleanly."""
     compact_blocked = asyncio.Event()
@@ -3760,7 +3720,6 @@ async def test_thinking_chunk_published() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_tool_result_partial_published() -> None:
     """A tool that pushes ToolResultPartial sees it published."""
 
@@ -3802,7 +3761,6 @@ async def test_tool_result_partial_published() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_quit_cancels_running_tool_tasks() -> None:
     """Quit cancels tool tasks still in flight."""
     tool_started = asyncio.Event()
@@ -3928,7 +3886,6 @@ async def test_gated_deque_drain_with_gate_waits_for_match() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_user_message_mid_stream_fires_followup_round() -> None:
     """Mid-stream user input must trigger a model call after the response.
 
@@ -4088,7 +4045,6 @@ def _assert_exactly_one_surface(
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_lifecycle_idle_enter_commits_immediately() -> None:
     """Idle Enter: no pending state. Straight to committed."""
     agent = agent_runtime.AgentRuntime(
@@ -4105,7 +4061,6 @@ async def test_lifecycle_idle_enter_commits_immediately() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_lifecycle_mid_stream_enter_stays_pending_before_drain() -> None:
     """Mid-stream Enter: pending. Not in history, not published, in queue."""
     model, stream_started, release_stream = _make_lifecycle_model()
@@ -4133,7 +4088,6 @@ async def test_lifecycle_mid_stream_enter_stays_pending_before_drain() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_lifecycle_mid_stream_enter_commits_on_drain() -> None:
     """Mid-stream Enter: pending -> committed when model finishes."""
     model, stream_started, release_stream = _make_lifecycle_model()
@@ -4166,7 +4120,6 @@ async def test_lifecycle_mid_stream_enter_commits_on_drain() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_lifecycle_multiple_mid_stream_enters_coalesce_on_drain() -> None:
     r"""N mid-stream Enters: all pending, then one coalesced commit + publish."""
     model, stream_started, release_stream = _make_lifecycle_model()
@@ -4217,7 +4170,6 @@ async def test_lifecycle_multiple_mid_stream_enters_coalesce_on_drain() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_lifecycle_tab_queued_stays_pending_until_model_idle() -> None:
     """Tab-staged ``UserQueuedMessage`` mirrors mid-stream lifecycle.
 
@@ -4393,7 +4345,6 @@ class TestUserMessageAlternation:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_two_idle_messages_same_batch_do_not_stack_consecutively() -> None:
     r"""Two ``UserMessage`` items in the same drain batch must not stack in history.
 
@@ -4467,7 +4418,6 @@ async def test_two_idle_messages_same_batch_do_not_stack_consecutively() -> None
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_user_messages_mid_stream_coalesce_into_one_followup() -> None:
     r"""Multiple mid-stream user messages coalesce into a single follow-up round.
 
@@ -4551,7 +4501,6 @@ async def test_user_messages_mid_stream_coalesce_into_one_followup() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_user_message_mid_stream_detaches_new_tools_to_background() -> None:
     """Mid-stream user input must cut in line over a response's tool_calls.
 
@@ -4659,7 +4608,6 @@ async def test_user_message_mid_stream_detaches_new_tools_to_background() -> Non
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_user_queued_message_mid_stream_fires_followup_round() -> None:
     """``UserQueuedMessage`` arriving mid-stream must fire a follow-up round.
 
@@ -4737,7 +4685,6 @@ async def test_user_queued_message_mid_stream_fires_followup_round() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_user_queued_message_waits_for_model_idle_not_cohort_complete() -> None:
     """``UserQueuedMessage`` drains at ``ModelIdle``, not ``CohortComplete``.
 
@@ -4840,7 +4787,6 @@ async def test_user_queued_message_waits_for_model_idle_not_cohort_complete() ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_halt_then_immediate_user_message_fires_followup_round() -> None:
     """Reproduce: model streams → Halt → fresh ``UserMessage`` should
     fire a new round.
@@ -4928,7 +4874,6 @@ async def test_halt_then_immediate_user_message_fires_followup_round() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_halt_then_queued_message_fires_followup_round() -> None:
     """A deferred message after halt is fresh user input, not idle-only backlog."""
     stream_started = asyncio.Event()
@@ -5235,7 +5180,6 @@ async def test_agent_idle_suppressed_while_tool_running() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_agent_idle_suppressed_while_detached_running() -> None:
     """Detach a running tool → AgentIdle suppressed until detached drains.
 
@@ -5314,7 +5258,6 @@ async def test_agent_idle_suppressed_while_detached_running() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_agent_idle_suppressed_while_compact_task_running() -> None:
     """AgentIdle suppressed while compaction is in flight."""
     release = asyncio.Event()
@@ -5399,7 +5342,6 @@ async def test_agent_idle_suppressed_while_compact_task_running() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_halt_cancels_running_compaction() -> None:
     """Halt must cancel in-flight compaction before waiting for user input."""
     compact_started = asyncio.Event()
@@ -5439,7 +5381,6 @@ async def test_halt_cancels_running_compaction() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_clear_cancels_running_compaction_without_adopting_result() -> None:
     """Clear must invalidate a pre-clear compaction result."""
     compact_started = asyncio.Event()
@@ -5489,7 +5430,6 @@ async def test_clear_cancels_running_compaction_without_adopting_result() -> Non
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_agent_idle_suppressed_while_gate_armed_after_halt() -> None:
     """After Halt arms AWAIT_USER, inbox.gate_armed is True and the
     agent is 'parked waiting for a fresh user message' -- not idle.
@@ -5552,7 +5492,6 @@ async def test_agent_idle_suppressed_while_gate_armed_after_halt() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_agent_idle_suppressed_while_mid_stream_queue_nonempty() -> None:
     """A UserMessage typed mid-stream buffers in ``_mid_stream_queue``.
     Until that buffer drains, the agent is not idle.
@@ -5847,7 +5786,6 @@ class TestGateRepairsInvalidContext:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_stop_tool_kill_carries_parent_id_to_synth_result() -> None:
     """`_stop_tool` must stamp the parent assistant ``id`` on its synth result.
 
@@ -5958,7 +5896,6 @@ def test_sanitize_for_send_drops_duplicate_tool_results() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_same_file_rew_run_sequentially_others_parallel() -> None:
     """Same-file Read/Edit/Write calls in one cohort run sequentially, in
     submission order; calls touching other files still run in parallel.
@@ -6075,7 +6012,6 @@ def _stub_for(agent: agent_runtime.AgentRuntime, call_id: str) -> ToolResult | N
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_detached_result_delivered_forward_stub_unchanged() -> None:
     """A detached tool's real result arrives forward; the stub is not rewritten.
 
@@ -6146,7 +6082,6 @@ async def test_detached_result_delivered_forward_stub_unchanged() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_detached_result_is_error_survives_forward_delivery() -> None:
     """A failed detached tool delivers ``is_error=True`` forward, not flattened."""
     started = asyncio.Event()
@@ -6199,7 +6134,6 @@ async def test_detached_result_is_error_survives_forward_delivery() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_detached_result_survives_compaction() -> None:
     """A detached result completing AFTER a compaction barrier is still delivered.
 
@@ -6278,7 +6212,6 @@ async def test_detached_result_survives_compaction() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_clear_then_completion_is_not_delivered() -> None:
     """The carve-out: a detached tool cancelled by ``Clear`` delivers nothing."""
     started = asyncio.Event()
@@ -6336,7 +6269,6 @@ async def test_clear_then_completion_is_not_delivered() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_multiple_detached_results_each_correlate_by_unique_id() -> None:
     """Concurrent detached completions each deliver under their own arrival id."""
     started: dict[str, asyncio.Event] = {"a": asyncio.Event(), "b": asyncio.Event()}
@@ -6402,7 +6334,6 @@ async def test_multiple_detached_results_each_correlate_by_unique_id() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_model_emitted_detached_arrived_call_is_deferred_not_unknown() -> None:
     """A mimicked ``DetachedArrived`` call costs no round; its error rides next turn.
 
@@ -6458,7 +6389,6 @@ async def test_model_emitted_detached_arrived_call_is_deferred_not_unknown() -> 
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_pending_pairing_alone_fires_no_round() -> None:
     """A pending mimicked-tool error pairing fires no round on its own.
 
@@ -6487,7 +6417,6 @@ async def test_pending_pairing_alone_fires_no_round() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_pending_lazy_pairing_survives_interleaved_detached_delivery() -> None:
     """A detached delivery must not strand a pending lazy pairing (bug 3).
 
@@ -6536,7 +6465,6 @@ async def test_pending_lazy_pairing_survives_interleaved_detached_delivery() -> 
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_model_forged_detached_arrived_id_collision_does_not_wedge() -> None:
     """A forged ``DetachedArrived`` id colliding with a real arrival stays live.
 
@@ -6849,7 +6777,6 @@ def test_sanitize_forged_arrivals_avoids_colliding_with_existing_id() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_gate_recovery_admits_clear_control_event() -> None:
     """The unrepairable-context recovery gate must not strand ``Clear``.
 
@@ -6885,7 +6812,6 @@ async def test_gate_recovery_admits_clear_control_event() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_gate_recovery_arms_before_publish_so_observer_clear_releases() -> None:
     """Recovery must arm the gate before publishing, like the ``Clear`` arm.
 
@@ -7077,7 +7003,6 @@ async def test_gate_failure_surfaces_model_response_error() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_e2e_duplicate_detached_delivery_does_not_wedge_runtime() -> None:
     """End-to-end: a second detached delivery for one call_id keeps the loop live.
 

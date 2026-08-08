@@ -944,7 +944,6 @@ async def test_persistent_run_logs_unhandled_exception(
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_persistent_child_does_not_overwrite_parent_registry_entry() -> None:
     """A persistent child must NOT clobber ``agent_registry['Agent']``.
 
@@ -1503,7 +1502,6 @@ async def test_persistent_spawn_writes_parent_lifecycle_record(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_persistent_spawn_model_error_reaches_parent_inbox() -> None:
     """A serviced child whose model call fails must reach the parent's inbox.
 
@@ -1562,7 +1560,6 @@ async def test_persistent_spawn_model_error_reaches_parent_inbox() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_persistent_spawn_with_notify_on_asleep_notifies_parent() -> None:
     """End-to-end: a persistent child seeded with a prompt completes one
     round, becomes idle, and the parent inbox receives the notification
@@ -1610,7 +1607,6 @@ async def test_persistent_spawn_with_notify_on_asleep_notifies_parent() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_persistent_spawn_notify_on_asleep_false_stays_silent() -> None:
     """Explicit ``notify_on_asleep=False`` suppresses idle pings.
 

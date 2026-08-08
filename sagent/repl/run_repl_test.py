@@ -1557,7 +1557,6 @@ def _history_has(runtime: agent_runtime.AgentRuntime, needle: str) -> bool:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_harness_enter_at_cursor_zero_fresh_session_reaches_history() -> None:
     """Enter on a fresh session: ``UserMessage`` reaches history."""
     runtime, holder, queues = _harness_runtime()
@@ -1569,7 +1568,6 @@ async def test_harness_enter_at_cursor_zero_fresh_session_reaches_history() -> N
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_harness_tab_at_cursor_zero_fresh_session_drains_to_history() -> None:
     """Tab on a fresh session: deferred drains via the initial ``AgentIdle``."""
     runtime, holder, queues = _harness_runtime()
@@ -1588,7 +1586,6 @@ async def _wait_until_idle(idle_events: list[type]) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_harness_tab_after_idle_turn_drains_to_history() -> None:
     """Tab AFTER a completed model turn: deferred must still drain.
 
@@ -1621,7 +1618,6 @@ async def test_harness_tab_after_idle_turn_drains_to_history() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_queued_pane_message_detaches_running_tool() -> None:
     """REGRESSION: a queue-pane message must still trigger a tool detach.
 
@@ -1677,7 +1673,6 @@ async def test_queued_pane_message_detaches_running_tool() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_typed_input_reaches_model_in_every_runtime_state() -> None:
     """EXHAUSTIVE: typed Enter AND Tab must reach the model from every state.
 
@@ -1826,7 +1821,6 @@ async def test_typed_input_reaches_model_in_every_runtime_state() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_enter_mid_cohort_detaches_running_tool() -> None:
     """REGRESSION: Enter while TOOLS are running must detach them.
 
@@ -1870,7 +1864,6 @@ async def test_enter_mid_cohort_detaches_running_tool() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_harness_enter_after_halt_dispatches_not_wedged() -> None:
     """REGRESSION (Bug 2): Enter after a Halt must reach the model.
 
@@ -1903,7 +1896,6 @@ async def test_harness_enter_after_halt_dispatches_not_wedged() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_harness_enter_at_nav_stop_on_idle_dispatches() -> None:
     """Enter at a nav stop on a fully-idle agent: text reaches history.
 
@@ -2016,7 +2008,6 @@ async def test_staging_path_end_to_end_renders_user_bar() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_repl_commit_during_cohort_preempts_tools_to_background() -> None:
     """Regression: REPL commit while a cohort is running must preempt.
 

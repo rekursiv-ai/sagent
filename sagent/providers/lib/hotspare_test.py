@@ -36,7 +36,6 @@ def _make_subproc() -> Subproc:
     return Subproc(["python3", "-c", "import sys; sys.stdin.read()"])
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_first_acquire_spawns_active() -> None:
     """The first ``acquire`` creates the active subprocess via the factory."""
@@ -58,7 +57,6 @@ async def test_first_acquire_spawns_active() -> None:
     await pool.close()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_respawn_promotes_spare_in_place() -> None:
     """``respawn`` closes the active subprocess and swaps the spare in."""
@@ -85,7 +83,6 @@ async def test_respawn_promotes_spare_in_place() -> None:
     await pool.close()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_concurrent_respawn_serialised_by_lock() -> None:
     """Two ``respawn`` calls in flight execute serially, never overlapping."""
@@ -223,7 +220,6 @@ async def test_concurrent_transport_failure_budget_accounting_is_serialized() ->
     assert all(not proc.is_alive for proc in procs)
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_transport_failure_budget_resets_after_success() -> None:
     async def factory() -> Subproc:
@@ -241,7 +237,6 @@ async def test_transport_failure_budget_resets_after_success() -> None:
     await pool.close()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_normal_respawn_excluded_from_transport_failure_budget() -> None:
     async def factory() -> Subproc:
@@ -319,7 +314,6 @@ async def test_close_cancels_warmup_without_leaking_produced_spare() -> None:
     assert all(not proc.is_alive for proc in procs)
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_close_idempotent_and_tears_down_active() -> None:
     """``close`` terminates the active subprocess and is safe to call twice."""
@@ -337,7 +331,6 @@ async def test_close_idempotent_and_tears_down_active() -> None:
     await pool.close()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_acquire_after_close_raises() -> None:
     """A closed pool refuses to hand out new subprocesses."""

@@ -5,11 +5,10 @@ with its own loop -- previously got ``RuntimeError: ... is bound to a
 different event loop`` from every thread but one, and a permanent hang
 from the thread left waiting on a lock nobody would release.
 
-Every test here carries ``@pytest.mark.real_sleep``: this suite patches
-``asyncio.sleep`` to a no-op (``sagent/conftest.py:65``), and without a
-real suspension two holders never overlap, so the lock is never contended
-and the harness proves nothing. ``asyncio.Lock.acquire`` returns before
-touching its loop when uncontended.
+Every sleep duration here is load-bearing: without a real suspension two
+holders never overlap, so the lock is never contended and the harness proves
+nothing. ``asyncio.Lock.acquire`` returns before touching its loop when
+uncontended. Do not replace these with bare yields.
 """
 
 from __future__ import annotations
@@ -21,8 +20,6 @@ from pathlib import Path
 import asyncio
 import threading
 import time
-
-import pytest
 
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.google.api import Google
@@ -54,7 +51,6 @@ def _drive(work: Callable[[], Awaitable[None]], runs: int = 3) -> list[str]:
     return failures
 
 
-@pytest.mark.real_sleep
 def test_anthropic_sdk_lock_survives_a_second_loop() -> None:
     """The confirmed defect: one provider, several loops, contended."""
     provider = Anthropic(api_key="sk-test")
@@ -70,7 +66,6 @@ def test_anthropic_sdk_lock_survives_a_second_loop() -> None:
     assert _drive(work) == []
 
 
-@pytest.mark.real_sleep
 def test_anthropic_sdk_is_not_shared_across_loops() -> None:
     """An SDK client holds a pool owned by the loop that opened it.
 
@@ -89,7 +84,6 @@ def test_anthropic_sdk_is_not_shared_across_loops() -> None:
     assert seen[0] is not seen[1]
 
 
-@pytest.mark.real_sleep
 def test_openai_subscription_sdk_is_not_shared_across_loops() -> None:
     """The transport this suite never covered, which is why it stayed broken.
 
@@ -111,7 +105,6 @@ def test_openai_subscription_sdk_is_not_shared_across_loops() -> None:
     assert seen[0] is not seen[1]
 
 
-@pytest.mark.real_sleep
 def test_google_client_survives_a_second_loop() -> None:
     """Google's per-model httpx client has the same binding."""
     provider = Google(api_key="test-key")
@@ -127,7 +120,6 @@ def test_google_client_survives_a_second_loop() -> None:
     assert _drive(work) == []
 
 
-@pytest.mark.real_sleep
 def test_file_write_lock_survives_a_second_loop(tmp_path: Path) -> None:
     """The process-global write-lock registry is reachable from any loop."""
     target = str(tmp_path / "edited.txt")
@@ -191,7 +183,6 @@ def peak_concurrent_holders(
     return peak
 
 
-@pytest.mark.real_sleep
 def test_credential_file_lock_excludes_across_loops(tmp_path: Path) -> None:
     """Refresh-token rotation is destructive, so this lock must be total.
 
@@ -209,7 +200,6 @@ def test_credential_file_lock_excludes_across_loops(tmp_path: Path) -> None:
     assert peak_concurrent_holders(enter) == 1
 
 
-@pytest.mark.real_sleep
 def test_file_write_lock_excludes_across_loops(tmp_path: Path) -> None:
     """``tools/core.py`` promises "same path -> same lock" without qualification.
 
