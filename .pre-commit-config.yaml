@@ -220,15 +220,42 @@ repos:
         entry: uv --quiet run --frozen --group pre-commit ty check
         # Exclusions defined in pyproject.toml.
 
-  # Every heavy pre-push hook below shares this one wrapper. It counts physical
-  # cores running at the top clock (P-cores only, on a hybrid CPU), clamps to
-  # [2, 32], exports the result as $WORKERS, then runs the hook's own command
-  # line -- supplied as the single `args` entry. Per-hook differences (env vars,
-  # marker filters, exit-5 tolerance, capability guards) live in that arg, so
-  # the arithmetic exists exactly once.
+  # Every heavy pre-push hook below shares this one wrapper. It sizes $WORKERS,
+  # then runs the hook's own command line -- supplied as the single `args`
+  # entry. Per-hook differences (env vars, marker filters, exit-5 tolerance,
+  # capability guards) live in that arg, so the arithmetic exists exactly once.
   #
   # Inline rather than a script under ops/: this file is copied verbatim into
   # public package repos that do not receive ops/.
+  #
+  #   WORKERS = max(2, min(perf - 1, round(phys * 3/8)))
+  #
+  # `phys` counts physical cores (SMT siblings deduped); `perf` counts those at
+  # the top clock -- equal to `phys` on a uniform-clock server, smaller on a
+  # hybrid laptop. Both terms were fitted to measured optima, not derived:
+  #
+  #   host                     nproc  phys  perf  optimal  imputed
+  #   tron (Core Ultra 7 255H)    16    16     6        5        5
+  #   colossus (EPYC 9555)       128    64    64       24       24
+  #
+  # `optimal` is the measured best `pytest -n`, `imputed` what the formula
+  # yields. tron: 5 -> 216s vs 6 -> 256s (653 slow tests, sequential, idle box).
+  # colossus: 24 -> 105s vs 20 -> 113s (651 slow tests). tron has no SMT, so
+  # nproc == phys; its 16 cores span three clock domains (6x5.1GHz, 8x4.4GHz,
+  # 2x2.5GHz) and only the first counts as perf. colossus is uniform at
+  # 3.25GHz, so perf == phys and the `perf - 1` term never binds there.
+  #
+  # `3/8` binds on the server, `perf - 1` only on a power-capped hybrid, `2`
+  # only on a 2-vCPU CI runner. On 2 pinned cores xdist still beats serial
+  # (n=2 5.4s vs n=0 6.4s), so the floor is 2 and never 1.
+  #
+  # Every structural alternative overshot at least one box: physical cores, top
+  # frequency domain, and nproc/2 all did. Do NOT "simplify" this back to a core
+  # count. Note also that the EPYC curve is a sawtooth (24 and 32 fast, 20 and
+  # 28 slow, likely CCD alignment), so a nearby value is not interchangeable.
+  #
+  # Set WORKERS in the environment to override on a host that measures
+  # differently; the formula only runs when it is unset.
   - repo: local
     hooks:
       - id: basedpyright-global
@@ -239,11 +266,26 @@ repos:
         stages: [pre-push]
         entry: &worker-entry >-
           bash -c '
-            cpu=/sys/devices/system/cpu;
-            top=$(sort -rn $cpu/cpu*/cpufreq/cpuinfo_max_freq 2>/dev/null | head -1);
-            WORKERS=$([ -n "$top" ] && grep -lx "$top" $cpu/cpu*/cpufreq/cpuinfo_max_freq | xargs -n1 dirname | xargs -n1 dirname | xargs -I@ cat @/topology/core_id | sort -u | wc -l || sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo $(( $(getconf _NPROCESSORS_ONLN) / 2 )));
-            ((WORKERS > 32)) && WORKERS=32;
-            ((WORKERS < 2)) && WORKERS=2;
+            if [ -z "$WORKERS" ]; then
+              cpu=/sys/devices/system/cpu;
+              if [ -d "$cpu/cpu0/topology" ]; then
+                phys=$(cat $cpu/cpu*/topology/core_id 2>/dev/null | sort -u | wc -l);
+                top=$(sort -rn $cpu/cpu*/cpufreq/cpuinfo_max_freq 2>/dev/null | head -1);
+                perf=$([ -n "$top" ] && grep -lx "$top" $cpu/cpu*/cpufreq/cpuinfo_max_freq | xargs -n1 dirname | xargs -n1 dirname | xargs -I@ cat @/topology/core_id | sort -u | wc -l || echo "$phys");
+              else
+                phys=$(sysctl -n hw.physicalcpu 2>/dev/null || getconf _NPROCESSORS_ONLN);
+                perf=0;
+                for i in $(seq 0 $(( $(sysctl -n hw.nperflevels 2>/dev/null || echo 1) - 1 ))); do
+                  [ "$(sysctl -n hw.perflevel$i.name 2>/dev/null)" = Efficiency ] && continue;
+                  perf=$(( perf + $(sysctl -n hw.perflevel$i.physicalcpu 2>/dev/null || echo 0) ));
+                done;
+                ((perf < 1)) && perf=$phys;
+              fi;
+              WORKERS=$(( (phys * 3 + 4) / 8 ));
+              ((WORKERS > perf - 1)) && WORKERS=$(( perf - 1 ));
+              ((WORKERS < 2)) && WORKERS=2;
+              # max(2, min(perf - 1, round(phys * 3/8))); +4 rounds to nearest.
+            fi;
             export WORKERS;
             exec bash -c "$@"
           ' bash
