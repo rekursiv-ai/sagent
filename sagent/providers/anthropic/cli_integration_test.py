@@ -45,13 +45,8 @@ from sagent.types.model import ModelRequest
 from sagent.types.runtime import UserMessage
 
 
-# ``real_sleep``: these spawn the real CLI + the MCP bridge's uvicorn
-# server, whose startup polls ``asyncio.sleep`` to yield to the serve
-# task. The conftest's autouse ``_fast_sleep`` no-ops ``asyncio.sleep``,
-# which starves uvicorn startup and trips the bridge's 10s deadline.
 pytestmark = [
     pytest.mark.integration,
-    pytest.mark.real_sleep,
     # Spawns the real ``claude`` binary: a heavy subprocess with model-latency
     # turns. Availability is gated by ``_requires_claude`` (skips precisely when
     # the CLI/credentials are absent), not an env var. Prefer low parallelism

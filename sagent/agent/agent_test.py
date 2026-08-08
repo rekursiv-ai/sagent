@@ -672,7 +672,6 @@ async def test_drive_until_first_idle_returns_first_post_work_result() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_agent_run_does_not_silently_drop_failed_detached_redrive() -> None:
     """A transient error on a post-idle detached re-drive must not vanish.
 
@@ -811,7 +810,6 @@ async def test_agent_run_does_not_silently_drop_failed_detached_redrive() -> Non
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_agent_run_waits_for_background_tool_result() -> None:
     """A ``background:true`` / ``delay`` tool's result must not be reaped.
 
@@ -893,7 +891,6 @@ async def test_agent_run_waits_for_background_tool_result() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_agent_run_not_blocked_by_persistent_subagent() -> None:
     """A live serviced subagent must not wedge a one-shot ``Agent.run``.
 
@@ -940,7 +937,6 @@ async def test_agent_run_not_blocked_by_persistent_subagent() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_agent_run_not_blocked_by_hidden_background_infra() -> None:
     """Hidden infra (REPL pump, watchdogs) must not wedge ``Agent.run``.
 
@@ -982,7 +978,6 @@ async def test_agent_run_not_blocked_by_hidden_background_infra() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_has_pending_background_predicate_table() -> None:
     """Exhaustively pin ``_has_pending_background`` over every ``_bg`` cell.
 
@@ -1070,7 +1065,6 @@ async def test_has_pending_background_predicate_table() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_agent_run_does_not_hang_on_external_quit() -> None:
     """An external ``Quit`` must not wedge ``Agent.run`` forever.
 
@@ -1125,7 +1119,6 @@ async def test_agent_run_does_not_hang_on_external_quit() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_background_result_lands_before_single_agent_idle() -> None:
     """No spurious ``AgentIdle`` during the bg result handoff; result lands first.
 
@@ -1210,7 +1203,6 @@ async def test_background_result_lands_before_single_agent_idle() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_agent_run_drains_queued_events_when_driver_exits_externally() -> None:
     """An external ``Quit`` must not drop events already queued for the caller.
 
@@ -2057,7 +2049,6 @@ async def test_swap_model_schedules_close_on_old_cli_model() -> None:
     assert old.closed_event.is_set()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_swap_model_logs_close_failure_via_log_task_exception(
     caplog: pytest.LogCaptureFixture,
@@ -3011,7 +3002,6 @@ async def test_activity_pauses_during_model_service_suspended() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_run_bg_propagates_external_cancellation() -> None:
     """``_AgentTool._run_bg`` must re-raise ``CancelledError`` on outer cancel.
 
@@ -3081,7 +3071,6 @@ async def test_run_bg_propagates_external_cancellation() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_activity_current_call_start_resets_on_each_model_call() -> None:
     """Mid-chain ``ModelCallStarted`` must reset ``current_call_start``.
 
@@ -7370,7 +7359,6 @@ async def test_compact_payload_ending_with_tool_calls_gets_synthetic_results() -
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_compact_now_awaits_active_runtime_compact_task() -> None:
     """Overflow compaction must not race an inbox-driven compaction."""
     started = asyncio.Event()

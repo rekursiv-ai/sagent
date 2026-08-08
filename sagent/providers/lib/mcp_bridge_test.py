@@ -154,7 +154,6 @@ class _SlowTool(_EchoTool):
         return ToolResult(call_id="", content="slow done")
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_start_then_stop_lifecycle() -> None:
     """The bridge binds a localhost URL on start and releases on stop."""
@@ -169,7 +168,6 @@ async def test_start_then_stop_lifecycle() -> None:
     await bridge.stop()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_unknown_tool_path_returns_404() -> None:
     """A GET on an unmapped path yields an HTTP error rather than a hang.
@@ -199,7 +197,6 @@ async def test_unknown_tool_path_returns_404() -> None:
         await bridge.stop()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_update_tools_replaces_registry() -> None:
     """``update_tools`` swaps the live registry observed by the MCP handlers.
@@ -218,7 +215,6 @@ async def test_update_tools_replaces_registry() -> None:
         await bridge.stop()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_handlers_route_tool_call() -> None:
     """Calling the MCP ``call_tool`` handler returns the wrapped tool's result."""
@@ -232,7 +228,6 @@ async def test_handlers_route_tool_call() -> None:
         await bridge.stop()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_call_tool_validates_required_args() -> None:
     """MCP execution returns wrapper-style validation errors."""
@@ -249,7 +244,6 @@ async def test_call_tool_validates_required_args() -> None:
         await bridge.stop()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_call_tool_detaches_background_args() -> None:
     """A background request returns a detached placeholder, then runs + drains.
@@ -278,7 +272,6 @@ async def test_call_tool_detaches_background_args() -> None:
         await bridge.stop()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_registered_handler_routes_call_over_http() -> None:
     """A real MCP client over HTTP reaches the registered call handler.
@@ -306,7 +299,6 @@ async def test_registered_handler_routes_call_over_http() -> None:
         await bridge.stop()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_detached_result_carries_detach_id() -> None:
     """A drained detached result is correlatable to its ``bg-N`` placeholder.
@@ -338,7 +330,6 @@ async def test_detached_result_carries_detach_id() -> None:
         await bridge.stop()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_call_tool_validates_args_before_detaching() -> None:
     """Schema validation runs before a background detach is spawned.
@@ -359,7 +350,6 @@ async def test_call_tool_validates_args_before_detaching() -> None:
         await bridge.stop()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_stop_clears_bg_done_and_blocks_late_phantom_result() -> None:
     """``stop`` drops detached results and a cancelled task's late
@@ -388,7 +378,6 @@ async def test_stop_clears_bg_done_and_blocks_late_phantom_result() -> None:
     assert not bridge.has_pending_detached()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_call_tool_contains_ordinary_tool_exceptions() -> None:
     """MCP execution returns ordinary tool exceptions as error content."""
@@ -403,7 +392,6 @@ async def test_call_tool_contains_ordinary_tool_exceptions() -> None:
         await bridge.stop()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_call_tool_propagates_tool_cancellation() -> None:
     """MCP execution leaves cancellation available to the server boundary."""
@@ -416,7 +404,6 @@ async def test_call_tool_propagates_tool_cancellation() -> None:
         await bridge.stop()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_call_tool_preserves_image_attachments() -> None:
     """Tool result image attachments become MCP image content blocks."""
@@ -433,7 +420,6 @@ async def test_call_tool_preserves_image_attachments() -> None:
         await bridge.stop()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_call_tool_keeps_provider_scoped_empty_result_contract() -> None:
     """MCP bridge does not apply AgentTool post-processing markers."""
@@ -448,7 +434,6 @@ async def test_call_tool_keeps_provider_scoped_empty_result_contract() -> None:
         await bridge.stop()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_call_tool_publishes_tool_label_when_publish_is_set() -> None:
     """When ``set_publish`` is wired the bridge fires a ``ToolLabel``.
@@ -473,7 +458,6 @@ async def test_call_tool_publishes_tool_label_when_publish_is_set() -> None:
         await bridge.stop()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_call_tool_silent_when_publish_unset() -> None:
     """Without ``set_publish`` wired, the bridge doesn't reach for one.
@@ -492,7 +476,6 @@ async def test_call_tool_silent_when_publish_unset() -> None:
         await bridge.stop()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_call_tool_marks_empty_error_result() -> None:
     bridge = ToolsBridge([cast(Tool, _EmptyErrorTool())])
@@ -506,7 +489,6 @@ async def test_call_tool_marks_empty_error_result() -> None:
         await bridge.stop()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_stop_leaks_no_asyncio_tasks() -> None:
     """Repeated ``start``/``stop`` cycles do not accrete loop tasks.
@@ -537,7 +519,6 @@ async def test_stop_leaks_no_asyncio_tasks() -> None:
         assert live_count() == baseline, "ToolsBridge.stop leaked a loop task"
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_one_uvicorn_server_shared_across_bridges() -> None:
     """All bridges share ONE process-global uvicorn server (single port).
@@ -564,7 +545,6 @@ async def test_one_uvicorn_server_shared_across_bridges() -> None:
         await b.stop()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_bridge_serves_http_after_another_bridge_stops() -> None:
     """A live bridge keeps serving after a sibling bridge is stopped.
@@ -597,7 +577,6 @@ async def test_bridge_serves_http_after_another_bridge_stops() -> None:
         await survivor.stop()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_restart_resets_stopped_and_delivers_detached() -> None:
     """``start`` after ``stop`` re-arms the bridge; detached results flow.
@@ -624,7 +603,6 @@ async def test_restart_resets_stopped_and_delivers_detached() -> None:
         await bridge.stop()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_stop_clears_publish_sink() -> None:
     """``stop`` releases the runtime publish closure pinned for the turn."""
@@ -635,7 +613,6 @@ async def test_stop_clears_publish_sink() -> None:
     assert bridge._publish is None, "stop left the runtime publish sink pinned"
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_delay_value_is_schema_validated() -> None:
     """A malformed ``delay`` is rejected, not silently coerced.

@@ -23,7 +23,6 @@ def test_default_read_idle_timeout_is_one_minute() -> None:
     assert proc._read_timeout_sec == 60.0
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_write_and_read_json_round_trip(tmp_path: Path) -> None:
     """Round-trip one NDJSON line through a Python echo subprocess."""
@@ -84,7 +83,6 @@ def test_interrupt_returns_false_before_start() -> None:
     assert proc.interrupt() is False
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_interrupt_signals_running_subprocess(tmp_path: Path) -> None:
     """SIGINT to a python child running ``signal.pause()`` makes it exit on KeyboardInterrupt."""
@@ -104,7 +102,6 @@ async def test_interrupt_signals_running_subprocess(tmp_path: Path) -> None:
     del tmp_path
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_interrupt_returns_false_after_close() -> None:
     """``interrupt`` after ``close`` is a no-op (idempotent guard)."""
@@ -114,7 +111,6 @@ async def test_interrupt_returns_false_after_close() -> None:
     assert proc.interrupt() is False
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_read_json_line_skips_non_json_when_requested() -> None:
     """``skip_non_json`` discards banner lines until the first ``{``."""
@@ -132,7 +128,6 @@ async def test_read_json_line_skips_non_json_when_requested() -> None:
     await proc.close()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_read_json_line_raises_transport_error_on_malformed_when_strict() -> None:
     """Protocol garbage on stdout is a subprocess transport failure."""
@@ -149,7 +144,6 @@ async def test_read_json_line_raises_transport_error_on_malformed_when_strict() 
     await proc.close()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_eof_returns_none() -> None:
     """``read_json_line`` returns ``None`` once stdout has closed."""
@@ -159,7 +153,6 @@ async def test_eof_returns_none() -> None:
     await proc.close()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_read_json_line_timeout_is_transport_error() -> None:
     """A silent stdout stall surfaces as a transport failure."""
@@ -175,7 +168,6 @@ async def test_read_json_line_timeout_is_transport_error() -> None:
         await proc.close()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_stderr_tail_captures_diagnostics() -> None:
     """Stderr is drained into the bounded ring buffer for diagnostics."""
@@ -194,7 +186,6 @@ async def test_stderr_tail_captures_diagnostics() -> None:
     await proc.close()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_close_removes_tmpdir(tmp_path: Path) -> None:
     """``close`` removes the owned tmpdir even if the subprocess already exited."""
@@ -207,7 +198,6 @@ async def test_close_removes_tmpdir(tmp_path: Path) -> None:
     assert not owned.exists()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_close_is_idempotent() -> None:
     """A second call to ``close`` is a no-op."""
@@ -217,7 +207,6 @@ async def test_close_is_idempotent() -> None:
     await proc.close()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_write_after_subprocess_exit_raises_runtime_error() -> None:
     """Writing to a closed-stdin subprocess surfaces a clean ``RuntimeError``."""
@@ -231,7 +220,6 @@ async def test_write_after_subprocess_exit_raises_runtime_error() -> None:
     await proc.close()
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_start_cancellation_closes_subprocess() -> None:
     """Cancellation during ``start`` tears down the partially-started child."""
@@ -258,7 +246,6 @@ class _BoomDrainSubproc(Subproc):
         raise RuntimeError("simulated drainer crash")
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_stderr_drain_failure_is_logged(
     caplog: pytest.LogCaptureFixture,

@@ -197,7 +197,6 @@ def test_ensure_valid_cwd_falls_back_to_home(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_run_basic_echo(tmp_path: Path) -> None:
     b = Bash()
     with with_fake_agent() as agent:
@@ -208,7 +207,6 @@ async def test_run_basic_echo(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_run_nonzero_exit_appends_code(tmp_path: Path) -> None:
     b = Bash()
     with with_fake_agent() as agent:
@@ -218,7 +216,6 @@ async def test_run_nonzero_exit_appends_code(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_run_updates_cwd_via_cd(tmp_path: Path) -> None:
     sub = tmp_path / "child"
     sub.mkdir()
@@ -230,7 +227,6 @@ async def test_run_updates_cwd_via_cd(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_run_empty_output(tmp_path: Path) -> None:
     b = Bash()
     with with_fake_agent() as agent:
@@ -240,7 +236,6 @@ async def test_run_empty_output(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_run_captures_stderr(tmp_path: Path) -> None:
     b = Bash()
     with with_fake_agent() as agent:
@@ -250,7 +245,6 @@ async def test_run_captures_stderr(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_run_as_fully_detached_returns_pid(tmp_path: Path) -> None:
     b = Bash()
     with with_fake_agent() as agent:
@@ -263,7 +257,6 @@ async def test_run_as_fully_detached_returns_pid(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_detached_child_reaped_at_exit_without_resource_warning(
     tmp_path: Path,
 ) -> None:
@@ -391,7 +384,6 @@ async def test_kill_and_drain_formats_reason() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_peer_nudge_emitted(tmp_path: Path) -> None:
     b = Bash(peers=[_FakePeer()])
     with with_fake_agent() as agent:
@@ -403,7 +395,6 @@ async def test_peer_nudge_emitted(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_peer_no_nudge_when_matcher_returns_none(tmp_path: Path) -> None:
     b = Bash(peers=[_NonMatchingPeer()])
     with with_fake_agent() as agent:
@@ -419,7 +410,6 @@ def test_bogus_peer_skipped() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.real_sleep
 async def test_peer_nudge_skipped_on_unparseable(tmp_path: Path) -> None:
     b = Bash(peers=[_FakePeer()])
     with with_fake_agent() as agent:

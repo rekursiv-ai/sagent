@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import cast
-from unittest.mock import patch
 
 import os
 
@@ -43,31 +41,8 @@ def pytest_configure(config: pytest.Config) -> None:
     """
     config.addinivalue_line(
         "markers",
-        "real_sleep: don't patch asyncio.sleep for this test",
-    )
-    config.addinivalue_line(
-        "markers",
         "real_llm: spawns a real model CLI/binary; runs in a low-parallelism gate",
     )
-
-
-@pytest.fixture(autouse=True)
-def _fast_sleep(request: pytest.FixtureRequest) -> Iterator[None]:  # pyright: ignore[reportUnusedFunction] -- pytest fixture used via decorator
-    """Replace asyncio.sleep with a no-op so retry tests run instantly.
-
-    Opt out on tests that depend on real sleep semantics (timing,
-    watchdogs, yield ordering) via ``@pytest.mark.real_sleep``.
-    """
-    node = cast(pytest.Item, request.node)
-    if node.get_closest_marker("real_sleep") is not None:
-        yield
-        return
-
-    async def _instant(_: float) -> None:
-        pass
-
-    with patch("asyncio.sleep", _instant):
-        yield
 
 
 @pytest.fixture(autouse=True)

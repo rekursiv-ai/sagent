@@ -1272,7 +1272,6 @@ class _FakeLogChannelAdapter:
 
 class TestLogTap:
     @pytest.mark.anyio
-    @pytest.mark.real_sleep
     async def test_flushes_buffer_on_sentinel(self) -> None:
         adapter = _FakeLogChannelAdapter()
         events: asyncio.Queue[str | None] = asyncio.Queue()
@@ -1297,7 +1296,6 @@ class TestLogTap:
         assert adapter.ensure_calls[0][1] == "C_SRC"
 
     @pytest.mark.anyio
-    @pytest.mark.real_sleep
     async def test_skips_when_no_channel(self) -> None:
         adapter = _FakeLogChannelAdapter(channel_id=None)
         events: asyncio.Queue[str | None] = asyncio.Queue()
@@ -1378,7 +1376,6 @@ class TestStopAgent:
 
 class TestAdapterConstruction:
     @pytest.mark.anyio
-    @pytest.mark.real_sleep
     async def test_start_invokes_auth_and_connect(self) -> None:
         adapter, _ = _make_adapter()
         adapter._web = MagicMock()
@@ -1397,7 +1394,6 @@ class TestAdapterConstruction:
         assert adapter.bot_user_id == "UNEW"
 
     @pytest.mark.anyio
-    @pytest.mark.real_sleep
     async def test_start_with_router_log_channel_resolves(self) -> None:
         adapter, _ = _make_adapter()
         adapter._router_log_channel = "CABC123"
@@ -1417,7 +1413,6 @@ class TestAdapterConstruction:
         assert adapter.bot_user_id == "UNEW"
 
     @pytest.mark.anyio
-    @pytest.mark.real_sleep
     async def test_spawn_agent_writes_manifest(self, tmp_path: Path) -> None:
         adapter, _ = _make_adapter(tmp_path=tmp_path)
         adapter._model = MagicMock()

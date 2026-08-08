@@ -576,7 +576,10 @@ async def test_foreground_success_returns_tool_result() -> None:
         )
 
         async def deliver() -> None:
-            await asyncio.sleep(0.01)
+            # A bare yield, not a timed sleep: this only has to let ``run``
+            # reach its wait before the result is published. A duration would
+            # make the test depend on that duration being faked away.
+            await asyncio.sleep(0)
             agent.runtime.publish(
                 DetachedResult(result=ToolResult(call_id="j", content="payload")),
             )
@@ -779,7 +782,8 @@ async def test_foreground_propagates_error_via_detached_result() -> None:
         )
 
         async def deliver() -> None:
-            await asyncio.sleep(0.01)
+            # See the sibling foreground test: a yield, not a timed sleep.
+            await asyncio.sleep(0)
             agent.runtime.publish(
                 DetachedResult(
                     result=ToolResult(

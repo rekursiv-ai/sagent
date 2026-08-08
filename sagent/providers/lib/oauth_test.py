@@ -228,15 +228,14 @@ async def test_credential_file_lock_blocks_on_external_holder(
         os.close(fd)
 
 
-@pytest.mark.real_sleep
 @pytest.mark.asyncio
 async def test_cancelled_acquire_leaves_no_orphaned_lock(tmp_path: Path) -> None:
     """Cancelling a blocked acquire must not strand the ``flock``.
 
-    Carries ``real_sleep``: the suite no-ops ``asyncio.sleep``
-    (``sagent/conftest.py:65``), and without a real suspension the
-    waiter is cancelled before it ever reaches the blocking ``flock``,
-    so the test passes against the defect.
+    Needs a REAL suspension: without one the waiter is cancelled before it
+    ever reaches the blocking ``flock``, so the test passes against the
+    defect. Nothing fakes ``asyncio.sleep`` any more, so the duration below
+    is load-bearing -- do not replace it with a bare yield.
 
     ``asyncio.to_thread`` cannot cancel the worker it dispatched: the
     thread goes on to acquire, while the cancelled coroutine never
