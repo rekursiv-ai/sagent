@@ -264,8 +264,10 @@ class Subproc:
     def _diagnostic(self) -> str:
         """Format a one-line snapshot for error messages."""
         rc = self._proc.returncode if self._proc is not None else "unstarted"
-        tail = self.stderr_tail[-400:]
-        return f"argv={self._argv[0]!r} rc={rc} stderr_tail={tail!r}"
+        # ``stderr_tail`` is already bounded by the ring buffer's
+        # ``maxlen``; a second character clamp here only cut the most
+        # recent (most diagnostic) lines out of the snapshot.
+        return f"argv={self._argv[0]!r} rc={rc} stderr_tail={self.stderr_tail!r}"
 
     async def _drain_stderr(self) -> None:
         """Read stderr forever, buffering the tail for diagnostics."""

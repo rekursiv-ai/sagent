@@ -111,10 +111,7 @@ class WebSearch:
           label: ``WebSearch '<query>'`` line shown before invocation.
 
         """
-        query = str(args.get("query", ""))
-        if len(query) > 50:
-            query = query[:47] + "..."
-        return f"WebSearch {query!r}"
+        return f"WebSearch {str(args.get('query', ''))!r}"
 
     def summary_result(self, result: ToolResult) -> str | None:
         """Suppress the per-call receipt for WebSearch.
@@ -237,7 +234,7 @@ class WebSearch:
         if not results:
             text = "(no results)"
         else:
-            text = "\n\n".join(_format_result(r) for r in results[:10])
+            text = "\n\n".join(_format_result(r) for r in results)
         return ToolResult(call_id="", content=truncate(text, TOOL_RESULT_MAX_CHARS))
 
 

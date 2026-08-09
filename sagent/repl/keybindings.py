@@ -135,13 +135,18 @@ def build_key_bindings(
     if nav is None:
         nav = NavState()
     kb = KeyBindings()
+    # ``~is_done`` on every binding that dispatches or mutates a pane:
+    # once the prompt is accepted the buffer is no longer the user's live
+    # input, so a late keypress would push to the inbox or edit a queue
+    # behind their back. Measured: without the filter ``tab``'s predicate
+    # still returns True after ``is_done`` flips, while ``enter``'s does not.
     kb.add("enter", filter=~is_done)(
         functools.partial(_kb_submit, agent, queues, nav),
     )
-    kb.add("tab")(functools.partial(_kb_defer, agent, queues, nav))
-    kb.add("down")(functools.partial(_kb_down, queues, nav))
+    kb.add("tab", filter=~is_done)(functools.partial(_kb_defer, agent, queues, nav))
+    kb.add("down", filter=~is_done)(functools.partial(_kb_down, agent, queues, nav))
     kb.add("escape", "enter")(_kb_newline)
-    kb.add("up")(functools.partial(_kb_up, queues, nav))
+    kb.add("up", filter=~is_done)(functools.partial(_kb_up, agent, queues, nav))
     kb.add("s-up")(_kb_history_prefix_back)
     kb.add("s-down")(_kb_history_prefix_fwd)
     kb.add("c-x", "c-e")(_kb_open_editor)
@@ -307,6 +312,7 @@ def _kb_defer(
 
 
 def _kb_up(
+    agent: Agent,
     queues: InputQueues,
     nav: NavState,
     event: KeyPressEvent,
@@ -325,12 +331,13 @@ def _kb_up(
     current.current = buf.text
     if nav.cursor + 1 >= len(nav.stops):
         return  # Oldest stop -- no-op (hard top).
-    _leave_stop_upward(queues, current)
+    _leave_stop_upward(queues, current, agent=agent)
     nav.cursor += 1
     _enter_stop(queues, nav.stops[nav.cursor], buf)
 
 
 def _kb_down(
+    agent: Agent,
     queues: InputQueues,
     nav: NavState,
     event: KeyPressEvent,
@@ -348,7 +355,7 @@ def _kb_down(
         return
     current = nav.stops[nav.cursor]
     current.current = buf.text
-    _leave_stop_downward(queues, current)
+    _leave_stop_downward(queues, current, agent=agent)
     nav.cursor -= 1
     if nav.cursor == 0:
         # Back at the input stop: restore its value and end navigation.
@@ -407,7 +414,9 @@ def _enter_stop(queues: InputQueues, stop: Stop, buf: Buffer) -> None:
     buf.cursor_position = len(buf.text)
 
 
-def _leave_stop_upward(queues: InputQueues, stop: Stop) -> None:
+def _leave_stop_upward(
+    queues: InputQueues, stop: Stop, *, agent: Agent | None = None
+) -> None:
     """Modified-test as the cursor leaves ``stop`` going up.
 
     Runs once per pane stop. Unchanged -> restore the pane (scrolling
@@ -420,10 +429,12 @@ def _leave_stop_upward(queues: InputQueues, stop: Stop) -> None:
     if stop.current != stop.loaded:
         stop.consumed = True
         return
-    _restore_pane(queues, stop, stop.current)
+    _restore_pane(queues, stop, stop.current, agent=agent)
 
 
-def _leave_stop_downward(queues: InputQueues, stop: Stop) -> None:
+def _leave_stop_downward(
+    queues: InputQueues, stop: Stop, *, agent: Agent | None = None
+) -> None:
     """Restore a live pane stop's pane as the cursor leaves it going down.
 
     Down never re-derives: it restores the pane to the stop's CURRENT
@@ -432,11 +443,29 @@ def _leave_stop_downward(queues: InputQueues, stop: Stop) -> None:
     """
     if stop.kind not in (StopKind.QUEUE, StopKind.DEFERRED) or stop.consumed:
         return
-    _restore_pane(queues, stop, stop.current)
+    _restore_pane(queues, stop, stop.current, agent=agent)
 
 
-def _restore_pane(queues: InputQueues, stop: Stop, text: str) -> None:
-    """Put ``text`` back into the pane ``stop`` represents."""
+def _restore_pane(
+    queues: InputQueues, stop: Stop, text: str, *, agent: Agent | None = None
+) -> None:
+    """Put ``text`` back into the pane ``stop`` represents.
+
+    Routes through ``_stage_or_dispatch`` when ``agent`` is known: the
+    pane was emptied while the cursor sat on it, and the runtime may have
+    gone idle in that window. Writing the pane directly would leave the
+    message waiting on an ``AgentIdle`` that never fires again, stranding
+    it until Ctrl+D.
+    """
+    if agent is not None:
+        _stage_or_dispatch(
+            agent,
+            queues,
+            text,
+            deferred=stop.kind is StopKind.DEFERRED,
+            attachments=stop.attachments,
+        )
+        return
     block = QueuedInputBlock(text=text, attachments=stop.attachments)
     if stop.kind is StopKind.QUEUE:
         queues.queue = block
@@ -464,21 +493,12 @@ def _kb_newline(event: KeyPressEvent) -> None:
     event.current_buffer.insert_text("\n")
 
 
-def _history_strings(buf: object) -> list[str]:
+def _history_strings(buf: Buffer) -> list[str]:
     """Return the sagent input history entries, oldest-first.
 
     The walk reads the REPL history file (prompt-toolkit ``FileHistory``).
-    Accessed via duck-typing so tests can supply ``MagicMock`` buffers
-    without a real ``History``.
     """
-    history = getattr(buf, "history", None)
-    if history is None:
-        return []
-    get_strings = getattr(history, "get_strings", None)
-    if get_strings is None:
-        return []
-    strings = get_strings()
-    return list(strings) if strings is not None else []
+    return list(buf.history.get_strings())
 
 
 def _kb_history_prefix_back(event: KeyPressEvent) -> None:

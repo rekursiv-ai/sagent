@@ -352,8 +352,6 @@ class AgentSpawn:
         prompt_arg = args.get("prompt")
         prompt = prompt_arg if isinstance(prompt_arg, str) else ""
         preview = prompt.replace("\n", " ").strip()
-        if len(preview) > 60:
-            preview = preview[:57] + "..."
         model_arg = args.get("model_id")
         suffix = f" [{model_arg}]" if isinstance(model_arg, str) and model_arg else ""
         return f"{self.name} {preview}{suffix}" if preview else self.name

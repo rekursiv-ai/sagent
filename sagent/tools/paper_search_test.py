@@ -65,9 +65,9 @@ def test_summary_fused_source_no_suffix() -> None:
     assert "(fused)" not in out
 
 
-def test_summary_truncates_long_query() -> None:
-    out = PaperSearch().summary({"query": "q" * 80})
-    assert "..." in out
+def test_summary_keeps_long_query() -> None:
+    q = "q" * 80
+    assert PaperSearch().summary({"query": q}) == f"PaperSearch {q!r}"
 
 
 def test_summary_empty_query() -> None:

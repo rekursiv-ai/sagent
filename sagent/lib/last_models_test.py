@@ -70,7 +70,7 @@ def test_record_empty_model_id_raises() -> None:
 def test_record_swallows_locked_down_sagent_dir(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """``record`` is best-effort: a non-writable ``~/.sagent`` must not crash."""
+    """``record`` is best-effort: a non-writable data dir must not crash."""
     ro_root = data_dir("rekursiv-ai") / "sagent"
     ro_root.mkdir(parents=True, exist_ok=True)
     ro_root.chmod(0o500)

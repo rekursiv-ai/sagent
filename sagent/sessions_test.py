@@ -6,9 +6,11 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+import dataclasses
 import json
 import logging
 import os
+import re
 import time
 
 import pytest
@@ -18,6 +20,7 @@ from sagent.lib.userdirs import data_dir
 from sagent.sessions import (
     SessionInfo,
     _peek_session,
+    _prior_cwd_slugs,
     cwd_slug,
     existing_scope_dir,
     latest_session,
@@ -166,6 +169,134 @@ def test_existing_scope_dir_returns_most_recent(tmp_path: Path) -> None:
     assert selected == new
 
 
+def test_latest_session_spans_prior_slug_schemes(tmp_path: Path) -> None:
+    """``--continue`` must see the newest session under ANY slug scheme.
+
+    ``list_sessions`` walks every generation; ``latest_session`` is the
+    cheap single-winner path behind ``--continue``. If it consults one
+    directory, the first new session hides an older-slug conversation
+    that is genuinely more recent.
+    """
+    root = tmp_path / "projects"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    current = root / cwd_slug(cwd) / "cur00000dead"
+    legacy = root / _prior_cwd_slugs(cwd)[-1] / "leg00000dead"
+    _write_session(current, session_id="current")
+    _write_session(legacy, session_id="legacy")
+    os.utime(current / "session.jsonl", (1, 1))
+    os.utime(legacy / "session.jsonl", (1_000_000, 1_000_000))
+
+    latest = latest_session(cwd, projects_dir=root)
+
+    assert latest is not None
+    assert latest.session_id == "legacy"
+
+
+def test_list_all_sessions_includes_nested_scope_sessions(tmp_path: Path) -> None:
+    """Nested scopes are permitted, so the global listing must reach them.
+
+    ``session_dir_for_scope("slack/T123")`` writes
+    ``<root>/slack/T123/<uuid>/``. A listing that assumes exactly one
+    level between the root and a session dir silently omits every scoped
+    session from ``--resume-all`` / ``--continue-all``.
+    """
+    sdir = session_dir_for_scope("slack/T123", base=tmp_path)
+    _write_session(sdir, session_id="nested")
+
+    found = list_all_sessions(projects_dir=tmp_path)
+
+    assert {s.session_id for s in found} == {"nested"}
+
+
+def test_list_sessions_spans_the_ambiguous_escape_scheme(tmp_path: Path) -> None:
+    """Sessions written under the short-lived ambiguous escape stay reachable.
+
+    Between the collapse schemes and today's prefix-free encoding, one
+    revision escaped only characters outside ``[A-Za-z0-9/_-]`` -- so
+    ``-`` and ``_`` passed through. Real sessions landed under it, and
+    the module's invariant is that a slug-rule change never strands a
+    transcript.
+    """
+    root = tmp_path / "projects"
+    cwd = tmp_path / "my-project"
+    cwd.mkdir()
+    old_slug = re.sub(
+        r"[^a-zA-Z0-9/_-]",
+        lambda m: f"-{m.group().encode('utf-8').hex()}-",
+        str(cwd.resolve()),
+    ).replace("/", "_")
+    assert old_slug != cwd_slug(cwd), "fixture must exercise a superseded slug"
+    _write_session(root / old_slug / "deadbeef0001", session_id="old")
+
+    found = list_sessions(cwd, projects_dir=root)
+
+    assert {s.session_id for s in found} == {"old"}
+
+
+def test_cwd_slug_escape_is_unambiguous() -> None:
+    """A literal escape-looking substring must not alias a real escape.
+
+    The escape introducer is ``-``. While ``-`` also passed through
+    verbatim, a path literally containing ``-2e-`` slugged identically to
+    one containing ``.`` -- the same transcript-mixing the escape was
+    added to prevent, moved to a rarer input.
+    """
+    assert cwd_slug("/tmp/x-2e-y") != cwd_slug("/tmp/x.y")  # noqa: S108 -- literal paths exercise the encoding invariant; no FS access.
+    assert cwd_slug("/tmp/a-5f-b") != cwd_slug("/tmp/a_b")  # noqa: S108 -- literal paths exercise the encoding invariant; no FS access.
+
+
+def test_cwd_slug_no_underscore_collision() -> None:
+    """Paths differing only in ``_`` vs ``-`` must not share a slug.
+
+    Sibling of ``test_cwd_slug_no_separator_collision``: that one closed
+    the ``/`` case, but every other non-alphanumeric still folded to
+    ``-``, so ``~/my_project`` and ``~/my-project`` mixed transcripts.
+    """
+    assert cwd_slug("/tmp/a_b") != cwd_slug("/tmp/a-b")  # noqa: S108 -- literal paths exercise the collision invariant; no FS access.
+    assert cwd_slug("/tmp/a.b") != cwd_slug("/tmp/a-b")  # noqa: S108 -- literal paths exercise the collision invariant; no FS access.
+
+
+def test_list_sessions_spans_prior_slug_schemes(tmp_path: Path) -> None:
+    """Sessions written under an older slug stay listable forever.
+
+    ``new_session_dir`` creates the current slug on the first new
+    session. A read path that resolves to a single slug therefore hides
+    every session written under a prior scheme the moment one new
+    session lands -- silently emptying ``--resume`` in that directory.
+    """
+    root = tmp_path / "projects"
+    cwd = tmp_path / "wk"
+    cwd.mkdir()
+    for slug in (*_prior_cwd_slugs(cwd), cwd_slug(cwd)):
+        _write_session(root / slug / f"{slug[-4:]}0000dead", session_id=slug)
+    found = {s.session_id for s in list_sessions(cwd, projects_dir=root)}
+    assert found == {*_prior_cwd_slugs(cwd), cwd_slug(cwd)}, (
+        f"every slug generation must remain listable; got {found}"
+    )
+
+
+def test_existing_scope_dir_ranks_by_transcript_mtime(tmp_path: Path) -> None:
+    """Recency means the transcript's mtime, as it does everywhere else.
+
+    ``_peek_session`` and ``latest_session`` both rank on the
+    ``session.jsonl`` mtime. A directory's own mtime moves whenever any
+    child is created or removed -- so ranking on it can hand back a scope
+    whose conversation is older than a sibling's.
+    """
+    scope = "scope-M"
+    stale = tmp_path / scope / "stale"
+    fresh = tmp_path / scope / "fresh"
+    _write_session(stale, session_id="S")
+    _write_session(fresh, session_id="F")
+    # Transcript recency and directory recency disagree.
+    os.utime(stale / "session.jsonl", (1_000_000, 1_000_000))
+    os.utime(fresh / "session.jsonl", (1, 1))
+    os.utime(stale, (1, 1))
+    os.utime(fresh, (1_000_000, 1_000_000))
+    assert existing_scope_dir(scope, base=tmp_path) == stale
+
+
 def test_parse_jsonl_skips_blank_and_malformed_lines() -> None:
     text = '{"a": 1}\n\n{not json}\n{"b": 2}\n'
     records = parse_jsonl(text)
@@ -309,6 +440,26 @@ def _info(idx: int) -> SessionInfo:
     )
 
 
+def test_pick_session_marks_corrupt_entries() -> None:
+    """A truncated transcript must be visibly distinguishable in the picker.
+
+    ``SessionInfo.corrupt`` records that the counts shown are partial. If
+    nothing renders it, a damaged session is indistinguishable from a
+    healthy one and resumes silently with a confidently wrong count.
+    """
+    healthy = _info(1)
+    damaged = dataclasses.replace(_info(2), corrupt=True)
+    sout = StringIO()
+    _ = pick_session([healthy, damaged], stream_in=StringIO("\n"), stream_out=sout)
+    lines = {
+        line.split("]")[0]: line for line in sout.getvalue().splitlines() if "]" in line
+    }
+    assert "?" in lines["  [ 2"], (
+        f"corrupt entry must be marked; got {lines['  [ 2']!r}"
+    )
+    assert "?" not in lines["  [ 1"], "healthy entry must not be marked"
+
+
 def test_pick_session_empty_returns_none() -> None:
     assert pick_session([]) is None
 
@@ -343,9 +494,8 @@ def test_pick_session_non_numeric_then_eof_returns_none() -> None:
     assert selected is None
 
 
-def test_pick_session_writes_a_menu(tmp_path: Path) -> None:
+def test_pick_session_writes_a_menu() -> None:
     """Each session renders a numbered entry."""
-    del tmp_path
     sessions = [_info(1), _info(2)]
     sout = StringIO()
     _ = pick_session(sessions, stream_in=StringIO("\n"), stream_out=sout)
@@ -688,6 +838,52 @@ def test_bridge_skills_absent_when_claude_lacks_it(
     assert not (sagent / "skills").is_symlink()
 
 
+def test_migrate_follows_sagent_symlink_to_a_non_claude_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``~/.sagent`` symlink to somewhere OTHER than ``~/.claude`` is real data.
+
+    Only a symlink into the Claude tree is the squat. Treating every
+    symlink as a squat sends the migration down the Claude branch and
+    silently abandons whatever the link actually points at.
+    """
+    claude, sagent = _setup_homes(tmp_path, monkeypatch)
+    target = tmp_path / "elsewhere"
+    _write_session(target / "projects" / "-p" / "deadbeef0001", session_id="S1")
+    link = tmp_path / "dot-sagent"
+    link.symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(sessions, "_LEGACY_SAGENT_HOME", link)
+    claude.mkdir(parents=True, exist_ok=True)
+
+    sessions.migrate_legacy_home()
+
+    migrated = sagent / "projects" / "-p" / "deadbeef0001" / "session.jsonl"
+    assert migrated.exists(), "data behind a non-Claude symlink must migrate"
+
+
+def test_migrate_logs_only_when_it_copies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The second run must not claim a migration it did not perform.
+
+    Migration runs on every startup; a log keyed on the destination
+    existing reports "migrated" forever after the one run that copied.
+    """
+    claude, _sagent = _setup_homes(tmp_path, monkeypatch)
+    _write_session(
+        claude / "projects" / "-home-u-proj" / "deadbeef0001", session_id="S1"
+    )
+    sessions.migrate_legacy_home()
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        sessions.migrate_legacy_home()
+    assert not [r for r in caplog.records if "migrated legacy sessions" in r.message], (
+        "a no-op migration must stay silent"
+    )
+
+
 def test_project_dir_resolves_legacy_dash_slug(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -696,7 +892,7 @@ def test_project_dir_resolves_legacy_dash_slug(
     projects = tmp_path / "projects"
     cwd = tmp_path / "work"
     cwd.mkdir()
-    legacy = projects / sessions._legacy_cwd_slug(cwd)
+    legacy = projects / _prior_cwd_slugs(cwd)[-1]
     _write_session(legacy / "deadbeef0001", session_id="S1")
 
     resolved = project_dir(cwd, projects_dir=projects)
@@ -713,7 +909,7 @@ def test_new_session_writes_current_slug_even_when_legacy_exists(
     projects = tmp_path / "projects"
     cwd = tmp_path / "work"
     cwd.mkdir()
-    legacy = projects / sessions._legacy_cwd_slug(cwd)
+    legacy = projects / _prior_cwd_slugs(cwd)[-1]
     _write_session(legacy / "deadbeef0001", session_id="S1")
 
     created = new_session_dir(cwd, projects_dir=projects)

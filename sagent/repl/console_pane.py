@@ -14,6 +14,7 @@ from typing import Final, Literal, assert_never, cast
 import io
 import re
 
+from rich.cells import chop_cells
 from rich.console import Console
 from rich.text import Text
 
@@ -111,9 +112,19 @@ class ConsolePrinter:
             self.console.print(Text(line, style="dim"))
 
     def write_tool_label(self, text: str) -> None:
-        """Render dim multi-line tool-call label."""
-        for line in (text or "").splitlines() or [""]:
-            self.console.print(Text(f"  {line}", style="dim"))
+        """Render a dim tool-call label, wrapped to the console width.
+
+        Tool ``summary`` implementations return their argument whole --
+        the cap lives here, in the only place that knows the terminal
+        width and the child-block gutter. Wrapping (rather than the
+        per-tool character clamps this replaced) keeps a long command or
+        query readable instead of ellipsized mid-token; the line cap
+        bounds the pathological case (a heredoc, a pasted blob) so one
+        call cannot flood scrollback before it even runs.
+        """
+        lines = _wrap_label(text, self.console.width - len(_LABEL_INDENT))
+        for line in lines:
+            self.console.print(Text(f"{_LABEL_INDENT}{line}", style="dim"))
 
     def write_tool_error(self, text: str) -> None:
         """Render red, indented tool-error (multi-line aware).
@@ -275,6 +286,37 @@ def _dim_baseline(line: str) -> str:
     """
     rebound = line.replace(_ANSI_RESET, _ANSI_RESET_DIM)
     return _ANSI_DIM + rebound + _ANSI_DIM_OFF
+
+
+_LABEL_INDENT: Final = "  "
+
+# Rendered-line cap for one tool label. Labels carry the argument whole
+# (a command, a query, a pasted prompt), so a heredoc or blob would
+# otherwise push the surrounding scrollback off-screen before the tool
+# has even run. Head-biased: the opening of a command identifies it.
+_LABEL_MAX_LINES: Final = 12
+
+
+def _wrap_label(text: str, width: int) -> list[str]:
+    """Wrap ``text`` to ``width`` cells, capped at ``_LABEL_MAX_LINES``.
+
+    Args:
+      text: Raw label text; may contain newlines.
+      width: Usable cell width after the indent.
+
+    Returns:
+      lines: Wrapped lines, with a trailing ``... (N more lines)`` marker
+          when the cap elided content.
+
+    """
+    usable = max(1, width)
+    out: list[str] = []
+    for raw in (text or "").splitlines() or [""]:
+        out.extend(chop_cells(raw, usable) or [""])
+    if len(out) <= _LABEL_MAX_LINES:
+        return out
+    hidden = len(out) - _LABEL_MAX_LINES
+    return [*out[:_LABEL_MAX_LINES], f"... ({hidden} more lines)"]
 
 
 _CHILD_INDENT: Final = "  "

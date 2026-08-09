@@ -40,13 +40,14 @@ def test_startup_error_no_log() -> None:
     assert _startup_error("server died", []) == "server died"
 
 
-def test_startup_error_with_tail() -> None:
+def test_startup_error_with_full_log() -> None:
     log = [f"line {i}" for i in range(30)]
     out = _startup_error("server died", log)
     assert out.startswith("server died; recent log:")
-    # Tail is the last 20 lines.
+    # Whole log: llama.cpp announces the real cause in the FIRST lines
+    # (missing model file, bad GPU layer count), which a tail dropped.
     assert "line 29" in out
-    assert "line 9" not in out
+    assert "line 0" in out
 
 
 def test_free_port_returns_int_within_range() -> None:

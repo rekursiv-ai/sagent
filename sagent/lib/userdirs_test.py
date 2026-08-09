@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from sagent.lib.userdirs import cache_dir, config_dir, data_dir, state_dir
+from sagent.lib.userdirs import (
+    cache_dir,
+    config_dir,
+    data_dir,
+    resolve_working_dir,
+    state_dir,
+)
 
 
 @pytest.fixture
@@ -104,6 +110,25 @@ def test_data_dir_localappdata_override(
     assert (
         data_dir("myapp", platform="win32") == tmp_path / "AppData" / "Local" / "myapp"
     )
+
+
+def test_resolve_working_dir_without_base_is_its_own_root() -> None:
+    assert resolve_working_dir(None, "/checkpoints") == Path("/checkpoints")
+
+
+def test_resolve_working_dir_nests_absolute_working_dir_under_base() -> None:
+    """An absolute ``working_dir`` must still land beneath ``base_dir``.
+
+    ``Path("/a") / "/b" == Path("/b")`` -- POSIX makes an absolute right
+    operand discard the base. Without the leading-slash strip, a logical
+    root like ``"/checkpoints"`` would silently escape its owner's
+    ``base_dir`` and write to the filesystem root.
+    """
+    assert resolve_working_dir("/base", "/checkpoints") == Path("/base/checkpoints")
+
+
+def test_resolve_working_dir_accepts_relative_working_dir() -> None:
+    assert resolve_working_dir("/base", "runs/exp1") == Path("/base/runs/exp1")
 
 
 if __name__ == "__main__":

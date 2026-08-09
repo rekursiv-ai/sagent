@@ -224,8 +224,7 @@ def test_summary_short_and_long() -> None:
     t = AgentSpawn()
     assert t.summary({"prompt": "go"}) == "AgentSpawn go"
     long = "x" * 100
-    s = t.summary({"prompt": long})
-    assert s.endswith("...")
+    assert t.summary({"prompt": long}) == f"AgentSpawn {long}"
     assert t.summary({"prompt": "go", "model_id": "m1"}) == "AgentSpawn go [m1]"
     assert t.summary({}) == "AgentSpawn"
 

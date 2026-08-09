@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import asyncio
-import contextlib
 import dataclasses
 import functools
 import logging
@@ -117,42 +116,58 @@ async def run_repl(
         render_observer = make_render_observer(
             printer, show_thinking=lambda: agent.show_thinking
         )
-        agent.runtime.observers.append(render_observer)
-        uninstall_committer = install_input_queue_committer(agent, queues)
-        pump_task = spawn_repl_pump(
-            agent,
-            PromptToolkitInputSource(session, queues=queues, console=console),
-            queues=queues,
-            printer=printer,
-        )
-        replay_messages(agent, printer)
-        if agent.status:
-            printer.set_terminal_title(agent.status)
-        elif agent.name:
-            printer.set_terminal_title(agent.name)
+        # Everything that mutates the runtime lives inside the ``try``: the
+        # ``finally`` below is the only path that detaches the observer,
+        # restores ``before_tool_spawn``, and cancels the pump. Replay and
+        # the title call can both raise on real input (a corrupt tape, a
+        # closed terminal), so installing outside would leak all three.
+        uninstall_committer: Callable[[], None] | None = None
+        pump_task: asyncio.Task[None] | None = None
         try:
+            agent.runtime.observers.append(render_observer)
+            uninstall_committer = install_input_queue_committer(agent, queues)
+            pump_task = spawn_repl_pump(
+                agent,
+                PromptToolkitInputSource(session, queues=queues, console=console),
+                queues=queues,
+                printer=printer,
+            )
+            replay_messages(agent, printer)
+            if agent.status:
+                printer.set_terminal_title(agent.status)
+            elif agent.name:
+                printer.set_terminal_title(agent.name)
             await agent.serve_forever()
         finally:
+            # Detach FIRST. These two lines are the whole reason the
+            # ``try`` exists; anything ahead of them (shutdown, task
+            # cancellation) can raise and would skip them, re-opening the
+            # leak. Detaching early is safe -- the observer only renders.
+            if uninstall_committer is not None:
+                uninstall_committer()
+            if render_observer in agent.runtime.observers:
+                agent.runtime.observers.remove(render_observer)
             agent.shutdown(force=True)
             bg_tasks = _background_tasks_for_repl_cancel(agent)
             for t in bg_tasks:
                 _ = t.cancel()
             if bg_tasks:
                 _ = await asyncio.gather(*bg_tasks, return_exceptions=True)
-            _ = pump_task.cancel()
-            try:
-                with contextlib.suppress(asyncio.CancelledError):
+            if pump_task is not None:
+                _ = pump_task.cancel()
+                try:
                     await pump_task
-            except Exception as exc:
-                log_exception_or_warning(
-                    logger, "REPL input pump raised during shutdown", exc
-                )
+                except asyncio.CancelledError:
+                    # Only OUR cancellation is expected here. If this task
+                    # is itself being cancelled, swallowing it would break
+                    # structured cancellation, so re-raise in that case.
+                    if not pump_task.cancelled():
+                        raise
+                except Exception as exc:
+                    log_exception_or_warning(
+                        logger, "REPL input pump raised during shutdown", exc
+                    )
             agent.cancel_background(REPL_PUMP_KEY)
-            # Detach observers + restore before_tool_spawn so re-entering
-            # ``run_repl`` on the same agent doesn't accumulate state.
-            uninstall_committer()
-            if render_observer in agent.runtime.observers:
-                agent.runtime.observers.remove(render_observer)
     # A non-empty tape with no transcript on disk is silent data loss. The
     # runtime isolates observer exceptions (Runtime.publish), so a persistence
     # write failure cannot surface mid-turn; this end-of-session check is where
@@ -167,7 +182,7 @@ async def run_repl(
     if agent.session_dir is not None:
         _ = sys.stderr.write(
             "Resume this session with:\n"
-            f"sagent --resume {agent.session_dir.name[:8]}  # this exact session (any unique prefix works)\n"
+            f"sagent --resume {agent.session_dir.name[:8]}  # this exact session (any prefix unique in this dir)\n"
             "sagent --continue         # most recent session in this dir\n"
             "sagent --resume           # interactive picker for this dir\n"
             "sagent --continue-all     # most recent session across all dirs\n"
@@ -616,8 +631,13 @@ _KV_KEYS = frozenset({"provider", "auth", "account", "model", "model_id"})
 class _ParsedModelArgs:
     """Only the fields the user explicitly typed; rest stay ``None``.
 
-    ``account_set`` disambiguates "user typed account=" (with empty or
-    'default' → ``None``) from "user didn't mention account at all."
+    ``account_set`` disambiguates "user typed ``account=``" from "user
+    didn't mention account at all." The typed value is preserved
+    verbatim, including ``""`` and ``"default"``: those name the legacy
+    unnamed account (``resolve_account`` / ``credentials_path`` in
+    ``providers/lib/oauth.py`` collapse both onto the default file), and
+    normalising them to ``None`` here would mean "inherit the current
+    account" instead -- leaving no way to switch back off a named one.
 
     """
 

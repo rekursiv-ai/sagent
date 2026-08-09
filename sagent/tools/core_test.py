@@ -531,15 +531,27 @@ async def test_tool_run_async_function_returns_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tool_run_truncates_long_content() -> None:
-    @tool(max_result_chars=10)
+async def test_tool_run_truncates_at_the_shared_cap() -> None:
+    """The only result cap is ``TOOL_RESULT_MAX_CHARS``; no per-tool knob."""
+
+    @tool
     def fn(x: str) -> str:
         del x
-        return "y" * 100
+        return "y" * (TOOL_RESULT_MAX_CHARS + 100)
 
     out = await fn.run({"x": ""})
-    assert len(out.content) > 10  # contains the truncation notice too.
     assert "truncated" in out.content
+
+
+@pytest.mark.asyncio
+async def test_tool_run_keeps_content_under_the_cap() -> None:
+    @tool
+    def fn(x: str) -> str:
+        del x
+        return "y" * 100_000
+
+    out = await fn.run({"x": ""})
+    assert out.content == "y" * 100_000
 
 
 @pytest.mark.asyncio
@@ -767,14 +779,17 @@ def test_changed_files_context_returns_reminder(tmp_path: Path) -> None:
     assert str(f) in out
 
 
-def test_changed_files_context_truncates_large_diff(tmp_path: Path) -> None:
+def test_changed_files_context_keeps_large_diff_whole(tmp_path: Path) -> None:
+    """A change the agent must not revert is reported in full."""
     f = tmp_path / "a.txt"
     f.write_text("\n".join(f"old{i}" for i in range(50)) + "\n")
     with with_fake_agent() as agent:
         agent.tool_state.mark_read(str(f), content=f.read_text(), mtime=1.0)
         f.write_text("\n".join(f"new{i}" for i in range(50)) + "\n")
-        out = changed_files_context(max_diff_lines=2)
-    assert "(truncated)" in out
+        out = changed_files_context()
+    assert "(truncated)" not in out
+    assert "new0" in out
+    assert "new49" in out
 
 
 def test_read_cache_entry_is_namedtuple() -> None:

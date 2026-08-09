@@ -54,11 +54,10 @@ def test_summary_short_query() -> None:
     assert t.summary({"query": "cats"}) == "WebSearch 'cats'"
 
 
-def test_summary_long_query_truncates() -> None:
+def test_summary_keeps_long_query() -> None:
     t = WebSearch()
     q = "x" * 80
-    out = t.summary({"query": q})
-    assert out.endswith("...'")
+    assert t.summary({"query": q}) == f"WebSearch {q!r}"
 
 
 def test_summary_result_returns_none() -> None:
@@ -140,16 +139,18 @@ def test_run_no_results() -> None:
     assert result.content == "(no results)"
 
 
-def test_run_caps_at_10_results() -> None:
+def test_run_returns_every_result() -> None:
     hits = [
         SearchResult(url=f"https://x/{i}", title=f"T{i}", snippet="s")
         for i in range(25)
     ]
     with patch("sagent.tools.web_search.search", return_value=hits):
         result = asyncio.run(WebSearch().run({"query": "many"}))
+    # The backend's own ``limit`` governs; a silent [:10] slice dropped
+    # results the caller had already paid to fetch.
     assert "T0" in result.content
     assert "T9" in result.content
-    assert "T10" not in result.content
+    assert "T24" in result.content
 
 
 def test_run_runtime_error_returns_tool_result_error() -> None:

@@ -50,12 +50,6 @@ def _suppress_oserror() -> contextlib.suppress:
     return contextlib.suppress(OSError, ProcessLookupError)
 
 
-# Mid-stream bash output line cap. Large outputs (test suites, log
-# dumps) trim the middle to keep tool_result under the per-tool
-# persist threshold, preserving head/tail for diagnosis.
-_BASH_MAX_LINES = 500  # config-globals: ignore -- display line cap, user-retunable
-_BASH_HEAD_LINES = 250  # config-globals: ignore -- display line cap, user-retunable
-_BASH_TAIL_LINES = 250  # config-globals: ignore -- display line cap, user-retunable
 BASH_DEFAULT_TIMEOUT_MS = 120_000  # config-globals: ignore -- default timeout dial
 BASH_MAX_TIMEOUT_MS = 600_000  # config-globals: ignore -- max timeout dial
 
@@ -117,16 +111,6 @@ def _render_bash_description(text: str) -> str:
         .replace("${GET_MAX_TIMEOUT_MS()}", str(BASH_MAX_TIMEOUT_MS))
         .replace("${GET_DEFAULT_TIMEOUT_MS()}", str(BASH_DEFAULT_TIMEOUT_MS))
     )
-
-
-def _trim_bash_output(lines: list[str]) -> str:
-    """Cap output at _BASH_MAX_LINES, dropping the middle if over."""
-    if len(lines) <= _BASH_MAX_LINES:
-        return "\n".join(lines)
-    head = lines[:_BASH_HEAD_LINES]
-    tail = lines[-_BASH_TAIL_LINES:]
-    omitted = len(lines) - _BASH_HEAD_LINES - _BASH_TAIL_LINES
-    return "\n".join(head) + f"\n... [{omitted} lines omitted] ...\n" + "\n".join(tail)
 
 
 class Bash:
@@ -201,8 +185,6 @@ class Bash:
         cmd = str(args.get("command", ""))
         cmd = cmd.replace("\r\n", "⏎").replace("\n", "⏎").replace("\r", "⏎")
         cmd = cmd.replace("\t", " ")
-        if len(cmd) > 60:
-            cmd = cmd[:57] + "..."
         return f"Bash {cmd}" if cmd else "Bash"
 
     def summary_result(self, result: ToolResult) -> str | None:
@@ -383,9 +365,7 @@ async def _kill_and_drain(
     killed_lines = stdout.split("\n")
     if stderr:
         killed_lines.extend(stderr.split("\n"))
-    return (
-        _trim_bash_output(killed_lines).strip() + f"\n[{reason} after {elapsed:.1f}s]"
-    )
+    return "\n".join(killed_lines).strip() + f"\n[{reason} after {elapsed:.1f}s]"
 
 
 def _process_output(
@@ -407,7 +387,7 @@ def _process_output(
             output_lines.append(line)
     if stderr:
         output_lines.extend(stderr.split("\n"))
-    out = _trim_bash_output(output_lines)
+    out = "\n".join(output_lines)
     if proc.returncode != 0:
         out += f"\n[exit code: {proc.returncode}]"
     return out.strip() or "(no output)"

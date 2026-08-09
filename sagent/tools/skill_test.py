@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from sagent.agent.state import ToolState
+from sagent.lib.userdirs import data_dir
 from sagent.testing import with_fake_agent
 from sagent.tools import skill as sk
 from sagent.tools.skill import (
@@ -40,15 +41,37 @@ def _write_skill(
 
 
 @pytest.fixture(autouse=True)
-def _isolate_user_skills(  # pyright: ignore[reportUnusedFunction] -- autouse fixture
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Point user-skill discovery at an empty tmp tree.
+def _isolate_user_skills() -> None:  # pyright: ignore[reportUnusedFunction] -- autouse fixture
+    """Assert the autouse XDG isolation actually reaches skill discovery.
 
-    Many devs have ``~/.sagent/skills`` populated; tests must not see
-    those, or assertions about "exactly N skills" will flake.
+    Many devs have a populated user skills dir; tests must not see it, or
+    assertions about "exactly N skills" flake. ``isolate_user_dirs``
+    already repoints ``XDG_DATA_HOME`` at a tmp root, and
+    :func:`user_skill_roots` resolves per call -- so no patching is
+    needed. This guard fails loudly if that resolution regresses to an
+    import-time constant, which would silently reintroduce the flake.
     """
-    monkeypatch.setattr(sk, "_USER_SKILL_ROOTS", ())
+    assert not sk.user_skill_roots()[0].exists(), (
+        "user skill discovery escaped XDG isolation; tests would see real skills"
+    )
+
+
+def test_user_skill_root_follows_xdg_data_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """User-skill discovery must resolve XDG at call time, not import time.
+
+    The autouse ``isolate_user_dirs`` fixture redirects the XDG vars per
+    test, but a module-level constant froze its value when the module was
+    first imported -- so discovery still reads the operator's real skills
+    dir. That is why ``_isolate_user_skills`` has to patch a private
+    constant instead of just setting the environment.
+    """
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    expected = data_dir("rekursiv-ai") / "sagent" / "skills"
+    assert sk.user_skill_roots() == (expected,), (
+        "user skill roots must follow a late XDG_DATA_HOME"
+    )
 
 
 def test_discover_finds_project_skill(tmp_path: Path) -> None:
@@ -140,7 +163,7 @@ def test_format_listing_empty_returns_blank() -> None:
     assert format_listing([]) == ""
 
 
-def test_format_listing_truncates_long_description() -> None:
+def test_format_listing_keeps_long_description() -> None:
     info = SkillInfo(
         name="x",
         description="a" * 300,
@@ -150,7 +173,9 @@ def test_format_listing_truncates_long_description() -> None:
     )
     out = format_listing([info])
     assert "x" in out
-    assert "..." in out
+    # The trigger description is author-authored prompt text, not model
+    # output: clipping it hid the very condition it exists to state.
+    assert "a" * 300 in out
 
 
 def test_format_listing_uses_placeholder_for_missing_description() -> None:
@@ -322,8 +347,9 @@ async def test_post_compact_restore_skips_when_cwd_unset(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_post_compact_restore_truncates_huge_body(tmp_path: Path) -> None:
-    huge = "x" * (Skill._MAX_CHARS_PER_SKILL + 100)
+async def test_post_compact_restore_keeps_huge_body_whole(tmp_path: Path) -> None:
+    """A skill body is a contract: restore it whole or not at all."""
+    huge = "x" * 60_000
     _write_skill(tmp_path, "alpha", body=huge)
     state = ToolState()
     state.bash_cwd = str(tmp_path)
@@ -332,18 +358,19 @@ async def test_post_compact_restore_truncates_huge_body(tmp_path: Path) -> None:
     await Skill(restore_after_compact=True).post_compact_restore(history, state)
     entry = history[0]
     assert isinstance(entry, UserMessage)
-    assert "(truncated)" in entry.text
+    assert huge in entry.text
+    assert "(truncated)" not in entry.text
 
 
 @pytest.mark.asyncio
-async def test_post_compact_restore_budget_caps_total(tmp_path: Path) -> None:
+async def test_post_compact_restore_keeps_every_skill(tmp_path: Path) -> None:
+    """``budget_chars`` no longer drops skills; a partial catalog is a lie."""
     _write_skill(tmp_path, "alpha", body="A" * 500)
     _write_skill(tmp_path, "beta", body="B" * 500)
     state = ToolState()
     state.bash_cwd = str(tmp_path)
     state.invoked_skills.update({"alpha", "beta"})
     history: list[ModelContextEvent] = [UserMessage(text="hi")]
-    # Budget caps total at ~one body; the second body is skipped.
     await Skill(restore_after_compact=True).post_compact_restore(
         history,
         state,
@@ -351,10 +378,8 @@ async def test_post_compact_restore_budget_caps_total(tmp_path: Path) -> None:
     )
     entry = history[0]
     assert isinstance(entry, UserMessage)
-    # Exactly one of the two skill bodies survives.
-    has_alpha = "A" * 500 in entry.text
-    has_beta = "B" * 500 in entry.text
-    assert has_alpha != has_beta
+    assert "A" * 500 in entry.text
+    assert "B" * 500 in entry.text
 
 
 if __name__ == "__main__":

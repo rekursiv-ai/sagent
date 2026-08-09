@@ -45,6 +45,7 @@ from sagent.bin.cli import (
     _parse_stream_json,
     _resolve_cli_thinking_state,
     _resolve_provider_and_allow,
+    _resolve_resume_hash,
     _resolve_session_dir,
     _resume_label,
     _resume_persistent_agents,
@@ -53,6 +54,7 @@ from sagent.bin.cli import (
     resolve_tools,
 )
 from sagent.providers import PROVIDER_NAMES
+from sagent.sessions import project_dir
 from sagent.testing import FakeAgent
 from sagent.types.cost import (
     PriceCatalog,
@@ -96,6 +98,20 @@ def test_parse_cli_args_defaults() -> None:
     assert ns.tools is None
     assert ns.add_dir == []
     assert ns.compact is True
+
+
+def test_parse_cli_args_history_is_a_path() -> None:
+    """``--history`` must reach ``run_repl`` as a ``Path``, not a ``str``.
+
+    ``run_repl`` annotates ``history: Path | None`` and calls
+    ``history_path.parent.mkdir(...)``. Without ``type=Path`` argparse
+    hands it a truthy ``str``, which survives the ``or`` default and
+    raises ``AttributeError`` before the prompt ever renders.
+    """
+    ns = _parse(["--history", "/tmp/h/hist"])  # noqa: S108 -- literal path, never created.
+    assert isinstance(ns.history, Path), (
+        f"--history must parse to Path; got {type(ns.history).__name__}"
+    )
 
 
 def test_parse_cli_args_no_compact() -> None:
@@ -574,6 +590,63 @@ def test_parse_cli_args_resume_no_value() -> None:
 def test_parse_cli_args_resume_with_hash() -> None:
     ns = _parse(["--resume", "abc123"])
     assert ns.resume == "abc123"
+
+
+def test_parse_stream_json_accepts_empty_object_line() -> None:
+    """A bare ``{}`` line is a JSON object and must not be fatal.
+
+    ``{"other": "data"}`` -- also prompt-less -- is silently skipped, so
+    rejecting ``{}`` makes the stricter case the one that carries LESS
+    information. The type guard must test the parsed value, not the
+    emptiness of the narrowed dict.
+    """
+    assert _parse_stream_json("{}\n") == ""
+    assert _parse_stream_json('{}\n{"prompt": "hi"}\n') == "hi"
+
+
+def test_parse_stream_json_rejects_non_object_line() -> None:
+    """A non-object line is still a hard error at the stdin trust boundary."""
+    with pytest.raises(TypeError, match="JSON objects per line"):
+        _ = _parse_stream_json("[1, 2]\n")
+
+
+def test_resolve_resume_hash_rejects_empty_prefix(tmp_path: Path) -> None:
+    """``--resume ''`` must not match every session by accident.
+
+    ``"".startswith(x)`` is universally true, so an empty prefix silently
+    resumes the only session on disk and reports "ambiguous" when there
+    are several -- neither of which the operator asked for.
+    """
+    project = project_dir(tmp_path)
+    d = project / "ab1111111111"
+    d.mkdir(parents=True)
+    (d / "session.jsonl").write_text('{"kind": "meta", "session_id": "x"}\n')
+    with pytest.raises(SystemExit):
+        _ = _resolve_resume_hash("", tmp_path)
+
+
+def test_resolve_resume_hash_refuses_ambiguous_prefix(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An ambiguous prefix must not silently pick one session.
+
+    The resume banner promises "any unique prefix works". Returning the
+    first mtime-ordered match instead attaches to a session the operator
+    did not name, and nothing in the output reveals the ambiguity. The
+    autouse XDG isolation puts the projects root under a tmp dir, so
+    ``list_sessions`` sees only what this test writes.
+    """
+    project = project_dir(tmp_path)
+    for sid in ("ab1111111111", "ab2222222222"):
+        d = project / sid
+        d.mkdir(parents=True)
+        (d / "session.jsonl").write_text('{"kind": "meta", "session_id": "x"}\n')
+    with pytest.raises(SystemExit):
+        _ = _resolve_resume_hash("ab", tmp_path)
+    err = capsys.readouterr().err
+    assert "ambiguous" in err.lower(), f"ambiguity must be surfaced; got {err!r}"
+    assert "ab1111111111" in err
+    assert "ab2222222222" in err
 
 
 def test_parse_cli_args_resume_persistent_defaults_enabled() -> None:

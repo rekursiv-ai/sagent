@@ -97,10 +97,7 @@ class AgentSend:
 
         """
         to = str(args.get("to", ""))
-        content = str(args.get("content", ""))
-        preview = content.replace("\n", " ").strip()
-        if len(preview) > 40:
-            preview = preview[:37] + "..."
+        preview = str(args.get("content", "")).replace("\n", " ").strip()
         return f"{self.name} → {to}: {preview}" if to else self.name
 
     def summary_result(self, result: ToolResult) -> str | None:

@@ -1,6 +1,7 @@
 """Structured JSON-line debug log for diagnosing wire-layer errors.
 
-Writes to ``$SAGENT_DEBUG_LOG`` (default ``~/.sagent/debug.log``). Two
+Writes to ``$SAGENT_DEBUG_LOG`` (default
+``data_dir("rekursiv-ai")/sagent/debug.log``). Two
 entry points:
 
 - ``trace(event, **data)`` - verbose, gated on ``SAGENT_DEBUG=1``.

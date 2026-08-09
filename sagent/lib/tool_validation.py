@@ -8,9 +8,6 @@ from typing import cast
 from sagent.lib.custom_json import JSON, validate_json_schema
 
 
-_MAX_ADVERTISED_KEYS = 50  # config-globals: ignore -- max advertised keys in error
-
-
 def validate_tool_input(
     tool_name: str,
     schema: JSON,
@@ -46,7 +43,8 @@ def validate_tool_input(
     # upstream function returns plain strings. Changes to that prefix must be
     # reflected here.
     if any(issue.startswith("Unexpected parameter") for issue in issues) and accepted:
-        parts.append(f"{tool_name} accepts: {_format_keys(accepted)}.")
+        keys = ", ".join(f"`{k}`" for k in accepted)
+        parts.append(f"{tool_name} accepts: {keys}.")
     parts.append(
         "\nThis tool call was not executed because its JSON directive was missing "
         "or misstated required fields. Do not repeat the same empty or incomplete "
@@ -62,11 +60,3 @@ def _schema_strings(value: object) -> list[str]:
         return []
     items = cast(Sequence[object], value)
     return [item for item in items if isinstance(item, str)]
-
-
-def _format_keys(keys: list[str]) -> str:
-    """Render a comma-separated, backtick-quoted key list capped at 50 names."""
-    if len(keys) <= _MAX_ADVERTISED_KEYS:
-        return ", ".join(f"`{k}`" for k in keys)
-    shown = ", ".join(f"`{k}`" for k in keys[:_MAX_ADVERTISED_KEYS])
-    return f"{shown} and {len(keys) - _MAX_ADVERTISED_KEYS} more"

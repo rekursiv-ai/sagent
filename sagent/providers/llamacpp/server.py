@@ -299,8 +299,12 @@ def _http_ok(url: str) -> bool:
 
 
 def _startup_error(prefix: str, lines: Sequence[str]) -> str:
-    """Format a startup-failure message with the last 20 log lines appended."""
+    """Format a startup-failure message with the captured log appended.
+
+    Uncapped: a llama.cpp startup failure usually announces itself in the
+    FIRST lines (missing model file, bad GPU layer count), which a
+    tail-20 window dropped.
+    """
     if not lines:
         return prefix
-    tail = "\n".join(lines[-20:])
-    return f"{prefix}; recent log:\n{tail}"
+    return f"{prefix}; recent log:\n" + "\n".join(lines)

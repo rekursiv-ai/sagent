@@ -26,11 +26,10 @@ def test_metadata_basics() -> None:
 def test_summary_short_and_long() -> None:
     t = AgentSend()
     assert t.summary({"to": "Bob", "content": "hi"}) == "AgentSend → Bob: hi"
+    # Uncapped: the renderer wraps and line-caps; the label is not clipped.
     long = "x" * 60
     s = t.summary({"to": "Bob", "content": long})
-    assert s.endswith("...")
-    # Preview is truncated to 40 chars (37 + ...).
-    assert len(s.split(": ", 1)[1]) == 40
+    assert s == f"AgentSend \u2192 Bob: {long}"
 
 
 def test_summary_without_to() -> None:

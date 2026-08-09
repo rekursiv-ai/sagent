@@ -89,8 +89,8 @@ class Read:
                     "type": "integer",
                     "minimum": 1,
                     "description": (
-                        "Max lines to return (default 2000, text files only)."
-                        " Must be ≥ 1."
+                        "Max lines to return (text files only). Omit to read"
+                        " the whole file. Must be ≥ 1."
                     ),
                 },
                 "last_lines": {
@@ -130,7 +130,11 @@ class Read:
         """
         file_path = resolve_tool_path(str(args.get("file_path", "")))
         offset = int_val(args.get("offset"), 1)
-        limit = int_val(args.get("limit"), 2000)
+        # ``0`` means unlimited (``_window_text`` reads to EOF). A prior
+        # 2000-line default made every large-file read a two-call
+        # round-trip, and keyed the read cache on the window so a
+        # re-read at a different offset always missed.
+        limit = int_val(args.get("limit"), 0)
         last_lines = int_val(args.get("last_lines"), 0)
         pages = str(args.get("pages", ""))
         # Schema declares ``offset``/``limit``/``last_lines`` as
@@ -237,7 +241,7 @@ class Read:
         *,
         file_path: str,
         offset: int = 1,
-        limit: int = 2000,
+        limit: int = 0,
         last_lines: int = 0,
         pages: str = "",
     ) -> ToolResult:

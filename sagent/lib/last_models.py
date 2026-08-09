@@ -1,6 +1,6 @@
 """Cross-session memory of the last model_id used per provider.
 
-Stored at ``~/.sagent/last-models.json`` as a flat
+Stored at ``data_dir("rekursiv-ai")/sagent/last-models.json`` as a flat
 ``{provider_class_name: model_id}`` map. Updated on every
 ``Agent.swap_model`` (and at initial agent construction when a
 ``ModelRecipe`` is supplied). Looked up by the ``/model`` slash
@@ -80,7 +80,7 @@ def record(provider: str, model_id: str) -> None:
 
     No-op when the entry already matches (skips the disk write).
     Persistence is best-effort: any ``OSError`` raised while creating
-    the ``~/.sagent/`` directory, acquiring the lock file, or writing
+    the sagent data directory, acquiring the lock file, or writing
     the data is logged at WARNING and swallowed -- callers never crash
     on a locked-down home directory.
 

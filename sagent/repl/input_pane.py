@@ -119,10 +119,6 @@ __all__ = [
 # Stable key for the REPL pump entry in ``agent._bg``.
 REPL_PUMP_KEY: Final = "__repl_pump__"
 
-# Max characters of the discard-preview body. Long enough to be
-# recognisable, short enough to stay on one console line.
-_PREVIEW_CHARS = 80  # config-globals: ignore -- discard-preview char cap, display pref
-
 
 class InputSource(Protocol):
     """Source of user input lines."""
@@ -565,16 +561,14 @@ class PromptToolkitInputSource(InputSource):
     def _surface_queued_input_on_quit(self) -> None:
         """Surface the tail of ``queued_input`` before the loop ends.
 
-        Mentions the total block count and marks truncated previews
-        with an ellipsis so the operator can tell at a glance that the
-        single line they see represents more than what was discarded.
+        Shown whole: this is the operator's last sight of input that is
+        about to be destroyed, so a preview clamp discarded exactly the
+        text they might have wanted to re-type.
         """
         if not self.queues.has_any() or self._console is None:
             return
         total = (self.queues.queue is not None) + (self.queues.deferred is not None)
-        raw = self.queues.peek_tail_preview().replace("\n", " ")
-        truncated = len(raw) > _PREVIEW_CHARS
-        preview = raw[:_PREVIEW_CHARS] + ("…" if truncated else "")
+        preview = self.queues.peek_tail_preview().replace("\n", " ")
         noun = "message" if total == 1 else "messages"
         self._console.print(
             Text(
