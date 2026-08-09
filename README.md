@@ -330,7 +330,7 @@ of each project.
 
 ## Name
 
-**sagent** (noun, neologism) /ˈseɪ.dʒənt/
+**sagent** (noun, neologism) *SAY-jent* /ˈseɪ.dʒənt/
 
 From *sage* + *agent*.
 
