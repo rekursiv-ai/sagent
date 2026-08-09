@@ -3893,8 +3893,8 @@ wheels = [
 
 [[package]]
 name = "wesearch"
-version = "0.1.8"
-source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#1bf8dd69698294bb5d173a53ec4714298ec4746a" }
+version = "0.1.9"
+source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#3cf3d9caaa010018fd6ec3b8778686f9a5b0b442" }
 dependencies = [
     { name = "beautifulsoup4", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "brotli", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
