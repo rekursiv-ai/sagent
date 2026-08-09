@@ -748,11 +748,11 @@ class TestRenderEvent:
     def test_thinking_empty(self) -> None:
         assert _render_event(ModelResponseThinking(text="")) is None
 
-    def test_thinking_truncated(self) -> None:
+    def test_thinking_kept_whole(self) -> None:
+        """``_flush_log`` splits at line boundaries, so no clamp is needed."""
         out = _render_event(ModelResponseThinking(text="x" * 3000))
         assert out is not None
-        assert out.endswith("…")
-        assert len(out) < 3010
+        assert out == "💭 " + "x" * 3000
 
     def test_tool_label(self) -> None:
         assert _render_event(ToolLabel(call_id="c1", text="Bash ls")) == "  Bash ls"
@@ -803,12 +803,11 @@ class TestRenderEvent:
         ev = ToolResult(call_id="c1", content="ok", hint="be careful")
         assert _render_event(ev) == "  hint: be careful"
 
-    def test_tool_result_truncates_long_content(self) -> None:
+    def test_tool_result_kept_whole(self) -> None:
         ev = ToolResult(call_id="c1", content="x" * 3000)
         out = _render_event(ev)
         assert out is not None
-        assert out.endswith("…")
-        assert len(out) < 3020
+        assert out == "  → " + "x" * 3000
 
 
 class TestSessionDirs:

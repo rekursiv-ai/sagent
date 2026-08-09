@@ -85,8 +85,8 @@ class Glob:
                     "type": "integer",
                     "minimum": 1,
                     "description": (
-                        "Maximum number of results to return (default 200)."
-                        " Must be ≥ 1."
+                        "Maximum number of results to return. Omit for"
+                        " unlimited. Must be ≥ 1."
                     ),
                 },
             },
@@ -157,7 +157,7 @@ class Glob:
             path=str(args.get("path", ".") or "."),
             sort=str(args.get("sort", _DEFAULT_SORT) or _DEFAULT_SORT),
             long=bool_val(args.get("long"), False),
-            max_results=int_val(args.get("max_results"), 200),
+            max_results=int_val(args.get("max_results"), 0),
         )
 
     def _run(
@@ -167,7 +167,7 @@ class Glob:
         path: str = ".",
         sort: str = _DEFAULT_SORT,
         long: bool = False,
-        max_results: int = 200,
+        max_results: int = 0,
     ) -> str | ToolResult:
         """Run the glob synchronously and return formatted matches."""
         if sort not in SORT_VALUES:
@@ -176,10 +176,10 @@ class Glob:
                 content=f"unknown sort: {sort!r} (expected one of {list(SORT_VALUES)})",
                 is_error=True,
             )
-        if max_results < 1:
+        if max_results < 0:
             return ToolResult(
                 call_id="",
-                content=f"max_results must be >= 1; got {max_results}.",
+                content=f"max_results must be >= 0; got {max_results}.",
                 is_error=True,
             )
         # Python's Path.glob requires a relative pattern. If the
@@ -206,14 +206,17 @@ class Glob:
         sort_paths(matches, sort)
         if not matches:
             return "(no matches)"
-        truncated = matches[:max_results]
+        # ``max_results=0`` is the unlimited default: the pattern the
+        # caller wrote is already the filter, and Glob has no ``offset``,
+        # so a capped result is unrecoverable without re-running.
+        shown = matches[:max_results] if max_results > 0 else matches
         if long:
-            lines = [_long_line(m) for m in truncated]
+            lines = [_long_line(m) for m in shown]
         else:
-            lines = [str(m.resolve()) for m in truncated]
+            lines = [str(m.resolve()) for m in shown]
         result = "\n".join(lines)
-        if len(matches) > max_results:
-            result += f"\n... ({len(matches) - max_results} more)"
+        if len(matches) > len(shown):
+            result += f"\n... ({len(matches) - len(shown)} more)"
         return result
 
     def bash_match(self, trees: Sequence[Node]) -> str | None:

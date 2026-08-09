@@ -2085,48 +2085,39 @@ def _dispatch_stream_event(
         return
 
 
-# Single truncation cap for every tool-arg label branch (parsed, unparsed, and
-# fallback), so a label's length does not depend on which rendering path hit.
-_ARG_LABEL_MAX = 120  # config-globals: ignore -- display label truncation cap
-
-
-def _truncate_label(s: str) -> str:
-    """Clamp ``s`` to ``_ARG_LABEL_MAX``, appending ``…`` iff it was clipped.
-
-    One rule for every label branch (parsed string, content, fallback dict, and
-    the unparsed raw form), so the ellipsis no longer depends on which rendering
-    path produced the value.
-    """
-    return s if len(s) <= _ARG_LABEL_MAX else s[:_ARG_LABEL_MAX] + "…"
-
-
 def _render_tool_args(raw_json: str) -> str:
     """Render tool input JSON as a short label suffix.
 
     Best-effort: if the JSON is incomplete (streaming aborted mid-flight)
-    or unparseable, falls back to a truncated raw form. Common args
+    or unparseable, falls back to the raw form. Common args
     (``command``, ``file_path``, ``pattern``, ``query``, ``to``,
     ``content``) get a friendly rendering; unknown tools fall back to
     the raw arg dict.
+
+    Known-arg branches return the value whole -- the renderer
+    (``console_pane.write_tool_label``) owns wrapping and the line cap.
+    The unknown-tool fallback keeps its per-value clamp: an arbitrary
+    arg dict can carry a multi-megabyte blob (the CLI's own stdout line
+    limit is 16 MiB for exactly this reason), and unlike the named args
+    it is not a value the operator asked to see.
     """
     if not raw_json:
         return ""
     try:
         args = json.loads(raw_json)
     except (json.JSONDecodeError, ValueError):
-        return f"({_truncate_label(raw_json.replace(chr(10), ' '))})"
+        return f"({raw_json.replace(chr(10), ' ')})"
     if not isinstance(args, dict):
-        return _truncate_label(str(args))
+        return str(args)
     arg_map = cast(dict[object, object], args)
     for key in ("command", "file_path", "path", "pattern", "query", "to"):
         val = arg_map.get(key)
         if isinstance(val, str):
-            return _truncate_label(val)
+            return val
     content = arg_map.get("content")
     if isinstance(content, str):
-        return _truncate_label(content)
-    rendered = ", ".join(f"{k}={str(v)[:40]!r}" for k, v in list(arg_map.items())[:3])
-    return _truncate_label(rendered)
+        return content
+    return ", ".join(f"{k}={str(v)[:40]!r}" for k, v in list(arg_map.items())[:3])
 
 
 def _round_context_tokens(round_usage: MutableJSON | None) -> int:

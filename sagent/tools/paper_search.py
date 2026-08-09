@@ -124,8 +124,6 @@ class PaperSearch:
     def summary(self, args: Mapping[str, object]) -> str:
         """Return a short display label for this invocation."""
         query = str(args.get("query", "")).strip()
-        if len(query) > 50:
-            query = query[:47] + "..."
         source = str(args.get("source", "") or "fused")
         label = f"PaperSearch {query!r}" if query else "PaperSearch"
         if source != "fused":

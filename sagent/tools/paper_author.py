@@ -156,8 +156,7 @@ class PaperAuthor:
         query = str(args.get("query", "")).strip()
         op = str(args.get("operation", "")).strip()
         if query:
-            q = query if len(query) <= 40 else query[:37] + "..."
-            return f"PaperAuthor search {q!r}"
+            return f"PaperAuthor search {query!r}"
         label = summary_ids(args)
         if label != "?":
             if op == "papers":

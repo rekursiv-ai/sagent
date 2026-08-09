@@ -24,7 +24,6 @@ from sagent.tools.bash import (
     _reap_at_exit,
     _render_bash_description,
     _suppress_oserror,
-    _trim_bash_output,
     reap_background_processes,
 )
 from sagent.tools.lib.bash import Node
@@ -65,11 +64,11 @@ def test_summary_empty_command() -> None:
     assert b.summary({}) == "Bash"
 
 
-def test_summary_truncates_long_command() -> None:
+def test_summary_keeps_long_command() -> None:
+    """Labels carry the command whole; the renderer owns wrap + line cap."""
     b = Bash()
-    out = b.summary({"command": "x" * 100})
-    assert out.endswith("...")
-    assert len(out) == len("Bash ") + 60
+    assert Bash().summary({"command": "x" * 100}) == "Bash " + "x" * 100
+    del b
 
 
 def test_summary_replaces_newlines_with_pilcrow() -> None:
@@ -157,18 +156,6 @@ def test_schema_rejects_unknown_fields_from_llm() -> None:
     )
     assert err is not None
     assert "run_as_fully_detached" in err or "Unexpected" in err
-
-
-def test_trim_bash_output_short_unchanged() -> None:
-    assert _trim_bash_output(["a", "b"]) == "a\nb"
-
-
-def test_trim_bash_output_long_drops_middle() -> None:
-    lines = [f"l{i}" for i in range(700)]
-    out = _trim_bash_output(lines)
-    assert "lines omitted" in out
-    assert "l0" in out
-    assert "l699" in out
 
 
 def test_ensure_valid_cwd_keeps_existing(tmp_path: Path) -> None:

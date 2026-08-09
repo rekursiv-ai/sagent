@@ -1415,8 +1415,9 @@ def test_service_error_snapshot_allowlists_forensic_fields() -> None:
         "retry-after": "14868",
         "x-ratelimit-reset": "soon",
     }
+    # Uncapped: the forensic payload is the whole point of the snapshot.
     assert snapshot.body.startswith("bucket details")
-    assert len(snapshot.body) == 500
+    assert len(snapshot.body) == len("bucket details") + 10_000
 
 
 class _UnreadStreamingResponse:
@@ -1458,10 +1459,11 @@ def test_error_diagnostics_no_response_returns_empty() -> None:
     assert error_diagnostics(ValueError("plain")) == ""
 
 
-def test_error_diagnostics_truncates_long_body() -> None:
+def test_error_diagnostics_keeps_whole_body() -> None:
+    """A clamped body cut provider JSON mid-object; diagnostics carry it all."""
     err = _HTTPError(_FakeResponse(500, text="A" * 10_000))
     diag = error_diagnostics(err)
-    assert len(diag) < 1_000
+    assert "A" * 10_000 in diag
 
 
 def test_rate_limit_error_carries_diagnostics() -> None:

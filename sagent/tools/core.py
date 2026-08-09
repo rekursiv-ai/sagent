@@ -503,7 +503,6 @@ class _ToolImpl:
     __slots__ = (
         "_fn",
         "_is_async",
-        "_max_result_chars",
         "clearable_results",
         "description",
         "directive_schema",
@@ -519,12 +518,10 @@ class _ToolImpl:
         name: str | None = None,
         description: str | None = None,
         schema: JSON | None = None,
-        max_result_chars: int = TOOL_RESULT_MAX_CHARS,
         clearable_results: bool = False,
     ) -> None:
         self._fn = fn
         self._is_async = inspect.iscoroutinefunction(fn)
-        self._max_result_chars = max_result_chars
         self.name = name or getattr(fn, "__name__", "tool")
         self.tool_id = f"application/x-tool-{self.name.lower()}"
         self.description = description or fn.__doc__ or ""
@@ -562,7 +559,7 @@ class _ToolImpl:
 
         The wrapped function may return ``str`` (wrapped to
         ``ToolResult(content=...)``) or ``ToolResult`` directly. Text
-        content over ``max_result_chars`` is truncated. Exceptions
+        content over ``TOOL_RESULT_MAX_CHARS`` is truncated. Exceptions
         propagate; the ``_AgentTool`` wrapper at the dispatch boundary
         converts them to ``is_error=True``.
 
@@ -585,9 +582,9 @@ class _ToolImpl:
                 await asyncio.to_thread(self._fn, **kwargs),
             )
         result = to_result(raw)
-        if len(result.content) > self._max_result_chars:
+        if len(result.content) > TOOL_RESULT_MAX_CHARS:
             return dataclasses.replace(
-                result, content=truncate(result.content, self._max_result_chars)
+                result, content=truncate(result.content, TOOL_RESULT_MAX_CHARS)
             )
         return result
 
@@ -600,7 +597,6 @@ def tool(
     name: str | None = ...,
     description: str | None = ...,
     schema: JSON | None = ...,
-    max_result_chars: int = ...,
     clearable_results: bool = ...,
 ) -> _ToolImpl: ...
 
@@ -611,7 +607,6 @@ def tool(
     name: str | None = ...,
     description: str | None = ...,
     schema: JSON | None = ...,
-    max_result_chars: int = ...,
     clearable_results: bool = ...,
 ) -> Callable[[Callable[..., object]], _ToolImpl]: ...
 
@@ -622,7 +617,6 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     schema: JSON | None = None,
-    max_result_chars: int = TOOL_RESULT_MAX_CHARS,
     clearable_results: bool = False,
 ) -> _ToolImpl | Callable[[Callable[..., object]], _ToolImpl]:
     """Decorator to create a Tool from a function.
@@ -632,7 +626,6 @@ def tool(
       name: Override the tool name (defaults to function name).
       description: Override description (defaults to docstring).
       schema: Override JSON schema (defaults to auto-generated).
-      max_result_chars: Truncate results beyond this length.
       clearable_results: Whether provider context management may clear results.
 
     Returns:
@@ -645,7 +638,6 @@ def tool(
             name=name,
             description=description,
             schema=schema,
-            max_result_chars=max_result_chars,
             clearable_results=clearable_results,
         )
     return lambda f: _ToolImpl(
@@ -653,7 +645,6 @@ def tool(
         name=name,
         description=description,
         schema=schema,
-        max_result_chars=max_result_chars,
         clearable_results=clearable_results,
     )
 
@@ -800,20 +791,15 @@ async def locked_file_write[T](path: str, mutate: Callable[[], T]) -> T:
     return await asyncio.to_thread(_locked)
 
 
-def changed_files_context(max_diff_lines: int = 500) -> str:
+def changed_files_context() -> str:
     """Context provider: detect externally modified files.
 
-    Checks all cached files against disk mtime. For each
-    changed file, generates a system-reminder with a unified
-    diff snippet (capped at ``max_diff_lines``).
+    Checks all cached files against disk mtime. For each changed file,
+    generates a system-reminder with the full unified diff.
 
     Wire this into Agent via ``context_providers``::
 
         Agent(context_providers=[changed_files_context])
-
-    Args:
-      max_diff_lines: Per-file truncation threshold for the diff
-          snippet.
 
     Returns:
       context: System reminder text, or empty string if
@@ -824,13 +810,7 @@ def changed_files_context(max_diff_lines: int = 500) -> str:
     if not changes:
         return ""
     parts: list[str] = []
-    for path, raw_diff in changes.items():
-        diff_lines = raw_diff.splitlines(keepends=True)
-        snippet = (
-            "".join(diff_lines[:max_diff_lines]) + "\n... (truncated)"
-            if len(diff_lines) > max_diff_lines
-            else raw_diff
-        )
+    for path, snippet in changes.items():
         parts.append(
             f"Note: {path} was modified, either by the user, a"
             f" linter, or another agent. This change was intentional,"

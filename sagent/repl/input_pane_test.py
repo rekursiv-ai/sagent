@@ -1086,11 +1086,11 @@ def test_quit_discard_preview_includes_count_when_both_panes() -> None:
     )
 
 
-def test_quit_discard_preview_marks_truncated_body_with_ellipsis() -> None:
-    """A long block preview must be marked as truncated, not silently cut.
+def test_quit_discard_preview_shows_whole_body() -> None:
+    """The discard notice is the operator's last sight of doomed input.
 
-    Otherwise an 80-char clip looks like the entire message; the
-    operator can't tell content was elided.
+    Clipping it discarded exactly the text they might re-type, so the
+    preview is rendered whole.
     """
     session = MagicMock()
 
@@ -1106,8 +1106,8 @@ def test_quit_discard_preview_marks_truncated_body_with_ellipsis() -> None:
     line = asyncio.run(src.next_line())
     assert line is None
     rendered = str(console.print.call_args.args[0])
-    assert "…" in rendered, (
-        f"truncated preview must end with ellipsis marker; got {rendered!r}"
+    assert long_text in rendered, (
+        f"discard preview must show the whole body; got {rendered!r}"
     )
 
 

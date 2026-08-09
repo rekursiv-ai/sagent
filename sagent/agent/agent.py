@@ -188,7 +188,7 @@ class Agent:
     Side effects:
       Constructing with a non-``None`` ``model_recipe`` (and
       :meth:`swap_model` with a non-``None`` ``spec``) writes
-      ``~/.sagent/last-models.json`` via ``last_models.record`` so the
+      the sagent ``last-models.json`` via ``last_models.record`` so the
       ``/model`` slash command can resume the same model_id when the
       user changes provider without naming a model. The write is
       ``fcntl.flock`` serialized so concurrent agent processes don't
@@ -1043,7 +1043,7 @@ class Agent:
         1. Prefer the current model id when the new provider's catalog
            knows it (same vendor, different auth subclass).
         2. Else use the last model recorded for the new provider in
-           ``~/.sagent/last-models.json``.
+           the sagent ``last-models.json``.
         3. Else fall back to the new provider's ``DEFAULT_MODEL``.
 
         Queues a :class:`types.runtime.ModelSwitch` through the runtime inbox so any

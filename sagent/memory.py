@@ -1,6 +1,6 @@
 """Auto-memory: persistent project-scoped memory across sessions.
 
-- Storage: ``~/.sagent/projects/<cwd-slug>/memory/``
+- Storage: ``data_dir("rekursiv-ai")/sagent/projects/<cwd-slug>/memory/``
 - Entrypoint: ``MEMORY.md`` - always loaded into the system prompt
   (truncated to 200 lines / 25 KB)
 - Per-memory files: ``<type>_<name>.md`` with YAML frontmatter
@@ -36,8 +36,8 @@ def memory_dir(cwd: str | Path, *, projects_dir: Path | None = None) -> Path:
 
     Args:
       cwd: Current working directory.
-      projects_dir: Override for the projects root. Defaults to
-        ``~/.sagent/projects``.
+      projects_dir: Override for the projects root. Defaults to the
+        per-user projects root.
 
     Returns:
       path: ``<projects_dir>/<cwd-slug>/memory/``.

@@ -206,8 +206,12 @@ def test_validate_tool_input_valid_passes() -> None:
     assert validate_tool_input("Echo", schema, {"msg": "hi"}) is None
 
 
-def test_validate_tool_input_caps_accepted_keys_list() -> None:
-    """Schemas with very many props don't dump an unbounded key list."""
+def test_validate_tool_input_lists_every_accepted_key() -> None:
+    """The model reads this error to self-correct, so name every key.
+
+    A 50-key cap could elide the very parameter the caller needed,
+    leaving "and 150 more" as the only hint.
+    """
     props = {f"k{i}": {"type": "string"} for i in range(200)}
     schema = json_freeze(
         {
@@ -223,13 +227,9 @@ def test_validate_tool_input_caps_accepted_keys_list() -> None:
         None,
     )
     assert accepts_line is not None
-    # The accepted-keys advertisement must be bounded.
-    assert "and " in accepts_line
-    assert "more" in accepts_line
-    backtick_count = accepts_line.count("`")
-    assert backtick_count <= 2 * 50, (
-        f"unbounded keys advertisement: {backtick_count // 2} keys listed"
-    )
+    assert "more" not in accepts_line
+    assert accepts_line.count("`") == 2 * 200
+    assert "`k199`" in accepts_line
 
 
 if __name__ == "__main__":

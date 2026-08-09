@@ -64,9 +64,9 @@ def test_summary_search() -> None:
     assert "Bengio" in out
 
 
-def test_summary_search_truncates() -> None:
-    out = PaperAuthor().summary({"query": "x" * 60})
-    assert "..." in out
+def test_summary_search_keeps_query() -> None:
+    q = "x" * 60
+    assert PaperAuthor().summary({"query": q}) == f"PaperAuthor search {q!r}"
 
 
 def test_summary_id_no_op() -> None:

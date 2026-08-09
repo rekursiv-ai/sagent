@@ -96,7 +96,7 @@ async def _slack_call(
     except FetchError as e:
         return ToolResult(
             call_id="",
-            content=(f"Slack HTTP {e.status}: {e.body[:200].decode(errors='replace')}"),
+            content=(f"Slack HTTP {e.status}: {e.body.decode(errors='replace')}"),
             is_error=True,
         )
     body = cast(MutableJSON, json.loads(raw[0]))
@@ -273,7 +273,7 @@ class Slack:
         if isinstance(body, ToolResult):
             return body
         sender = self._username or "bot"
-        logger.info("[%s->%s] %s", sender, channel, text[:200])
+        logger.info("[%s->%s] %s", sender, channel, text)
         return f"Sent. ts={body.get('ts')} channel={body.get('channel')}"
 
     async def _list_channels(self, limit: int) -> str | ToolResult:

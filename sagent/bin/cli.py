@@ -78,7 +78,7 @@ from sagent.agent.session_io import (
 )
 from sagent.agent.state import agent_registry, unique_registry_label
 from sagent.compaction.summary import SummaryCompactor
-from sagent.lib.custom_json import MutableJSON, json_unfreeze
+from sagent.lib.custom_json import MutableJSON, dict_val, str_val
 from sagent.lib.userdirs import data_dir
 from sagent.prompt import build_system
 from sagent.providers import (
@@ -219,15 +219,42 @@ def _resolve_continue(cwd: Path) -> str:
 
 
 def _resolve_resume_hash(session_hash: str, cwd: Path) -> str:
-    """Resume a session by hash prefix (directory name match)."""
-    for s in sessions.list_sessions(cwd):
-        if s.path.name.startswith(session_hash):
-            sys.stderr.write(f"[resume] {s.path}\n")
-            return str(s.path)
-    for s in sessions.list_all_sessions():
-        if s.path.name.startswith(session_hash):
-            sys.stderr.write(f"[resume] {s.path}\n")
-            return str(s.path)
+    """Resume a session by hash prefix (directory name match).
+
+    ``--resume`` is cwd-scoped (``--resume-all`` is the global door), so
+    a prefix unique within this directory wins even when a session
+    elsewhere shares it. Widening to every project only happens when
+    this directory has no match. The prefix must be unambiguous WITHIN
+    the scope that matched: taking the first of several would attach to
+    a session the operator did not name, with nothing in the output to
+    reveal it -- hence the scope is named on every resolution.
+    """
+    if not session_hash:
+        # ``"".startswith(x)`` is universally true, so an empty prefix
+        # would match every session: one on disk resumes silently, several
+        # report "ambiguous". Neither is what the operator asked for.
+        sys.stderr.write("[resume] HASH cannot be empty.\n")
+        raise SystemExit(1)
+    # Lazily: the global scan head-reads every session file under the
+    # root, so evaluating it eagerly costs a full walk even when the cwd
+    # scope already matched.
+    scopes: tuple[tuple[str, Callable[[], list[sessions.SessionInfo]]], ...] = (
+        ("this directory", lambda: sessions.list_sessions(cwd)),
+        ("all projects", sessions.list_all_sessions),
+    )
+    for label, load in scopes:
+        matches = [s for s in load() if s.path.name.startswith(session_hash)]
+        if len(matches) > 1:
+            names = ", ".join(sorted(s.path.name for s in matches))
+            sys.stderr.write(
+                f"[resume] {session_hash!r} is ambiguous in {label}; "
+                f"matches: {names}.\n"
+                "[resume] Re-run with a longer prefix.\n"
+            )
+            raise SystemExit(1)
+        if matches:
+            sys.stderr.write(f"[resume] {matches[0].path} (matched in {label})\n")
+            return str(matches[0].path)
     sys.stderr.write(
         f"[resume] no session matching {session_hash!r}; starting fresh.\n"
     )
@@ -545,8 +572,12 @@ def _parse_cli_args(
     parser.add_argument(
         "--history",
         default=None,
+        type=Path,
         metavar="PATH",
-        help="File for input history (default: the per-user state directory).",
+        help=(
+            "File for input history"
+            " (default: <state-dir>/rekursiv-ai/sagent/repl-history)."
+        ),
     )
     parser.add_argument(
         "--advisor",
@@ -1088,7 +1119,6 @@ def _configure_logging(level: str | None) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     logging.getLogger("sagent").setLevel(value)
-    logging.getLogger("sagent").setLevel(value)
 
 
 def _install_repl_logging(
@@ -1151,7 +1181,6 @@ def _install_repl_logging(
         logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"),
     )
     root.addHandler(file_handler)
-    logging.getLogger("sagent").setLevel(value)
     logging.getLogger("sagent").setLevel(value)
 
 
@@ -1221,11 +1250,16 @@ def _parse_stream_json(raw: str) -> str:
             obj: object = json.loads(line)
         except json.JSONDecodeError as e:
             raise ValueError(f"invalid JSON line in stream-json input: {e}") from e
-        if not isinstance(obj, dict):
+        # ``dict_val`` maps any non-object to ``{}``, which is also what a
+        # legitimate empty object yields -- so compare against the parsed
+        # value rather than testing emptiness. A bare ``{}`` is a valid
+        # prompt-less line and must be skipped, exactly like the
+        # prompt-less ``{"other": "data"}``; only a non-object is fatal.
+        record = dict_val(obj)
+        if not record and obj != {}:
             raise TypeError("stream-json input requires JSON objects per line.")
-        parsed = json_unfreeze(cast(Mapping[str, object], obj))
-        p = parsed.get("prompt")
-        if isinstance(p, str) and p:
+        p = str_val(record.get("prompt"))
+        if p:
             prompts.append(p)
     return "\n\n".join(prompts)
 

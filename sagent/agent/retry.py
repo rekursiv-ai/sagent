@@ -845,9 +845,6 @@ def _make_stream_sink(
     return _sink
 
 
-_BODY_EXCERPT_CHARS = 500  # config-globals: ignore -- diagnostic body excerpt length
-
-
 def _diagnostic_headers(headers: object) -> dict[str, str]:
     """Return allowlisted response headers useful for rate-limit forensics."""
     if not isinstance(headers, Mapping):
@@ -865,7 +862,11 @@ def _diagnostic_headers(headers: object) -> dict[str, str]:
 
 
 def _response_body_excerpt(response: object) -> str:
-    """Return up to ``_BODY_EXCERPT_CHARS`` of a response body, never raising.
+    """Return a response body for diagnostics, never raising.
+
+    Uncapped: a provider error body is the whole forensic payload, and a
+    500-char clamp cut JSON mid-object exactly when the detail mattered
+    (the same reasoning that made :func:`_response_body_text` uncapped).
 
     ``httpx.Response.text`` / ``.content`` are properties that raise
     ``httpx.ResponseNotRead`` when the body of a *streaming* response was
@@ -879,13 +880,13 @@ def _response_body_excerpt(response: object) -> str:
     try:
         text = getattr(response, "text", None)
         if isinstance(text, str):
-            return text[:_BODY_EXCERPT_CHARS]
+            return text
         raw = getattr(response, "content", None)
     except httpx.ResponseNotRead:
         return ""
     if isinstance(raw, (bytes, bytearray)):
         try:
-            return raw[:_BODY_EXCERPT_CHARS].decode("utf-8", errors="replace")
+            return raw.decode("utf-8", errors="replace")
         except (AttributeError, ValueError):
             return ""
     return ""

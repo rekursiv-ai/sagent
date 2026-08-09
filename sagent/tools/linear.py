@@ -73,9 +73,7 @@ async def _gql(
     except FetchError as e:
         return ToolResult(
             call_id="",
-            content=(
-                f"Linear API HTTP {e.status}: {e.body[:200].decode(errors='replace')}"
-            ),
+            content=(f"Linear API HTTP {e.status}: {e.body.decode(errors='replace')}"),
             is_error=True,
         )
     body = cast(MutableJSON, json.loads(raw[0]))

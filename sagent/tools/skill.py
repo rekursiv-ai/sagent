@@ -60,11 +60,25 @@ class SkillInfo:
     """Absolute path to the source ``SKILL.md``."""
 
 
-_USER_SKILL_ROOTS: tuple[Path, ...] = (data_dir("rekursiv-ai") / "sagent" / "skills",)
 _IMPORT_SKILL_SUBDIRS: Final = {
     "agents": ".agents/skills",
 }
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+
+
+def user_skill_roots() -> tuple[Path, ...]:
+    """Return the user-global skill roots.
+
+    Resolved per call, not at import: the XDG base directories are read
+    from the environment, so a module-level constant would freeze
+    whatever value happened to be set when this module was first
+    imported.
+
+    Returns:
+      roots: User-global skill directories, outermost first.
+
+    """
+    return (data_dir("rekursiv-ai") / "sagent" / "skills",)
 
 
 def discover(
@@ -94,7 +108,7 @@ def discover(
     ]
     project = _scan_roots(project_roots, "project")
     imported = _scan_roots(imported_roots, "import")
-    user = _scan_roots(list(_USER_SKILL_ROOTS), "user")
+    user = _scan_roots(list(user_skill_roots()), "user")
     seen: set[str] = set()
     out: list[SkillInfo] = []
     for s in project + imported + user:
@@ -151,8 +165,6 @@ def format_listing(skills: list[SkillInfo]) -> str:
     ]
     for s in skills:
         desc = s.description or "(no description)"
-        if len(desc) > 250:
-            desc = desc[:247] + "..."
         lines.append(f"- **{s.name}** ({s.source}) - {desc}")
     return "\n".join(lines)
 
@@ -231,14 +243,12 @@ class Skill:
         """
         return format_listing(_discover_for_state(get_tool_state()))
 
-    _MAX_CHARS_PER_SKILL = 20_000
-
     async def post_compact_restore(
         self,
         history: list[ModelContextEvent],
         tool_state: ToolState,
         *,
-        budget_chars: int = 100_000,
+        budget_chars: int = 0,
     ) -> None:
         """Re-attach previously invoked skill bodies after compaction.
 
@@ -250,9 +260,15 @@ class Skill:
           history: Post-compaction history; mutated in place.
           tool_state: Active tool state; ``invoked_skills`` selects which
               bodies to restore.
-          budget_chars: Character budget cap across all reattached bodies.
+          budget_chars: Accepted for hook-protocol compatibility and
+              ignored. A skill body is a contract: half a workflow is
+              worse than none, and the prior per-skill cap cut mid-body
+              while the aggregate budget dropped whole skills silently.
+              Every invoked skill is now re-attached whole; overall
+              context pressure stays the compactor's business.
 
         """
+        del budget_chars
         if not self.restore_after_compact:
             return
         invoked = tool_state.invoked_skills
@@ -263,17 +279,10 @@ class Skill:
             return
         skills = discover(cwd)
         parts: list[str] = []
-        total = 0
         for s in skills:
             if s.name not in invoked:
                 continue
-            body = s.body
-            if len(body) > self._MAX_CHARS_PER_SKILL:
-                body = body[: self._MAX_CHARS_PER_SKILL] + "\n... (truncated)"
-            body = escape_prompt_text(body)
-            if total + len(body) > budget_chars:
-                break
-            total += len(body)
+            body = escape_prompt_text(s.body)
             parts.append(
                 f"<skill name='{s.name}' source='{s.source}'>\n{body}\n</skill>"
             )

@@ -550,7 +550,7 @@ async def test_grep_python_multiline_count(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_grep_python_multiline_truncates_long_match(tmp_path: Path) -> None:
+async def test_grep_python_multiline_keeps_long_match(tmp_path: Path) -> None:
     long = "x" * 300
     (tmp_path / "x.py").write_text(long)
     result = await _run_grep_py(
@@ -562,7 +562,8 @@ async def test_grep_python_multiline_truncates_long_match(tmp_path: Path) -> Non
         },
         tmp_path,
     )
-    assert "..." in result.content
+    # Uncapped: a 300-char match is content, not a size problem.
+    assert long in result.content
 
 
 def test_bash_match_xargs_no_grep_at_end() -> None:
@@ -601,9 +602,8 @@ def test_summary_with_path() -> None:
     assert grep.summary({"pattern": "foo", "path": "/x"}) == "Grep 'foo' in /x"
 
 
-def test_summary_truncates_pattern() -> None:
-    out = grep.summary({"pattern": "x" * 100})
-    assert out.endswith("...'")
+def test_summary_keeps_pattern() -> None:
+    assert grep.summary({"pattern": "x" * 100}) == f"Grep {'x' * 100!r}"
 
 
 def test_summary_result_off() -> None:

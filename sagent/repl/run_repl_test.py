@@ -12,7 +12,6 @@ from unittest.mock import MagicMock, patch
 import asyncio
 import contextlib
 import dataclasses
-import inspect
 import sys
 
 from prompt_toolkit.history import FileHistory
@@ -287,7 +286,7 @@ def test_parse_model_args_flag_provider() -> None:
 def test_parse_model_args_short_flag_provider_falls_back_to_default_model() -> None:
     """Switching provider with no model → provider's DEFAULT_MODEL.
 
-    With no entry in ``~/.sagent/last-models.json`` for Google, the
+    With no entry in the sagent ``last-models.json`` for Google, the
     resolver falls back to ``Google.DEFAULT_MODEL``.
     """
     with patch.object(last_models, "load", return_value={}):
@@ -363,7 +362,7 @@ def test_provider_switch_uses_last_used_when_known(
 
     The current spec's ``claude-opus-4-7`` is not in ``Google.CAPABILITIES``
     so cross-provider preservation falls through. With a recorded last-used
-    Google model in ``~/.sagent/last-models.json``, the resolver picks
+    Google model in the sagent ``last-models.json``, the resolver picks
     that up. ``Google.DEFAULT_MODEL`` is the cold-start fallback.
     """
     monkeypatch.setattr(last_models, "load", lambda: {"Google": "remembered-model"})
@@ -1022,12 +1021,70 @@ def test_format_tasks_namespaces_same_job_id_by_agent_label() -> None:
     assert "fix-tools/job-1" in out
 
 
-def test_run_repl_invokes_replay_messages() -> None:
-    # --resume / --continue rely on replay_messages to render persisted
-    # history into scrollback. The unit test on replay_messages itself
-    # stays green even when the call site is dropped (see eb4700ef).
-    src = inspect.getsource(run_repl)
-    assert "replay_messages(" in src
+@pytest.mark.asyncio
+async def test_run_repl_invokes_replay_messages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run_repl`` must actually call ``replay_messages``.
+
+    --resume / --continue rely on it to render persisted history into
+    scrollback, and the unit test on ``replay_messages`` itself stays
+    green even when the call site is dropped (see eb4700ef). Asserting on
+    the source text instead would pass on a commented-out call, so drive
+    the real coroutine and record the invocation.
+    """
+    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+
+    @dataclass(slots=True, kw_only=True)
+    class _Holder:
+        runtime: agent_runtime.AgentRuntime
+        show_thinking: bool = False
+        name: str = "test"
+        status: str | None = None
+        session_dir: object | None = None
+        background: dict[str, BackgroundTaskEntry] = field(default_factory=dict)
+
+        async def serve_forever(self) -> None:
+            return None
+
+        def shutdown(self, *, force: bool = False) -> None:
+            del force
+
+        def cancel_background(self, key: str) -> None:
+            del key
+
+    @contextlib.contextmanager
+    def _stub_patch_stdout(**_kwargs: object):
+        yield
+
+    def _stub_mock(*_args: object, **_kwargs: object) -> MagicMock:
+        return MagicMock()
+
+    calls: list[object] = []
+
+    def _recording_replay(agent: object, _printer: object) -> None:
+        calls.append(agent)
+
+    fake_pump: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
+
+    def _stub_spawn(
+        _agent: object, _source: object, **_kwargs: object
+    ) -> asyncio.Task[None]:
+        return fake_pump
+
+    run_repl_mod = sys.modules["sagent.repl.run_repl"]
+    monkeypatch.setattr(run_repl_mod, "patch_stdout", _stub_patch_stdout)
+    monkeypatch.setattr(run_repl_mod, "Console", _stub_mock)
+    monkeypatch.setattr(run_repl_mod, "PromptSession", _stub_mock)
+    monkeypatch.setattr(run_repl_mod, "PromptToolkitInputSource", _stub_mock)
+    monkeypatch.setattr(run_repl_mod, "replay_messages", _recording_replay)
+    monkeypatch.setattr(run_repl_mod, "spawn_repl_pump", _stub_spawn)
+
+    holder = _Holder(runtime=runtime)
+    await run_repl(cast(Agent, holder), history=tmp_path / "hist")
+
+    assert calls == [holder], "run_repl must call replay_messages with the agent"
 
 
 @pytest.mark.asyncio
@@ -1113,6 +1170,151 @@ async def test_run_repl_unwinds_observers_and_before_tool_spawn(
     )
     assert runtime.before_tool_spawn is original_before_tool_spawn, (
         f"run_repl must restore before_tool_spawn; got {runtime.before_tool_spawn}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_repl_unwinds_when_setup_raises_after_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setup that raises after install must still detach observers.
+
+    ``install_input_queue_committer`` and ``spawn_repl_pump`` mutate the
+    runtime; everything between them and ``serve_forever`` (replay, title)
+    can raise on real input -- a corrupt tape, a closed terminal. Unless
+    those installs sit INSIDE the ``try``, the observer and the wrapped
+    ``before_tool_spawn`` survive the failure and accumulate on re-entry.
+    """
+    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+    observers_before = list(runtime.observers)
+    original_before_tool_spawn = runtime.before_tool_spawn
+
+    @dataclass(slots=True, kw_only=True)
+    class _Holder:
+        runtime: agent_runtime.AgentRuntime
+        show_thinking: bool = False
+        name: str = "test"
+        status: str | None = None
+        session_dir: object | None = None
+        background: dict[str, BackgroundTaskEntry] = field(default_factory=dict)
+
+        async def serve_forever(self) -> None:
+            return None
+
+        def shutdown(self, *, force: bool = False) -> None:
+            del force
+
+        def cancel_background(self, key: str) -> None:
+            del key
+
+    @contextlib.contextmanager
+    def _stub_patch_stdout(**_kwargs: object):
+        yield
+
+    def _stub_mock(*_args: object, **_kwargs: object) -> MagicMock:
+        return MagicMock()
+
+    def _raising_replay(_agent: object, _printer: object) -> None:
+        raise RuntimeError("corrupt tape")
+
+    fake_pump: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
+
+    def _stub_spawn(
+        _agent: object, _source: object, **_kwargs: object
+    ) -> asyncio.Task[None]:
+        return fake_pump
+
+    run_repl_mod = sys.modules["sagent.repl.run_repl"]
+    monkeypatch.setattr(run_repl_mod, "patch_stdout", _stub_patch_stdout)
+    monkeypatch.setattr(run_repl_mod, "Console", _stub_mock)
+    monkeypatch.setattr(run_repl_mod, "PromptSession", _stub_mock)
+    monkeypatch.setattr(run_repl_mod, "PromptToolkitInputSource", _stub_mock)
+    monkeypatch.setattr(run_repl_mod, "replay_messages", _raising_replay)
+    monkeypatch.setattr(run_repl_mod, "spawn_repl_pump", _stub_spawn)
+
+    with pytest.raises(RuntimeError, match="corrupt tape"):
+        await run_repl(cast(Agent, _Holder(runtime=runtime)), history=tmp_path / "hist")
+
+    assert runtime.observers == observers_before, (
+        f"a raise after install must not leak observers; got {runtime.observers}"
+    )
+    assert runtime.before_tool_spawn is original_before_tool_spawn, (
+        "a raise after install must restore before_tool_spawn"
+    )
+
+
+def _noop_replay(_agent: object, _printer: object) -> None:
+    """Stand-in for ``replay_messages`` in run_repl teardown tests."""
+    return
+
+
+@pytest.mark.asyncio
+async def test_run_repl_unwinds_when_teardown_step_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raise inside ``finally`` must not skip the detach that follows it.
+
+    The observer detach and ``before_tool_spawn`` restore sit at the END
+    of the ``finally``, behind shutdown and task-cancellation calls.
+    Ordering the cleanup so the leak-preventing steps run last means any
+    raise ahead of them re-opens the exact leak the ``try`` was widened
+    to close.
+    """
+    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+    observers_before = list(runtime.observers)
+    original_before_tool_spawn = runtime.before_tool_spawn
+
+    @dataclass(slots=True, kw_only=True)
+    class _Holder:
+        runtime: agent_runtime.AgentRuntime
+        show_thinking: bool = False
+        name: str = "test"
+        status: str | None = None
+        session_dir: object | None = None
+        background: dict[str, BackgroundTaskEntry] = field(default_factory=dict)
+
+        async def serve_forever(self) -> None:
+            return None
+
+        def shutdown(self, *, force: bool = False) -> None:
+            del force
+            raise RuntimeError("shutdown exploded")
+
+        def cancel_background(self, key: str) -> None:
+            del key
+
+    @contextlib.contextmanager
+    def _stub_patch_stdout(**_kwargs: object):
+        yield
+
+    def _stub_mock(*_args: object, **_kwargs: object) -> MagicMock:
+        return MagicMock()
+
+    fake_pump: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
+
+    def _stub_spawn(
+        _agent: object, _source: object, **_kwargs: object
+    ) -> asyncio.Task[None]:
+        return fake_pump
+
+    run_repl_mod = sys.modules["sagent.repl.run_repl"]
+    monkeypatch.setattr(run_repl_mod, "patch_stdout", _stub_patch_stdout)
+    monkeypatch.setattr(run_repl_mod, "Console", _stub_mock)
+    monkeypatch.setattr(run_repl_mod, "PromptSession", _stub_mock)
+    monkeypatch.setattr(run_repl_mod, "PromptToolkitInputSource", _stub_mock)
+    monkeypatch.setattr(run_repl_mod, "replay_messages", _noop_replay)
+    monkeypatch.setattr(run_repl_mod, "spawn_repl_pump", _stub_spawn)
+
+    with pytest.raises(RuntimeError, match="shutdown exploded"):
+        await run_repl(cast(Agent, _Holder(runtime=runtime)), history=tmp_path / "hist")
+
+    assert runtime.observers == observers_before, (
+        f"a raise during teardown must not leak observers; got {runtime.observers}"
+    )
+    assert runtime.before_tool_spawn is original_before_tool_spawn, (
+        "a raise during teardown must still restore before_tool_spawn"
     )
 
 
@@ -1618,6 +1820,49 @@ async def test_harness_tab_after_idle_turn_drains_to_history() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pane_restored_onto_idle_agent_still_drains() -> None:
+    """Up-then-Up over a pane must not strand its message.
+
+    ``_enter_stop`` empties the pane while the cursor sits on it, and an
+    unchanged pass restores it via ``_restore_pane`` -- which writes the
+    queue directly, bypassing the dispatch predicate. If ``AgentIdle``
+    fires during the window when the pane is empty, the committer sees
+    nothing, and the later restore lands on an already-idle runtime that
+    never publishes another ``AgentIdle``. Same bug class as
+    ``test_harness_tab_after_idle_turn_drains_to_history``.
+    """
+    runtime, holder, queues = _harness_runtime()
+    nav = NavState()
+    idle_events: list[type] = []
+    runtime.observers.append(
+        lambda ev: idle_events.append(type(ev)) if isinstance(ev, AgentIdle) else None
+    )
+    async with _running_runtime(runtime):
+        queues.stage_queue("staged while busy", ())
+        # History gives Up somewhere to go PAST the pane stop. With no
+        # older stop the second Up is a no-op at the hard top and the
+        # text correctly stays in the buffer -- no restore happens.
+        event = _make_kb_event("")
+        event.current_buffer.history.get_strings.return_value = ["older entry"]
+        # Up lifts the pane message into the buffer, emptying the pane.
+        _kb_up(cast(Agent, holder), queues, nav, event)
+        assert queues.queue is None
+        # The agent goes idle during exactly that window.
+        runtime.inbox.push_back(UserMessage(text="warm"))
+        await _wait_until_idle(idle_events)
+        idle_events.clear()
+        # Up again, unchanged -> the stop is LEFT and its pane restored,
+        # now onto an agent that has already gone idle.
+        event.current_buffer.text = "staged while busy"
+        _kb_up(cast(Agent, holder), queues, nav, event)
+        await _wait_for(lambda: _history_has(runtime, "staged while busy"))
+    assert _history_has(runtime, "staged while busy"), (
+        "a pane restored onto an already-idle agent must still drain;"
+        " no further AgentIdle fires to wake the committer"
+    )
+
+
+@pytest.mark.asyncio
 async def test_queued_pane_message_detaches_running_tool() -> None:
     """REGRESSION: a queue-pane message must still trigger a tool detach.
 
@@ -1918,7 +2163,7 @@ async def test_harness_enter_at_nav_stop_on_idle_dispatches() -> None:
         # A queued message + idle agent. Up unlifts it, Enter dispatches.
         queues.stage_queue("draft")
         buf = _make_kb_event("")
-        _kb_up(queues, nav, buf)
+        _kb_up(cast(Agent, holder), queues, nav, buf)
         assert buf.current_buffer.text == "draft"
         _kb_submit(cast(Agent, holder), queues, nav, buf)
 

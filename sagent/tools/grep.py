@@ -156,7 +156,7 @@ class Grep:
                 "keep_first": {
                     "type": "number",
                     "minimum": 0,
-                    "description": "Keep only the first N lines/entries. Defaults to 250. Pass 0 for unlimited. Ignored when keep_last is set.",
+                    "description": "Keep only the first N lines/entries. Defaults to 0 (unlimited). Ignored when keep_last is set.",
                 },
                 "keep_last": {
                     "type": "number",
@@ -203,8 +203,6 @@ class Grep:
         """
         pattern = str(args.get("pattern", ""))
         path = str(args.get("path", "")) or "."
-        if len(pattern) > 40:
-            pattern = pattern[:37] + "..."
         suffix = f" in {path}" if path != "." else ""
         return f"Grep {pattern!r}{suffix}"
 
@@ -265,7 +263,7 @@ class Grep:
             "multiline",
         }
         kwargs: dict[str, object] = {k: v for k, v in args.items() if k not in known}
-        keep_first = int_val(args.get("keep_first"), 250)
+        keep_first = int_val(args.get("keep_first"), 0)
         keep_last = int_val(args.get("keep_last"), 0)
         offset = int_val(args.get("offset"), 0)
         context_before = _kw_int(kwargs, "-B", "context_before")
@@ -305,7 +303,7 @@ class Grep:
         pattern: str = "",
         path: str = ".",
         output_mode: str = "files_with_matches",
-        keep_first: int = 250,
+        keep_first: int = 0,
         keep_last: int = 0,
         offset: int = 0,
         multiline: bool = False,
@@ -807,8 +805,6 @@ class _GrepState:
                 continue
             line_num = text[: m.start()].count("\n") + 1
             matched_text = m.group()
-            if len(matched_text) > 200:
-                matched_text = matched_text[:200] + "..."
             if self.show_line_numbers:
                 self.matches.append(f"{filepath}:{line_num}:{matched_text}")
             else:

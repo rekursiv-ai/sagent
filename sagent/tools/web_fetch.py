@@ -116,10 +116,7 @@ class WebFetch:
           label: ``WebFetch <url>`` line shown before invocation.
 
         """
-        url = str(args.get("url", ""))
-        if len(url) > 60:
-            url = url[:57] + "..."
-        return f"WebFetch {url}"
+        return f"WebFetch {args.get('url', '')}"
 
     def summary_result(self, result: ToolResult) -> str | None:
         """Suppress the per-call receipt for WebFetch.

@@ -52,12 +52,10 @@ def test_summary_short_url() -> None:
     assert t.summary({"url": "https://example.com"}) == "WebFetch https://example.com"
 
 
-def test_summary_long_url_truncates() -> None:
+def test_summary_keeps_long_url() -> None:
     t = WebFetch()
     long_url = "https://example.com/" + ("x" * 100)
-    out = t.summary({"url": long_url})
-    assert out.endswith("...")
-    assert len(out) <= 100
+    assert t.summary({"url": long_url}) == f"WebFetch {long_url}"
 
 
 def test_summary_result_none() -> None:

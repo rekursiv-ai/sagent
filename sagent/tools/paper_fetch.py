@@ -5,7 +5,8 @@ source cascade (arXiv, open-access, and any source-only providers) and the
 rate-gated open-access lookups; the tool owns schema, the on-disk PDF cache,
 and result rendering.
 
-Downloads are content-addressed under ``~/.sagent/papers/``; repeated calls for
+Downloads are content-addressed under
+``cache_dir("rekursiv-ai")/wesearch/papers/``; repeated calls for
 the same id return the cached path.
 """
 

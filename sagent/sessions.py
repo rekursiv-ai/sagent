@@ -2,9 +2,11 @@
 
 Session storage layout:
 
-- Root: ``~/.sagent/projects/<cwd-slug>/``
-- Per session: ``<session-id>.jsonl`` (one file per conversation)
-- Slug: cwd with non-alphanumerics replaced by ``-``
+- Root: ``data_dir("rekursiv-ai")/sagent/projects/<cwd-slug>/``
+- Per session: a ``<uuid4-hex>/`` directory holding ``session.jsonl``
+- Slug: ``/`` maps to ``_``, alphanumerics pass through, every other
+  byte escapes as ``-<hex>-`` (see :func:`cwd_slug`; superseded schemes
+  in :func:`_prior_cwd_slugs`)
 
 We reuse the ``Agent``'s existing per-directory layout
 (``session.jsonl`` + per-session dirs) rather than a one-file-per-session layout
@@ -14,7 +16,7 @@ A single project has many session dirs, one per conversation.
 Public API:
 
 - ``cwd_slug(cwd)`` - slug algorithm
-- ``project_dir(cwd)`` - ``~/.sagent/projects/<slug>/``
+- ``project_dir(cwd)`` - ``<projects-root>/<slug>/``
 - ``new_session_dir(cwd)`` - generate a fresh ``<project_dir>/<uuid>``
 - ``list_sessions(cwd)`` - all session dirs, newest first
 - ``latest_session(cwd)`` - most recent one, or None
@@ -23,10 +25,10 @@ Public API:
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, cast
+from typing import IO, Final
 
 import contextlib
 import json
@@ -37,7 +39,7 @@ import sys
 import time
 import uuid
 
-from sagent.lib.custom_json import MutableJSON
+from sagent.lib.custom_json import MutableJSON, dict_val, json_unfreeze
 from sagent.lib.userdirs import data_dir
 
 
@@ -53,18 +55,6 @@ logger = logging.getLogger(__name__)
 # a real dir or a symlink.
 _LEGACY_SAGENT_HOME = Path.home() / ".sagent"
 _LEGACY_CLAUDE_HOME = Path.home() / ".claude"
-
-
-def _legacy_cwd_slug(cwd: str | Path) -> str:
-    """Slug under the pre-convention rule: every non-alphanumeric -> ``-``.
-
-    This is the scheme the squatted ``~/.claude`` tree (and the Claude CLI
-    itself) used. Distinct from :func:`cwd_slug`, which maps ``/`` to ``_``.
-    Forward-only and well-defined; the inverse is not (``/`` and ``.`` both
-    collapse to ``-``), which is why migration copies legacy dirs verbatim
-    under their original name rather than translating the slug.
-    """
-    return re.sub(r"[^a-zA-Z0-9]", "-", str(Path(cwd).resolve()))
 
 
 def _copy_tree_merge(src: Path, dst: Path) -> None:
@@ -122,10 +112,17 @@ def migrate_legacy_home() -> None:
     sagent path is read.
     """
     try:
-        # A real ``~/.sagent`` dir is the standard legacy home. A *symlink*
-        # there is the squat -- it resolves into ``~/.claude``, so we must NOT
-        # treat it as a real home (that would double-process the Claude tree).
-        if _LEGACY_SAGENT_HOME.is_dir() and not _LEGACY_SAGENT_HOME.is_symlink():
+        # A real ``~/.sagent`` dir is the standard legacy home. A symlink
+        # to ``~/.claude`` is the squat and must NOT be treated as a real
+        # home (that would double-process the Claude tree). A symlink
+        # anywhere ELSE still points at sagent's own data, so it takes the
+        # real-home path -- otherwise the target is silently skipped and
+        # the Claude tree is migrated in its place.
+        squats_claude = (
+            _LEGACY_SAGENT_HOME.is_symlink()
+            and _LEGACY_SAGENT_HOME.resolve() == _LEGACY_CLAUDE_HOME.resolve()
+        )
+        if _LEGACY_SAGENT_HOME.is_dir() and not squats_claude:
             _migrate_real_sagent_home()
         elif _LEGACY_CLAUDE_HOME.is_dir():
             _migrate_legacy_projects()
@@ -172,14 +169,19 @@ def _migrate_legacy_projects() -> None:
         if not sess_dirs:
             continue
         dst = (data_dir("rekursiv-ai") / "sagent" / "projects") / proj.name
+        copied = False
         for sd in sess_dirs:
             tgt = dst / sd.name
             if not tgt.exists():
                 _copy_tree_merge(sd, tgt)
+                copied = True
         mem = proj / "memory"
         if mem.is_dir():
             _copy_tree_merge(mem, dst / "memory")
-        if dst.is_dir():
+        # Log the copy, not the destination's existence: migration runs on
+        # every startup, so keying on ``dst.is_dir()`` reports a migration
+        # forever after the one run that actually performed it.
+        if copied:
             logger.info("migrated legacy sessions %s -> %s", proj, dst)
 
 
@@ -212,23 +214,66 @@ def _bridge_shared_dirs() -> None:
             logger.warning("could not bridge shared dir %s: %s", sagent_path, exc)
 
 
-# Path separators map to ``_`` so the slug stays injective on the
-# separator structure: ``/tmp/a-b`` and ``/tmp/a/b`` previously
-# collapsed to the same slug because both ``/`` and ``-`` became
-# ``-``. Keeping ``/`` distinct under ``_`` preserves the directory
-# boundary information without introducing characters outside
-# ``[A-Za-z0-9_-]`` (all filesystem-safe).
-_SLUG_NONALPHANUM_RE = re.compile(r"[^a-zA-Z0-9/]")
+# ``/`` -> ``_``; alphanumerics pass through; EVERY other character --
+# including a literal ``-`` and ``_`` -- escapes to ``-<hex>-``.
+# Escaping the introducer is what makes the encoding prefix-free and so
+# injective: while ``-`` also passed through verbatim, a path containing
+# a literal ``-2e-`` decoded the same as one containing ``.``, which is
+# the transcript-mixing the escape exists to prevent.
+_SLUG_ESCAPE_RE = re.compile(r"[^a-zA-Z0-9/]")
+
+
+def _slug_rule_ambiguous_escape(path: str) -> str:
+    """Pre-prefix-free scheme: ``-`` and ``_`` passed through unescaped.
+
+    Short-lived but real sessions landed under it, so it stays in the
+    fallback chain even though its ambiguity is exactly what the current
+    encoding fixes.
+    """
+    return re.sub(
+        r"[^a-zA-Z0-9/_-]",
+        lambda m: f"-{m.group().encode('utf-8').hex()}-",
+        path,
+    ).replace("/", "_")
+
+
+def _slug_rule_collapse_except_sep(path: str) -> str:
+    """Pre-escape scheme: every non-alphanumeric except ``/`` became ``-``."""
+    return re.sub(r"[^a-zA-Z0-9/]", "-", path).replace("/", "_")
+
+
+def _slug_rule_collapse_all(path: str) -> str:
+    """Pre-convention scheme: every non-alphanumeric, ``/`` included, became ``-``."""
+    return re.sub(r"[^a-zA-Z0-9]", "-", path)
+
+
+# The historical slug schemes, newest first. ``project_dirs`` walks these
+# so a session written under any prior generation stays resumable: a
+# slug rule change must never strand transcripts on disk.
+#
+# EDITING ``cwd_slug``? Copy its PREVIOUS body to a new ``_slug_rule_*``
+# function and prepend it here, in the same commit. Omitting that step
+# makes every session written under the old rule unreachable, and
+# nothing fails loudly -- the sessions simply stop appearing in
+# ``--resume``. This has been missed twice.
+_PRIOR_SLUG_RULES: Final[tuple[Callable[[str], str], ...]] = (
+    _slug_rule_ambiguous_escape,
+    _slug_rule_collapse_except_sep,
+    _slug_rule_collapse_all,
+)
 
 
 def cwd_slug(cwd: str | Path, *, max_slug_len: int = 200) -> str:
     """Derive a directory-safe slug for ``cwd``.
 
-    Maps path separators (``/``) to ``_`` and other non-alphanumerics
-    to ``-``, then truncates with a stable hash suffix when the result
-    exceeds ``max_slug_len``. The two-character mapping prevents
-    sibling directory paths that differ only in ``/`` vs ``-`` from
-    aliasing to the same slug.
+    Maps path separators (``/``) to ``_``, passes alphanumerics through,
+    and percent-style escapes every other character as ``-<hex>-``.
+    Escaping rather than collapsing keeps the map injective, so sibling
+    directories differing only in punctuation (``a_b`` / ``a-b`` /
+    ``a.b``) never share a session directory. The escape introducer is
+    itself escaped, so the encoding is prefix-free and a literal
+    ``-2e-`` in a path cannot alias an encoded ``.``. Slugs longer than
+    ``max_slug_len`` are truncated with a stable hash suffix.
 
     Args:
       cwd: Current working directory.
@@ -240,24 +285,57 @@ def cwd_slug(cwd: str | Path, *, max_slug_len: int = 200) -> str:
 
     """
     s = str(Path(cwd).resolve())
-    sanitized = _SLUG_NONALPHANUM_RE.sub("-", s).replace("/", "_")
+    sanitized = _SLUG_ESCAPE_RE.sub(
+        lambda m: f"-{m.group().encode('utf-8').hex()}-", s
+    ).replace("/", "_")
     if len(sanitized) <= max_slug_len:
         return sanitized
-    # Python hash is salted per-process; use a stable fnv-like
-    # fold so the same cwd always hashes to the same slug.
+    return f"{sanitized[:max_slug_len]}-{_slug_hash(s):x}"
+
+
+def _slug_hash(text: str) -> int:
+    """Stable FNV-1a fold; ``hash()`` is salted per process."""
     h = 0xCBF29CE484222325
-    for ch in s.encode():
+    for ch in text.encode():
         h = ((h ^ ch) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
-    return f"{sanitized[:max_slug_len]}-{h:x}"
+    return h
+
+
+def _prior_cwd_slugs(cwd: str | Path, *, max_slug_len: int = 200) -> tuple[str, ...]:
+    """Return ``cwd``'s slugs under every superseded scheme, newest first.
+
+    Read paths consult these after the current slug so a slug-rule change
+    never strands sessions already on disk. Truncation mirrors
+    :func:`cwd_slug` because the old schemes shared its hash suffix.
+    """
+    s = str(Path(cwd).resolve())
+    # A path drawn entirely from ``[A-Za-z0-9/]`` has nothing to escape,
+    # so an older rule can reproduce the CURRENT slug byte-for-byte.
+    # Excluding it keeps the contract ("superseded schemes") honest for
+    # every caller, not just the one that happens to filter.
+    seen = {cwd_slug(cwd, max_slug_len=max_slug_len)}
+    out: list[str] = []
+    for rule in _PRIOR_SLUG_RULES:
+        slug = rule(s)
+        if len(slug) > max_slug_len:
+            slug = f"{slug[:max_slug_len]}-{_slug_hash(s):x}"
+        if slug not in seen:
+            seen.add(slug)
+            out.append(slug)
+    return tuple(out)
 
 
 def project_dir(cwd: str | Path, *, projects_dir: Path | None = None) -> Path:
-    """Return the project directory under ``~/.sagent/projects/``.
+    """Return the project directory under the per-user projects root.
 
-    Resolves to the current ``_``-slug dir. When that does not yet exist but a
-    migrated legacy ``-``-slug dir does, returns the legacy one so resume finds
-    pre-convention sessions without an (impossible) slug translation. New
-    sessions always write to the current slug.
+    Resolves to the current-slug dir, falling back to the newest
+    superseded slug that exists on disk (see :func:`_prior_cwd_slugs`) so
+    resume finds sessions written before a slug-rule change. New sessions
+    always write to the current slug.
+
+    Prefer :func:`project_dirs` when listing: this returns ONE directory,
+    so once a new session establishes the current slug, older-slug
+    sessions stop being reachable through it.
 
     Args:
       cwd: Current working directory.
@@ -267,13 +345,39 @@ def project_dir(cwd: str | Path, *, projects_dir: Path | None = None) -> Path:
       path: Project directory path.
 
     """
+    return project_dirs(cwd, projects_dir=projects_dir)[0]
+
+
+def project_dirs(
+    cwd: str | Path, *, projects_dir: Path | None = None
+) -> tuple[Path, ...]:
+    """Return every project directory holding ``cwd``'s sessions.
+
+    The current slug first, then each superseded slug that exists on
+    disk. Listing must span all of them: ``new_session_dir`` creates the
+    current slug on the first new session, so a single-directory lookup
+    would hide every previously written session from that moment on.
+
+    Args:
+      cwd: Current working directory.
+      projects_dir: Override for the projects root directory.
+
+    Returns:
+      paths: Project directories, current slug first; always non-empty.
+
+    """
     root = projects_dir or (data_dir("rekursiv-ai") / "sagent" / "projects")
     current = root / cwd_slug(cwd)
-    if not current.exists():
-        legacy = root / _legacy_cwd_slug(cwd)
-        if legacy != current and legacy.is_dir():
-            return legacy
-    return current
+    prior = [
+        root / slug
+        for slug in _prior_cwd_slugs(cwd)
+        if root / slug != current and (root / slug).is_dir()
+    ]
+    if not current.exists() and prior:
+        # Nothing written under the current rule yet: lead with the
+        # newest surviving generation so resume lands there.
+        return (*prior, current)
+    return (current, *prior)
 
 
 def new_session_dir(cwd: str | Path, *, projects_dir: Path | None = None) -> Path:
@@ -284,7 +388,7 @@ def new_session_dir(cwd: str | Path, *, projects_dir: Path | None = None) -> Pat
       projects_dir: Override for the projects root directory.
 
     Returns:
-      path: ``~/.sagent/projects/<slug>/<uuid4-hex>/``.
+      path: ``<projects-root>/<slug>/<uuid4-hex>/``.
 
     """
     # A NEW session always establishes the current ``_``-slug. ``project_dir``
@@ -305,6 +409,8 @@ def _safe_scope(scope: str) -> str:
     unchanged; an attacker controlling that key must not be able to
     write outside the configured projects root via path-traversal
     segments (``..``), absolute paths, NUL bytes, or empty names.
+    Nested scopes (``a/b``) are permitted; only absolute paths,
+    backslashes, and traversal segments are rejected.
 
     Args:
       scope: Caller-supplied scope identifier.
@@ -313,8 +419,8 @@ def _safe_scope(scope: str) -> str:
       scope: The validated scope, unchanged.
 
     Raises:
-      ValueError: When ``scope`` contains traversal or is otherwise
-          unusable as a single directory name.
+      ValueError: When ``scope`` is absolute, contains a backslash, or
+          holds a traversal segment.
 
     """
     if not scope:
@@ -322,7 +428,9 @@ def _safe_scope(scope: str) -> str:
     if "\x00" in scope:
         raise ValueError("scope cannot contain NUL bytes.")
     if scope.startswith("/") or "\\" in scope:
-        raise ValueError(f"scope must be a relative single segment: {scope!r}")
+        raise ValueError(
+            f"scope must be a relative path without backslashes: {scope!r}"
+        )
     parts = scope.split("/")
     if any(p in ("", ".", "..") for p in parts):
         raise ValueError(f"scope must not contain traversal segments: {scope!r}")
@@ -335,7 +443,7 @@ def session_dir_for_scope(scope: str, base: Path | None = None) -> Path:
     Args:
       scope: Named scope (e.g. Slack thread ID). Must be a relative
           path with no traversal segments; otherwise ``ValueError``.
-      base: Root directory override. Defaults to ``~/.sagent/projects``.
+      base: Root directory override. Defaults to the per-user projects root.
 
     Returns:
       path: ``<base>/<scope>/<uuid>/``.
@@ -355,7 +463,7 @@ def existing_scope_dir(scope: str, base: Path | None = None) -> Path | None:
     Args:
       scope: Named scope (e.g. Slack thread ID). Must be a relative
           path with no traversal segments; otherwise ``ValueError``.
-      base: Root directory override. Defaults to ``~/.sagent/projects``.
+      base: Root directory override. Defaults to the per-user projects root.
 
     Returns:
       path: Most recent session directory containing ``session.jsonl``,
@@ -368,12 +476,18 @@ def existing_scope_dir(scope: str, base: Path | None = None) -> Path | None:
     scope_dir = root / _safe_scope(scope)
     if not scope_dir.exists():
         return None
+    # Rank on the transcript's mtime, matching ``_peek_session`` and
+    # ``latest_session``. A directory's own mtime changes when any child
+    # is added or removed, so it can rank a scope above one whose
+    # conversation is genuinely newer.
     children = [
-        c for c in scope_dir.iterdir() if c.is_dir() and (c / "session.jsonl").exists()
+        (c / "session.jsonl", c)
+        for c in scope_dir.iterdir()
+        if c.is_dir() and (c / "session.jsonl").exists()
     ]
     if not children:
         return None
-    return max(children, key=lambda p: p.stat().st_mtime)
+    return max(children, key=lambda pair: pair[0].stat().st_mtime)[1]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -426,8 +540,12 @@ def _iter_jsonl(lines: Iterable[str]) -> Iterator[MutableJSON]:
         except json.JSONDecodeError:
             logger.warning("Skipping malformed JSONL line: %r", line[:120])
             continue
-        if isinstance(parsed, dict):
-            yield cast(MutableJSON, parsed)
+        # ``dict_val`` narrows without a cast, but maps a non-object to an
+        # empty dict -- indistinguishable from ``{}`` on the wire. Compare
+        # against the parsed value to keep the non-dict warning honest.
+        record = dict_val(parsed)
+        if record or parsed == {}:
+            yield json_unfreeze(record)
         else:
             logger.warning("Skipping non-dict JSONL record: %r", line[:120])
 
@@ -505,16 +623,16 @@ def list_sessions(
       sessions: Session metadata sorted by mtime descending.
 
     """
-    pdir = project_dir(cwd, projects_dir=projects_dir)
-    if not pdir.exists():
-        return []
     out: list[SessionInfo] = []
-    for child in pdir.iterdir():
-        if not child.is_dir():
+    for pdir in project_dirs(cwd, projects_dir=projects_dir):
+        if not pdir.exists():
             continue
-        info = _peek_session(child)
-        if info is not None:
-            out.append(info)
+        for child in pdir.iterdir():
+            if not child.is_dir():
+                continue
+            info = _peek_session(child)
+            if info is not None:
+                out.append(info)
     out.sort(key=lambda s: s.mtime, reverse=True)
     return out
 
@@ -532,16 +650,15 @@ def list_all_sessions(*, projects_dir: Path | None = None) -> list[SessionInfo]:
     root = projects_dir or (data_dir("rekursiv-ai") / "sagent" / "projects")
     if not root.exists():
         return []
-    out: list[SessionInfo] = []
-    for proj in root.iterdir():
-        if not proj.is_dir():
-            continue
-        for child in proj.iterdir():
-            if not child.is_dir():
-                continue
-            info = _peek_session(child)
-            if info is not None:
-                out.append(info)
+    # Walk to any depth rather than assuming ``<root>/<proj>/<session>``:
+    # ``session_dir_for_scope`` accepts nested scopes (``slack/T123``), so
+    # a fixed two-level scan silently omits every scoped session from
+    # ``--resume-all`` / ``--continue-all``.
+    out = [
+        info
+        for session_file in root.glob("**/session.jsonl")
+        if (info := _peek_session(session_file.parent)) is not None
+    ]
     out.sort(key=lambda s: s.mtime, reverse=True)
     return out
 
@@ -562,20 +679,20 @@ def latest_session(
       session: Most recent session, or None if none exist.
 
     """
-    pdir = project_dir(cwd, projects_dir=projects_dir)
-    if not pdir.exists():
-        return None
     candidates: list[tuple[float, Path]] = []
-    for child in pdir.iterdir():
-        if not child.is_dir():
+    for pdir in project_dirs(cwd, projects_dir=projects_dir):
+        if not pdir.exists():
             continue
-        session_file = child / "session.jsonl"
-        if not session_file.exists():
-            continue
-        try:
-            candidates.append((session_file.stat().st_mtime, child))
-        except OSError:
-            continue
+        for child in pdir.iterdir():
+            if not child.is_dir():
+                continue
+            session_file = child / "session.jsonl"
+            if not session_file.exists():
+                continue
+            try:
+                candidates.append((session_file.stat().st_mtime, child))
+            except OSError:
+                continue
     candidates.sort(key=lambda t: t[0], reverse=True)
     for _, child in candidates:
         info = _peek_session(child)
@@ -633,7 +750,11 @@ def pick_session(
     for i, s in enumerate(visible, start=1):
         rel = _format_relative_time(s.mtime)
         label = _truncate(s.status, 60) or "(no user messages)"
-        sout.write(f"  [{i:>2}] {rel:>7} · {s.message_count:>3} msg · {label}\n")
+        # A corrupt transcript stopped parsing partway, so its counts are
+        # a floor, not a total. Marking it keeps a damaged session from
+        # reading as a healthy one with a confidently wrong count.
+        count = f"{s.message_count:>3}?" if s.corrupt else f"{s.message_count:>3} "
+        sout.write(f"  [{i:>2}] {rel:>7} · {count}msg · {label}\n")
     # Re-prompt on parse failure so a typo is recoverable; only EOF /
     # Ctrl-C / out-of-range aborts.
     while True:

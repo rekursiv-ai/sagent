@@ -427,13 +427,13 @@ class SlackAdapter:
 
         # Cache agent messages for reaction lookups.
         if sender_agent and ts:
-            self._sent_messages[(channel, ts)] = (sender_agent, clean[:200], thread_ts)
+            self._sent_messages[(channel, ts)] = (sender_agent, clean, thread_ts)
 
         # 1. Log channel → owning agent (skip self-routing).
         if channel in self._log_channel_owners:
             owner = self._log_channel_owners[channel]
             if owner in agent_registry and owner != sender_agent:
-                self._log_route(f"[{user}->{owner}] log-channel {clean[:200]}")
+                self._log_route(f"[{user}->{owner}] log-channel {clean}")
                 agent_registry[owner].runtime.inbox.push_back(
                     UserMessage(text=formatted),
                 )
@@ -445,7 +445,7 @@ class SlackAdapter:
             thread_key = (channel, thread_ts)
             if thread_key not in self._thread_owners:
                 self._thread_owners[thread_key] = target
-            self._log_route(f"[{user}->{target}] mention {clean[:200]}")
+            self._log_route(f"[{user}->{target}] mention {clean}")
             agent_registry[target].runtime.inbox.push_back(
                 UserMessage(text=formatted),
             )
@@ -456,7 +456,7 @@ class SlackAdapter:
         if thread_key in self._thread_owners:
             owner = self._thread_owners[thread_key]
             if owner in agent_registry and owner != sender_agent:
-                self._log_route(f"[{user}->{owner}] thread {clean[:200]}")
+                self._log_route(f"[{user}->{owner}] thread {clean}")
                 agent_registry[owner].runtime.inbox.push_back(
                     UserMessage(text=formatted),
                 )
@@ -464,26 +464,26 @@ class SlackAdapter:
 
         # Agent messages that don't match steps 1-3: drop.
         if sender_agent:
-            self._log_route(f"[{sender_agent}] dropped {clean[:200]}")
+            self._log_route(f"[{sender_agent}] dropped {clean}")
             return
 
         # 4. Try as command (human messages only).
         if await self._try_command(clean, channel, thread_ts):
-            self._log_route(f"[{user}] command {clean[:200]}")
+            self._log_route(f"[{user}] command {clean}")
             return
 
         # 5. Single agent default.
         agents = list(agent_registry)
         if len(agents) == 1:
             self._thread_owners[(channel, thread_ts)] = agents[0]
-            self._log_route(f"[{user}->{agents[0]}] default {clean[:200]}")
+            self._log_route(f"[{user}->{agents[0]}] default {clean}")
             agent_registry[agents[0]].runtime.inbox.push_back(
                 UserMessage(text=formatted),
             )
             return
 
         # 6. Ambiguous or no agents.
-        self._log_route(f"[{user}] unrouted {clean[:200]}")
+        self._log_route(f"[{user}] unrouted {clean}")
         if agents:
             names = ", ".join(sorted(agents))
             await self._reply(
@@ -839,8 +839,6 @@ def _render_event(event: RuntimeEvent) -> str | None:
         text = event.text.strip()
         if not text:
             return None
-        if len(text) > 2000:
-            text = text[:2000] + "…"
         return f"💭 {text}"
 
     if isinstance(event, ToolLabel):
@@ -857,10 +855,10 @@ def _render_event(event: RuntimeEvent) -> str | None:
         if event.summary.strip():
             lines.append(f"  → {event.summary.strip()}")
         if not lines and event.content.strip():
-            text = event.content.strip()
-            if len(text) > 2000:
-                text = text[:2000] + "…"
-            lines.append(f"  → {text}")
+            # No length clamp: ``_flush_log`` chunks the buffer at line
+            # boundaries under Slack's per-message limit, so an oversize
+            # body is split across messages rather than lost.
+            lines.append(f"  → {event.content.strip()}")
         return "\n".join(lines) if lines else None
 
     if isinstance(event, ModelResponseError):

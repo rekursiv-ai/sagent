@@ -114,12 +114,23 @@ async def test_glob_sort_mtime_desc(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_glob_max_results_zero_errors(tmp_path: Path) -> None:
-    # Schema declares minimum=1; the runtime must reject 0/negative
-    # rather than returning an empty (no matches) string.
-    (tmp_path / "a.py").write_text("")
+async def test_glob_max_results_zero_is_unlimited(tmp_path: Path) -> None:
+    """``0`` is the unlimited default, not an error: the pattern IS the filter."""
+    for i in range(5):
+        (tmp_path / f"a{i}.py").write_text("")
     result = await _run_glob(
         {"pattern": "*.py", "path": str(tmp_path), "max_results": 0},
+        tmp_path,
+    )
+    assert not result.is_error
+    assert len(result.content.splitlines()) == 5
+
+
+@pytest.mark.asyncio
+async def test_glob_max_results_negative_errors(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("")
+    result = await _run_glob(
+        {"pattern": "*.py", "path": str(tmp_path), "max_results": -1},
         tmp_path,
     )
     assert result.is_error
