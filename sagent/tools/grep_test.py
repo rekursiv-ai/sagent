@@ -7,8 +7,11 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
+import asyncio
+
 import pytest
 
+from sagent.lib.tool_validation import validate_tool_input
 from sagent.testing import FakeAgent, with_fake_agent
 from sagent.tools.grep import Grep
 from sagent.tools.lib.bash import parse_bash
@@ -904,6 +907,84 @@ async def test_grep_rejects_negative_pagination(field: str, tmp_path: Path) -> N
     )
     assert result.is_error, result.content
     assert field in result.content
+
+
+@pytest.mark.parametrize("output_mode", ["content", "count", "files_with_matches"])
+@pytest.mark.parametrize(
+    "knobs",
+    [
+        {},
+        {"keep_first": 2},
+        {"keep_last": 2},
+        {"offset": 3},
+    ],
+    ids=["plain", "keep_first", "keep_last", "offset"],
+)
+@pytest.mark.asyncio
+async def test_backends_agree(
+    tmp_path: Path, output_mode: str, knobs: dict[str, int]
+) -> None:
+    """Ripgrep and the Python fallback are documented as interchangeable.
+
+    They are not: ``_grep_rg`` post-slices ripgrep's stdout lines while
+    ``_grep_python`` slices an accumulator whose element granularity
+    differs per ``output_mode``. Same query, different answer, no error
+    -- the result depends on whether ``rg`` happens to be installed.
+    """
+    for i in range(6):
+        (tmp_path / f"f{i}.txt").write_text("hit\nhit\n", encoding="utf-8")
+    args: dict[str, object] = {
+        "pattern": "hit",
+        "path": str(tmp_path),
+        "output_mode": output_mode,
+    }
+    args.update(knobs)
+    rg = await _run_grep(dict(args), tmp_path)
+    py = await _run_grep_py(dict(args), tmp_path)
+    assert rg.content == py.content, (
+        f"backend divergence in {output_mode} with {knobs}:\n"
+        f"  rg -> {rg.content!r}\n  py -> {py.content!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_long_matching_line_is_not_dropped(tmp_path: Path) -> None:
+    """``--max-columns 500`` replaces the line with a placeholder.
+
+    Without ``--max-columns-preview`` ripgrep emits
+    ``[Omitted long matching line]``, so a minified file yields a match
+    the model cannot read -- while the Python fallback returns it whole.
+    """
+    (tmp_path / "min.js").write_text(
+        "y" * 3000 + "NEEDLE" + "y" * 3000 + "\n", encoding="utf-8"
+    )
+    result = await _run_grep(
+        {"pattern": "NEEDLE", "path": str(tmp_path), "output_mode": "content"},
+        tmp_path,
+    )
+    assert "NEEDLE" in result.content, (
+        f"long matching line dropped by the column cap: {result.content!r}"
+    )
+
+
+@pytest.mark.parametrize("bad", ["abc", {"a": 1}, [1]])
+def test_run_reports_bad_context_arg_as_error(bad: object) -> None:
+    """``Tool.run`` must not raise; it returns ``is_error`` instead.
+
+    ``types.tools`` states the contract outright, and ``Read`` carries
+    an explicit defense-in-depth check for direct ``_run`` callers.
+    Grep coerces with a bare ``int()`` and propagates the exception.
+    """
+    result = asyncio.run(grep.run({"pattern": "x", "-B": bad}))
+    assert isinstance(result, ToolResult), "run() must return, not raise"
+
+
+def test_context_knobs_reject_floats() -> None:
+    """Context knobs are line counts; ``2.5`` is not one."""
+    err = validate_tool_input(
+        "Grep", grep.directive_schema, {"pattern": "x", "-B": 2.5}
+    )
+    assert err is not None, "a float context arg passed schema validation"
 
 
 if __name__ == "__main__":

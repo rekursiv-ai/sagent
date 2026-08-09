@@ -114,16 +114,19 @@ class InputQueues:
         return True
 
     def peek_tail_preview(self) -> str:
-        """Return the most-committed pane's text for discard messages.
+        """Return every staged pane's text for discard messages.
 
-        Read-only. The queue pane outranks the deferred pane
-        (Enter-staged is nearer dispatch than Tab-staged).
+        Read-only. Both panes are shown, queue first (Enter-staged is
+        nearer dispatch than Tab-staged): the discard notice counts both,
+        so returning only one destroyed the other without the operator
+        ever seeing what they would have to re-type.
         """
-        if self.queue is not None:
-            return self.queue.text
-        if self.deferred is not None:
-            return self.deferred.text
-        return ""
+        texts = [
+            block.text
+            for block in (self.queue, self.deferred)
+            if block is not None and block.text
+        ]
+        return "\n".join(texts)
 
 
 def _coalesce(

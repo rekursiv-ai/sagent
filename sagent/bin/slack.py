@@ -54,9 +54,10 @@ Usage
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast, override
+from typing import TYPE_CHECKING, Final, Protocol, cast, override
 
 import argparse
 import asyncio
@@ -105,6 +106,11 @@ if TYPE_CHECKING:
     from sagent.types.model import Model
 
 logger = logging.getLogger(__name__)
+
+# Agent-sent messages retained for reaction lookups. Reactions land on
+# recent messages, so the tail is what matters; the cache is a lookup
+# table, not a transcript.
+_SENT_MESSAGE_CACHE: Final = 512
 
 _AGENT_TOOL_NAMES = [
     name for name in DEFAULT_TOOLS if name not in ("AgentSpawn", "AgentSend")
@@ -280,11 +286,19 @@ class SlackAdapter:
         self._log_channel_owners: dict[str, str] = {}
         self._thread_owners: dict[tuple[str, str], str] = {}
         self._active_agents: dict[str, dict[str, str]] = {}
-        self._tasks: list[asyncio.Task[None]] = []
+        # Set + done-callback rather than a list: ``stop_agent`` never
+        # pruned it, so every create/stop cycle leaked a task object for
+        # the life of the adapter.
+        self._tasks: set[asyncio.Task[None]] = set()
         self._bg_tasks: set[asyncio.Task[object]] = set()
         self._user_names: dict[str, str] = {}
         # Cache of agent-sent messages: (channel, ts) → (agent, text, thread_ts).
-        self._sent_messages: dict[tuple[str, str], tuple[str, str, str]] = {}
+        # Bounded: reactions arrive against recent messages, so an
+        # unbounded dict retained every bot message for the life of a
+        # service that runs for weeks.
+        self._sent_messages: OrderedDict[tuple[str, str], tuple[str, str, str]] = (
+            OrderedDict()
+        )
 
     @property
     def bot_user_id(self) -> str:
@@ -428,6 +442,8 @@ class SlackAdapter:
         # Cache agent messages for reaction lookups.
         if sender_agent and ts:
             self._sent_messages[(channel, ts)] = (sender_agent, clean, thread_ts)
+            while len(self._sent_messages) > _SENT_MESSAGE_CACHE:
+                _ = self._sent_messages.popitem(last=False)
 
         # 1. Log channel → owning agent (skip self-routing).
         if channel in self._log_channel_owners:
@@ -671,8 +687,10 @@ class SlackAdapter:
             finally:
                 _ = agent_registry.pop(c.name, None)
 
-        self._tasks.append(asyncio.create_task(_run_child()))
-        self._tasks.append(asyncio.create_task(log_tap(log_queue, label, self)))
+        for coro in (_run_child(), log_tap(log_queue, label, self)):
+            task = asyncio.create_task(coro)
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
 
     def stop_agent(self, label: str) -> None:
         """Shut down the agent registered under ``label`` and persist manifest."""
@@ -790,6 +808,12 @@ def _extract_channel_from_text(text: str) -> str:
     return ""
 
 
+# Buffered characters that trigger a flush mid-session. Roughly one
+# Slack message, so a live agent's log channel stays current instead of
+# filling only when the agent exits.
+_LOG_FLUSH_CHARS: Final = 3_500
+
+
 async def _flush_log(
     buffer: list[str],
     channel_id: str,
@@ -797,19 +821,33 @@ async def _flush_log(
     *,
     msg_limit: int = 3900,
 ) -> None:
-    """Flush buffered log lines to Slack, splitting at line boundaries."""
+    """Flush buffered log lines to Slack, splitting to fit ``msg_limit``.
+
+    Splits at line boundaries where it can and WITHIN a line when it
+    must: one rendered tool result can exceed the whole per-message
+    limit on its own, and appending it whole made Slack reject the send
+    rather than deliver a shortened one.
+    """
     chunk: list[str] = []
     chunk_len = 0
     for line in buffer:
-        line_len = len(line) + 1  # +1 for newline join
-        if chunk and chunk_len + line_len > msg_limit:
-            _ = await slack.send(channel_id, "\n".join(chunk))
-            chunk = []
-            chunk_len = 0
-        chunk.append(line)
-        chunk_len += line_len
+        for piece in _split_line(line, msg_limit):
+            piece_len = len(piece) + 1  # +1 for newline join
+            if chunk and chunk_len + piece_len > msg_limit:
+                _ = await slack.send(channel_id, "\n".join(chunk))
+                chunk = []
+                chunk_len = 0
+            chunk.append(piece)
+            chunk_len += piece_len
     if chunk:
         _ = await slack.send(channel_id, "\n".join(chunk))
+
+
+def _split_line(line: str, msg_limit: int) -> list[str]:
+    """Break one line into pieces that each fit within ``msg_limit``."""
+    if len(line) < msg_limit:
+        return [line]
+    return [line[i : i + msg_limit - 1] for i in range(0, len(line), msg_limit - 1)]
 
 
 def _make_log_forwarder(
@@ -906,10 +944,13 @@ async def log_tap(
     while True:
         rendered = await events.get()
         if rendered is None:
+            # Terminal sentinel: the producer has ended, so flush what is
+            # left and RETURN. Continuing left one tap task alive per
+            # agent for the life of the process.
             if buffer and channel_id and slack:
                 await _flush_log(buffer, channel_id, slack)
             buffer.clear()
-            continue
+            return
         if not source_channel:
             source_channel = _extract_channel_from_text(rendered)
         if channel_id is None:
@@ -921,6 +962,13 @@ async def log_tap(
                 continue
             slack = Slack(token=adapter.bot_token)
         buffer.append(rendered)
+        # Flush as soon as a message's worth has accumulated. A serviced
+        # agent runs for days, so waiting for the terminal sentinel meant
+        # its log channel stayed empty for the whole session while the
+        # buffer grew without bound.
+        if slack is not None and sum(len(x) + 1 for x in buffer) >= _LOG_FLUSH_CHARS:
+            await _flush_log(buffer, channel_id, slack)
+            buffer.clear()
 
 
 def parse_slack_args(

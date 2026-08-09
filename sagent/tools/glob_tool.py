@@ -8,7 +8,7 @@ from typing import Final
 
 import time
 
-from sagent.agent.state import get_tool_state
+from sagent.agent.state import current_agent_var, get_tool_state
 from sagent.lib.custom_json import JSON, bool_val, int_val, json_freeze
 from sagent.tools.core import load_tool_description, run_sync
 from sagent.tools.lib.bash import Node, unwrap_cd_prefix
@@ -22,6 +22,35 @@ from sagent.types.runtime import ToolResult
 
 
 _NUDGE: Final = "find via Bash is a bad UX. Use the Glob tool."
+
+# Match cap when no agent is in context (standalone use, tests).
+_FALLBACK_MAX_RESULTS: Final = 1_000
+
+# Characters a rendered match line costs, used to turn the agent's
+# character budget into a match count. Set above a typical absolute path
+# so the derived cap errs small.
+_ASSUMED_CHARS_PER_MATCH: Final = 120
+
+
+def _default_max_results() -> int:
+    """Match cap for a windowless Glob, derived from the active budget.
+
+    A result over ``max_result_chars`` is off-loaded or elided, so an
+    "unlimited" default silently returned less than a bounded one on a
+    wide pattern. Deriving the bound keeps one reply whole and pairs it
+    with ``offset`` so the remainder stays reachable.
+
+    Returns:
+      limit: Maximum matches returned by default; the fallback constant
+          when no agent is in context.
+
+    """
+    agent = current_agent_var.get(None)
+    ceiling = agent.max_result_chars if agent is not None else 0
+    if ceiling <= 0:
+        return _FALLBACK_MAX_RESULTS
+    return max(_FALLBACK_MAX_RESULTS, ceiling // _ASSUMED_CHARS_PER_MATCH)
+
 
 _DEFAULT_SORT: Final = "name"
 
@@ -83,10 +112,19 @@ class Glob:
                 },
                 "max_results": {
                     "type": "integer",
-                    "minimum": 1,
+                    "minimum": 0,
                     "description": (
-                        "Maximum number of results to return. Omit for"
-                        " unlimited. Must be ≥ 1."
+                        "Maximum number of matches to return. Omit for a"
+                        " budget-derived default; ``0`` means unlimited."
+                    ),
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": (
+                        "Skip the first N matches. Pair with ``max_results``"
+                        " to page through a match set too large for one"
+                        " reply."
                     ),
                 },
             },
@@ -145,7 +183,7 @@ class Glob:
 
         Args:
           args: Directive with ``pattern`` and optional ``path`` / ``sort``
-              / ``long`` / ``max_results``.
+              / ``long`` / ``max_results`` / ``offset``.
 
         Returns:
           result: One match per line (resolved paths), or ``(no matches)``.
@@ -157,7 +195,8 @@ class Glob:
             path=str(args.get("path", ".") or "."),
             sort=str(args.get("sort", _DEFAULT_SORT) or _DEFAULT_SORT),
             long=bool_val(args.get("long"), False),
-            max_results=int_val(args.get("max_results"), 0),
+            max_results=int_val(args.get("max_results"), _default_max_results()),
+            offset=int_val(args.get("offset"), 0),
         )
 
     def _run(
@@ -168,6 +207,7 @@ class Glob:
         sort: str = _DEFAULT_SORT,
         long: bool = False,
         max_results: int = 0,
+        offset: int = 0,
     ) -> str | ToolResult:
         """Run the glob synchronously and return formatted matches."""
         if sort not in SORT_VALUES:
@@ -180,6 +220,12 @@ class Glob:
             return ToolResult(
                 call_id="",
                 content=f"max_results must be >= 0; got {max_results}.",
+                is_error=True,
+            )
+        if offset < 0:
+            return ToolResult(
+                call_id="",
+                content=f"offset must be >= 0; got {offset}.",
                 is_error=True,
             )
         # Python's Path.glob requires a relative pattern. If the
@@ -206,17 +252,21 @@ class Glob:
         sort_paths(matches, sort)
         if not matches:
             return "(no matches)"
-        # ``max_results=0`` is the unlimited default: the pattern the
-        # caller wrote is already the filter, and Glob has no ``offset``,
-        # so a capped result is unrecoverable without re-running.
-        shown = matches[:max_results] if max_results > 0 else matches
+        total = len(matches)
+        window = matches[offset:]
+        # ``max_results=0`` means unlimited; the default comes from the
+        # active budget so one reply stays under the size at which the
+        # result would be off-loaded or elided.
+        shown = window[:max_results] if max_results > 0 else window
         if long:
             lines = [_long_line(m) for m in shown]
         else:
             lines = [str(m.resolve()) for m in shown]
-        result = "\n".join(lines)
-        if len(matches) > len(shown):
-            result += f"\n... ({len(matches) - len(shown)} more)"
+        result = "\n".join(lines) or "(no matches in this window)"
+        remaining = total - offset - len(shown)
+        if remaining > 0:
+            resume = offset + len(shown)
+            result += f"\n... ({remaining} more; pass offset={resume} to continue)"
         return result
 
     def bash_match(self, trees: Sequence[Node]) -> str | None:

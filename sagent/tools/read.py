@@ -89,8 +89,9 @@ class Read:
                     "type": "integer",
                     "minimum": 1,
                     "description": (
-                        "Max lines to return (text files only). Omit to read"
-                        " the whole file. Must be ≥ 1."
+                        "Max lines to return (text files only). Omit for a"
+                        " budget-derived default; the reply names the offset"
+                        " to resume from. Must be ≥ 1."
                     ),
                 },
                 "last_lines": {
@@ -130,11 +131,7 @@ class Read:
         """
         file_path = resolve_tool_path(str(args.get("file_path", "")))
         offset = int_val(args.get("offset"), 1)
-        # ``0`` means unlimited (``_window_text`` reads to EOF). A prior
-        # 2000-line default made every large-file read a two-call
-        # round-trip, and keyed the read cache on the window so a
-        # re-read at a different offset always missed.
-        limit = int_val(args.get("limit"), 0)
+        limit = int_val(args.get("limit"), _default_line_limit())
         last_lines = int_val(args.get("last_lines"), 0)
         pages = str(args.get("pages", ""))
         # Schema declares ``offset``/``limit``/``last_lines`` as
@@ -241,7 +238,7 @@ class Read:
         *,
         file_path: str,
         offset: int = 1,
-        limit: int = 0,
+        limit: int = 0,  # 0 = read to EOF; callers pass _default_line_limit()
         last_lines: int = 0,
         pages: str = "",
     ) -> ToolResult:
@@ -625,6 +622,42 @@ def _render_pdf_jpegs(
     return extract_pdf_pages(
         path, first=first, last=last, max_total_bytes=_rendered_byte_budget()
     )
+
+
+# Line cap used when no agent is in context (standalone tool use, tests).
+_FALLBACK_LINE_LIMIT: Final = 2_000
+
+# Characters per line assumed when turning a character budget into a line
+# count. Set above typical source-line width so the derived cap errs
+# small: over-estimating width under-counts lines, which is the safe
+# direction.
+_ASSUMED_CHARS_PER_LINE: Final = 80
+
+
+def _default_line_limit() -> int:
+    """Line cap for a windowless Read, derived from the active budget.
+
+    One result must stay under ``max_result_chars`` or it is off-loaded
+    to disk (replaced by a ~2 KB preview) or, past the per-request
+    budget, elided to a placeholder -- both of which hand back LESS of
+    the file than a plain windowed read. Read is additionally exempt
+    from disk offload, so without a cap here nothing bounds it at all.
+
+    Deriving the cap from the agent keeps one read whole across models
+    whose windows differ by two orders of magnitude, where any single
+    constant is wrong at one end. Mirrors :func:`_rendered_byte_budget`,
+    which sizes PDF rasterization from the same handle.
+
+    Returns:
+      limit: Maximum lines a default Read returns; the fallback constant
+          when no agent is in context.
+
+    """
+    agent = current_agent_var.get(None)
+    ceiling = agent.max_result_chars if agent is not None else 0
+    if ceiling <= 0:
+        return _FALLBACK_LINE_LIMIT
+    return max(_FALLBACK_LINE_LIMIT, ceiling // _ASSUMED_CHARS_PER_LINE)
 
 
 def _rendered_byte_budget() -> int:

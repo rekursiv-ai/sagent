@@ -21,6 +21,28 @@ from sagent.types.runtime import (
 
 ELIDED_TOOL_RESULT_TAG: Final = "<elided>"
 
+_ELISION_NOTICE: Final = (
+    "<elided: {chars:,} chars dropped to fit the request budget."
+    " Re-run the tool with a narrower window to see this content.>"
+)
+
+
+def elided_placeholder(original_chars: int) -> str:
+    """Render the wire placeholder for an over-budget tool result.
+
+    Says what was dropped and how to get it back. A bare tag left the
+    model unable to distinguish "the tool returned nothing" from "the
+    result was too large to ship", and the second is recoverable.
+
+    Args:
+      original_chars: Length of the content being replaced.
+
+    Returns:
+      placeholder: Self-describing replacement text.
+
+    """
+    return _ELISION_NOTICE.format(chars=original_chars)
+
 
 def materialize_request(
     request: ModelRequest,
@@ -79,11 +101,15 @@ def materialize_messages(
                 keep_calls.add(entry.call_id)
                 out_reversed.append(entry)
             elif used + len(ELIDED_TOOL_RESULT_TAG) <= tool_result_budget_chars:
-                used += len(ELIDED_TOOL_RESULT_TAG)
+                # The full notice when it fits, the bare tag when only it
+                # does. A placeholder must never be sliced: a partial
+                # ``<elided...`` reads as content rather than as a marker.
+                placeholder = elided_placeholder(len(content))
+                if used + len(placeholder) > tool_result_budget_chars:
+                    placeholder = ELIDED_TOOL_RESULT_TAG
+                used += len(placeholder)
                 keep_calls.add(entry.call_id)
-                out_reversed.append(
-                    dataclasses.replace(entry, content=ELIDED_TOOL_RESULT_TAG)
-                )
+                out_reversed.append(dataclasses.replace(entry, content=placeholder))
         elif isinstance(entry, AssistantMessage) and entry.tool_calls:
             call_ids = {tc.id for tc in entry.tool_calls}
             if call_ids <= keep_calls:

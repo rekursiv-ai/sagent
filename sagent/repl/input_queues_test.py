@@ -89,12 +89,14 @@ def test_clear_empties_both_panes() -> None:
     assert not queues.has_any()
 
 
-def test_peek_tail_preview_prefers_queue() -> None:
+def test_peek_tail_preview_shows_every_pane_queue_first() -> None:
     queues = InputQueues(
         queue=QueuedInputBlock(text="now"),
         deferred=QueuedInputBlock(text="later"),
     )
-    assert queues.peek_tail_preview() == "now"
+    # Both panes appear: the discard notice counts both, so showing one
+    # destroyed the other unseen. Queue leads (nearer dispatch).
+    assert queues.peek_tail_preview() == "now\nlater"
     # Read-only.
     assert queues.queue is not None
     assert queues.deferred is not None

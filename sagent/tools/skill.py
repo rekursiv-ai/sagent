@@ -256,19 +256,23 @@ class Skill:
         construction. When disabled, skill bodies vanish on macro-compact
         and the agent re-invokes ``Skill`` if it needs the workflow again.
 
+        Bodies are restored WHOLE or not at all -- a skill is a contract,
+        and half a workflow misleads worse than an absent one. When they
+        do not all fit, the omitted names are listed so the agent can
+        re-invoke deliberately instead of silently proceeding without a
+        workflow it believes is loaded.
+
         Args:
           history: Post-compaction history; mutated in place.
           tool_state: Active tool state; ``invoked_skills`` selects which
               bodies to restore.
-          budget_chars: Accepted for hook-protocol compatibility and
-              ignored. A skill body is a contract: half a workflow is
-              worse than none, and the prior per-skill cap cut mid-body
-              while the aggregate budget dropped whole skills silently.
-              Every invoked skill is now re-attached whole; overall
-              context pressure stays the compactor's business.
+          budget_chars: Characters this hook may add. The compactor
+              derives it from the space actually left after compaction,
+              so overrunning it can push the just-compacted request back
+              over the window -- the very condition compaction ran to
+              relieve. ``0`` means unbounded.
 
         """
-        del budget_chars
         if not self.restore_after_compact:
             return
         invoked = tool_state.invoked_skills
@@ -279,12 +283,23 @@ class Skill:
             return
         skills = discover(cwd)
         parts: list[str] = []
+        skipped: list[str] = []
+        total = 0
         for s in skills:
             if s.name not in invoked:
                 continue
             body = escape_prompt_text(s.body)
+            block = f"<skill name='{s.name}' source='{s.source}'>\n{body}\n</skill>"
+            if budget_chars > 0 and total + len(block) > budget_chars:
+                skipped.append(s.name)
+                continue
+            total += len(block)
+            parts.append(block)
+        if skipped:
             parts.append(
-                f"<skill name='{s.name}' source='{s.source}'>\n{body}\n</skill>"
+                "Not restored (post-compaction budget): "
+                + ", ".join(sorted(skipped))
+                + ". Re-invoke Skill if you need one of these."
             )
         if not parts:
             return

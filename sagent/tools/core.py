@@ -208,7 +208,7 @@ def load_tool_description(name: str) -> str:
         logger.error(
             "Tool %r not in recipe %s", name, _recipe_path_override or _DEFAULT_RECIPE
         )
-        return ""
+        return _MISSING_TOOL_DESCRIPTION
     try:
         text = read_asset(str(by_lower[key])).rstrip()
     except FileNotFoundError:

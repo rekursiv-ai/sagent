@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from queue import Queue
 
 import shutil
 
@@ -120,6 +121,24 @@ def test_llamacpp_argv_missing_server_raises(
     monkeypatch.setattr(llamacpp_mod, "_docker_server", _no_docker)
     with pytest.raises(RuntimeError, match="llama-server not found"):
         _ = p._argv(8080)
+
+
+def test_first_line_failure_survives_the_log_window() -> None:
+    """llama.cpp names the real cause in its FIRST lines.
+
+    A missing model file or a bad GPU layer count is announced at
+    startup; a tail-only window reports the generic lines that follow
+    and drops the diagnosis.
+    """
+    server = LlamaCpp.__new__(LlamaCpp)
+    server._log = []
+    server._log_queue = Queue()
+    server._log_queue.put("FIRST_FAILURE: model file not found")
+    for i in range(60):
+        server._log_queue.put(f"line {i}")
+    server._drain_log()
+    out = _startup_error("llama-server exited", server._log)
+    assert "FIRST_FAILURE" in out, "the startup cause was dropped by the log window"
 
 
 if __name__ == "__main__":

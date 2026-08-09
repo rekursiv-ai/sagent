@@ -21,6 +21,7 @@ from sagent.agent.state import (
 )
 from sagent.testing import with_fake_agent
 from sagent.tools.core import (
+    _MISSING_TOOL_DESCRIPTION,
     TOOL_RESULT_MAX_CHARS,
     _ToolImpl,
     changed_files_context,
@@ -750,11 +751,12 @@ def test_read_asset_includes_directive(tmp_path: Path) -> None:
     assert "\nb" in text
 
 
-def test_load_tool_description_missing_returns_empty() -> None:
-    # A name not present in the sagent recipe falls back to "".
+def test_load_tool_description_missing_returns_fallback() -> None:
+    # A name not present in the recipe gets the documented generic
+    # description; shipping "" sent the model a tool with no docs at all.
     set_recipe("sagent")
     desc = load_tool_description("__totally_made_up_tool__")
-    assert desc == ""
+    assert desc == _MISSING_TOOL_DESCRIPTION
 
 
 def test_load_tool_description_known_returns_nonempty() -> None:
@@ -819,6 +821,13 @@ async def test_locked_file_write_serializes(tmp_path: Path) -> None:
         ["in:a", "out:a", "in:b", "out:b"],
         ["in:b", "out:b", "in:a", "out:a"],
     )
+
+
+def test_unknown_tool_gets_the_documented_fallback() -> None:
+    """A tool absent from the recipe must not ship an empty description."""
+    out = load_tool_description("NoSuchToolXYZ")
+    assert out, "unknown tool shipped an empty description to the model"
+    assert out == _MISSING_TOOL_DESCRIPTION
 
 
 if __name__ == "__main__":

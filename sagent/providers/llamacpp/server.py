@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
-from typing import ClassVar, Self, cast, override
+from typing import ClassVar, Final, Self, cast, override
 
 import atexit
 import os
@@ -246,15 +246,21 @@ class LlamaCpp(OpenAICompat):
         )
 
     def _drain_log(self) -> None:
-        """Drain queued server log lines into the bounded tail buffer."""
+        """Drain queued server log lines into the bounded buffer.
+
+        Keeps the HEAD as well as the tail: llama.cpp names the real
+        startup failure in its first lines (a missing model file, an
+        impossible GPU layer count), so a tail-only window reported the
+        generic noise that followed and dropped the diagnosis.
+        """
         while True:
             try:
                 line = self._log_queue.get_nowait()
             except Empty:
                 return
             self._log.append(line)
-            if len(self._log) > 40:
-                del self._log[:-40]
+            if len(self._log) > _LOG_HEAD_LINES + _LOG_TAIL_LINES:
+                del self._log[_LOG_HEAD_LINES:-_LOG_TAIL_LINES]
 
 
 def _start_log_reader(proc: subprocess.Popen[str], out: Queue[str]) -> None:
@@ -282,6 +288,12 @@ def _docker_server() -> str | None:
     return str(path) if path.exists() else None
 
 
+# Startup-log retention. Head keeps the failure cause (llama.cpp reports
+# it first); tail keeps the symptom that stopped the process.
+_LOG_HEAD_LINES: Final = 20
+_LOG_TAIL_LINES: Final = 40
+
+
 def _free_port() -> int:
     """Return an OS-assigned free localhost TCP port."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -301,9 +313,9 @@ def _http_ok(url: str) -> bool:
 def _startup_error(prefix: str, lines: Sequence[str]) -> str:
     """Format a startup-failure message with the captured log appended.
 
-    Uncapped: a llama.cpp startup failure usually announces itself in the
-    FIRST lines (missing model file, bad GPU layer count), which a
-    tail-20 window dropped.
+    ``lines`` is already bounded head-and-tail by :meth:`_drain_log`, so
+    the whole buffer is emitted: the cause is usually in the head and
+    the symptom in the tail, and dropping either loses the diagnosis.
     """
     if not lines:
         return prefix

@@ -5,6 +5,7 @@ All tests stub the Slack SDK -- no network calls.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -128,11 +129,11 @@ def _make_adapter(
     adapter._log_channel_owners = {}
     adapter._thread_owners = {}
     adapter._active_agents = {}
-    adapter._tasks = []
+    adapter._tasks = set()
     adapter._bg_tasks = set()
     adapter._user_names = {}
     adapter._router_log_channel = ""
-    adapter._sent_messages = {}
+    adapter._sent_messages = OrderedDict()
     spy = _SpySlack()
     adapter._slack = spy  # ty: ignore[invalid-assignment]  # pyright: ignore[reportAttributeAccessIssue]  -- test spy duck-types Slack.send only
     return adapter, spy
@@ -1542,6 +1543,76 @@ class TestRouteEdgeCases:
         result = await adapter._try_command("", "C1", "1.0")
         assert result is False
         assert spy.sent == []
+
+
+class TestFlushLogSplitting:
+    @pytest.mark.anyio
+    async def test_single_oversized_line_is_split(self) -> None:
+        """One line longer than the limit must still be delivered in pieces."""
+        sent: list[str] = []
+
+        async def _capture(
+            _self: Slack, channel: str, text: str, thread_ts: str = ""
+        ) -> str:
+            del channel, thread_ts
+            sent.append(text)
+            return "ok"
+
+        slack = Slack(token="x")  # noqa: S106 -- test credential
+        with patch.object(Slack, "send", new=_capture):
+            await _flush_log(["x" * 5000], "C1", slack, msg_limit=3900)
+        assert sent, "nothing was sent"
+        assert all(len(s) <= 3900 for s in sent), (
+            f"send exceeded the limit: {[len(s) for s in sent]}"
+        )
+        assert sum(len(s) for s in sent) >= 5000, "content lost while splitting"
+
+
+class TestLogTapLifecycle:
+    @pytest.mark.anyio
+    async def test_flushes_before_shutdown(self) -> None:
+        """A long-running agent's logs must reach Slack while it runs."""
+        adapter = _FakeLogChannelAdapter()
+        events: asyncio.Queue[str | None] = asyncio.Queue()
+        # Enough volume to cross the mid-session flush threshold; a
+        # long-running agent produces far more than this per hour.
+        events.put_nowait("channel=C_SRC] first")
+        for i in range(50):
+            events.put_nowait(f"line {i}: " + "detail " * 20)
+        with patch.object(Slack, "send", new=AsyncMock(return_value="ok")) as send_mock:
+            task = asyncio.create_task(log_tap(events, "sara", adapter))
+            for _ in range(200):
+                await asyncio.sleep(0)
+                if send_mock.await_count:
+                    break
+            sent_before_sentinel = send_mock.await_count
+            _ = task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        assert sent_before_sentinel > 0, (
+            "no log line reached Slack before shutdown; the buffer only"
+            " flushes on the terminal sentinel"
+        )
+
+    @pytest.mark.anyio
+    async def test_returns_on_sentinel(self) -> None:
+        """The sentinel ends the producer, so the tap must not outlive it."""
+        adapter = _FakeLogChannelAdapter()
+        events: asyncio.Queue[str | None] = asyncio.Queue()
+        events.put_nowait("channel=C_SRC] one")
+        events.put_nowait(None)
+        with patch.object(Slack, "send", new=AsyncMock(return_value="ok")):
+            task = asyncio.create_task(log_tap(events, "sara", adapter))
+            for _ in range(200):
+                await asyncio.sleep(0)
+                if task.done():
+                    break
+            done = task.done()
+            if not done:
+                _ = task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        assert done, "log_tap kept running after its producer ended"
 
 
 if __name__ == "__main__":

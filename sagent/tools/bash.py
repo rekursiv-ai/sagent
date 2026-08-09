@@ -234,8 +234,10 @@ class Bash:
           args: Parsed tool directive mapping.
 
         Returns:
-          result: ``ToolResult`` carrying truncated stdout/stderr and any
-            bash-lint nudges.
+          result: ``ToolResult`` carrying stdout/stderr, the exit code,
+            and any bash-lint nudges. Output is already bounded by the
+            producers (``_process_output`` / ``_kill_and_drain``), which
+            truncate the body before appending trailing diagnostics.
 
         """
         command = str(args.get("command", ""))
@@ -251,7 +253,7 @@ class Bash:
         else:
             timeout_s = max(1, min(int(timeout) // 1000, BASH_MAX_TIMEOUT_MS // 1_000))
             text = await _run_foreground(command, state=state, timeout_s=timeout_s)
-        body = truncate(text, TOOL_RESULT_MAX_CHARS)
+        body = text
         if not self._peer_matchers:
             return ToolResult(call_id="", content=body)
         nudges = self._collect_nudges(command)
@@ -362,10 +364,10 @@ async def _kill_and_drain(
     stdout = stdout_bytes.decode("utf-8", errors="replace")
     stderr = stderr_bytes.decode("utf-8", errors="replace")
     elapsed = time.monotonic() - start
-    killed_lines = stdout.split("\n")
+    body = truncate(stdout.strip(), TOOL_RESULT_MAX_CHARS)
     if stderr:
-        killed_lines.extend(stderr.split("\n"))
-    return "\n".join(killed_lines).strip() + f"\n[{reason} after {elapsed:.1f}s]"
+        body += f"\n{stderr.strip()}"
+    return body + f"\n[{reason} after {elapsed:.1f}s]"
 
 
 def _process_output(
@@ -385,9 +387,13 @@ def _process_output(
                 state.bash_cwd = new_cwd
         else:
             output_lines.append(line)
+    # Truncate stdout, THEN append the diagnostics -- never the other way
+    # round. ``truncate`` keeps the head, so folding stderr and the exit
+    # code into the body first drops both on any oversized run and makes a
+    # failed command read as a successful one.
+    out = truncate("\n".join(output_lines).strip(), TOOL_RESULT_MAX_CHARS)
     if stderr:
-        output_lines.extend(stderr.split("\n"))
-    out = "\n".join(output_lines)
+        out += f"\n{stderr.strip()}"
     if proc.returncode != 0:
         out += f"\n[exit code: {proc.returncode}]"
     return out.strip() or "(no output)"

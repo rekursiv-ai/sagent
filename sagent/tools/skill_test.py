@@ -364,7 +364,7 @@ async def test_post_compact_restore_keeps_huge_body_whole(tmp_path: Path) -> Non
 
 @pytest.mark.asyncio
 async def test_post_compact_restore_keeps_every_skill(tmp_path: Path) -> None:
-    """``budget_chars`` no longer drops skills; a partial catalog is a lie."""
+    """With no budget (``0``), every invoked skill is restored whole."""
     _write_skill(tmp_path, "alpha", body="A" * 500)
     _write_skill(tmp_path, "beta", body="B" * 500)
     state = ToolState()
@@ -372,14 +372,44 @@ async def test_post_compact_restore_keeps_every_skill(tmp_path: Path) -> None:
     state.invoked_skills.update({"alpha", "beta"})
     history: list[ModelContextEvent] = [UserMessage(text="hi")]
     await Skill(restore_after_compact=True).post_compact_restore(
-        history,
-        state,
-        budget_chars=700,
+        history, state, budget_chars=0
     )
     entry = history[0]
     assert isinstance(entry, UserMessage)
     assert "A" * 500 in entry.text
     assert "B" * 500 in entry.text
+    assert "Not restored" not in entry.text
+
+
+@pytest.mark.asyncio
+async def test_post_compact_restore_honors_the_budget(tmp_path: Path) -> None:
+    """The compactor passes real remaining capacity; the hook must respect it.
+
+    ``post_compact_enrich`` computes ``hook_budget`` from the space left
+    after compaction. Ignoring it can push the just-compacted request
+    straight back over the window -- the condition compaction just ran
+    to relieve.
+    """
+    _write_skill(tmp_path, "alpha", body="A" * 500)
+    _write_skill(tmp_path, "beta", body="B" * 500)
+    state = ToolState()
+    state.bash_cwd = str(tmp_path)
+    state.invoked_skills.update({"alpha", "beta"})
+    history: list[ModelContextEvent] = [UserMessage(text="hi")]
+    await Skill(restore_after_compact=True).post_compact_restore(
+        history, state, budget_chars=600
+    )
+    entry = history[0]
+    assert isinstance(entry, UserMessage)
+    injected = len(entry.text)
+    assert injected <= 600 + 400, (
+        f"hook injected {injected} chars against a 600-char budget"
+    )
+    assert "A" * 500 in entry.text or "B" * 500 in entry.text
+    assert "Not restored" in entry.text, (
+        "skills were dropped for budget with no mention of the omission"
+    )
+    assert "beta" in entry.text, "the omitted skill was not named"
 
 
 if __name__ == "__main__":

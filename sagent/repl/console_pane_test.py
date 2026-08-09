@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import io
+import re
 
 from rich.console import Console
 
-from sagent.repl.console_pane import ConsolePrinter
+import pytest
+
+from sagent.repl.console_pane import (
+    _LABEL_MAX_LINES,
+    ConsolePrinter,
+    _wrap_label,
+)
 from sagent.repl.render import ChildItem
 from sagent.types.runtime import (
     AssistantMessage,
@@ -15,6 +22,9 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _printer(width: int = 80) -> tuple[ConsolePrinter, io.StringIO]:
@@ -266,6 +276,34 @@ def test_rich_still_emits_ansi_full_reset_pinning() -> None:
         "Rich no longer emits \\x1b[0m full resets after styled spans;"
         " _dim_baseline's rewrite is now a no-op. Update the helper to"
         " match the new reset shape."
+    )
+
+
+def test_wrap_label_total_lines_respect_the_cap() -> None:
+    """The omission marker is part of the cap, not an extra line past it."""
+    lines = _wrap_label("x\n" * 20, 80)
+    assert len(lines) <= _LABEL_MAX_LINES, (
+        f"cap is {_LABEL_MAX_LINES} but {len(lines)} lines were returned"
+    )
+    assert "more lines" in lines[-1], "elision happened with no marker"
+
+
+@pytest.mark.parametrize("width", [16, 20, 24, 33])
+def test_child_block_labels_fit_narrow_terminals(width: int) -> None:
+    """A child-block label must not overflow the terminal it renders into.
+
+    The inner console is floored at 20 columns while the gutter is 14,
+    so below ~34 columns the composed line is wider than the terminal
+    and every label wraps raggedly in the user's pane.
+    """
+    printer, buf = _printer(width=width)
+    printer.write_child_block("Agent_0", [ToolLabel(call_id="c", text="B" * 300)])
+    rendered = [
+        _ANSI_RE.sub("", line) for line in buf.getvalue().split("\n") if line.strip()
+    ]
+    widest = max(len(line) for line in rendered)
+    assert widest <= width, (
+        f"child-block label rendered {widest} columns into a {width}-column terminal"
     )
 
 

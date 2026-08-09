@@ -57,7 +57,9 @@ def test_materialize_messages_elides_error_results() -> None:
     result = materialized[1]
     assert isinstance(result, ToolResult)
     assert result.is_error is True
-    assert result.content == ELIDED_TOOL_RESULT_TAG[:10]
+    # A budget too small for the full notice falls back to the bare tag
+    # rather than slicing it: a partial "<elided..." reads as content.
+    assert result.content == ELIDED_TOOL_RESULT_TAG
 
 
 def test_materialize_messages_drops_excess_turns_before_emptying_results() -> None:

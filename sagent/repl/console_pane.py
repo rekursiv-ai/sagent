@@ -122,9 +122,9 @@ class ConsolePrinter:
         bounds the pathological case (a heredoc, a pasted blob) so one
         call cannot flood scrollback before it even runs.
         """
-        lines = _wrap_label(text, self.console.width - len(_LABEL_INDENT))
+        lines = _wrap_label(text, self.console.width - len(_CHILD_INDENT))
         for line in lines:
-            self.console.print(Text(f"{_LABEL_INDENT}{line}", style="dim"))
+            self.console.print(Text(f"{_CHILD_INDENT}{line}", style="dim"))
 
     def write_tool_error(self, text: str) -> None:
         """Render red, indented tool-error (multi-line aware).
@@ -201,7 +201,10 @@ class ConsolePrinter:
         buf = io.StringIO()
         inner_console = Console(
             file=buf,
-            width=max(20, self.console.width - gutter_width),
+            # Never wider than what the gutter leaves: a fixed floor made
+            # the composed line exceed the terminal on narrow panes, so
+            # every child line wrapped raggedly in the user's console.
+            width=_inner_width(self.console.width, gutter_width),
             force_terminal=self.console.is_terminal,
             color_system=cast(
                 "Literal['auto', 'standard', '256', 'truecolor', 'windows'] | None",
@@ -288,7 +291,8 @@ def _dim_baseline(line: str) -> str:
     return _ANSI_DIM + rebound + _ANSI_DIM_OFF
 
 
-_LABEL_INDENT: Final = "  "
+# Two-space gutter shared by tool labels and child blocks.
+_CHILD_INDENT: Final = "  "
 
 # Rendered-line cap for one tool label. Labels carry the argument whole
 # (a command, a query, a pasted prompt), so a heredoc or blob would
@@ -315,11 +319,31 @@ def _wrap_label(text: str, width: int) -> list[str]:
         out.extend(chop_cells(raw, usable) or [""])
     if len(out) <= _LABEL_MAX_LINES:
         return out
-    hidden = len(out) - _LABEL_MAX_LINES
-    return [*out[:_LABEL_MAX_LINES], f"... ({hidden} more lines)"]
+    # The marker occupies one of the capped lines rather than sitting
+    # past the cap, so the rendered block never exceeds the limit the
+    # constant advertises.
+    kept = _LABEL_MAX_LINES - 1
+    return [*out[:kept], f"... ({len(out) - kept} more lines)"]
 
 
-_CHILD_INDENT: Final = "  "
+def _inner_width(outer_width: int, gutter_width: int) -> int:
+    """Usable width for a child block's inner console.
+
+    The composed line is ``gutter + inner``, so the inner console must
+    never claim more than the terminal leaves. The prior fixed floor of
+    20 columns did exactly that on a narrow pane: with a 14-column
+    gutter, anything under 34 columns overran the terminal and every
+    child line wrapped raggedly.
+
+    Args:
+      outer_width: Width of the enclosing console.
+      gutter_width: Columns consumed by the child-label gutter.
+
+    Returns:
+      width: Inner console width, at least 1 and never overrunning.
+
+    """
+    return max(1, outer_width - gutter_width)
 
 
 def _gutter_width(label: str) -> int:

@@ -461,6 +461,24 @@ class AgentLike(Protocol):
         ...
 
     @property
+    def max_result_chars(self) -> int:
+        """Characters one tool result may occupy before it is off-loaded.
+
+        Text-producing tools consult this -- via ``current_agent_var`` --
+        to size their own default limits, the way PDF rasterization
+        consults :attr:`max_request_bytes`. A result at or under this
+        size is guaranteed to reach the model whole: it neither trips
+        disk persistence nor exceeds the per-request tool-result budget,
+        which would replace it with an elision placeholder.
+
+        Derived from the active budget rather than a constant because
+        the safe size spans two orders of magnitude across the model
+        range. ``0`` means no agent-derived ceiling; callers fall back to
+        their own constant.
+        """
+        ...
+
+    @property
     def background(self) -> Mapping[str, BackgroundTaskEntry]:
         """Return a read view of all backgrounded jobs (merged).
 

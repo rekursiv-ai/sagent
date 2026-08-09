@@ -15,17 +15,20 @@ from sagent.agent.state import ToolState
 from sagent.lib.tool_validation import validate_tool_input
 from sagent.testing import with_fake_agent
 from sagent.tools.bash import (
+    _BASH_EXIT_RE,
     BASH_DEFAULT_TIMEOUT_MS,
     BASH_MAX_TIMEOUT_MS,
     Bash,
     _ensure_valid_cwd,
     _kill_and_drain,
     _kill_process_group,
+    _process_output,
     _reap_at_exit,
     _render_bash_description,
     _suppress_oserror,
     reap_background_processes,
 )
+from sagent.tools.core import TOOL_RESULT_MAX_CHARS
 from sagent.tools.lib.bash import Node
 from sagent.types.runtime import ToolResult
 
@@ -156,6 +159,33 @@ def test_schema_rejects_unknown_fields_from_llm() -> None:
     )
     assert err is not None
     assert "run_as_fully_detached" in err or "Unexpected" in err
+
+
+@pytest.mark.parametrize(
+    "stdout_size",
+    [10, TOOL_RESULT_MAX_CHARS - 1, TOOL_RESULT_MAX_CHARS, TOOL_RESULT_MAX_CHARS + 1],
+)
+def test_exit_marker_survives_truncation(stdout_size: int) -> None:
+    """A failing command must still read as failed once output is cut.
+
+    ``truncate`` keeps the head; ``_process_output`` puts stderr and
+    ``[exit code: N]`` at the tail. Composed in the wrong order, an
+    oversized stdout silently swallows the only evidence the command
+    failed -- so a broken build reads as a clean one.
+    """
+    proc = MagicMock()
+    proc.returncode = 7
+    out = _process_output(
+        proc, "x" * stdout_size, "fatal: boom", sentinel="__NONE__", state=ToolState()
+    )
+    assert _BASH_EXIT_RE.search(out), (
+        f"exit-code marker lost at stdout={stdout_size:,}: a failed command"
+        " is indistinguishable from a successful one"
+    )
+    assert "fatal: boom" in out, "stderr lost to head-only truncation"
+    # The producer owns the bound, so the composed result is already
+    # within the cap plus its trailing diagnostics.
+    assert len(out) <= TOOL_RESULT_MAX_CHARS + 200
 
 
 def test_ensure_valid_cwd_keeps_existing(tmp_path: Path) -> None:

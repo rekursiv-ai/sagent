@@ -12,6 +12,7 @@ import time
 import httpx
 import pytest
 
+from sagent.agent import retry
 from sagent.agent.retry import (
     _MAX_SERVER_RETRY_AFTER_SEC,
     DEFAULT_MAX_PERSISTENT_ATTEMPTS,
@@ -1716,6 +1717,13 @@ async def test_publish_recoverable_includes_diagnostics_on_retry(
     assert retry_notes
     assert "status=503" in retry_notes[0]
     assert "upstream gone" in retry_notes[0]
+
+
+def test_one_body_reader_symbol() -> None:
+    """Two names for one behavior is a fork waiting to drift."""
+    assert not hasattr(retry, "_response_body_excerpt"), (
+        "_response_body_excerpt duplicated _response_body_text verbatim"
+    )
 
 
 if __name__ == "__main__":
