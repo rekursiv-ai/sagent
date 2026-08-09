@@ -1128,6 +1128,34 @@ def test_quit_without_console_swallows_preview() -> None:
     assert queues.deferred.text == "queued"
 
 
+def test_quit_discard_preview_shows_every_pane() -> None:
+    """The notice counts both panes, so it must show both.
+
+    Rendering ``[discarding 2 queued messages: <queue text>]`` destroys
+    the deferred block without ever showing it -- the operator cannot
+    re-type what they were never shown.
+    """
+    session = MagicMock()
+
+    async def _prompt_async(**kwargs: object) -> str:
+        del kwargs
+        return "/quit"
+
+    session.prompt_async = _prompt_async
+    console = MagicMock()
+    queues = InputQueues(
+        queue=QueuedInputBlock(text="QUEUE-TEXT"),
+        deferred=QueuedInputBlock(text="DEFERRED-TEXT"),
+    )
+    src = PromptToolkitInputSource(session, queues=queues, console=console)
+    assert asyncio.run(src.next_line()) is None
+    rendered = str(console.print.call_args.args[0])
+    assert "QUEUE-TEXT" in rendered
+    assert "DEFERRED-TEXT" in rendered, (
+        f"deferred pane destroyed without being shown: {rendered!r}"
+    )
+
+
 if __name__ == "__main__":
     from sagent.lib.testing.main import test_main
 

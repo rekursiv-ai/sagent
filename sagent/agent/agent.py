@@ -383,6 +383,18 @@ class Agent:
         return self.model.spec.context_limits.max_request_bytes
 
     @property
+    def max_result_chars(self) -> int:
+        """Characters one tool result may occupy and still arrive whole.
+
+        The persist threshold is the binding constraint: a result above
+        it is off-loaded to disk and replaced by a short preview, and one
+        above ``message_budget_chars`` is elided outright. Sizing tool
+        defaults from the persist threshold keeps a single result clear
+        of both.
+        """
+        return self._budget.persist_threshold
+
+    @property
     def max_request_tokens(self) -> int:
         """Active per-request input token budget."""
         return self._budget.max_request_tokens

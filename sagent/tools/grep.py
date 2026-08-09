@@ -4,16 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Final, cast
+from typing import Final
 
 import logging
 import os
 import re
 import shutil
 import subprocess
-import sys
 
-from sagent.agent.state import get_tool_state
+from sagent.agent.state import current_agent_var, get_tool_state
 from sagent.lib.custom_json import JSON, bool_val, int_val, json_freeze
 from sagent.tools.core import load_tool_description, run_sync
 from sagent.tools.lib.bash import (
@@ -86,6 +85,35 @@ _GREP_LONG_VALUE_FLAGS: frozenset[str] = frozenset({"--include", "--exclude"})
 _GREP_EXES: frozenset[str] = frozenset({"grep", "rg"})
 _NUDGE: Final = "grep/rg via Bash is a bad UX. Use the Grep tool."
 
+# Entry cap when no agent is in context (standalone use, tests).
+_FALLBACK_KEEP_FIRST: Final = 1_000
+
+# Characters a rendered match line costs, used to turn the agent's
+# character budget into an entry count. Set above a typical
+# ``path:line:text`` row so the derived cap errs small.
+_ASSUMED_CHARS_PER_MATCH: Final = 150
+
+
+def _default_keep_first() -> int:
+    """Entry cap for an unpaginated Grep, derived from the active budget.
+
+    A result over ``max_result_chars`` is off-loaded to disk or elided,
+    and either outcome returns less than a bounded reply would -- so an
+    "unlimited" default silently lost matches on a wide pattern. The
+    derived cap keeps one reply whole; ``offset`` reaches the rest.
+
+    Returns:
+      limit: Maximum entries returned by default; the fallback constant
+          when no agent is in context.
+
+    """
+    agent = current_agent_var.get(None)
+    ceiling = agent.max_result_chars if agent is not None else 0
+    if ceiling <= 0:
+        return _FALLBACK_KEEP_FIRST
+    return max(_FALLBACK_KEEP_FIRST, ceiling // _ASSUMED_CHARS_PER_MATCH)
+
+
 # Mirrors the ``output_mode`` enum advertised in ``directive_schema``.
 # Validated at runtime so an unknown value errors instead of silently
 # behaving like ``files_with_matches``.
@@ -126,22 +154,22 @@ class Grep:
                     "description": 'Output mode. Defaults to "files_with_matches".',
                 },
                 "-B": {
-                    "type": "number",
+                    "type": "integer",
                     "minimum": 0,
                     "description": 'Number of lines to show before each match (rg -B). Requires output_mode: "content". Must be ≥ 0.',
                 },
                 "-A": {
-                    "type": "number",
+                    "type": "integer",
                     "minimum": 0,
                     "description": 'Number of lines to show after each match (rg -A). Requires output_mode: "content". Must be ≥ 0.',
                 },
                 "-C": {
-                    "type": "number",
+                    "type": "integer",
                     "minimum": 0,
                     "description": "Alias for context. Must be ≥ 0.",
                 },
                 "context": {
-                    "type": "number",
+                    "type": "integer",
                     "minimum": 0,
                     "description": 'Number of lines to show before and after each match (rg -C). Requires output_mode: "content". Must be ≥ 0.',
                 },
@@ -154,17 +182,17 @@ class Grep:
                     "description": "Show line numbers in output (rg -n). Defaults to true.",
                 },
                 "keep_first": {
-                    "type": "number",
+                    "type": "integer",
                     "minimum": 0,
-                    "description": "Keep only the first N lines/entries. Defaults to 0 (unlimited). Ignored when keep_last is set.",
+                    "description": "Keep only the first N lines/entries. Omit for a budget-derived default; 0 means unlimited. Ignored when keep_last is set.",
                 },
                 "keep_last": {
-                    "type": "number",
+                    "type": "integer",
                     "minimum": 0,
                     "description": "Keep only the last N lines/entries. Defaults to 0 (disabled). When set, takes precedence over keep_first and offset.",
                 },
                 "offset": {
-                    "type": "number",
+                    "type": "integer",
                     "minimum": 0,
                     "description": "Skip first N lines/entries before applying keep_first. Defaults to 0. Ignored when keep_last is set.",
                 },
@@ -263,7 +291,7 @@ class Grep:
             "multiline",
         }
         kwargs: dict[str, object] = {k: v for k, v in args.items() if k not in known}
-        keep_first = int_val(args.get("keep_first"), 0)
+        keep_first = int_val(args.get("keep_first"), _default_keep_first())
         keep_last = int_val(args.get("keep_last"), 0)
         offset = int_val(args.get("offset"), 0)
         context_before = _kw_int(kwargs, "-B", "context_before")
@@ -413,11 +441,28 @@ def _kw_str(
 def _kw_int(
     kwargs: dict[str, object], key: str, *fallbacks: str, default: int = 0
 ) -> int:
-    """Coerce the first non-None kwargs entry among aliases to an int."""
+    """Coerce the first non-None kwargs entry among aliases to an int.
+
+    Unparseable values fall back to ``default`` rather than raising:
+    ``Tool.run`` must not raise, and the schema gate already rejects
+    non-integers on the production path. This keeps a direct ``_run``
+    caller (tests, internal reuse) from escaping the tool envelope --
+    the same defense-in-depth ``Read._check_minimum`` provides.
+    """
     for k in (key, *fallbacks):
         v = kwargs.get(k)
-        if v is not None:
-            return int(cast(int | str, v))
+        if v is None:
+            continue
+        if isinstance(v, bool):
+            return default
+        if isinstance(v, (int, float)):
+            return int(v)
+        if isinstance(v, str):
+            try:
+                return int(v)
+            except ValueError:
+                return default
+        return default
     return default
 
 
@@ -611,6 +656,39 @@ def _parse_find_for_grep(args: tuple[str, ...]) -> bool:
     return True
 
 
+def _paginate(text: str, *, keep_first: int, keep_last: int, offset: int) -> str:
+    """Apply the pagination knobs to already-rendered output.
+
+    The single place either backend slices. Both produce one entry per
+    line for every ``output_mode``, so slicing here means ``offset`` and
+    ``keep_first`` mean the same thing in ripgrep and in the fallback --
+    and in ``content``, ``count``, and ``files_with_matches`` alike.
+    Slicing inside the accumulator instead let the unit differ per mode
+    (content lines vs. per-file counts vs. context separators).
+
+    Args:
+      text: Rendered output, one entry per line.
+      keep_first: Keep only the leading N entries; ``0`` is unlimited.
+      keep_last: Keep only the trailing N entries; takes precedence.
+      offset: Skip N leading entries before ``keep_first``.
+
+    Returns:
+      paginated: The selected entries, or ``(no matches)`` when empty.
+
+    """
+    if not text or text == "(no matches)":
+        return text or "(no matches)"
+    lines = text.split("\n")
+    if keep_last > 0:
+        lines = lines[-keep_last:]
+    else:
+        if offset > 0:
+            lines = lines[offset:]
+        if keep_first > 0:
+            lines = lines[:keep_first]
+    return "\n".join(lines) if lines and lines[0] else "(no matches)"
+
+
 def _grep_rg(
     *,
     pattern: str,
@@ -667,15 +745,12 @@ def _grep_rg(
             content=f"ripgrep error (exit {result.returncode}): {err}",
             is_error=True,
         )
-    lines = result.stdout.strip().split("\n")
-    if keep_last > 0:
-        lines = lines[-keep_last:]
-    else:
-        if offset > 0:
-            lines = lines[offset:]
-        if keep_first > 0:
-            lines = lines[:keep_first]
-    return "\n".join(lines) if lines and lines[0] else "(no matches)"
+    return _paginate(
+        result.stdout.strip(),
+        keep_first=keep_first,
+        keep_last=keep_last,
+        offset=offset,
+    )
 
 
 def _build_rg_cmd(
@@ -699,8 +774,18 @@ def _build_rg_cmd(
         _RG_PATH,
         "--no-heading",
         "--hidden",
-        "--max-columns",
-        "500",
+        # Deterministic order. ripgrep's default parallel walk emits files
+        # in whatever order the workers finish, so ``offset`` selects a
+        # different slice run to run -- and the Python fallback, which
+        # walks ``sorted()``, disagrees with it on every query.
+        "--sort",
+        "path",
+        # No column cap. ``--max-columns`` replaces a long line with a
+        # placeholder, and ``--max-columns-preview`` only restores its
+        # LEADING columns -- a match further right (a needle in a minified
+        # bundle) stays invisible, while the Python fallback returns the
+        # line whole. Total size is bounded downstream by the tool-result
+        # cap, which says what it dropped.
         "--glob",
         "!.git",
         "--glob",
@@ -742,44 +827,24 @@ class _GrepState:
         "context_before",
         "file_counts",
         "matches",
-        "max_results",
-        "offset",
         "output_mode",
         "show_line_numbers",
-        "skipped",
     )
 
     def __init__(
         self,
         *,
         output_mode: str,
-        offset: int,
-        max_results: int,
         context_before: int,
         context_after: int,
         show_line_numbers: bool,
     ) -> None:
         self.output_mode = output_mode
-        self.offset = offset
-        self.max_results = max_results
         self.context_before = context_before
         self.context_after = context_after
         self.show_line_numbers = show_line_numbers
         self.matches: list[str] = []
         self.file_counts: dict[str, int] = {}
-        self.skipped = 0
-
-    @property
-    def full(self) -> bool:
-        """Whether ``len(matches)`` has reached ``max_results``."""
-        return len(self.matches) >= self.max_results
-
-    def _skip(self) -> bool:
-        """Return True if this result should be skipped (offset accounting)."""
-        if self.skipped < self.offset:
-            self.skipped += 1
-            return True
-        return False
 
     def process_multiline(self, pat: re.Pattern[str], text: str, filepath: str) -> None:
         """Accumulate matches for one file in multiline mode.
@@ -794,23 +859,18 @@ class _GrepState:
         if not found:
             return
         if self.output_mode == "files_with_matches":
-            if not self._skip():
-                self.matches.append(filepath)
+            self.matches.append(filepath)
             return
         if self.output_mode == "count":
             self.file_counts[filepath] = len(found)
             return
         for m in found:
-            if self._skip():
-                continue
             line_num = text[: m.start()].count("\n") + 1
             matched_text = m.group()
             if self.show_line_numbers:
                 self.matches.append(f"{filepath}:{line_num}:{matched_text}")
             else:
                 self.matches.append(f"{filepath}:{matched_text}")
-            if self.full:
-                break
 
     def process_lines(
         self,
@@ -832,16 +892,11 @@ class _GrepState:
                 continue
             file_match_count += 1
             if self.output_mode == "files_with_matches":
-                if not self._skip():
-                    self.matches.append(filepath)
+                self.matches.append(filepath)
                 break
             if self.output_mode == "count":
                 continue
-            if self._skip():
-                continue
             self._emit_line(lines, filepath, i, line)
-            if self.full:
-                break
         if self.output_mode == "count" and file_match_count > 0:
             self.file_counts[filepath] = file_match_count
 
@@ -868,26 +923,20 @@ class _GrepState:
         else:
             self.matches.append(f"{filepath}:{line}")
 
-    def format(self, *, keep_last: int) -> str:
-        """Return final output string.
+    def format(self) -> str:
+        """Render accumulated results, one entry per line.
 
-        Args:
-          keep_last: Keep only the trailing ``keep_last`` lines/entries
-              (``0`` disables truncation).
+        Pagination is applied afterwards by :func:`_paginate`, uniformly
+        with the ripgrep path.
 
         Returns:
           text: Newline-joined output, or ``(no matches)`` when empty.
 
         """
         if self.output_mode == "count":
-            items = list(self.file_counts.items())
-            if keep_last > 0:
-                items = items[-keep_last:]
-            return "\n".join(f"{p}:{c}" for p, c in items) or "(no matches)"
-        matches = self.matches
-        if keep_last > 0:
-            matches = matches[-keep_last:]
-        return "\n".join(matches) or "(no matches)"
+            counts = self.file_counts.items()
+            return "\n".join(f"{p}:{c}" for p, c in counts) or "(no matches)"
+        return "\n".join(self.matches) or "(no matches)"
 
 
 def _grep_python(
@@ -934,11 +983,8 @@ def _grep_python(
             content=f"ripgrep error (Python fallback): invalid regex pattern: {exc}",
             is_error=True,
         )
-    max_results = sys.maxsize if keep_last > 0 or keep_first <= 0 else keep_first
     state = _GrepState(
         output_mode=output_mode,
-        offset=offset,
-        max_results=max_results,
         context_before=context_before,
         context_after=context_after,
         show_line_numbers=show_line_numbers,
@@ -955,9 +1001,9 @@ def _grep_python(
             state.process_multiline(pat, text, filepath)
         else:
             state.process_lines(pat, text.splitlines(), filepath)
-        if state.full:
-            break
-    return state.format(keep_last=keep_last)
+    return _paginate(
+        state.format(), keep_first=keep_first, keep_last=keep_last, offset=offset
+    )
 
 
 def _collect_files(

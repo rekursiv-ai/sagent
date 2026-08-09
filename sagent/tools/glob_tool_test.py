@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from sagent.lib.tool_validation import validate_tool_input
 from sagent.testing import with_fake_agent
 from sagent.tools.glob_tool import Glob, _long_line
 from sagent.tools.lib.bash import parse_bash
@@ -85,7 +86,7 @@ async def test_glob_max_results_truncates(tmp_path: Path) -> None:
     result = await _run_glob(
         {"pattern": "*.py", "path": str(tmp_path), "max_results": 3}, tmp_path
     )
-    assert "more)" in result.content
+    assert "7 more; pass offset=3 to continue" in result.content
 
 
 @pytest.mark.asyncio
@@ -277,6 +278,14 @@ def test_bash_match_non_find_no_nudge() -> None:
     trees = parse_bash("ls -la")
     assert trees is not None
     assert glob_tool.bash_match(trees) is None
+
+
+def test_schema_admits_the_unlimited_default() -> None:
+    """``_run`` implements 0 as unlimited, so the schema must permit it."""
+    err = validate_tool_input(
+        "Glob", Glob.directive_schema, {"pattern": "*.py", "max_results": 0}
+    )
+    assert err is None, f"schema rejects the documented unlimited default: {err}"
 
 
 if __name__ == "__main__":

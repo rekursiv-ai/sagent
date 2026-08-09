@@ -199,6 +199,13 @@ class FakeAgent:
     max_request_bytes: int = 32 * 1024 * 1024
     """Active model's request byte ceiling (mirrors ``Agent.max_request_bytes``)."""
 
+    max_result_chars: int = 150_000
+    """Per-result character ceiling (mirrors ``Agent.max_result_chars``).
+
+    Defaults to the value a 200k-token model derives, so tools under test
+    size their limits the way they would in production.
+    """
+
     runtime: agent_runtime.AgentRuntime = field(default_factory=_new_runtime)
     """Real ``AgentRuntime`` with a null model; its observers list
     captures every published event."""

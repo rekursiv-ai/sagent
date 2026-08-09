@@ -370,9 +370,10 @@ def _google_retry_delay(body: str) -> float | None:
 def _response_body_text(response: object) -> str:
     """Return the full response body text, never raising.
 
-    Unlike :func:`_response_body_excerpt` (capped for forensics), this returns
-    the untruncated body so a ``retryDelay`` detail far into a large error body
-    is not missed. Guards ``ResponseNotRead`` for unread streaming responses.
+    Uncapped: a provider error body is the whole forensic payload, and a
+    character clamp cut JSON mid-object exactly when the detail mattered
+    -- a ``retryDelay`` far into a large body, say. Guards
+    ``ResponseNotRead`` for unread streaming responses.
     """
     if response is None:
         return ""
@@ -442,7 +443,7 @@ def service_error_snapshot(error: Exception) -> runtime_types.ServiceErrorSnapsh
         message=_body_error_message(error) or str(error),
         status=error_status(error),
         headers=_diagnostic_headers(headers),
-        body=_response_body_excerpt(response),
+        body=_response_body_text(response),
     )
 
 
@@ -859,34 +860,3 @@ def _diagnostic_headers(headers: object) -> dict[str, str]:
         ):
             out[str(key)] = str(value)
     return out
-
-
-def _response_body_excerpt(response: object) -> str:
-    """Return a response body for diagnostics, never raising.
-
-    Uncapped: a provider error body is the whole forensic payload, and a
-    500-char clamp cut JSON mid-object exactly when the detail mattered
-    (the same reasoning that made :func:`_response_body_text` uncapped).
-
-    ``httpx.Response.text`` / ``.content`` are properties that raise
-    ``httpx.ResponseNotRead`` when the body of a *streaming* response was
-    never read -- which happens when an error carries a streaming response
-    (e.g. Anthropic reports a ``rate_limit_error`` via an in-band SSE
-    ``error`` event on a 200 stream). ``getattr`` does not suppress an
-    exception raised inside the property, so the access itself is guarded.
-    """
-    if response is None:
-        return ""
-    try:
-        text = getattr(response, "text", None)
-        if isinstance(text, str):
-            return text
-        raw = getattr(response, "content", None)
-    except httpx.ResponseNotRead:
-        return ""
-    if isinstance(raw, (bytes, bytearray)):
-        try:
-            return raw.decode("utf-8", errors="replace")
-        except (AttributeError, ValueError):
-            return ""
-    return ""
