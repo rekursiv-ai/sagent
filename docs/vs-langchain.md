@@ -296,10 +296,11 @@ per surface.
   event rendering.
 - **`Bash` understands shell ASTs.** `bashlex` parses cached per
   request; `is_read_only` parallelises reads and serialises writes;
-  `unwrap_cd_prefix` tracks cwd shifts; sibling tools (`Edit`, `List`,
-  `Glob`, `Grep`) implement `bash_match(trees)` to nudge the model
-  toward dedicated tools. LangChain's `ShellTool` wraps
-  `subprocess.run` with none of this.
+  `walk_commands` yields every command with its `cd` context and
+  pipeline neighbours; sibling tools (`Edit`, `List`, `Glob`, `Grep`)
+  implement `bash_match(trees)` to nudge the model toward dedicated
+  tools. LangChain's `ShellTool` wraps `subprocess.run` with none of
+  this.
 
 ## Where sagent is weaker
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Annotated, cast, get_args
 
 import asyncio
@@ -28,7 +29,7 @@ from wesearch.search import (
     search,
 )
 
-from sagent.lib.custom_json import JSON, JSONValue, json_freeze
+from sagent.lib.custom_json import JSONValue, json_freeze
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
     load_tool_description,
@@ -39,12 +40,13 @@ from sagent.tools.tool_spec import CLI_SETTABLE
 from sagent.types.runtime import ToolResult
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
 class WebSearch:
     """Search the web using a configurable backend."""
 
-    name: str = "WebSearch"
-    tool_id: str = "application/x-tool-websearch"
-    clearable_results: bool = True
+    name = "WebSearch"
+    tool_id = "application/x-tool-websearch"
+    clearable_results = True
 
     @property
     def description(self) -> str:
@@ -55,7 +57,7 @@ class WebSearch:
         """
         return load_tool_description("WebSearch")
 
-    directive_schema: JSON = json_freeze(
+    directive_schema = json_freeze(
         {
             "type": "object",
             "properties": {

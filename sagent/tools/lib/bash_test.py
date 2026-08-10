@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
+import pytest
+
 from sagent.tools.lib.bash import (
     BashParseCache,
     cached_parse_bash,
     is_read_only,
-    match_pipeline,
     parse_bash,
     resolve_cwd_path,
-    unwrap_cd_prefix,
-    unwrap_cd_subtree,
+    walk_commands,
 )
 
 
@@ -42,101 +42,6 @@ def test_cached_parse_bash_caches_none() -> None:
     cache: BashParseCache = {}
     _ = cached_parse_bash("cat <<EOF", cache)
     assert cache["cat <<EOF"] is None
-
-
-def test_unwrap_cd_prefix_plain_command() -> None:
-    trees = parse_bash("grep foo .")
-    assert trees is not None
-    result = unwrap_cd_prefix(trees)
-    assert result is not None
-    cwd, cmd = result
-    assert cwd is None
-    assert cmd.exe == "grep"
-    assert cmd.args == ("foo", ".")
-
-
-def test_unwrap_cd_prefix_with_cd() -> None:
-    trees = parse_bash("cd src && grep foo .")
-    assert trees is not None
-    result = unwrap_cd_prefix(trees)
-    assert result is not None
-    cwd, cmd = result
-    assert cwd == "src"
-    assert cmd.exe == "grep"
-
-
-def test_unwrap_cd_prefix_rejects_cd_without_arg() -> None:
-    trees = parse_bash("cd && pwd")
-    assert trees is not None
-    assert unwrap_cd_prefix(trees) is None
-
-
-def test_unwrap_cd_prefix_rejects_stdout_redirect() -> None:
-    trees = parse_bash("ls > out.txt")
-    assert trees is not None
-    assert unwrap_cd_prefix(trees) is None
-
-
-def test_unwrap_cd_prefix_rejects_or_operator() -> None:
-    trees = parse_bash("a || b")
-    assert trees is not None
-    assert unwrap_cd_prefix(trees) is None
-
-
-def test_unwrap_cd_prefix_rejects_pipeline() -> None:
-    trees = parse_bash("ls | grep x")
-    assert trees is not None
-    assert unwrap_cd_prefix(trees) is None
-
-
-def test_unwrap_cd_subtree_pipeline() -> None:
-    trees = parse_bash("cd src && ls | grep x")
-    assert trees is not None
-    rest = unwrap_cd_subtree(trees)
-    assert rest is not None
-    assert len(rest) == 1
-    assert rest[0].kind == "pipeline"
-
-
-def test_unwrap_cd_subtree_rejects_no_cd() -> None:
-    trees = parse_bash("ls -la")
-    assert trees is not None
-    assert unwrap_cd_subtree(trees) is None
-
-
-def test_unwrap_cd_subtree_rejects_three_part_no_match() -> None:
-    trees = parse_bash("a && b && c")
-    assert trees is not None
-    # 5 parts (a && b && c), not 3; rejected.
-    assert unwrap_cd_subtree(trees) is None
-
-
-def test_match_pipeline_simple() -> None:
-    trees = parse_bash("ls | grep x")
-    assert trees is not None
-    pair = match_pipeline(trees)
-    assert pair is not None
-    a, b = pair
-    assert a.exe == "ls"
-    assert b.exe == "grep"
-
-
-def test_match_pipeline_rejects_single_command() -> None:
-    trees = parse_bash("ls -la")
-    assert trees is not None
-    assert match_pipeline(trees) is None
-
-
-def test_match_pipeline_rejects_three_stage() -> None:
-    trees = parse_bash("ls | grep x | wc")
-    assert trees is not None
-    assert match_pipeline(trees) is None
-
-
-def test_match_pipeline_rejects_env_prefix() -> None:
-    trees = parse_bash("X=1 ls | grep x")
-    assert trees is not None
-    assert match_pipeline(trees) is None
 
 
 def test_resolve_cwd_path_neither() -> None:
@@ -332,8 +237,46 @@ def test_is_read_only_unknown_command_unsafe() -> None:
 def test_command_captures_stdout_flag() -> None:
     trees = parse_bash("ls > out.txt")
     assert trees is not None
-    # unwrap_cd_prefix returns None for stdout-capturing commands
-    assert unwrap_cd_prefix(trees) is None
+    assert [i.captures_stdout for i in walk_commands(trees)] == [True]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # ``env``/``command`` EXECUTE their argument; allowlisting the
+        # wrapper without inspecting its payload launders anything.
+        "env rm victim",
+        "command rm victim",
+        # Write flags on otherwise read-only utilities.
+        "sort -o victim input",
+        "sed 'w victim' input",
+        "go env -w GOFLAGS=-x",
+        # ``awk`` can shell out.
+        "awk 'BEGIN { system(\"rm victim\") }'",
+        # Loop bodies: the compound child is kind ``for``/``while``,
+        # which the kind-filter drops -- and ``all([])`` is True, so an
+        # unexamined body reads as safe.
+        "for f in victim; do rm $f; done",
+        "while true; do rm victim; break; done",
+    ],
+)
+def test_a_mutating_command_is_never_read_only(command: str) -> None:
+    """The gate must bias to False: a false negative means concurrent writes."""
+    trees = parse_bash(command)
+    assert trees is not None
+    assert not is_read_only(trees), command
+
+
+def test_an_unknown_node_kind_fails_closed() -> None:
+    """A construct the classifier does not model must read as unsafe.
+
+    ``if`` parses to a ``compound`` whose child is an ``if`` node -- a
+    kind the classifier has no rule for, so it must reject rather than
+    let the branch bodies go unexamined.
+    """
+    trees = parse_bash("if true; then rm victim; fi")
+    assert trees is not None
+    assert not is_read_only(trees)
 
 
 if __name__ == "__main__":

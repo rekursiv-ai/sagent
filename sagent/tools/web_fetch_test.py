@@ -114,23 +114,23 @@ def test_run_appends_truncation_notice_when_body_exceeds_limit() -> None:
 
 
 def test_match_http_fetch_simple_curl() -> None:
-    assert _match_http_fetch("curl", ("https://example.com",)) is not None
+    assert _match_http_fetch(("https://example.com",)) is not None
 
 
 def test_match_http_fetch_simple_wget() -> None:
-    assert _match_http_fetch("wget", ("https://example.com",)) is not None
+    assert _match_http_fetch(("https://example.com",)) is not None
 
 
 def test_match_http_fetch_no_url_returns_none() -> None:
-    assert _match_http_fetch("curl", ("-v",)) is None
+    assert _match_http_fetch(("-v",)) is None
 
 
 def test_match_http_fetch_two_urls_returns_none() -> None:
-    assert _match_http_fetch("curl", ("https://a", "https://b")) is None
+    assert _match_http_fetch(("https://a", "https://b")) is None
 
 
 def test_match_http_fetch_output_flag_bails() -> None:
-    assert _match_http_fetch("curl", ("-o", "f.txt", "https://x")) is None
+    assert _match_http_fetch(("-o", "f.txt", "https://x")) is None
 
 
 def test_bash_match_simple_curl() -> None:

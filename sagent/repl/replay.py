@@ -64,7 +64,7 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
     if not tape:
         return
     tools = agent.tools_map
-    policy = functools.partial(_replay_output_policy, tools, tape)
+    policy = functools.partial(_replay_output_policy, tools, _tool_names_by_call(tape))
     # Replay is a one-shot pass over a frozen tape; snapshot
     # ``show_thinking`` once and thread the same bool through both the
     # observer (via a constant-returning closure) and ``_render_entry``.
@@ -198,27 +198,39 @@ def _render_entry(
             return 0
 
 
-def _replay_output_policy(
-    tools: Mapping[str, Tool],
-    tape: Sequence[TapeRecord],
-    call_id: str,
-) -> ToolDisplay:
-    """Return the output policy for the tool that produced ``call_id``.
+def _tool_names_by_call(tape: Sequence[TapeRecord]) -> dict[str, str]:
+    """Index ``call_id -> tool name`` for the whole tape, once.
 
-    Live rendering resolves this through the agent's call registry, which
-    a resumed session does not have -- so the owning tool is recovered by
-    scanning the tape for the ``ToolCall`` that opened this id. Without
-    it a resumed session silently drops bodies the live pane showed.
+    Live rendering resolves this through the agent's call registry,
+    which a resumed session does not have. Recovering it by SCANNING the
+    tape per call is quadratic: measured at 200/800/1600 calls, resume
+    took 0.004/0.052/0.592s -- doubling the calls multiplied the work by
+    up to eleven, so a long session stalls the pane on ``--resume``.
+
+    Args:
+      tape: Full session tape.
+
+    Returns:
+      names: Tool name for every call id the tape opened.
+
     """
+    out: dict[str, str] = {}
     for record in tape:
         event = record.event if isinstance(record, ReferrableTapeEvent) else None
-        if not isinstance(event, AssistantMessage):
-            continue
-        for tc in event.tool_calls:
-            if tc.id == call_id:
-                tool = tools.get(tc.name)
-                return ToolDisplay() if tool is None else row_spec(tool)
-    return ToolDisplay()
+        if isinstance(event, AssistantMessage):
+            for tc in event.tool_calls:
+                out[tc.id] = tc.name
+    return out
+
+
+def _replay_output_policy(
+    tools: Mapping[str, Tool],
+    names_by_call: Mapping[str, str],
+    call_id: str,
+) -> ToolDisplay:
+    """Return the output policy for the tool that produced ``call_id``."""
+    tool = tools.get(names_by_call.get(call_id, ""))
+    return ToolDisplay() if tool is None else row_spec(tool)
 
 
 def _label_for_call(tc: ToolCall, tools: Mapping[str, Tool]) -> str:

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Final
 
 import time
 
 from sagent.agent.state import current_agent_var, get_tool_state
-from sagent.lib.custom_json import JSON, bool_val, int_val, json_freeze
+from sagent.lib.custom_json import bool_val, int_val, json_freeze
 from sagent.tools.core import load_tool_description, run_sync
 from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import Node, walk_commands
@@ -57,6 +58,7 @@ def _default_max_results() -> int:
 _DEFAULT_SORT: Final = "name"
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Glob:
     """Match file paths against glob patterns.
 
@@ -78,11 +80,11 @@ class Glob:
     pattern matching across a tree (especially recursive ``**/*.py``).
     """
 
-    name: str = "Glob"
-    tool_id: str = "application/x-tool-glob"
-    clearable_results: bool = True
-    description: str = load_tool_description("Glob")
-    directive_schema: JSON = json_freeze(
+    name = "Glob"
+    tool_id = "application/x-tool-glob"
+    clearable_results = True
+    description = load_tool_description("Glob")
+    directive_schema = json_freeze(
         {
             "type": "object",
             "properties": {

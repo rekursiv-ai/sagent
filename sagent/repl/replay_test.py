@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
+import time
+
 from sagent.compaction.files import MICROCOMPACTED_ARGS_KEY
 from sagent.repl.render import RecordingPrinter
 from sagent.repl.replay import replay_messages
@@ -251,8 +253,8 @@ def test_replay_renders_a_body_the_live_pane_showed() -> None:
         # The whole knob set: ``row_spec`` narrows through the
         # ``Displayable`` protocol, so a partial stub reads as hidden.
         output: str = "on"
-        output_head_rows: int = 0
-        output_tail_rows: int = 0
+        output_head_rows: int = 2
+        output_tail_rows: int = 2
         output_max_width: int = 0
         output_wrap: str = "wrap"
 
@@ -390,6 +392,36 @@ def test_replay_renders_resolved_view_after_compaction_splice() -> None:
     assert p.dim_lines == [
         "[compaction complete: ~100 → ~10 tokens, 1 entries]",
     ]
+
+
+def test_resume_cost_is_linear_in_tool_calls() -> None:
+    """Resolving a tool per call by scanning the tape is quadratic.
+
+    Measured before the fix: 200/800/1600 calls took 0.004/0.052/0.592s
+    -- doubling the calls quadrupled-to-eleven-times the work, so a long
+    session stalls the pane on ``--resume``.
+    """
+
+    def _elapsed(n: int) -> float:
+        history: list[TapeEvent] = []
+        for i in range(n):
+            history.append(
+                AssistantMessage(
+                    text="",
+                    tool_calls=(ToolCall(id=f"c{i}", name="Echo", args={}),),
+                )
+            )
+            history.append(ToolResult(call_id=f"c{i}", content="body"))
+        agent = _agent(history=history)
+        start = time.perf_counter()
+        replay_messages(agent, RecordingPrinter())
+        return time.perf_counter() - start
+
+    small = _elapsed(200)
+    large = _elapsed(1_600)
+    # Eight times the calls, so linear predicts ~8x. Allow generous
+    # slack for timer noise; quadratic would be ~64x.
+    assert large < max(small * 24, 0.25), f"{small=} {large=}"
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Annotated, Any, Final, Literal, cast, get_args
 
 import asyncio
@@ -13,7 +14,7 @@ from wesearch.web import fetch_web
 
 import cachetools
 
-from sagent.lib.custom_json import JSON, JSONValue, json_freeze, json_unfreeze
+from sagent.lib.custom_json import JSONValue, json_freeze, json_unfreeze
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
     load_tool_description,
@@ -29,14 +30,15 @@ from sagent.types.runtime import ToolResult
 HttpMethod = Literal["GET", "POST"]
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
 class WebFetch:
     """Fetch a web page and extract its main content as clean text."""
 
-    name: str = "WebFetch"
-    tool_id: str = "application/x-tool-webfetch"
-    clearable_results: bool = True
-    description: str = load_tool_description("WebFetch")
-    directive_schema: JSON = json_freeze(
+    name = "WebFetch"
+    tool_id = "application/x-tool-webfetch"
+    clearable_results = True
+    description = load_tool_description("WebFetch")
+    directive_schema = json_freeze(
         {
             "type": "object",
             "properties": {
@@ -94,10 +96,17 @@ class WebFetch:
     output_wrap: Annotated[Wrap, CLI_SETTABLE] = "wrap"
     """``wrap`` continues an over-wide line, ``chop`` marks the cut."""
 
-    def __init__(self) -> None:
-        self._cache = cachetools.TTLCache[tuple[Transport, str], str](
+    # The cache is per-instance MUTABLE state on a frozen record: the
+    # freeze is about configuration, not about the response cache, and
+    # ``/tool`` rebuilds the instance so a default_factory keeps each
+    # swap from inheriting a stale cache.
+    _cache: cachetools.TTLCache[tuple[Transport, str], str] = field(
+        default_factory=lambda: cachetools.TTLCache[tuple[Transport, str], str](
             maxsize=128, ttl=15 * 60
-        )
+        ),
+        repr=False,
+        compare=False,
+    )
 
     def bash_match(self, trees: Sequence[Node]) -> str | None:
         """Emit a tool-use nudge for ``curl URL`` / ``wget URL``.
@@ -123,7 +132,7 @@ class WebFetch:
                 continue
             if inv.exe not in {"curl", "wget"}:
                 continue
-            hint = _match_http_fetch(inv.exe, inv.args)
+            hint = _match_http_fetch(inv.args)
             if hint is not None:
                 return hint
         return None
@@ -289,15 +298,40 @@ _HTTP_FETCH_BAIL_FLAGS: frozenset[str] = frozenset(
 )
 
 
-def _match_http_fetch(exe: str, args: tuple[str, ...]) -> str | None:
-    """Return a nudge when a shell command is a simple HTTP fetch."""
-    del exe
+def _match_http_fetch(args: tuple[str, ...]) -> str | None:
+    """Return a nudge when a shell command is a simple HTTP fetch.
+
+    A fetch that writes a file or uploads one is not something WebFetch
+    can do, so those forms stay with Bash. Exact-string matching missed
+    every spelling but the separated one: ``--output=x``, the bundled
+    ``-sO``, and ``--output-document=x`` all still nudged.
+    """
     url_count = 0
     for arg in args:
-        if arg in _HTTP_FETCH_BAIL_FLAGS:
+        if _writes_a_file(arg):
             return None
         if arg.startswith(("http://", "https://")):
             url_count += 1
     if url_count != 1:
         return None
     return _NUDGE
+
+
+def _writes_a_file(arg: str) -> bool:
+    """Whether one argument makes the fetch write or upload a file."""
+    if arg in _HTTP_FETCH_BAIL_FLAGS:
+        return True
+    # ``--output=out.html`` -- the value is attached, so the flag never
+    # appears as its own token.
+    if arg.startswith("--") and arg.partition("=")[0] in _HTTP_FETCH_BAIL_FLAGS:
+        return True
+    # ``-sO`` / ``-oout`` -- short flags bundle, so the output flag is a
+    # letter inside the cluster rather than the whole token.
+    if arg.startswith("-") and not arg.startswith("--"):
+        return any(letter in arg[1:] for letter in _HTTP_FETCH_BAIL_LETTERS)
+    return False
+
+
+# Short flags whose presence anywhere in a bundle means the fetch writes
+# or uploads a file: ``-o``/``-O`` output, ``-T`` upload, ``-F`` form.
+_HTTP_FETCH_BAIL_LETTERS: frozenset[str] = frozenset({"o", "O", "T", "F"})

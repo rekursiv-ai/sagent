@@ -52,11 +52,14 @@ class OutputSpec:
     Attributes:
       show: Whether the body renders at all.
       head_rows: Leading rows kept. ``0`` with ``tail_rows`` set gives a
-          tail-only view.
+          tail-only view; ``0`` for both hides the body entirely, which
+          is what a zero budget reads as.
       tail_rows: Trailing rows kept, after a ``⋯ N lines ⋯`` marker.
       max_width: Cell width cap. ``0`` defers to the caller's width
           (the terminal, less the indent).
       wrap: Treatment of a line exceeding the effective width.
+      unbounded: Keep every line. The explicit form of "no budget", so a
+          zero count is never mistaken for one.
 
     """
 
@@ -65,11 +68,28 @@ class OutputSpec:
     tail_rows: int = 0
     max_width: int = 0
     wrap: Wrap = "wrap"
+    unbounded: bool = False
+
+    def __post_init__(self) -> None:
+        """Reject counts a renderer cannot express.
+
+        A negative budget silently drops a line (``lines[:-1]``) and
+        over-reports the elision count, so the marker lies about what it
+        hid.
+        """
+        for name in ("head_rows", "tail_rows", "max_width"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must not be negative")
 
     @property
     def bounded(self) -> bool:
-        """Whether this spec elides anything at all."""
-        return self.head_rows > 0 or self.tail_rows > 0
+        """Whether this spec elides anything at all.
+
+        A zero budget means "keep nothing", not "keep everything": the
+        knob that reads as tightest must not produce the loosest output.
+        ``unbounded`` is the explicit way to ask for the whole body.
+        """
+        return not self.unbounded
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -87,7 +107,7 @@ class ToolDisplay:
 
     """
 
-    command: OutputSpec = OutputSpec(show=True)
+    command: OutputSpec = OutputSpec(show=True, unbounded=True)
     output: OutputSpec = OutputSpec()
     command_lang: str = ""
 
@@ -157,8 +177,10 @@ def row_spec(tool: object) -> ToolDisplay:
 def format_output(text: str, spec: OutputSpec, *, width: int = 0) -> list[str]:
     """Render ``text`` into display rows under ``spec``.
 
-    Wrapping happens BEFORE the row budget applies, so the counts bound
-    what the terminal actually prints rather than what the tool emitted.
+    The budget counts LOGICAL lines, then each kept line wraps to the
+    available width. A kept line therefore survives whole rather than as
+    a fragment of one long line, and the pane is bounded separately by
+    the renderer's own per-line cap (``console_pane._LABEL_MAX_LINES``).
 
     Args:
       text: Raw body; may contain newlines.
@@ -180,9 +202,14 @@ def format_output(text: str, spec: OutputSpec, *, width: int = 0) -> list[str]:
     # pipeline), which reads as corrupt rather than elided. The wrap
     # still bounds the total, since each kept line is itself capped.
     lines = text.rstrip("\n").split("\n")
+    budget = spec.head_rows + spec.tail_rows
+    if spec.bounded and budget == 0:
+        # Nothing is kept, so there is nothing to mark as elided: a bare
+        # marker would be a row the caller asked not to have.
+        return []
     kept = lines
     marker_at = -1
-    if spec.bounded and len(lines) > spec.head_rows + spec.tail_rows:
+    if spec.bounded and len(lines) > budget:
         hidden = len(lines) - spec.head_rows - spec.tail_rows
         head = lines[: spec.head_rows]
         # ``lines[-0:]`` is the whole list, so a zero tail must slice to

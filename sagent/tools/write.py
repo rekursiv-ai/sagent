@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
@@ -10,7 +11,7 @@ import re
 
 from sagent.agent.state import get_tool_state
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.custom_json import JSON, json_freeze
+from sagent.lib.custom_json import json_freeze
 from sagent.tools.core import (
     file_lock_key,
     load_tool_description,
@@ -26,14 +27,15 @@ from sagent.types.runtime import ToolResult
 _WRITE_OK_RE = re.compile(r"^Wrote (\d+) bytes to ")
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Write:
     """Create or overwrite files."""
 
-    name: str = "Write"
-    tool_id: str = "application/x-tool-write"
-    clearable_results: bool = False
-    description: str = load_tool_description("Write")
-    directive_schema: JSON = json_freeze(
+    name = "Write"
+    tool_id = "application/x-tool-write"
+    clearable_results = False
+    description = load_tool_description("Write")
+    directive_schema = json_freeze(
         {
             "type": "object",
             "properties": {

@@ -120,7 +120,9 @@ def test_write_tool_label_marks_the_input_row() -> None:
     output looks the same across every tool.
     """
     printer, buf = _printer()
-    printer.write_tool_label("Bash List files\nls -la")
+    printer.write_tool_label(
+        "Bash List files\nls -la", command=OutputSpec(show=True, unbounded=True)
+    )
     out = buf.getvalue()
     assert "  Bash List files" in out
     assert "\u23bf  ls -la" in out
@@ -139,7 +141,9 @@ def test_write_tool_output_is_indented_without_a_glyph() -> None:
 def test_wrapped_input_continues_at_the_output_indent() -> None:
     """The input glyph marks the row once, not on every wrapped line."""
     printer, buf = _printer(width=20)
-    printer.write_tool_label(f"Bash\n{'x' * 40}")
+    printer.write_tool_label(
+        f"Bash\n{'x' * 40}", command=OutputSpec(show=True, unbounded=True)
+    )
     lines = [ln for ln in buf.getvalue().split("\n") if ln.strip()]
     assert lines[1].startswith("  \u23bf  ")
     assert lines[2].startswith("     ")
@@ -378,7 +382,9 @@ def test_child_block_renders_a_tool_body_when_the_policy_says_so() -> None:
     printer.write_child_block(
         "Agent_0",
         items,
-        output_policy=lambda _cid: ToolDisplay(output=OutputSpec(show=True)),
+        output_policy=lambda _cid: ToolDisplay(
+            output=OutputSpec(show=True, unbounded=True)
+        ),
     )
     assert "SENTINEL" in buf.getvalue()
 

@@ -11,13 +11,31 @@ from __future__ import annotations
 
 from typing import get_type_hints
 
+import dataclasses
 import inspect
 
 import pytest
 
 from sagent.bin.cli import DEFAULT_TOOLS, resolve_tools
+from sagent.tools.display import row_spec
 from sagent.tools.tool_spec import CLI_SETTABLE, coerce_kwargs
 from sagent.types.tools import Tool
+
+
+# Tools whose call block renders a body, per ``docs/sagent_tool_ux.md``.
+# Each advertises ``--tool <name>.output=...`` there, so each must be
+# able to honour it.
+_DISPLAY_TOOLS = [
+    "Read",
+    "Grep",
+    "Glob",
+    "List",
+    "Write",
+    "Edit",
+    "Bash",
+    "WebSearch",
+    "WebFetch",
+]
 
 
 def _settable_keys(cls: type) -> list[str]:
@@ -80,6 +98,38 @@ def test_every_settable_knob_round_trips_from_the_command_line(name: str) -> Non
         default = inspect.signature(cls.__init__).parameters[key].default
         coerced = coerce_kwargs(cls, {key: str(default)})
         assert coerced == {key: default}, f"{name}.{key} did not round-trip"
+
+
+@pytest.mark.parametrize("name", _DISPLAY_TOOLS)
+def test_a_tool_that_renders_output_declares_settable_knobs(name: str) -> None:
+    """A displayed body must be switchable off from the command line.
+
+    The round-trip check above iterates ``_settable_keys``, so a tool
+    that declares its knobs as CLASS attributes rather than constructor
+    parameters yields an EMPTY list -- the loop body never runs and the
+    test passes having verified nothing. Assert the list is non-empty
+    first, or the guard silently exempts exactly the tools it was
+    written to cover.
+    """
+    cls = type(resolve_tools([name])[0])
+    assert _settable_keys(cls), (
+        f"{name} renders output but declares no CLI-settable knob;"
+        " --tool {name}.output=off would abort"
+    )
+
+
+@pytest.mark.parametrize("name", _DISPLAY_TOOLS)
+def test_output_can_be_switched_off_from_the_command_line(name: str) -> None:
+    """The documented flag must construct the tool, not abort the CLI."""
+    tools = resolve_tools([name], overrides={name: {"output": "off"}})
+    assert row_spec(tools[0]).output.show is False
+
+
+@pytest.mark.parametrize("name", _DISPLAY_TOOLS)
+def test_output_can_be_reconfigured_at_runtime(name: str) -> None:
+    """``/tool`` swaps a frozen instance; a plain class cannot be swapped."""
+    tool = resolve_tools([name])[0]
+    assert dataclasses.is_dataclass(tool), f"/tool cannot reconfigure {name}"
 
 
 if __name__ == "__main__":
