@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Final, cast
 
@@ -12,7 +13,6 @@ import re
 
 from sagent.agent.state import current_agent_var, get_tool_state
 from sagent.lib.custom_json import (
-    JSON,
     MutableJSON,
     MutableJSONValue,
     int_val,
@@ -28,6 +28,7 @@ from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
     Invocation,
     Node,
+    sed_mutates,
     walk_commands,
 )
 from sagent.tools.lib.pdf import (
@@ -60,18 +61,18 @@ _MIME_BY_EXT: Final[dict[str, str]] = {
 _IMAGE_EXTS = frozenset(_MIME_BY_EXT)
 _PDF_EXT: Final = ".pdf"
 _NOTEBOOK_EXT: Final = ".ipynb"
-_NUDGE: Final = "cat via Bash is a bad UX. Use the Read tool."
 _CAT_SHAPERS: frozenset[str] = frozenset({"head", "tail", "less", "more"})
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Read:
     """Read file contents: text, image, PDF, and notebook."""
 
-    name: str = "Read"
-    tool_id: str = "application/x-tool-read"
-    clearable_results: bool = True
-    description: str = load_tool_description("Read")
-    directive_schema: JSON = json_freeze(
+    name = "Read"
+    tool_id = "application/x-tool-read"
+    clearable_results = True
+    description = load_tool_description("Read")
+    directive_schema = json_freeze(
         {
             "type": "object",
             "properties": {
@@ -479,7 +480,9 @@ def _reads_a_file(inv: Invocation) -> bool:
     so the shape is left alone; one that merely truncates or paginates is
     what Read's own windowing already does.
     """
-    if inv.piped_into and inv.piped_into not in _CAT_SHAPERS:
+    if any(d.captures_stdout for d in inv.downstream()):
+        return False
+    if inv.piped_into is not None and inv.piped_into.exe not in _CAT_SHAPERS:
         return False
     if inv.exe == "cat":
         return _cat_reads(inv.args)
@@ -491,12 +494,21 @@ def _reads_a_file(inv: Invocation) -> bool:
 
 
 def _cat_reads(args: tuple[str, ...]) -> bool:
-    """``cat FILE...`` with no flags.
+    """``cat FILE...`` with no flags and no glob.
 
     Multiple files count: the nudge is a suggestion to batch Read calls,
     which is exactly what several ``cat`` positionals are doing by hand.
+    A GLOB does not: Read takes one ``file_path`` and cannot expand one,
+    so pointing there sends the caller to a tool that cannot do the job.
     """
-    return bool(args) and not any(a.startswith("-") for a in args)
+    if not args or any(a.startswith("-") for a in args):
+        return False
+    return not any(_has_glob(a) for a in args)
+
+
+def _has_glob(arg: str) -> bool:
+    """Whether a positional is a shell glob rather than a literal path."""
+    return any(ch in arg for ch in "*?[")
 
 
 def _head_tail_reads(args: tuple[str, ...]) -> bool:
@@ -523,7 +535,7 @@ def _head_tail_reads(args: tuple[str, ...]) -> bool:
             continue
         positional.append(a)
         i += 1
-    return bool(positional)
+    return bool(positional) and not any(_has_glob(a) for a in positional)
 
 
 def _sed_reads(args: tuple[str, ...]) -> bool:
@@ -533,6 +545,12 @@ def _sed_reads(args: tuple[str, ...]) -> bool:
     is Edit's business, and silently nudging those toward Read would
     send the caller to a tool that cannot do the job.
     """
+    # ``-in`` is quiet PLUS in-place: the file is rewritten, so this is
+    # Edit's business. Share the predicate rather than re-deriving it --
+    # matching only on "a short flag containing n" accepted ``-in`` and
+    # advertised a destructive command as a Read.
+    if sed_mutates(args):
+        return False
     if not any(a.startswith("-") and not a.startswith("--") and "n" in a for a in args):
         return False
     scripts = [a for a in args if _LINE_RANGE_SCRIPT.fullmatch(a)]
@@ -547,8 +565,13 @@ _LINE_RANGE_SCRIPT: Final = re.compile(r"^\d+(,(\d+|\$))?p$")
 
 
 def _image_mime(suffix: str) -> str:
-    """MIME type for an image file suffix (defaults to ``application/octet-stream``)."""
-    return _MIME_BY_EXT.get(suffix, "application/octet-stream")
+    """MIME type for an image file suffix.
+
+    The only caller gates on ``_IMAGE_EXTS``, which IS the key set of
+    this table, so a miss cannot happen -- a default would be a branch
+    for an impossible case.
+    """
+    return _MIME_BY_EXT[suffix]
 
 
 def _read_pdf(path: Path, pages: str) -> ToolResult:

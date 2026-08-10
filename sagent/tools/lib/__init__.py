@@ -9,10 +9,10 @@ from sagent.tools.lib.bash import (
     Command,
     cached_parse_bash,
     is_read_only,
-    match_pipeline,
     parse_bash,
     resolve_cwd_path,
-    unwrap_cd_prefix,
+    sed_mutates,
+    walk_commands,
 )
 from sagent.tools.lib.pdf import (
     MAX_INLINE_PAGES,
@@ -37,9 +37,9 @@ __all__ = [
     "get_pdf_page_count",
     "is_pdf",
     "is_read_only",
-    "match_pipeline",
     "parse_bash",
     "parse_page_range",
     "resolve_cwd_path",
-    "unwrap_cd_prefix",
+    "sed_mutates",
+    "walk_commands",
 ]

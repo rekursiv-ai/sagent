@@ -8,6 +8,7 @@ sed-like replacements cheap when the caller already knows the target text.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Final
 
@@ -16,7 +17,7 @@ import re
 
 from sagent.agent.state import get_tool_state
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.custom_json import JSON, bool_val, json_freeze
+from sagent.lib.custom_json import bool_val, json_freeze
 from sagent.tools.core import (
     file_lock_key,
     load_tool_description,
@@ -74,6 +75,7 @@ def make_diff(old: str, new: str, offset: int) -> str:
 _NUDGE: Final = "sed via Bash is a bad UX. Use the Edit tool."
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Edit:
     """Perform exact-string replacement in files.
 
@@ -82,11 +84,11 @@ class Edit:
     state exists, but lack of a prior Read is not itself an error.
     """
 
-    name: str = "Edit"
-    tool_id: str = "application/x-tool-edit"
-    clearable_results: bool = False
-    description: str = load_tool_description("Edit")
-    directive_schema: JSON = json_freeze(
+    name = "Edit"
+    tool_id = "application/x-tool-edit"
+    clearable_results = False
+    description = load_tool_description("Edit")
+    directive_schema = json_freeze(
         {
             "type": "object",
             "properties": {

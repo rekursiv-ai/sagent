@@ -53,7 +53,10 @@ dependencies = [
     # text / docs
     "pypdfium2",
     # markdown
-    "markdown-it-py",
+    # repl/tight_markdown.py wraps the private ``list_block`` rule and swaps
+    # ``state.parentType``; 4.2 is the version those internals were verified
+    # against. An older release has a different rule body.
+    "markdown-it-py>=4.2",
     "prompt-toolkit",
     "pygments",
     "rich",
@@ -154,8 +157,9 @@ markers = [
     "cuda: tests that require a real CUDA device (skipped in hosted CI)",
     "integration: tests that require networking or external CLIs (deselected by default)",
     "performance: timing-sensitive tests (deselected by default)",
+    "slow: expensive local correctness test (git, bash, or a fresh interpreter); excluded from the fast unit tier and run by the pre-push slow gate",
 ]
-addopts = "-m 'not ci_smoke and not cuda and not integration and not performance' --durations=20 --dist=worksteal"
+addopts = "-m 'not ci_smoke and not cuda and not integration and not performance and not slow' --durations=20 --dist=worksteal"
 timeout = 60
 # "error" = treat all warnings as errors (same as -Werror).
 # Using filterwarnings instead of addopts so we can add exceptions.

@@ -6,21 +6,27 @@ below are matcher-friendly conveniences over it.
 
 Public surface:
 
-- :func:`parse_bash` - parse a command string into typed bashlex trees.
-- :func:`unwrap_cd_prefix` - normalize ``cd X && CMD`` into ``(cwd, CMD)``.
-- :func:`match_pipeline` - extract a clean two-command pipeline.
+- :func:`parse_bash` / :func:`cached_parse_bash` - parse a command
+  string into typed bashlex trees.
+- :func:`walk_commands` - every simple command in the line, each with
+  its ``cd`` context and pipeline neighbours. The one entry point a
+  tool matcher needs.
+- :func:`is_read_only` - classify a parse as side-effect-free.
+- :func:`sed_mutates` - whether ``sed`` args request an in-place edit.
 - :func:`resolve_cwd_path` - combine a ``cd`` prefix with a positional path.
-- :func:`is_read_only` - classify a parse as side-effect-free (concurrency gate).
-- :class:`Command`, :class:`Node` - record / protocol types.
+- :class:`Invocation`, :class:`Command`, :class:`Node` - record types.
+- :class:`BashMatcher` - the duck-type a nudging tool satisfies.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast, runtime_checkable
 
+import dataclasses
+import re
 import types
 
 
@@ -45,11 +51,9 @@ __all__ = [
     "Node",
     "cached_parse_bash",
     "is_read_only",
-    "match_pipeline",
     "parse_bash",
     "resolve_cwd_path",
-    "unwrap_cd_prefix",
-    "unwrap_cd_subtree",
+    "sed_mutates",
     "walk_commands",
 ]
 
@@ -113,9 +117,15 @@ class Invocation:
       exe: Executable name (first word).
       args: Positional arguments in argv order.
       cwd: Directory from an enclosing ``cd PATH &&``, or ``""``.
-      piped_into: Executable this command's stdout feeds, or ``""``.
+      piped_into: The command this one's stdout feeds, or ``None``.
           Distinguishes ``find . -name '*.py'`` (Glob) from
-          ``find . | xargs grep`` (Grep).
+          ``find . | xargs grep`` (Grep). A REFERENCE, not a name: two
+          pipelines on one line can both end in ``wc``, so a matcher
+          recovering its neighbour by executable name reads whichever
+          came first and an unrelated statement changes the verdict.
+      piped_from: The command feeding this one's stdin, or ``None``.
+          Some rules are about the SOURCE -- "was I fed by a flagged
+          ``cat``" -- which the downstream link cannot answer.
       env_prefix: Leading ``KEY=value`` assignments. A deliberate
           ``LC_ALL=C grep`` is not a Grep call.
       captures_stdout: True when a redirect diverts fd 1. ``grep p f >
@@ -126,9 +136,17 @@ class Invocation:
     exe: str
     args: tuple[str, ...]
     cwd: str = ""
-    piped_into: str = ""
+    piped_into: Invocation | None = None
+    piped_from: Invocation | None = None
     env_prefix: Mapping[str, str] = types.MappingProxyType({})
     captures_stdout: bool = False
+
+    def downstream(self) -> Iterator[Invocation]:
+        """Yield every command this one's output flows through."""
+        node = self.piped_into
+        while node is not None:
+            yield node
+            node = node.piped_into
 
 
 def walk_commands(trees: Sequence[Node]) -> tuple[Invocation, ...]:
@@ -157,7 +175,7 @@ def _walk_node(node: Node, *, cwd: str, out: list[Invocation]) -> None:
     """Recurse one AST node, appending every simple command found."""
     kind: str = node.kind
     if kind == "command":
-        _walk_command(node, cwd=cwd, piped_into="", out=out)
+        _walk_command(node, cwd=cwd, out=out)
         return
     if kind == "pipeline":
         _walk_pipeline(node, cwd=cwd, out=out)
@@ -184,6 +202,10 @@ def _walk_list(node: Node, *, cwd: str, out: list[Invocation]) -> None:
     inner_cwd = cwd
     for part in node.parts:
         if part.kind == "operator":
+            # ``cd X || CMD`` runs CMD only when the cd FAILED, so the
+            # directory it names is exactly where CMD is not.
+            if part.op == "||":
+                inner_cwd = cwd
             continue
         if part.kind == "command":
             cmd = _parse_command(part)
@@ -194,26 +216,45 @@ def _walk_list(node: Node, *, cwd: str, out: list[Invocation]) -> None:
 
 
 def _walk_pipeline(node: Node, *, cwd: str, out: list[Invocation]) -> None:
-    """Walk ``A | B``, recording each stage's sink."""
+    """Walk ``A | B | C``, linking each stage to its true neighbours.
+
+    Built back-to-front so each stage can hold a reference to the one it
+    feeds; the reverse links are then stitched in a second pass. Names
+    would not do: two pipelines on one line can both end in ``wc``, and
+    a matcher that searches for one by name reads the wrong pipeline.
+    """
     stages = [p for p in node.parts if p.kind != "pipe"]
+    linked: list[Invocation | None] = [None] * len(stages)
+    for i in reversed(range(len(stages))):
+        if stages[i].kind != "command":
+            continue
+        cmd = _parse_command(stages[i])
+        if not cmd.exe:
+            continue
+        linked[i] = Invocation(
+            exe=cmd.exe,
+            args=cmd.args,
+            cwd=cwd,
+            piped_into=linked[i + 1] if i + 1 < len(stages) else None,
+            env_prefix=cmd.env_prefix,
+            captures_stdout=cmd.captures_stdout,
+        )
+    # ``Invocation`` is frozen, so the upstream link is stitched by
+    # rebuilding each record once its predecessor is known.
+    for i, inv in enumerate(linked):
+        if inv is None:
+            continue
+        prev = next((linked[j] for j in reversed(range(i)) if linked[j]), None)
+        out.append(dataclasses.replace(inv, piped_from=prev) if prev else inv)
     for i, stage in enumerate(stages):
-        sink = ""
-        if i + 1 < len(stages) and stages[i + 1].kind == "command":
-            sink = _parse_command(stages[i + 1]).exe
         if stage.kind == "command":
-            _walk_command(stage, cwd=cwd, piped_into=sink, out=out)
-        else:
+            _walk_substitutions(stage, cwd=cwd, out=out)
+        elif linked[i] is None:
             _walk_node(stage, cwd=cwd, out=out)
 
 
-def _walk_command(
-    node: Node,
-    *,
-    cwd: str,
-    piped_into: str,
-    out: list[Invocation],
-) -> None:
-    """Record one simple command, then descend into any substitutions."""
+def _walk_command(node: Node, *, cwd: str, out: list[Invocation]) -> None:
+    """Record one un-piped simple command, then its substitutions."""
     cmd = _parse_command(node)
     if cmd.exe:
         out.append(
@@ -221,11 +262,15 @@ def _walk_command(
                 exe=cmd.exe,
                 args=cmd.args,
                 cwd=cwd,
-                piped_into=piped_into,
                 env_prefix=cmd.env_prefix,
                 captures_stdout=cmd.captures_stdout,
             )
         )
+    _walk_substitutions(node, cwd=cwd, out=out)
+
+
+def _walk_substitutions(node: Node, *, cwd: str, out: list[Invocation]) -> None:
+    """Descend into ``$(...)`` and friends nested in a command's words."""
     for child in _child_nodes(node):
         if child.kind in ("word", "commandsubstitution", "command", "list", "pipeline"):
             _walk_node(child, cwd=cwd, out=out)
@@ -304,126 +349,6 @@ def cached_parse_bash(
     trees = parse_bash(command)
     cache[command] = trees
     return trees
-
-
-def unwrap_cd_prefix(
-    trees: Sequence[Node],
-) -> tuple[str | None, Command] | None:
-    """Normalize a ``cd X && CMD`` pattern into ``(cwd, CMD)``.
-
-    Returns ``(None, cmd)`` for a plain simple command, or
-    ``(cd_path, cmd)`` for ``cd PATH && CMD`` with a single positional
-    ``cd`` arg and no other adornment (extra operators, redirects,
-    env prefix). Returns ``None`` for everything else.
-
-    Matchers call this so ``cd src && grep foo .`` and ``grep foo src``
-    produce the same suggestion.
-
-    Args:
-      trees: Top-level bashlex AST nodes.
-
-    Returns:
-      result: ``(cd_path, command)`` tuple, or None if not matched.
-
-    """
-    if len(trees) != 1:
-        return None
-    top = trees[0]
-    if top.kind == "command":
-        cmd = _parse_command(top)
-        if cmd.captures_stdout:
-            return None
-        return None, cmd
-    if top.kind != "list":
-        return None
-    parts = top.parts
-    cmd_nodes = [p for p in parts if p.kind == "command"]
-    op_nodes = [p for p in parts if p.kind == "operator"]
-    if len(cmd_nodes) != 2 or len(op_nodes) != 1 or op_nodes[0].op != "&&":
-        return None
-    cd_cmd = _parse_command(cmd_nodes[0])
-    inner = _parse_command(cmd_nodes[1])
-    if (
-        cd_cmd.exe != "cd"
-        or len(cd_cmd.args) != 1
-        or cd_cmd.env_prefix
-        or cd_cmd.captures_stdout
-        or inner.env_prefix
-        or inner.captures_stdout
-    ):
-        return None
-    return cd_cmd.args[0], inner
-
-
-def unwrap_cd_subtree(trees: Sequence[Node]) -> Sequence[Node] | None:
-    """Strip a leading ``cd PATH &&`` and return the remaining subtree.
-
-    For input ``cd X && SUBTREE`` (where ``SUBTREE`` is any single AST
-    node — command, pipeline, etc.), returns ``[SUBTREE]`` so callers
-    can re-dispatch through other matchers (``match_pipeline``,
-    ``unwrap_cd_prefix`` won't recurse into a pipeline). Returns
-    ``None`` if the prefix doesn't match the cd-clean shape.
-
-    Args:
-      trees: Top-level bashlex AST nodes.
-
-    Returns:
-      subtree: Remaining AST nodes after the ``cd`` prefix, or None.
-
-    """
-    if len(trees) != 1 or trees[0].kind != "list":
-        return None
-    parts = trees[0].parts
-    if len(parts) != 3:
-        return None
-    cd_node, op_node, rest = parts[0], parts[1], parts[2]
-    if cd_node.kind != "command":
-        return None
-    if op_node.kind != "operator" or op_node.op != "&&":
-        return None
-    cd_cmd = _parse_command(cd_node)
-    if (
-        cd_cmd.exe != "cd"
-        or len(cd_cmd.args) != 1
-        or cd_cmd.env_prefix
-        or cd_cmd.captures_stdout
-    ):
-        return None
-    return [rest]
-
-
-def match_pipeline(trees: Sequence[Node]) -> tuple[Command, Command] | None:
-    """Match a clean two-command pipeline (``A | B``).
-
-    Returns ``(first, second)`` only if exactly two simple commands
-    are piped together with no env prefix, no redirect, and no
-    enclosing subshell. ``None`` otherwise.
-
-    Args:
-      trees: Top-level bashlex AST nodes.
-
-    Returns:
-      result: ``(first, second)`` command pair, or None.
-
-    """
-    if len(trees) != 1:
-        return None
-    top = trees[0]
-    if top.kind != "pipeline":
-        return None
-    cmd_nodes = [p for p in top.parts if p.kind == "command"]
-    if len(cmd_nodes) != 2:
-        return None
-    first = _parse_command(cmd_nodes[0])
-    second = _parse_command(cmd_nodes[1])
-    if (
-        first.env_prefix
-        or second.env_prefix
-        or first.captures_stdout
-        or second.captures_stdout
-    ):
-        return None
-    return first, second
 
 
 def resolve_cwd_path(cwd: str | None, path: str | None) -> str:
@@ -565,7 +490,7 @@ _READ_ONLY_EXTRA: frozenset[str] = frozenset(
         "comm",
         "diff",
         "cmp",
-        # sed - read-only iff no in-place flag (see _sed_mutates).
+        # sed - read-only iff no in-place flag (see sed_mutates).
         "sed",
         # Hashing.
         "md5sum",
@@ -615,6 +540,19 @@ _FIND_DENY_FLAGS: frozenset[str] = frozenset(
 _TYPE_CHECKERS: frozenset[str] = frozenset(
     {"pyright", "basedpyright", "mypy", "ty"},
 )
+
+# Utilities whose argv IS another command. They are read-only only if
+# what they run is.
+_ARGV_EXECUTORS: frozenset[str] = frozenset({"env", "command", "nice", "stdbuf"})
+
+_ENV_ASSIGNMENT: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+# ``sed`` writes without ``-i`` via the ``w`` command and the ``w``
+# flag on ``s///``.
+_SED_WRITE_SCRIPT: Final = re.compile(r"(^|;|\})\s*\d*\s*w\s|s/.*/.*/[a-z]*w")
+
+# ``awk`` can shell out or redirect from inside its program text.
+_AWK_ESCAPE: Final = re.compile(r"\b(system|print\s*>|printf\s*>)|\|\s*\"")
 
 # Flags that consume the following word as their value. Without
 # these, ``git -C /repo log`` skips ``-C`` but leaves ``/repo`` in
@@ -812,6 +750,13 @@ _GIT_BRANCH_TAG_VALUE_FLAGS: frozenset[str] = frozenset(
 # Node kinds that always indicate a write or unsafe operation.
 _UNSAFE_NODE_KINDS: frozenset[str] = frozenset({"redirect"})
 
+# Syntax that carries no command of its own. Everything NOT listed here
+# is recursed into, so a construct bashlex adds later fails closed
+# instead of disappearing from an allow-list comprehension.
+_GLUE_NODE_KINDS: frozenset[str] = frozenset(
+    {"operator", "pipe", "reservedword", "word", "assignment"},
+)
+
 
 def _parse_command(node: Node) -> Command:
     """Convert a bashlex ``command`` node into a :class:`Command` record."""
@@ -848,7 +793,29 @@ def _parse_command(node: Node) -> Command:
     )
 
 
-def _sed_mutates(args: list[str]) -> bool:
+def _mutating_flags(exe: str, args: list[str]) -> bool:
+    """Whether an otherwise read-only utility was asked to write.
+
+    Each entry is a utility that reads by default but has a documented
+    write mode; the allow-list keys on the executable alone, so without
+    these gates ``sort -o victim`` and ``sed 'w victim'`` both read safe.
+    """
+    if exe == "find":
+        return any(a in _FIND_DENY_FLAGS for a in args)
+    if exe == "sed":
+        return sed_mutates(args) or any(_SED_WRITE_SCRIPT.search(a) for a in args)
+    if exe in _TYPE_CHECKERS:
+        return _type_checker_mutates(args)
+    if exe == "sort":
+        return any(a == "-o" or a.startswith("--output") for a in args)
+    if exe == "awk":
+        # ``system()``/``print > file`` make awk a general executor; the
+        # program text is not something this classifier can analyse.
+        return any(_AWK_ESCAPE.search(a) for a in args)
+    return False
+
+
+def sed_mutates(args: Sequence[str]) -> bool:
     """Return True iff any arg requests in-place editing.
 
     Catches ``--in-place``/``--in-place=SUFFIX``, the short form ``-i``
@@ -916,6 +883,11 @@ def _git_branch_or_tag_safe(args_after_sub: list[str]) -> bool:
     return True
 
 
+def _go_env_writes(tail: tuple[str, ...]) -> bool:
+    """``go env -w K=V`` MUTATES the persistent go environment."""
+    return any(a in ("-w", "-u") for a in tail)
+
+
 def _subcommand_extra_safe(
     exe: str,
     prefix: tuple[str, ...],
@@ -928,6 +900,8 @@ def _subcommand_extra_safe(
     """
     if exe == "git" and prefix in (("branch",), ("tag",)):
         return _git_branch_or_tag_safe(list(tail[len(prefix) :]))
+    if exe == "go" and prefix == ("env",) and _go_env_writes(tail):
+        return False
     deny = _SUBCOMMAND_NEXT_DENY.get((exe, prefix[0]))
     return not (
         deny is not None and len(tail) > len(prefix) and tail[len(prefix)] in deny
@@ -983,13 +957,19 @@ def _classify(exe: str, args: list[str]) -> bool:
             inner = args[i + kw_len :]
             return _classify(inner[0], inner[1:])
 
+    # ``env FOO=1 rm x`` / ``command rm x`` EXECUTE their argument, so
+    # allow-listing the wrapper without inspecting its payload launders
+    # anything through it. Recurse, exactly as ``_EXEC_WRAPPERS`` does.
+    if exe in _ARGV_EXECUTORS:
+        payload = [a for a in args if not _ENV_ASSIGNMENT.match(a)]
+        payload = payload[_skip_leading_flags(exe, payload) :]
+        if not payload:
+            # Bare ``env`` / ``command`` just prints; nothing runs.
+            return True
+        return _classify(Path(payload[0]).name, payload[1:])
+
     if exe in _READ_ONLY:
-        mutates = (
-            (exe == "find" and any(a in _FIND_DENY_FLAGS for a in args))
-            or (exe == "sed" and _sed_mutates(args))
-            or (exe in _TYPE_CHECKERS and _type_checker_mutates(args))
-        )
-        return not mutates
+        return not _mutating_flags(exe, args)
 
     prefixes = _SUBCOMMAND.get(exe)
     if prefixes is not None and args:
@@ -1009,40 +989,25 @@ def _is_node_safe(node: Node) -> bool:
     if kind == "command":
         return _is_command_safe(node)
     if kind in ("pipeline", "list"):
-        # Operator/pipe/reservedword children are pure glue - only
-        # actual command-bearing children matter.
+        # Operator/pipe/reservedword children are pure glue, and are
+        # named explicitly rather than filtered by an allow-list of the
+        # kinds we DO understand: an unlisted kind must reach the
+        # fail-closed branch below, not vanish from the comprehension.
         return all(
-            _is_node_safe(p)
-            for p in node.parts
-            if p.kind == "command"
-            or p.kind
-            in (
-                "pipeline",
-                "list",
-                "compound",
-                "commandsubstitution",
-                "processsubstitution",
-            )
+            _is_node_safe(p) for p in node.parts if p.kind not in _GLUE_NODE_KINDS
         )
     if kind == "compound":
-        # Subshells/group commands: recurse into the embedded list.
-        return all(
-            _is_node_safe(p)
-            for p in node.list
-            if p.kind
-            in (
-                "command",
-                "pipeline",
-                "list",
-                "compound",
-                "commandsubstitution",
-                "processsubstitution",
-            )
-        )
+        # Subshells and group commands: recurse into the embedded list.
+        # EVERY child is examined, not just the kinds we recognise --
+        # filtering meant a ``for``/``while`` child was dropped and
+        # ``all([])`` returned True, so an entire loop body went
+        # unexamined and ``for f in victim; do rm $f; done`` read safe.
+        return all(_is_node_safe(p) for p in node.list)
     if kind in ("commandsubstitution", "processsubstitution"):
         return _is_node_safe(node.command)
     # ``tilde`` / ``parameter`` are pure word expansions (``~/path``,
     # ``$VAR``, ``${VAR:-default}``) - no execution, no writes.
-    # Everything else (reservedword, operator, pipe, function, for,
-    # while, if, case, select) may hide arbitrary code and is rejected.
+    # Everything else (function, for, while, if, case, select, and any
+    # kind bashlex grows later) may hide arbitrary code. Fail CLOSED:
+    # a classifier whose default is "safe" is not a classifier.
     return kind in ("tilde", "parameter")

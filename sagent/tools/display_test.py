@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from sagent.tools.display import (
     OutputSpec,
     ToolDisplay,
@@ -15,11 +17,15 @@ def test_hidden_body_renders_nothing() -> None:
 
 
 def test_blank_text_renders_nothing() -> None:
-    assert format_output("   \n\n", OutputSpec(show=True)) == []
+    assert format_output("   \n\n", OutputSpec(show=True, unbounded=True)) == []
 
 
 def test_unbounded_body_keeps_every_line() -> None:
-    assert format_output("a\nb\nc", OutputSpec(show=True)) == ["a", "b", "c"]
+    assert format_output("a\nb\nc", OutputSpec(show=True, unbounded=True)) == [
+        "a",
+        "b",
+        "c",
+    ]
 
 
 def test_head_and_tail_are_kept_with_a_marker_between() -> None:
@@ -65,7 +71,7 @@ def test_budget_counts_logical_lines_and_keeps_them_whole() -> None:
 
 def test_wrapping_still_bounds_each_kept_line() -> None:
     body = "\n".join("x" * 40 for _ in range(2))
-    got = format_output(body, OutputSpec(show=True, max_width=10))
+    got = format_output(body, OutputSpec(show=True, unbounded=True, max_width=10))
     assert all(len(row) <= 10 for row in got), got
 
 
@@ -79,17 +85,21 @@ def test_the_elision_marker_is_never_wrapped() -> None:
 
 
 def test_chop_keeps_the_head_and_marks_the_cut() -> None:
-    assert format_output("abcdef", OutputSpec(show=True, wrap="chop"), width=4) == [
-        "abc\u2026"
-    ]
+    assert format_output(
+        "abcdef", OutputSpec(show=True, unbounded=True, wrap="chop"), width=4
+    ) == ["abc\u2026"]
 
 
 def test_chop_leaves_a_fitting_line_unmarked() -> None:
-    assert format_output("abc", OutputSpec(show=True, wrap="chop"), width=4) == ["abc"]
+    assert format_output(
+        "abc", OutputSpec(show=True, unbounded=True, wrap="chop"), width=4
+    ) == ["abc"]
 
 
 def test_max_width_overrides_the_caller_width() -> None:
-    got = format_output("abcdef", OutputSpec(show=True, max_width=2), width=99)
+    got = format_output(
+        "abcdef", OutputSpec(show=True, unbounded=True, max_width=2), width=99
+    )
     assert got == ["ab", "cd", "ef"]
 
 
@@ -145,7 +155,23 @@ def test_command_is_unbounded_without_command_knobs() -> None:
         output_max_width = 0
         output_wrap = "wrap"
 
-    assert row_spec(_Tool()).command == OutputSpec(show=True)
+    assert row_spec(_Tool()).command == OutputSpec(show=True, unbounded=True)
+
+
+def test_a_zero_budget_hides_the_body() -> None:
+    """``head=0 tail=0`` reads as "keep nothing", not "keep everything".
+
+    ``bounded`` being ``head > 0 or tail > 0`` sent an all-zero budget
+    down the UNBOUNDED path, so the knob that looks like the tightest
+    setting produced the loosest output.
+    """
+    assert format_output("a\nb\nc", OutputSpec(show=True)) == []
+
+
+def test_a_negative_budget_is_rejected() -> None:
+    """``head_rows=-1`` silently drops a line and miscounts the elision."""
+    with pytest.raises(ValueError, match="negative"):
+        _ = OutputSpec(show=True, head_rows=-1, tail_rows=1)
 
 
 if __name__ == "__main__":

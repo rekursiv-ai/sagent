@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Final
 
 import asyncio
 import atexit
@@ -33,12 +33,18 @@ from sagent.tools.lib.bash import (
     BashMatcher,
     Node,
     cached_parse_bash,
+    is_read_only,
 )
 from sagent.tools.tool_spec import CLI_SETTABLE
 from sagent.types.runtime import ToolResult
 
 
 logger = logging.getLogger(__name__)
+
+# Shared by every write-capable Bash call, so the runtime coalesces them
+# into one sequential group. The value is arbitrary; only its sameness
+# matters -- ``_partition_cohort`` groups on key equality.
+_WRITER_KEY: Final = "bash:writer"
 
 
 def _suppress_oserror() -> contextlib.suppress:
@@ -236,9 +242,33 @@ class Bash:
         return ""
 
     def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        """Run in parallel: Bash has no static path to serialize on."""
-        del args
-        return None
+        """Serialize writers against each other; run reads in parallel.
+
+        Bash has no static path to key on, so the key is the command's
+        EFFECT: anything that cannot mutate state runs concurrently,
+        and everything else queues behind the other writers in its
+        cohort. Two concurrent writers race and the loser's edit is
+        silently lost.
+
+        Biased hard toward serializing. An unparseable command, an
+        unrecognized utility, any redirect or control-flow construct all
+        read as a writer -- a false positive costs sequential dispatch,
+        a false negative costs data.
+
+        Args:
+          args: Parsed tool directive mapping.
+
+        Returns:
+          key: ``None`` for a read-only command, else a shared constant
+              so every writer in the cohort runs one at a time.
+
+        """
+        trees = cached_parse_bash(
+            str(args.get("command", "")), get_tool_state().bash_parse_cache
+        )
+        if trees is not None and is_read_only(trees):
+            return None
+        return _WRITER_KEY
 
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Execute the command and return the result.

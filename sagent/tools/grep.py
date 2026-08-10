@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Final
 
@@ -13,7 +14,7 @@ import shutil
 import subprocess
 
 from sagent.agent.state import current_agent_var, get_tool_state
-from sagent.lib.custom_json import JSON, bool_val, int_val, json_freeze
+from sagent.lib.custom_json import bool_val, int_val, json_freeze
 from sagent.tools.core import load_tool_description, run_sync
 from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
@@ -122,14 +123,15 @@ def _default_keep_first() -> int:
 _OUTPUT_MODES: frozenset[str] = frozenset({"content", "files_with_matches", "count"})
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Grep:
     """Search file contents with regex patterns."""
 
-    name: str = "Grep"
-    tool_id: str = "application/x-tool-grep"
-    clearable_results: bool = True
-    description: str = load_tool_description("Grep")
-    directive_schema: JSON = json_freeze(
+    name = "Grep"
+    tool_id = "application/x-tool-grep"
+    clearable_results = True
+    description = load_tool_description("Grep")
+    directive_schema = json_freeze(
         {
             "type": "object",
             "properties": {
@@ -408,11 +410,10 @@ class Grep:
           nudge: Suggestion text when the shape is replaceable, else ``None``.
 
         """
-        invocations = walk_commands(trees)
-        for inv in invocations:
+        for inv in walk_commands(trees):
             if inv.env_prefix or inv.captures_stdout:
                 continue
-            if _searches_files(inv, invocations):
+            if _searches_files(inv):
                 return _NUDGE
         return None
 
@@ -472,32 +473,41 @@ def _kw_bool(
     return default
 
 
-def _shaping_sink(inv: Invocation, all_invocations: Sequence[Invocation]) -> bool:
+def _shaping_sink(sink: Invocation) -> bool:
     """Whether the sink only truncates or counts what grep already found.
 
     ``wc -l`` is Grep's ``output_mode="count"``; ``wc -c`` counts BYTES,
     which Grep cannot express, so that shape stays with Bash.
     """
-    if inv.piped_into in _DISPLAY_SHAPERS:
+    if sink.exe in _DISPLAY_SHAPERS:
         return True
-    if inv.piped_into != "wc":
+    return sink.exe == "wc" and sink.args == ("-l",)
+
+
+def _searches_files(inv: Invocation) -> bool:
+    """Whether this invocation is a search the Grep tool replaces.
+
+    Every question is answered from ``inv``'s own pipeline links. Asking
+    it of the whole command line instead let an unrelated statement --
+    ``cat -n a.py; grep -n p f`` -- decide the verdict.
+    """
+    if any(d.captures_stdout for d in inv.downstream()):
+        # Something downstream writes a file, so the pipeline's product
+        # is the file, not the matches.
         return False
-    return any(other.exe == "wc" and other.args == ("-l",) for other in all_invocations)
-
-
-def _searches_files(inv: Invocation, all_invocations: Sequence[Invocation]) -> bool:
-    """Whether this invocation is a search the Grep tool replaces."""
     if inv.exe in _GREP_EXES:
         # A ``cat -n f | grep p`` source is adding line numbers, not
         # simply feeding the file; that is not the shape Grep replaces.
-        if any(
-            other.exe == "cat" and any(a.startswith("-") for a in other.args)
-            for other in all_invocations
+        source = inv.piped_from
+        if (
+            source is not None
+            and source.exe == "cat"
+            and any(a.startswith("-") for a in source.args)
         ):
             return False
         # A pipeline sink that only truncates or counts is what Grep's
         # own paging and ``output_mode="count"`` already do.
-        if inv.piped_into and not _shaping_sink(inv, all_invocations):
+        if inv.piped_into is not None and not _shaping_sink(inv.piped_into):
             return False
         return _parse_grep_args(inv.args, positional_path=True)
     if inv.exe == "xargs":
@@ -506,10 +516,12 @@ def _searches_files(inv: Invocation, all_invocations: Sequence[Invocation]) -> b
         grep_args = _strip_xargs_prefix(inv.args)
         if grep_args is None:
             return False
-        return any(
-            other.exe == "find" and _parse_find_for_grep(other.args)
-            for other in all_invocations
-        ) and _parse_grep_args(grep_args, positional_path=False)
+        source = inv.piped_from
+        if source is None or source.exe != "find":
+            return False
+        return _parse_find_for_grep(source.args) and _parse_grep_args(
+            grep_args, positional_path=False
+        )
     return False
 
 

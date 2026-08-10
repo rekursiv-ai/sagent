@@ -476,6 +476,63 @@ async def test_timeout_keeps_output_produced_before_the_kill(
     assert "timeout" in out
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat foo.py",
+        "grep -n pat foo.py",
+        "ls -la",
+        "git status --short",
+    ],
+)
+def test_a_read_only_command_runs_in_parallel(command: str) -> None:
+    """Reads cannot collide, so they need no serialization key."""
+    assert Bash().serialize_key({"command": command}) is None
+
+
+def test_a_cd_prefix_serializes_because_it_moves_the_shared_cwd() -> None:
+    """``cd`` writes ``ToolState.bash_cwd``, which the next call reads.
+
+    Racing it against another Bash call means the second command runs
+    from whichever directory won, which is not what either asked for.
+    """
+    assert Bash().serialize_key({"command": "cd /srv && head -20 f"}) is not None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm victim",
+        "echo hi > victim",
+        "sed -i 's/a/b/' foo.py",
+        "git checkout .",
+        "for f in victim; do rm $f; done",
+        "env rm victim",
+    ],
+)
+def test_a_writing_command_serializes_against_other_bash(command: str) -> None:
+    """Two concurrent writers race, and the loser's edit is lost.
+
+    ``serialize_key`` returned ``None`` unconditionally, so every Bash
+    call in a cohort ran in parallel however destructive -- the
+    read-only classifier existed to prevent exactly this and was never
+    consulted.
+    """
+    assert Bash().serialize_key({"command": command}) is not None
+
+
+def test_writers_share_one_key_so_they_queue_behind_each_other() -> None:
+    b = Bash()
+    assert b.serialize_key({"command": "rm a"}) == b.serialize_key(
+        {"command": "git checkout ."}
+    )
+
+
+def test_an_unparseable_command_is_treated_as_a_writer() -> None:
+    """A command we cannot classify must not be assumed harmless."""
+    assert Bash().serialize_key({"command": "cat <<'EOF'\nhi\nEOF"}) is not None
+
+
 if __name__ == "__main__":
     from sagent.lib.testing.main import test_main
 

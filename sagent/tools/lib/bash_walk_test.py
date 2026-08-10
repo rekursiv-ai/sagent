@@ -14,10 +14,13 @@ from sagent.tools.lib.bash import parse_bash, walk_commands
 
 
 def _walk(command: str) -> list[tuple[str, tuple[str, ...], str, str]]:
-    """Return ``(exe, args, cwd, piped_into)`` for each command found."""
+    """Return ``(exe, args, cwd, sink_exe)`` for each command found."""
     trees = parse_bash(command)
     assert trees is not None, f"failed to parse: {command!r}"
-    return [(i.exe, i.args, i.cwd, i.piped_into) for i in walk_commands(trees)]
+    return [
+        (i.exe, i.args, i.cwd, i.piped_into.exe if i.piped_into else "")
+        for i in walk_commands(trees)
+    ]
 
 
 def test_bare_command() -> None:
@@ -70,6 +73,15 @@ def test_stdout_redirect_is_flagged() -> None:
     assert [i.captures_stdout for i in walk_commands(trees)] == [True]
 
 
+def test_a_redirect_downstream_is_reachable_from_the_source() -> None:
+    """``grep p f | head > out`` writes a file; the source must see it."""
+    trees = parse_bash("grep pat foo.py | head -20 > out.txt")
+    assert trees is not None
+    grep = next(i for i in walk_commands(trees) if i.exe == "grep")
+    assert not grep.captures_stdout
+    assert any(d.captures_stdout for d in grep.downstream())
+
+
 def test_env_prefix_is_flagged() -> None:
     trees = parse_bash("LC_ALL=C grep pat foo.py")
     assert trees is not None
@@ -79,6 +91,56 @@ def test_env_prefix_is_flagged() -> None:
 def test_nested_cd_inside_a_loop() -> None:
     got = _walk("for f in *.py; do cd /srv && cat $f; done")
     assert [(e, c) for e, _a, c, _p in got] == [("cat", "/srv")]
+
+
+def test_pipeline_neighbours_are_references_not_names() -> None:
+    """A name cannot identify WHICH neighbour, only what kind it is.
+
+    Two pipelines on one line both ending in ``wc`` are indistinguishable
+    by name, so a matcher recovering its sink by scanning for an
+    executable crosses the statement boundary and reads the wrong one.
+    """
+    trees = parse_bash("grep pat foo.py | wc -c; ls | wc -l")
+    assert trees is not None
+    invocations = walk_commands(trees)
+    grep = next(i for i in invocations if i.exe == "grep")
+    ls = next(i for i in invocations if i.exe == "ls")
+    assert grep.piped_into is not None
+    assert ls.piped_into is not None
+    assert grep.piped_into.args == ("-c",)
+    assert ls.piped_into.args == ("-l",)
+    assert grep.piped_into is not ls.piped_into
+
+
+def test_a_command_knows_its_upstream_source() -> None:
+    """``cat -n f | grep p``: grep's rule is about what FED it.
+
+    ``piped_into`` points downstream only, so a matcher asking "was I
+    fed by a flagged cat" has to scan -- and then an unrelated ``cat``
+    in another statement answers for it.
+    """
+    trees = parse_bash("cat -n f | grep p")
+    assert trees is not None
+    grep = next(i for i in walk_commands(trees) if i.exe == "grep")
+    assert grep.piped_from is not None
+    assert grep.piped_from.exe == "cat"
+    assert grep.piped_from.args == ("-n", "f")
+
+
+def test_a_bare_command_has_no_pipeline_neighbours() -> None:
+    trees = parse_bash("cat -n a.py; grep -n pat foo.py")
+    assert trees is not None
+    for inv in walk_commands(trees):
+        assert inv.piped_into is None, inv
+        assert inv.piped_from is None, inv
+
+
+def test_cd_does_not_thread_across_an_or_operator() -> None:
+    """``cd X || CMD`` runs CMD only when the cd FAILED."""
+    trees = parse_bash("cd /srv || cat foo.py")
+    assert trees is not None
+    cat = next(i for i in walk_commands(trees) if i.exe == "cat")
+    assert cat.cwd == ""
 
 
 if __name__ == "__main__":

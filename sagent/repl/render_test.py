@@ -845,7 +845,7 @@ def test_tool_result_content_renders_when_requested() -> None:
     render_tool_result(
         printer,
         ToolResult(call_id="c1", content="alpha\nbeta"),
-        output=OutputSpec(show=True),
+        output=OutputSpec(show=True, unbounded=True),
     )
     assert "alpha" in "".join(printer.tool_outputs)
     assert "beta" in "".join(printer.tool_outputs)
@@ -874,7 +874,7 @@ def test_tool_result_content_is_width_chopped() -> None:
     render_tool_result(
         printer,
         ToolResult(call_id="c1", content="abcdefgh"),
-        output=OutputSpec(show=True, max_width=4, wrap="chop"),
+        output=OutputSpec(show=True, unbounded=True, max_width=4, wrap="chop"),
     )
     assert printer.tool_outputs == ["abc\u2026"]
 

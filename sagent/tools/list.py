@@ -11,7 +11,7 @@ import asyncio
 import time
 
 from sagent.agent.state import get_tool_state
-from sagent.lib.custom_json import JSON, bool_val, int_val, json_freeze
+from sagent.lib.custom_json import bool_val, int_val, json_freeze
 from sagent.tools.core import load_tool_description
 from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
@@ -34,14 +34,15 @@ _NUDGE_PREFIX: Final = "ls via Bash is a bad UX. Use the List tool"
 _DEFAULT_SORT: Final = "name"
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
 class List:
     """List directory contents."""
 
-    name: str = "List"
-    tool_id: str = "application/x-tool-list"
-    clearable_results: bool = True
-    description: str = load_tool_description("List")
-    directive_schema: JSON = json_freeze(
+    name = "List"
+    tool_id = "application/x-tool-list"
+    clearable_results = True
+    description = load_tool_description("List")
+    directive_schema = json_freeze(
         {
             "type": "object",
             "properties": {
@@ -216,39 +217,33 @@ class List:
           hint: Nudge string redirecting to the List tool, or ``None``.
 
         """
-        invocations = walk_commands(trees)
-        for inv in invocations:
+        for inv in walk_commands(trees):
             if inv.exe != "ls" or inv.env_prefix or inv.captures_stdout:
                 continue
-            if not inv.piped_into:
+            if any(d.captures_stdout for d in inv.downstream()):
+                continue
+            if inv.piped_into is None:
                 hint = _ls_to_hint(inv.args, max_results=None, flip_sort=False)
             else:
-                hint = _piped_ls_hint(inv, invocations)
+                hint = _piped_ls_hint(inv, inv.piped_into)
             if hint is not None:
                 return hint
         return None
 
 
-def _piped_ls_hint(
-    inv: Invocation, all_invocations: Sequence[Invocation]
-) -> str | None:
+def _piped_ls_hint(inv: Invocation, sink: Invocation) -> str | None:
     """Nudge for ``ls … | head/tail -N``, which List expresses natively.
 
     ``tail`` flips the sort: the last N of an ascending listing is the
     first N of a descending one, which is what ``sort`` + ``max_results``
-    already say.
+    already say. The count comes from THIS pipeline's sink -- searching
+    by name found whichever ``head`` came first on the line.
     """
-    if inv.piped_into == "head":
+    if sink.exe == "head":
         flip = False
-    elif inv.piped_into == "tail":
+    elif sink.exe == "tail":
         flip = True
     else:
-        return None
-    sink = next(
-        (o for o in all_invocations if o.exe == inv.piped_into),
-        None,
-    )
-    if sink is None:
         return None
     n = _parse_line_count(sink.args)
     if n is None:

@@ -95,6 +95,67 @@ def test_shape_is_deliberately_silent(command: str) -> None:
     assert not _nudging_tools(command), command
 
 
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # A decoy statement must not change a verdict. Matchers that
+        # recover their pipeline neighbour by scanning every invocation
+        # for an executable NAME cross statement boundaries, so an
+        # unrelated command elsewhere on the line flips the answer.
+        ("grep pat foo.py | wc -c; ls | wc -l", set[str]()),
+        ("cat -n a.py; grep -n pat foo.py", {"Grep"}),
+        ("ls | xargs grep pat; find . -name '*.py'", {"Glob"}),
+    ],
+)
+def test_a_decoy_statement_does_not_change_the_verdict(
+    command: str, expected: set[str]
+) -> None:
+    assert _nudging_tools(command) == expected, command
+
+
+def test_ls_pipeline_reads_its_own_sink() -> None:
+    """The suggestion must quote the sink that actually follows ``ls``."""
+    trees = parse_bash("cat f | head -5; ls | head -20")
+    assert trees is not None
+    tool = next(t for t in _MATCHERS if t.name == "List")
+    assert isinstance(tool, BashMatcher)
+    hint = tool.bash_match(trees) or ""
+    assert "max_results=20" in hint, hint
+
+
+def test_a_sed_that_edits_in_place_is_never_a_read() -> None:
+    """``-in`` is quiet PLUS in-place: the file is rewritten.
+
+    Matching on "a short flag containing n" accepts it, so a destructive
+    command is advertised as a Read.
+    """
+    assert "Read" not in _nudging_tools("sed -in '1,5p' foo.py")
+
+
+def test_a_glob_positional_is_not_a_read() -> None:
+    """Read takes ONE ``file_path`` and cannot expand a glob."""
+    assert "Read" not in _nudging_tools("cat *.py")
+    assert "Read" not in _nudging_tools("head -20 *.py")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "curl --output=out.html https://example.com",
+        "curl -sO https://example.com",
+        "wget --output-document=out https://example.com",
+    ],
+)
+def test_a_fetch_that_writes_a_file_does_not_nudge(command: str) -> None:
+    """Exact-string flag matching misses ``--flag=value`` and bundles."""
+    assert not _nudging_tools(command), command
+
+
+def test_a_redirect_on_the_pipeline_sink_disqualifies_the_source() -> None:
+    """``grep p f | head > out`` writes a file; it is not a Grep call."""
+    assert not _nudging_tools("grep pat foo.py | head -20 > out.txt")
+
+
 def test_sed_print_goes_to_read_and_sed_edit_goes_to_edit() -> None:
     """One executable, two tools, split on whether it mutates."""
     assert _nudging_tools("sed -n '1,50p' foo.py") == {"Read"}
