@@ -46,5 +46,5 @@ jobs:
           uv run python -c "import sagent"
           rm -rf dist
           uv build --out-dir dist
-          wheels=(dist/sagent-*.whl); wheel="${wheels[0]}"; uv run --isolated --with "$wheel" --with "wesearch[extract] @ git+https://github.com/rekursiv-ai/wesearch" python -P -c "import sagent; print(sagent.__file__)"
+          wheels=(dist/sagent-*.whl); wheel="${wheels[0]}"; uv run --isolated --with "$wheel" --with "wesearch @ git+https://github.com/rekursiv-ai/wesearch" python -P -c "import sagent; print(sagent.__file__)"
           uv run python sagent/bin/check_wheel.py
