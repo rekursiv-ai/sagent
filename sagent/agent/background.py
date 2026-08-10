@@ -221,18 +221,6 @@ class BackgroundAwareTool:
         """
         return self._tool.summary(args)
 
-    def summary_result(self, result: ToolResult) -> str | None:
-        """Forward to the wrapped tool's post-execution receipt.
-
-        Args:
-          result: Completed tool result.
-
-        Returns:
-          receipt: Short receipt line, or ``None`` to suppress it.
-
-        """
-        return self._tool.summary_result(result)
-
     def prompt(self) -> str | None:
         """Forward to the wrapped tool's system-prompt contribution.
 

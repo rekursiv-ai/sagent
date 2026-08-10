@@ -12,7 +12,6 @@ import pytest
 
 from sagent.testing import with_fake_agent
 from sagent.tools.write import Write
-from sagent.types.runtime import ToolResult
 
 
 write = Write()
@@ -118,32 +117,6 @@ def test_summary_path_basename() -> None:
 
 def test_summary_no_path() -> None:
     assert write.summary({}) == "Write ?"
-
-
-def test_summary_result_off_by_default() -> None:
-    r = ToolResult(call_id="", content="Wrote 10 bytes to /x")
-    assert write.summary_result(r) is None
-
-
-def test_summary_result_on_for_wrote_message() -> None:
-    w = Write()
-    w.emit_tool_summary = True
-    r = ToolResult(call_id="", content="Wrote 42 bytes to /x")
-    assert w.summary_result(r) == "wrote 42 bytes"
-
-
-def test_summary_result_error_skipped() -> None:
-    w = Write()
-    w.emit_tool_summary = True
-    r = ToolResult(call_id="", content="boom", is_error=True)
-    assert w.summary_result(r) is None
-
-
-def test_summary_result_unmatched_content_none() -> None:
-    w = Write()
-    w.emit_tool_summary = True
-    r = ToolResult(call_id="", content="something else")
-    assert w.summary_result(r) is None
 
 
 def test_prompt_empty() -> None:

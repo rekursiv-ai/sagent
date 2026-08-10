@@ -26,7 +26,11 @@ import re
 from markdown_it import MarkdownIt
 from pygments import highlight
 from pygments.formatters import Terminal256Formatter
-from pygments.lexers import TextLexer, get_lexer_for_filename
+from pygments.lexers import (
+    TextLexer,
+    get_lexer_by_name,
+    get_lexer_for_filename,
+)
 from pygments.style import Style
 from pygments.token import (
     Comment,
@@ -223,6 +227,28 @@ def find_stable_boundary(text: str) -> int:
     boundary_line = block_lines[-1]
     lines = text.split("\n")
     return sum(len(lines[i]) + 1 for i in range(boundary_line))
+
+
+def highlight_source(code: str, lang: str) -> Text:
+    """Syntax-highlight ``code`` for a named language.
+
+    Args:
+      code: Source text, one line or many.
+      lang: Pygments lexer name, e.g. ``"bash"``. An unknown name falls
+          back to plain text rather than raising -- highlighting is
+          decoration, never a reason to lose the content.
+
+    Returns:
+      text: Rich ``Text`` carrying the highlighted source.
+
+    """
+    if not code:
+        return Text("")
+    try:
+        lexer = get_lexer_by_name(lang, stripnl=False, ensurenl=False)
+    except ClassNotFound:
+        return Text(code)
+    return _highlight(code, lexer)
 
 
 def _get_lexer(filepath: str) -> Lexer:

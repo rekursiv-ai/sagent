@@ -9,7 +9,6 @@ import pytest
 from sagent.testing import with_fake_agent
 from sagent.tools import wiki as wm
 from sagent.tools.wiki import Wiki
-from sagent.types.runtime import ToolResult
 
 
 def _make_wiki(root: Path, pages: dict[str, str] | None = None) -> Path:
@@ -128,7 +127,6 @@ def test_summary_includes_slug() -> None:
         "Wiki read_page:intro"
     )
     assert t.summary({"operation": "list"}) == "Wiki list"
-    assert t.summary_result(ToolResult(call_id="", content="x")) is None
 
 
 @pytest.mark.asyncio

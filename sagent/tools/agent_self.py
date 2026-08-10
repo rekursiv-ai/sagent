@@ -185,19 +185,6 @@ class AgentSelf:
         parts = _summary_parts(args)
         return "AgentSelf " + " ".join(parts) if parts else "AgentSelf"
 
-    def summary_result(self, result: types.runtime.ToolResult) -> str | None:
-        """Return no per-result receipt for AgentSelf.
-
-        Args:
-          result: The tool's completed ``ToolResult``.
-
-        Returns:
-          receipt: Always ``None``; AgentSelf has no compact receipt.
-
-        """
-        del result
-        return None
-
     def prompt(self) -> str:
         """Return dynamic system-prompt guidance.
 

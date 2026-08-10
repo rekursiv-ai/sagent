@@ -54,6 +54,7 @@ from sagent.repl.render import make_render_observer
 from sagent.repl.replay import replay_messages
 from sagent.repl.status_pane import render_status_pane
 from sagent.thinking import ThinkingState, resolve_thinking_command
+from sagent.tools.display import ToolDisplay, row_spec
 from sagent.types.exceptions import log_exception_or_warning
 from sagent.types.runtime import (
     AgentIdle,
@@ -114,7 +115,9 @@ async def run_repl(
         )
         printer = ConsolePrinter(console)
         render_observer = make_render_observer(
-            printer, show_thinking=lambda: agent.show_thinking
+            printer,
+            show_thinking=lambda: agent.show_thinking,
+            output_policy=lambda call_id: _tool_output_policy(agent, call_id),
         )
         # Everything that mutates the runtime lives inside the ``try``: the
         # ``finally`` below is the only path that detaches the observer,
@@ -188,6 +191,18 @@ async def run_repl(
             "sagent --continue-all     # most recent session across all dirs\n"
             "sagent --resume-all       # interactive picker across all dirs\n"
         )
+
+
+def _tool_output_policy(agent: Agent, call_id: str) -> ToolDisplay:
+    """Return the output policy for the tool behind ``call_id``.
+
+    Whether a result body renders is the TOOL's setting (e.g.
+    ``--tool Bash.output=on``), so the renderer resolves the owning tool
+    rather than carrying a display policy of its own.
+    """
+    name, _started = agent.tool_name_for_call(call_id)
+    tool = agent.tools_map.get(name)
+    return ToolDisplay() if tool is None else row_spec(tool)
 
 
 def _background_tasks_for_repl_cancel(agent: Agent) -> list[asyncio.Task[object]]:

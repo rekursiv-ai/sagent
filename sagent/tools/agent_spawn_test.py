@@ -229,17 +229,6 @@ def test_summary_short_and_long() -> None:
     assert t.summary({}) == "AgentSpawn"
 
 
-def test_summary_result_off_by_default() -> None:
-    t = AgentSpawn()
-    assert t.summary_result(ToolResult(call_id="", content="x\ny")) is None
-    t.emit_tool_summary = True
-    assert t.summary_result(ToolResult(call_id="", content="x\ny")) == "2L"
-    assert (
-        t.summary_result(ToolResult(call_id="", content=""))
-        == "completed with no output"
-    )
-
-
 def test_prompt_no_cap() -> None:
     t = AgentSpawn()
     token = max_depth_var.set(None)

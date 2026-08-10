@@ -225,19 +225,6 @@ class Wiki:
         suffix = f":{slug}" if slug else ""
         return f"Wiki {operation}{suffix}"
 
-    def summary_result(self, result: ToolResult) -> str | None:
-        """Suppress the per-call receipt for Wiki.
-
-        Args:
-          result: Completed ``ToolResult`` (ignored).
-
-        Returns:
-          receipt: Always ``None`` (no receipt line).
-
-        """
-        del result
-        return None
-
     def prompt(self) -> str:
         """Return no supplemental system-prompt text for Wiki.
 

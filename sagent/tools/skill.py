@@ -220,19 +220,6 @@ class Skill:
         skill = str(args.get("skill", ""))
         return f"Skill {skill}" if skill else "Skill"
 
-    def summary_result(self, result: ToolResult) -> str | None:
-        """Suppress the per-call receipt for Skill.
-
-        Args:
-          result: Completed ``ToolResult`` (ignored).
-
-        Returns:
-          receipt: Always ``None`` (no receipt line).
-
-        """
-        del result
-        return None
-
     def prompt(self) -> str:
         """Return a per-request listing of discoverable skills.
 

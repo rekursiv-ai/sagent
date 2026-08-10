@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import cast, get_args
+from typing import Annotated, cast, get_args
 
 import asyncio
 import re
@@ -34,6 +34,8 @@ from sagent.tools.core import (
     load_tool_description,
     truncate,
 )
+from sagent.tools.display import Toggle, Wrap
+from sagent.tools.tool_spec import CLI_SETTABLE
 from sagent.types.runtime import ToolResult
 
 
@@ -101,6 +103,21 @@ class WebSearch:
         }
     )
 
+    output: Annotated[Toggle, CLI_SETTABLE] = "off"
+    """Whether the result body renders in the pane."""
+
+    output_head_rows: Annotated[int, CLI_SETTABLE] = 2
+    """Leading body rows kept."""
+
+    output_tail_rows: Annotated[int, CLI_SETTABLE] = 2
+    """Trailing body rows kept, after a ``⋯ N lines ⋯`` marker."""
+
+    output_max_width: Annotated[int, CLI_SETTABLE] = 0
+    """Cell width cap; ``0`` uses the pane width."""
+
+    output_wrap: Annotated[Wrap, CLI_SETTABLE] = "wrap"
+    """``wrap`` continues an over-wide line, ``chop`` marks the cut."""
+
     def summary(self, args: Mapping[str, object]) -> str:
         """Return a short display label for this invocation.
 
@@ -112,19 +129,6 @@ class WebSearch:
 
         """
         return f"WebSearch {str(args.get('query', ''))!r}"
-
-    def summary_result(self, result: ToolResult) -> str | None:
-        """Suppress the per-call receipt for WebSearch.
-
-        Args:
-          result: Completed ``ToolResult`` (ignored).
-
-        Returns:
-          receipt: Always ``None`` (no receipt line).
-
-        """
-        del result
-        return None
 
     def prompt(self) -> str:
         """Return no supplemental system-prompt text for WebSearch.

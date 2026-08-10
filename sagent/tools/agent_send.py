@@ -100,19 +100,6 @@ class AgentSend:
         preview = str(args.get("content", "")).replace("\n", " ").strip()
         return f"{self.name} → {to}: {preview}" if to else self.name
 
-    def summary_result(self, result: ToolResult) -> str | None:
-        """Suppress the per-call receipt for AgentSend.
-
-        Args:
-          result: Completed ``ToolResult`` (ignored).
-
-        Returns:
-          receipt: Always ``None`` (no receipt line).
-
-        """
-        del result
-        return None
-
     def prompt(self) -> str:
         """Return a self-identity + active-agents listing.
 

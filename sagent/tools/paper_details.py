@@ -182,11 +182,6 @@ class PaperDetails:
             return f"PaperDetails citations {short}"
         return f"PaperDetails {short}"
 
-    def summary_result(self, result: ToolResult) -> str | None:
-        """Suppress the per-call receipt for PaperDetails."""
-        del result
-        return None
-
     def prompt(self) -> str:
         """Return supplemental system-prompt text (none)."""
         return ""

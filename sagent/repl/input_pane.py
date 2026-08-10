@@ -41,6 +41,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final, Protocol, assert_never, override
 
 import asyncio
+import dataclasses
 import fnmatch
 import logging
 import re
@@ -71,10 +72,16 @@ from sagent.repl.slash import (
     Tasks as SlashTasks,
     Text as SlashText,
     Thinking as SlashThinking,
+    Tool as SlashTool,
     Unknown as SlashUnknown,
     parse_slash,
 )
 from sagent.tools.background_task import cancel_persistent_subagent
+from sagent.tools.tool_spec import (
+    ToolSpecError,
+    coerce_kwargs,
+    parse_tool_overrides,
+)
 from sagent.types.exceptions import (
     UserFacingError,
     log_exception_or_warning,
@@ -443,6 +450,55 @@ def _kill_persistent_subagent(agent: Agent, label: str) -> None:
     _ = cancel_persistent_subagent(agent, label)
 
 
+def _dispatch_tool(agent: Agent, spec: str, printer: Printer | None) -> None:
+    """Reconfigure a live tool: ``/tool Bash.output=off``.
+
+    Same grammar as the ``--tool`` flag, applied to the constructed
+    instance so it takes effect on the next call. The tool's own
+    ``__init__`` signature is the contract, so an unknown key is
+    reported with the ones it accepts.
+    """
+    try:
+        overrides = parse_tool_overrides([spec])
+    except ToolSpecError as exc:
+        if printer is not None:
+            printer.write_tool_error(f"[/tool] {exc}")
+        return
+    for name, kv in overrides.items():
+        tool = agent.tools_map.get(name)
+        if tool is None:
+            if printer is not None:
+                loaded = ", ".join(sorted(agent.tools_map))
+                printer.write_tool_error(
+                    f"[/tool] unknown tool {name!r}. Loaded: {loaded}"
+                )
+            return
+        # ``is_dataclass`` also admits the CLASS, which ``replace``
+        # rejects; the registry only ever holds instances, so exclude the
+        # type case rather than widening what ``replace`` accepts.
+        if not dataclasses.is_dataclass(tool) or isinstance(tool, type):
+            if printer is not None:
+                printer.write_tool_error(
+                    f"[/tool] {name} is not reconfigurable at runtime"
+                )
+            return
+        try:
+            coerced = coerce_kwargs(type(tool), kv)
+            # ``replace`` rather than ``setattr``: tools are frozen
+            # dataclasses, and routing the swap through ``replace_tool``
+            # also bumps the version that invalidates the cached
+            # provider-facing tool list -- so the display view and the
+            # schema the model sees cannot drift apart.
+            agent.replace_tool(name, dataclasses.replace(tool, **coerced))
+        except (ToolSpecError, TypeError) as exc:
+            if printer is not None:
+                printer.write_tool_error(f"[/tool] {exc}")
+            return
+        if printer is not None:
+            shown = ", ".join(f"{k}={v}" for k, v in sorted(kv.items()))
+            printer.write_slash_block(f"[/tool] {name}: {shown}")
+
+
 async def _dispatch(
     agent: Agent,
     action: SlashAction,
@@ -483,6 +539,8 @@ async def _dispatch(
             _run_repl.do_switch_thinking(agent, command, printer)
         case SlashEffort(value=value):
             _run_repl.do_switch_effort(agent, value, printer)
+        case SlashTool(spec=spec):
+            _dispatch_tool(agent, spec, printer)
         case SlashLogin():
             await _run_repl.do_login(agent, printer)
             if queues is not None:
@@ -609,7 +667,9 @@ def render_input_pane(agent: Agent, queues: InputQueues) -> FormattedText:
     lines.extend(
         f"pending: {m.text}"
         for m in agent.runtime.pending_mid_stream()
-        if isinstance(m, UserMessage)
+        # ``hidden`` reaches the model but not the human, so it has no
+        # place in a pane the user can edit or retract.
+        if isinstance(m, UserMessage) and not m.hidden
     )
     parts: list[tuple[str, str]] = []
     if lines:

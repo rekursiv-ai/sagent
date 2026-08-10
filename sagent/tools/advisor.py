@@ -123,19 +123,6 @@ class Advisor:
         del args
         return "Advisor consulting…"
 
-    def summary_result(self, result: ToolResult) -> str | None:
-        """Suppress the per-call receipt for advisor consults.
-
-        Args:
-          result: Completed ``ToolResult`` (ignored).
-
-        Returns:
-          receipt: Always ``None`` (no receipt line).
-
-        """
-        del result
-        return None
-
     def prompt(self) -> str:
         """Return the advisor system-prompt nudge.
 

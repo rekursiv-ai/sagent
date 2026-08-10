@@ -63,7 +63,7 @@ Three protocols stacked:
 - ``runtime.Tool`` (in ``agent/runtime.py``) -- ``name`` + ``run`` only;
   what the runtime dispatches.
 - ``types.tools.Tool`` -- rich surface (``description``,
-  ``directive_schema``, ``summary``, ``summary_result``, ``prompt``);
+  ``directive_schema``, ``summary``, ``prompt``);
   what providers and the system prompt consume.
 - :class:`_AgentTool` (in ``agent/agent.py``) -- the runtime-side
   wrapper. Pre-validates args against ``directive_schema``,

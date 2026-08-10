@@ -23,7 +23,6 @@ from sagent.tools.web_search import (
     _build_query,
     _format_result,
 )
-from sagent.types.runtime import ToolResult
 
 
 def test_websearch_metadata() -> None:
@@ -58,10 +57,6 @@ def test_summary_keeps_long_query() -> None:
     t = WebSearch()
     q = "x" * 80
     assert t.summary({"query": q}) == f"WebSearch {q!r}"
-
-
-def test_summary_result_returns_none() -> None:
-    assert WebSearch().summary_result(ToolResult(call_id="", content="x")) is None
 
 
 def test_prompt_empty() -> None:

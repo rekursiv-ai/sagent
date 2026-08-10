@@ -10,7 +10,7 @@ Owns three wrappers and a small set of observers:
   out-of-band on :attr:`Agent.cost_tracker`.
 
 - :class:`_AgentTool` bridges a rich ``Tool`` (with metadata,
-  ``summary`` / ``summary_result`` / ``prompt``) to the runtime's
+  ``summary`` / ``prompt``) to the runtime's
   minimal ``run(args) -> ToolResult`` protocol. Emits ``ToolLabel``
   before running, validates the directive against the tool's
   ``directive_schema``, postprocesses the result (empty-marker,
@@ -154,6 +154,13 @@ class ActivityTracker:
 
     num_tool_call_rounds: int = 0
     """Cumulative count of responses that included tool calls."""
+
+
+# Retained tool-call identities. Sized so a long session cannot grow the
+# registry without bound while still outliving any plausible detached
+# call: one entry is ~100 bytes, and 10k covers far more rounds than a
+# session sustains between compactions.
+_TOOL_REGISTRY_MAX: Final = 10_000  # config-globals: ignore -- retention bound
 
 
 class Agent:
@@ -1404,6 +1411,16 @@ class Agent:
         root agent, direct ``serve_forever`` callers) this self-registers
         and self-deregisters.
         """
+        # ``run`` documents a single-driver contract and enforces it via
+        # ``_run_active``; a driver that never claims the flag is
+        # invisible to that check, so a concurrent ``run`` would push
+        # ``Quit`` into this loop's inbox and kill it. Claiming it here
+        # closes that hole -- unless the caller already claimed it to
+        # launch this very loop (``drive_until_first_idle``), which owns
+        # the flag for the whole span and clears it itself.
+        owns_run_flag = not self._run_active
+        if owns_run_flag:
+            self._run_active = True
         preexisting = self._registered_label()
         owns_registry = preexisting is None
         label = preexisting or self._dedup_label()
@@ -1413,6 +1430,8 @@ class Agent:
             with self._install_contextvars(label=label):
                 await self.runtime.run_forever()
         finally:
+            if owns_run_flag:
+                self._run_active = False
             if owns_registry:
                 self.deregister(label)
 
@@ -1631,6 +1650,13 @@ class Agent:
             )
             if not idle_task.done():
                 _ = idle_task.cancel()
+            # A drive that ended by raising produced no result at all;
+            # extracting history anyway hands the caller an empty success
+            # and buries the traceback in a done-callback log line.
+            if drive.done() and not drive.cancelled():
+                exc = drive.exception()
+                if exc is not None:
+                    raise exc
             extractor = result_of or _default_last_assistant_result
             return extractor(self.history)
         finally:
@@ -1921,13 +1947,41 @@ class Agent:
             self.activity.current_compact_start = 0.0
 
     def _track_tool_registry(self, event: types.runtime.RuntimeEvent) -> None:
-        """Populate the cohort id → (tool_name, started) registry."""
+        """Populate the cohort id → (tool_name, started) registry.
+
+        Entries must outlive their turn -- the renderer resolves a result
+        back to its tool, and a detached one can land many rounds later
+        -- so the registry is bounded by age rather than pruned per call.
+        Without a bound it grows one entry per tool call for the entire
+        session.
+        """
         if isinstance(event, types.runtime.ModelResponseComplete):
             now = time.time()
             for tc in event.message.tool_calls:
                 self._tool_registry[tc.id] = (tc.name, now)
             if event.message.tool_calls:
                 self.activity.num_tool_call_rounds += 1
+            self._prune_tool_registry()
+
+    def _prune_tool_registry(self) -> None:
+        """Drop the oldest completed entries once the registry is large.
+
+        Detached and still-running calls are kept whatever their age:
+        their results have not arrived yet, so forgetting them would
+        leave the renderer unable to attribute the late arrival.
+        """
+        if len(self._tool_registry) <= _TOOL_REGISTRY_MAX:
+            return
+        live = set(self.runtime.detached) | {
+            job.call_id for job in self._bg.values() if job.call_id
+        }
+        stale = sorted(
+            (started, call_id)
+            for call_id, (_name, started) in self._tool_registry.items()
+            if call_id not in live
+        )
+        for _started, call_id in stale[: len(self._tool_registry) - _TOOL_REGISTRY_MAX]:
+            _ = self._tool_registry.pop(call_id, None)
 
     def _track_compaction(self, event: types.runtime.RuntimeEvent) -> None:
         """Update compaction state after a barrier lands."""
@@ -2008,6 +2062,22 @@ class Agent:
     def _cancel_background(self, job_id: str) -> None:
         """Cancel and forget one explicit background job."""
         self.cancel_background(job_id)
+
+    def tool_name_for_call(self, call_id: str) -> tuple[str, float]:
+        """Return ``(tool_name, started_at)`` for a dispatched call id.
+
+        Renderers need the originating tool to honour its display
+        settings; the registry is populated when the assistant turn
+        lands, so a result always resolves.
+
+        Args:
+          call_id: Provider call id from the ``ToolResult``.
+
+        Returns:
+          entry: ``(tool_name, started_at)``; ``("", 0.0)`` when unknown.
+
+        """
+        return self._tool_registry.get(call_id, ("", 0.0))
 
     def job_id_for_call(self, call_id: str) -> str:
         """Return the stable human job id for a provider call id."""

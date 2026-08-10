@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Final, Literal, cast, get_args
+from typing import Annotated, Any, Final, Literal, cast, get_args
 
 import asyncio
 
@@ -19,7 +19,9 @@ from sagent.tools.core import (
     load_tool_description,
     truncate,
 )
-from sagent.tools.lib.bash import Node, unwrap_cd_prefix
+from sagent.tools.display import Toggle, Wrap
+from sagent.tools.lib.bash import Node, walk_commands
+from sagent.tools.tool_spec import CLI_SETTABLE
 from sagent.types.runtime import ToolResult
 
 
@@ -77,6 +79,21 @@ class WebFetch:
         }
     )
 
+    output: Annotated[Toggle, CLI_SETTABLE] = "off"
+    """Whether the result body renders in the pane."""
+
+    output_head_rows: Annotated[int, CLI_SETTABLE] = 2
+    """Leading body rows kept."""
+
+    output_tail_rows: Annotated[int, CLI_SETTABLE] = 2
+    """Trailing body rows kept, after a ``⋯ N lines ⋯`` marker."""
+
+    output_max_width: Annotated[int, CLI_SETTABLE] = 0
+    """Cell width cap; ``0`` uses the pane width."""
+
+    output_wrap: Annotated[Wrap, CLI_SETTABLE] = "wrap"
+    """``wrap`` continues an over-wide line, ``chop`` marks the cut."""
+
     def __init__(self) -> None:
         self._cache = cachetools.TTLCache[tuple[Transport, str], str](
             maxsize=128, ttl=15 * 60
@@ -85,11 +102,14 @@ class WebFetch:
     def bash_match(self, trees: Sequence[Node]) -> str | None:
         """Emit a tool-use nudge for ``curl URL`` / ``wget URL``.
 
-        Accepts ``cd PATH && CMD`` compounds via ``unwrap_cd_prefix``.
+        Policy only: :func:`walk_commands` supplies every simple command
+        with its context, so a leading ``cd``, an enclosing loop, and a
+        sequence all reach this matcher without it re-deriving AST shape.
         Bails on output redirection (``-o``/``-O``/``--output``),
         ``--data-binary @file`` style file uploads, and any non-http(s)
-        URL -- those are cases WebFetch can't cleanly replace. Pipelines
-        and stdout redirects are already filtered by ``unwrap_cd_prefix``.
+        URL -- those are cases WebFetch can't cleanly replace. A piped
+        fetch is feeding another program rather than being read, which
+        WebFetch does not replace either.
 
         Args:
           trees: Parsed bashlex command trees from the active Bash call.
@@ -98,13 +118,15 @@ class WebFetch:
           hint: Nudge string redirecting to the WebFetch tool, or ``None``.
 
         """
-        unwrapped = unwrap_cd_prefix(trees)
-        if unwrapped is None:
-            return None
-        _cwd, cmd = unwrapped
-        if cmd.exe not in {"curl", "wget"} or cmd.env_prefix:
-            return None
-        return _match_http_fetch(cmd.exe, cmd.args)
+        for inv in walk_commands(trees):
+            if inv.env_prefix or inv.captures_stdout or inv.piped_into:
+                continue
+            if inv.exe not in {"curl", "wget"}:
+                continue
+            hint = _match_http_fetch(inv.exe, inv.args)
+            if hint is not None:
+                return hint
+        return None
 
     def summary(self, args: Mapping[str, object]) -> str:
         """Return a short display label for this invocation.
@@ -117,19 +139,6 @@ class WebFetch:
 
         """
         return f"WebFetch {args.get('url', '')}"
-
-    def summary_result(self, result: ToolResult) -> str | None:
-        """Suppress the per-call receipt for WebFetch.
-
-        Args:
-          result: Completed ``ToolResult`` (ignored).
-
-        Returns:
-          receipt: Always ``None`` (no receipt line).
-
-        """
-        del result
-        return None
 
     def prompt(self) -> str:
         """Return no supplemental system-prompt text for WebFetch.

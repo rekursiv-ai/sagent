@@ -138,7 +138,6 @@ def test_aware_preserves_metadata_and_delegates() -> None:
     assert wrapped.tool_id == "application/x-tool-dummy"
     assert wrapped.description == "dummy"
     assert wrapped.summary({"x": "hi"}) == "Dummy hi"
-    assert wrapped.summary_result(ToolResult(call_id="", content="")) == "ok"
     assert wrapped.prompt() == "dummy-prompt"
 
 
@@ -194,7 +193,6 @@ def test_metadata_basics() -> None:
     assert t.name == "BackgroundTask"
     assert t.tool_id == "application/x-tool-backgroundtask"
     assert "background:" in t.prompt()
-    assert t.summary_result(ToolResult(call_id="", content="")) is None
 
 
 def test_summary_with_and_without_id() -> None:

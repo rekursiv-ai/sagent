@@ -506,7 +506,6 @@ class _ToolImpl:
         "clearable_results",
         "description",
         "directive_schema",
-        "emit_tool_summary",
         "name",
         "tool_id",
     )
@@ -533,7 +532,6 @@ class _ToolImpl:
             json_freeze(_build_schema(fn, hints)) if schema is None else schema
         )
         self.clearable_results = clearable_results
-        self.emit_tool_summary = False
 
     def summary(self, args: Mapping[str, object]) -> str:
         """Return a short label for this tool invocation."""
@@ -543,11 +541,6 @@ class _ToolImpl:
     def prompt(self) -> str:
         """Return supplemental prompt text for this tool."""
         return ""
-
-    def summary_result(self, result: ToolResult) -> str | None:
-        """Return no receipt for decorator-based tools by default."""
-        del result
-        return None
 
     def serialize_key(self, args: Mapping[str, object]) -> str | None:
         """Run decorator-based tools in parallel (no serialization)."""

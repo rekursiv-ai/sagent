@@ -22,7 +22,6 @@ class WorldTool:
     name: str = "world"
     tool_id: str = "application/x-tool-maze-world"
     clearable_results: bool = True
-    emit_tool_summary: bool = False
 
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
@@ -66,10 +65,6 @@ class WorldTool:
         if act == "press":
             return f"world press → {args.get('partner')}"
         return f"world {act}"
-
-    def summary_result(self, result: ToolResult) -> str | None:
-        del result
-        return None
 
     def prompt(self) -> str:
         return ""
@@ -128,7 +123,6 @@ class CommsTool:
     name: str = "comms"
     tool_id: str = "application/x-tool-maze-comms"
     clearable_results: bool = False
-    emit_tool_summary: bool = False
 
     def __init__(
         self,
@@ -173,10 +167,6 @@ class CommsTool:
         if str(args.get("action")) == "say":
             return f"comms say → {args.get('to')}"
         return "comms broadcast"
-
-    def summary_result(self, result: ToolResult) -> str | None:
-        del result
-        return None
 
     def prompt(self) -> str:
         me = agent_label_var.get("")
@@ -267,7 +257,6 @@ class SpawnTool:
     name: str = "spawn"
     tool_id: str = "application/x-tool-maze-spawn"
     clearable_results: bool = False
-    emit_tool_summary: bool = False
 
     def __init__(
         self,
@@ -303,10 +292,6 @@ class SpawnTool:
 
     def summary(self, args: Mapping[str, object]) -> str:
         return f"spawn ({args.get('x')},{args.get('y')})"
-
-    def summary_result(self, result: ToolResult) -> str | None:
-        del result
-        return None
 
     def prompt(self) -> str:
         return ""

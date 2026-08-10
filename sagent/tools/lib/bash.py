@@ -19,7 +19,9 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast, runtime_checkable
+
+import types
 
 
 if TYPE_CHECKING:
@@ -36,8 +38,10 @@ else:
     Node = object
 
 __all__ = [
+    "BashMatcher",
     "BashParseCache",
     "Command",
+    "Invocation",
     "Node",
     "cached_parse_bash",
     "is_read_only",
@@ -46,6 +50,7 @@ __all__ = [
     "resolve_cwd_path",
     "unwrap_cd_prefix",
     "unwrap_cd_subtree",
+    "walk_commands",
 ]
 
 type BashParseCache = dict[str, tuple[Node, ...] | None]
@@ -77,6 +82,176 @@ class Command:
 
     captures_stdout: bool
     """True when a redirect diverts fd 1 (``>``/``>>``/``>|``/``>&``)."""
+
+
+@runtime_checkable
+class BashMatcher(Protocol):
+    """A tool that nudges when Bash is doing its job.
+
+    Structural, not inherited: a tool opts in by defining the method,
+    and :class:`Bash` discovers its peers through this check.
+    """
+
+    def bash_match(self, trees: Sequence[Node]) -> str | None:
+        """Return a nudge when ``trees`` contains a replaceable shape."""
+        ...
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Invocation:
+    """One simple command found anywhere in a Bash line, in context.
+
+    A Bash line decomposes into four independent, optional axes: a
+    leading ``cd``, an enclosing loop or sequence, the command itself,
+    and a trailing filter. Matchers that re-derive this structure each
+    cover a different subset -- which is why ``grep p f | head`` nudged
+    while ``cd X && grep p f | head`` did not. This record is what one
+    shared walk yields so a matcher only decides POLICY: whether its own
+    executable is replaceable.
+
+    Attributes:
+      exe: Executable name (first word).
+      args: Positional arguments in argv order.
+      cwd: Directory from an enclosing ``cd PATH &&``, or ``""``.
+      piped_into: Executable this command's stdout feeds, or ``""``.
+          Distinguishes ``find . -name '*.py'`` (Glob) from
+          ``find . | xargs grep`` (Grep).
+      env_prefix: Leading ``KEY=value`` assignments. A deliberate
+          ``LC_ALL=C grep`` is not a Grep call.
+      captures_stdout: True when a redirect diverts fd 1. ``grep p f >
+          out`` writes a file rather than showing the operator anything.
+
+    """
+
+    exe: str
+    args: tuple[str, ...]
+    cwd: str = ""
+    piped_into: str = ""
+    env_prefix: Mapping[str, str] = types.MappingProxyType({})
+    captures_stdout: bool = False
+
+
+def walk_commands(trees: Sequence[Node]) -> tuple[Invocation, ...]:
+    """Yield every simple command in ``trees``, with its context.
+
+    Descends through ``&&``/``;`` lists, pipelines, loop and conditional
+    bodies, and command substitutions, so a matcher sees a flat list
+    instead of re-deriving shape. Nothing is filtered here: a matcher
+    that cares about redirects or an env prefix reads the flags on each
+    record, and one that does not is not silently narrowed by the walk.
+
+    Args:
+      trees: Top-level bashlex AST nodes.
+
+    Returns:
+      invocations: Every simple command found, in source order.
+
+    """
+    out: list[Invocation] = []
+    for node in trees:
+        _walk_node(node, cwd="", out=out)
+    return tuple(out)
+
+
+def _walk_node(node: Node, *, cwd: str, out: list[Invocation]) -> None:
+    """Recurse one AST node, appending every simple command found."""
+    kind: str = node.kind
+    if kind == "command":
+        _walk_command(node, cwd=cwd, piped_into="", out=out)
+        return
+    if kind == "pipeline":
+        _walk_pipeline(node, cwd=cwd, out=out)
+        return
+    if kind == "list":
+        _walk_list(node, cwd=cwd, out=out)
+        return
+    # ``compound`` (loops, conditionals) and everything else: descend
+    # through whatever child collections the node carries. A loop body
+    # nudges even when its argument is a loop variable -- a command
+    # reaching for ``cat $f`` wants the tool regardless of whether the
+    # filename is knowable here.
+    for child in _child_nodes(node):
+        _walk_node(child, cwd=cwd, out=out)
+
+
+def _walk_list(node: Node, *, cwd: str, out: list[Invocation]) -> None:
+    """Walk an ``A && B ; C`` list, threading any ``cd`` through it.
+
+    A ``cd`` binds to everything after it in the same list, so
+    ``cd X && ls && cat f`` reports BOTH commands under ``X`` -- the
+    two-command-only unwrap missed the chain entirely.
+    """
+    inner_cwd = cwd
+    for part in node.parts:
+        if part.kind == "operator":
+            continue
+        if part.kind == "command":
+            cmd = _parse_command(part)
+            if cmd.exe == "cd" and len(cmd.args) == 1 and not cmd.captures_stdout:
+                inner_cwd = cmd.args[0]
+                continue
+        _walk_node(part, cwd=inner_cwd, out=out)
+
+
+def _walk_pipeline(node: Node, *, cwd: str, out: list[Invocation]) -> None:
+    """Walk ``A | B``, recording each stage's sink."""
+    stages = [p for p in node.parts if p.kind != "pipe"]
+    for i, stage in enumerate(stages):
+        sink = ""
+        if i + 1 < len(stages) and stages[i + 1].kind == "command":
+            sink = _parse_command(stages[i + 1]).exe
+        if stage.kind == "command":
+            _walk_command(stage, cwd=cwd, piped_into=sink, out=out)
+        else:
+            _walk_node(stage, cwd=cwd, out=out)
+
+
+def _walk_command(
+    node: Node,
+    *,
+    cwd: str,
+    piped_into: str,
+    out: list[Invocation],
+) -> None:
+    """Record one simple command, then descend into any substitutions."""
+    cmd = _parse_command(node)
+    if cmd.exe:
+        out.append(
+            Invocation(
+                exe=cmd.exe,
+                args=cmd.args,
+                cwd=cwd,
+                piped_into=piped_into,
+                env_prefix=cmd.env_prefix,
+                captures_stdout=cmd.captures_stdout,
+            )
+        )
+    for child in _child_nodes(node):
+        if child.kind in ("word", "commandsubstitution", "command", "list", "pipeline"):
+            _walk_node(child, cwd=cwd, out=out)
+
+
+def _child_nodes(node: Node) -> list[Node]:
+    """Return every child AST node hanging off ``node``.
+
+    bashlex hangs children off several attributes (``parts``, ``list``,
+    ``command``) depending on the construct, so the walk asks for all of
+    them rather than special-casing each compound type.
+    """
+    out: list[Node] = []
+    for attr in ("parts", "list", "command"):
+        value: object = getattr(node, attr, None)
+        if value is None:
+            continue
+        items: list[object] = (
+            cast(list[object], value) if isinstance(value, list) else [value]
+        )
+        out.extend(
+            cast(Node, child)
+            for child in items
+            if child is not node and hasattr(child, "kind")
+        )
+    return out
 
 
 def parse_bash(command: str) -> tuple[Node, ...] | None:

@@ -3,7 +3,7 @@
 The Protocol every concrete tool implementation must satisfy. The
 runtime needs only ``name`` + ``run``; the wrapper / REPL layer
 consumes the rest (``tool_id``, ``description``, ``directive_schema``,
-``summary``, ``summary_result``, ``prompt``).
+``summary``, ``prompt``).
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ class Tool(Protocol):
 
     The runtime sees only ``name`` + ``run``; the wrapper layer
     consumes the rest (``tool_id``, ``description``,
-    ``directive_schema``, ``summary``, ``summary_result``, ``prompt``).
+    ``directive_schema``, ``summary``, ``prompt``).
 
     Note: ``@runtime_checkable`` enables ``isinstance(obj, Tool)`` for
     duck-typed registration, but Python's protocol-isinstance only
@@ -39,20 +39,35 @@ class Tool(Protocol):
     mismatches.
     """
 
-    name: str
-    """Human-readable tool name, e.g. ``"Bash"``."""
+    # Read-only, and deliberately NOT ``ClassVar``: a tool's identity is
+    # never written by a consumer, so demanding a settable attribute
+    # excludes a frozen dataclass and a computed ``property``, while
+    # demanding a ``ClassVar`` excludes the many tools that assign theirs
+    # per instance. A read-only property admits all three.
+    @property
+    def name(self) -> str:
+        """Human-readable tool name, e.g. ``"Bash"``."""
+        ...
 
-    tool_id: str
-    """MIME-style identifier, e.g. ``"application/x-tool-bash"``."""
+    @property
+    def tool_id(self) -> str:
+        """MIME-style identifier, e.g. ``"application/x-tool-bash"``."""
+        ...
 
-    description: str
-    """Human/model-facing description rendered into the tool schema."""
+    @property
+    def description(self) -> str:
+        """Human/model-facing description rendered into the tool schema."""
+        ...
 
-    directive_schema: JSON
-    """Frozen JSON Schema for the tool's directive."""
+    @property
+    def directive_schema(self) -> JSON:
+        """Frozen JSON Schema for the tool's directive."""
+        ...
 
-    clearable_results: bool
-    """Whether server-side context management may drop this tool's results."""
+    @property
+    def clearable_results(self) -> bool:
+        """Whether server-side context management may drop this tool's results."""
+        ...
 
     def summary(self, args: Mapping[str, object]) -> str:
         """Build a short label for a pending invocation.
@@ -62,18 +77,6 @@ class Tool(Protocol):
 
         Returns:
           label: Pre-execution label for renderers.
-
-        """
-        ...
-
-    def summary_result(self, result: ToolResult) -> str | None:
-        """Build a short receipt for a completed invocation.
-
-        Args:
-          result: The completed ``ToolResult``.
-
-        Returns:
-          receipt: Short receipt line, or ``None`` to suppress it.
 
         """
         ...

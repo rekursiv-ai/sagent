@@ -41,7 +41,6 @@ def test_metadata_basics() -> None:
     assert t.name == "PlayAudio"
     assert t.tool_id == "application/x-tool-playaudio"
     assert t.prompt() == ""
-    assert t.summary_result(MagicMock()) is None
 
 
 def test_summary_renders_basename() -> None:

@@ -20,7 +20,6 @@ from sagent.tools.web_fetch import (
     _match_http_fetch,
     _request_bodies,
 )
-from sagent.types.runtime import ToolResult
 
 
 # socket.getaddrinfo returns the canonical 5-tuple
@@ -56,10 +55,6 @@ def test_summary_keeps_long_url() -> None:
     t = WebFetch()
     long_url = "https://example.com/" + ("x" * 100)
     assert t.summary({"url": long_url}) == f"WebFetch {long_url}"
-
-
-def test_summary_result_none() -> None:
-    assert WebFetch().summary_result(ToolResult(call_id="", content="x")) is None
 
 
 def test_prompt_empty() -> None:

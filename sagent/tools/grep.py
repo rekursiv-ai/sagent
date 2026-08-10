@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Final
+from typing import Annotated, Final
 
 import logging
 import os
@@ -15,11 +15,13 @@ import subprocess
 from sagent.agent.state import current_agent_var, get_tool_state
 from sagent.lib.custom_json import JSON, bool_val, int_val, json_freeze
 from sagent.tools.core import load_tool_description, run_sync
+from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
+    Invocation,
     Node,
-    match_pipeline,
-    unwrap_cd_prefix,
+    walk_commands,
 )
+from sagent.tools.tool_spec import CLI_SETTABLE
 from sagent.types.runtime import ToolResult
 
 
@@ -127,7 +129,6 @@ class Grep:
     tool_id: str = "application/x-tool-grep"
     clearable_results: bool = True
     description: str = load_tool_description("Grep")
-    emit_tool_summary: bool = False
     directive_schema: JSON = json_freeze(
         {
             "type": "object",
@@ -219,6 +220,21 @@ class Grep:
         }
     )
 
+    output: Annotated[Toggle, CLI_SETTABLE] = "off"
+    """Whether the result body renders in the pane."""
+
+    output_head_rows: Annotated[int, CLI_SETTABLE] = 2
+    """Leading body rows kept."""
+
+    output_tail_rows: Annotated[int, CLI_SETTABLE] = 2
+    """Trailing body rows kept, after a ``⋯ N lines ⋯`` marker."""
+
+    output_max_width: Annotated[int, CLI_SETTABLE] = 0
+    """Cell width cap; ``0`` uses the pane width."""
+
+    output_wrap: Annotated[Wrap, CLI_SETTABLE] = "wrap"
+    """``wrap`` continues an over-wide line, ``chop`` marks the cut."""
+
     def summary(self, args: Mapping[str, object]) -> str:
         """Return a short label for this tool invocation.
 
@@ -233,26 +249,6 @@ class Grep:
         path = str(args.get("path", "")) or "."
         suffix = f" in {path}" if path != "." else ""
         return f"Grep {pattern!r}{suffix}"
-
-    def summary_result(self, result: ToolResult) -> str | None:
-        """Return a one-line receipt with the hit count.
-
-        Args:
-          result: The completed ``ToolResult``.
-
-        Returns:
-          receipt: Hit-count receipt, or ``None`` when summaries are
-            disabled or the result is an error.
-
-        """
-        if not self.emit_tool_summary or result.is_error:
-            return None
-        text = result.content.strip()
-        if not text or text.startswith("(no matches"):
-            return "no matches"
-        # Output is one match per line; line count == match count for
-        # files_with_matches and content modes both.
-        return f"{text.count(chr(10)) + 1} hits"
 
     def prompt(self) -> str:
         """Return supplemental prompt text for this tool.
@@ -399,12 +395,11 @@ class Grep:
     def bash_match(self, trees: Sequence[Node]) -> str | None:
         """Emit a tool-use nudge for a replaceable grep shape.
 
-        Handles four shapes:
-
-        - ``grep PATTERN [PATH]`` (simple)
-        - ``cd X && grep PATTERN [PATH]``
-        - ``find X … | xargs grep PATTERN`` (pipeline)
-        - ``cat FILE | grep PATTERN`` (pipeline)
+        Policy only: :func:`walk_commands` supplies every simple command
+        with its context, so a leading ``cd``, an enclosing loop, and a
+        trailing ``| head`` all reach this matcher without it re-deriving
+        AST shape -- the omission that left ``cd X && grep p f | head``
+        silent while ``grep p f | head`` nudged.
 
         Args:
           trees: Parsed bash command-trees from the Bash directive.
@@ -413,12 +408,12 @@ class Grep:
           nudge: Suggestion text when the shape is replaceable, else ``None``.
 
         """
-        single = _match_single_grep(trees)
-        if single is not None:
-            return single
-        pipeline = _match_pipeline_grep(trees)
-        if pipeline is not None:
-            return pipeline
+        invocations = walk_commands(trees)
+        for inv in invocations:
+            if inv.env_prefix or inv.captures_stdout:
+                continue
+            if _searches_files(inv, invocations):
+                return _NUDGE
         return None
 
 
@@ -477,69 +472,45 @@ def _kw_bool(
     return default
 
 
-def _match_single_grep(trees: Sequence[Node]) -> str | None:
-    """Match ``grep …`` or ``rg …`` (optionally prefixed by ``cd X &&``)."""
-    unwrapped = unwrap_cd_prefix(trees)
-    if unwrapped is None:
-        return None
-    _, cmd = unwrapped
-    if cmd.exe not in _GREP_EXES or cmd.env_prefix:
-        return None
-    if not _parse_grep_args(cmd.args, positional_path=True):
-        return None
-    return _NUDGE
+def _shaping_sink(inv: Invocation, all_invocations: Sequence[Invocation]) -> bool:
+    """Whether the sink only truncates or counts what grep already found.
 
-
-def _match_pipeline_grep(trees: Sequence[Node]) -> str | None:
-    """Match grep/rg shapes wired through a pipeline.
-
-    Shapes:
-    - ``find X … | xargs {grep,rg} …``
-    - ``cat FILE | {grep,rg} …``
-    - ``{grep,rg} … | {head,tail,less,more,cat}``
-    - ``{grep,rg} … | wc -l``
+    ``wc -l`` is Grep's ``output_mode="count"``; ``wc -c`` counts BYTES,
+    which Grep cannot express, so that shape stays with Bash.
     """
-    pair = match_pipeline(trees)
-    if pair is None:
-        return None
-    first, second = pair
+    if inv.piped_into in _DISPLAY_SHAPERS:
+        return True
+    if inv.piped_into != "wc":
+        return False
+    return any(other.exe == "wc" and other.args == ("-l",) for other in all_invocations)
 
-    # Shape 1: find … | xargs {grep,rg} …
-    if first.exe == "find" and second.exe == "xargs":
-        if not _parse_find_for_grep(first.args):
-            return None
-        grep_args = _strip_xargs_prefix(second.args)
+
+def _searches_files(inv: Invocation, all_invocations: Sequence[Invocation]) -> bool:
+    """Whether this invocation is a search the Grep tool replaces."""
+    if inv.exe in _GREP_EXES:
+        # A ``cat -n f | grep p`` source is adding line numbers, not
+        # simply feeding the file; that is not the shape Grep replaces.
+        if any(
+            other.exe == "cat" and any(a.startswith("-") for a in other.args)
+            for other in all_invocations
+        ):
+            return False
+        # A pipeline sink that only truncates or counts is what Grep's
+        # own paging and ``output_mode="count"`` already do.
+        if inv.piped_into and not _shaping_sink(inv, all_invocations):
+            return False
+        return _parse_grep_args(inv.args, positional_path=True)
+    if inv.exe == "xargs":
+        # ``find … | xargs grep …``: the search is the xargs payload,
+        # and the find half only enumerates what to search.
+        grep_args = _strip_xargs_prefix(inv.args)
         if grep_args is None:
-            return None
-        if not _parse_grep_args(grep_args, positional_path=False):
-            return None
-        return _NUDGE
-
-    # Shape 2: cat FILE | {grep,rg} PATTERN
-    if first.exe == "cat" and second.exe in _GREP_EXES:
-        if len(first.args) != 1 or first.args[0].startswith("-"):
-            return None
-        if not _parse_grep_args(second.args, positional_path=False):
-            return None
-        return _NUDGE
-
-    # Shape 3: {grep,rg} … | DISPLAY_SHAPER -- user is just truncating or
-    # paginating Grep's output; Grep tool handles both natively.
-    if first.exe in _GREP_EXES and second.exe in _DISPLAY_SHAPERS:
-        if not _parse_grep_args(first.args, positional_path=True):
-            return None
-        return _NUDGE
-
-    # Shape 4: {grep,rg} … | wc -l -- line count equals Grep output_mode="count".
-    if (
-        first.exe in _GREP_EXES
-        and second.exe == "wc"
-        and second.args == ("-l",)
-        and _parse_grep_args(first.args, positional_path=True)
-    ):
-        return _NUDGE
-
-    return None
+            return False
+        return any(
+            other.exe == "find" and _parse_find_for_grep(other.args)
+            for other in all_invocations
+        ) and _parse_grep_args(grep_args, positional_path=False)
+    return False
 
 
 # Post-processors that only truncate/paginate grep's output. Piping

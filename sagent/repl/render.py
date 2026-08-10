@@ -21,10 +21,16 @@ from typing import Final, Protocol
 import contextlib
 import contextvars
 import logging
+import re
 import time
 
 from sagent.lib.durations import humanize_duration
 from sagent.repl.render_diff import find_stable_boundary
+from sagent.tools.display import (
+    OutputSpec,
+    ToolDisplay,
+    format_output,
+)
 from sagent.types.exceptions import (
     AuthRefreshError,
     ContextOverflowError,
@@ -55,6 +61,7 @@ from sagent.types.runtime import (
     StatusChanged,
     ToolLabel,
     ToolResult,
+    ToolResultKind,
     ToolResultPartial,
     UserMessage,
 )
@@ -178,15 +185,28 @@ class Printer(Protocol):
     def write_user_bar(self, text: str) -> None: ...
     def write_agent_bar(self, source: str, text: str) -> None: ...
     def write_slash_block(self, text: str) -> None: ...
-    def write_tool_label(self, text: str) -> None: ...
+    def write_tool_label(
+        self,
+        text: str,
+        *,
+        command: OutputSpec | None = None,
+        lang: str = "",
+    ) -> None: ...
     def write_tool_error(self, text: str) -> None: ...
     def write_tool_summary(self, text: str) -> None: ...
+    def write_tool_output(self, text: str) -> None: ...
     def write_hint(self, text: str) -> None: ...
     def write_thinking(self, text: str) -> None: ...
     def write_diff(self, diff: str, file_path: str = "") -> None: ...
     def write_interrupted(self) -> None: ...
     def write_halt(self, text: str) -> None: ...
-    def write_child_block(self, label: str, items: Sequence[ChildItem]) -> None: ...
+    def write_child_block(
+        self,
+        label: str,
+        items: Sequence[ChildItem],
+        *,
+        output_policy: Callable[[str], ToolDisplay] | None = None,
+    ) -> None: ...
     def set_terminal_title(self, text: str) -> None: ...
 
 
@@ -227,6 +247,9 @@ class RecordingPrinter:
     tool_summaries: list[str]
     """``write_tool_summary`` payloads."""
 
+    tool_outputs: list[str]
+    """``write_tool_output`` payloads."""
+
     hints: list[str]
     """``write_hint`` payloads."""
 
@@ -234,7 +257,7 @@ class RecordingPrinter:
     """``write_thinking`` payloads."""
 
     diffs: list[tuple[str, str]]
-    """``write_diff`` payloads (``(old, new)`` pairs)."""
+    """``write_diff`` payloads as ``(diff, file_path)`` tuples."""
 
     interruptions: int
     """Count of ``write_interrupted`` calls."""
@@ -259,6 +282,7 @@ class RecordingPrinter:
         self.tool_labels = []
         self.tool_errors = []
         self.tool_summaries = []
+        self.tool_outputs = []
         self.hints = []
         self.thinkings = []
         self.diffs = []
@@ -288,7 +312,14 @@ class RecordingPrinter:
     def write_slash_block(self, text: str) -> None:
         self.slash_blocks.append(text)
 
-    def write_tool_label(self, text: str) -> None:
+    def write_tool_label(
+        self,
+        text: str,
+        *,
+        command: OutputSpec | None = None,
+        lang: str = "",
+    ) -> None:
+        del command, lang
         self.tool_labels.append(text)
 
     def write_tool_error(self, text: str) -> None:
@@ -296,6 +327,9 @@ class RecordingPrinter:
 
     def write_tool_summary(self, text: str) -> None:
         self.tool_summaries.append(text)
+
+    def write_tool_output(self, text: str) -> None:
+        self.tool_outputs.append(text)
 
     def write_hint(self, text: str) -> None:
         self.hints.append(text)
@@ -312,7 +346,14 @@ class RecordingPrinter:
     def write_halt(self, text: str) -> None:
         self.halts.append(text)
 
-    def write_child_block(self, label: str, items: Sequence[ChildItem]) -> None:
+    def write_child_block(
+        self,
+        label: str,
+        items: Sequence[ChildItem],
+        *,
+        output_policy: Callable[[str], ToolDisplay] | None = None,
+    ) -> None:
+        del output_policy
         self.child_blocks.append((label, list(items)))
 
     def set_terminal_title(self, text: str) -> None:
@@ -324,19 +365,29 @@ class RecordingPrinter:
         return "".join(self.markdowns)
 
 
-def render_tool_result(printer: Printer, result: ToolResult) -> None:
+def render_tool_result(
+    printer: Printer,
+    result: ToolResult,
+    *,
+    output: OutputSpec | None = None,
+) -> None:
     """Render the user-facing parts of a :class:`ToolResult`.
 
-    On error, only ``write_tool_error(content)`` fires. On success,
-    diff / hint / summary fire in field order when populated.
+    Errors and hints always render; the body renders only when the
+    owning tool asked for it. A ``PENDING`` stub renders no body: it
+    stands in for a result that arrives later as its own event, so
+    displaying it would show the same call twice.
 
     Args:
       printer: Printer to receive formatted output.
       result: Tool-result entry to render.
+      output: Display policy for the result body. ``None`` hides it, so
+          a tool must opt in (``--tool Bash.output=on``); most tools'
+          bodies are far longer than the pane should carry.
 
     """
     if result.is_error:
-        printer.write_tool_error(result.content)
+        printer.write_tool_error(strip_reminders(result.content))
         return
     if result.diff:
         printer.write_diff(result.diff, result.diff_file_path)
@@ -344,25 +395,69 @@ def render_tool_result(printer: Printer, result: ToolResult) -> None:
         printer.write_hint(result.hint)
     if result.summary:
         printer.write_tool_summary(result.summary)
+    if result.kind is ToolResultKind.PENDING:
+        return
+    rows = format_output(strip_reminders(result.content), output or OutputSpec())
+    if rows:
+        printer.write_tool_output("\n".join(rows))
+
+
+def error_text(exc: BaseException) -> str:
+    """Render an exception for display.
+
+    ``UserFacingError`` carries polished, user-actionable text; the
+    class-name prefix would add Python-internals noise to a message the
+    reader is meant to act on. Shared so the child-block path cannot
+    drift from the parent's rule.
+    """
+    return (
+        str(exc) if isinstance(exc, UserFacingError) else f"{type(exc).__name__}: {exc}"
+    )
+
+
+def strip_reminders(content: str) -> str:
+    """Drop ``<system-reminder>`` blocks from user-facing text.
+
+    The banner is model plumbing: a tool bakes it into ``content`` so the
+    model reads it, and surfaces the same text on ``hint`` for the human.
+    Rendering ``content`` verbatim therefore prints every nudge twice,
+    the second time wrapped in a tag that means nothing to the reader.
+    """
+    return _REMINDER_RE.sub("", content).strip()
+
+
+_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>\s*", re.DOTALL)
 
 
 def make_render_observer(
     printer: Printer,
     *,
     show_thinking: Callable[[], bool] | None = None,
+    output_policy: Callable[[str], ToolDisplay] | None = None,
 ) -> RenderObserver:
     """Return a ``RuntimeEvent``-consuming observer bound to ``printer``.
 
     Args:
       printer: Printer that receives formatted output.
       show_thinking: Predicate controlling thinking display. ``None`` always shows.
+      output_policy: Maps a result's ``call_id`` to the ``output``
+          :class:`OutputSpec` of its originating tool. ``None`` shows no
+          result bodies -- the historical behaviour.
 
     Returns:
       observer: ``RenderObserver`` instance the agent appends to
           ``self.observers``; callable on each ``RuntimeEvent``.
 
     """
-    return RenderObserver(printer, show_thinking=show_thinking)
+    return RenderObserver(
+        printer, show_thinking=show_thinking, output_policy=output_policy
+    )
+
+
+def _no_output(call_id: str) -> ToolDisplay:
+    """Default policy: render no result bodies."""
+    del call_id
+    return ToolDisplay()
 
 
 class RenderObserver:
@@ -378,9 +473,13 @@ class RenderObserver:
         printer: Printer,
         *,
         show_thinking: Callable[[], bool] | None = None,
+        output_policy: Callable[[str], ToolDisplay] | None = None,
     ) -> None:
         self._printer = printer
         self._show_thinking = show_thinking or (lambda: True)
+        self._output_policy: Callable[[str], ToolDisplay] = (
+            output_policy if output_policy is not None else _no_output
+        )
         self._stream_buf: str = ""
         self._child_text: dict[str, str] = {}
         self._child_items: dict[str, list[ChildItem]] = {}
@@ -422,16 +521,27 @@ class RenderObserver:
                 self._flush_stream()
             case ToolLabel(text=text):
                 self._flush_stream()
-                self._printer.write_tool_label(text)
+                display = self._output_policy(event.call_id)
+                self._printer.write_tool_label(
+                    text, command=display.command, lang=display.command_lang
+                )
             case ToolResult():
-                render_tool_result(self._printer, event)
+                render_tool_result(
+                    self._printer,
+                    event,
+                    output=self._output_policy(event.call_id).output,
+                )
             case DetachedResult(result=result):
                 # A detached tool finally completed; the user has no
                 # other visual cue for the late arrival, so render the
                 # result through the same surface a sync ``ToolResult``
                 # would use.
                 self._flush_stream()
-                render_tool_result(self._printer, result)
+                render_tool_result(
+                    self._printer,
+                    result,
+                    output=self._output_policy(result.call_id).output,
+                )
             case ToolResultPartial(text=text):
                 self._printer.write_chunk(text)
             case ModelResponseCancelled():
@@ -451,10 +561,7 @@ class RenderObserver:
                 # and act on. Some user-facing errors further tailor
                 # the halt banner: the generic "type to retry" misleads
                 # when retrying cannot change the failed request.
-                if isinstance(exc, UserFacingError):
-                    self._printer.write_tool_error(str(exc))
-                else:
-                    self._printer.write_tool_error(f"{type(exc).__name__}: {exc}")
+                self._printer.write_tool_error(error_text(exc))
                 if isinstance(exc, AuthRefreshError):
                     self._printer.write_halt(HALT_MESSAGE_AUTH)
                 elif isinstance(exc, ContextOverflowError):
@@ -463,10 +570,7 @@ class RenderObserver:
                     self._printer.write_halt(HALT_MESSAGE)
             case ModelSwitchRejected(exception=exc):
                 self._flush_stream()
-                if isinstance(exc, UserFacingError):
-                    self._printer.write_tool_error(str(exc))
-                else:
-                    self._printer.write_tool_error(f"{type(exc).__name__}: {exc}")
+                self._printer.write_tool_error(error_text(exc))
             case BudgetReset(
                 model_id=model_id,
                 prior_max_request_tokens=prior_in,
@@ -616,7 +720,9 @@ class RenderObserver:
         """Emit pending items for ``label``; leave streaming text untouched."""
         items = self._child_items.pop(label, [])
         if items:
-            self._printer.write_child_block(label, items)
+            self._printer.write_child_block(
+                label, items, output_policy=self._output_policy
+            )
 
 
 def _child_atomic_item(inner: RuntimeEvent) -> ChildItem | None:
@@ -661,6 +767,7 @@ sagent commands
   /provider <name>            switch provider
   /thinking <state|partial>   adaptive/on/off/redact/show/hide
   /effort [level]             show or set effort; bare lists options
+  /tool     NAME.key=value    reconfigure a tool, e.g. Bash.output=off
   /login                      re-auth current provider
 
   /tasks                      list running work (agents + fg + bg)

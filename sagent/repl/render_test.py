@@ -18,6 +18,7 @@ from sagent.repl.render import (
     service_suspended_text,
     strict_observer,
 )
+from sagent.tools.display import OutputSpec
 from sagent.types.exceptions import (
     AuthRefreshError,
     ContextOverflowError,
@@ -831,6 +832,51 @@ def test_help_text_documents_recompact_as_compact_alias() -> None:
     assert "alias" in line
     assert "/compact" in line
     assert "reload" not in line.lower()
+
+
+def test_tool_result_content_renders_when_requested() -> None:
+    """A successful result must be able to show its body.
+
+    ``render_tool_result`` handled error/diff/hint/summary only, so a
+    plain ``ls`` printed nothing at all -- there was no display path for
+    ``content`` to switch on.
+    """
+    printer = RecordingPrinter()
+    render_tool_result(
+        printer,
+        ToolResult(call_id="c1", content="alpha\nbeta"),
+        output=OutputSpec(show=True),
+    )
+    assert "alpha" in "".join(printer.tool_outputs)
+    assert "beta" in "".join(printer.tool_outputs)
+
+
+def test_tool_result_content_hidden_by_default() -> None:
+    printer = RecordingPrinter()
+    render_tool_result(printer, ToolResult(call_id="c1", content="alpha"))
+    assert not printer.tool_outputs
+
+
+def test_tool_result_content_is_line_capped() -> None:
+    printer = RecordingPrinter()
+    render_tool_result(
+        printer,
+        ToolResult(call_id="c1", content="\n".join(str(i) for i in range(100))),
+        output=OutputSpec(show=True, head_rows=2, tail_rows=2),
+    )
+    body = "".join(printer.tool_outputs)
+    assert "96 lines" in body, body
+
+
+def test_tool_result_content_is_width_chopped() -> None:
+    """``output_wrap=chop`` keeps the head and marks the cut."""
+    printer = RecordingPrinter()
+    render_tool_result(
+        printer,
+        ToolResult(call_id="c1", content="abcdefgh"),
+        output=OutputSpec(show=True, max_width=4, wrap="chop"),
+    )
+    assert printer.tool_outputs == ["abc\u2026"]
 
 
 if __name__ == "__main__":

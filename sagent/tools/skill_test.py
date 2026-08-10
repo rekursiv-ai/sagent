@@ -18,7 +18,6 @@ from sagent.tools.skill import (
 )
 from sagent.types.runtime import (
     ModelContextEvent,
-    ToolResult,
     UserMessage,
 )
 
@@ -197,7 +196,6 @@ def test_metadata_basics() -> None:
     assert t.clearable_results is False
     assert t.summary({"skill": "alpha"}) == "Skill alpha"
     assert t.summary({}) == "Skill"
-    assert t.summary_result(ToolResult(call_id="", content="")) is None
 
 
 def test_prompt_lists_discovered_skills(tmp_path: Path) -> None:

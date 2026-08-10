@@ -164,11 +164,6 @@ class PaperAuthor:
             return f"PaperAuthor {label}"
         return "PaperAuthor"
 
-    def summary_result(self, result: ToolResult) -> str | None:
-        """Suppress the per-call receipt for PaperAuthor."""
-        del result
-        return None
-
     def prompt(self) -> str:
         """Return supplemental system-prompt text (none)."""
         return ""

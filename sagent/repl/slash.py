@@ -71,6 +71,13 @@ class Thinking:
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class Tool:
+    """User typed ``/tool NAME.key=value``; reconfigure a live tool."""
+
+    spec: str
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class Effort:
     """User typed ``/effort [value]``; bare shows status, value sets it."""
 
@@ -145,6 +152,7 @@ type SlashAction = (
     | Recompact
     | ModelSwitch
     | Thinking
+    | Tool
     | Effort
     | Login
     | Help
@@ -210,6 +218,11 @@ def parse_slash(line: str) -> SlashAction | None:
     arg = _arg_after("/effort", stripped)
     if arg is not None:
         return Effort(value=arg)
+    arg = _arg_after("/tool", stripped)
+    if arg is not None:
+        if not arg:
+            return Unknown(text="/tool requires NAME.key=value")
+        return Tool(spec=arg)
     arg = _arg_after("/halt", stripped)
     if arg is not None:
         return Halt(target=arg)
@@ -234,7 +247,7 @@ def parse_slash(line: str) -> SlashAction | None:
         # Public list of supported commands; drives the unknown-command help line.
         supported = (
             "/help /clear /compact /recompact /model /provider /thinking /effort"
-            " /login /tasks /halt /kill /defer /send /quit /exit"
+            " /tool /login /tasks /halt /kill /defer /send /quit /exit"
         )
         return Unknown(text=f"unknown command: {cmd}. Supported: {supported}")
     return Text(content=stripped)
