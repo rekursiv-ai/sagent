@@ -17,7 +17,6 @@ from sagent.testing import FakeAgent, with_fake_agent
 from sagent.tools.lib.bash import parse_bash
 from sagent.tools.lib.pdf import MAX_PDF_BYTES, extract_pdf_pages
 from sagent.tools.read import Read
-from sagent.types.runtime import BytesMessage, ToolResult
 
 
 read = Read()
@@ -484,50 +483,6 @@ def test_summary_only_limit() -> None:
 
 def test_summary_no_path() -> None:
     assert read.summary({}) == "Read ?"
-
-
-def test_summary_result_off() -> None:
-    assert read.summary_result(ToolResult(call_id="", content="x")) is None
-
-
-def test_summary_result_lines_when_emit() -> None:
-    r = Read()
-    r.emit_tool_summary = True
-    assert r.summary_result(ToolResult(call_id="", content="a\nb\nc\n")) == "3 lines"
-
-
-def test_summary_result_binary_marker() -> None:
-    r = Read()
-    r.emit_tool_summary = True
-    out = r.summary_result(
-        ToolResult(
-            call_id="",
-            content="[image: x.png]",
-            attachments=(BytesMessage(b"", "image/png"),),
-        ),
-    )
-    assert out == "binary"
-
-
-def test_summary_result_unchanged_marker() -> None:
-    r = Read()
-    r.emit_tool_summary = True
-    assert (
-        r.summary_result(ToolResult(call_id="", content="[File unchanged since…]"))
-        == "unchanged"
-    )
-
-
-def test_summary_result_error_skipped() -> None:
-    r = Read()
-    r.emit_tool_summary = True
-    assert r.summary_result(ToolResult(call_id="", content="!", is_error=True)) is None
-
-
-def test_summary_result_empty_text() -> None:
-    r = Read()
-    r.emit_tool_summary = True
-    assert r.summary_result(ToolResult(call_id="", content="")) is None
 
 
 def test_prompt_empty() -> None:

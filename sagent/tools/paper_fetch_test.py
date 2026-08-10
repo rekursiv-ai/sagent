@@ -20,7 +20,6 @@ import asyncio
 from wesearch.paper.errors import NotFoundError
 
 from sagent.tools.paper_fetch import PaperFetch, _is_cached_pdf
-from sagent.types.runtime import ToolResult
 
 
 # A valid PDF: magic prefix + padding past the 128-byte floor _is_cached_pdf
@@ -57,11 +56,6 @@ def test_summary_missing_id(tmp_path: Path) -> None:
 
 def test_prompt_empty(tmp_path: Path) -> None:
     assert PaperFetch(cache_dir=tmp_path).prompt() == ""
-
-
-def test_summary_result_suppressed(tmp_path: Path) -> None:
-    result = ToolResult(call_id="", content="anything")
-    assert PaperFetch(cache_dir=tmp_path).summary_result(result) is None
 
 
 # ---------------------------------------------------------------------------

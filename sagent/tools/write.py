@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Annotated
 
 import re
 
@@ -16,6 +17,8 @@ from sagent.tools.core import (
     locked_file_write,
     resolve_tool_path,
 )
+from sagent.tools.display import Toggle, Wrap
+from sagent.tools.tool_spec import CLI_SETTABLE
 from sagent.types.runtime import ToolResult
 
 
@@ -30,7 +33,6 @@ class Write:
     tool_id: str = "application/x-tool-write"
     clearable_results: bool = False
     description: str = load_tool_description("Write")
-    emit_tool_summary: bool = False
     directive_schema: JSON = json_freeze(
         {
             "type": "object",
@@ -41,6 +43,21 @@ class Write:
             "required": ["file_path", "content"],
         }
     )
+
+    output: Annotated[Toggle, CLI_SETTABLE] = "off"
+    """Whether the result body renders in the pane."""
+
+    output_head_rows: Annotated[int, CLI_SETTABLE] = 2
+    """Leading body rows kept."""
+
+    output_tail_rows: Annotated[int, CLI_SETTABLE] = 2
+    """Trailing body rows kept, after a ``⋯ N lines ⋯`` marker."""
+
+    output_max_width: Annotated[int, CLI_SETTABLE] = 0
+    """Cell width cap; ``0`` uses the pane width."""
+
+    output_wrap: Annotated[Wrap, CLI_SETTABLE] = "wrap"
+    """``wrap`` continues an over-wide line, ``chop`` marks the cut."""
 
     def serialize_key(self, args: Mapping[str, object]) -> str | None:
         """Serialize same-file Read/Edit/Write within a cohort.
@@ -68,23 +85,6 @@ class Write:
         file_path = str(args.get("file_path", ""))
         fname = Path(file_path).name if file_path else "?"
         return f"Write {fname}"
-
-    def summary_result(self, result: ToolResult) -> str | None:
-        """One-line receipt: confirmation count from the success message.
-
-        Args:
-          result: Completed ``ToolResult`` from ``run``.
-
-        Returns:
-          receipt: ``wrote N bytes`` line, or ``None`` when suppressed.
-
-        """
-        if not self.emit_tool_summary or result.is_error:
-            return None
-        match = _WRITE_OK_RE.match(result.content.strip())
-        if match:
-            return f"wrote {match.group(1)} bytes"
-        return None
 
     def prompt(self) -> str:
         """Return supplemental prompt text for this tool.

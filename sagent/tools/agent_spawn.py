@@ -289,7 +289,6 @@ class AgentSpawn:
     tool_id: str = "application/x-tool-agentspawn"
     description: str = load_tool_description("agentspawn")
     clearable_results: bool = False
-    emit_tool_summary: bool = False
 
     def __init__(
         self,
@@ -378,24 +377,6 @@ class AgentSpawn:
             f"Spawn budget: depth {depth}/{cap} -- "
             f"{remaining} generation{s} of sub-spawning available."
         )
-
-    def summary_result(self, result: ToolResult) -> str | None:
-        """Return a one-line receipt for the child result.
-
-        Args:
-          result: The child's completed ``ToolResult``.
-
-        Returns:
-          receipt: Compact line-count receipt, or ``None`` when summaries
-            are disabled for this tool.
-
-        """
-        if not self.emit_tool_summary:
-            return None
-        text = result.content.strip()
-        if not text:
-            return "completed with no output"
-        return f"{len(text.splitlines())}L"
 
     def serialize_key(self, args: Mapping[str, object]) -> str | None:
         """Run in parallel: child spawns are independent."""

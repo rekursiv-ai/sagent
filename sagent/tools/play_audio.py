@@ -68,19 +68,6 @@ class PlayAudio:
         name = Path(path).name if path else "?"
         return f"PlayAudio {name}"
 
-    def summary_result(self, result: ToolResult) -> str | None:
-        """Suppress the per-call receipt for PlayAudio.
-
-        Args:
-          result: Completed ``ToolResult`` (ignored).
-
-        Returns:
-          receipt: Always ``None`` (no receipt line).
-
-        """
-        del result
-        return None
-
     def prompt(self) -> str:
         """Return no supplemental system-prompt text for PlayAudio.
 

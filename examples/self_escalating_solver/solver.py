@@ -169,10 +169,6 @@ class RunPython:
         del args
         return "run_python"
 
-    def summary_result(self, result: ToolResult) -> str | None:
-        del result
-        return None
-
     def prompt(self) -> str:
         return ""
 

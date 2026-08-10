@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import io
 import re
 
+from rich.cells import cell_len
 from rich.console import Console
 
 import pytest
@@ -15,8 +18,11 @@ from sagent.repl.console_pane import (
     _wrap_label,
 )
 from sagent.repl.render import ChildItem
+from sagent.tools.display import OutputSpec, ToolDisplay
+from sagent.types.exceptions import AuthRefreshError
 from sagent.types.runtime import (
     AssistantMessage,
+    ModelResponseError,
     ModelResponseThinking,
     ToolLabel,
     ToolResult,
@@ -107,12 +113,65 @@ def test_write_agent_bar_body_not_dim() -> None:
     )
 
 
-def test_write_tool_label_indents_each_line() -> None:
+def test_write_tool_label_marks_the_input_row() -> None:
+    """Line 0 is the header; further lines are the call's INPUT.
+
+    The input glyph matches the diff receipt, so the one row that is not
+    output looks the same across every tool.
+    """
     printer, buf = _printer()
-    printer.write_tool_label("step 1\nstep 2")
+    printer.write_tool_label("Bash List files\nls -la")
     out = buf.getvalue()
-    assert "  step 1" in out
-    assert "  step 2" in out
+    assert "  Bash List files" in out
+    assert "\u23bf  ls -la" in out
+
+
+def test_write_tool_output_is_indented_without_a_glyph() -> None:
+    """Output carries no glyph: a 20-line body must not be 20 glyphs."""
+    printer, buf = _printer()
+    printer.write_tool_output("alpha\nbeta")
+    out = buf.getvalue()
+    assert "   alpha" in out
+    assert "   beta" in out
+    assert "\u23bf" not in out
+
+
+def test_wrapped_input_continues_at_the_output_indent() -> None:
+    """The input glyph marks the row once, not on every wrapped line."""
+    printer, buf = _printer(width=20)
+    printer.write_tool_label(f"Bash\n{'x' * 40}")
+    lines = [ln for ln in buf.getvalue().split("\n") if ln.strip()]
+    assert lines[1].startswith("  \u23bf  ")
+    assert lines[2].startswith("     ")
+    assert "\u23bf" not in lines[2]
+
+
+def _emit_label(printer: ConsolePrinter) -> None:
+    printer.write_tool_label("Bash\n" + "x" * 200)
+
+
+def _emit_output(printer: ConsolePrinter) -> None:
+    printer.write_tool_output("x" * 200)
+
+
+@pytest.mark.parametrize(
+    "emit",
+    [_emit_label, _emit_output],
+    ids=["label", "output"],
+)
+def test_rows_keep_their_indent_when_wrapped(
+    emit: Callable[[ConsolePrinter], None],
+) -> None:
+    """A row wider than the pane lost its gutter on every wrapped line.
+
+    Printing the row verbatim let Rich wrap it, so a 200-char line broke
+    back to column 0 -- outdented past the indent, reading as top-level.
+    """
+    printer, buf = _printer(width=80)
+    emit(printer)
+    for line in buf.getvalue().rstrip("\n").split("\n"):
+        assert line.startswith("  "), line
+        assert cell_len(line) <= 80, line
 
 
 def test_write_tool_label_empty_string_emits_blank_indent() -> None:
@@ -126,8 +185,8 @@ def test_write_tool_error_first_line_carries_glyph() -> None:
     printer, buf = _printer()
     printer.write_tool_error("oops\nmore")
     out = buf.getvalue()
-    assert "✗ oops" in out
-    assert "      more" in out
+    assert "   ✗ oops" in out
+    assert "     more" in out
 
 
 def test_write_tool_error_blank_renders_placeholder() -> None:
@@ -305,6 +364,42 @@ def test_child_block_labels_fit_narrow_terminals(width: int) -> None:
     assert widest <= width, (
         f"child-block label rendered {widest} columns into a {width}-column terminal"
     )
+
+
+def test_child_block_renders_a_tool_body_when_the_policy_says_so() -> None:
+    """A subagent's Bash body must render exactly as the parent's does.
+
+    The child path called ``render_tool_result`` with no policy, which
+    reads as hidden -- so ``--tool Bash.output=on`` showed bodies live
+    and nothing at all under a child label.
+    """
+    printer, buf = _printer()
+    items: list[ChildItem] = [ToolResult(call_id="c1", content="SENTINEL")]
+    printer.write_child_block(
+        "Agent_0",
+        items,
+        output_policy=lambda _cid: ToolDisplay(output=OutputSpec(show=True)),
+    )
+    assert "SENTINEL" in buf.getvalue()
+
+
+def test_child_block_hides_the_body_without_a_policy() -> None:
+    printer, buf = _printer()
+    items: list[ChildItem] = [ToolResult(call_id="c1", content="SENTINEL")]
+    printer.write_child_block("Agent_0", items)
+    assert "SENTINEL" not in buf.getvalue()
+
+
+def test_child_user_facing_error_drops_the_class_name_prefix() -> None:
+    """The parent strips it and pins that in a test; the child must too."""
+    printer, buf = _printer()
+    items: list[ChildItem] = [
+        ModelResponseError(exception=AuthRefreshError("run /login"))
+    ]
+    printer.write_child_block("Agent_0", items)
+    out = _ANSI_RE.sub("", buf.getvalue())
+    assert "run /login" in out
+    assert "AuthRefreshError" not in out
 
 
 if __name__ == "__main__":

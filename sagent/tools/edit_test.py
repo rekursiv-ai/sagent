@@ -13,7 +13,6 @@ import pytest
 from sagent.testing import with_fake_agent
 from sagent.tools.edit import Edit, make_diff
 from sagent.tools.lib.bash import parse_bash
-from sagent.types.runtime import ToolResult
 
 
 edit = Edit()
@@ -216,10 +215,6 @@ def test_summary_path_basename(tmp_path: Path) -> None:
 
 def test_summary_no_path() -> None:
     assert edit.summary({}) == "Edit ?"
-
-
-def test_summary_result_returns_none() -> None:
-    assert edit.summary_result(ToolResult(call_id="", content="x")) is None
 
 
 def test_prompt_empty() -> None:

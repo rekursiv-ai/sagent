@@ -23,7 +23,6 @@ from sagent.tools.paper_author import (
     _cache,
     _validate_author_args,
 )
-from sagent.types.runtime import ToolResult
 
 
 def _clear_cache() -> None:
@@ -47,10 +46,6 @@ def test_prompt_empty() -> None:
 
 def test_serialize_key_none() -> None:
     assert PaperAuthor().serialize_key({"query": "x"}) is None
-
-
-def test_summary_result_suppressed() -> None:
-    assert PaperAuthor().summary_result(ToolResult(call_id="", content="x")) is None
 
 
 # ---------------------------------------------------------------------------

@@ -609,31 +609,6 @@ def test_summary_keeps_pattern() -> None:
     assert grep.summary({"pattern": "x" * 100}) == f"Grep {'x' * 100!r}"
 
 
-def test_summary_result_off() -> None:
-    assert grep.summary_result(ToolResult(call_id="", content="x")) is None
-
-
-def test_summary_result_no_matches() -> None:
-    g = Grep()
-    g.emit_tool_summary = True
-    assert g.summary_result(ToolResult(call_id="", content="(no matches)")) == (
-        "no matches"
-    )
-
-
-def test_summary_result_with_hits() -> None:
-    g = Grep()
-    g.emit_tool_summary = True
-    out = g.summary_result(ToolResult(call_id="", content="a.py\nb.py"))
-    assert out == "2 hits"
-
-
-def test_summary_result_error_skipped() -> None:
-    g = Grep()
-    g.emit_tool_summary = True
-    assert g.summary_result(ToolResult(call_id="", content="!", is_error=True)) is None
-
-
 def test_prompt_empty() -> None:
     assert grep.prompt() == ""
 

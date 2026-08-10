@@ -7,47 +7,43 @@ live in :mod:`sagent.tools.lib.bash`.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Annotated
 
 import asyncio
 import atexit
 import contextlib
 import logging
 import os
-import re
 import secrets
 import signal
 import subprocess
 import time
 
 from sagent.agent.state import ToolState, get_tool_state
-from sagent.lib.custom_json import JSON, bool_val, int_val, json_freeze
+from sagent.lib.custom_json import bool_val, int_val, json_freeze
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
     load_tool_description,
     truncate,
 )
-from sagent.tools.lib.bash import Node, cached_parse_bash
+from sagent.tools.display import Toggle, Wrap
+from sagent.tools.lib.bash import (
+    BashMatcher,
+    Node,
+    cached_parse_bash,
+)
+from sagent.tools.tool_spec import CLI_SETTABLE
 from sagent.types.runtime import ToolResult
 
 
 logger = logging.getLogger(__name__)
 
-# Matches ``[exit code: N]`` appended by ``_run`` on non-zero exits.
-_BASH_EXIT_RE = re.compile(r"(?:^|\n)\[exit code: (\d+)\]\s*$")
-
-
-@runtime_checkable
-class _BashMatchPeer(Protocol):
-    """Duck-type for sibling tools that provide a bash-lint hook."""
-
-    def bash_match(self, trees: Sequence[Node]) -> str | None: ...
-
 
 def _suppress_oserror() -> contextlib.suppress:
     """OSError handler for process-group signals (race: proc may have exited)."""
-    return contextlib.suppress(OSError, ProcessLookupError)
+    return contextlib.suppress(OSError)
 
 
 BASH_DEFAULT_TIMEOUT_MS = 120_000  # config-globals: ignore -- default timeout dial
@@ -113,15 +109,46 @@ def _render_bash_description(text: str) -> str:
     )
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Bash:
-    """Execute shell commands."""
+    """Execute shell commands.
 
-    name: str = "Bash"
-    tool_id: str = "application/x-tool-bash"
-    description: str = _render_bash_description(load_tool_description("Bash"))
-    clearable_results: bool = True
-    emit_tool_summary: bool = False
-    directive_schema: JSON = json_freeze(
+    The ``Tool`` protocol's fields are ``ClassVar`` so they stay off
+    ``__init__``: a display knob sharing a name with ``description``
+    would otherwise shadow the model-facing prompt on every instance and
+    ship its own value to the provider.
+
+    Attributes:
+      peers: Sibling tools supplying ``bash_match`` lint hooks. Any peer
+          whose class defines ``bash_match(self, trees) -> str | None``
+          is registered as a lint source; its output is surfaced on the
+          result's ``hint`` field, and the same nudges are prepended to
+          ``content`` as a ``<system-reminder>`` so the model sees them.
+      command_head_rows: Leading command rows kept. The first line of a
+          shell command identifies it.
+      command_tail_rows: Trailing command rows kept. The last line
+          usually carries the pipe or redirect that says what comes back.
+      command_lang: Pygments lexer for the command row.
+      output: Whether the result body renders in the pane.
+      output_head_rows: Leading body rows kept.
+      output_tail_rows: Trailing body rows kept, after a ``⋯ N lines ⋯``
+          marker. Head and tail together bound what the terminal prints.
+      output_max_width: Cell width cap; ``0`` uses the pane width.
+      output_wrap: ``wrap`` continues an over-wide line on the next row,
+          ``chop`` keeps its head and marks the cut.
+
+    """
+
+    # Unannotated on purpose: an annotated name becomes a dataclass
+    # FIELD, which puts it on ``__init__`` -- and a display knob sharing
+    # a name would then shadow the model-facing prompt on every instance.
+    # Without the annotation these stay plain class attributes, excluded
+    # from the constructor and unshadowable.
+    name = "Bash"
+    tool_id = "application/x-tool-bash"
+    description = _render_bash_description(load_tool_description("Bash"))
+    clearable_results = True
+    directive_schema = json_freeze(
         {
             "type": "object",
             "properties": {
@@ -154,59 +181,50 @@ class Bash:
         }
     )
 
-    def __init__(
-        self,
-        *,
-        peers: Sequence[object] = (),
-    ) -> None:
-        """Collect ``bash_match`` matchers from peer tools.
-
-        Peers are sibling tools in the same agent. Any peer whose class
-        defines ``bash_match(self, trees: Sequence[Node]) -> str | None``
-        is registered as a lint source; its output is surfaced via the
-        result's ``hint`` field for renderer-only display, AND the same
-        nudges are prepended to ``content`` as a ``<system-reminder>``
-        block so the model sees them too.
-        """
-        self._peer_matchers: tuple[Callable[[Sequence[Node]], str | None], ...] = tuple(
-            peer.bash_match for peer in peers if isinstance(peer, _BashMatchPeer)
-        )
+    peers: Sequence[object] = ()
+    command_head_rows: Annotated[int, CLI_SETTABLE] = 3
+    command_tail_rows: Annotated[int, CLI_SETTABLE] = 1
+    command_lang: Annotated[str, CLI_SETTABLE] = "bash"
+    output: Annotated[Toggle, CLI_SETTABLE] = "on"
+    output_head_rows: Annotated[int, CLI_SETTABLE] = 2
+    output_tail_rows: Annotated[int, CLI_SETTABLE] = 2
+    output_max_width: Annotated[int, CLI_SETTABLE] = 0
+    output_wrap: Annotated[Wrap, CLI_SETTABLE] = "wrap"
 
     def summary(self, args: Mapping[str, object]) -> str:
-        """Return a short label for this tool invocation.
+        """Return the header and input rows for this invocation.
+
+        Line 0 is the header -- the model's own ``description`` argument,
+        present on 96% of real calls. The rest is the command verbatim,
+        which the renderer marks with ``⎿`` as the call's input.
+
+        Newlines are preserved rather than folded to ``⏎``: a heredoc
+        rendered as one long line is unreadable, and the renderer bounds
+        the rows so a long script cannot flood the pane.
 
         Args:
           args: Parsed tool directive mapping.
 
         Returns:
-          label: Compact one-line label for renderer display.
+          label: Header line, then the command lines.
 
         """
-        cmd = str(args.get("command", ""))
-        cmd = cmd.replace("\r\n", "⏎").replace("\n", "⏎").replace("\r", "⏎")
-        cmd = cmd.replace("\t", " ")
-        return f"Bash {cmd}" if cmd else "Bash"
+        cmd = str(args.get("command", "")).replace("\r\n", "\n").replace("\r", "\n")
+        cmd = cmd.replace("\t", "    ").strip("\n")
+        desc = str(args.get("description", "")).strip()
+        header = f"Bash {desc}".rstrip()
+        return f"{header}\n{cmd}" if cmd else header
 
-    def summary_result(self, result: ToolResult) -> str | None:
-        """Return a one-line receipt: line count plus nonzero exit code.
+    @property
+    def _peer_matchers(self) -> tuple[Callable[[Sequence[Node]], str | None], ...]:
+        """Lint hooks contributed by sibling tools.
 
-        Args:
-          result: The completed ``ToolResult``.
-
-        Returns:
-          receipt: Line-count receipt (with exit code on nonzero), or
-            ``None`` when summaries are disabled or the result is an error.
-
+        Recomputed rather than cached: ``functools.cached_property``
+        needs a ``__dict__``, which ``slots=True`` removes.
         """
-        if not self.emit_tool_summary or result.is_error:
-            return None
-        text = result.content
-        exit_match = _BASH_EXIT_RE.search(text)
-        body = text[: exit_match.start()] if exit_match else text
-        lines = body.count("\n") + (0 if body.endswith("\n") or not body else 1)
-        if exit_match:
-            return f"{lines}L · exit {exit_match.group(1)}"
-        return f"{lines}L"
+        return tuple(
+            peer.bash_match for peer in self.peers if isinstance(peer, BashMatcher)
+        )
 
     def prompt(self) -> str:
         """Return supplemental prompt text for this tool.
@@ -311,7 +329,11 @@ def _run_as_fully_detached(command: str, *, state: ToolState) -> str:
 async def _run_foreground(command: str, *, state: ToolState, timeout_s: int) -> str:
     """Run a foreground bash command via :mod:`asyncio.subprocess`."""
     sentinel = f"__SAGENT_CWD_{secrets.token_hex(4)}__"
-    tracked_cmd = f"trap 'echo {sentinel}=$(pwd)' EXIT\n{command}"
+    # ``printf`` with a LEADING newline, not ``echo``: a command whose
+    # stdout lacks a trailing newline otherwise fuses with the sentinel
+    # on one line, which fails the prefix test below -- cwd tracking
+    # silently stops and the raw token is shown to the model.
+    tracked_cmd = f'trap \'printf "\\n%s=%s\\n" "{sentinel}" "$(pwd)"\' EXIT\n{command}'
     proc = await asyncio.create_subprocess_exec(
         "/bin/bash",
         "-c",
@@ -323,19 +345,35 @@ async def _run_foreground(command: str, *, state: ToolState, timeout_s: int) -> 
         start_new_session=True,
     )
     start = time.monotonic()
+    # ``communicate()`` is driven by a task we own, so a timeout cancels
+    # the WAIT and not the read: the partial stdout/stderr collected
+    # before the kill stays reachable. Re-awaiting a cancelled
+    # ``communicate()`` instead returns only what buffered afterwards,
+    # dropping the very output the drain exists to recover.
+    comm = asyncio.ensure_future(proc.communicate())
     try:
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(),
+            asyncio.shield(comm),
             timeout=timeout_s,
         )
     except TimeoutError:
-        return await _kill_and_drain(proc, start=start, reason="timeout")
+        await _kill_process_group(proc)
+        stdout_bytes, stderr_bytes = await comm
+        reason = f"timeout after {time.monotonic() - start:.1f}s"
     except asyncio.CancelledError:
+        _ = comm.cancel()
         await _kill_process_group(proc)
         raise
-    stdout = stdout_bytes.decode("utf-8", errors="replace")
-    stderr = stderr_bytes.decode("utf-8", errors="replace")
-    return _process_output(proc, stdout, stderr, sentinel=sentinel, state=state)
+    else:
+        reason = ""
+    return _process_output(
+        proc,
+        stdout_bytes.decode("utf-8", errors="replace"),
+        stderr_bytes.decode("utf-8", errors="replace"),
+        sentinel=sentinel,
+        state=state,
+        reason=reason,
+    )
 
 
 async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
@@ -352,24 +390,6 @@ async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
         _ = await proc.wait()
 
 
-async def _kill_and_drain(
-    proc: asyncio.subprocess.Process,
-    *,
-    start: float,
-    reason: str,
-) -> str:
-    """Kill the process group, drain remaining output, format reason line."""
-    await _kill_process_group(proc)
-    stdout_bytes, stderr_bytes = await proc.communicate()
-    stdout = stdout_bytes.decode("utf-8", errors="replace")
-    stderr = stderr_bytes.decode("utf-8", errors="replace")
-    elapsed = time.monotonic() - start
-    body = truncate(stdout.strip(), TOOL_RESULT_MAX_CHARS)
-    if stderr:
-        body += f"\n{stderr.strip()}"
-    return body + f"\n[{reason} after {elapsed:.1f}s]"
-
-
 def _process_output(
     proc: asyncio.subprocess.Process,
     stdout: str,
@@ -377,23 +397,47 @@ def _process_output(
     *,
     sentinel: str,
     state: ToolState,
+    reason: str = "",
 ) -> str:
-    """Extract cwd sentinel, trim output, and append exit code."""
-    output_lines: list[str] = []
+    """Extract the cwd sentinel, bound the output, append diagnostics.
+
+    The single exit path for every outcome -- clean, failed, timed out --
+    so the sentinel is stripped and the bound applied exactly once.
+
+    Args:
+      proc: The finished (or killed) process, read for its exit code.
+      stdout: Decoded stdout, still carrying the cwd sentinel line.
+      stderr: Decoded stderr.
+      sentinel: Token the tracking trap echoes with the final cwd.
+      state: Tool state whose ``bash_cwd`` the sentinel updates.
+      reason: Non-empty when the run did not finish on its own, e.g.
+          ``"timeout after 1.0s"``.
+
+    Returns:
+      text: Bounded body followed by any diagnostics.
+
+    """
+    body_lines: list[str] = []
     for line in stdout.split("\n"):
         if line.startswith(f"{sentinel}="):
             new_cwd = line[len(f"{sentinel}=") :]
             if new_cwd and Path(new_cwd).is_dir():
                 state.bash_cwd = new_cwd
         else:
-            output_lines.append(line)
-    # Truncate stdout, THEN append the diagnostics -- never the other way
-    # round. ``truncate`` keeps the head, so folding stderr and the exit
-    # code into the body first drops both on any oversized run and makes a
-    # failed command read as a successful one.
-    out = truncate("\n".join(output_lines).strip(), TOOL_RESULT_MAX_CHARS)
-    if stderr:
-        out += f"\n{stderr.strip()}"
-    if proc.returncode != 0:
+            body_lines.append(line)
+    # Diagnostics are what says the command FAILED, so they are bounded
+    # and appended separately: ``truncate`` keeps the head, so folding
+    # them into the body first drops them on exactly the runs that
+    # overflow, and a broken build then reads as a clean one. Each half
+    # gets its own share of the cap, so neither can crowd out the other
+    # and the total stays bounded however noisy one of them is.
+    diagnostics = truncate(stderr.strip(), TOOL_RESULT_MAX_CHARS // 4)
+    body_budget = TOOL_RESULT_MAX_CHARS - len(diagnostics)
+    out = truncate("\n".join(body_lines).strip(), body_budget)
+    if diagnostics:
+        out = f"{out}\n{diagnostics}" if out else diagnostics
+    if reason:
+        out += f"\n[{reason}]"
+    elif proc.returncode != 0:
         out += f"\n[exit code: {proc.returncode}]"
     return out.strip() or "(no output)"

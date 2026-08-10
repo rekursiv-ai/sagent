@@ -4,20 +4,22 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Final
+from typing import Annotated, Final
 
 import time
 
 from sagent.agent.state import current_agent_var, get_tool_state
 from sagent.lib.custom_json import JSON, bool_val, int_val, json_freeze
 from sagent.tools.core import load_tool_description, run_sync
-from sagent.tools.lib.bash import Node, unwrap_cd_prefix
+from sagent.tools.display import Toggle, Wrap
+from sagent.tools.lib.bash import Node, walk_commands
 from sagent.tools.lib.path_sort import (
     SORT_VALUES,
     safe_mtime,
     safe_size,
     sort_paths,
 )
+from sagent.tools.tool_spec import CLI_SETTABLE
 from sagent.types.runtime import ToolResult
 
 
@@ -80,7 +82,6 @@ class Glob:
     tool_id: str = "application/x-tool-glob"
     clearable_results: bool = True
     description: str = load_tool_description("Glob")
-    emit_tool_summary: bool = False
     directive_schema: JSON = json_freeze(
         {
             "type": "object",
@@ -132,6 +133,21 @@ class Glob:
         }
     )
 
+    output: Annotated[Toggle, CLI_SETTABLE] = "off"
+    """Whether the result body renders in the pane."""
+
+    output_head_rows: Annotated[int, CLI_SETTABLE] = 2
+    """Leading body rows kept."""
+
+    output_tail_rows: Annotated[int, CLI_SETTABLE] = 2
+    """Trailing body rows kept, after a ``⋯ N lines ⋯`` marker."""
+
+    output_max_width: Annotated[int, CLI_SETTABLE] = 0
+    """Cell width cap; ``0`` uses the pane width."""
+
+    output_wrap: Annotated[Wrap, CLI_SETTABLE] = "wrap"
+    """``wrap`` continues an over-wide line, ``chop`` marks the cut."""
+
     def summary(self, args: Mapping[str, object]) -> str:
         """Return a short label for this tool invocation.
 
@@ -146,23 +162,6 @@ class Glob:
         path = str(args.get("path", "")) or "."
         suffix = f" in {path}" if path != "." else ""
         return f"Glob {pattern}{suffix}"
-
-    def summary_result(self, result: ToolResult) -> str | None:
-        """One-line receipt: number of matches.
-
-        Args:
-          result: Completed ``ToolResult`` from ``run``.
-
-        Returns:
-          receipt: ``N matches`` / ``no matches``, or ``None`` when suppressed.
-
-        """
-        if not self.emit_tool_summary or result.is_error:
-            return None
-        text = result.content.strip()
-        if not text or text.startswith("(no matches"):
-            return "no matches"
-        return f"{text.count(chr(10)) + 1} matches"
 
     def prompt(self) -> str:
         """Return supplemental prompt text for this tool.
@@ -272,7 +271,9 @@ class Glob:
     def bash_match(self, trees: Sequence[Node]) -> str | None:
         """Emit a tool-use nudge for ``find … -name GLOB``.
 
-        Accepts ``cd PATH && CMD`` compounds via ``unwrap_cd_prefix``.
+        Policy only: :func:`walk_commands` supplies every simple command
+        with its context, so a leading ``cd``, an enclosing loop, and a
+        sequence all reach this matcher without it re-deriving AST shape.
         Bails on ``find`` predicates Glob can't express
         (time/size/perm/exec/depth). Directory listing (``ls``) is
         handled by the List tool, not Glob.
@@ -284,13 +285,17 @@ class Glob:
           hint: Nudge string redirecting to the Glob tool, or ``None``.
 
         """
-        unwrapped = unwrap_cd_prefix(trees)
-        if unwrapped is None:
-            return None
-        cwd, cmd = unwrapped
-        if cmd.exe != "find" or cmd.env_prefix:
-            return None
-        return _match_find(cwd, cmd.args)
+        for inv in walk_commands(trees):
+            if inv.exe != "find" or inv.env_prefix or inv.captures_stdout:
+                continue
+            # ``find … | xargs grep`` is a SEARCH, which Grep owns; the
+            # find half only enumerates what to search.
+            if inv.piped_into:
+                continue
+            hint = _match_find(inv.cwd or None, inv.args)
+            if hint is not None:
+                return hint
+        return None
 
 
 def _long_line(p: Path) -> str:

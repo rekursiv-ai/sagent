@@ -49,19 +49,6 @@ class CharacterCount:
         """
         return f"CharacterCount {len(str(args.get('text', '')))} chars"
 
-    def summary_result(self, result: ToolResult) -> str | None:
-        """Return an optional one-line receipt for the tool result.
-
-        Args:
-          result: Tool result to summarize.
-
-        Returns:
-          receipt: Always ``None`` (no receipt line emitted).
-
-        """
-        del result
-        return None
-
     def prompt(self) -> str:
         """Return optional tool-specific system prompt text.
 

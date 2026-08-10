@@ -172,19 +172,6 @@ class Linear:
         suffix = f":{ident}" if ident else ""
         return f"Linear {operation}{suffix}"
 
-    def summary_result(self, result: ToolResult) -> str | None:
-        """Suppress the per-call receipt for Linear.
-
-        Args:
-          result: Completed ``ToolResult`` (ignored).
-
-        Returns:
-          receipt: Always ``None`` (no receipt line).
-
-        """
-        del result
-        return None
-
     def prompt(self) -> str:
         """Return supplemental system-prompt text.
 

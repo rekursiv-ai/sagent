@@ -124,10 +124,6 @@ def test_summary_empty_path() -> None:
     assert list_tool.summary({}) == "List ."
 
 
-def test_summary_result_returns_none() -> None:
-    assert list_tool.summary_result(ToolResult(call_id="", content="x")) is None
-
-
 def test_prompt_empty() -> None:
     assert list_tool.prompt() == ""
 

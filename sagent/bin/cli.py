@@ -48,7 +48,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Coroutine, Mapping
 from pathlib import Path
-from typing import Final, cast
+from typing import Any, Final, cast
 
 import argparse
 import asyncio
@@ -101,6 +101,11 @@ from sagent.tools.agent_spawn import (
     _build_forwarder,
 )
 from sagent.tools.core import set_recipe
+from sagent.tools.tool_spec import (
+    ToolSpecError,
+    coerce_kwargs,
+    parse_tool_overrides,
+)
 
 
 _DEFAULT_PROVIDER = "Anthropic"
@@ -145,6 +150,7 @@ def resolve_tools(
     names: list[str],
     *,
     allow_providers: tuple[str, ...] | None = None,
+    overrides: Mapping[str, Mapping[str, str]] | None = None,
 ) -> list[types.tools.Tool]:
     """Instantiate tools by class name from the ``tools`` module.
 
@@ -158,14 +164,28 @@ def resolve_tools(
         ``AgentSpawn`` and ``AgentSelf`` so their schemas and catalogs
         only enumerate providers the host can actually use. ``None``
         means "every provider in ``sagent.providers``".
+      overrides: Per-tool constructor kwargs from ``--tool NAME.key=value``,
+        already grouped by tool name. Passed straight to the tool's
+        ``__init__``, so the signature is the contract.
 
     Returns:
       tools: Instantiated tool objects in the requested order.
 
     Raises:
-      SystemExit: If a tool name is not found in the tools module.
+      SystemExit: If a tool name is not found in the tools module, or an
+        override names an unknown tool, key, or value.
 
     """
+    by_tool = dict(overrides or {})
+    # Validate BEFORE the empty-set shortcut: returning early let
+    # ``--tools none --tool Bash.output=off`` exit 0 having silently
+    # ignored the flag, while any other tool set aborts on it.
+    unknown_tools = sorted(set(by_tool) - set(names))
+    if unknown_tools:
+        raise SystemExit(
+            f"--tool names tool(s) not loaded: {', '.join(unknown_tools)}."
+            f" Loaded: {', '.join(names)}"
+        )
     if names == ["none"]:
         return []
     provider_aware = {"AgentSpawn", "AgentSelf"}
@@ -176,18 +196,45 @@ def resolve_tools(
         cls = getattr(tools, name, None)
         if cls is None:
             raise SystemExit(f"unknown tool: {name!r}")
+        kwargs = _tool_kwargs(cls, by_tool.get(name, {}))
         if name in provider_aware:
-            non_bash[name] = cls(allow_providers=allow_providers)
+            non_bash[name] = cls(allow_providers=allow_providers, **kwargs)
         else:
-            non_bash[name] = cls()
+            non_bash[name] = cls(**kwargs)
     resolved: list[types.tools.Tool] = []
     peers = tuple(non_bash.values())
     for name in names:
         if name == "Bash":
-            resolved.append(tools.Bash(peers=peers))
+            bash = tools.Bash(
+                peers=peers, **_tool_kwargs(tools.Bash, by_tool.get(name, {}))
+            )
+            resolved.append(bash)
         else:
             resolved.append(non_bash[name])
     return resolved
+
+
+def _tool_kwargs(cls: type, overrides: Mapping[str, str]) -> Any:
+    """Coerce ``--tool`` overrides for ``cls``, exiting on a bad key.
+
+    Returns ``Any`` deliberately: the result is splatted into a tool
+    constructor whose signature varies per tool, and the values were
+    already validated against that signature by ``coerce_kwargs``.
+    """
+    if not overrides:
+        return {}
+    try:
+        return coerce_kwargs(cls, overrides)
+    except ToolSpecError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _parse_tool_flag(specs: list[str]) -> dict[str, dict[str, str]]:
+    """Parse ``--tool`` values, exiting with the message on a bad spec."""
+    try:
+        return parse_tool_overrides(specs)
+    except ToolSpecError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def _resolve_session_dir(args: argparse.Namespace) -> str | None:
@@ -501,6 +548,18 @@ def _parse_cli_args(
         "--session",
         default=None,
         help="Session directory for persistence. Overrides --resume/--continue.",
+    )
+    parser.add_argument(
+        "--tool",
+        dest="tool",
+        action="append",
+        default=[],
+        metavar="NAME.key=value",
+        help=(
+            "Configure one tool, e.g. --tool Bash.output=off. The key is a"
+            " constructor argument of that tool; repeat the flag to set"
+            " several. An unknown tool or key aborts."
+        ),
     )
     parser.add_argument(
         "--ephemeral",
@@ -1324,6 +1383,11 @@ async def _run_headless(
     the user out.
     """
     loop = asyncio.get_running_loop()
+    # ONE handler shared by both signals: its ``triggered`` flag is what
+    # turns the second signal into a force-exit, so building a fresh
+    # closure per signal would let SIGINT-then-SIGTERM push two quits
+    # and never exit.
+    handler = _quit_handler(agent)
     suspended: list[signal.Signals] = []
     for sig in (signal.SIGINT, signal.SIGTERM):
         with contextlib.suppress(NotImplementedError, RuntimeError):
@@ -1338,7 +1402,7 @@ async def _run_headless(
     finally:
         for sig in suspended:
             with contextlib.suppress(NotImplementedError):
-                loop.add_signal_handler(sig, _quit_handler(agent))
+                loop.add_signal_handler(sig, handler)
     if input_format == "stream-json":
         try:
             prompt = _parse_stream_json(raw)
@@ -1496,7 +1560,11 @@ def main() -> int:
         sys.stderr.write(f"[{args.provider}] {model.spec.tagged_model_id}\n")
 
     tool_names = args.tools or DEFAULT_TOOLS
-    agent_tools = resolve_tools(tool_names, allow_providers=allow_providers)
+    agent_tools = resolve_tools(
+        tool_names,
+        allow_providers=allow_providers,
+        overrides=_parse_tool_flag(args.tool),
+    )
     if args.advisor:
         advisor_model = provider.model(args.advisor)
         agent_tools.append(

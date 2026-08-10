@@ -14,12 +14,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import functools
+
 from sagent.agent.context import alive_splices, masked_refs_by_alive
 from sagent.compaction.files import MICROCOMPACTED_ARGS_KEY
 from sagent.repl.render import (
     make_render_observer,
     render_tool_result,
 )
+from sagent.tools.display import ToolDisplay, row_spec
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
@@ -36,10 +39,11 @@ from sagent.types.tape import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping, Sequence
 
     from sagent.agent.agent import Agent
     from sagent.repl.render import Printer, RenderObserver
+    from sagent.types.tape import TapeRecord
     from sagent.types.tools import Tool
 
 
@@ -60,6 +64,7 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
     if not tape:
         return
     tools = agent.tools_map
+    policy = functools.partial(_replay_output_policy, tools, tape)
     # Replay is a one-shot pass over a frozen tape; snapshot
     # ``show_thinking`` once and thread the same bool through both the
     # observer (via a constant-returning closure) and ``_render_entry``.
@@ -70,6 +75,7 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
     render_event = make_render_observer(
         printer,
         show_thinking=lambda: show_thinking,
+        output_policy=policy,
     )
     alive = alive_splices(tape)
     masked = masked_refs_by_alive(tape, alive)
@@ -85,6 +91,7 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
                     render_event=render_event,
                     tools=tools,
                     show_thinking=show_thinking,
+                    output_policy=policy,
                 )
             continue
         assert isinstance(record, ReferrableTapeEvent)
@@ -112,6 +119,7 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
             render_event=render_event,
             tools=tools,
             show_thinking=show_thinking,
+            output_policy=policy,
         )
     parts = ["resumed", f"{rendered_messages} messages"]
     cost = agent.cost_tracker.spend.total
@@ -150,6 +158,7 @@ def _render_entry(
     render_event: RenderObserver,
     tools: Mapping[str, Tool],
     show_thinking: bool,
+    output_policy: Callable[[str], ToolDisplay],
 ) -> int:
     """Render one tape event; return 1 if it counts as a message, else 0."""
     match entry:
@@ -172,14 +181,44 @@ def _render_entry(
             if text.strip():
                 printer.write_markdown(text)
             for tc in calls:
-                printer.write_tool_label(_label_for_call(tc, tools))
+                display = output_policy(tc.id)
+                printer.write_tool_label(
+                    _label_for_call(tc, tools),
+                    command=display.command,
+                    lang=display.command_lang,
+                )
             return 1
         case ToolResult():
-            render_tool_result(printer, entry)
+            render_tool_result(
+                printer, entry, output=output_policy(entry.call_id).output
+            )
             return 1
         case _:
             render_event(entry)
             return 0
+
+
+def _replay_output_policy(
+    tools: Mapping[str, Tool],
+    tape: Sequence[TapeRecord],
+    call_id: str,
+) -> ToolDisplay:
+    """Return the output policy for the tool that produced ``call_id``.
+
+    Live rendering resolves this through the agent's call registry, which
+    a resumed session does not have -- so the owning tool is recovered by
+    scanning the tape for the ``ToolCall`` that opened this id. Without
+    it a resumed session silently drops bodies the live pane showed.
+    """
+    for record in tape:
+        event = record.event if isinstance(record, ReferrableTapeEvent) else None
+        if not isinstance(event, AssistantMessage):
+            continue
+        for tc in event.tool_calls:
+            if tc.id == call_id:
+                tool = tools.get(tc.name)
+                return ToolDisplay() if tool is None else row_spec(tool)
+    return ToolDisplay()
 
 
 def _label_for_call(tc: ToolCall, tools: Mapping[str, Tool]) -> str:

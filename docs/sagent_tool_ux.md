@@ -24,8 +24,8 @@ lines. Both counts are per-tool defaults and CLI-configurable.
 | Write | off |
 | Edit | on |
 | Bash | on |
-| WebSearch | on |
-| WebFetch | on |
+| WebSearch | off |
+| WebFetch | off |
 
 ## Read
 
@@ -152,7 +152,7 @@ Bash Run the gates
 
 ## WebSearch
 
-`output=on` by default.
+`output=off` by default. With `--tool WebSearch.output=on`:
 
 ```
 WebSearch 'pep 695 type alias get_origin'
@@ -165,7 +165,7 @@ WebSearch 'pep 695 type alias get_origin'
 
 ## WebFetch
 
-`output=on` by default.
+`output=off` by default. With `--tool WebFetch.output=on`:
 
 ```
 WebFetch https://peps.python.org/pep-0695/

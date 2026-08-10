@@ -8,7 +8,7 @@ duplicate -- the formatting logic is already correct and battle-tested.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Final, Literal, assert_never, cast
 
 import io
@@ -24,11 +24,20 @@ from sagent.repl.format import (
 )
 from sagent.repl.render import (
     ChildItem,
+    error_text,
     render_tool_result,
     service_suspended_text,
 )
-from sagent.repl.render_diff import render_diff_detail
+from sagent.repl.render_diff import (
+    highlight_source,
+    render_diff_detail,
+)
 from sagent.repl.tight_markdown import TightMarkdown
+from sagent.tools.display import (
+    OutputSpec,
+    ToolDisplay,
+    format_output,
+)
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
@@ -111,49 +120,96 @@ class ConsolePrinter:
         for line in (text or "").splitlines() or [""]:
             self.console.print(Text(line, style="dim"))
 
-    def write_tool_label(self, text: str) -> None:
+    def write_tool_label(
+        self,
+        text: str,
+        *,
+        command: OutputSpec | None = None,
+        lang: str = "",
+    ) -> None:
         """Render a dim tool-call label, wrapped to the console width.
+
+        A label whose header is followed by more lines is a tool
+        reporting an INPUT -- Bash's command. Input rows carry the ``⎿``
+        glyph, matching the diff receipt, so the one thing that is not
+        output reads the same everywhere. Tools with a one-line label
+        are unaffected.
 
         Tool ``summary`` implementations return their argument whole --
         the cap lives here, in the only place that knows the terminal
         width and the child-block gutter. Wrapping (rather than the
         per-tool character clamps this replaced) keeps a long command or
-        query readable instead of ellipsized mid-token; the line cap
+        query readable instead of ellipsized mid-token; the row budget
         bounds the pathological case (a heredoc, a pasted blob) so one
         call cannot flood scrollback before it even runs.
+
+        Args:
+          text: Header line, then zero or more input lines.
+          command: Row budget for the input. ``None`` renders it whole,
+              which is right for a one-line path or receipt.
+          lang: Pygments lexer name for the input, e.g. ``"bash"``.
+
         """
-        lines = _wrap_label(text, self.console.width - len(_CHILD_INDENT))
-        for line in lines:
+        header, _, rest = (text or "").partition("\n")
+        for line in _wrap_label(header, self.console.width - len(_CHILD_INDENT)):
             self.console.print(Text(f"{_CHILD_INDENT}{line}", style="dim"))
+        if not rest:
+            return
+        spec = command or OutputSpec(show=True)
+        rows = format_output(rest, spec, width=self.console.width - len(_INPUT_GLYPH))
+        for i, row in enumerate(rows):
+            marker = _INPUT_GLYPH if i == 0 else _OUTPUT_INDENT
+            body = highlight_source(row, lang) if lang else Text(row)
+            body.stylize("dim")
+            self.console.print(Text(marker, style="dim") + body)
 
     def write_tool_error(self, text: str) -> None:
-        """Render red, indented tool-error (multi-line aware).
+        """Render a red tool-error at the output indent (multi-line aware).
 
-        First line gets the ``✗`` glyph; subsequent lines align with the
-        message column so structured traces stay readable. An all-blank
-        body still renders a placeholder line: silently swallowing the
-        call would let upstream callers think the operator saw the
-        failure.
+        Errors are output, so they sit at the output indent rather than
+        in a column of their own; the ``✗`` glyph marks the first line
+        and continuations align under its message. An all-blank body
+        still renders a placeholder: silently swallowing the call would
+        let upstream callers think the operator saw the failure.
         """
         lines = text.rstrip("\n").splitlines() or [text.rstrip("\n")]
         if not any(line.strip() for line in lines):
             lines = ["<no error message>"]
-        self.console.print(Text(f"    ✗ {lines[0]}", style="dim red"))
+        self.console.print(Text(f"{_OUTPUT_INDENT}✗ {lines[0]}", style="dim red"))
         for line in lines[1:]:
-            self.console.print(Text(f"      {line}", style="dim red"))
+            self.console.print(Text(f"{_OUTPUT_INDENT}  {line}", style="dim red"))
 
     def write_tool_summary(self, text: str) -> None:
-        """Render the dim ``  ⎿ <summary>`` receipt line for a tool result.
+        """Render a receipt line for a tool result.
 
-        Mirrors the diff-header glyph (``⎿``) so tools without a
-        diff (Read, Bash, Glob, Grep, ...) get the same visual
-        cue that the call landed and what came back.
+        Shares the ``⎿`` input glyph: a receipt describes the call, not
+        its output, so it belongs in the same column as the command.
         """
-        self.console.print(Text(f"    ⎿  {text.strip()}", style="dim"))
+        self._write_input(text.strip())
+
+    def write_tool_output(self, text: str) -> None:
+        """Render a tool's result body, indented under its label.
+
+        Output carries no glyph at all -- indentation alone separates it
+        from the header, so a 20-line body does not become 20 lines of
+        box-drawing noise.
+
+        Wrapping happens here because this is the only layer that knows
+        the pane width: printing an over-wide line verbatim lets Rich
+        break it back to column 0, outdenting the continuation past the
+        indent so it reads as top-level output.
+        """
+        width = self.console.width - len(_OUTPUT_INDENT)
+        for raw in text.split("\n"):
+            for line in _wrap_label(raw, width) or [""]:
+                self.console.print(Text(f"{_OUTPUT_INDENT}{line}", style="dim"))
 
     def write_hint(self, text: str) -> None:
-        """Render a dim yellow ``hint:`` line (bash-lint nudge surface)."""
-        self.console.print(Text(f"    hint: {text}", style="dim yellow"))
+        """Render a dim yellow ``hint:`` line at the output indent."""
+        for line in (text or "").split("\n"):
+            self.console.print(
+                Text(f"{_OUTPUT_INDENT}hint: {line}", style="dim yellow"),
+            )
 
     def write_interrupted(self) -> None:
         """Render the dim ``[interrupted]`` line for cancelled work."""
@@ -171,7 +227,13 @@ class ConsolePrinter:
         self.console.print(Text(text, style="bold red"))
         self.console.print(Text(bar, style="red"))
 
-    def write_child_block(self, label: str, items: Sequence[ChildItem]) -> None:
+    def write_child_block(
+        self,
+        label: str,
+        items: Sequence[ChildItem],
+        *,
+        output_policy: Callable[[str], ToolDisplay] | None = None,
+    ) -> None:
         r"""Render a child agent's labeled block.
 
         Format: first line carries the label gutter (``Agent_N  :  ``),
@@ -215,7 +277,7 @@ class ConsolePrinter:
         )
         inner = ConsolePrinter(inner_console)
         for item in items:
-            _render_child_item(inner, item)
+            _render_child_item(inner, item, output_policy=output_policy)
 
         captured = buf.getvalue()
         if not captured:
@@ -246,6 +308,19 @@ class ConsolePrinter:
     def set_terminal_title(self, text: str) -> None:
         """Write an OSC 0 title escape (no-op when stderr is not a TTY)."""
         set_terminal_title(text)
+
+    def _write_input(self, row: str) -> None:
+        """Render one input row under its tool header.
+
+        Wrapping happens here, not in the tool: this is the only place
+        that knows the pane width and the glyph width. A row too wide for
+        the pane continues at the output indent, so the ``⎿`` marks the
+        input once rather than repeating down the block.
+        """
+        width = self.console.width - len(_INPUT_GLYPH)
+        for i, line in enumerate(_wrap_label(row, width) or [""]):
+            marker = _INPUT_GLYPH if i == 0 else _OUTPUT_INDENT
+            self.console.print(Text(f"{marker}{line}", style="dim"))
 
 
 # ANSI dim attribute. ``\x1b[2m`` enables dim; ``\x1b[22m`` cancels
@@ -293,6 +368,13 @@ def _dim_baseline(line: str) -> str:
 
 # Two-space gutter shared by tool labels and child blocks.
 _CHILD_INDENT: Final = "  "
+
+# Marks a tool call's INPUT -- the Bash command, the Edit diff receipt.
+# Output carries no glyph, so the one non-output row is the one that
+# stands out. Both are five cells wide and both start from the header's
+# own indent, so header, input, and body share one left edge.
+_INPUT_GLYPH: Final = f"{_CHILD_INDENT}\u23bf  "
+_OUTPUT_INDENT: Final = f"{_CHILD_INDENT}   "
 
 # Rendered-line cap for one tool label. Labels carry the argument whole
 # (a command, a query, a pasted prompt), so a heredoc or blob would
@@ -365,18 +447,32 @@ def _gutter_prefix(label: str, width: int) -> str:
     return pfx
 
 
-def _render_child_item(printer: ConsolePrinter, item: ChildItem) -> None:
+def _render_child_item(
+    printer: ConsolePrinter,
+    item: ChildItem,
+    *,
+    output_policy: Callable[[str], ToolDisplay] | None = None,
+) -> None:
     """Dispatch one child-block item to the appropriate printer method.
 
     Exhaustive over :data:`repl.render.ChildItem`; ``assert_never`` makes
     the type checker flag any new variant that forgets a branch here.
+
+    ``output_policy`` resolves the child tool's display settings. Without
+    it a subagent's Bash body never renders even with ``output=on``,
+    because the missing policy reads as hidden.
     """
     match item:
         case AssistantMessage(text=text):
             if text:
                 printer.write_markdown(text)
         case ToolLabel(text=text):
-            printer.write_tool_label(text)
+            display = output_policy(item.call_id) if output_policy is not None else None
+            printer.write_tool_label(
+                text,
+                command=display.command if display else None,
+                lang=display.command_lang if display else "",
+            )
         case ModelResponseThinking(text=text):
             printer.write_thinking(text)
         case ModelServiceSuspended():
@@ -384,9 +480,17 @@ def _render_child_item(printer: ConsolePrinter, item: ChildItem) -> None:
         case NoticeMessage(text=text):
             printer.write_dim_line(text)
         case ModelResponseError(exception=exc):
-            printer.write_tool_error(f"{type(exc).__name__}: {exc}")
+            printer.write_tool_error(error_text(exc))
         case ToolResult():
-            render_tool_result(printer, item)
+            render_tool_result(
+                printer,
+                item,
+                output=(
+                    output_policy(item.call_id).output
+                    if output_policy is not None
+                    else None
+                ),
+            )
         case AgentSendMessage(source=source, text=text):
             printer.write_agent_bar(source, text)
         case UserMessage(text=text):

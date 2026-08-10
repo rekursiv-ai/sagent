@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Final
+from typing import Annotated, Final
 
 import difflib
 import re
@@ -23,7 +23,9 @@ from sagent.tools.core import (
     locked_file_write,
     resolve_tool_path,
 )
-from sagent.tools.lib.bash import Node, unwrap_cd_prefix
+from sagent.tools.display import Toggle, Wrap
+from sagent.tools.lib.bash import Node, walk_commands
+from sagent.tools.tool_spec import CLI_SETTABLE
 from sagent.types.runtime import ToolResult
 
 
@@ -122,6 +124,21 @@ class Edit:
             lambda: self._run(file_path, old_string, new_string, replace_all),
         )
 
+    output: Annotated[Toggle, CLI_SETTABLE] = "on"
+    """Whether the result body renders in the pane."""
+
+    output_head_rows: Annotated[int, CLI_SETTABLE] = 2
+    """Leading body rows kept."""
+
+    output_tail_rows: Annotated[int, CLI_SETTABLE] = 2
+    """Trailing body rows kept, after a ``⋯ N lines ⋯`` marker."""
+
+    output_max_width: Annotated[int, CLI_SETTABLE] = 0
+    """Cell width cap; ``0`` uses the pane width."""
+
+    output_wrap: Annotated[Wrap, CLI_SETTABLE] = "wrap"
+    """``wrap`` continues an over-wide line, ``chop`` marks the cut."""
+
     def serialize_key(self, args: Mapping[str, object]) -> str | None:
         """Serialize same-file Read/Edit/Write within a cohort.
 
@@ -148,19 +165,6 @@ class Edit:
         file_path = resolve_tool_path(str(args.get("file_path", "")))
         fname = Path(file_path).name if file_path else "?"
         return f"Edit {fname}"
-
-    def summary_result(self, result: ToolResult) -> str | None:
-        """Suppress the per-call receipt for Edit.
-
-        Args:
-          result: Completed ``ToolResult`` (ignored).
-
-        Returns:
-          receipt: Always ``None`` (no receipt line).
-
-        """
-        del result
-        return None
 
     def prompt(self) -> str:
         """Return no supplemental system-prompt text for Edit.
@@ -268,7 +272,11 @@ class Edit:
         )
 
     def bash_match(self, trees: Sequence[Node]) -> str | None:
-        """Emit a hint if the command is a simple ``sed -i 's/X/Y/g' FILE``.
+        """Emit a hint if any command is a simple ``sed -i 's/X/Y/g' FILE``.
+
+        Policy only: :func:`walk_commands` supplies every simple command
+        with its context, so a leading ``cd``, an enclosing loop, and a
+        sequence all reach this matcher without it re-deriving AST shape.
 
         Args:
           trees: Parsed bashlex command trees from the active Bash call.
@@ -277,13 +285,13 @@ class Edit:
           hint: Nudge string redirecting to the Edit tool, or ``None``.
 
         """
-        unwrapped = unwrap_cd_prefix(trees)
-        if unwrapped is None:
-            return None
-        cwd, cmd = unwrapped
-        if cmd.exe != "sed" or cmd.env_prefix:
-            return None
-        return _match_sed(cwd, cmd.args)
+        for inv in walk_commands(trees):
+            if inv.exe != "sed" or inv.env_prefix or inv.captures_stdout:
+                continue
+            hint = _match_sed(inv.cwd or None, inv.args)
+            if hint is not None:
+                return hint
+        return None
 
 
 def _match_sed(cwd: str | None, args: tuple[str, ...]) -> str | None:

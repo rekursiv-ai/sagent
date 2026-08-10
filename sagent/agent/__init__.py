@@ -23,7 +23,7 @@ Composition (no inheritance):
   AssistantMessage`` protocol. Owns the retry loop and overflow
   recovery; records cost out-of-band on ``Agent.cost_tracker``.
 - ``_AgentTool`` bridges a rich ``Tool`` (metadata + ``summary`` /
-  ``summary_result`` / ``prompt``) to the runtime's minimal
+  ``prompt``) to the runtime's minimal
   ``run(args) -> ToolResult`` protocol. Emits ``ToolLabel`` before
   execution; post-processes the result for empty-marker and
   oversized-content handling.

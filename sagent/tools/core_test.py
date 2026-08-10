@@ -503,14 +503,6 @@ def test_tool_prompt_default_empty() -> None:
     assert fn.prompt() == ""
 
 
-def test_tool_summary_result_default_none() -> None:
-    @tool(name="X")
-    def fn(x: str) -> str:
-        return x
-
-    assert fn.summary_result(ToolResult(call_id="", content="hi")) is None
-
-
 @pytest.mark.asyncio
 async def test_tool_run_sync_function_returns_result() -> None:
     @tool

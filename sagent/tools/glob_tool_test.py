@@ -156,31 +156,6 @@ def test_summary_with_path() -> None:
     assert glob_tool.summary({"pattern": "*.py", "path": "/x"}) == "Glob *.py in /x"
 
 
-def test_summary_result_off() -> None:
-    assert glob_tool.summary_result(ToolResult(call_id="", content="x")) is None
-
-
-def test_summary_result_no_matches_marker() -> None:
-    g = Glob()
-    g.emit_tool_summary = True
-    assert g.summary_result(ToolResult(call_id="", content="(no matches)")) == (
-        "no matches"
-    )
-
-
-def test_summary_result_count() -> None:
-    g = Glob()
-    g.emit_tool_summary = True
-    assert g.summary_result(ToolResult(call_id="", content="a\nb")) == "2 matches"
-
-
-def test_summary_result_error_skipped() -> None:
-    g = Glob()
-    g.emit_tool_summary = True
-    r = ToolResult(call_id="", content="x", is_error=True)
-    assert g.summary_result(r) is None
-
-
 def test_prompt_empty() -> None:
     assert glob_tool.prompt() == ""
 

@@ -94,19 +94,6 @@ class BackgroundTask:
             return f"BackgroundTask {op} {job_id}"
         return f"BackgroundTask {op}"
 
-    def summary_result(self, result: ToolResult) -> str | None:
-        """No receipt line: the operation's content is self-explanatory.
-
-        Args:
-          result: Completed ``ToolResult`` (ignored).
-
-        Returns:
-          receipt: Always ``None`` (no receipt line).
-
-        """
-        del result
-        return None
-
     def prompt(self) -> str:
         """Return background-task usage guidance for the system prompt.
 

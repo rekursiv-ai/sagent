@@ -27,6 +27,7 @@ from sagent import (
 )
 from sagent.agent import runtime as agent_runtime
 from sagent.agent.agent import (
+    _TOOL_REGISTRY_MAX,
     MAX_OVERFLOW_RECOVERY,
     ActivityTracker,
     Agent,
@@ -8266,6 +8267,78 @@ def test_tool_round_cap_pushes_single_error_when_before_spawn_blocks() -> None:
 
     error_count = asyncio.new_event_loop().run_until_complete(_drive())
     assert error_count == 1, f"expected 1 ModelResponseError, got {error_count}"
+
+
+@pytest.mark.asyncio
+async def test_serve_forever_rejects_a_concurrent_run() -> None:
+    """``run`` documents protection from a concurrent ``serve_forever``.
+
+    Only ``run`` and ``drive_until_first_idle`` claimed the flag, so a
+    direct ``serve_forever`` was invisible to the check and ``run``'s
+    ``finally`` would push ``Quit`` into the foreign driver's inbox.
+    """
+    a = _build_agent()
+    serving = asyncio.create_task(a.serve_forever())
+    await asyncio.sleep(0)
+    try:
+        with pytest.raises(RuntimeError):
+            async for _ in a.run(types.runtime.UserMessage(text="hi")):
+                pass
+    finally:
+        a.shutdown(force=True)
+        _ = serving.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await serving
+
+
+@pytest.mark.asyncio
+async def test_drive_until_first_idle_propagates_a_driver_crash() -> None:
+    """A crashed loop must not read as an empty successful result."""
+    a = _build_agent()
+
+    async def _boom() -> None:
+        raise RuntimeError("boom")
+
+    # ty: ignore[invalid-assignment] -- stubbing the driver is the point
+    a.serve_forever = _boom
+    with pytest.raises(RuntimeError, match="boom"):
+        _ = await a.drive_until_first_idle(types.runtime.UserMessage(text="hi"))
+
+
+def test_tool_registry_is_bounded_across_a_long_session() -> None:
+    """One entry per tool call, never pruned, grows for the whole session."""
+    a = _build_agent()
+    for i in range(_TOOL_REGISTRY_MAX + 500):
+        a._track_tool_registry(
+            types.runtime.ModelResponseComplete(
+                message=types.runtime.AssistantMessage(
+                    text="",
+                    tool_calls=(
+                        types.runtime.ToolCall(id=f"c{i}", name="Echo", args={}),
+                    ),
+                ),
+            ),
+        )
+    assert len(a._tool_registry) <= _TOOL_REGISTRY_MAX
+
+
+def test_tool_registry_keeps_detached_calls_however_old() -> None:
+    """A detached result lands later; forgetting it loses its attribution."""
+    a = _build_agent()
+    a.runtime.detached["old"] = cast("asyncio.Task[None]", None)
+    a._tool_registry["old"] = ("Bash", 0.0)
+    for i in range(_TOOL_REGISTRY_MAX + 500):
+        a._track_tool_registry(
+            types.runtime.ModelResponseComplete(
+                message=types.runtime.AssistantMessage(
+                    text="",
+                    tool_calls=(
+                        types.runtime.ToolCall(id=f"c{i}", name="Echo", args={}),
+                    ),
+                ),
+            ),
+        )
+    assert a._tool_registry["old"] == ("Bash", 0.0)
 
 
 if __name__ == "__main__":

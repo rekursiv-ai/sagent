@@ -11,7 +11,6 @@ from wesearch.errors import FetchError
 from wesearch.fetch import FetchSession
 
 from sagent.tools.slack import Slack
-from sagent.types.runtime import ToolResult
 
 
 _TOKEN = "test-token-placeholder"  # noqa: S105 -- fake test token
@@ -41,12 +40,6 @@ def test_summary_with_channel() -> None:
 def test_summary_no_channel() -> None:
     s = Slack(token=_TOKEN)
     assert s.summary({"operation": "list_channels"}) == "Slack list_channels"
-
-
-def test_summary_result_none() -> None:
-    assert (
-        Slack(token=_TOKEN).summary_result(ToolResult(call_id="", content="ok")) is None
-    )
 
 
 def test_prompt_empty() -> None:

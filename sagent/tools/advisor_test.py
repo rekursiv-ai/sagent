@@ -18,7 +18,6 @@ from sagent.types.runtime import (
     AssistantMessage,
     ModelResponsePartial,
     RuntimeEvent,
-    ToolResult,
 )
 
 
@@ -49,7 +48,6 @@ def test_metadata_basics() -> None:
     assert t.name == "advisor"
     assert t.tool_id == "application/x-tool-advisor"
     assert t.summary({}) == "Advisor consulting…"
-    assert t.summary_result(ToolResult(call_id="", content="")) is None
 
 
 def test_prompt_returns_nudge() -> None:

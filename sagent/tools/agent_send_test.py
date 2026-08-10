@@ -12,7 +12,6 @@ from sagent.tools import agent_send as send_module
 from sagent.tools.agent_send import AgentSend
 from sagent.types.runtime import (
     AgentSendMessage,
-    ToolResult,
 )
 
 
@@ -20,7 +19,6 @@ def test_metadata_basics() -> None:
     t = AgentSend()
     assert t.name == "AgentSend"
     assert t.tool_id == "application/x-tool-agentsend"
-    assert t.summary_result(ToolResult(call_id="", content="")) is None
 
 
 def test_summary_short_and_long() -> None:

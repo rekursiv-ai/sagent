@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Annotated, Final
 
 import asyncio
 import time
@@ -13,11 +13,11 @@ import time
 from sagent.agent.state import get_tool_state
 from sagent.lib.custom_json import JSON, bool_val, int_val, json_freeze
 from sagent.tools.core import load_tool_description
+from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
+    Invocation,
     Node,
-    match_pipeline,
-    unwrap_cd_prefix,
-    unwrap_cd_subtree,
+    walk_commands,
 )
 from sagent.tools.lib.path_sort import (
     SORT_VALUES,
@@ -25,6 +25,7 @@ from sagent.tools.lib.path_sort import (
     safe_size,
     sort_paths,
 )
+from sagent.tools.tool_spec import CLI_SETTABLE
 from sagent.types.runtime import ToolResult
 
 
@@ -77,6 +78,21 @@ class List:
         }
     )
 
+    output: Annotated[Toggle, CLI_SETTABLE] = "off"
+    """Whether the result body renders in the pane."""
+
+    output_head_rows: Annotated[int, CLI_SETTABLE] = 2
+    """Leading body rows kept."""
+
+    output_tail_rows: Annotated[int, CLI_SETTABLE] = 2
+    """Trailing body rows kept, after a ``⋯ N lines ⋯`` marker."""
+
+    output_max_width: Annotated[int, CLI_SETTABLE] = 0
+    """Cell width cap; ``0`` uses the pane width."""
+
+    output_wrap: Annotated[Wrap, CLI_SETTABLE] = "wrap"
+    """``wrap`` continues an over-wide line, ``chop`` marks the cut."""
+
     def summary(self, args: Mapping[str, object]) -> str:
         """Return a short label for this directory listing.
 
@@ -89,19 +105,6 @@ class List:
         """
         path = str(args.get("path", "")) or "."
         return f"List {path}"
-
-    def summary_result(self, result: ToolResult) -> str | None:
-        """Suppress the per-call receipt for List.
-
-        Args:
-          result: Completed ``ToolResult`` (ignored).
-
-        Returns:
-          receipt: Always ``None`` (no receipt line).
-
-        """
-        del result
-        return None
 
     def prompt(self) -> str:
         """Return no supplemental system-prompt text for List.
@@ -199,7 +202,12 @@ class List:
         return ToolResult(call_id="", content=out)
 
     def bash_match(self, trees: Sequence[Node]) -> str | None:
-        """Emit a hint when the command is an ``ls`` invocation.
+        """Emit a hint when any command is an ``ls`` invocation.
+
+        Policy only: :func:`walk_commands` supplies every simple command
+        with its context, so a leading ``cd``, an enclosing loop, and a
+        trailing ``| head`` all reach this matcher without it re-deriving
+        AST shape.
 
         Args:
           trees: Parsed bashlex command trees from the active Bash call.
@@ -208,29 +216,44 @@ class List:
           hint: Nudge string redirecting to the List tool, or ``None``.
 
         """
-        effective: Sequence[Node] = unwrap_cd_subtree(trees) or trees
-        unwrapped = unwrap_cd_prefix(effective)
-        if unwrapped is not None:
-            _cwd, cmd = unwrapped
-            if cmd.exe != "ls" or cmd.env_prefix:
-                return None
-            return _ls_to_hint(cmd.args, max_results=None, flip_sort=False)
-        pair = match_pipeline(effective)
-        if pair is None:
-            return None
-        first, second = pair
-        if first.exe != "ls":
-            return None
-        if second.exe == "head":
-            flip = False
-        elif second.exe == "tail":
-            flip = True
-        else:
-            return None
-        n = _parse_line_count(second.args)
-        if n is None:
-            return None
-        return _ls_to_hint(first.args, max_results=n, flip_sort=flip)
+        invocations = walk_commands(trees)
+        for inv in invocations:
+            if inv.exe != "ls" or inv.env_prefix or inv.captures_stdout:
+                continue
+            if not inv.piped_into:
+                hint = _ls_to_hint(inv.args, max_results=None, flip_sort=False)
+            else:
+                hint = _piped_ls_hint(inv, invocations)
+            if hint is not None:
+                return hint
+        return None
+
+
+def _piped_ls_hint(
+    inv: Invocation, all_invocations: Sequence[Invocation]
+) -> str | None:
+    """Nudge for ``ls … | head/tail -N``, which List expresses natively.
+
+    ``tail`` flips the sort: the last N of an ascending listing is the
+    first N of a descending one, which is what ``sort`` + ``max_results``
+    already say.
+    """
+    if inv.piped_into == "head":
+        flip = False
+    elif inv.piped_into == "tail":
+        flip = True
+    else:
+        return None
+    sink = next(
+        (o for o in all_invocations if o.exe == inv.piped_into),
+        None,
+    )
+    if sink is None:
+        return None
+    n = _parse_line_count(sink.args)
+    if n is None:
+        return None
+    return _ls_to_hint(inv.args, max_results=n, flip_sort=flip)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

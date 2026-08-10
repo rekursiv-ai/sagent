@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Final, cast
+from typing import Annotated, Final, cast
 
 import asyncio
 import json
+import re
 
 from sagent.agent.state import current_agent_var, get_tool_state
 from sagent.lib.custom_json import (
@@ -23,10 +24,11 @@ from sagent.tools.core import (
     mark_read,
     resolve_tool_path,
 )
+from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
+    Invocation,
     Node,
-    match_pipeline,
-    unwrap_cd_prefix,
+    walk_commands,
 )
 from sagent.tools.lib.pdf import (
     MAX_INLINE_PAGES,
@@ -38,6 +40,7 @@ from sagent.tools.lib.pdf import (
     is_pdf,
     parse_page_range,
 )
+from sagent.tools.tool_spec import CLI_SETTABLE
 from sagent.types.runtime import BytesMessage, ToolResult
 
 
@@ -68,7 +71,6 @@ class Read:
     tool_id: str = "application/x-tool-read"
     clearable_results: bool = True
     description: str = load_tool_description("Read")
-    emit_tool_summary: bool = False
     directive_schema: JSON = json_freeze(
         {
             "type": "object",
@@ -156,6 +158,21 @@ class Read:
             pages=pages,
         )
 
+    output: Annotated[Toggle, CLI_SETTABLE] = "off"
+    """Whether the result body renders in the pane."""
+
+    output_head_rows: Annotated[int, CLI_SETTABLE] = 2
+    """Leading body rows kept."""
+
+    output_tail_rows: Annotated[int, CLI_SETTABLE] = 2
+    """Trailing body rows kept, after a ``⋯ N lines ⋯`` marker."""
+
+    output_max_width: Annotated[int, CLI_SETTABLE] = 0
+    """Cell width cap; ``0`` uses the pane width."""
+
+    output_wrap: Annotated[Wrap, CLI_SETTABLE] = "wrap"
+    """``wrap`` continues an over-wide line, ``chop`` marks the cut."""
+
     def serialize_key(self, args: Mapping[str, object]) -> str | None:
         """Serialize same-file Read/Edit/Write within a cohort.
 
@@ -201,28 +218,6 @@ class Read:
         else:
             suffix = ""
         return f"Read {fname}{suffix}"
-
-    def summary_result(self, result: ToolResult) -> str | None:
-        """One-line receipt: line count for text, ``binary``/``unchanged`` markers.
-
-        Args:
-          result: Completed ``ToolResult`` from ``run``.
-
-        Returns:
-          receipt: Short receipt line, or ``None`` when suppressed/empty.
-
-        """
-        if not self.emit_tool_summary or result.is_error:
-            return None
-        text = result.content
-        has_binary = bool(result.attachments)
-        if not text:
-            return "binary" if has_binary else None
-        if has_binary:
-            return "binary"
-        if text.startswith("[File unchanged"):
-            return "unchanged"
-        return f"{text.count(chr(10))} lines"
 
     def prompt(self) -> str:
         """Return supplemental prompt text for this tool.
@@ -298,7 +293,13 @@ class Read:
         )
 
     def bash_match(self, trees: Sequence[Node]) -> str | None:
-        """Emit a hint if the command is ``cat``/``head``/``tail``.
+        """Emit a hint if any command reads a file the Read tool could.
+
+        Policy only: :func:`walk_commands` supplies every simple command
+        with its context, so a leading ``cd``, an enclosing loop, and a
+        trailing ``| head`` all reach this matcher without it re-deriving
+        AST shape -- the omission that left ``cd X && cat f | head``
+        silent while ``cat f | head`` nudged.
 
         Args:
           trees: Parsed bashlex command trees from the active Bash call.
@@ -307,25 +308,11 @@ class Read:
           hint: Nudge string redirecting to the Read tool, or ``None``.
 
         """
-        single = self._match_single(trees)
-        if single is not None:
-            return single
-        return _match_pipeline_read(trees)
-
-    def _match_single(self, trees: Sequence[Node]) -> str | None:
-        """Match a single ``cat``/``head``/``tail`` command for a Read nudge."""
-        unwrapped = unwrap_cd_prefix(trees)
-        if unwrapped is None:
-            return None
-        cmd = unwrapped[1]  # [0] is the cd-prefix cwd, unused by the nudge
-        if cmd.env_prefix:
-            return None
-        if cmd.exe == "cat":
-            return _match_cat(cmd.args)
-        if cmd.exe == "head":
-            return _match_head_tail(cmd.args, which="head")
-        if cmd.exe == "tail":
-            return _match_head_tail(cmd.args, which="tail")
+        for inv in walk_commands(trees):
+            if inv.env_prefix or inv.captures_stdout:
+                continue
+            if _reads_a_file(inv):
+                return f"{inv.exe} via Bash is a bad UX. Use the Read tool."
         return None
 
 
@@ -485,65 +472,78 @@ def _window_text(
     return result_str
 
 
-def _match_cat(args: tuple[str, ...]) -> str | None:
-    """Match ``cat FILE`` (exactly one positional, no flags) for a Read nudge."""
-    if len(args) != 1 or args[0].startswith("-"):
-        return None
-    return "cat via Bash is a bad UX. Use the Read tool."
+def _reads_a_file(inv: Invocation) -> bool:
+    """Whether this invocation is a file read the Read tool replaces.
+
+    A sink that TRANSFORMS (``sort``, ``awk``) is doing work Read cannot,
+    so the shape is left alone; one that merely truncates or paginates is
+    what Read's own windowing already does.
+    """
+    if inv.piped_into and inv.piped_into not in _CAT_SHAPERS:
+        return False
+    if inv.exe == "cat":
+        return _cat_reads(inv.args)
+    if inv.exe in ("head", "tail"):
+        return _head_tail_reads(inv.args)
+    if inv.exe == "sed":
+        return _sed_reads(inv.args)
+    return False
 
 
-def _match_head_tail(
-    args: tuple[str, ...],
-    *,
-    which: str,
-) -> str | None:
-    """Validate ``head``/``tail`` args and return a fixed hint.
+def _cat_reads(args: tuple[str, ...]) -> bool:
+    """``cat FILE...`` with no flags.
 
-    Supported shapes: ``<cmd> FILE``, ``<cmd> -n N FILE``,
-    ``<cmd> -N FILE``. Anything else (e.g. ``-c`` bytes, bundled
-    flags) bails.
+    Multiple files count: the nudge is a suggestion to batch Read calls,
+    which is exactly what several ``cat`` positionals are doing by hand.
+    """
+    return bool(args) and not any(a.startswith("-") for a in args)
+
+
+def _head_tail_reads(args: tuple[str, ...]) -> bool:
+    """``head``/``tail`` limited to line counts, not byte offsets.
+
+    ``-c`` reads bytes, which Read's line windowing cannot express, so
+    that shape is deliberately left alone.
     """
     positional: list[str] = []
     i = 0
     while i < len(args):
         a = args[i]
         if a.startswith("--"):
-            return None
+            return False
         if a == "-n":
-            if i + 1 >= len(args):
-                return None
-            try:
-                int(args[i + 1])
-            except ValueError:
-                return None
+            if i + 1 >= len(args) or not args[i + 1].lstrip("+-").isdigit():
+                return False
             i += 2
             continue
         if a.startswith("-") and a != "-":
-            rest = a[1:]
-            if rest.isdigit():
-                i += 1
-                continue
-            return None
+            if not a[1:].isdigit():
+                return False
+            i += 1
+            continue
         positional.append(a)
         i += 1
-    if len(positional) != 1:
-        return None
-    return f"{which} via Bash is a bad UX. Use the Read tool."
+    return bool(positional)
 
 
-def _match_pipeline_read(trees: Sequence[Node]) -> str | None:
-    """Match ``cat FILE | head/tail/less/more``."""
-    pair = match_pipeline(trees)
-    if pair is None:
-        return None
-    first, second = pair
-    if first.exe != "cat":
-        return None
-    if len(first.args) != 1 or first.args[0].startswith("-"):
-        return None
-    if second.exe not in _CAT_SHAPERS:
-        return None
-    return _NUDGE
+def _sed_reads(args: tuple[str, ...]) -> bool:
+    """``sed -n 'M,Np'`` -- the hand-rolled line window Read's args express.
+
+    Gated hard on a bare print range: a substitution or an in-place edit
+    is Edit's business, and silently nudging those toward Read would
+    send the caller to a tool that cannot do the job.
+    """
+    if not any(a.startswith("-") and not a.startswith("--") and "n" in a for a in args):
+        return False
+    scripts = [a for a in args if _LINE_RANGE_SCRIPT.fullmatch(a)]
+    others = [a for a in args if not a.startswith("-") and a not in scripts]
+    return len(scripts) == 1 and bool(others)
+
+
+# ``sed -n`` scripts that only PRINT a line range: ``5p``, ``1,50p``,
+# ``10,$p``. Anything else (``s/…/…/``, ``d``, ``w file``) transforms or
+# writes, and belongs to Edit rather than Read.
+_LINE_RANGE_SCRIPT: Final = re.compile(r"^\d+(,(\d+|\$))?p$")
 
 
 def _image_mime(suffix: str) -> str:

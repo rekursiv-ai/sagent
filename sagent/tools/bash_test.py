@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock
 
 import asyncio
+import re
 import warnings
 
 import pytest
@@ -15,22 +17,25 @@ from sagent.agent.state import ToolState
 from sagent.lib.tool_validation import validate_tool_input
 from sagent.testing import with_fake_agent
 from sagent.tools.bash import (
-    _BASH_EXIT_RE,
     BASH_DEFAULT_TIMEOUT_MS,
     BASH_MAX_TIMEOUT_MS,
     Bash,
     _ensure_valid_cwd,
-    _kill_and_drain,
     _kill_process_group,
     _process_output,
     _reap_at_exit,
     _render_bash_description,
+    _run_foreground,
     _suppress_oserror,
     reap_background_processes,
 )
 from sagent.tools.core import TOOL_RESULT_MAX_CHARS
 from sagent.tools.lib.bash import Node
-from sagent.types.runtime import ToolResult
+
+
+# The production code writes this marker with an f-string; the pattern is
+# a test oracle, so it lives with the assertion that uses it.
+_EXIT_MARKER_RE = re.compile(r"(?:^|\n)\[exit code: (\d+)\]\s*$")
 
 
 class _FakePeer:
@@ -59,58 +64,20 @@ class _BogusPeer:
 
 def test_summary_short_command() -> None:
     b = Bash()
-    assert b.summary({"command": "ls"}) == "Bash ls"
+    assert b.summary({"command": "ls"}) == "Bash\nls"
 
 
-def test_summary_empty_command() -> None:
+def test_summary_prefers_the_description_row() -> None:
+    """The header is the model's own description; the command is input."""
     b = Bash()
-    assert b.summary({}) == "Bash"
+    assert b.summary({"command": "ls -la", "description": "List files"}) == (
+        "Bash List files\nls -la"
+    )
 
 
-def test_summary_keeps_long_command() -> None:
-    """Labels carry the command whole; the renderer owns wrap + line cap."""
+def test_summary_without_description_is_the_bare_name() -> None:
     b = Bash()
-    assert Bash().summary({"command": "x" * 100}) == "Bash " + "x" * 100
-    del b
-
-
-def test_summary_replaces_newlines_with_pilcrow() -> None:
-    b = Bash()
-    assert b.summary({"command": "a\nb\r\nc\rd\te"}) == "Bash a⏎b⏎c⏎d e"
-
-
-def test_summary_result_off_by_default() -> None:
-    b = Bash()
-    r = ToolResult(call_id="", content="ok\n")
-    assert b.summary_result(r) is None
-
-
-def test_summary_result_line_count_when_emit_on() -> None:
-    b = Bash()
-    b.emit_tool_summary = True
-    r = ToolResult(call_id="", content="line1\nline2\n")
-    assert b.summary_result(r) == "2L"
-
-
-def test_summary_result_with_exit_code() -> None:
-    b = Bash()
-    b.emit_tool_summary = True
-    r = ToolResult(call_id="", content="oops\n[exit code: 7]\n")
-    assert b.summary_result(r) == "1L · exit 7"
-
-
-def test_summary_result_skipped_on_error() -> None:
-    b = Bash()
-    b.emit_tool_summary = True
-    r = ToolResult(call_id="", content="boom", is_error=True)
-    assert b.summary_result(r) is None
-
-
-def test_summary_result_no_trailing_newline_counts_one() -> None:
-    b = Bash()
-    b.emit_tool_summary = True
-    r = ToolResult(call_id="", content="only line")
-    assert b.summary_result(r) == "1L"
+    assert b.summary({"command": "ls -la"}) == "Bash\nls -la"
 
 
 def test_prompt_empty() -> None:
@@ -135,9 +102,8 @@ def test_description_does_not_recommend_ls_for_directory_inspection() -> None:
 
 
 def test_schema_required_command() -> None:
-    b = Bash()
-    schema = b.directive_schema
-    assert isinstance(schema, dict) or hasattr(schema, "__getitem__")
+    schema = Bash().directive_schema
+    assert isinstance(schema, Mapping)
     assert schema["required"] == ("command",)
 
 
@@ -178,7 +144,7 @@ def test_exit_marker_survives_truncation(stdout_size: int) -> None:
     out = _process_output(
         proc, "x" * stdout_size, "fatal: boom", sentinel="__NONE__", state=ToolState()
     )
-    assert _BASH_EXIT_RE.search(out), (
+    assert _EXIT_MARKER_RE.search(out), (
         f"exit-code marker lost at stdout={stdout_size:,}: a failed command"
         " is indistinguishable from a successful one"
     )
@@ -386,18 +352,24 @@ async def test_kill_process_group_sigkill_on_wait_timeout(
     assert wait_calls == [1]
 
 
-@pytest.mark.asyncio
-async def test_kill_and_drain_formats_reason() -> None:
-    proc = MagicMock()
-    proc.returncode = 0
-    proc.pid = 12_345
+def test_reason_replaces_the_exit_code() -> None:
+    """A killed run reports WHY, not the shell's incidental status."""
 
-    async def _comm() -> tuple[bytes, bytes]:
-        return (b"out\n", b"err\n")
+    class _Proc:
+        returncode = -9
 
-    proc.communicate = _comm
-    text = await _kill_and_drain(proc, start=0.0, reason="timeout")
-    assert "timeout" in text
+    text = _process_output(
+        cast("asyncio.subprocess.Process", _Proc()),
+        "out\n",
+        "err\n",
+        sentinel="__S__",
+        state=ToolState(),
+        reason="timeout after 1.0s",
+    )
+    assert "timeout after 1.0s" in text
+    assert "exit code" not in text
+    assert "out" in text
+    assert "err" in text
 
 
 @pytest.mark.asyncio
@@ -435,6 +407,73 @@ async def test_peer_nudge_skipped_on_unparseable(tmp_path: Path) -> None:
         result = await b.run({"command": "echo hi |"})
     # On unparseable input, no nudge banner appears.
     assert "<system-reminder>" not in result.content
+
+
+def test_stderr_is_bounded_with_the_body() -> None:
+    """The cap must bound the whole result, not just stdout.
+
+    Truncating stdout and then appending raw stderr let a noisy failure
+    return twice the cap, so the bound the docstring advertises did not
+    hold on exactly the runs that produce the most output.
+    """
+
+    class _Proc:
+        returncode = 1
+
+    out = _process_output(
+        cast("asyncio.subprocess.Process", _Proc()),
+        "",
+        "e" * (2 * TOOL_RESULT_MAX_CHARS),
+        sentinel="__S__",
+        state=ToolState(),
+    )
+    assert len(out) <= TOOL_RESULT_MAX_CHARS + 200, len(out)
+    assert "[exit code: 1]" in out, "diagnostics must survive truncation"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_never_reaches_the_output(tmp_path: Path) -> None:
+    """``echo`` appends no leading newline, so unterminated stdout fuses.
+
+    The cwd sentinel then fails its ``startswith`` test: tracking stops
+    AND the internal token is shown to the model as command output.
+    """
+    state = ToolState()
+    state.bash_cwd = str(tmp_path)
+    state.start_cwd = str(tmp_path)
+    out = await _run_foreground("printf hello", state=state, timeout_s=5)
+    assert "__SAGENT_CWD_" not in out, out
+    assert out.strip() == "hello"
+
+
+@pytest.mark.asyncio
+async def test_cwd_tracking_survives_unterminated_output(tmp_path: Path) -> None:
+    (tmp_path / "sub").mkdir()
+    state = ToolState()
+    state.bash_cwd = str(tmp_path)
+    state.start_cwd = str(tmp_path)
+    _ = await _run_foreground("cd sub; printf hello", state=state, timeout_s=5)
+    assert state.bash_cwd.endswith("sub")
+
+
+@pytest.mark.asyncio
+async def test_timeout_keeps_output_produced_before_the_kill(
+    tmp_path: Path,
+) -> None:
+    """A timed-out run must still report what the command printed.
+
+    The drain re-awaited ``communicate()`` after the first call had been
+    cancelled, which returns only what buffered after the kill -- so the
+    pre-timeout output the drain exists to recover was dropped, and the
+    raw sentinel was shown in its place.
+    """
+    state = ToolState()
+    state.bash_cwd = str(tmp_path)
+    state.start_cwd = str(tmp_path)
+    out = await _run_foreground("echo before; sleep 30", state=state, timeout_s=1)
+    assert "before" in out, out
+    assert "__SAGENT_CWD_" not in out, out
+    assert "timeout" in out
 
 
 if __name__ == "__main__":

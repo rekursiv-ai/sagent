@@ -12,7 +12,6 @@ from wesearch.errors import FetchError
 from wesearch.fetch import FetchSession
 
 from sagent.tools.linear import Linear
-from sagent.types.runtime import ToolResult
 
 
 if TYPE_CHECKING:
@@ -39,11 +38,6 @@ def test_summary_with_id() -> None:
 def test_summary_without_id() -> None:
     t = Linear()
     assert t.summary({"operation": "list_issues"}) == "Linear list_issues"
-
-
-def test_summary_result_returns_none() -> None:
-    t = Linear()
-    assert t.summary_result(ToolResult(call_id="", content="x")) is None
 
 
 def test_prompt_empty() -> None:

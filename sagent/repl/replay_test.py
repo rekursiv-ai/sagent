@@ -239,6 +239,51 @@ def test_replay_tool_result_summary() -> None:
     assert p.tool_summaries == ["one line"]
 
 
+def test_replay_renders_a_body_the_live_pane_showed() -> None:
+    """Resume must reproduce the scrollback, bodies included.
+
+    Replay built its observer with no output policy, so a tool with
+    ``output=on`` rendered its body live and nothing after ``--resume``.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _ShowingTool(_StubTool):
+        # The whole knob set: ``row_spec`` narrows through the
+        # ``Displayable`` protocol, so a partial stub reads as hidden.
+        output: str = "on"
+        output_head_rows: int = 0
+        output_tail_rows: int = 0
+        output_max_width: int = 0
+        output_wrap: str = "wrap"
+
+    history: list[TapeEvent] = [
+        AssistantMessage(
+            text="",
+            tool_calls=(ToolCall(id="c1", name="Echo", args={}),),
+        ),
+        ToolResult(call_id="c1", content="SENTINEL"),
+    ]
+    p = RecordingPrinter()
+    replay_messages(
+        _agent(history=history, tools_map={"Echo": _ShowingTool()}),
+        p,
+    )
+    assert "SENTINEL" in "".join(p.tool_outputs)
+
+
+def test_replay_hides_a_body_for_a_tool_with_output_off() -> None:
+    history: list[TapeEvent] = [
+        AssistantMessage(
+            text="",
+            tool_calls=(ToolCall(id="c1", name="Echo", args={}),),
+        ),
+        ToolResult(call_id="c1", content="SENTINEL"),
+    ]
+    p = RecordingPrinter()
+    replay_messages(_agent(history=history, tools_map={"Echo": _StubTool()}), p)
+    assert p.tool_outputs == []
+
+
 def test_replay_footer_with_cost() -> None:
     history: list[TapeEvent] = [UserMessage(text="hi")]
     p = RecordingPrinter()
