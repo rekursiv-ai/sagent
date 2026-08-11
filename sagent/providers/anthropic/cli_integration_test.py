@@ -36,13 +36,15 @@ import pytest
 
 from sagent.providers.anthropic.cli import (
     AnthropicCLI,
+    _AnthropicCLIModel,
     _claude_auth_status,
 )
 from sagent.providers.lib.oauth import credentials_path
 from sagent.providers.lib.subproc import SubprocessTransportError
 from sagent.tools import tool
-from sagent.types.model import ModelRequest
+from sagent.types.model import ModelRequest, ModelResponse
 from sagent.types.runtime import UserMessage
+from sagent.types.tools import Tool
 
 
 pytestmark = [
@@ -433,6 +435,12 @@ async def test_real_claude_drives_full_detach_path() -> None:
     a tool (observed running it inline or hallucinating it absent),
     which is a model-capability fact, not a provider defect. This is the
     committed analogue of the standalone MCP experiment.
+
+    Whether even sonnet elects to background is a per-sample coin flip, so
+    turn 1 is retried on a FRESH session (a session that already contains an
+    inline call is poisoned -- the transcript teaches the next turn to repeat
+    it). Only a model that declines every attempt fails the test; the
+    provider-side assertions below are unconditional.
     """
 
     @tool(name="slow_oracle")
@@ -441,40 +449,13 @@ async def test_real_claude_drives_full_detach_path() -> None:
         await asyncio.sleep(0.5)
         return "PELICAN"
 
-    sid = str(_uuid.uuid4())
-    model = AnthropicCLI.from_credentials().model("claude-sonnet-4-6", session_id=sid)
+    detach_prompt = (
+        "Call the slow_oracle tool, passing background set to true so it runs "
+        "without blocking. Do NOT wait for its result. Just confirm you started it."
+    )
+    model, turn1 = await _background_electing_turn_one(slow_oracle, detach_prompt)
     try:
-        # Turn 1: claude must background the tool and end the turn on the
-        # detached placeholder, with no answer yet.
-        turn1 = await model.stream(
-            ModelRequest(
-                messages=[
-                    UserMessage(
-                        text=(
-                            "Call the slow_oracle tool, passing background set "
-                            "to true so it runs without blocking. Do NOT wait "
-                            "for its result. Just confirm you started it."
-                        ),
-                    ),
-                ],
-                tools=[slow_oracle],
-            ),
-        )
-        bridge = model._tools_bridge
-        assert bridge is not None, "turn 1 must have created the bridge"
-        for _ in range(200):
-            if not bridge.has_pending_detached():
-                break
-            await asyncio.sleep(0.05)
-        assert not bridge.has_pending_detached(), "detached task never completed"
-        # Real claude actually drove the detach: a background task ran and
-        # produced a result. If empty, claude declined to background -- the
-        # very behavior this test exists to verify, surfaced clearly.
-        assert bridge._bg_done, (
-            "real claude did not background the tool (ran it inline or "
-            f"skipped it); turn-1 text was {turn1.message.text!r}"
-        )
-        # And it did NOT already have the answer (it came up for air).
+        # It did NOT already have the answer (it came up for air).
         assert "PELICAN" not in turn1.message.text.upper(), (
             f"turn 1 should not contain the answer yet; got {turn1.message.text!r}"
         )
@@ -483,13 +464,7 @@ async def test_real_claude_drives_full_detach_path() -> None:
         turn2 = await model.stream(
             ModelRequest(
                 messages=[
-                    UserMessage(
-                        text=(
-                            "Call the slow_oracle tool, passing background set "
-                            "to true so it runs without blocking. Do NOT wait "
-                            "for its result. Just confirm you started it."
-                        ),
-                    ),
+                    UserMessage(text=detach_prompt),
                     UserMessage(
                         text=(
                             "What word did the slow_oracle tool return? It was "
@@ -508,6 +483,52 @@ async def test_real_claude_drives_full_detach_path() -> None:
         await model.close()
     assert "PELICAN" in turn2.message.text.upper(), (
         f"model never received the detached result; got {turn2.message.text!r}"
+    )
+
+
+async def _background_electing_turn_one(
+    slow_oracle: Tool,
+    prompt: str,
+    attempts: int = 3,
+) -> tuple[_AnthropicCLIModel, ModelResponse]:
+    """Return a model whose first turn really backgrounded ``slow_oracle``.
+
+    Non-empty ``_bg_done`` is the proof: claude emitted ``background: true``
+    and the bridge ran the tool as a task. Retrying within one session would
+    not be an independent sample -- a transcript holding an inline call biases
+    the next turn toward repeating it -- so each attempt mints a session id.
+    """
+    last = ""
+    for _ in range(attempts):
+        model = AnthropicCLI.from_credentials().model(
+            "claude-sonnet-4-6",
+            session_id=str(_uuid.uuid4()),
+        )
+        try:
+            turn1 = await model.stream(
+                ModelRequest(
+                    messages=[UserMessage(text=prompt)],
+                    tools=[slow_oracle],
+                ),
+            )
+            bridge = model._tools_bridge
+            assert bridge is not None, "turn 1 must have created the bridge"
+            for _ in range(200):
+                if not bridge.has_pending_detached():
+                    break
+                await asyncio.sleep(0.05)
+            assert not bridge.has_pending_detached(), "detached task never completed"
+            if bridge._bg_done:
+                return model, turn1
+            last = turn1.message.text
+        except (TimeoutError, SubprocessTransportError) as exc:
+            await model.close()
+            _skip_if_bridge_unavailable(exc)
+            raise
+        await model.close()
+    pytest.fail(
+        f"real claude declined to background the tool in {attempts} fresh "
+        f"sessions (ran it inline or skipped it); last turn-1 text was {last!r}"
     )
 
 
