@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Final, Literal, cast, get_args
+from typing import Annotated, Final, Literal, cast, get_args
 
 import asyncio
 
-from wesearch.errors import BotDetectionError, FetchError
-from wesearch.fetch import Policy, Transport
+from wesearch.fetch import Extractor, Policy, Transport
+from wesearch.types.errors import BotDetectionError, FetchError
 from wesearch.web import fetch_web
 
 import cachetools
@@ -60,6 +60,21 @@ class WebFetch:
                         "transport to stress a path."
                     ),
                 },
+                "extractor": {
+                    "type": "string",
+                    "enum": get_args(Extractor),
+                    "description": (
+                        "How the page becomes text. 'html2text' (default) "
+                        "converts every text node to Markdown. 'markdownify' "
+                        "converts the document's elements instead, keeping "
+                        "nested lists and tables a text walk flattens. "
+                        "'trafilatura' returns only what it scores as the "
+                        "article, which is smaller but drops the substance of "
+                        "any page that is not article-shaped -- a dictionary "
+                        "entry, a Q&A thread, a profile timeline. 'raw' "
+                        "returns the HTML source untouched."
+                    ),
+                },
                 "json": {
                     "description": (
                         "JSON-serializable body for POST requests. Sets"
@@ -100,10 +115,10 @@ class WebFetch:
     # freeze is about configuration, not about the response cache, and
     # ``/tool`` rebuilds the instance so a default_factory keeps each
     # swap from inheriting a stale cache.
-    _cache: cachetools.TTLCache[tuple[Transport, str], str] = field(
-        default_factory=lambda: cachetools.TTLCache[tuple[Transport, str], str](
-            maxsize=128, ttl=15 * 60
-        ),
+    _cache: cachetools.TTLCache[tuple[Transport, Extractor, str], str] = field(
+        default_factory=lambda: cachetools.TTLCache[
+            tuple[Transport, Extractor, str], str
+        ](maxsize=128, ttl=15 * 60),
         repr=False,
         compare=False,
     )
@@ -166,21 +181,32 @@ class WebFetch:
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Fetch the URL, extract main content, and return as text.
 
-        GET responses are cached per URL and transport for 15 minutes. A URL
-        whose server-side extraction path changes during the TTL window (e.g. a
-        Reddit page that starts returning a different shape and falls into a
-        different adapter) continues to serve the previously-extracted body
-        until the entry expires. Switching transport bypasses that cache entry.
+        GET responses are cached per URL, transport, and extractor for 15
+        minutes. A URL whose server-side extraction path changes during the TTL
+        window (e.g. a Reddit page that starts returning a different shape and
+        falls into a different adapter) continues to serve the
+        previously-extracted body until the entry expires. Switching transport
+        or extractor bypasses that cache entry.
 
         Args:
-          args: Directive with ``url`` and optional ``method`` / ``json``
-              / ``form`` keys.
+          args: Directive with ``url`` and optional ``method`` / ``transport``
+              / ``extractor`` / ``json`` / ``form`` keys.
 
         Returns:
           result: Extracted text body, or a fetch/extraction error.
 
         """
-        raw_url = str(args.get("url", ""))
+        raw_url = args.get("url", "")
+        if not isinstance(raw_url, str):
+            # A model can emit a schema-invalid directive, and this method is
+            # where that arrives -- str() would turn ``{"url": []}`` into a
+            # fetch of the literal text "[]" and report the resulting failure as
+            # a network error.
+            return ToolResult(
+                call_id="",
+                content=f"Invalid url: expected a string, got {type(raw_url).__name__}.",
+                is_error=True,
+            )
         raw_method = str(args.get("method", "GET")).upper()
         if raw_method not in ("GET", "POST"):
             return ToolResult(
@@ -206,13 +232,29 @@ class WebFetch:
                 is_error=True,
             )
         transport = cast(Transport, raw_transport)
+        raw_extractor = args.get("extractor", "html2text")
+        if not isinstance(raw_extractor, str) or raw_extractor not in get_args(
+            Extractor
+        ):
+            return ToolResult(
+                call_id="",
+                content=(
+                    f"Invalid extractor {raw_extractor!r}."
+                    f" Valid: {', '.join(get_args(Extractor))}."
+                ),
+                is_error=True,
+            )
+        extractor = cast(Extractor, raw_extractor)
 
         try:
             json_body, form_body = _request_bodies(method, args)
         except ValueError as e:
             return ToolResult(call_id="", content=str(e), is_error=True)
 
-        cache_key = (transport, raw_url) if method == "GET" else None
+        # The extractor is part of the key: two extractors of one URL are two
+        # different results, and omitting it would replay the first one's text
+        # for the second.
+        cache_key = (transport, extractor, raw_url) if method == "GET" else None
         if cache_key is not None:
             cached = self._cache.get(cache_key)
             if cached is not None:
@@ -233,7 +275,7 @@ class WebFetch:
                 method=method,
                 json_body=json_body,
                 form_body=form_body,
-                policy=Policy(transport=transport),
+                policy=Policy(transport=transport, extractor=extractor),
             )
         except BotDetectionError as e:
             # fetch() classified the block at the boundary: surface the SPECIFIC
@@ -277,9 +319,19 @@ def _request_bodies(
         raise ValueError(  # noqa: TRY004 -- caller catches ValueError uniformly.
             f"'form' must be an object of string fields, got {type(unfrozen_form).__name__}."
         )
-    return None, {
-        str(k): str(v) for k, v in cast(dict[str, Any], unfrozen_form).items()
-    }
+    # Values checked, not stringified: str() turned {"x": []} into the literal
+    # field "x=[]" and {"x": {"a": 1}} into "x={'a': 1}" -- a request the caller
+    # never described, sent to a real endpoint, while the schema promised
+    # strings. cast() to a value-typed dict so the check narrows rather than
+    # asserting.
+    form: dict[str, str] = {}
+    for key, value in cast("dict[str, object]", unfrozen_form).items():
+        if not isinstance(value, str):
+            raise ValueError(  # noqa: TRY004 -- caller catches ValueError uniformly.
+                f"'form' field {key!r} must be a string, got {type(value).__name__}."
+            )
+        form[str(key)] = value
+    return None, form
 
 
 _NUDGE: Final = "curl/wget via Bash is a bad UX. Use the WebFetch tool."

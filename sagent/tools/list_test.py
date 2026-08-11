@@ -131,7 +131,9 @@ def test_prompt_empty() -> None:
 def test_bash_match_ls_basic() -> None:
     trees = parse_bash("ls")
     assert trees is not None
-    assert list_tool.bash_match(trees) == "ls via Bash is a bad UX. Use the List tool."
+    assert list_tool.bash_match(trees) == (
+        "ls via Bash is a bad UX. Use the List tool. Replaces: `ls`. Try: List path='.'"
+    )
 
 
 def test_bash_match_ls_la() -> None:
@@ -183,22 +185,15 @@ def test_bash_match_ls_reverse_only() -> None:
     assert "name_desc" in result
 
 
-def test_bash_match_ls_long_flag_no_nudge() -> None:
-    trees = parse_bash("ls --color=auto")
+@pytest.mark.parametrize(
+    "command", ["ls --color=auto", "ls -Z", "ls a b", "ls -tS", "ls -R", "ls -lh"]
+)
+def test_bash_match_an_untranslatable_ls_still_nudges(command: str) -> None:
+    """A flag List cannot express costs the worked example, not the nudge."""
+    trees = parse_bash(command)
     assert trees is not None
-    assert list_tool.bash_match(trees) is None
-
-
-def test_bash_match_ls_unknown_flag_no_nudge() -> None:
-    trees = parse_bash("ls -Z")
-    assert trees is not None
-    assert list_tool.bash_match(trees) is None
-
-
-def test_bash_match_ls_multi_paths_no_nudge() -> None:
-    trees = parse_bash("ls a b")
-    assert trees is not None
-    assert list_tool.bash_match(trees) is None
+    hint = list_tool.bash_match(trees) or ""
+    assert hint.startswith("ls via Bash is a bad UX."), command
 
 
 def test_bash_match_ls_glob_redirect_to_glob() -> None:
@@ -208,12 +203,6 @@ def test_bash_match_ls_glob_redirect_to_glob() -> None:
         list_tool.bash_match(trees)
         == "ls glob via Bash is a bad UX. Use the Glob tool."
     )
-
-
-def test_bash_match_ls_t_and_s_conflict_no_nudge() -> None:
-    trees = parse_bash("ls -tS")
-    assert trees is not None
-    assert list_tool.bash_match(trees) is None
 
 
 def test_bash_match_ls_pipe_head() -> None:
@@ -255,28 +244,22 @@ def test_bash_match_ls_pipe_head_no_count() -> None:
     assert "max_results=10" in result
 
 
-def test_bash_match_ls_pipe_head_invalid() -> None:
-    trees = parse_bash("ls | head -c 5")
+@pytest.mark.parametrize(
+    "command", ["ls | head -c 5", "ls | head -nabc", "ls | head -n", "ls | head -0"]
+)
+def test_bash_match_an_unparsable_count_drops_only_the_bound(command: str) -> None:
+    """An unreadable ``head`` count leaves the listing nudge intact."""
+    trees = parse_bash(command)
     assert trees is not None
-    assert list_tool.bash_match(trees) is None
-
-
-def test_bash_match_ls_pipe_head_bad_n_value() -> None:
-    trees = parse_bash("ls | head -nabc")
-    assert trees is not None
-    assert list_tool.bash_match(trees) is None
-
-
-def test_bash_match_ls_pipe_head_n_no_value() -> None:
-    trees = parse_bash("ls | head -n")
-    assert trees is not None
-    assert list_tool.bash_match(trees) is None
+    hint = list_tool.bash_match(trees) or ""
+    assert hint.startswith("ls via Bash is a bad UX.")
+    assert "max_results=" not in hint
 
 
 def test_bash_match_cd_ls_prefix() -> None:
     trees = parse_bash("cd /src && ls")
     assert trees is not None
-    assert list_tool.bash_match(trees) == "ls via Bash is a bad UX. Use the List tool."
+    assert (list_tool.bash_match(trees) or "").startswith("ls via Bash is a bad UX.")
 
 
 def test_bash_match_env_prefix_no_nudge() -> None:
@@ -288,13 +271,6 @@ def test_bash_match_env_prefix_no_nudge() -> None:
 def test_bash_match_non_ls_no_nudge() -> None:
     trees = parse_bash("echo hi")
     assert trees is not None
-    assert list_tool.bash_match(trees) is None
-
-
-def test_bash_match_ls_pipe_head_negative_count() -> None:
-    trees = parse_bash("ls | head -0")
-    assert trees is not None
-    # ``-0`` parses to count 0, which is rejected (< 1).
     assert list_tool.bash_match(trees) is None
 
 
@@ -318,7 +294,7 @@ def test_bash_match_ls_double_dash_separator() -> None:
     trees = parse_bash("ls -- foo")
     assert trees is not None
     # ``--`` is skipped; ``foo`` becomes a single positional (treated like a path).
-    assert list_tool.bash_match(trees) == "ls via Bash is a bad UX. Use the List tool."
+    assert "Try: List path='foo'" in (list_tool.bash_match(trees) or "")
 
 
 if __name__ == "__main__":

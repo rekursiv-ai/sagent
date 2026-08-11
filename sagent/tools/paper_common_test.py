@@ -9,18 +9,20 @@ adaptation, and text rendering.
 from __future__ import annotations
 
 from wesearch.paper.custom_types import AuthorRecord, PaperRecord
-
-from sagent.tools.paper_common import (
+from wesearch.paper.render import (
     format_author_block,
     format_author_line,
     format_block,
     format_record,
+    truncation_notice,
+)
+
+from sagent.tools.paper_common import (
     normalize_id_arg,
     parse_optional_ids,
     resolve_id_args,
     short_id,
     summary_ids,
-    truncation_notice,
     validate_abstract_chars,
     validate_limit,
 )

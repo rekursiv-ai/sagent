@@ -175,72 +175,72 @@ def test_long_line_missing_file(tmp_path: Path) -> None:
     assert "no.py" in out
 
 
-def test_bash_match_find_with_name() -> None:
-    trees = parse_bash("find . -name '*.py'")
+@pytest.mark.parametrize(
+    "command",
+    [
+        "find . -name '*.py'",
+        "find /src -iname '*.PY'",
+        "find . -type f -name '*.py'",
+        "cd src && find . -name '*.py'",
+        # No ``-name`` at all: still an enumeration Glob performs.
+        "find . -type f",
+        # Predicates Glob cannot express are still a reach for Glob. The
+        # translated call is dropped, not the nudge.
+        "find . -mtime -1 -name '*.py'",
+        "find . -type l -name '*.py'",
+        "find /a /b -name '*.py'",
+        "find . -name",
+        "find . -type",
+    ],
+)
+def test_bash_match_find_nudges(command: str) -> None:
+    trees = parse_bash(command)
     assert trees is not None
-    assert (
-        glob_tool.bash_match(trees) == "find via Bash is a bad UX. Use the Glob tool."
-    )
+    hint = glob_tool.bash_match(trees) or ""
+    assert hint.startswith("find via Bash is a bad UX."), command
 
 
-def test_bash_match_find_with_iname() -> None:
-    trees = parse_bash("find /src -iname '*.PY'")
+@pytest.mark.parametrize(
+    ("command", "call"),
+    [
+        ("find . -name '*.py'", "Try: Glob pattern='**/*.py'"),
+        ("find /src -iname '*.PY'", "Try: Glob pattern='**/*.PY' path='/src'"),
+        ("find . -type f -name '*.py'", "Try: Glob pattern='**/*.py'"),
+    ],
+)
+def test_bash_match_find_suggests_a_concrete_call(command: str, call: str) -> None:
+    trees = parse_bash(command)
     assert trees is not None
-    assert (
-        glob_tool.bash_match(trees) == "find via Bash is a bad UX. Use the Glob tool."
-    )
+    assert call in (glob_tool.bash_match(trees) or ""), command
 
 
-def test_bash_match_find_type_f() -> None:
-    trees = parse_bash("find . -type f -name '*.py'")
+@pytest.mark.parametrize(
+    "command",
+    ["find . -mtime -1 -name '*.py'", "find /a /b -name '*.py'", "find . -type f"],
+)
+def test_an_untranslatable_predicate_drops_only_the_example(command: str) -> None:
+    """Detection must survive what the translator cannot render."""
+    trees = parse_bash(command)
     assert trees is not None
-    assert (
-        glob_tool.bash_match(trees) == "find via Bash is a bad UX. Use the Glob tool."
-    )
+    hint = glob_tool.bash_match(trees) or ""
+    assert hint.startswith("find via Bash is a bad UX.")
+    assert "Try: Glob" not in hint
 
 
-def test_bash_match_find_no_name_no_nudge() -> None:
-    trees = parse_bash("find . -type f")
+@pytest.mark.parametrize(
+    "command",
+    [
+        # These predicates ACT on what they match, so the command's
+        # product is the action rather than the path list.
+        "find . -name '*.pyc' -delete",
+        "find . -name '*.py' -exec wc -l {} +",
+        "find . -name '*.py' -fprint out.txt",
+    ],
+)
+def test_bash_match_find_that_acts_is_silent(command: str) -> None:
+    trees = parse_bash(command)
     assert trees is not None
-    assert glob_tool.bash_match(trees) is None
-
-
-def test_bash_match_find_no_value_for_name() -> None:
-    trees = parse_bash("find . -name")
-    assert trees is not None
-    assert glob_tool.bash_match(trees) is None
-
-
-def test_bash_match_find_unknown_predicate() -> None:
-    trees = parse_bash("find . -mtime -1 -name '*.py'")
-    assert trees is not None
-    assert glob_tool.bash_match(trees) is None
-
-
-def test_bash_match_find_invalid_type() -> None:
-    trees = parse_bash("find . -type l -name '*.py'")
-    assert trees is not None
-    assert glob_tool.bash_match(trees) is None
-
-
-def test_bash_match_find_type_no_value() -> None:
-    trees = parse_bash("find . -type")
-    assert trees is not None
-    assert glob_tool.bash_match(trees) is None
-
-
-def test_bash_match_find_two_paths() -> None:
-    trees = parse_bash("find /a /b -name '*.py'")
-    assert trees is not None
-    assert glob_tool.bash_match(trees) is None
-
-
-def test_bash_match_cd_find_prefix() -> None:
-    trees = parse_bash("cd src && find . -name '*.py'")
-    assert trees is not None
-    assert (
-        glob_tool.bash_match(trees) == "find via Bash is a bad UX. Use the Glob tool."
-    )
+    assert glob_tool.bash_match(trees) is None, command
 
 
 def test_bash_match_env_prefix_no_nudge() -> None:

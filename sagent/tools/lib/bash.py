@@ -11,6 +11,9 @@ Public surface:
 - :func:`walk_commands` - every simple command in the line, each with
   its ``cd`` context and pipeline neighbours. The one entry point a
   tool matcher needs.
+- :func:`replaceable` - whether one invocation is a shape a dedicated
+  tool replaces. The one policy a tool matcher needs.
+- :func:`render_command` - re-render an invocation for a nudge message.
 - :func:`is_read_only` - classify a parse as side-effect-free.
 - :func:`sed_mutates` - whether ``sed`` args request an in-place edit.
 - :func:`resolve_cwd_path` - combine a ``cd`` prefix with a positional path.
@@ -27,6 +30,7 @@ from typing import TYPE_CHECKING, Final, Protocol, cast, runtime_checkable
 
 import dataclasses
 import re
+import shlex
 import types
 
 
@@ -52,6 +56,8 @@ __all__ = [
     "cached_parse_bash",
     "is_read_only",
     "parse_bash",
+    "render_command",
+    "replaceable",
     "resolve_cwd_path",
     "sed_mutates",
     "walk_commands",
@@ -274,6 +280,150 @@ def _walk_substitutions(node: Node, *, cwd: str, out: list[Invocation]) -> None:
     for child in _child_nodes(node):
         if child.kind in ("word", "commandsubstitution", "command", "list", "pipeline"):
             _walk_node(child, cwd=cwd, out=out)
+
+
+# Sinks that only truncate or paginate what the source already produced.
+# Piping into one is equivalent to calling the tool directly, since every
+# tool bounds its own output.
+_SHAPING_SINKS: frozenset[str] = frozenset({"head", "tail", "less", "more", "cat"})
+
+# Executables whose operand is a PATTERN plus an optional path.
+_SEARCH_EXES: frozenset[str] = frozenset({"grep", "rg"})
+
+# Executables that turn a path into file CONTENT on stdout. A search fed
+# by one of these still has a file operand -- one hop upstream -- so it
+# remains a single tool call.
+_FILE_PRODUCERS: frozenset[str] = frozenset({"cat", "head", "tail", "sed"})
+
+# Short flags a pure-negation filter may carry. Anything else (``-o``,
+# ``-c``, a second path) makes it a search in its own right rather than
+# an ``exclude=`` on the one upstream.
+_NEGATION_FLAG_LETTERS: frozenset[str] = frozenset({"v", "i", "E", "F"})
+
+
+def replaceable(
+    inv: Invocation,
+    *,
+    exes: frozenset[str],
+    deny: frozenset[str] = frozenset(),
+) -> bool:
+    """Whether ``inv`` is a shape one dedicated tool call replaces.
+
+    Answers only questions about the SHELL LINE -- does an operand
+    exist, does anything downstream write or transform -- and takes the
+    caller's own policy as ``exes`` and ``deny``. Splitting it this way
+    is the point: matchers previously gated detection on being able to
+    TRANSLATE every flag, so any of the ~80 tokens per utility outside
+    their whitelist silently suppressed the nudge. Translation now
+    happens after this returns, and failing it costs message quality
+    rather than detection.
+
+    Args:
+      inv: One simple command, with its pipeline context.
+      exes: Executables the calling tool claims.
+      deny: Arguments that make Bash genuinely necessary for THIS
+          executable. Per-executable because the same spelling differs:
+          ``-c`` counts bytes for ``head`` but matching lines for
+          ``grep``, which the Grep tool expresses directly.
+
+    Returns:
+      replaceable: True when one tool call covers the invocation.
+
+    """
+    if inv.exe not in exes or inv.env_prefix or inv.captures_stdout:
+        return False
+    if any(_sink_blocks(inv, d) for d in inv.downstream()):
+        return False
+    if any(a in deny or a.partition("=")[0] in deny for a in inv.args):
+        return False
+    if inv.piped_from is not None:
+        return _stdin_operand(inv)
+    # ``ls``/``find`` default to the current directory, so a bare
+    # invocation still names a target.
+    if inv.exe in ("ls", "find"):
+        return True
+    return any(not a.startswith("-") for a in inv.args)
+
+
+def render_command(inv: Invocation) -> str:
+    """Re-render ``inv`` as the shell fragment it came from.
+
+    Most nudged lines carry several commands, so a fixed nudge string
+    leaves the reader to guess which fragment the tool replaces.
+
+    Args:
+      inv: Invocation to render.
+
+    Returns:
+      text: ``exe arg arg``, each argument shell-quoted.
+
+    """
+    # shlex.quote, not a space test: bashlex hands back the UNQUOTED word, so
+    # re-rendering `find . -name '*.py'` without quotes produced a fragment the
+    # shell would glob-expand, and an argument containing an apostrophe was
+    # wrapped in the very character it contains.
+    return " ".join([inv.exe, *(shlex.quote(a) for a in inv.args)])
+
+
+def _sink_blocks(source: Invocation, sink: Invocation) -> bool:
+    """Whether ``sink`` stops ``source`` from being one tool call.
+
+    Asked of every stage in ``downstream()``, not just the adjacent one:
+    checking the immediate sink alone made ``a | head | grep -v`` and
+    ``a | grep -v | head`` -- the same pipeline -- disagree.
+    """
+    if sink.captures_stdout:
+        return True
+    if sink.exe in _SHAPING_SINKS:
+        return False
+    if source.exe in _SEARCH_EXES and _negation_only(sink):
+        return False
+    # ``grep p f | wc -l`` is the search's own ``output_mode="count"``;
+    # other ``wc`` flags count bytes or words, which it cannot express.
+    return not (
+        sink.exe == "wc" and sink.args == ("-l",) and source.exe in _SEARCH_EXES
+    )
+
+
+def _negation_only(inv: Invocation) -> bool:
+    """Whether ``inv`` is a stdin ``grep -v PATTERN`` and nothing more.
+
+    That shape is exactly the Grep tool's ``exclude``, so it filters the
+    upstream search rather than being a search of its own.
+    """
+    if inv.exe not in _SEARCH_EXES:
+        return False
+    flags = [a for a in inv.args if a.startswith("-")]
+    positional = [a for a in inv.args if not a.startswith("-")]
+    if len(positional) != 1 or not flags:
+        return False
+    if not all(set(f.lstrip("-")) <= _NEGATION_FLAG_LETTERS for f in flags):
+        return False
+    return any("v" in f.lstrip("-") for f in flags)
+
+
+def _stdin_operand(inv: Invocation) -> bool:
+    """Whether a stdin-fed ``inv`` still names an operand one hop up.
+
+    A search reading a pipe has no path of its own, and every dedicated
+    tool takes a path. ``git log | grep fix`` is therefore not a Grep
+    call at all, while ``cat f.py | grep fix`` is -- the operand is on
+    the producer.
+    """
+    source = inv.piped_from
+    assert source is not None
+    if _negation_only(inv):
+        # The upstream carries the operand and receives the nudge.
+        return False
+    return (
+        inv.exe in _SEARCH_EXES
+        # A search still needs its own pattern; only the PATH comes from
+        # upstream.
+        and any(not a.startswith("-") for a in inv.args)
+        and source.exe in _FILE_PRODUCERS
+        and any(not a.startswith("-") for a in source.args)
+        and not (source.exe == "sed" and sed_mutates(source.args))
+    )
 
 
 def _child_nodes(node: Node) -> list[Node]:

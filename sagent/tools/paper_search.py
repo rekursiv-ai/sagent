@@ -14,6 +14,10 @@ from typing import TYPE_CHECKING, Final
 import asyncio
 
 from wesearch.paper.errors import PaperError
+from wesearch.paper.render import (
+    format_record,
+    truncation_notice,
+)
 from wesearch.paper.search import Source, search
 
 import cachetools
@@ -21,8 +25,6 @@ import cachetools
 from sagent.lib.custom_json import JSON, bool_val, json_freeze
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
-    format_record,
-    truncation_notice,
     validate_abstract_chars,
     validate_limit,
     validate_year_range,

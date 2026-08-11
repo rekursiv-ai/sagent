@@ -7,8 +7,7 @@ from unittest.mock import patch
 
 import asyncio
 
-from wesearch.errors import GoogleSorryError, PuzzleChallengeError
-from wesearch.search import (
+from wesearch.search.custom_types import (
     ImageResult,
     MapResult,
     PaperResult,
@@ -16,6 +15,9 @@ from wesearch.search import (
     TorrentResult,
     VideoResult,
 )
+from wesearch.types.errors import GoogleSorryError, PuzzleChallengeError
+
+import pytest
 
 from sagent.tools.paper_search import PaperSearch
 from sagent.tools.web_search import (
@@ -83,31 +85,32 @@ def test_build_query_strips_whitespace() -> None:
     assert "site:arxiv.org" in q
 
 
-def test_build_query_ignores_non_string_domains() -> None:
-    q = _build_query("ml", [1, "good.com"], None)
-    assert "site:good.com" in q
-    assert "site:1" not in q
+def test_build_query_rejects_non_string_domains() -> None:
+    # Raising, not skipping: dropping the bad member ran an UNRESTRICTED search
+    # while the caller believed it was scoped -- failing open on the one
+    # argument whose whole purpose is to restrict.
+    with pytest.raises(ValueError, match="non-hostname"):
+        _build_query("ml", [1, "good.com"], None)
 
 
-def test_build_query_ignores_non_list() -> None:
-    q = _build_query("ml", "not-a-list", None)
-    assert q == "ml"
+def test_build_query_rejects_non_list() -> None:
+    with pytest.raises(TypeError, match="must be a list of hostnames"):
+        _build_query("ml", "not-a-list", None)
 
 
 def test_build_query_rejects_operator_injection() -> None:
     # A domain value carrying an embedded operator must not splice into the
     # query and un-scope/contradict the filter.
-    q = _build_query("ml", ["example.com -site:trusted.com"], None)
-    assert q == "ml"
-    assert "-site:trusted.com" not in q
+    with pytest.raises(ValueError, match="non-hostname"):
+        _build_query("ml", ["example.com -site:trusted.com"], None)
 
 
 def test_build_query_rejects_whitespace_and_non_hostname() -> None:
-    q = _build_query("ml", ["not a host", "valid.com", "no-dot"], ["a.b -c"])
-    assert "site:valid.com" in q
-    assert "not a host" not in q
-    assert "site:no-dot" not in q  # single label, not a hostname
-    assert "-site:a.b" not in q  # embedded operator rejected wholesale
+    for bad in ("not a host", "no-dot"):
+        with pytest.raises(ValueError, match="non-hostname"):
+            _build_query("ml", [bad], None)
+    with pytest.raises(ValueError, match="non-hostname"):
+        _build_query("ml", None, ["a.b -c"])
 
 
 def test_build_query_accepts_wildcard_and_port() -> None:
@@ -190,6 +193,15 @@ def test_run_bot_flag_preserves_per_instance_reason() -> None:
     assert result.is_error
     assert "cooling down ~5.0h on this IP" in result.content
     assert GoogleSorryError.guidance in result.content
+
+
+def test_run_rejects_non_string_query() -> None:
+    """A schema-invalid query is a directive error, not a search for its repr."""
+    with patch("sagent.tools.web_search.search") as mock_search:
+        result = asyncio.run(WebSearch().run({"query": []}))
+    assert result.is_error
+    assert "Invalid query" in result.content
+    mock_search.assert_not_called()
 
 
 def test_run_invalid_backend() -> None:

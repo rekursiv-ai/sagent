@@ -22,14 +22,16 @@ from wesearch.paper.details import (
 )
 from wesearch.paper.errors import PaperError
 from wesearch.paper.ids import s2_wire_id
+from wesearch.paper.render import (
+    format_block,
+    format_record,
+)
 
 import cachetools
 
 from sagent.lib.custom_json import JSON, bool_val, json_freeze
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
-    format_block,
-    format_record,
     normalize_id_arg,
     resolve_id_args,
     summary_ids,

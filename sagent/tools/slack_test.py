@@ -7,8 +7,8 @@ from unittest.mock import patch
 import asyncio
 import json
 
-from wesearch.errors import FetchError
 from wesearch.fetch import FetchSession
+from wesearch.types.errors import FetchError
 
 from sagent.tools.slack import Slack
 

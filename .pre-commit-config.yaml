@@ -17,6 +17,7 @@
 #   Stages. `default_stages: [pre-commit]` below means a bare `run` sees only
 #   the pre-commit hooks; the heavy ones (ty-global, basedpyright-global,
 #   pytest*) declare `stages: [pre-push]` and need it named explicitly:
+#
 #     uv --quiet run --frozen --group pre-commit pre-commit run --all-files
 #     uv --quiet run --frozen --group pre-commit pre-commit run --all-files --hook-stage pre-push
 #     uv --quiet run --frozen --group pre-commit pre-commit run --all-files --hook-stage commit-msg
@@ -24,8 +25,13 @@
 #   Always pass --files or --all-files. Bare `run` (and the hook `git commit`
 #   fires on a dirty tree) STASHES your changes -- a git mutation, and this
 #   worktree is shared.
+#
 #     uv --quiet run --frozen --group pre-commit pre-commit run \
 #       --files $(git status --short | awk '{print $2}')
+#
+#     # Or to just pre-commit on .
+#     uv --quiet run --frozen --group pre-commit pre-commit run \
+#       --files $(git diff --name-only --cached --relative | xargs)
 #
 #   One hook at a time, by id (`ruff-check`, `ty`, `pytest`, ...):
 #     uv --quiet run --frozen --group pre-commit pre-commit run ruff-check --all-files
@@ -33,15 +39,19 @@
 #
 #   Individual tests: the pytest hooks take no test selector, so call pytest
 #   directly.
+#
 #     uv --quiet run --frozen --group pre-commit pytest path/to/thing_test.py
 #     uv --quiet run --frozen --group pre-commit pytest path/to/thing_test.py::test_name
 #     uv --quiet run --frozen --group pre-commit pytest -k some_substring path/to/
 #     uv --quiet run --frozen --group pre-commit pytest -n 6 path/to/
+#
 #   Marker tiers mirror the pytest-slow / -ci-smoke / -integration hooks; the
 #   default `-m` filter lives in pyproject addopts, so ask for them by name:
+#
 #     uv --quiet run --frozen --group pre-commit pytest -m slow path/to/
 #
 #   Skipping. SKIP takes hook ids, comma-separated, and reports "Skipped":
+#
 #     SKIP=ruff-check uv --quiet run --frozen --group pre-commit pre-commit run --all-files
 #     SKIP=pytest,pytest-slow uv --quiet run --frozen --group pre-commit pre-commit run --hook-stage pre-push --all-files
 #

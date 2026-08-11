@@ -26,8 +26,8 @@ import asyncio
 import json
 import os
 
-from wesearch.errors import FetchError
 from wesearch.fetch import Content, RequestParams, Retry, fetch
+from wesearch.types.errors import FetchError
 
 from sagent.lib.custom_json import JSON, MutableJSON, int_val, json_freeze
 from sagent.tools.core import load_tool_description

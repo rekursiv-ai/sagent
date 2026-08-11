@@ -13,18 +13,20 @@ import asyncio
 
 from wesearch.paper.authors import author_metadata, author_papers, search_authors
 from wesearch.paper.errors import PaperError
+from wesearch.paper.render import (
+    format_author_block,
+    format_author_line,
+    format_record,
+    truncation_notice,
+)
 
 import cachetools
 
 from sagent.lib.custom_json import JSON, json_freeze
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
-    format_author_block,
-    format_author_line,
-    format_record,
     parse_optional_ids,
     summary_ids,
-    truncation_notice,
     validate_abstract_chars,
     validate_limit,
     validate_year_range,
