@@ -5,7 +5,32 @@ All notable sagent changes are documented here. This project follows
 
 ## Unreleased
 
-## 0.1.15 - 2026-08-04
+## 0.1.16 - 2026-08-11
+
+### Added
+
+- `WebFetch` takes an `extractor` argument (`trafilatura` by default,
+  plus `html2text`, `markdownify`, `raw`). trafilatura returns only what it
+  scores as the article, which is wrong for a page that is not
+  article-shaped -- a Q&A thread came back without its answers.
+- `Read` takes `last_lines`, for content expected near the end of a file.
+- Bash lint nudges a file-inspection shell command toward `Read` or `Grep`,
+  and names the equivalent call.
+
+### Changed
+
+- Requires wesearch 0.1.10 or newer, which folds the former `[extract]`
+  extra into its core dependencies; drop the suffix from any install of
+  sagent's dependency.
+- Config and data live under a single org namespace, resolved through the
+  XDG user directories rather than hand-built paths.
+- Tool results are bounded by a character budget instead of per-tool
+  truncation caps, so diagnostics survive the cut.
+
+### Fixed
+
+- Rendered bash fragments are escaped and delimited, so a command
+  containing quotes or newlines no longer corrupts the surrounding text.
 
 ### Changed
 
