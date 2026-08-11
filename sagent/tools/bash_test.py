@@ -27,6 +27,7 @@ from sagent.tools.bash import (
     _render_bash_description,
     _run_foreground,
     _suppress_oserror,
+    _timeout_seconds,
     reap_background_processes,
 )
 from sagent.tools.core import TOOL_RESULT_MAX_CHARS
@@ -454,6 +455,102 @@ async def test_cwd_tracking_survives_unterminated_output(tmp_path: Path) -> None
     state.start_cwd = str(tmp_path)
     _ = await _run_foreground("cd sub; printf hello", state=state, timeout_s=5)
     assert state.bash_cwd.endswith("sub")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "prologue",
+    ["trap - EXIT; ", 'trap "echo mine" EXIT; ', "trap '' EXIT; "],
+)
+async def test_cwd_tracking_survives_a_command_that_owns_the_exit_trap(
+    tmp_path: Path, prologue: str
+) -> None:
+    """A command may set its own EXIT trap; tracking must not depend on ours.
+
+    Tracking was implemented ONLY as an EXIT trap, so ``trap - EXIT``
+    silently disabled it: the shell reported no cwd, the tool kept the
+    stale one, and every later relative path in the session resolved
+    against the wrong directory with no error anywhere.
+    """
+    (tmp_path / "sub").mkdir()
+    state = ToolState()
+    state.bash_cwd = str(tmp_path)
+    state.start_cwd = str(tmp_path)
+    out = await _run_foreground(f"{prologue}cd sub; echo hi", state=state, timeout_s=5)
+    assert "__SAGENT_CWD_" not in out, out
+    assert state.bash_cwd.endswith("sub"), state.bash_cwd
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A trailing backslash continues the NEXT line, so appending the
+        # cwd report as text made the command swallow it: the reporting
+        # statement became an argument to ``echo`` and its raw sentinel
+        # was shown to the model.
+        "echo hi \\",
+        # An unterminated construct likewise reaches into whatever text
+        # follows it.
+        "echo a &&",
+    ],
+)
+async def test_a_trailing_continuation_cannot_swallow_the_cwd_report(
+    tmp_path: Path, command: str
+) -> None:
+    """The command must not be able to splice into the wrapper's own lines."""
+    state = ToolState()
+    state.bash_cwd = str(tmp_path)
+    state.start_cwd = str(tmp_path)
+    out = await _run_foreground(command, state=state, timeout_s=5)
+    assert "__SAGENT_CWD_" not in out, out
+    assert "__rc" not in out, out
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [("false", "[exit code: 1]"), ("exit 3", "[exit code: 3]"), ("true", "")],
+)
+async def test_the_commands_own_exit_status_is_reported(
+    tmp_path: Path, command: str, expected: str
+) -> None:
+    """The wrapper must not overwrite the status with its own.
+
+    Reporting the cwd from a trailing statement made every run exit with
+    that statement's 0, so ``false`` and a failing build both read clean.
+    """
+    state = ToolState()
+    state.bash_cwd = str(tmp_path)
+    state.start_cwd = str(tmp_path)
+    out = await _run_foreground(command, state=state, timeout_s=5)
+    assert ("[exit code:" in out) == bool(expected), out
+    if expected:
+        assert expected in out, out
+
+
+@pytest.mark.parametrize(
+    ("timeout_ms", "expected_s"),
+    [(1_999, 1.999), (500, 0.5), (1, 0.001), (120_000, 120.0)],
+)
+def test_a_sub_second_timeout_is_not_truncated(
+    timeout_ms: int, expected_s: float
+) -> None:
+    """The schema takes MILLISECONDS, so the conversion must keep them.
+
+    ``int(timeout) // 1000`` floored: 1999ms became 1s (half the budget)
+    and anything under 1000ms became 0, then clamped up to a full second
+    -- 1000x what the caller asked for. The schema's ``minimum: 1`` says
+    a 1ms timeout is legal, so it must not silently become 1s.
+    """
+    assert _timeout_seconds(timeout_ms) == pytest.approx(expected_s)
+
+
+def test_a_timeout_over_the_ceiling_is_clamped() -> None:
+    """The advertised maximum is still the maximum."""
+    assert _timeout_seconds(BASH_MAX_TIMEOUT_MS * 10) == pytest.approx(
+        BASH_MAX_TIMEOUT_MS / 1000
+    )
 
 
 @pytest.mark.asyncio

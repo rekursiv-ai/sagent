@@ -16,7 +16,11 @@ import pytest
 from sagent.testing import FakeAgent, with_fake_agent
 from sagent.tools.lib.bash import parse_bash
 from sagent.tools.lib.pdf import MAX_PDF_BYTES, extract_pdf_pages
-from sagent.tools.read import Read
+from sagent.tools.read import (
+    _ASSUMED_CHARS_PER_LINE,
+    Read,
+    _default_line_limit,
+)
 
 
 read = Read()
@@ -519,6 +523,15 @@ def test_bash_match_nudges(command: str, exe: str) -> None:
         ("tail -n 5 foo.txt", "Try: Read file_path='foo.txt' last_lines=5"),
         ("sed -n '10,20p' foo.txt", "Try: Read file_path='foo.txt' offset=10 limit=11"),
         ("sed -n '10,$p' foo.txt", "Try: Read file_path='foo.txt' offset=10"),
+        # A shaping sink bounds the output, and Read expresses that bound
+        # directly. Dropping it advertised the WHOLE file for a command
+        # that asked for 20 lines -- on a large file the difference is
+        # the entire reason the caller wrote ``| head``.
+        ("cat foo.txt | head -20", "Try: Read file_path='foo.txt' limit=20"),
+        ("cat foo.txt | head", "Try: Read file_path='foo.txt' limit=10"),
+        ("cat foo.txt | tail -5", "Try: Read file_path='foo.txt' last_lines=5"),
+        # ``less``/``cat`` page rather than truncate: no bound to render.
+        ("cat foo.txt | less", "Try: Read file_path='foo.txt'"),
     ],
 )
 def test_bash_match_suggests_a_concrete_call(command: str, call: str) -> None:
@@ -633,6 +646,78 @@ async def test_read_notebook_output_no_text(tmp_path: Path) -> None:
         agent.tool_state.bash_cwd = str(tmp_path)
         result = await read.run({"file_path": str(f)})
     assert "[output]" not in result.content
+
+
+@pytest.mark.asyncio
+async def test_notebook_outputs_beyond_stream_text_are_kept(tmp_path: Path) -> None:
+    """A cell's VALUE and its traceback are its most useful outputs.
+
+    Only ``output['text']`` was read -- the ``stream`` shape. An
+    ``execute_result`` carries ``data['text/plain']`` and an ``error``
+    carries ``traceback``, so reading a notebook to see what a cell
+    returned or how it failed showed neither.
+    """
+    nb = {
+        "cells": [
+            {
+                "cell_type": "code",
+                "source": "1 / 0",
+                "outputs": [
+                    {"output_type": "execute_result", "data": {"text/plain": "42"}},
+                    {
+                        "output_type": "error",
+                        "ename": "ZeroDivisionError",
+                        "traceback": ["Traceback", "ZeroDivisionError: division"],
+                    },
+                ],
+            }
+        ]
+    }
+    nb_path = tmp_path / "n.ipynb"
+    nb_path.write_text(json.dumps(nb), encoding="utf-8")
+    with with_fake_agent():
+        result = await read.run({"file_path": str(nb_path)})
+    assert "42" in result.content, result.content
+    assert "ZeroDivisionError" in result.content, result.content
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_file_returns_an_error_not_an_exception(
+    tmp_path: Path,
+) -> None:
+    """``Tool.run`` must return a ToolResult, never raise.
+
+    A mode-000 file raised PermissionError straight out of the envelope,
+    which the agent loop sees as a crash rather than a tool error.
+    """
+    locked = tmp_path / "locked.txt"
+    locked.write_text("x", encoding="utf-8")
+    locked.chmod(0o000)
+    try:
+        with with_fake_agent():
+            result = await read.run({"file_path": str(locked)})
+    finally:
+        locked.chmod(0o600)
+    assert result.is_error, result.content
+    assert "locked.txt" in result.content, result.content
+
+
+@pytest.mark.parametrize("ceiling", [20_000, 60_000, 150_000, 600_000])
+def test_the_default_line_cap_stays_under_the_result_ceiling(ceiling: int) -> None:
+    """The derived cap must fit ONE reply at every budget, not a floor.
+
+    ``ContextBudget.from_model`` bottoms out at ``persist_threshold=20_000``,
+    where a 2000-line floor is ~160_000 chars -- 8x the ceiling the cap
+    exists to respect, and Read is exempt from disk offload, so nothing
+    else bounds it.
+    """
+    with with_fake_agent() as agent:
+        agent.max_result_chars = ceiling
+        lines = _default_line_limit()
+    assert lines * _ASSUMED_CHARS_PER_LINE <= ceiling, (
+        f"{lines} lines x {_ASSUMED_CHARS_PER_LINE} chars exceeds {ceiling}"
+    )
+    assert lines >= 1, "a positive ceiling must still allow lines"
 
 
 if __name__ == "__main__":

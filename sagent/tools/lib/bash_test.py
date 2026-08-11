@@ -5,7 +5,9 @@ from __future__ import annotations
 import pytest
 
 from sagent.tools.lib.bash import (
+    _UNKNOWN_CWD,
     BashParseCache,
+    _denied,
     cached_parse_bash,
     is_read_only,
     parse_bash,
@@ -116,6 +118,51 @@ def test_is_read_only_find_with_delete_unsafe() -> None:
     assert is_read_only(trees) is False
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Attached value: `-o FILE` was gated by an equality test, so the
+        # attached spelling slipped through and `sort -oout input` wrote `out`.
+        "sort -oout input",
+        "sort -o out input",
+        # `-fprint0` writes exactly like its listed `-fprint`/`-fls` siblings.
+        "find . -fprint0 out",
+        # The redirect need not follow `print`: the whole record sits between
+        # them, and the old regex required adjacency.
+        "awk '{ print $0 > \"out\" }' input",
+        # A read-only git subcommand still writes when handed an output path.
+        "git diff --output=report.patch",
+        "git diff -o report.patch",
+    ],
+)
+def test_is_read_only_rejects_writes_that_look_like_reads(command: str) -> None:
+    """Each of these WRITES a file while classifying as read-only.
+
+    ``is_read_only`` gates concurrent dispatch, so a false negative here is not
+    a cosmetic misclassification -- it lets two writers run at once.
+    """
+    trees = parse_bash(command)
+    assert trees is not None
+    assert is_read_only(trees) is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sort input",
+        "find . -name x",
+        "awk '{ print $1 }' f",
+        "git diff",
+        "git show HEAD",
+    ],
+)
+def test_is_read_only_still_admits_the_plain_reads(command: str) -> None:
+    """The write-gates above must not swallow the ordinary read spelling."""
+    trees = parse_bash(command)
+    assert trees is not None
+    assert is_read_only(trees) is True
+
+
 def test_is_read_only_sed_in_place_unsafe() -> None:
     trees = parse_bash("sed -i 's/a/b/' file")
     assert trees is not None
@@ -152,10 +199,13 @@ def test_is_read_only_git_branch_create_unsafe() -> None:
     assert is_read_only(trees) is False
 
 
-def test_is_read_only_uv_run_basedpyright_safe() -> None:
+def test_is_read_only_uv_run_basedpyright_unsafe() -> None:
+    # strace on a bare `basedpyright a.py`: mkdir("/tmp/pyright-<pid>-*", 0700)
+    # then openat(..., O_WRONLY|O_CREAT|O_TRUNC) inside it. Unconditional, with
+    # no flag to gate, so "read-only with a flag denylist" cannot express it.
     trees = parse_bash("uv run basedpyright")
     assert trees is not None
-    assert is_read_only(trees) is True
+    assert is_read_only(trees) is False
 
 
 def test_is_read_only_uv_run_basedpyright_createstubs_unsafe() -> None:
@@ -277,6 +327,91 @@ def test_an_unknown_node_kind_fails_closed() -> None:
     trees = parse_bash("if true; then rm victim; fi")
     assert trees is not None
     assert not is_read_only(trees)
+
+
+@pytest.mark.parametrize(
+    ("arg", "deny", "exe", "denied"),
+    [
+        # ``-e`` takes a value, so everything after it is the PATTERN.
+        # Scanning the whole tail found a ``-v`` that is not there and
+        # silently suppressed the nudge. Measured: ``grep -evalue f``
+        # prints the matching line, i.e. it does not invert.
+        ("-evalue", frozenset({"-v"}), "grep", False),
+        ("-equiet", frozenset({"-q"}), "grep", False),
+        # A real bundle still denies.
+        ("-iv", frozenset({"-v"}), "grep", True),
+        ("-vf", frozenset({"-v"}), "grep", True),
+        # The denied flag may itself take a value: ``head -c5`` is a byte
+        # window, so deny wins over the value-flag stop.
+        ("-c5", frozenset({"-c"}), "head", True),
+    ],
+)
+def test_a_flag_value_is_not_scanned_for_denied_letters(
+    arg: str, deny: frozenset[str], exe: str, denied: bool
+) -> None:
+    """A value-taking flag ends the cluster; its value is not more flags."""
+    assert _denied(arg, deny, exe=exe) is denied
+
+
+@pytest.mark.parametrize(
+    ("command", "cwd"),
+    [
+        # A literal destination is knowable and composes.
+        ("cd /srv && cat f", "/srv"),
+        ("cd -- /srv && cat f", "/srv"),
+        ("cd -P /srv && cat f", "/srv"),
+        ("cd /srv && cd sub && cat f", "/srv/sub"),
+        # ``cd`` goes to $HOME and ``cd -`` to $OLDPWD: real moves whose
+        # destination the command text does not name. Reading ``-`` as a
+        # literal directory rendered ``file_path='-/f'``.
+        ("cd && cat f", _UNKNOWN_CWD),
+        ("cd - && cat f", _UNKNOWN_CWD),
+        # No ``cd`` at all is a THIRD state, distinct from unknowable.
+        ("cat f", ""),
+    ],
+)
+def test_cd_destination_is_resolved_or_marked_unknowable(
+    command: str, cwd: str
+) -> None:
+    """Option flags are not destinations, and $HOME/$OLDPWD are not literals."""
+    trees = parse_bash(command)
+    assert trees is not None
+    assert [i.cwd for i in walk_commands(trees) if i.exe == "cat"] == [cwd]
+
+
+def test_an_unknowable_cwd_suppresses_a_relative_path() -> None:
+    """Resolving against an unknown directory names the wrong file."""
+    assert resolve_cwd_path(_UNKNOWN_CWD, "f") == ""
+    # An absolute operand does not depend on the cwd at all.
+    assert resolve_cwd_path(_UNKNOWN_CWD, "/etc/hosts") == "/etc/hosts"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A compound stage is still a stage. Leaving it unlinked let the
+        # neighbours join across it as if it were absent, so the search
+        # looked unpiped even though ``sort`` transforms its output.
+        "(grep p f) | sort",
+        "grep p f | (sort)",
+        "grep p f | { sort; }",
+    ],
+)
+def test_a_compound_stage_still_separates_its_neighbours(command: str) -> None:
+    """The stage between two commands must not vanish from the pipeline."""
+    trees = parse_bash(command)
+    assert trees is not None
+    search = next(i for i in walk_commands(trees) if i.exe == "grep")
+    assert search.piped_into is not None, command
+
+
+def test_a_command_inside_a_compound_stage_inherits_its_sink() -> None:
+    """``(grep p f) | head`` bounds the search exactly as the bare form does."""
+    trees = parse_bash("(grep p f) | head -5")
+    assert trees is not None
+    search = next(i for i in walk_commands(trees) if i.exe == "grep")
+    assert search.piped_into is not None
+    assert search.piped_into.exe == "head"
 
 
 if __name__ == "__main__":

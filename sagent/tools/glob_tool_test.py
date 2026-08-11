@@ -9,9 +9,16 @@ import pytest
 
 from sagent.lib.tool_validation import validate_tool_input
 from sagent.testing import with_fake_agent
-from sagent.tools.glob_tool import Glob, _long_line
+from sagent.tools.glob_tool import (
+    _ASSUMED_CHARS_PER_MATCH,
+    Glob,
+    _default_max_results,
+    _long_line,
+)
 from sagent.tools.lib.bash import parse_bash
 from sagent.types.runtime import ToolResult
+
+import sagent.tools.glob_tool as glob_tool_module
 
 
 glob_tool = Glob()
@@ -204,7 +211,7 @@ def test_bash_match_find_nudges(command: str) -> None:
     ("command", "call"),
     [
         ("find . -name '*.py'", "Try: Glob pattern='**/*.py'"),
-        ("find /src -iname '*.PY'", "Try: Glob pattern='**/*.PY' path='/src'"),
+        ("find /src -name '*.PY'", "Try: Glob pattern='**/*.PY' path='/src'"),
         ("find . -type f -name '*.py'", "Try: Glob pattern='**/*.py'"),
     ],
 )
@@ -235,12 +242,26 @@ def test_an_untranslatable_predicate_drops_only_the_example(command: str) -> Non
         "find . -name '*.pyc' -delete",
         "find . -name '*.py' -exec wc -l {} +",
         "find . -name '*.py' -fprint out.txt",
+        "find . -name '*.py' -fprint0 out.txt",
+        "find . -name '*.py' -fls out.txt",
     ],
 )
 def test_bash_match_find_that_acts_is_silent(command: str) -> None:
     trees = parse_bash(command)
     assert trees is not None
     assert glob_tool.bash_match(trees) is None, command
+
+
+def test_the_find_denylist_has_exactly_one_definition() -> None:
+    """Two copies of one policy diverge; one definition is what stops that.
+
+    They already had: ``-fprint0`` was added to the classifier's copy and
+    not Glob's, so the same predicate was a writer to ``is_read_only``
+    and a nudgeable listing here.
+    """
+    src = Path(glob_tool_module.__file__).read_text()
+    assert "FIND_DENY_FLAGS" in src
+    assert "-exec" not in src, "glob_tool re-lists the find denylist"
 
 
 def test_bash_match_env_prefix_no_nudge() -> None:
@@ -261,6 +282,23 @@ def test_schema_admits_the_unlimited_default() -> None:
         "Glob", Glob.directive_schema, {"pattern": "*.py", "max_results": 0}
     )
     assert err is None, f"schema rejects the documented unlimited default: {err}"
+
+
+@pytest.mark.parametrize("ceiling", [20_000, 60_000, 150_000, 600_000])
+def test_the_default_match_cap_stays_under_the_result_ceiling(ceiling: int) -> None:
+    """The derived cap must fit ONE reply at every budget, not a floor.
+
+    ``ContextBudget.from_model`` bottoms out at ``persist_threshold=20_000``,
+    where a 1000-match floor is ~120_000 chars -- 6x over, so the result
+    off-loads to disk and the caller sees a preview instead of paths.
+    """
+    with with_fake_agent() as agent:
+        agent.max_result_chars = ceiling
+        matches = _default_max_results()
+    assert matches * _ASSUMED_CHARS_PER_MATCH <= ceiling, (
+        f"{matches} matches x {_ASSUMED_CHARS_PER_MATCH} chars exceeds {ceiling}"
+    )
+    assert matches >= 1, "a positive ceiling must still allow matches"
 
 
 if __name__ == "__main__":

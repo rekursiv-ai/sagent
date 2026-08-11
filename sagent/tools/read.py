@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Final, cast
+from typing import Annotated, Final
 
 import asyncio
 import json
@@ -13,10 +13,12 @@ import re
 
 from sagent.agent.state import current_agent_var, get_tool_state
 from sagent.lib.custom_json import (
-    MutableJSON,
-    MutableJSONValue,
+    dict_val,
+    dicts_val,
     int_val,
     json_freeze,
+    list_val,
+    str_val,
 )
 from sagent.tools.core import (
     file_lock_key,
@@ -28,8 +30,11 @@ from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
     Invocation,
     Node,
+    bounding_sink,
+    cwd_is_known,
     render_command,
     replaceable,
+    resolve_cwd_path,
     sed_mutates,
     walk_commands,
 )
@@ -65,18 +70,22 @@ _PDF_EXT: Final = ".pdf"
 _NOTEBOOK_EXT: Final = ".ipynb"
 _READ_EXES: frozenset[str] = frozenset({"cat", "head", "tail", "sed"})
 
-# ``-c`` windows BYTES and ``-f`` follows a growing file; Read windows
-# LINES of a snapshot, so neither round-trips. ``cat``'s ``-A/-v/-e/-t``
-# family renders nonprinting characters, which Read does not. Kept
-# per-executable: the same ``-c`` means "count matching lines" to grep,
-# which Grep expresses directly as ``output_mode="count"``. Notably
-# ABSENT: ``cat -n``, since Read numbers every line it returns.
+# ``-c`` windows BYTES, and ``-f``/``-F`` follow a growing file; Read
+# windows LINES of a snapshot, so none round-trips. ``-F`` is ``-f`` plus
+# retry-on-rotate: a different letter for the same reason, and omitting
+# it let a follow shape advertise itself as a snapshot read. ``cat``'s
+# ``-A/-v/-e/-t`` family renders nonprinting characters, which Read does
+# not. Kept per-executable: the same ``-c`` means "count matching lines"
+# to grep, which Grep expresses directly as ``output_mode="count"``.
+# Notably ABSENT: ``cat -n``, since Read numbers every line it returns.
 _READ_DENY: frozenset[str] = frozenset(
     {
         "-c",
         "-f",
+        "-F",
         "--bytes",
         "--follow",
+        "--retry",
         "-A",
         "-v",
         "-e",
@@ -175,14 +184,22 @@ class Read:
         )
         if bounds_err is not None:
             return bounds_err
-        return await asyncio.to_thread(
-            self._run,
-            file_path=file_path,
-            offset=offset,
-            limit=limit,
-            last_lines=last_lines,
-            pages=pages,
-        )
+        try:
+            return await asyncio.to_thread(
+                self._run,
+                file_path=file_path,
+                offset=offset,
+                limit=limit,
+                last_lines=last_lines,
+                pages=pages,
+            )
+        except OSError as err:
+            # A mode-000 file raised PermissionError straight out of the
+            # envelope. ``Tool.run`` must RETURN failures: the agent loop
+            # reads a raised exception as a crash, not a tool error.
+            return ToolResult(
+                call_id="", content=f"Error reading {file_path}: {err}", is_error=True
+            )
 
     output: Annotated[Toggle, CLI_SETTABLE] = "off"
     """Whether the result body renders in the pane."""
@@ -368,27 +385,20 @@ def _read_notebook(p: Path, *, file_path: str) -> ToolResult:
             call_id="",
             content=f"[Non-UTF-8 notebook: {file_path}: {e}]",
         )
-    if not isinstance(nb, dict):
+    nb_d = dict_val(nb)
+    if not nb_d:
         return ToolResult(
             call_id="",
             content=f"[Not a valid Jupyter notebook: {file_path}]",
         )
-    nb_d = cast(MutableJSON, nb)
-    cells_raw = cast(list[MutableJSONValue], nb_d.get("cells") or [])
     parts: list[str] = []
-    for i, cell in enumerate(cells_raw):
-        if not isinstance(cell, dict):
+    for i, cell in enumerate(list_val(nb_d.get("cells"))):
+        cell_d = dict_val(cell)
+        if not cell_d:
             continue
-        cell_d = cast(MutableJSON, cell)
-        ctype = str(cell_d.get("cell_type") or "code")
-        source_raw = cell_d.get("source")
-        source = (
-            "".join(str(x) for x in source_raw)
-            if isinstance(source_raw, list)
-            else str(source_raw or "")
-        )
+        ctype = str_val(cell_d.get("cell_type")) or "code"
         parts.append(f"--- Cell {i + 1} ({ctype}) ---")
-        parts.append(source)
+        parts.append(_joined(cell_d.get("source")))
         _collect_cell_outputs(cell_d, parts)
     return ToolResult(
         call_id="",
@@ -396,24 +406,32 @@ def _read_notebook(p: Path, *, file_path: str) -> ToolResult:
     )
 
 
-def _collect_cell_outputs(cell: MutableJSON, parts: list[str]) -> None:
-    """Append text outputs from a notebook cell to ``parts``."""
-    outputs_raw = cell.get("outputs")
-    if not isinstance(outputs_raw, list):
-        return
-    for out in outputs_raw:
-        if not isinstance(out, dict):
-            continue
-        out_d = cast(MutableJSON, out)
-        text_raw = out_d.get("text")
-        if text_raw is None:
-            continue
-        text_out = (
-            "".join(str(x) for x in text_raw)
-            if isinstance(text_raw, list)
-            else str(text_raw)
-        )
-        parts.append("[output] " + text_out)
+def _collect_cell_outputs(cell: Mapping[str, object], parts: list[str]) -> None:
+    """Append text outputs from a notebook cell to ``parts``.
+
+    nbformat spells an output three ways and only ``stream`` uses
+    ``text``: ``execute_result``/``display_data`` put the value under
+    ``data['text/plain']`` and ``error`` puts the failure under
+    ``traceback``. Reading just ``text`` therefore showed neither what a
+    cell returned nor how it failed -- the two things a reader opens a
+    notebook for.
+    """
+    for out_d in dicts_val(cell.get("outputs")):
+        text = _joined(out_d.get("text"))
+        if not text:
+            text = _joined(dict_val(out_d.get("data")).get("text/plain"))
+        if not text:
+            text = _joined(out_d.get("traceback"))
+        if text:
+            parts.append("[output] " + text)
+
+
+def _joined(raw: object) -> str:
+    """Render a notebook text field, which is a string OR a line list."""
+    if raw is None:
+        return ""
+    lines = list_val(raw)
+    return "".join(str(x) for x in lines) if lines else str_val(raw)
 
 
 def _read_text(
@@ -513,54 +531,122 @@ def _read_call(inv: Invocation) -> str:
     worked example rather than the nudge itself.
     """
     if inv.exe == "sed":
-        return _sed_call(inv.args)
-    paths, window = _paths_and_window(inv.args)
+        return _sed_call(inv)
+    paths, window, sign = _paths_and_window(inv.args)
     if len(paths) != 1:
         return ""
+    # The tools resolve a relative path against the AGENT's cwd, not the
+    # shell's, so a ``cd`` prefix that never reaches here names a
+    # different file -- or none.
+    target = resolve_cwd_path(inv.cwd, paths[0])
+    if not cwd_is_known(inv.cwd):
+        # The ``cd`` went somewhere the text does not name, so the file
+        # cannot be identified. Drop the example rather than invent one.
+        return ""
     if inv.exe == "cat":
-        return f" Try: Read file_path={paths[0]!r}"
+        # ``cat f | head -20`` asked for 20 lines. ``cat`` itself carries
+        # no window, so the bound lives on the sink -- and omitting it
+        # advertised the whole file, which on a large one is the entire
+        # reason the caller reached for ``| head``.
+        return f" Try: Read file_path={target!r}{_sink_window(inv)}"
     if window == 0:
         return ""
-    key = "limit" if inv.exe == "head" else "last_lines"
-    return f" Try: Read file_path={paths[0]!r} {key}={window}"
+    # Measured against coreutils on a 100-line file: ``head -n +N`` is
+    # ``head -n N``, ``head -n -N`` is all-but-the-last-N (no Read window
+    # expresses it), and ``tail -n +N`` counts from the START.
+    if inv.exe == "head":
+        return "" if sign == "-" else f" Try: Read file_path={target!r} limit={window}"
+    key = "offset" if sign == "+" else "last_lines"
+    return f" Try: Read file_path={target!r} {key}={window}"
 
 
-def _sed_call(args: tuple[str, ...]) -> str:
+def _sink_window(inv: Invocation) -> str:
+    """Render the line bound a ``| head``/``| tail`` sink imposes.
+
+    Only those two truncate. ``cat``/``less``/``more`` page the whole
+    stream, so reading a count off them would invent a cap the command
+    never asked for.
+    """
+    sink = bounding_sink(inv)
+    if sink is None:
+        return ""
+    _, window, sign = _paths_and_window(sink.args)
+    if window == 0 or sign == "-":
+        return ""
+    if sink.exe == "head":
+        return "" if sign == "+" else f" limit={window}"
+    return f" {'offset' if sign == '+' else 'last_lines'}={window}"
+
+
+def _sed_call(inv: Invocation) -> str:
     """Render ``sed -n 'M,Np' FILE`` as a Read window, or ``""``."""
+    args = inv.args
     scripts = [a for a in args if _LINE_RANGE_SCRIPT.fullmatch(a)]
     paths = [a for a in args if not a.startswith("-") and a not in scripts]
     if len(scripts) != 1 or len(paths) != 1:
         return ""
-    first, _, last = scripts[0].removesuffix("p").partition(",")
-    if not last or last == "$":
-        return f" Try: Read file_path={paths[0]!r} offset={first}"
+    target = resolve_cwd_path(inv.cwd, paths[0])
+    if not cwd_is_known(inv.cwd):
+        return ""
+    first, comma, last = scripts[0].removesuffix("p").partition(",")
+    if not comma:
+        # ``sed -n '5p'`` prints exactly one line; without the limit the
+        # suggestion returns the rest of the file.
+        return f" Try: Read file_path={target!r} offset={first} limit=1"
+    if last == "$":
+        return f" Try: Read file_path={target!r} offset={first}"
     limit = int(last) - int(first) + 1
-    return f" Try: Read file_path={paths[0]!r} offset={first} limit={limit}"
+    return f" Try: Read file_path={target!r} offset={first} limit={limit}"
 
 
-def _paths_and_window(args: tuple[str, ...]) -> tuple[list[str], int]:
-    """Split ``head``/``tail`` args into path operands and a line count.
+def _paths_and_window(args: tuple[str, ...]) -> tuple[list[str], int, str]:
+    """Split ``head``/``tail`` args into operands, a line count, and its sign.
 
-    ``-n`` consumes the following token, so a caller that treats every
-    non-flag token as a path reads the COUNT as a filename.
+    Every spelling of the count reaches the same place: ``-n N``,
+    ``-nN``, ``--lines=N``, ``--lines N``, and the bare ``-N``. Matching
+    only ``-n`` left the rest falling through to the default 10, so a
+    command asking for 50 lines was advertised as asking for 10.
+
+    The sign is RETURNED rather than stripped because it selects which
+    end of the file is meant, and the answer differs per executable.
+
+    Returns:
+      paths: Non-flag operands, in argv order.
+      window: Line count; ``0`` when the count is present but unreadable.
+      sign: ``+``, ``-``, or ``""`` for an unsigned count.
+
     """
     paths: list[str] = []
     window = 10
+    sign = ""
     i = 0
     while i < len(args):
         a = args[i]
-        if a == "-n" and i + 1 < len(args):
-            value = args[i + 1].lstrip("+-")
-            window = int(value) if value.isdigit() else 0
+        raw = ""
+        if a in ("-n", "--lines") and i + 1 < len(args):
+            raw = args[i + 1]
             i += 2
-            continue
-        if a.startswith("-") and a != "-":
-            window = int(a[1:]) if a[1:].isdigit() else window
+        elif a.startswith("--lines="):
+            raw = a.partition("=")[2]
+            i += 1
+        elif a.startswith("-n") and len(a) > 2:
+            raw = a[2:]
+            i += 1
+        elif a.startswith("-") and a != "-":
+            # A bare ``-20`` is the obsolete count form; any other flag
+            # leaves the window alone.
+            if a[1:].isdigit():
+                window, sign = int(a[1:]), ""
             i += 1
             continue
-        paths.append(a)
-        i += 1
-    return paths, window
+        else:
+            paths.append(a)
+            i += 1
+            continue
+        sign = raw[0] if raw[:1] in ("+", "-") else ""
+        digits = raw.lstrip("+-")
+        window = int(digits) if digits.isdigit() else 0
+    return paths, window, sign
 
 
 def _sed_reads(args: tuple[str, ...]) -> bool:
@@ -705,7 +791,11 @@ def _default_line_limit() -> int:
     ceiling = agent.max_result_chars if agent is not None else 0
     if ceiling <= 0:
         return _FALLBACK_LINE_LIMIT
-    return max(_FALLBACK_LINE_LIMIT, ceiling // _ASSUMED_CHARS_PER_LINE)
+    # A floor here defeats the derivation. The smallest budget
+    # ``ContextBudget.from_model`` produces is ``persist_threshold=20_000``,
+    # where 2000 lines is ~160_000 chars -- 8x the ceiling this cap exists
+    # to respect. ``offset`` reaches whatever a smaller cap left behind.
+    return max(1, ceiling // _ASSUMED_CHARS_PER_LINE)
 
 
 def _rendered_byte_budget() -> int:

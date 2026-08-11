@@ -14,6 +14,7 @@ from typing import Annotated, Final
 
 import difflib
 import re
+import shlex
 
 from sagent.agent.state import get_tool_state
 from sagent.lib.atomic_file import atomic_write_bytes
@@ -25,7 +26,11 @@ from sagent.tools.core import (
     resolve_tool_path,
 )
 from sagent.tools.display import Toggle, Wrap
-from sagent.tools.lib.bash import Node, walk_commands
+from sagent.tools.lib.bash import (
+    Node,
+    resolve_cwd_path,
+    walk_commands,
+)
 from sagent.tools.tool_spec import CLI_SETTABLE
 from sagent.types.runtime import ToolResult
 
@@ -290,15 +295,20 @@ class Edit:
         for inv in walk_commands(trees):
             if inv.exe != "sed" or inv.env_prefix or inv.captures_stdout:
                 continue
-            hint = _match_sed(inv.cwd or None, inv.args)
+            hint = _match_sed(inv.cwd, inv.args)
             if hint is not None:
                 return hint
         return None
 
 
-def _match_sed(cwd: str | None, args: tuple[str, ...]) -> str | None:
-    """Match a simple ``sed -i 's/OLD/NEW/[g]' FILE`` for an Edit nudge."""
-    del cwd  # Hint is a fixed string; path resolution is the LLM's job.
+def _match_sed(cwd: str, args: tuple[str, ...]) -> str | None:
+    """Match a simple ``sed -i 's/OLD/NEW/[g]' FILE`` for an Edit nudge.
+
+    ``cwd`` is the enclosing ``cd`` prefix. Edit resolves a relative
+    ``file_path`` against the AGENT's cwd, not the shell's, so a nudge
+    that drops it points the caller at a different file -- the same
+    failure every sibling matcher resolves through ``resolve_cwd_path``.
+    """
     in_place = False
     script: str | None = None
     file: str | None = None
@@ -331,4 +341,10 @@ def _match_sed(cwd: str | None, args: tuple[str, ...]) -> str | None:
     if "i" in m.group(3):
         # Case-insensitive substitution - Edit is exact-match only.
         return None
-    return _NUDGE
+    target = resolve_cwd_path(cwd, file)
+    return (
+        f"{_NUDGE} Replaces: `sed {' '.join(shlex.quote(a) for a in args)}`."
+        f" Try: Edit file_path={target!r}"
+        f" old_string={m.group(1)!r} new_string={m.group(2)!r}"
+        f"{' replace_all=true' if 'g' in m.group(3) else ''}"
+    )

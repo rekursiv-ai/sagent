@@ -114,23 +114,27 @@ def test_run_appends_truncation_notice_when_body_exceeds_limit() -> None:
 
 
 def test_match_http_fetch_simple_curl() -> None:
-    assert _match_http_fetch(("https://example.com",)) is not None
+    assert _match_http_fetch("curl", ("https://example.com",)) is not None
 
 
 def test_match_http_fetch_simple_wget() -> None:
-    assert _match_http_fetch(("https://example.com",)) is not None
+    # ``wget`` WRITES by default (measured: bare wget saved index.html),
+    # so only the stream-to-stdout spelling is a WebFetch call. The
+    # previous version of this test passed ``curl``'s argv twice and so
+    # never exercised wget at all.
+    assert _match_http_fetch("wget", ("-O", "-", "https://example.com")) is not None
 
 
 def test_match_http_fetch_no_url_returns_none() -> None:
-    assert _match_http_fetch(("-v",)) is None
+    assert _match_http_fetch("curl", ("-v",)) is None
 
 
 def test_match_http_fetch_two_urls_returns_none() -> None:
-    assert _match_http_fetch(("https://a", "https://b")) is None
+    assert _match_http_fetch("curl", ("https://a", "https://b")) is None
 
 
 def test_match_http_fetch_output_flag_bails() -> None:
-    assert _match_http_fetch(("-o", "f.txt", "https://x")) is None
+    assert _match_http_fetch("curl", ("-o", "f.txt", "https://x")) is None
 
 
 def test_bash_match_simple_curl() -> None:
@@ -426,6 +430,56 @@ def test_post_form_non_object_rejected(bad_form: object) -> None:
 def test_get_body_rejected(body_key: str) -> None:
     with pytest.raises(ValueError, match="POST"):
         _request_bodies("GET", {body_key: {"key": "value"}})
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # MEASURED: ``curl -K opts.conf https://example.com`` with
+        # ``output = "out.html"`` in opts.conf wrote out.html. The flag
+        # that writes never appears in argv -- it is in the config file.
+        "curl -K opts.conf https://example.com",
+        "curl --config opts.conf https://example.com",
+        "curl --config=opts.conf https://example.com",
+        # ``-d @file`` reads the request body from disk, which WebFetch's
+        # inline ``json``/``form`` cannot express.
+        "curl -d @payload.json https://example.com",
+        "curl --data @payload.json https://example.com",
+        # Saves every URL to a file, like ``-O`` for the whole argv.
+        "curl --remote-name-all https://example.com",
+        # MEASURED: bare ``wget https://example.com`` wrote index.html.
+        # wget writes to disk BY DEFAULT, so the bare form is the one
+        # that needs the bail, not the one that earns a nudge.
+        "wget https://example.com",
+        "wget -q https://example.com",
+    ],
+)
+def test_a_fetch_that_writes_a_file_is_silent(command: str) -> None:
+    """A gate reading argv cannot see behavior sourced elsewhere.
+
+    Each of these writes a file, yet none carries a write flag the
+    argv scan recognises -- the flag is in a config file, or is the
+    utility's default.
+    """
+    trees = parse_bash(command)
+    assert trees is not None
+    assert WebFetch().bash_match(trees) is None, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # ``-O -`` sends the body to STDOUT, which is the one wget shape
+        # WebFetch actually matches.
+        "wget -O - https://example.com",
+        "wget -qO- https://example.com",
+    ],
+)
+def test_a_wget_that_streams_to_stdout_still_nudges(command: str) -> None:
+    """The bail must key on writing a FILE, not on the letter ``O``."""
+    trees = parse_bash(command)
+    assert trees is not None
+    assert WebFetch().bash_match(trees) is not None, command
 
 
 if __name__ == "__main__":
