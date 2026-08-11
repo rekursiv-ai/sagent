@@ -230,8 +230,8 @@ def test_run_rejects_invalid_transport() -> None:
     assert "Invalid transport" in result.content
 
 
-def test_run_defaults_to_the_html2text_extractor() -> None:
-    """An unspecified extractor keeps every text node, not just article prose."""
+def test_run_defaults_to_the_trafilatura_extractor() -> None:
+    """An unspecified extractor returns the scored article body only."""
     captured: dict[str, object] = {}
 
     def fake_fetch_web(url: str, **kwargs: object) -> WebFetchResult:
@@ -245,7 +245,7 @@ def test_run_defaults_to_the_html2text_extractor() -> None:
     ):
         result = asyncio.run(WebFetch().run({"url": "https://example.com"}))
     assert not result.is_error
-    assert captured["extractor"] == "html2text"
+    assert captured["extractor"] == "trafilatura"
 
 
 def test_run_explicit_extractor_passes_through() -> None:
@@ -353,7 +353,7 @@ def test_run_cache_separates_extractors() -> None:
         tool = WebFetch()
         _ = asyncio.run(tool.run({"url": "https://example.com"}))
         _ = asyncio.run(
-            tool.run({"url": "https://example.com", "extractor": "trafilatura"})
+            tool.run({"url": "https://example.com", "extractor": "html2text"})
         )
     assert mock_web.call_count == 2
 

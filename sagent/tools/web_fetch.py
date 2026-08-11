@@ -64,15 +64,18 @@ class WebFetch:
                     "type": "string",
                     "enum": get_args(Extractor),
                     "description": (
-                        "How the page becomes text. 'html2text' (default) "
-                        "converts every text node to Markdown. 'markdownify' "
-                        "converts the document's elements instead, keeping "
-                        "nested lists and tables a text walk flattens. "
-                        "'trafilatura' returns only what it scores as the "
-                        "article, which is smaller but drops the substance of "
-                        "any page that is not article-shaped -- a dictionary "
-                        "entry, a Q&A thread, a profile timeline. 'raw' "
-                        "returns the HTML source untouched."
+                        "How the page becomes text. 'trafilatura' (default) "
+                        "returns only what it scores as the article -- "
+                        "smallest, but it drops the substance of any page "
+                        "that is not article-shaped (a dictionary entry loses "
+                        "its pronunciation, a Q&A thread loses every answer), "
+                        "and the loss is invisible because the output still "
+                        "looks complete. 'html2text' converts every text node "
+                        "to Markdown, losing nothing. 'markdownify' converts "
+                        "the document's elements instead, keeping nested "
+                        "lists and tables a text walk flattens. 'raw' returns "
+                        "the HTML source untouched. Re-fetch with 'html2text' "
+                        "when the answer you expected is missing."
                     ),
                 },
                 "json": {
@@ -232,7 +235,7 @@ class WebFetch:
                 is_error=True,
             )
         transport = cast(Transport, raw_transport)
-        raw_extractor = args.get("extractor", "html2text")
+        raw_extractor = args.get("extractor", "trafilatura")
         if not isinstance(raw_extractor, str) or raw_extractor not in get_args(
             Extractor
         ):
