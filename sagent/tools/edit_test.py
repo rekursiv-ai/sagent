@@ -236,19 +236,25 @@ def test_make_diff_empty() -> None:
 def test_bash_match_sed_in_place_simple() -> None:
     trees = parse_bash("sed -i 's/foo/bar/' file.txt")
     assert trees is not None
-    assert edit.bash_match(trees) == "sed via Bash is a bad UX. Use the Edit tool."
+    hint = edit.bash_match(trees) or ""
+    assert hint.startswith("sed via Bash is a bad UX. Use the Edit tool."), hint
+    assert "old_string='foo' new_string='bar'" in hint, hint
 
 
 def test_bash_match_sed_in_place_global() -> None:
     trees = parse_bash("sed -i 's/foo/bar/g' file.txt")
     assert trees is not None
-    assert edit.bash_match(trees) == "sed via Bash is a bad UX. Use the Edit tool."
+    hint = edit.bash_match(trees) or ""
+    assert hint.startswith("sed via Bash is a bad UX. Use the Edit tool."), hint
+    assert "replace_all=true" in hint, hint
 
 
 def test_bash_match_sed_long_in_place() -> None:
     trees = parse_bash("sed --in-place 's/foo/bar/' file.txt")
     assert trees is not None
-    assert edit.bash_match(trees) == "sed via Bash is a bad UX. Use the Edit tool."
+    hint = edit.bash_match(trees) or ""
+    assert hint.startswith("sed via Bash is a bad UX. Use the Edit tool."), hint
+    assert "file_path='file.txt'" in hint, hint
 
 
 def test_bash_match_sed_no_in_place_no_nudge() -> None:
@@ -303,6 +309,32 @@ def test_bash_match_unknown_shape_no_nudge() -> None:
     trees = parse_bash("echo hi | grep x")
     assert trees is not None
     assert edit.bash_match(trees) is None
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("sed -i 's/a/b/' f.txt", "file_path='f.txt'"),
+        ("cd /srv && sed -i 's/a/b/' f.txt", "file_path='/srv/f.txt'"),
+        ("cd /srv && cd sub && sed -i 's/a/b/' f.txt", "file_path='/srv/sub/f.txt'"),
+        ("cd /srv && sed -i 's/a/b/' /etc/hosts", "file_path='/etc/hosts'"),
+    ],
+)
+def test_bash_match_names_the_file_the_command_edits(
+    command: str, expected: str
+) -> None:
+    """Edit resolves a relative path against the AGENT's cwd, not the shell's.
+
+    ``_match_sed`` took ``cwd`` and dropped it, so ``cd /srv && sed -i``
+    pointed the caller at a DIFFERENT file -- the one failure mode the
+    sibling matchers all resolve. Edit also offered no worked example at
+    all, so there was nothing to be right or wrong.
+    """
+    trees = parse_bash(command)
+    assert trees is not None
+    hint = edit.bash_match(trees) or ""
+    assert hint.startswith("sed via Bash is a bad UX."), hint
+    assert expected in hint, hint
 
 
 if __name__ == "__main__":

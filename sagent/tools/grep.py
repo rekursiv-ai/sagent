@@ -20,8 +20,13 @@ from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
     Invocation,
     Node,
+    bounding_sink,
+    cwd_is_known,
+    operands,
+    parse_line_count,
     render_command,
     replaceable,
+    resolve_cwd_path,
     walk_commands,
 )
 from sagent.tools.tool_spec import CLI_SETTABLE
@@ -94,7 +99,21 @@ _NUDGE: Final = "grep/rg via Bash is a bad UX. Use the Grep tool."
 # Bash necessary. Notably ABSENT: ``-c``, which counts matching lines and
 # is ``output_mode="count"``; a denylist shared with ``head`` (where
 # ``-c`` means bytes) silently dropped every ``grep -c``.
-_GREP_DENY: frozenset[str] = frozenset()
+#
+# ``-v`` inverts the match, and ``directive_schema`` has no property for
+# that -- ``exclude`` is a PATH glob (it becomes ``rg --glob !PAT``).
+# Measured on a file containing ``ERROR DEBUG b``: the pipeline
+# ``grep ERROR | grep -v DEBUG`` drops that line while
+# ``exclude='DEBUG'`` returns it.
+#
+# ``-q`` prints NOTHING and is read for its exit status -- the whole
+# point of ``grep -q x f && action``. A tool call returns matches, not a
+# status a later shell command can branch on, so Bash is necessary.
+_GREP_DENY: frozenset[str] = frozenset({"-v", "--invert-match", "-q", "--quiet"})
+
+# Prepended to the body when a knob was dropped. The model passed it and
+# must be told it did not apply; ``logger.warning`` goes nowhere it reads.
+_OFFSET_IGNORED: Final = "[offset ignored: context lines were requested]\n"
 
 # Entry cap when no agent is in context (standalone use, tests).
 _FALLBACK_KEEP_FIRST: Final = 1_000
@@ -122,7 +141,12 @@ def _default_keep_first() -> int:
     ceiling = agent.max_result_chars if agent is not None else 0
     if ceiling <= 0:
         return _FALLBACK_KEEP_FIRST
-    return max(_FALLBACK_KEEP_FIRST, ceiling // _ASSUMED_CHARS_PER_MATCH)
+    # A floor here defeats the derivation. The smallest budget
+    # ``ContextBudget.from_model`` produces is ``persist_threshold=20_000``,
+    # where 1000 entries is ~150_000 chars -- 7.5x the ceiling, so the
+    # result off-loads to disk and the caller sees a preview instead of
+    # matches. ``offset`` reaches whatever a smaller cap left behind.
+    return max(1, ceiling // _ASSUMED_CHARS_PER_MATCH)
 
 
 # Mirrors the ``output_mode`` enum advertised in ``directive_schema``.
@@ -367,6 +391,27 @@ class Grep:
         if context_symmetric > 0:
             context_before = max(context_before, context_symmetric)
             context_after = max(context_after, context_symmetric)
+        # Checked before dispatch so both backends agree. ``rg`` exits 2
+        # on an unknown type; the fallback's ``.get`` miss fell through to
+        # ``["*"]`` and searched the whole tree instead.
+        if file_type and file_type not in _TYPE_GLOBS:
+            return ToolResult(
+                call_id="",
+                content=(
+                    f"unknown type: {file_type!r}"
+                    f" (expected one of {sorted(_TYPE_GLOBS)})"
+                ),
+                is_error=True,
+            )
+        # Checked once, before dispatch: rg exits 2 on a missing path
+        # while the fallback walked it and reported ``(no matches)`` --
+        # "found nothing" and "no such path" are different answers.
+        if not Path(path).exists():
+            return ToolResult(
+                call_id="",
+                content=f"no such file or directory: {path}",
+                is_error=True,
+            )
         if _RG_PATH:
             return _grep_rg(
                 pattern=pattern,
@@ -391,6 +436,7 @@ class Grep:
             glob_filter=glob_filter,
             file_type=file_type,
             exclude=exclude,
+            pcre=pcre,
             output_mode=output_mode,
             keep_first=keep_first,
             keep_last=keep_last,
@@ -487,22 +533,129 @@ def _nudge_for(inv: Invocation) -> str:
     flag costs the caller a worked example, not the nudge. Gating
     detection on it instead made every flag outside
     :data:`_GREP_TRANSLATABLE_FLAGS` -- most of grep's ~80 -- silent.
+
+    The translated args come from the SEARCH, which is not always
+    ``inv``: an ``xargs`` payload carries the search behind the wrapper,
+    and a stdin-fed search's path sits on the producer feeding it.
+    Translating ``inv.args`` blindly rendered ``xargs grep pat`` as
+    ``pattern='grep' path='pat'``.
     """
-    args = _translate_grep_args(inv.args)
-    call = f" Try: Grep {args}" if args else ""
+    args = _search_args(inv)
+    fields = _translate_grep_args(args, cwd=inv.cwd) if args is not None else ""
+    if fields:
+        fields += _sink_fields(inv)
+    call = f" Try: Grep {fields}" if fields else ""
     return f"{_NUDGE} Replaces: `{render_command(inv)}`.{call}"
 
 
-def _translate_grep_args(args: tuple[str, ...]) -> str:
-    """Render ``args`` as Grep tool keywords, or ``""`` when unsupported."""
+def _search_args(inv: Invocation) -> tuple[str, ...] | None:
+    """Argv of the SEARCH itself, with its path operand resolved.
+
+    Returns ``None`` when the operand cannot be recovered, so the caller
+    drops the worked example rather than inventing one.
+    """
+    if inv.exe == "xargs":
+        payload = _strip_xargs_prefix(inv.args)
+        source = inv.piped_from
+        if payload is None or source is None:
+            return None
+        # ``find``'s own vocabulary: its operands are the ROOTS, and a
+        # predicate's value (``-name '*.py'``) is not one of them.
+        roots = operands("find", source.args)
+        if len(roots) > 1:
+            return None
+        # ``find -name '*.py'`` omits the root, which defaults to the
+        # cwd. Reading the first non-flag token as the root instead named
+        # the GLOB as the path.
+        root = roots[0] if roots else "."
+        name = next(
+            (source.args[i + 1] for i, a in enumerate(source.args) if a == "-name"),
+            "",
+        )
+        # ``-name`` is optional: ``find /src -type f`` names a root and
+        # nothing else, which is a Grep call with no ``glob``.
+        return (*payload, root, *(("--include", name) if name else ()))
+    if inv.piped_from is None:
+        return inv.args
+    # ``cat f | grep p``: the pattern is here, the path one hop upstream.
+    # Ask through ``operands`` so a producer's flag VALUE is not counted
+    # as a second path -- ``head -n 20 f`` spends its ``20`` on the flag.
+    source = inv.piped_from
+    paths = [a for a in operands(source.exe, source.args) if not _is_sed_script(a)]
+    if len(paths) != 1:
+        return None
+    return (*inv.args, paths[0])
+
+
+def _is_sed_script(arg: str) -> bool:
+    """Whether ``arg`` is a bare ``sed`` script rather than a path.
+
+    ``sed -n '1,50p' f`` puts the script in operand position, so a
+    producer's path cannot be recovered by counting operands alone.
+    """
+    return bool(_SED_SCRIPT.fullmatch(arg))
+
+
+# A ``sed`` address plus command (``5p``, ``1,50p``, ``10,$p``) or a
+# substitution -- the spellings that appear where a path would.
+_SED_SCRIPT: Final = re.compile(r"\d+(,(\d+|\$))?[a-z]|s/.*/.*/[a-z]*")
+
+
+def _sink_fields(inv: Invocation) -> str:
+    """Render the downstream stages ``replaceable`` folded into this call.
+
+    ``_sink_blocks`` accepts ``| wc -l`` precisely because Grep expresses
+    it as ``output_mode="count"``; omitting it advertises a different
+    search than the one replaced.
+
+    Notably ABSENT: ``| grep -v X``. Measured on a file whose line reads
+    ``ERROR DEBUG b``: the pipeline drops that line, while
+    ``exclude='DEBUG'`` returns it -- ``exclude`` is a PATH glob passed
+    to ``rg --glob !PAT``, not a line filter.
+    """
+    fields = "".join(
+        ' output_mode="count"'
+        for sink in inv.downstream()
+        if sink.exe == "wc" and sink.args == ("-l",)
+    )
+    # ``| head -5`` bounds the search, and Grep says that directly. A
+    # suggestion without it returns the whole match set.
+    sink = bounding_sink(inv)
+    count = parse_line_count(sink.args) if sink is not None else None
+    if count is not None:
+        fields += (
+            f" keep_last={count}"
+            if sink and sink.exe == "tail"
+            else (f" keep_first={count}")
+        )
+    return fields
+
+
+def _translate_grep_args(args: tuple[str, ...], *, cwd: str = "") -> str:
+    """Render ``args`` as Grep tool keywords, or ``""`` when unsupported.
+
+    ``cwd`` is the enclosing ``cd`` prefix. Grep resolves a relative
+    ``path`` against the AGENT's cwd, not the shell's, so dropping it
+    searches a different tree than the command being replaced.
+    """
     fields: list[str] = []
     positional: list[str] = []
+    patterns: list[str] = []
     i = 0
     while i < len(args):
         a = args[i]
         if a == "-" or not a.startswith("-"):
             positional.append(a)
             i += 1
+            continue
+        if a in ("-e", "--regexp"):
+            # ``-e`` NAMES the pattern -- the only spelling that works
+            # for a pattern beginning with a dash. Skipping it as an
+            # ordinary flag value left the search with no pattern at all.
+            if i + 1 >= len(args):
+                return ""
+            patterns.append(args[i + 1])
+            i += 2
             continue
         if a.startswith("--"):
             name, eq, value = a.partition("=")
@@ -520,7 +673,10 @@ def _translate_grep_args(args: tuple[str, ...]) -> str:
         if a in _GREP_VALUE_FLAGS:
             if i + 1 >= len(args):
                 return ""
-            fields.append(f"{a!r}={args[i + 1]}".replace("'", '"'))
+            # Bare, not quoted: the schema property IS ``-B``, and the
+            # sibling booleans already render ``-i=true``. ``"-B"=3``
+            # parses as nothing a caller can paste.
+            fields.append(f"{a}={args[i + 1]}")
             i += 2
             continue
         for c in a[1:]:
@@ -535,11 +691,25 @@ def _translate_grep_args(args: tuple[str, ...]) -> str:
             elif c == "P":
                 fields.append("pcre=true")
         i += 1
-    if not positional or len(positional) > 2:
+    # With ``-e`` the pattern is already named, so every positional is a
+    # path; without it the first positional is the pattern.
+    if patterns:
+        pattern, paths = "|".join(patterns), positional
+    elif positional:
+        pattern, paths = positional[0], positional[1:]
+    else:
         return ""
-    head = f"pattern={positional[0]!r}"
-    if len(positional) == 2:
-        head += f" path={positional[1]!r}"
+    if len(paths) > 1:
+        return ""
+    head = f"pattern={pattern!r}"
+    target = resolve_cwd_path(cwd, paths[0] if paths else None)
+    if paths and not cwd_is_known(cwd):
+        # ``cd``/``cd -`` moved somewhere the text does not name, so the
+        # operand cannot be resolved and a pattern-only call would search
+        # a different tree than the command it claims to replace.
+        return ""
+    if target:
+        head += f" path={target!r}"
     return " ".join([head, *fields])
 
 
@@ -606,13 +776,20 @@ def _parse_find_for_grep(args: tuple[str, ...]) -> bool:
         if a in ("-print", "-print0"):
             i += 1
             continue
-        if a in ("-name", "-iname"):
+        if a == "-name":
             if i + 1 >= len(args):
                 return False
             i += 2
             continue
+        if a == "-iname":
+            # Case-INsensitive. Grep's ``glob`` is case-sensitive, so
+            # rendering the same pattern asks a different question.
+            return False
         if a == "-type":
-            if i + 1 >= len(args) or args[i + 1] not in {"f", "d"}:
+            # Only ``f``. ``-type d`` feeds xargs DIRECTORIES, so the
+            # search recurses each one -- a shape Grep's single ``path``
+            # cannot express, and the nudge named the pattern as a path.
+            if i + 1 >= len(args) or args[i + 1] != "f":
                 return False
             i += 2
             continue
@@ -677,8 +854,12 @@ def _grep_rg(
     offset: int,
 ) -> str | ToolResult:
     """Grep using ripgrep."""
+    notice = ""
     if offset > 0 and (context_before > 0 or context_after > 0):
-        logger.warning("grep: offset ignored when context lines are requested")
+        # A log line is invisible to the model that passed the knob, so
+        # the dropped ``offset`` read as a search that simply started at
+        # the top. Say it in the body instead.
+        notice = _OFFSET_IGNORED
         offset = 0
     cmd = _build_rg_cmd(
         pattern=pattern,
@@ -694,13 +875,22 @@ def _grep_rg(
         show_line_numbers=show_line_numbers,
         multiline=multiline,
     )
-    result = subprocess.run(  # noqa: S603 -- trusted fixed argv, not user input
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
+    try:
+        result = subprocess.run(  # noqa: S603 -- trusted fixed argv, not user input
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        # ``Tool.run`` returns failures; a raised exception reaches the
+        # agent loop as a crash rather than a tool error.
+        return ToolResult(
+            call_id="",
+            content="ripgrep timed out after 30s; narrow the path or pattern.",
+            is_error=True,
+        )
     if result.returncode >= 2:
         err = result.stderr.strip() or "unknown"
         if not multiline and 'the literal "\\n" is not allowed' in err:
@@ -714,7 +904,7 @@ def _grep_rg(
             content=f"ripgrep error (exit {result.returncode}): {err}",
             is_error=True,
         )
-    return _paginate(
+    return notice + _paginate(
         result.stdout.strip(),
         keep_first=keep_first,
         keep_last=keep_last,
@@ -855,36 +1045,40 @@ class _GrepState:
           filepath: Path string used in result lines.
 
         """
-        file_match_count = 0
-        for i, line in enumerate(lines):
-            if not pat.search(line):
-                continue
-            file_match_count += 1
-            if self.output_mode == "files_with_matches":
-                self.matches.append(filepath)
-                break
-            if self.output_mode == "count":
-                continue
-            self._emit_line(lines, filepath, i, line)
-        if self.output_mode == "count" and file_match_count > 0:
-            self.file_counts[filepath] = file_match_count
-
-    def _emit_line(
-        self,
-        all_lines: list[str],
-        filepath: str,
-        i: int,
-        line: str,
-    ) -> None:
-        """Append one match (with optional context) to ``self.matches``."""
-        if self.context_before > 0 or self.context_after > 0:
-            start = max(0, i - self.context_before)
-            end = min(len(all_lines), i + self.context_after + 1)
+        hits = [i for i, line in enumerate(lines) if pat.search(line)]
+        if not hits:
+            return
+        if self.output_mode == "files_with_matches":
+            self.matches.append(filepath)
+            return
+        if self.output_mode == "count":
+            self.file_counts[filepath] = len(hits)
+            return
+        if self.context_before <= 0 and self.context_after <= 0:
+            for i in hits:
+                self._append_content_line(filepath, i, lines[i])
+            return
+        for start, end in self._context_groups(hits, len(lines)):
             for j in range(start, end):
-                self._append_content_line(filepath, j, all_lines[j])
+                self._append_content_line(filepath, j, lines[j])
             self.matches.append("--")
-        else:
-            self._append_content_line(filepath, i, line)
+
+    def _context_groups(self, hits: list[int], total: int) -> list[tuple[int, int]]:
+        """Merge each match's context window with its overlapping neighbours.
+
+        One group per match repeated the shared lines: two matches a line
+        apart printed the overlap twice, so a caller counting occurrences
+        in the output counted them twice. ripgrep merges instead.
+        """
+        groups: list[tuple[int, int]] = []
+        for i in hits:
+            start = max(0, i - self.context_before)
+            end = min(total, i + self.context_after + 1)
+            if groups and start <= groups[-1][1]:
+                groups[-1] = (groups[-1][0], max(groups[-1][1], end))
+                continue
+            groups.append((start, end))
+        return groups
 
     def _append_content_line(self, filepath: str, i: int, line: str) -> None:
         if self.show_line_numbers:
@@ -924,10 +1118,24 @@ def _grep_python(
     show_line_numbers: bool,
     multiline: bool,
     offset: int,
+    pcre: bool = False,
 ) -> str | ToolResult:
     """Grep using Python regex (fallback)."""
+    if pcre:
+        # The schema promises PCRE2 (lookaround, backrefs). Python ``re``
+        # is a different language, and silently substituting it returns
+        # results under a name that does not describe them.
+        return ToolResult(
+            call_id="",
+            content=(
+                "pcre=true requires ripgrep, which is not installed;"
+                " the Python fallback cannot provide PCRE2 semantics."
+            ),
+            is_error=True,
+        )
+    notice = ""
     if offset > 0 and (context_before > 0 or context_after > 0):
-        logger.warning("grep: offset ignored when context lines are requested")
+        notice = _OFFSET_IGNORED
         offset = 0
     if not multiline and r"\n" in pattern:
         return ToolResult(
@@ -970,7 +1178,7 @@ def _grep_python(
             state.process_multiline(pat, text, filepath)
         else:
             state.process_lines(pat, text.splitlines(), filepath)
-    return _paginate(
+    return notice + _paginate(
         state.format(), keep_first=keep_first, keep_last=keep_last, offset=offset
     )
 
@@ -982,9 +1190,9 @@ def _collect_files(
     exclude: str,
 ) -> list[Path]:
     """Walk *root* and return files matching the glob/type/exclude filters."""
-    globs = _TYPE_GLOBS.get(file_type, []) if file_type else []
+    globs = _TYPE_GLOBS[file_type] if file_type else []
     if glob_filter:
-        globs = [glob_filter]
+        globs = _expand_braces(glob_filter)
     if not globs:
         globs = ["*"]
     if root.is_file():
@@ -1005,6 +1213,21 @@ def _collect_files(
             if _path_matches(str(rel), globs, exclude):
                 files.append(fpath)
     return files
+
+
+def _expand_braces(glob: str) -> list[str]:
+    """Expand one ``{a,b}`` alternation into separate globs.
+
+    ``Path.match`` has no brace syntax, so the ``"*.{ts,tsx}"`` the schema
+    advertises matched NOTHING in this backend while ripgrep matched both
+    extensions. One group is enough for the documented shape; a glob with
+    several is passed through and simply matches literally, as before.
+    """
+    before, brace, rest = glob.partition("{")
+    body, close, after = rest.partition("}")
+    if not brace or not close or "{" in after:
+        return [glob]
+    return [f"{before}{alt}{after}" for alt in body.split(",")]
 
 
 def _path_matches(path: str, globs: Sequence[str], exclude: str) -> bool:

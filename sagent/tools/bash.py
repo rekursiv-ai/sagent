@@ -300,8 +300,11 @@ class Bash:
         if run_as_fully_detached:
             text = _run_as_fully_detached(command, state=state)
         else:
-            timeout_s = max(1, min(int(timeout) // 1000, BASH_MAX_TIMEOUT_MS // 1_000))
-            text = await _run_foreground(command, state=state, timeout_s=timeout_s)
+            text = await _run_foreground(
+                command,
+                state=state,
+                timeout_s=_timeout_seconds(timeout),
+            )
         body = text
         if not self._peer_matchers:
             return ToolResult(call_id="", content=body)
@@ -361,18 +364,50 @@ def _run_as_fully_detached(command: str, *, state: ToolState) -> str:
     return f"(running in background, pid={proc.pid})"
 
 
-async def _run_foreground(command: str, *, state: ToolState, timeout_s: int) -> str:
+def _timeout_seconds(timeout_ms: int) -> float:
+    """Convert the directive's millisecond timeout to wait_for seconds.
+
+    Float, not floor division: ``// 1000`` mapped 1999ms to 1s -- half the
+    requested budget -- and anything under 1000ms to 0, which the old
+    ``max(1, ...)`` then raised to a full second, 1000x the request. The
+    schema's ``minimum: 1`` makes a 1ms timeout legal, so it must survive.
+    """
+    return min(max(timeout_ms, 1), BASH_MAX_TIMEOUT_MS) / 1000
+
+
+async def _run_foreground(command: str, *, state: ToolState, timeout_s: float) -> str:
     """Run a foreground bash command via :mod:`asyncio.subprocess`."""
     sentinel = f"__SAGENT_CWD_{secrets.token_hex(4)}__"
     # ``printf`` with a LEADING newline, not ``echo``: a command whose
     # stdout lacks a trailing newline otherwise fuses with the sentinel
     # on one line, which fails the prefix test below -- cwd tracking
     # silently stops and the raw token is shown to the model.
-    tracked_cmd = f'trap \'printf "\\n%s=%s\\n" "{sentinel}" "$(pwd)"\' EXIT\n{command}'
+    report = f'printf "\\n%s=%s\\n" "{sentinel}" "$(pwd)"'
+    # The trap is what survives an early ``exit``; the trailing statement is
+    # what survives the command installing its own trap -- ``trap - EXIT``
+    # silently disabled tracking outright, so the tool kept a stale cwd and
+    # every later relative path resolved against the wrong directory. Two
+    # identical sentinel lines are harmless: the reader applies each and they
+    # agree.
+    #
+    # ``__rc`` then ``exit`` restores the command's own status: a bare
+    # trailing statement made every run exit with printf's 0, so ``false``
+    # and a failing build both reported success.
+    #
+    # ``eval "$1"`` with the command passed as an ARGUMENT, not spliced
+    # into this text: bash reads a script line-wise, so a command ending
+    # in a continuation (``echo hi \``) consumed the very next line and
+    # printed ``__rc=0`` as its own output.
+    tracked_cmd = f"trap '{report}' EXIT\neval \"$1\"\n__rc=$?\n{report}\nexit $__rc"
     proc = await asyncio.create_subprocess_exec(
         "/bin/bash",
         "-c",
         tracked_cmd,
+        # ``$0``: names the shell in ``$0`` and in its error prefixes, so a
+        # syntax error still reads ``bash: ...`` as it did when the command was
+        # the ``-c`` string itself.
+        "bash",
+        command,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

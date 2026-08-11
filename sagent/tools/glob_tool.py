@@ -14,9 +14,13 @@ from sagent.lib.custom_json import bool_val, int_val, json_freeze
 from sagent.tools.core import load_tool_description, run_sync
 from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
+    FIND_DENY_FLAGS,
     Node,
+    bounding_sink,
+    parse_line_count,
     render_command,
     replaceable,
+    resolve_cwd_path,
     walk_commands,
 )
 from sagent.tools.lib.path_sort import (
@@ -32,12 +36,6 @@ from sagent.types.runtime import ToolResult
 _NUDGE: Final = "find via Bash is a bad UX. Use the Glob tool."
 
 _FIND_EXES: frozenset[str] = frozenset({"find"})
-
-# Predicates that ACT on what they match rather than listing it, so the
-# command's product is the action and not the paths.
-_FIND_DENY: frozenset[str] = frozenset(
-    {"-exec", "-execdir", "-delete", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"}
-)
 
 # Match cap when no agent is in context (standalone use, tests).
 _FALLBACK_MAX_RESULTS: Final = 1_000
@@ -65,7 +63,12 @@ def _default_max_results() -> int:
     ceiling = agent.max_result_chars if agent is not None else 0
     if ceiling <= 0:
         return _FALLBACK_MAX_RESULTS
-    return max(_FALLBACK_MAX_RESULTS, ceiling // _ASSUMED_CHARS_PER_MATCH)
+    # A floor here defeats the derivation. The smallest budget
+    # ``ContextBudget.from_model`` produces is ``persist_threshold=20_000``,
+    # where 1000 matches is ~120_000 chars -- 6x the ceiling, so the
+    # result off-loads to disk and the caller sees a preview instead of
+    # paths. ``offset`` reaches whatever a smaller cap left behind.
+    return max(1, ceiling // _ASSUMED_CHARS_PER_MATCH)
 
 
 _DEFAULT_SORT: Final = "name"
@@ -300,11 +303,22 @@ class Glob:
 
         """
         for inv in walk_commands(trees):
-            if not replaceable(inv, exes=_FIND_EXES, deny=_FIND_DENY):
+            # The classifier's denylist verbatim: these predicates ACT on
+            # what they match, so the command's product is the write or the
+            # exec, not the path list. A second copy diverged on -fprint0.
+            if not replaceable(inv, exes=_FIND_EXES, deny=FIND_DENY_FLAGS):
                 continue
             if inv.piped_into is not None and inv.piped_into.exe == "xargs":
                 continue
-            return f"{_NUDGE} Replaces: `{render_command(inv)}`.{_glob_call(inv.args)}"
+            sink = bounding_sink(inv)
+            call = _glob_call(
+                inv.args,
+                cwd=inv.cwd,
+                # ``| head -50`` bounds the listing, which Glob says
+                # directly as ``max_results``.
+                max_results=parse_line_count(sink.args) if sink else None,
+            )
+            return f"{_NUDGE} Replaces: `{render_command(inv)}`.{call}"
         return None
 
 
@@ -318,27 +332,43 @@ def _long_line(p: Path) -> str:
     return f"{size:>10}  {mtime}  {p.resolve()}"
 
 
-def _glob_call(args: tuple[str, ...]) -> str:
+def _glob_call(
+    args: tuple[str, ...],
+    *,
+    cwd: str = "",
+    max_results: int | None = None,
+) -> str:
     """Render a concrete Glob call, or ``""`` when a predicate is untranslatable.
 
     Runs after detection, so an unsupported predicate (``-newer``,
     ``-maxdepth``) costs the caller a worked example rather than the
     nudge itself -- gating detection on this parse is what made most of
     ``find``'s ~80 predicates silent.
+
+    ``cwd`` is the enclosing ``cd`` prefix. Glob resolves a relative
+    ``path`` against the AGENT's cwd, not the shell's, so dropping it
+    searches a different tree than the command being replaced.
     """
     path = ""
     pattern = ""
     i = 0
     while i < len(args):
         a = args[i]
-        if a in {"-name", "-iname"}:
+        if a == "-name":
             if i + 1 >= len(args):
                 return ""
             pattern = args[i + 1]
             i += 2
             continue
+        if a == "-iname":
+            # ``Path.glob`` is case-sensitive on Linux, so rendering the
+            # same pattern under Glob asks a different question.
+            return ""
         if a == "-type":
-            if i + 1 >= len(args) or args[i + 1] not in {"f", "d"}:
+            # ``-type f`` is lossless: Glob's pattern already matches
+            # files. ``-type d`` restricts to directories, which Glob
+            # cannot express -- dropping it silently widens the result.
+            if i + 1 >= len(args) or args[i + 1] != "f":
                 return ""
             i += 2
             continue
@@ -351,5 +381,7 @@ def _glob_call(args: tuple[str, ...]) -> str:
         i += 1
     if not pattern:
         return ""
-    root = f" path={path!r}" if path and path != "." else ""
-    return f" Try: Glob pattern='**/{pattern}'{root}"
+    target = resolve_cwd_path(cwd, path)
+    root = f" path={target!r}" if target else ""
+    cap = f" max_results={max_results}" if max_results is not None else ""
+    return f" Try: Glob pattern='**/{pattern}'{root}{cap}"

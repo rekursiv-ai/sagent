@@ -16,8 +16,13 @@ from sagent.tools.core import load_tool_description
 from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
     Node,
+    bounding_sink,
+    cwd_is_known,
+    operands,
+    parse_line_count,
     render_command,
     replaceable,
+    resolve_cwd_path,
     walk_commands,
 )
 from sagent.tools.lib.path_sort import (
@@ -77,6 +82,15 @@ class List:
                     "minimum": 1,
                     "description": "Maximum number of entries. Default 500.",
                 },
+                "keep_last": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": (
+                        "Keep only the trailing N entries, in listing order"
+                        " (like ``| tail -n N``). Takes precedence over"
+                        " max_results."
+                    ),
+                },
             },
             "required": ["path"],
         }
@@ -129,7 +143,7 @@ class List:
 
         Args:
           args: Directive with ``path`` and optional ``show_hidden`` /
-              ``long`` / ``sort`` / ``max_results``.
+              ``long`` / ``sort`` / ``max_results`` / ``keep_last``.
 
         Returns:
           result: Entry listing (one per line), or an error when the
@@ -141,17 +155,34 @@ class List:
         long = bool_val(args.get("long"), False)
         sort = str(args.get("sort", _DEFAULT_SORT) or _DEFAULT_SORT)
         max_results = int_val(args.get("max_results"), 500)
+        # ``0`` is not "disabled": the schema floor is 1, so a supplied
+        # zero is a malformed directive. Distinguish absent from zero.
+        keep_last = int_val(args.get("keep_last"), 0)
+        if args.get("keep_last") is not None and keep_last < 1:
+            return ToolResult(
+                call_id="",
+                content=f"keep_last must be >= 1; got {keep_last}.",
+                is_error=True,
+            )
         return await asyncio.to_thread(
-            self._run, path, show_hidden, long, sort, max_results
+            self._run,
+            path,
+            show_hidden=show_hidden,
+            long=long,
+            sort=sort,
+            max_results=max_results,
+            keep_last=keep_last,
         )
 
     def _run(
         self,
         path: str,
+        *,
         show_hidden: bool,
         long: bool,
         sort: str,
         max_results: int,
+        keep_last: int = 0,
     ) -> ToolResult:
         """Run the directory listing synchronously and return the result."""
         if sort not in SORT_VALUES:
@@ -185,7 +216,10 @@ class List:
             entries = [e for e in entries if not e.name.startswith(".")]
         sort_paths(entries, sort)
         total = len(entries)
-        entries = entries[:max_results]
+        # ``keep_last`` slices the TAIL without reordering, which is what
+        # ``| tail -n N`` does. Expressing it as a flipped sort returned
+        # the same entries reversed.
+        entries = entries[-keep_last:] if keep_last > 0 else entries[:max_results]
         lines: list[str] = []
         for e in entries:
             name = e.name + ("/" if e.is_dir() else "")
@@ -201,8 +235,8 @@ class List:
             else:
                 lines.append(name)
         out = "\n".join(lines) or "(empty directory)"
-        if total > max_results:
-            out += f"\n... ({total - max_results} more)"
+        if total > len(entries):
+            out += f"\n... ({total - len(entries)} more)"
         return ToolResult(call_id="", content=out)
 
     def bash_match(self, trees: Sequence[Node]) -> str | None:
@@ -223,17 +257,21 @@ class List:
         for inv in walk_commands(trees):
             if not replaceable(inv, exes=_LS_EXES):
                 continue
-            if _ls_has_glob_positional(inv.args):
+            if _ls_has_glob_positional(operands("ls", inv.args)):
                 return "ls glob via Bash is a bad UX. Use the Glob tool."
-            sink = inv.piped_into
-            fields = _ls_fields(
+            # Anywhere downstream, not just adjacent: ``ls | cat | head -5``
+            # is the same five rows as ``ls | head -5``, and reading only
+            # the neighbour dropped the bound on the first spelling.
+            sink = bounding_sink(inv)
+            count = parse_line_count(sink.args) if sink else None
+            call = _ls_call(
                 inv.args,
-                max_results=_parse_line_count(sink.args) if sink else None,
-                flip_sort=bool(sink) and sink.exe == "tail",
+                cwd=inv.cwd,
+                max_results=count,
+                # ``tail`` keeps the LAST N in listing order. Rendering it
+                # as a reversed sort returned those same entries backwards.
+                keep_last=sink is not None and sink.exe == "tail",
             )
-            call = f" Try: List path={_ls_path(inv.args)!r}"
-            if fields:
-                call += f" {fields}"
             return f"{_NUDGE_PREFIX}. Replaces: `{render_command(inv)}`.{call}"
         return None
 
@@ -251,44 +289,53 @@ class _LsParse:
     sort: str | None
     """Sort key derived from ``-t`` / ``-S`` / ``-r``, or ``None``."""
 
-
-def _ls_path(args: tuple[str, ...]) -> str:
-    """Directory operand of an ``ls`` invocation; ``"."`` when omitted."""
-    return next((a for a in args if not a.startswith("-") and a != "--"), ".")
+    path: str
+    """The single directory operand; ``"."`` when omitted."""
 
 
-def _ls_fields(
-    args: tuple[str, ...], *, max_results: int | None, flip_sort: bool
+def _ls_call(
+    args: tuple[str, ...], *, cwd: str, max_results: int | None, keep_last: bool
 ) -> str:
-    """Render List keywords for ``ls`` args, or ``""`` when untranslatable.
+    """Render a concrete List call for ``ls`` args, or ``""``.
 
-    ``tail`` flips the sort: the last N of an ascending listing is the
-    first N of a descending one, which is what ``sort`` plus
-    ``max_results`` already say.
+    One parse decides everything: ``_parse_ls`` already rejects several
+    roots and unknown flags, so deriving the path separately handed back
+    a call that same parse had refused -- ``ls a b`` suggested only
+    ``a``, and ``ls -I '*.pyc' /src`` named the ignore-glob as the
+    directory.
+
+    ``tail`` becomes ``keep_last``, not a flipped sort. Measured in a
+    directory of ``f1``..``f5``: ``ls | tail -n 3`` prints ``f3 f4 f5``,
+    while ``sort='name_desc' max_results=3`` returns ``f5 f4 f3`` -- the
+    same entries in the opposite order.
     """
     parsed = _parse_ls(args)
     if parsed is None:
         return ""
-    sort = _flip_sort(parsed.sort) if flip_sort else parsed.sort
+    # List resolves a relative path against the AGENT's cwd, not the
+    # shell's, so a ``cd`` prefix dropped here lists a different tree.
+    if not cwd_is_known(cwd):
+        # The ``cd`` destination is not in the command text.
+        return ""
+    target = resolve_cwd_path(cwd, parsed.path) or "."
+    pieces = [f"path={target!r}", *_ls_fields(parsed)]
+    if max_results is not None:
+        pieces.append(
+            f"keep_last={max_results}" if keep_last else f"max_results={max_results}"
+        )
+    return f" Try: List {' '.join(pieces)}"
+
+
+def _ls_fields(parsed: _LsParse) -> list[str]:
+    """Render the non-path List keywords implied by parsed ``ls`` flags."""
     pieces: list[str] = []
-    if sort is not None:
-        pieces.append(f"sort={sort!r}")
+    if parsed.sort is not None:
+        pieces.append(f"sort={parsed.sort!r}")
     if parsed.long:
         pieces.append("long=true")
     if parsed.show_hidden:
         pieces.append("show_hidden=true")
-    if max_results is not None:
-        pieces.append(f"max_results={max_results}")
-    return " ".join(pieces)
-
-
-def _flip_sort(sort: str | None) -> str:
-    """Reverse a sort-direction key. ``None`` means default name asc."""
-    if sort is None:
-        return "name_desc"
-    if sort.endswith("_desc"):
-        return sort.removesuffix("_desc")
-    return f"{sort}_desc"
+    return pieces
 
 
 def _ls_has_glob_positional(args: tuple[str, ...]) -> bool:
@@ -343,34 +390,9 @@ def _parse_ls(args: tuple[str, ...]) -> _LsParse | None:
         sort = "name_desc"
     else:
         sort = None
-    return _LsParse(long=long, show_hidden=show_hidden, sort=sort)
-
-
-def _parse_line_count(args: tuple[str, ...]) -> int | None:
-    """Extract line count from ``head``/``tail`` args."""
-    if not args:
-        return 10
-    count: int | None = None
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a == "-n":
-            if i + 1 >= len(args) or not args[i + 1].isdigit():
-                return None
-            count = int(args[i + 1])
-            i += 2
-            continue
-        if a.startswith("-n"):
-            if not a[2:].isdigit():
-                return None
-            count = int(a[2:])
-            i += 1
-            continue
-        if len(a) > 1 and a[0] == "-" and a[1:].isdigit():
-            count = int(a[1:])
-            i += 1
-            continue
-        return None
-    if count is None or count < 1:
-        return None
-    return count
+    return _LsParse(
+        long=long,
+        show_hidden=show_hidden,
+        sort=sort,
+        path=positional[0] if positional else ".",
+    )

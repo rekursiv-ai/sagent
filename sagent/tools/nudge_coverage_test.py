@@ -22,11 +22,33 @@ from sagent.tools.lib.bash import BashMatcher, parse_bash
 _MATCHERS = resolve_tools(["Read", "Grep", "Glob", "List", "Edit", "WebFetch"])
 
 # Flags that make Bash genuinely necessary: they act on what they match,
-# window bytes rather than lines, or follow a growing file. Everything
-# else in a utility's alphabet must still reach its tool -- see
+# window bytes rather than lines, follow a growing file, invert the
+# match, or return a status instead of output. Everything else in a
+# utility's alphabet must still reach its tool -- see
 # ``test_every_documented_flag_still_nudges``.
+#
+# ``-v`` is here on a measurement, not a reading. On a file whose second
+# line is ``ERROR DEBUG b``, ``grep ERROR f | grep -v DEBUG`` returns two
+# lines while ``Grep(pattern='ERROR', exclude='DEBUG')`` returns all
+# three: ``exclude`` becomes ``rg --glob '!PAT'``, a PATH filter, and
+# ``directive_schema`` has no inverted-match property at all.
+#
+# ``-q`` prints NOTHING and is read for its exit status, which is the
+# whole point of ``grep -q x f && action``. A tool call returns matches,
+# not a status a later shell command can branch on.
 _NECESSARY: frozenset[str] = frozenset(
-    {"-exec", "-execdir", "-delete", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"}
+    {
+        "-exec",
+        "-execdir",
+        "-delete",
+        "-ok",
+        "-okdir",
+        "-fprint",
+        "-fprintf",
+        "-fls",
+        "-v",
+        "-q",
+    }
 )
 
 # A representative slice of each utility's real alphabet. Hard-coded
@@ -156,6 +178,11 @@ def test_shape_nudges_the_right_tool(command: str, tool: str) -> None:
         # ``find -exec``/``-delete`` act on what they match.
         "find . -name '*.pyc' -delete",
         "find . -name '*.py' -exec wc -l {} +",
+        # ``-v`` inverts the match, which no tool property expresses --
+        # ``exclude`` filters PATHS. Measured: on a line reading
+        # ``ERROR DEBUG b``, the pipeline drops it and ``exclude`` keeps it.
+        "grep -v pat foo.py",
+        "grep -rn pat --include='*.py' . | grep -v '^./build/'",
     ],
 )
 def test_shape_is_deliberately_silent(command: str) -> None:
@@ -262,8 +289,6 @@ def test_find_splits_on_its_sink() -> None:
         ("grep -rn pat --exclude-dir=.git .", "Grep"),
         ("ls -R /srv", "List"),
         ("ls -lh /srv", "List"),
-        # A sink that only filters is what ``exclude`` already says.
-        ("grep -rn pat --include='*.py' . | grep -v '^./build/'", "Grep"),
         ("find /srv -name '*.toml' | head -50", "Glob"),
     ],
 )
@@ -368,6 +393,180 @@ def test_every_documented_flag_still_nudges(
     assert not silent, f"{exe} flags silently suppressed the nudge: {silent}"
 
 
+@pytest.mark.parametrize(
+    ("command", "tool", "expected"),
+    [
+        # A sink `replaceable` ACCEPTS is part of the one tool call it
+        # accepted the source for, so dropping it from the example
+        # advertises a different search than the one being replaced.
+        ("grep -rn pat /src | wc -l", "Grep", 'output_mode="count"'),
+        # The operand of a stdin-fed search lives one hop upstream --
+        # which is the whole reason `_stdin_operand` accepts the shape.
+        ("cat foo.py | grep pat", "Grep", "path='foo.py'"),
+        ("head -100 foo.py | grep pat", "Grep", "path='foo.py'"),
+        # ``sed`` puts its SCRIPT in operand position, so counting
+        # operands alone cannot recover the producer's path.
+        ("sed -n '1,50p' foo.py | grep pat", "Grep", "path='foo.py'"),
+        # ``find … | xargs grep pat``: the search is the xargs PAYLOAD,
+        # so translating the xargs argv reads ``grep`` as the pattern.
+        ("find /src -name '*.py' | xargs grep pat", "Grep", "pattern='pat'"),
+        # ``tail -n +N`` counts from the START; only the unsigned form
+        # is a tail. Measured against coreutils, not inferred.
+        ("tail -n +5 foo.py", "Read", "offset=5"),
+        ("head -n5 foo.py", "Read", "limit=5"),
+        ("head --lines=50 foo.py", "Read", "limit=50"),
+        # ``sed -n 'Np'`` prints ONE line.
+        ("sed -n '5p' foo.py", "Read", "offset=5 limit=1"),
+        # A sink that shows everything imposes no bound.
+        ("ls /src | cat", "List", "path='/src'"),
+    ],
+)
+def test_a_worked_example_matches_the_command_it_replaces(
+    command: str, tool: str, expected: str
+) -> None:
+    """A wrong worked example is worse than none -- it gets acted on.
+
+    Each case below was measured against the real utility; the shipped
+    translator rendered a call with different semantics.
+    """
+    trees = parse_bash(command)
+    assert trees is not None
+    matcher = next(t for t in _MATCHERS if t.name == tool)
+    assert isinstance(matcher, BashMatcher)
+    assert expected in (matcher.bash_match(trees) or ""), command
+
+
+# Every way a utility can spell the same request. Sampling ONE per shape
+# is what let a defect hide behind its neighbour: ``head -100 f | grep p``
+# translated while ``head -n 20 f | grep p`` -- the identical shape --
+# returned nothing, because only the separated form leaves a token that a
+# naive scan miscounts as a second path.
+_COUNT_SPELLINGS: tuple[str, ...] = ("-20", "-n 20", "-n20", "--lines=20", "--lines 20")
+
+
+@pytest.mark.parametrize("spelling", _COUNT_SPELLINGS)
+def test_every_count_spelling_renders_the_same_read(spelling: str) -> None:
+    """``head`` has five ways to ask for 20 lines; all are one Read call."""
+    trees = parse_bash(f"head {spelling} foo.py")
+    assert trees is not None
+    matcher = next(t for t in _MATCHERS if t.name == "Read")
+    assert isinstance(matcher, BashMatcher)
+    hint = matcher.bash_match(trees) or ""
+    assert "file_path='foo.py' limit=20" in hint, hint
+
+
+@pytest.mark.parametrize("spelling", _COUNT_SPELLINGS)
+def test_every_count_spelling_yields_the_upstream_path(spelling: str) -> None:
+    """A producer's count is never its path, however the count is spelled.
+
+    ``_search_args`` kept a private ``startswith("-")`` scan after
+    :func:`operands` was extracted to own that question, so the separated
+    forms lost the operand and the example vanished.
+    """
+    trees = parse_bash(f"head {spelling} foo.py | grep pat")
+    assert trees is not None
+    matcher = next(t for t in _MATCHERS if t.name == "Grep")
+    assert isinstance(matcher, BashMatcher)
+    hint = matcher.bash_match(trees) or ""
+    assert "pattern='pat' path='foo.py'" in hint, hint
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # ``-e PATTERN`` is the POSIX spelling, and the only one that
+        # works for a pattern beginning with a dash.
+        "grep -e pat foo.py",
+        "grep -e pat -i foo.py",
+    ],
+)
+def test_an_explicit_pattern_flag_still_renders_the_pattern(command: str) -> None:
+    """``-e`` names the pattern; consuming it as a flag value loses it."""
+    trees = parse_bash(command)
+    assert trees is not None
+    matcher = next(t for t in _MATCHERS if t.name == "Grep")
+    assert isinstance(matcher, BashMatcher)
+    assert "pattern='pat'" in (matcher.bash_match(trees) or ""), command
+
+
+def test_a_find_without_a_name_predicate_still_renders_its_root() -> None:
+    """``find /src -type f | xargs grep pat`` IS ``Grep pattern path``.
+
+    Requiring ``-name`` to render anything dropped the example from a
+    shape whose root and pattern are both present.
+    """
+    trees = parse_bash("find /src -type f | xargs grep pat")
+    assert trees is not None
+    matcher = next(t for t in _MATCHERS if t.name == "Grep")
+    assert isinstance(matcher, BashMatcher)
+    hint = matcher.bash_match(trees) or ""
+    assert "pattern='pat' path='/src'" in hint, hint
+
+
+@pytest.mark.parametrize(
+    ("command", "tool"),
+    [
+        # ``head -n -N`` is all-but-the-last-N, which Read cannot window.
+        ("head -n -5 foo.py", "Read"),
+        # Glob is case-sensitive and returns files AND directories.
+        ("find /src -iname '*.PY'", "Glob"),
+        ("find /src -type d -name build", "Glob"),
+        # Several roots; List and Glob each take one.
+        ("ls a b", "List"),
+        # A flag VALUE is not an operand.
+        ("ls -I '*.pyc' /src", "List"),
+    ],
+)
+def test_an_inexpressible_shape_offers_no_worked_example(
+    command: str, tool: str
+) -> None:
+    """Translation failure must drop the example, never invent one."""
+    trees = parse_bash(command)
+    assert trees is not None
+    matcher = next(t for t in _MATCHERS if t.name == tool)
+    assert isinstance(matcher, BashMatcher)
+    hint = matcher.bash_match(trees) or ""
+    assert hint, command
+    assert "Try:" not in hint, hint
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # ``-c`` bundles: ``-c5`` is the same flag as ``-c 5``, so a deny
+        # set matched against whole argv tokens never sees it.
+        "head -c5 foo.py",
+        "tail -c1 foo.py",
+        "tail -fn 5 foo.log",
+        "cat -vet foo.py",
+        # ``-F`` is ``--follow=name --retry``: still a live stream, which
+        # Read cannot return. Only the lowercase spelling was denied.
+        "tail -F foo.log",
+        "tail --retry -f foo.log",
+    ],
+)
+def test_a_bundled_denied_flag_still_suppresses_the_nudge(command: str) -> None:
+    """Deny sets must match the FLAG, not the token that spells it."""
+    assert "Read" not in _nudging_tools(command), command
+
+
+def test_a_bare_line_count_survives_the_bundle_rule() -> None:
+    """``head -20 f`` is a count, not a cluster of digit flags.
+
+    The obsolete-but-universal form; treating its digits as bundled
+    letters would regress the most common head/tail spelling there is.
+    """
+    assert "Read" in _nudging_tools("head -20 foo.py")
+    assert "limit=20" in (
+        next(
+            t.bash_match(parse_bash("head -20 foo.py") or ())
+            for t in _MATCHERS
+            if t.name == "Read" and isinstance(t, BashMatcher)
+        )
+        or ""
+    )
+
+
 def test_a_nudge_names_the_offending_fragment() -> None:
     """A compound line must say WHICH command to replace.
 
@@ -380,6 +579,162 @@ def test_a_nudge_names_the_offending_fragment() -> None:
     assert isinstance(tool, BashMatcher)
     hint = tool.bash_match(trees) or ""
     assert "grep -n pat foo.py" in hint, hint
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "(grep p f) > out",
+        "{ grep p f; } > out",
+        "for x in a; do grep p f; done > out",
+    ],
+)
+def test_a_redirect_on_an_enclosing_group_disqualifies_its_commands(
+    command: str,
+) -> None:
+    """A group's redirect writes a file, so its commands are not tool calls.
+
+    bashlex hangs a compound's redirects off its own ``redirects``
+    attribute rather than ``parts``, so the walk never saw them and the
+    inner command reported ``captures_stdout=False``.
+    """
+    trees = parse_bash(command)
+    assert trees is not None
+    matchers = [t for t in _MATCHERS if isinstance(t, BashMatcher)]
+    assert all(m.bash_match(trees) is None for m in matchers), command
+
+
+def test_a_group_without_a_redirect_still_nudges() -> None:
+    """The inherited-redirect fix must not silence an ordinary group."""
+    trees = parse_bash("(grep p f)")
+    assert trees is not None
+    matchers = [t for t in _MATCHERS if isinstance(t, BashMatcher)]
+    assert any(m.bash_match(trees) for m in matchers)
+
+
+@pytest.mark.parametrize(
+    ("command", "tool", "expected"),
+    [
+        # A worked example that drops the ``cd`` names a DIFFERENT file
+        # than the command it claims to replace -- and the tools resolve
+        # relative paths against the agent's cwd, not the shell's.
+        ("cd /srv && cat f", "Read", "file_path='/srv/f'"),
+        ("cd /srv && head -20 f", "Read", "file_path='/srv/f'"),
+        ("cd /srv && sed -n '1,5p' f", "Read", "file_path='/srv/f'"),
+        ("cd /srv && grep -n pat f", "Grep", "path='/srv/f'"),
+        ("cd /srv && ls", "List", "path='/srv'"),
+        ("cd /srv && ls sub", "List", "path='/srv/sub'"),
+        ("cd /srv && find . -name '*.py'", "Glob", "path='/srv'"),
+        ("cd /srv && find sub -name '*.py'", "Glob", "path='/srv/sub'"),
+        # An absolute operand wins over the prefix.
+        ("cd /srv && cat /etc/hosts", "Read", "file_path='/etc/hosts'"),
+        # ``cd`` composes; the second is relative to the first.
+        ("cd /srv && cd sub && cat f", "Read", "file_path='/srv/sub/f'"),
+    ],
+)
+def test_a_cd_prefix_reaches_the_worked_example(
+    command: str, tool: str, expected: str
+) -> None:
+    """``cd`` is tracked by the walk, so a renderer that drops it lies.
+
+    ``cd /srv && cat f`` rendered ``Read file_path='f'``, which resolves
+    against the agent's own cwd and reads a different file -- or none.
+    """
+    trees = parse_bash(command)
+    assert trees is not None
+    matcher = next(t for t in _MATCHERS if t.name == tool)
+    assert isinstance(matcher, BashMatcher)
+    assert expected in (matcher.bash_match(trees) or ""), command
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # ``||`` runs the tail only when the ``cd`` FAILED, so the
+        # directory it names is exactly where the command is not.
+        ("cd /srv || cat f", "file_path='f'"),
+        ("cd /a && cd /b || cat f", "file_path='/a/f'"),
+        # ``&`` backgrounds the ``cd`` in a subshell; the parent's
+        # directory never changes.
+        ("cd /x & cat f", "file_path='f'"),
+    ],
+)
+def test_a_cd_that_does_not_take_effect_is_not_applied(
+    command: str, expected: str
+) -> None:
+    """Only a ``cd`` the shell actually performed may reach the example."""
+    trees = parse_bash(command)
+    assert trees is not None
+    matcher = next(t for t in _MATCHERS if t.name == "Read")
+    assert isinstance(matcher, BashMatcher)
+    assert expected in (matcher.bash_match(trees) or ""), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The value of a value-flag is not an operand. Each of these has
+        # NO file and NO pattern, so there is nothing for a tool to act
+        # on -- ``grep -A 2`` reads stdin and ``head -n 5`` reads stdin.
+        "grep -A 2",
+        "grep -B 3",
+        "grep -C 1",
+        "head -n 5",
+        "tail -n 3",
+        "head --lines=5",
+        "grep --include='*.py'",
+        "grep --exclude=build",
+    ],
+)
+def test_a_flag_value_is_not_an_operand(command: str) -> None:
+    """A command with only flags reads stdin; no tool call replaces it."""
+    assert not _nudging_tools(command), command
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # ...but the same flag WITH an operand still nudges.
+        ("grep -A 2 pat f", "Grep"),
+        ("head -n 5 f", "Read"),
+        ("grep --include='*.py' pat /src", "Grep"),
+    ],
+)
+def test_a_value_flag_does_not_suppress_a_real_operand(
+    command: str, expected: str
+) -> None:
+    assert expected in _nudging_tools(command), command
+
+
+def test_an_ignore_glob_is_not_a_glob_positional() -> None:
+    """``ls -I '*.pyc' /src`` lists a DIRECTORY; the glob is a filter.
+
+    Reading the flag's value as a positional routed a plain listing to
+    the Glob tool, which cannot express ``-I`` at all.
+    """
+    trees = parse_bash("ls -I '*.pyc' /src")
+    assert trees is not None
+    matcher = next(t for t in _MATCHERS if t.name == "List")
+    assert isinstance(matcher, BashMatcher)
+    hint = matcher.bash_match(trees) or ""
+    assert "List tool" in hint, hint
+    assert "Glob" not in hint, hint
+
+
+def test_a_context_flag_renders_as_a_usable_keyword() -> None:
+    """``"-B"=3`` is not syntax any caller can paste.
+
+    The schema names the property ``-B``, and the sibling booleans
+    already render ``-i=true``; quoting only this one produced a form
+    that parses as nothing.
+    """
+    trees = parse_bash("grep -B 3 pat f")
+    assert trees is not None
+    matcher = next(t for t in _MATCHERS if t.name == "Grep")
+    assert isinstance(matcher, BashMatcher)
+    hint = matcher.bash_match(trees) or ""
+    assert "-B=3" in hint, hint
+    assert '"-B"' not in hint, hint
 
 
 def test_a_rendered_fragment_is_shell_safe_and_delimited() -> None:

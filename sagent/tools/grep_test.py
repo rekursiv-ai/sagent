@@ -8,12 +8,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 import asyncio
+import subprocess
 
 import pytest
 
 from sagent.lib.tool_validation import validate_tool_input
 from sagent.testing import FakeAgent, with_fake_agent
-from sagent.tools.grep import Grep
+from sagent.tools.grep import (
+    _ASSUMED_CHARS_PER_MATCH,
+    Grep,
+    _default_keep_first,
+)
 from sagent.tools.lib.bash import parse_bash
 from sagent.types.runtime import ToolResult
 
@@ -726,11 +731,18 @@ def test_bash_match_grep_wc_c_no_nudge() -> None:
     assert grep.bash_match(trees) is None
 
 
-def test_bash_match_negation_sink_still_nudges() -> None:
-    """``| grep -v X`` is the Grep tool's ``exclude``, not a second search."""
+def test_bash_match_negation_sink_does_not_nudge() -> None:
+    """``| grep -v X`` is NOT the Grep tool's ``exclude``.
+
+    Measured on a file whose second line is ``ERROR DEBUG b``:
+    ``grep ERROR f | grep -v DEBUG`` returns two lines, while
+    ``Grep(pattern='ERROR', exclude='DEBUG')`` returns all three.
+    ``exclude`` becomes ``rg --glob '!PAT'`` -- a PATH filter -- and
+    ``directive_schema`` has no inverted-match property at all.
+    """
     trees = parse_bash("grep -rn foo /src | grep -v _test")
     assert trees is not None
-    assert (grep.bash_match(trees) or "").startswith(_NUDGE)
+    assert grep.bash_match(trees) is None
 
 
 def test_bash_match_env_prefix_no_nudge() -> None:
@@ -863,6 +875,63 @@ async def test_backends_agree(
 
 
 @pytest.mark.asyncio
+async def test_an_unknown_type_errors_in_both_backends(tmp_path: Path) -> None:
+    """``type='nosuchtype'`` must not silently widen to every file.
+
+    ``rg`` exits 2 with ``unrecognized file type``; the fallback's
+    ``_TYPE_GLOBS.get`` missed and fell through to ``["*"]``, so the same
+    directive searched the WHOLE tree and returned matches the caller
+    never asked for.
+    """
+    (tmp_path / "a.py").write_text("hit\n", encoding="utf-8")
+    (tmp_path / "b.ts").write_text("hit\n", encoding="utf-8")
+    args = {"pattern": "hit", "path": str(tmp_path), "type": "nosuchtype"}
+    rg = await _run_grep(dict(args), tmp_path)
+    py = await _run_grep_py(dict(args), tmp_path)
+    assert rg.is_error, rg.content
+    assert py.is_error, f"fallback silently searched everything: {py.content!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_brace_glob_matches_in_both_backends(tmp_path: Path) -> None:
+    """``"*.{ts,tsx}"`` is advertised in the schema, so it must work.
+
+    ``Path.match`` has no brace expansion, so the fallback matched
+    nothing while ``rg`` matched both files.
+    """
+    (tmp_path / "a.ts").write_text("hit\n", encoding="utf-8")
+    (tmp_path / "b.tsx").write_text("hit\n", encoding="utf-8")
+    (tmp_path / "c.py").write_text("hit\n", encoding="utf-8")
+    args = {"pattern": "hit", "path": str(tmp_path), "glob": "*.{ts,tsx}"}
+    rg = await _run_grep(dict(args), tmp_path)
+    py = await _run_grep_py(dict(args), tmp_path)
+    assert rg.content == py.content, (
+        f"brace-glob divergence:\n  rg -> {rg.content!r}\n  py -> {py.content!r}"
+    )
+    assert "c.py" not in py.content, py.content
+
+
+@pytest.mark.asyncio
+async def test_overlapping_context_groups_are_merged(tmp_path: Path) -> None:
+    """Adjacent matches share context; ripgrep prints each line once.
+
+    The fallback emitted one group per match, so two matches one line
+    apart repeated the overlap -- a caller counting occurrences in the
+    output counts them twice.
+    """
+    (tmp_path / "ctx.txt").write_text("x\nHIT\nHIT\ny\n", encoding="utf-8")
+    args = {
+        "pattern": "HIT",
+        "path": str(tmp_path / "ctx.txt"),
+        "output_mode": "content",
+        "-C": 1,
+    }
+    py = await _run_grep_py(dict(args), tmp_path)
+    body = [ln for ln in py.content.split("\n") if ln and ln != "--"]
+    assert len(body) == len(set(body)), f"context lines repeated:\n{py.content}"
+
+
+@pytest.mark.asyncio
 async def test_long_matching_line_is_not_dropped(tmp_path: Path) -> None:
     """``--max-columns 500`` replaces the line with a placeholder.
 
@@ -900,6 +969,92 @@ def test_context_knobs_reject_floats() -> None:
         "Grep", grep.directive_schema, {"pattern": "x", "-B": 2.5}
     )
     assert err is not None, "a float context arg passed schema validation"
+
+
+@pytest.mark.parametrize("ceiling", [20_000, 60_000, 150_000, 600_000])
+def test_the_default_entry_cap_stays_under_the_result_ceiling(ceiling: int) -> None:
+    """The default must fit ONE reply, at every budget the agent derives.
+
+    ``max(1000, ceiling // 150)`` is a floor, not a bound: the smallest
+    ``ContextBudget.from_model`` produces is ``persist_threshold=20_000``,
+    where 1000 entries at ~150 chars is 150_000 chars -- 7.5x over the
+    ceiling the cap exists to respect, so the result is off-loaded to
+    disk and the caller sees a preview instead of matches.
+    """
+    with with_fake_agent() as agent:
+        agent.max_result_chars = ceiling
+        entries = _default_keep_first()
+    assert entries * _ASSUMED_CHARS_PER_MATCH <= ceiling, (
+        f"{entries} entries x {_ASSUMED_CHARS_PER_MATCH} chars exceeds {ceiling}"
+    )
+    assert entries >= 1, "a positive ceiling must still allow matches"
+
+
+@pytest.mark.asyncio
+async def test_a_missing_root_errors_in_both_backends(tmp_path: Path) -> None:
+    """Rg exits 2 on a missing path; the fallback returned ``(no matches)``.
+
+    Same directive, opposite meaning -- "searched, found nothing" versus
+    "the path does not exist" -- decided by whether rg is installed.
+    """
+    missing = str(tmp_path / "nope")
+    rg = await _run_grep({"pattern": "x", "path": missing}, tmp_path)
+    py = await _run_grep_py({"pattern": "x", "path": missing}, tmp_path)
+    assert rg.is_error, rg.content
+    assert py.is_error, f"fallback hid a missing root: {py.content!r}"
+
+
+@pytest.mark.asyncio
+async def test_pcre_is_not_silently_downgraded_to_python_re(tmp_path: Path) -> None:
+    """``pcre=True`` promises PCRE2; the fallback compiles Python ``re``.
+
+    The schema advertises "PCRE2 regex (rg -P): lookaround, backrefs",
+    and a caller who gets Python-``re`` semantics under that name has no
+    way to notice.
+    """
+    (tmp_path / "a.txt").write_text("ab\n", encoding="utf-8")
+    result = await _run_grep_py(
+        {"pattern": "(?<=a)b", "path": str(tmp_path), "pcre": True}, tmp_path
+    )
+    assert result.is_error, result.content
+    assert "pcre" in result.content.lower(), result.content
+
+
+@pytest.mark.asyncio
+async def test_a_ripgrep_timeout_returns_a_tool_error(tmp_path: Path) -> None:
+    """``Tool.run`` returns failures; ``subprocess.run`` raises them."""
+
+    def _timeout(*_args: object, **_kwargs: object) -> object:
+        raise subprocess.TimeoutExpired(cmd="rg", timeout=30)
+
+    with patch("subprocess.run", _timeout):
+        result = await _run_grep({"pattern": "x", "path": str(tmp_path)}, tmp_path)
+    assert result.is_error, result.content
+    assert "timed out" in result.content.lower(), result.content
+
+
+@pytest.mark.asyncio
+async def test_offset_with_context_says_it_was_ignored(tmp_path: Path) -> None:
+    """A silently dropped knob is a wrong answer with no way to notice.
+
+    ``offset`` is zeroed when context lines are requested, and the only
+    record was a ``logger.warning`` the model never sees.
+    """
+    (tmp_path / "a.txt").write_text("hit\n" * 10, encoding="utf-8")
+    result = await _run_grep(
+        {
+            "pattern": "hit",
+            "path": str(tmp_path),
+            "output_mode": "content",
+            "offset": 5,
+            "-C": 1,
+        },
+        tmp_path,
+    )
+    assert "offset" in result.content.lower(), result.content
+    # The notice must be a real line, not the word appearing inside a
+    # matched path -- assert on the sentence the tool emits.
+    assert "offset ignored" in result.content.lower(), result.content
 
 
 if __name__ == "__main__":

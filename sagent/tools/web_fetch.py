@@ -147,7 +147,7 @@ class WebFetch:
                 continue
             if inv.exe not in {"curl", "wget"}:
                 continue
-            hint = _match_http_fetch(inv.args)
+            hint = _match_http_fetch(inv.exe, inv.args)
             if hint is not None:
                 return hint
         return None
@@ -346,27 +346,76 @@ _HTTP_FETCH_BAIL_FLAGS: frozenset[str] = frozenset(
         "-T",
         "-F",
         "--form",
+        # MEASURED: ``curl -K opts.conf URL`` with ``output = "out.html"``
+        # in the file wrote out.html. The flag that writes is IN THE FILE,
+        # so no argv scan can ever see it -- the option source itself has
+        # to be the bail.
+        "-K",
+        "--config",
+        # ``-d @file`` reads the body from disk; WebFetch's ``json``/
+        # ``form`` are inline values only.
+        "-d",
+        "--data",
+        # Saves every URL to a file, as ``-O`` does for one.
+        "--remote-name-all",
+        "-J",
+        "--remote-header-name",
     }
 )
 
+# Utilities that write to disk BY DEFAULT, so the bare invocation is the
+# one that needs a bail. MEASURED: ``wget https://example.com`` wrote
+# index.html into the cwd. Only an explicit "send it to stdout" spelling
+# makes wget the shape WebFetch replaces.
+_WRITES_BY_DEFAULT: frozenset[str] = frozenset({"wget"})
 
-def _match_http_fetch(args: tuple[str, ...]) -> str | None:
+
+def _match_http_fetch(exe: str, args: tuple[str, ...]) -> str | None:
     """Return a nudge when a shell command is a simple HTTP fetch.
 
     A fetch that writes a file or uploads one is not something WebFetch
     can do, so those forms stay with Bash. Exact-string matching missed
     every spelling but the separated one: ``--output=x``, the bundled
     ``-sO``, and ``--output-document=x`` all still nudged.
+
+    Two axes, because a flag denylist alone answers neither: an option
+    FILE can carry the write flag where argv never shows it, and ``wget``
+    writes with no flag at all.
     """
+    # ``-O -`` is wget's "write the body to stdout", so the output flag
+    # is exactly what makes this shape replaceable. Asked FIRST, because
+    # the generic scan below denies ``-O`` on sight.
+    streams = _streams_to_stdout(args)
     url_count = 0
     for arg in args:
-        if _writes_a_file(arg):
+        if not streams and _writes_a_file(arg):
             return None
         if arg.startswith(("http://", "https://")):
             url_count += 1
     if url_count != 1:
         return None
+    # ``wget`` saves to disk with no flag at all, so a bare invocation is
+    # the one that needs the bail rather than the one that earns a nudge.
+    if exe in _WRITES_BY_DEFAULT and not streams:
+        return None
     return _NUDGE
+
+
+def _streams_to_stdout(args: tuple[str, ...]) -> bool:
+    """Whether ``wget`` was told to write the body to stdout.
+
+    ``-O -`` (and its bundled ``-qO-``) is the only form that does; every
+    other invocation saves a file, so the polarity is the reverse of the
+    ``-O`` denial that applies to ``curl``.
+    """
+    for i, a in enumerate(args):
+        if a in ("-O", "--output-document") and i + 1 < len(args):
+            return args[i + 1] == "-"
+        if a.startswith("--output-document="):
+            return a.partition("=")[2] == "-"
+        if a.startswith("-") and not a.startswith("--") and a.endswith("O-"):
+            return True
+    return False
 
 
 def _writes_a_file(arg: str) -> bool:

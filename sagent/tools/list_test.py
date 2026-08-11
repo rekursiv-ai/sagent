@@ -213,21 +213,30 @@ def test_bash_match_ls_pipe_head() -> None:
     assert "max_results=5" in result
 
 
-def test_bash_match_ls_pipe_tail_flips_sort() -> None:
+def test_bash_match_ls_pipe_tail_keeps_the_last_entries_in_order() -> None:
+    """``| tail -n N`` is ``keep_last``, not a flipped sort.
+
+    Measured in a directory of ``f1``..``f5``: ``ls | tail -n 3`` prints
+    ``f3 f4 f5``, while ``sort='name_desc' max_results=3`` returns
+    ``f5 f4 f3``. Same entries, reversed -- and a reader scanning for
+    "the last one" reads the wrong row.
+    """
     trees = parse_bash("ls -t | tail -n 5")
     assert trees is not None
-    result = list_tool.bash_match(trees)
-    assert result is not None
-    # tail flips ``mtime_desc`` → ``mtime``.
-    assert "sort='mtime'" in result
+    result = list_tool.bash_match(trees) or ""
+    assert "keep_last=5" in result, result
+    # The listing order is the one ``ls -t`` produced; only the window moved.
+    assert "sort='mtime_desc'" in result, result
+    assert "max_results" not in result, result
 
 
-def test_bash_match_ls_pipe_tail_no_sort_becomes_name_desc() -> None:
+def test_bash_match_ls_pipe_tail_leaves_the_default_sort_alone() -> None:
+    """``| tail`` windows the listing; it does not reorder it."""
     trees = parse_bash("ls | tail -n 3")
     assert trees is not None
-    result = list_tool.bash_match(trees)
-    assert result is not None
-    assert "sort='name_desc'" in result
+    result = list_tool.bash_match(trees) or ""
+    assert "keep_last=3" in result, result
+    assert "sort=" not in result, result
 
 
 def test_bash_match_ls_pipe_other_no_nudge() -> None:
@@ -295,6 +304,18 @@ def test_bash_match_ls_double_dash_separator() -> None:
     assert trees is not None
     # ``--`` is skipped; ``foo`` becomes a single positional (treated like a path).
     assert "Try: List path='foo'" in (list_tool.bash_match(trees) or "")
+
+
+@pytest.mark.asyncio
+async def test_keep_last_zero_is_rejected_like_the_schema_says(tmp_path: Path) -> None:
+    """The schema's floor is 1, so a supplied 0 is a malformed directive.
+
+    Runtime treated it as "disabled", which is a third meaning the schema
+    never advertised -- the sibling tools reject their own floors.
+    """
+    result = await _run_list({"path": str(tmp_path), "keep_last": 0}, tmp_path)
+    assert result.is_error, result.content
+    assert "keep_last" in result.content, result.content
 
 
 if __name__ == "__main__":
