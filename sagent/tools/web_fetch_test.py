@@ -8,8 +8,8 @@ from unittest.mock import patch
 import asyncio
 import socket
 
-from wesearch.errors import CloudflareChallengeError, FetchError
 from wesearch.fetch import Policy
+from wesearch.types.errors import CloudflareChallengeError, FetchError
 from wesearch.web import WebFetchResult
 
 import pytest
@@ -226,6 +226,60 @@ def test_run_rejects_invalid_transport() -> None:
     assert "Invalid transport" in result.content
 
 
+def test_run_defaults_to_the_html2text_extractor() -> None:
+    """An unspecified extractor keeps every text node, not just article prose."""
+    captured: dict[str, object] = {}
+
+    def fake_fetch_web(url: str, **kwargs: object) -> WebFetchResult:
+        del url
+        captured["extractor"] = getattr(kwargs.get("policy"), "extractor", None)
+        return _result("{}")
+
+    with patch(
+        "sagent.tools.web_fetch.fetch_web",
+        side_effect=fake_fetch_web,
+    ):
+        result = asyncio.run(WebFetch().run({"url": "https://example.com"}))
+    assert not result.is_error
+    assert captured["extractor"] == "html2text"
+
+
+def test_run_explicit_extractor_passes_through() -> None:
+    captured: dict[str, object] = {}
+
+    def fake_fetch_web(url: str, **kwargs: object) -> WebFetchResult:
+        del url
+        captured["extractor"] = getattr(kwargs.get("policy"), "extractor", None)
+        return _result("{}")
+
+    with patch(
+        "sagent.tools.web_fetch.fetch_web",
+        side_effect=fake_fetch_web,
+    ):
+        result = asyncio.run(
+            WebFetch().run({"url": "https://example.com", "extractor": "trafilatura"})
+        )
+    assert not result.is_error
+    assert captured["extractor"] == "trafilatura"
+
+
+def test_run_rejects_non_string_url() -> None:
+    """A schema-invalid url is a directive error, not a fetch of its repr."""
+    with patch("sagent.tools.web_fetch.fetch_web") as mock_web:
+        result = asyncio.run(WebFetch().run({"url": []}))
+    assert result.is_error
+    assert "Invalid url" in result.content
+    mock_web.assert_not_called()
+
+
+def test_run_rejects_invalid_extractor() -> None:
+    result = asyncio.run(
+        WebFetch().run({"url": "https://example.com", "extractor": "readability"})
+    )
+    assert result.is_error
+    assert "Invalid extractor" in result.content
+
+
 def test_run_returns_extracted_text() -> None:
     """The tool wraps ``fetch_web``'s text into the ToolResult content."""
     with patch(
@@ -282,6 +336,20 @@ def test_run_cache_separates_transports() -> None:
         _ = asyncio.run(tool.run({"url": "https://example.com"}))
         _ = asyncio.run(
             tool.run({"url": "https://example.com", "transport": "zendriver"})
+        )
+    assert mock_web.call_count == 2
+
+
+def test_run_cache_separates_extractors() -> None:
+    """Two extractors of one URL are two results, not one replayed twice."""
+    with patch(
+        "sagent.tools.web_fetch.fetch_web",
+        return_value=_result("{}"),
+    ) as mock_web:
+        tool = WebFetch()
+        _ = asyncio.run(tool.run({"url": "https://example.com"}))
+        _ = asyncio.run(
+            tool.run({"url": "https://example.com", "extractor": "trafilatura"})
         )
     assert mock_web.call_count == 2
 

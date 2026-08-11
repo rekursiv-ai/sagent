@@ -21,6 +21,68 @@ from sagent.tools.lib.bash import BashMatcher, parse_bash
 
 _MATCHERS = resolve_tools(["Read", "Grep", "Glob", "List", "Edit", "WebFetch"])
 
+# Flags that make Bash genuinely necessary: they act on what they match,
+# window bytes rather than lines, or follow a growing file. Everything
+# else in a utility's alphabet must still reach its tool -- see
+# ``test_every_documented_flag_still_nudges``.
+_NECESSARY: frozenset[str] = frozenset(
+    {"-exec", "-execdir", "-delete", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"}
+)
+
+# A representative slice of each utility's real alphabet. Hard-coded
+# rather than scraped from ``--help`` at runtime: the test must fail on
+# THIS machine's parse and on CI's, and GNU/BSD spellings differ.
+_GREP_HELP_FLAGS: tuple[str, ...] = (
+    "-i",
+    "-v",
+    "-w",
+    "-x",
+    "-c",
+    "-l",
+    "-L",
+    "-o",
+    "-q",
+    "-s",
+    "-r",
+    "-R",
+    "-E",
+    "-F",
+    "-P",
+    "-a",
+    "-b",
+    "-H",
+    "-h",
+    "-n",
+    "-z",
+    "--color=auto",
+    "--exclude-dir=.git",
+    "--include=*.py",
+    "--line-buffered",
+    "--null-data",
+)
+_FIND_HELP_PREDICATES: tuple[str, ...] = (
+    "-name",
+    "-iname",
+    "-path",
+    "-ipath",
+    "-regex",
+    "-type",
+    "-maxdepth",
+    "-mindepth",
+    "-newer",
+    "-mtime",
+    "-size",
+    "-perm",
+    "-user",
+    "-group",
+    "-empty",
+    "-print",
+    "-print0",
+    "-prune",
+    "-follow",
+    "-not",
+)
+
 
 def _nudging_tools(command: str) -> set[str]:
     """Return the names of every tool that nudges for ``command``."""
@@ -89,10 +151,25 @@ def test_shape_nudges_the_right_tool(command: str, tool: str) -> None:
         # ``-c`` counts bytes, which neither Read nor Grep expresses.
         "head -c 20 foo.py",
         "grep pat foo.py | wc -c",
+        # ``tail -f`` follows a growing file; Read returns a snapshot.
+        "tail -f /var/log/syslog",
+        # ``find -exec``/``-delete`` act on what they match.
+        "find . -name '*.pyc' -delete",
+        "find . -name '*.py' -exec wc -l {} +",
     ],
 )
 def test_shape_is_deliberately_silent(command: str) -> None:
     assert not _nudging_tools(command), command
+
+
+def test_grep_counts_lines_and_head_counts_bytes() -> None:
+    """``-c`` means COUNT for grep and BYTES for head -- one denylist per exe.
+
+    A shared ``-c`` denylist silently drops ``grep -c``, which the Grep
+    tool expresses exactly as ``output_mode="count"``.
+    """
+    assert "Grep" in _nudging_tools("grep -c pat foo.py")
+    assert "Read" not in _nudging_tools("head -c 20 foo.py")
 
 
 @pytest.mark.parametrize(
@@ -103,7 +180,10 @@ def test_shape_is_deliberately_silent(command: str) -> None:
         # for an executable NAME cross statement boundaries, so an
         # unrelated command elsewhere on the line flips the answer.
         ("grep pat foo.py | wc -c; ls | wc -l", set[str]()),
-        ("cat -n a.py; grep -n pat foo.py", {"Grep"}),
+        # ``cat -n`` is a READ: the Read tool numbers every line it
+        # returns, so both tools legitimately claim this line.
+        ("cat -n a.py; grep -n pat foo.py", {"Grep", "Read"}),
+        ("cat -A a.py; grep -n pat foo.py", {"Grep"}),
         ("ls | xargs grep pat; find . -name '*.py'", {"Glob"}),
     ],
 )
@@ -166,6 +246,164 @@ def test_find_splits_on_its_sink() -> None:
     """``find`` enumerates for Glob, but feeds a search for Grep."""
     assert _nudging_tools("find . -name '*.py'") == {"Glob"}
     assert _nudging_tools("find . -name '*.py' | xargs grep pat") == {"Grep"}
+
+
+@pytest.mark.parametrize(
+    ("command", "tool"),
+    [
+        # A predicate or flag the tool cannot translate is still a reach
+        # for that tool. Gating DETECTION on translatability made every
+        # unknown token a silent miss, and there are ~80 per utility.
+        ("find /srv -name f.toml -not -path '*/node_modules/*'", "Glob"),
+        ("find . -maxdepth 2 -name '*.py'", "Glob"),
+        ("find . -newer setup.py -name '*.py'", "Glob"),
+        ("grep -w pat foo.py", "Grep"),
+        ("grep -o pat foo.py", "Grep"),
+        ("grep -rn pat --exclude-dir=.git .", "Grep"),
+        ("ls -R /srv", "List"),
+        ("ls -lh /srv", "List"),
+        # A sink that only filters is what ``exclude`` already says.
+        ("grep -rn pat --include='*.py' . | grep -v '^./build/'", "Grep"),
+        ("find /srv -name '*.toml' | head -50", "Glob"),
+    ],
+)
+def test_an_untranslatable_shape_still_nudges(command: str, tool: str) -> None:
+    assert tool in _nudging_tools(command), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A search reading STDIN has no path operand, so the Grep tool --
+        # which takes ``path`` -- cannot express it at all. Nudging here
+        # sends the caller to a tool that cannot do the job.
+        "git log --oneline | grep fix",
+        "uv run pytest -q | grep FAILED",
+        "journalctl -u foo | grep error",
+        "ps aux | grep python",
+        "docker ps | grep running",
+    ],
+)
+def test_a_stdin_fed_search_does_not_nudge(command: str) -> None:
+    assert not _nudging_tools(command), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # ...but a search whose stdin comes from a FILE reader does have
+        # an operand, one hop upstream.
+        "cat foo.py | grep pat",
+        "head -100 foo.py | grep pat",
+        "sed -n '1,50p' foo.py | grep pat",
+    ],
+)
+def test_a_file_fed_search_still_nudges(command: str) -> None:
+    assert "Grep" in _nudging_tools(command), command
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (
+            "grep -n pat foo.py | head -40 | grep -v skip",
+            "grep -n pat foo.py | grep -v skip | head -40",
+        ),
+        (
+            "cat foo.py | head -20 | grep -v skip",
+            "cat foo.py | grep -v skip | head -20",
+        ),
+        ("find . -name '*.py' | head -5", "find . -name '*.py' | head -5 | cat"),
+    ],
+)
+def test_the_verdict_does_not_depend_on_sink_order(first: str, second: str) -> None:
+    """Reordering equivalent sinks must not flip the answer.
+
+    Each matcher used to inspect only its IMMEDIATE sink while checking
+    redirects across the whole chain, so the same pipeline stages in a
+    different order gave opposite verdicts.
+    """
+    assert _nudging_tools(first) == _nudging_tools(second)
+
+
+def test_detection_survives_a_translation_failure() -> None:
+    """Detection must not depend on rendering a concrete suggestion.
+
+    Fusing the two made an untranslatable flag silently suppress the
+    nudge, which is why coverage tracked the flag whitelist rather than
+    the shape.
+    """
+    tool = next(t for t in _MATCHERS if t.name == "List")
+    assert isinstance(tool, BashMatcher)
+    trees = parse_bash("ls -R /srv")
+    assert trees is not None
+    hint = tool.bash_match(trees)
+    assert hint is not None
+    assert "List tool" in hint
+
+
+@pytest.mark.parametrize(
+    ("exe", "tool", "flags"),
+    [
+        ("grep", "Grep", _GREP_HELP_FLAGS),
+        ("find", "Glob", _FIND_HELP_PREDICATES),
+    ],
+)
+def test_every_documented_flag_still_nudges(
+    exe: str, tool: str, flags: tuple[str, ...]
+) -> None:
+    """Sweep each utility's REAL flag alphabet, not a hand-picked sample.
+
+    Example-based cases can only encode misses somebody already noticed,
+    which is why an unknown token stayed silent for as long as it did.
+    Flags the tool genuinely cannot serve are named in ``_NECESSARY``;
+    everything else must still reach its tool.
+    """
+    silent = [
+        flag
+        for flag in flags
+        if flag not in _NECESSARY
+        and tool not in _nudging_tools(f"{exe} {flag} pat /srv")
+    ]
+    assert not silent, f"{exe} flags silently suppressed the nudge: {silent}"
+
+
+def test_a_nudge_names_the_offending_fragment() -> None:
+    """A compound line must say WHICH command to replace.
+
+    Most nudged lines carry several commands, so a fixed string leaves
+    the caller guessing which fragment the tool replaces.
+    """
+    trees = parse_bash("cd /srv && uv run pytest -q && grep -n pat foo.py")
+    assert trees is not None
+    tool = next(t for t in _MATCHERS if t.name == "Grep")
+    assert isinstance(tool, BashMatcher)
+    hint = tool.bash_match(trees) or ""
+    assert "grep -n pat foo.py" in hint, hint
+
+
+def test_a_rendered_fragment_is_shell_safe_and_delimited() -> None:
+    """The rendered fragment must survive being read back as shell.
+
+    Two ways it did not: bashlex yields the UNQUOTED word, so re-rendering
+    ``find . -name '*.py'`` emitted a bare glob the shell would expand, and a
+    path ending in ``.`` ran into the sentence period -- ``grep -r pat ..``
+    names the parent directory, not the current one.
+    """
+    trees = parse_bash("find . -name '*.py'")
+    assert trees is not None
+    glob_tool = next(t for t in _MATCHERS if t.name == "Glob")
+    assert isinstance(glob_tool, BashMatcher)
+    hint = glob_tool.bash_match(trees) or ""
+    assert "'*.py'" in hint, hint
+
+    trees = parse_bash("grep -r pat .")
+    assert trees is not None
+    grep_tool = next(t for t in _MATCHERS if t.name == "Grep")
+    assert isinstance(grep_tool, BashMatcher)
+    hint = grep_tool.bash_match(trees) or ""
+    assert "`grep -r pat .`." in hint, hint
+    assert " pat .." not in hint, hint
 
 
 if __name__ == "__main__":

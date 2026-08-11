@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Annotated, cast, get_args
 
 import asyncio
 import re
 
-from wesearch.errors import BotDetectionError
 from wesearch.fetch import Transport
-from wesearch.search import (
+from wesearch.search.custom_types import (
     DEFAULT_SEARCH_BACKEND,
     CodeResult,
     FileResult,
@@ -23,13 +22,14 @@ from wesearch.search import (
     SearchBackends,
     SearchError,
     SearchResult,
-    SearxngCategory,
     TorrentResult,
     VideoResult,
-    search,
 )
+from wesearch.search.search import search
+from wesearch.search.searxng import SearxngCategory
+from wesearch.types.errors import BotDetectionError
 
-from sagent.lib.custom_json import JSONValue, json_freeze
+from sagent.lib.custom_json import json_freeze
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
     load_tool_description,
@@ -159,7 +159,16 @@ class WebSearch:
               carries -- or an error when the backend rejects the query.
 
         """
-        query = str(args.get("query", ""))
+        query = args.get("query", "")
+        if not isinstance(query, str):
+            # A model can emit a schema-invalid directive, and this method is
+            # where that arrives -- str() would search for the literal text
+            # "[]" and report the empty result as a legitimate miss.
+            return ToolResult(
+                call_id="",
+                content=f"Invalid query: expected a string, got {type(query).__name__}.",
+                is_error=True,
+            )
         backend: SearchBackends = DEFAULT_SEARCH_BACKEND
         backend_val = args.get("backend")
         if isinstance(backend_val, str) and backend_val in get_args(SearchBackends):
@@ -204,11 +213,14 @@ class WebSearch:
         # when the caller left the backend at its default.
         if categories != "general":
             backend = "searxng"
-        q = _build_query(
-            query,
-            args.get("allowed_domains"),
-            args.get("blocked_domains"),
-        )
+        try:
+            q = _build_query(
+                query,
+                args.get("allowed_domains"),
+                args.get("blocked_domains"),
+            )
+        except (TypeError, ValueError) as e:
+            return ToolResult(call_id="", content=str(e), is_error=True)
         try:
             if transport == "auto":
                 results = await asyncio.to_thread(
@@ -259,27 +271,42 @@ def _build_query(
 ) -> str:
     """Return *query* with ``site:`` / ``-site:`` filters for valid domains.
 
-    Only tokens matching a bare-hostname shape are appended; a non-hostname
-    value (containing whitespace or query operators) is silently dropped rather
-    than spliced in, so a domain filter cannot inject extra query syntax.
+    Only tokens matching a bare-hostname shape are accepted; a non-hostname
+    value (containing whitespace or query operators) is REJECTED rather than
+    spliced in, so a domain filter cannot inject extra query syntax.
+
+    Raises:
+      TypeError: When a filter argument is not a list.
+      ValueError: When a list member is not a hostname. Dropping
+        the bad value instead would run an UNRESTRICTED search while the caller
+        believed it was scoped -- failing open on the one argument whose whole
+        purpose is to restrict.
+
     """
-    allowed = (
-        list(cast(list[JSONValue], allowed_domains))
-        if isinstance(allowed_domains, (list, tuple))
-        else []
+    return (
+        query
+        + _site_filters(allowed_domains, name="allowed_domains", prefix="site:")
+        + _site_filters(blocked_domains, name="blocked_domains", prefix="-site:")
     )
-    blocked = (
-        list(cast(list[JSONValue], blocked_domains))
-        if isinstance(blocked_domains, (list, tuple))
-        else []
-    )
-    for domain in allowed:
-        if isinstance(domain, str) and _HOSTNAME_RE.match(domain.strip()):
-            query += f" site:{domain.strip()}"
-    for domain in blocked:
-        if isinstance(domain, str) and _HOSTNAME_RE.match(domain.strip()):
-            query += f" -site:{domain.strip()}"
-    return query
+
+
+def _site_filters(domains: object, *, name: str, prefix: str) -> str:
+    """Render one domain list as ``site:``/``-site:`` terms, rejecting bad input."""
+    if domains is None:
+        return ""
+    if not isinstance(domains, (list, tuple)):
+        raise TypeError(
+            f"{name!r} must be a list of hostnames, got {type(domains).__name__}."
+        )
+    terms = ""
+    # Iterated as `object`, not cast to a value type: the cast asserted a
+    # member type the very next line has to check anyway, and left the sequence
+    # itself partially unknown.
+    for domain in cast("Sequence[object]", domains):
+        if not isinstance(domain, str) or not _HOSTNAME_RE.match(domain.strip()):
+            raise ValueError(f"{name!r} contains a non-hostname value: {domain!r}.")
+        terms += f" {prefix}{domain.strip()}"
+    return terms
 
 
 def _format_result(r: SearchResult) -> str:
@@ -324,7 +351,13 @@ def _result_detail(r: SearchResult) -> str:
             r.audio_url or r.iframe_url,
         ]
     elif isinstance(r, MapResult):
-        coords = f"{r.latitude},{r.longitude}" if r.latitude is not None else ""
+        # BOTH or neither: guarding on latitude alone rendered "1.0,None",
+        # which reads as a coordinate pair and is not one.
+        coords = (
+            f"{r.latitude},{r.longitude}"
+            if r.latitude is not None and r.longitude is not None
+            else ""
+        )
         parts = [coords, ", ".join(r.address.values())]
     elif isinstance(r, PackageResult):
         parts = [

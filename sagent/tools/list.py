@@ -15,8 +15,9 @@ from sagent.lib.custom_json import bool_val, int_val, json_freeze
 from sagent.tools.core import load_tool_description
 from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
-    Invocation,
     Node,
+    render_command,
+    replaceable,
     walk_commands,
 )
 from sagent.tools.lib.path_sort import (
@@ -30,6 +31,8 @@ from sagent.types.runtime import ToolResult
 
 
 _NUDGE_PREFIX: Final = "ls via Bash is a bad UX. Use the List tool"
+
+_LS_EXES: frozenset[str] = frozenset({"ls"})
 
 _DEFAULT_SORT: Final = "name"
 
@@ -218,37 +221,21 @@ class List:
 
         """
         for inv in walk_commands(trees):
-            if inv.exe != "ls" or inv.env_prefix or inv.captures_stdout:
+            if not replaceable(inv, exes=_LS_EXES):
                 continue
-            if any(d.captures_stdout for d in inv.downstream()):
-                continue
-            if inv.piped_into is None:
-                hint = _ls_to_hint(inv.args, max_results=None, flip_sort=False)
-            else:
-                hint = _piped_ls_hint(inv, inv.piped_into)
-            if hint is not None:
-                return hint
+            if _ls_has_glob_positional(inv.args):
+                return "ls glob via Bash is a bad UX. Use the Glob tool."
+            sink = inv.piped_into
+            fields = _ls_fields(
+                inv.args,
+                max_results=_parse_line_count(sink.args) if sink else None,
+                flip_sort=bool(sink) and sink.exe == "tail",
+            )
+            call = f" Try: List path={_ls_path(inv.args)!r}"
+            if fields:
+                call += f" {fields}"
+            return f"{_NUDGE_PREFIX}. Replaces: `{render_command(inv)}`.{call}"
         return None
-
-
-def _piped_ls_hint(inv: Invocation, sink: Invocation) -> str | None:
-    """Nudge for ``ls … | head/tail -N``, which List expresses natively.
-
-    ``tail`` flips the sort: the last N of an ascending listing is the
-    first N of a descending one, which is what ``sort`` + ``max_results``
-    already say. The count comes from THIS pipeline's sink -- searching
-    by name found whichever ``head`` came first on the line.
-    """
-    if sink.exe == "head":
-        flip = False
-    elif sink.exe == "tail":
-        flip = True
-    else:
-        return None
-    n = _parse_line_count(sink.args)
-    if n is None:
-        return None
-    return _ls_to_hint(inv.args, max_results=n, flip_sort=flip)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -265,15 +252,23 @@ class _LsParse:
     """Sort key derived from ``-t`` / ``-S`` / ``-r``, or ``None``."""
 
 
-def _ls_to_hint(
+def _ls_path(args: tuple[str, ...]) -> str:
+    """Directory operand of an ``ls`` invocation; ``"."`` when omitted."""
+    return next((a for a in args if not a.startswith("-") and a != "--"), ".")
+
+
+def _ls_fields(
     args: tuple[str, ...], *, max_results: int | None, flip_sort: bool
-) -> str | None:
-    """Translate parsed ``ls`` args into a List-tool nudge string."""
-    if _ls_has_glob_positional(args):
-        return "ls glob via Bash is a bad UX. Use the Glob tool."
+) -> str:
+    """Render List keywords for ``ls`` args, or ``""`` when untranslatable.
+
+    ``tail`` flips the sort: the last N of an ascending listing is the
+    first N of a descending one, which is what ``sort`` plus
+    ``max_results`` already say.
+    """
     parsed = _parse_ls(args)
     if parsed is None:
-        return None
+        return ""
     sort = _flip_sort(parsed.sort) if flip_sort else parsed.sort
     pieces: list[str] = []
     if sort is not None:
@@ -284,9 +279,7 @@ def _ls_to_hint(
         pieces.append("show_hidden=true")
     if max_results is not None:
         pieces.append(f"max_results={max_results}")
-    if not pieces:
-        return f"{_NUDGE_PREFIX}."
-    return f"{_NUDGE_PREFIX} with {', '.join(pieces)}."
+    return " ".join(pieces)
 
 
 def _flip_sort(sort: str | None) -> str:

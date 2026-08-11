@@ -613,74 +613,87 @@ def test_prompt_empty() -> None:
     assert grep.prompt() == ""
 
 
-def test_bash_match_simple_grep() -> None:
-    trees = parse_bash("grep foo file.txt")
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep foo file.txt",
+        "grep -rln foo /src",
+        "grep --include=*.py foo /src",
+        "grep --include foo /src",
+        "grep -A 2 foo file.txt",
+        "cd /src && grep foo .",
+        "grep foo file.txt | head",
+        "grep foo file.txt | wc -l",
+        "cat file.txt | grep foo",
+        "cat -n file.txt | grep foo",
+        "find . -name '*.py' | xargs grep foo",
+        "find . -type f -print0 | xargs -0 grep foo",
+        # Flags outside the translatable set are still a reach for Grep.
+        "grep foo a.txt b.txt",
+        "grep --weird=val foo",
+        "grep -Z foo file.txt",
+        "rg foo file.txt",
+        "rg -n -i foo /src",
+        "rg foo /src | head",
+        "rg foo /src | wc -l",
+        "cat file.txt | rg foo",
+        "find . -name '*.py' | xargs rg foo",
+        "cd /src && rg foo .",
+        "rg -U 'a\\nb' .",
+    ],
+)
+def test_bash_match_nudges(command: str) -> None:
+    trees = parse_bash(command)
     assert trees is not None
-    assert grep.bash_match(trees) == "grep/rg via Bash is a bad UX. Use the Grep tool."
+    assert (grep.bash_match(trees) or "").startswith(_NUDGE), command
 
 
-def test_bash_match_grep_flags() -> None:
-    trees = parse_bash("grep -rln foo /src")
+@pytest.mark.parametrize(
+    ("command", "call"),
+    [
+        ("grep foo file.txt", "Try: Grep pattern='foo' path='file.txt'"),
+        ("grep -rln foo /src", 'output_mode="files_with_matches"'),
+        ("grep --include=*.py foo /src", "glob='*.py'"),
+        ("grep -c foo file.txt", 'output_mode="count"'),
+    ],
+)
+def test_bash_match_grep_suggests_a_concrete_call(command: str, call: str) -> None:
+    trees = parse_bash(command)
     assert trees is not None
-    assert grep.bash_match(trees) == "grep/rg via Bash is a bad UX. Use the Grep tool."
+    assert call in (grep.bash_match(trees) or ""), command
 
 
-def test_bash_match_grep_long_include() -> None:
-    trees = parse_bash("grep --include=*.py foo /src")
+@pytest.mark.parametrize("command", ["grep -Z foo file.txt", "grep --weird=val foo"])
+def test_an_untranslatable_flag_drops_only_the_example(command: str) -> None:
+    """Detection must survive what the translator cannot render."""
+    trees = parse_bash(command)
     assert trees is not None
-    assert grep.bash_match(trees) == "grep/rg via Bash is a bad UX. Use the Grep tool."
-
-
-def test_bash_match_grep_too_many_positional() -> None:
-    trees = parse_bash("grep foo a.txt b.txt")
-    assert trees is not None
-    assert grep.bash_match(trees) is None
-
-
-def test_bash_match_grep_long_flag_missing_value() -> None:
-    trees = parse_bash("grep --include foo /src")
-    assert trees is not None
-    # ``--include`` consumes the next token as value, but then ``foo`` is
-    # not a recognized positional grep pattern alone with ``/src``: actually it does
-    # parse. We want one positional only or 1-2 with positional_path=True.
-    # ``--include`` + value consumed, leaving ``foo /src`` as positional → 2 args OK.
-    assert grep.bash_match(trees) == "grep/rg via Bash is a bad UX. Use the Grep tool."
-
-
-def test_bash_match_grep_unknown_long_flag() -> None:
-    trees = parse_bash("grep --weird=val foo")
-    assert trees is not None
-    assert grep.bash_match(trees) is None
-
-
-def test_bash_match_grep_unknown_short_flag() -> None:
-    trees = parse_bash("grep -Z foo file.txt")
-    assert trees is not None
-    assert grep.bash_match(trees) is None
-
-
-def test_bash_match_grep_with_value_flag() -> None:
-    trees = parse_bash("grep -A 2 foo file.txt")
-    assert trees is not None
-    assert grep.bash_match(trees) == "grep/rg via Bash is a bad UX. Use the Grep tool."
+    hint = grep.bash_match(trees) or ""
+    assert hint.startswith(_NUDGE)
+    assert "Try: Grep" not in hint
 
 
 def test_bash_match_grep_value_flag_missing_value() -> None:
+    """``grep -A`` has no pattern operand, so no Grep call exists."""
     trees = parse_bash("grep -A")
     assert trees is not None
     assert grep.bash_match(trees) is None
 
 
-def test_bash_match_find_xargs_grep() -> None:
-    trees = parse_bash("find . -name '*.py' | xargs grep foo")
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A search reading STDIN from a non-file producer has no path
+        # operand at all, and every Grep call takes a path.
+        "git log --oneline | grep fix",
+        "uv run pytest -q | grep FAILED",
+        "ps aux | grep python",
+    ],
+)
+def test_bash_match_stdin_fed_search_no_nudge(command: str) -> None:
+    trees = parse_bash(command)
     assert trees is not None
-    assert grep.bash_match(trees) == "grep/rg via Bash is a bad UX. Use the Grep tool."
-
-
-def test_bash_match_find_xargs_grep_with_null() -> None:
-    trees = parse_bash("find . -type f -print0 | xargs -0 grep foo")
-    assert trees is not None
-    assert grep.bash_match(trees) == "grep/rg via Bash is a bad UX. Use the Grep tool."
+    assert grep.bash_match(trees) is None, command
 
 
 def test_bash_match_xargs_unknown_flag_no_nudge() -> None:
@@ -707,40 +720,17 @@ def test_bash_match_find_bad_type_no_nudge() -> None:
     assert grep.bash_match(trees) is None
 
 
-def test_bash_match_cat_grep_pipeline() -> None:
-    trees = parse_bash("cat file.txt | grep foo")
-    assert trees is not None
-    assert grep.bash_match(trees) == "grep/rg via Bash is a bad UX. Use the Grep tool."
-
-
-def test_bash_match_cat_flag_no_nudge() -> None:
-    trees = parse_bash("cat -n file.txt | grep foo")
-    assert trees is not None
-    assert grep.bash_match(trees) is None
-
-
-def test_bash_match_grep_head_pipeline() -> None:
-    trees = parse_bash("grep foo file.txt | head")
-    assert trees is not None
-    assert grep.bash_match(trees) == "grep/rg via Bash is a bad UX. Use the Grep tool."
-
-
-def test_bash_match_grep_wc_l() -> None:
-    trees = parse_bash("grep foo file.txt | wc -l")
-    assert trees is not None
-    assert grep.bash_match(trees) == "grep/rg via Bash is a bad UX. Use the Grep tool."
-
-
 def test_bash_match_grep_wc_c_no_nudge() -> None:
     trees = parse_bash("grep foo file.txt | wc -c")
     assert trees is not None
     assert grep.bash_match(trees) is None
 
 
-def test_bash_match_cd_grep_prefix() -> None:
-    trees = parse_bash("cd /src && grep foo .")
+def test_bash_match_negation_sink_still_nudges() -> None:
+    """``| grep -v X`` is the Grep tool's ``exclude``, not a second search."""
+    trees = parse_bash("grep -rn foo /src | grep -v _test")
     assert trees is not None
-    assert grep.bash_match(trees) == "grep/rg via Bash is a bad UX. Use the Grep tool."
+    assert (grep.bash_match(trees) or "").startswith(_NUDGE)
 
 
 def test_bash_match_env_prefix_no_nudge() -> None:
@@ -751,56 +741,6 @@ def test_bash_match_env_prefix_no_nudge() -> None:
 
 def test_bash_match_other_no_nudge() -> None:
     trees = parse_bash("ls -la")
-    assert trees is not None
-    assert grep.bash_match(trees) is None
-
-
-def test_bash_match_simple_rg() -> None:
-    trees = parse_bash("rg foo file.txt")
-    assert trees is not None
-    assert grep.bash_match(trees) == _NUDGE
-
-
-def test_bash_match_rg_with_flags() -> None:
-    trees = parse_bash("rg -n -i foo /src")
-    assert trees is not None
-    assert grep.bash_match(trees) == _NUDGE
-
-
-def test_bash_match_rg_pipe_head() -> None:
-    trees = parse_bash("rg foo /src | head")
-    assert trees is not None
-    assert grep.bash_match(trees) == _NUDGE
-
-
-def test_bash_match_rg_wc_l() -> None:
-    trees = parse_bash("rg foo /src | wc -l")
-    assert trees is not None
-    assert grep.bash_match(trees) == _NUDGE
-
-
-def test_bash_match_cat_rg_pipeline() -> None:
-    trees = parse_bash("cat file.txt | rg foo")
-    assert trees is not None
-    assert grep.bash_match(trees) == _NUDGE
-
-
-def test_bash_match_find_xargs_rg() -> None:
-    trees = parse_bash("find . -name '*.py' | xargs rg foo")
-    assert trees is not None
-    assert grep.bash_match(trees) == _NUDGE
-
-
-def test_bash_match_cd_rg_prefix() -> None:
-    trees = parse_bash("cd /src && rg foo .")
-    assert trees is not None
-    assert grep.bash_match(trees) == _NUDGE
-
-
-def test_bash_match_rg_multiline_flag_no_nudge() -> None:
-    # ``-U`` is ripgrep-only; not in the translatable allowlist, so the
-    # nudge bails. Acceptable: complex shapes stay in Bash.
-    trees = parse_bash("rg -U 'a\\nb' .")
     assert trees is not None
     assert grep.bash_match(trees) is None
 

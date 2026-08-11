@@ -13,7 +13,12 @@ from sagent.agent.state import current_agent_var, get_tool_state
 from sagent.lib.custom_json import bool_val, int_val, json_freeze
 from sagent.tools.core import load_tool_description, run_sync
 from sagent.tools.display import Toggle, Wrap
-from sagent.tools.lib.bash import Node, walk_commands
+from sagent.tools.lib.bash import (
+    Node,
+    render_command,
+    replaceable,
+    walk_commands,
+)
 from sagent.tools.lib.path_sort import (
     SORT_VALUES,
     safe_mtime,
@@ -25,6 +30,14 @@ from sagent.types.runtime import ToolResult
 
 
 _NUDGE: Final = "find via Bash is a bad UX. Use the Glob tool."
+
+_FIND_EXES: frozenset[str] = frozenset({"find"})
+
+# Predicates that ACT on what they match rather than listing it, so the
+# command's product is the action and not the paths.
+_FIND_DENY: frozenset[str] = frozenset(
+    {"-exec", "-execdir", "-delete", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"}
+)
 
 # Match cap when no agent is in context (standalone use, tests).
 _FALLBACK_MAX_RESULTS: Final = 1_000
@@ -271,14 +284,13 @@ class Glob:
         return result
 
     def bash_match(self, trees: Sequence[Node]) -> str | None:
-        """Emit a tool-use nudge for ``find … -name GLOB``.
+        """Emit a tool-use nudge for ``find`` used to enumerate paths.
 
-        Policy only: :func:`walk_commands` supplies every simple command
-        with its context, so a leading ``cd``, an enclosing loop, and a
-        sequence all reach this matcher without it re-deriving AST shape.
-        Bails on ``find`` predicates Glob can't express
-        (time/size/perm/exec/depth). Directory listing (``ls``) is
-        handled by the List tool, not Glob.
+        Detection is :func:`replaceable`; this decides only that Glob
+        claims ``find`` and that acting predicates make Bash necessary.
+        ``find … | xargs grep`` is skipped because Grep claims it: the
+        find half only enumerates what to search. Directory listing
+        (``ls``) belongs to the List tool.
 
         Args:
           trees: Parsed bashlex command trees from the active Bash call.
@@ -288,15 +300,11 @@ class Glob:
 
         """
         for inv in walk_commands(trees):
-            if inv.exe != "find" or inv.env_prefix or inv.captures_stdout:
+            if not replaceable(inv, exes=_FIND_EXES, deny=_FIND_DENY):
                 continue
-            # ``find … | xargs grep`` is a SEARCH, which Grep owns; the
-            # find half only enumerates what to search.
-            if inv.piped_into:
+            if inv.piped_into is not None and inv.piped_into.exe == "xargs":
                 continue
-            hint = _match_find(inv.cwd or None, inv.args)
-            if hint is not None:
-                return hint
+            return f"{_NUDGE} Replaces: `{render_command(inv)}`.{_glob_call(inv.args)}"
         return None
 
 
@@ -310,36 +318,38 @@ def _long_line(p: Path) -> str:
     return f"{size:>10}  {mtime}  {p.resolve()}"
 
 
-def _match_find(cwd: str | None, args: tuple[str, ...]) -> str | None:
-    """Match a ``find [PATH] [-type f|d] -name GLOB`` for a Glob nudge."""
-    # Shape: ``find [PATH] [-type f|d] -name GLOB``. PATH is the first
-    # non-flag arg (or "." if omitted). ``-type`` is accepted but not
-    # translated. Whitelist-only parsing: any predicate outside the
-    # branches below bails.
-    del cwd  # Hint is a fixed string; path resolution is the LLM's job.
-    seen_path = False
-    seen_name = False
+def _glob_call(args: tuple[str, ...]) -> str:
+    """Render a concrete Glob call, or ``""`` when a predicate is untranslatable.
+
+    Runs after detection, so an unsupported predicate (``-newer``,
+    ``-maxdepth``) costs the caller a worked example rather than the
+    nudge itself -- gating detection on this parse is what made most of
+    ``find``'s ~80 predicates silent.
+    """
+    path = ""
+    pattern = ""
     i = 0
     while i < len(args):
         a = args[i]
         if a in {"-name", "-iname"}:
             if i + 1 >= len(args):
-                return None
-            seen_name = True
+                return ""
+            pattern = args[i + 1]
             i += 2
             continue
         if a == "-type":
             if i + 1 >= len(args) or args[i + 1] not in {"f", "d"}:
-                return None
+                return ""
             i += 2
             continue
         if a.startswith("-"):
-            return None
-        if seen_path:
-            # Multiple bare paths - ambiguous for Glob.
-            return None
-        seen_path = True
+            return ""
+        if path:
+            # Multiple bare paths -- Glob takes one root.
+            return ""
+        path = a
         i += 1
-    if not seen_name:
-        return None
-    return _NUDGE
+    if not pattern:
+        return ""
+    root = f" path={path!r}" if path and path != "." else ""
+    return f" Try: Glob pattern='**/{pattern}'{root}"

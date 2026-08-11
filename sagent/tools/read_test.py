@@ -489,88 +489,66 @@ def test_prompt_empty() -> None:
     assert read.prompt() == ""
 
 
-def test_bash_match_cat_file() -> None:
-    trees = parse_bash("cat foo.txt")
+@pytest.mark.parametrize(
+    ("command", "exe"),
+    [
+        ("cat foo.txt", "cat"),
+        ("head -n 5 foo.txt", "head"),
+        ("head -5 foo.txt", "head"),
+        ("tail -n 5 foo.txt", "tail"),
+        ("cat foo.txt | head", "cat"),
+        # ``-n`` numbers lines, which Read does for every line it returns.
+        ("cat -n foo.txt", "cat"),
+        ("cat -n foo.txt | head", "cat"),
+        # An unparsed count costs the worked example, not the nudge.
+        ("head -n abc foo.txt", "head"),
+    ],
+)
+def test_bash_match_nudges(command: str, exe: str) -> None:
+    trees = parse_bash(command)
     assert trees is not None
-    assert read.bash_match(trees) == "cat via Bash is a bad UX. Use the Read tool."
+    hint = read.bash_match(trees) or ""
+    assert hint.startswith(f"{exe} via Bash is a bad UX."), command
 
 
-def test_bash_match_cat_with_flag_no_nudge() -> None:
-    trees = parse_bash("cat -n foo.txt")
+@pytest.mark.parametrize(
+    ("command", "call"),
+    [
+        ("cat foo.txt", "Try: Read file_path='foo.txt'"),
+        ("head -n 5 foo.txt", "Try: Read file_path='foo.txt' limit=5"),
+        ("tail -n 5 foo.txt", "Try: Read file_path='foo.txt' last_lines=5"),
+        ("sed -n '10,20p' foo.txt", "Try: Read file_path='foo.txt' offset=10 limit=11"),
+        ("sed -n '10,$p' foo.txt", "Try: Read file_path='foo.txt' offset=10"),
+    ],
+)
+def test_bash_match_suggests_a_concrete_call(command: str, call: str) -> None:
+    trees = parse_bash(command)
     assert trees is not None
-    assert read.bash_match(trees) is None
+    assert call in (read.bash_match(trees) or ""), command
 
 
-def test_bash_match_head_n_flag() -> None:
-    trees = parse_bash("head -n 5 foo.txt")
+@pytest.mark.parametrize(
+    "command",
+    [
+        # No operand at all.
+        "head",
+        "head -n",
+        # ``-c``/``--bytes`` window BYTES; Read windows lines.
+        "head --bytes 5 foo.txt",
+        "head -c 5 foo.txt",
+        # ``-f`` follows a growing file; Read returns a snapshot.
+        "tail -f /var/log/syslog",
+        # ``-A`` renders nonprinting characters, which Read does not.
+        "cat -A foo.txt",
+        # A transforming sink does work Read cannot.
+        "cat foo.txt | sort",
+        "grep x foo.txt | head",
+    ],
+)
+def test_bash_match_no_nudge(command: str) -> None:
+    trees = parse_bash(command)
     assert trees is not None
-    assert read.bash_match(trees) == "head via Bash is a bad UX. Use the Read tool."
-
-
-def test_bash_match_head_short_flag() -> None:
-    trees = parse_bash("head -5 foo.txt")
-    assert trees is not None
-    assert read.bash_match(trees) == "head via Bash is a bad UX. Use the Read tool."
-
-
-def test_bash_match_tail_n_flag() -> None:
-    trees = parse_bash("tail -n 5 foo.txt")
-    assert trees is not None
-    assert read.bash_match(trees) == "tail via Bash is a bad UX. Use the Read tool."
-
-
-def test_bash_match_head_no_arg_no_nudge() -> None:
-    trees = parse_bash("head")
-    assert trees is not None
-    assert read.bash_match(trees) is None
-
-
-def test_bash_match_head_long_flag_no_nudge() -> None:
-    trees = parse_bash("head --bytes 5 foo.txt")
-    assert trees is not None
-    assert read.bash_match(trees) is None
-
-
-def test_bash_match_head_bad_n_value() -> None:
-    trees = parse_bash("head -n abc foo.txt")
-    assert trees is not None
-    assert read.bash_match(trees) is None
-
-
-def test_bash_match_head_n_no_value() -> None:
-    trees = parse_bash("head -n")
-    assert trees is not None
-    assert read.bash_match(trees) is None
-
-
-def test_bash_match_head_c_no_nudge() -> None:
-    trees = parse_bash("head -c 5 foo.txt")
-    assert trees is not None
-    assert read.bash_match(trees) is None
-
-
-def test_bash_match_pipeline_cat_head() -> None:
-    trees = parse_bash("cat foo.txt | head")
-    assert trees is not None
-    assert read.bash_match(trees) == "cat via Bash is a bad UX. Use the Read tool."
-
-
-def test_bash_match_pipeline_other_no_nudge() -> None:
-    trees = parse_bash("cat foo.txt | sort")
-    assert trees is not None
-    assert read.bash_match(trees) is None
-
-
-def test_bash_match_pipeline_grep_first_no_nudge() -> None:
-    trees = parse_bash("grep x foo.txt | head")
-    assert trees is not None
-    assert read.bash_match(trees) is None
-
-
-def test_bash_match_pipeline_cat_flag_no_nudge() -> None:
-    trees = parse_bash("cat -n foo.txt | head")
-    assert trees is not None
-    assert read.bash_match(trees) is None
+    assert read.bash_match(trees) is None, command
 
 
 def test_bash_match_unknown_command_no_nudge() -> None:

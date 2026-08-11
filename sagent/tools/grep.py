@@ -20,6 +20,8 @@ from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
     Invocation,
     Node,
+    render_command,
+    replaceable,
     walk_commands,
 )
 from sagent.tools.tool_spec import CLI_SETTABLE
@@ -57,8 +59,8 @@ _GREP_TRANSLATABLE_FLAGS: frozenset[str] = frozenset(
     {
         "-r",
         "-R",  # recursive (Grep tool is recursive by default)
-        "-l",  # → output_mode="files_with_matches"
-        "-c",  # → output_mode="count"
+        "-l",  # -> output_mode="files_with_matches"
+        "-c",  # -> output_mode="count"
         "-n",  # → -n
         "-i",  # → -i
         "-E",  # extended regex (ripgrep's default is close enough)
@@ -87,6 +89,12 @@ _GREP_LONG_VALUE_FLAGS: frozenset[str] = frozenset({"--include", "--exclude"})
 # ``-t`` fall through and the nudge bails on those shapes.
 _GREP_EXES: frozenset[str] = frozenset({"grep", "rg"})
 _NUDGE: Final = "grep/rg via Bash is a bad UX. Use the Grep tool."
+
+# ``grep`` reads by default and has no write mode, so nothing here makes
+# Bash necessary. Notably ABSENT: ``-c``, which counts matching lines and
+# is ``output_mode="count"``; a denylist shared with ``head`` (where
+# ``-c`` means bytes) silently dropped every ``grep -c``.
+_GREP_DENY: frozenset[str] = frozenset()
 
 # Entry cap when no agent is in context (standalone use, tests).
 _FALLBACK_KEEP_FIRST: Final = 1_000
@@ -397,11 +405,10 @@ class Grep:
     def bash_match(self, trees: Sequence[Node]) -> str | None:
         """Emit a tool-use nudge for a replaceable grep shape.
 
-        Policy only: :func:`walk_commands` supplies every simple command
-        with its context, so a leading ``cd``, an enclosing loop, and a
-        trailing ``| head`` all reach this matcher without it re-deriving
-        AST shape -- the omission that left ``cd X && grep p f | head``
-        silent while ``grep p f | head`` nudged.
+        Detection is :func:`replaceable`; this decides only which
+        executables Grep claims. ``find … | xargs grep`` is claimed too:
+        the search is the xargs payload and the find half only
+        enumerates what to search.
 
         Args:
           trees: Parsed bash command-trees from the Bash directive.
@@ -411,10 +418,10 @@ class Grep:
 
         """
         for inv in walk_commands(trees):
-            if inv.env_prefix or inv.captures_stdout:
-                continue
-            if _searches_files(inv):
-                return _NUDGE
+            if replaceable(inv, exes=_GREP_EXES, deny=_GREP_DENY) or (
+                inv.exe == "xargs" and _xargs_searches_files(inv)
+            ):
+                return _nudge_for(inv)
         return None
 
 
@@ -473,78 +480,22 @@ def _kw_bool(
     return default
 
 
-def _shaping_sink(sink: Invocation) -> bool:
-    """Whether the sink only truncates or counts what grep already found.
+def _nudge_for(inv: Invocation) -> str:
+    """Render the nudge, with concrete Grep arguments when translatable.
 
-    ``wc -l`` is Grep's ``output_mode="count"``; ``wc -c`` counts BYTES,
-    which Grep cannot express, so that shape stays with Bash.
+    Translation runs AFTER detection and may fail freely: an untranslated
+    flag costs the caller a worked example, not the nudge. Gating
+    detection on it instead made every flag outside
+    :data:`_GREP_TRANSLATABLE_FLAGS` -- most of grep's ~80 -- silent.
     """
-    if sink.exe in _DISPLAY_SHAPERS:
-        return True
-    return sink.exe == "wc" and sink.args == ("-l",)
+    args = _translate_grep_args(inv.args)
+    call = f" Try: Grep {args}" if args else ""
+    return f"{_NUDGE} Replaces: `{render_command(inv)}`.{call}"
 
 
-def _searches_files(inv: Invocation) -> bool:
-    """Whether this invocation is a search the Grep tool replaces.
-
-    Every question is answered from ``inv``'s own pipeline links. Asking
-    it of the whole command line instead let an unrelated statement --
-    ``cat -n a.py; grep -n p f`` -- decide the verdict.
-    """
-    if any(d.captures_stdout for d in inv.downstream()):
-        # Something downstream writes a file, so the pipeline's product
-        # is the file, not the matches.
-        return False
-    if inv.exe in _GREP_EXES:
-        # A ``cat -n f | grep p`` source is adding line numbers, not
-        # simply feeding the file; that is not the shape Grep replaces.
-        source = inv.piped_from
-        if (
-            source is not None
-            and source.exe == "cat"
-            and any(a.startswith("-") for a in source.args)
-        ):
-            return False
-        # A pipeline sink that only truncates or counts is what Grep's
-        # own paging and ``output_mode="count"`` already do.
-        if inv.piped_into is not None and not _shaping_sink(inv.piped_into):
-            return False
-        return _parse_grep_args(inv.args, positional_path=True)
-    if inv.exe == "xargs":
-        # ``find … | xargs grep …``: the search is the xargs payload,
-        # and the find half only enumerates what to search.
-        grep_args = _strip_xargs_prefix(inv.args)
-        if grep_args is None:
-            return False
-        source = inv.piped_from
-        if source is None or source.exe != "find":
-            return False
-        return _parse_find_for_grep(source.args) and _parse_grep_args(
-            grep_args, positional_path=False
-        )
-    return False
-
-
-# Post-processors that only truncate/paginate grep's output. Piping
-# grep into one of these is equivalent to calling Grep directly (it
-# has its own truncation). ``wc -l`` is handled as Shape 4 above
-# (not here, since other wc flags have different semantics).
-# Excluded: ``sort``/``uniq``/``awk``/``sed`` (actual transforms).
-_DISPLAY_SHAPERS: frozenset[str] = frozenset({"head", "tail", "less", "more", "cat"})
-
-
-def _parse_grep_args(args: tuple[str, ...], *, positional_path: bool) -> bool:
-    """Validate that ``args`` is a grep shape we understand.
-
-    ``positional_path=True`` accepts 1 or 2 positionals (pattern,
-    optional path). ``positional_path=False`` accepts exactly 1
-    (pattern only) - used for pipeline shapes where the file list
-    comes from stdin.
-
-    Returns True for supported shapes. Extracted values are discarded:
-    the nudge is the fixed string ``_NUDGE`` and the LLM re-derives its
-    own Grep args from the original bash command.
-    """
+def _translate_grep_args(args: tuple[str, ...]) -> str:
+    """Render ``args`` as Grep tool keywords, or ``""`` when unsupported."""
+    fields: list[str] = []
     positional: list[str] = []
     i = 0
     while i < len(args):
@@ -554,28 +505,63 @@ def _parse_grep_args(args: tuple[str, ...], *, positional_path: bool) -> bool:
             i += 1
             continue
         if a.startswith("--"):
-            name, eq, _ = a.partition("=")
+            name, eq, value = a.partition("=")
             if name not in _GREP_LONG_VALUE_FLAGS:
-                return False
-            if eq:
-                i += 1
-            else:
+                return ""
+            if not eq:
                 if i + 1 >= len(args):
-                    return False
-                i += 2
+                    return ""
+                value = args[i + 1]
+            fields.append(
+                f"glob={value!r}" if name == "--include" else f"exclude={value!r}"
+            )
+            i += 1 if eq else 2
             continue
         if a in _GREP_VALUE_FLAGS:
             if i + 1 >= len(args):
-                return False
+                return ""
+            fields.append(f"{a!r}={args[i + 1]}".replace("'", '"'))
             i += 2
             continue
         for c in a[1:]:
             if f"-{c}" not in _GREP_TRANSLATABLE_FLAGS:
-                return False
+                return ""
+            if c == "l":
+                fields.append('output_mode="files_with_matches"')
+            elif c == "c":
+                fields.append('output_mode="count"')
+            elif c == "i":
+                fields.append("-i=true")
+            elif c == "P":
+                fields.append("pcre=true")
         i += 1
-    if positional_path:
-        return len(positional) in (1, 2)
-    return len(positional) == 1
+    if not positional or len(positional) > 2:
+        return ""
+    head = f"pattern={positional[0]!r}"
+    if len(positional) == 2:
+        head += f" path={positional[1]!r}"
+    return " ".join([head, *fields])
+
+
+def _xargs_searches_files(inv: Invocation) -> bool:
+    """Whether ``find … | xargs grep …`` is one Grep call.
+
+    ``xargs`` runs an arbitrary command, so this shape is recognised by
+    its payload rather than by :func:`replaceable`: the operand lives on
+    the ``find`` half, which only enumerates what to search.
+    """
+    if any(d.captures_stdout for d in inv.downstream()):
+        return False
+    grep_args = _strip_xargs_prefix(inv.args)
+    if grep_args is None:
+        return False
+    source = inv.piped_from
+    if source is None or source.exe != "find":
+        return False
+    return (
+        _parse_find_for_grep(source.args)
+        and len([a for a in grep_args if not a.startswith("-")]) == 1
+    )
 
 
 # Simple xargs flags we know how to ignore (data-plumbing only, no

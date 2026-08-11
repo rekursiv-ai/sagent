@@ -28,6 +28,8 @@ from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
     Invocation,
     Node,
+    render_command,
+    replaceable,
     sed_mutates,
     walk_commands,
 )
@@ -61,7 +63,30 @@ _MIME_BY_EXT: Final[dict[str, str]] = {
 _IMAGE_EXTS = frozenset(_MIME_BY_EXT)
 _PDF_EXT: Final = ".pdf"
 _NOTEBOOK_EXT: Final = ".ipynb"
-_CAT_SHAPERS: frozenset[str] = frozenset({"head", "tail", "less", "more"})
+_READ_EXES: frozenset[str] = frozenset({"cat", "head", "tail", "sed"})
+
+# ``-c`` windows BYTES and ``-f`` follows a growing file; Read windows
+# LINES of a snapshot, so neither round-trips. ``cat``'s ``-A/-v/-e/-t``
+# family renders nonprinting characters, which Read does not. Kept
+# per-executable: the same ``-c`` means "count matching lines" to grep,
+# which Grep expresses directly as ``output_mode="count"``. Notably
+# ABSENT: ``cat -n``, since Read numbers every line it returns.
+_READ_DENY: frozenset[str] = frozenset(
+    {
+        "-c",
+        "-f",
+        "--bytes",
+        "--follow",
+        "-A",
+        "-v",
+        "-e",
+        "-E",
+        "-t",
+        "-T",
+        "--show-all",
+        "--show-nonprinting",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -296,11 +321,10 @@ class Read:
     def bash_match(self, trees: Sequence[Node]) -> str | None:
         """Emit a hint if any command reads a file the Read tool could.
 
-        Policy only: :func:`walk_commands` supplies every simple command
-        with its context, so a leading ``cd``, an enclosing loop, and a
-        trailing ``| head`` all reach this matcher without it re-deriving
-        AST shape -- the omission that left ``cd X && cat f | head``
-        silent while ``cat f | head`` nudged.
+        Detection is :func:`replaceable`; this decides only which
+        executables Read claims and which of their arguments make Bash
+        necessary. A ``sed`` that EDITS belongs to the Edit tool, and a
+        glob positional cannot be expressed by a single ``file_path``.
 
         Args:
           trees: Parsed bashlex command trees from the active Bash call.
@@ -310,10 +334,14 @@ class Read:
 
         """
         for inv in walk_commands(trees):
-            if inv.env_prefix or inv.captures_stdout:
+            if not replaceable(inv, exes=_READ_EXES, deny=_READ_DENY):
                 continue
-            if _reads_a_file(inv):
-                return f"{inv.exe} via Bash is a bad UX. Use the Read tool."
+            if inv.exe == "sed" and not _sed_reads(inv.args):
+                continue
+            if any(_has_glob(a) for a in inv.args if not a.startswith("-")):
+                continue
+            hint = f"{inv.exe} via Bash is a bad UX. Use the Read tool."
+            return f"{hint} Replaces: `{render_command(inv)}`.{_read_call(inv)}"
         return None
 
 
@@ -473,69 +501,66 @@ def _window_text(
     return result_str
 
 
-def _reads_a_file(inv: Invocation) -> bool:
-    """Whether this invocation is a file read the Read tool replaces.
-
-    A sink that TRANSFORMS (``sort``, ``awk``) is doing work Read cannot,
-    so the shape is left alone; one that merely truncates or paginates is
-    what Read's own windowing already does.
-    """
-    if any(d.captures_stdout for d in inv.downstream()):
-        return False
-    if inv.piped_into is not None and inv.piped_into.exe not in _CAT_SHAPERS:
-        return False
-    if inv.exe == "cat":
-        return _cat_reads(inv.args)
-    if inv.exe in ("head", "tail"):
-        return _head_tail_reads(inv.args)
-    if inv.exe == "sed":
-        return _sed_reads(inv.args)
-    return False
-
-
-def _cat_reads(args: tuple[str, ...]) -> bool:
-    """``cat FILE...`` with no flags and no glob.
-
-    Multiple files count: the nudge is a suggestion to batch Read calls,
-    which is exactly what several ``cat`` positionals are doing by hand.
-    A GLOB does not: Read takes one ``file_path`` and cannot expand one,
-    so pointing there sends the caller to a tool that cannot do the job.
-    """
-    if not args or any(a.startswith("-") for a in args):
-        return False
-    return not any(_has_glob(a) for a in args)
-
-
 def _has_glob(arg: str) -> bool:
     """Whether a positional is a shell glob rather than a literal path."""
     return any(ch in arg for ch in "*?[")
 
 
-def _head_tail_reads(args: tuple[str, ...]) -> bool:
-    """``head``/``tail`` limited to line counts, not byte offsets.
+def _read_call(inv: Invocation) -> str:
+    """Render a concrete Read call for ``inv``, or ``""`` if not derivable.
 
-    ``-c`` reads bytes, which Read's line windowing cannot express, so
-    that shape is deliberately left alone.
+    Runs after detection, so an unrecognised flag costs the caller a
+    worked example rather than the nudge itself.
     """
-    positional: list[str] = []
+    if inv.exe == "sed":
+        return _sed_call(inv.args)
+    paths, window = _paths_and_window(inv.args)
+    if len(paths) != 1:
+        return ""
+    if inv.exe == "cat":
+        return f" Try: Read file_path={paths[0]!r}"
+    if window == 0:
+        return ""
+    key = "limit" if inv.exe == "head" else "last_lines"
+    return f" Try: Read file_path={paths[0]!r} {key}={window}"
+
+
+def _sed_call(args: tuple[str, ...]) -> str:
+    """Render ``sed -n 'M,Np' FILE`` as a Read window, or ``""``."""
+    scripts = [a for a in args if _LINE_RANGE_SCRIPT.fullmatch(a)]
+    paths = [a for a in args if not a.startswith("-") and a not in scripts]
+    if len(scripts) != 1 or len(paths) != 1:
+        return ""
+    first, _, last = scripts[0].removesuffix("p").partition(",")
+    if not last or last == "$":
+        return f" Try: Read file_path={paths[0]!r} offset={first}"
+    limit = int(last) - int(first) + 1
+    return f" Try: Read file_path={paths[0]!r} offset={first} limit={limit}"
+
+
+def _paths_and_window(args: tuple[str, ...]) -> tuple[list[str], int]:
+    """Split ``head``/``tail`` args into path operands and a line count.
+
+    ``-n`` consumes the following token, so a caller that treats every
+    non-flag token as a path reads the COUNT as a filename.
+    """
+    paths: list[str] = []
+    window = 10
     i = 0
     while i < len(args):
         a = args[i]
-        if a.startswith("--"):
-            return False
-        if a == "-n":
-            if i + 1 >= len(args) or not args[i + 1].lstrip("+-").isdigit():
-                return False
+        if a == "-n" and i + 1 < len(args):
+            value = args[i + 1].lstrip("+-")
+            window = int(value) if value.isdigit() else 0
             i += 2
             continue
         if a.startswith("-") and a != "-":
-            if not a[1:].isdigit():
-                return False
+            window = int(a[1:]) if a[1:].isdigit() else window
             i += 1
             continue
-        positional.append(a)
+        paths.append(a)
         i += 1
-    return bool(positional) and not any(_has_glob(a) for a in positional)
+    return paths, window
 
 
 def _sed_reads(args: tuple[str, ...]) -> bool:

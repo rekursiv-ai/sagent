@@ -22,6 +22,7 @@ import subprocess
 import time
 
 from sagent.agent.state import ToolState, get_tool_state
+from sagent.lib import debug_log
 from sagent.lib.custom_json import bool_val, int_val, json_freeze
 from sagent.tools.core import (
     TOOL_RESULT_MAX_CHARS,
@@ -318,15 +319,19 @@ class Bash:
         )
 
     def _collect_nudges(self, command: str) -> list[str]:
-        """Run peer ``bash_match`` matchers and return any nudges."""
+        """Run peer ``bash_match`` matchers and return any nudges.
+
+        Every Bash call is traced, nudged or not. Whether the banner
+        changes behaviour is unmeasurable from the matchers alone --
+        replaying them over old sessions counts shapes, not deliveries --
+        so the delivered rate and what follows it have to be recorded as
+        they happen.
+        """
         trees = cached_parse_bash(command, get_tool_state().bash_parse_cache)
         if trees is None:
             return []
-        nudges: list[str] = []
-        for matcher in self._peer_matchers:
-            nudge = matcher(trees)
-            if nudge:
-                nudges.append(nudge)
+        nudges = [n for matcher in self._peer_matchers if (n := matcher(trees))]
+        debug_log.trace("bash_nudge", nudged=bool(nudges), count=len(nudges))
         return nudges
 
 
