@@ -369,6 +369,12 @@ repos:
       # runs nothing and exits 0 -- a green here means "no paired test found", not
       # "tested". That is only acceptable because pre-push is the real gate.
       #
+      # Tolerate pytest exit 5 (nothing collected) for the same reason the
+      # pre-push tiers do: a paired test file whose every test carries a
+      # deselected marker (`integration`, `slow`) collects zero, which is not a
+      # failure. Editing `chrome/echo.py` reported RED on a sidecar of seven
+      # passing integration tests. A REAL failure is exit 1 and still fails.
+      #
       # Parallelism is chosen from the changeset size, because neither setting
       # wins everywhere. xdist costs a fixed ~5s of worker startup, and a
       # sidecar file is ~0.23s serial vs ~0.10s spread over workers, so the two
@@ -415,7 +421,8 @@ repos:
             mapfile -t tests < <(printf "%s\n" "${tests[@]}" | sort -u);
             dist=();
             ((${#tests[@]} >= ${SIDECAR_XDIST_MIN:-16})) && dist=(-n "$WORKERS");
-            exec uv --quiet run --frozen --group pre-commit pytest "${dist[@]}" -q --tb=short "${tests[@]}"
+            uv --quiet run --frozen --group pre-commit pytest "${dist[@]}" -q --tb=short "${tests[@]}"
+            || test "$?" = 5
 
   # === Pre-Push Gates =========================================================
   # To enable:  uv run pre-commit install --hook-type pre-push
