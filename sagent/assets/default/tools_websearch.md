@@ -14,7 +14,7 @@ Sources:
 - `allowed_domains` / `blocked_domains` scope results.
 - `backend` selects the search engine. Only set it to compare engines or recover from failure.
 - `transport` selects retrieval: `auto` (default), `curl`, `curl-then-zendriver`, `zendriver`, or `stdlib`. `auto` tries curl and escalates to Zendriver when a site bot-blocks it, routing straight to Zendriver for domains already learned to require it. Set it explicitly to stress a path or isolate transport failures.
-- `categories` -- SearXNG result tab. Omit for general web. A non-default value forces the SearXNG backend (overriding `backend`) and returns results structured for that domain:
+- `categories` -- SearXNG result tab; each returns results structured for that domain. Omit for general web. A non-default value selects the SearXNG backend when you name none, and is REJECTED alongside an explicit backend that cannot serve it (it is no longer silently overridden):
   - `general` -- web results (default).
   - `images` -- image URL, resolution, format, source.
   - `videos` -- duration, view count, channel, embed URL.

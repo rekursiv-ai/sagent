@@ -25,7 +25,7 @@ import asyncio
 import json
 import logging
 
-from wesearch.fetch import Content, RequestParams, Retry, fetch
+from wesearch.fetch import ContentParams, RequestParams, RetryParams, fetch
 from wesearch.types.errors import FetchError
 
 from sagent.lib.custom_json import JSON, MutableJSON, int_val, json_freeze
@@ -80,8 +80,10 @@ async def _slack_call(
                 fetch,
                 url=url,
                 request=RequestParams(
-                    content=Content(method="POST", json=dict(params), headers=headers),
-                    retry=Retry(timeout_sec=timeout_sec),
+                    content=ContentParams(
+                        method="POST", json=dict(params), headers=headers
+                    ),
+                    retry=RetryParams(timeout_sec=timeout_sec),
                 ),
             )
         else:
@@ -89,8 +91,8 @@ async def _slack_call(
                 fetch,
                 url=url,
                 request=RequestParams(
-                    content=Content(params=dict(params), headers=headers),
-                    retry=Retry(timeout_sec=timeout_sec),
+                    content=ContentParams(params=dict(params), headers=headers),
+                    retry=RetryParams(timeout_sec=timeout_sec),
                 ),
             )
     except FetchError as e:

@@ -3,8 +3,9 @@ Fetch a URL. GET (default) or POST.
 - GET -- main content as markdown, read-only intent. Cached 15 min.
 - POST -- `json` or `form` (exactly one); response verbatim, truncated. Never cached. Side effects possible -- use only when needed.
 - GET/POST only; PUT/PATCH/DELETE rejected.
-- `transport` selects retrieval: `auto` (default), `curl`, `curl-then-zendriver`, `zendriver`, or `stdlib`. `auto` tries curl and escalates to Zendriver when a site bot-blocks it, routing straight to Zendriver for domains already learned to require it. Set it explicitly to stress a path or isolate transport failures.
-- `extractor` selects how the page becomes text: `trafilatura` (default) returns only what it scores as the article -- smallest, but it drops the substance of any page that is not article-shaped (a dictionary entry loses its pronunciation, a Q&A thread loses every answer), and the loss is invisible because the output still looks complete; `html2text` renders every text node as markdown, losing nothing; `markdownify` converts the document's elements instead, keeping nested lists and tables that a text walk flattens; `raw` returns the HTML source. Re-fetch with `html2text` when the answer you expected is missing.
+- Every parameter is described in this tool's schema, generated from one spec shared with the MCP surface. What the schema cannot say:
+- Reach for `extractor: trafilatura` only when you already know the page is ONE contiguous prose body: an encyclopedia article, a PEP/RFC/spec, a long-form post. There it is both smaller and lossless.
+- Everywhere else it silently drops content, and no length or structure check predicts it. Measured on an 11-page corpus by `loop/wesearch/scripts/compare_extractors.py`: `html2text` loses 0 of 37 content probes, `trafilatura` loses 12 -- a Q&A thread keeps one answer of dozens, a profile timeline returns 864 of 4,530 chars.
 - URLs fully qualified; `http://` upgraded to HTTPS.
 - No custom headers (`Authorization`, `Cookie`).
 - Cross-host redirects reported, not followed -- re-issue.

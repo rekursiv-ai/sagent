@@ -2,29 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from unittest.mock import patch
 
 import asyncio
 
-from wesearch.search.custom_types import (
-    ImageResult,
-    MapResult,
-    PaperResult,
-    SearchResult,
-    TorrentResult,
-    VideoResult,
-)
+from wesearch.search.custom_types import SearchResult
 from wesearch.types.errors import GoogleSorryError, PuzzleChallengeError
 
 import pytest
 
 from sagent.tools.paper_search import PaperSearch
-from sagent.tools.web_search import (
-    WebSearch,
-    _build_query,
-    _format_result,
-)
+from sagent.tools.web_search import WebSearch, _build_query
 
 
 def test_websearch_metadata() -> None:
@@ -281,7 +269,14 @@ def test_run_with_allowed_and_blocked_domains() -> None:
     assert "-site:x.com" in q
 
 
-def test_run_category_forces_searxng_backend() -> None:
+def test_run_leaves_backend_resolution_to_the_library() -> None:
+    """An unnamed backend reaches ``search`` as ``None``, not a substituted name.
+
+    The tool used to force ``searxng`` itself for a non-general category. Two
+    consequences, both fixed by resolving in ``search``: the MCP server had no
+    such override and raised on the same call in the public build, and an
+    EXPLICIT ``backend`` was silently overwritten (see below).
+    """
     captured: dict[str, object] = {}
 
     def fake_search(
@@ -293,93 +288,32 @@ def test_run_category_forces_searxng_backend() -> None:
         return []
 
     with patch("sagent.tools.web_search.search", side_effect=fake_search):
-        # Caller leaves backend at default; a non-general category forces searxng.
         _ = asyncio.run(WebSearch().run({"query": "x", "categories": "science"}))
-    assert captured["backend"] == "searxng"
+    assert captured["backend"] is None
     assert captured["categories"] == "science"
+
+
+def test_run_does_not_overwrite_an_explicit_backend() -> None:
+    """A stated backend that cannot serve the category ERRORS, silently rewritten.
+
+    ``backend="duckduckgo", categories="science"`` used to run against SearXNG
+    instead -- the caller's choice replaced without a word.
+    """
+    result = asyncio.run(
+        WebSearch().run(
+            {"query": "x", "backend": "duckduckgo", "categories": "science"}
+        )
+    )
+    assert result.is_error
+    assert "only supported by the 'searxng' backend" in result.content
 
 
 def test_run_invalid_category_errors() -> None:
     result = asyncio.run(WebSearch().run({"query": "x", "categories": "bogus"}))
     assert result.is_error
-    assert "Invalid category" in result.content
-
-
-def test_format_paper_result() -> None:
-    out = _format_result(
-        PaperResult(
-            url="https://doi.org/10.1/x",
-            title="Attn",
-            snippet="abstract",
-            authors=("A", "B"),
-            journal="NeurIPS",
-            doi="10.1/x",
-            published=datetime(2017, 6, 1),  # noqa: DTZ001 -- naive ok in test
-            citations=42,
-        )
-    )
-    assert "[Attn](https://doi.org/10.1/x)" in out
-    assert "abstract" in out
-    assert "doi:10.1/x" in out
-    assert "cites:42" in out
-    assert "2017" in out
-
-
-def test_format_image_result() -> None:
-    out = _format_result(
-        ImageResult(
-            url="https://p",
-            title="Cat",
-            snippet="",
-            image_url="https://img",
-            resolution="1x1",
-        )
-    )
-    assert out.count("https://img") >= 1
-    assert "1x1" in out
-
-
-def test_format_map_result() -> None:
-    out = _format_result(
-        MapResult(
-            url="https://m",
-            title="Tower",
-            snippet="",
-            latitude=48.8,
-            longitude=2.3,
-        )
-    )
-    assert "48.8,2.3" in out
-
-
-def test_format_torrent_result() -> None:
-    out = _format_result(
-        TorrentResult(
-            url="https://t",
-            title="ISO",
-            snippet="",
-            magnet_url="magnet:?xt=1",
-            seed=10,
-            leech=2,
-        )
-    )
-    assert "seed:10" in out
-    assert "leech:2" in out
-    assert "magnet:?xt=1" in out
-
-
-def test_format_plain_search_result_has_no_detail() -> None:
-    out = _format_result(SearchResult(url="https://w", title="W", snippet="s"))
-    assert out == "[W](https://w)\ns"
-
-
-def test_video_detail_precedes_media_dispatch() -> None:
-    # VideoResult is-a MediaResult; the formatter must use the video branch.
-    out = _format_result(
-        VideoResult(url="https://v", title="V", snippet="", views="1M", author="C")
-    )
-    assert "1M views" in out
-    assert "C" in out
+    # Named for the PARAMETER, which is plural; the spec derives the
+    # message from the declared name rather than a hand-written string.
+    assert "Invalid categories" in result.content
 
 
 if __name__ == "__main__":

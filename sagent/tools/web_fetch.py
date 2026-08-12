@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Annotated, Final, Literal, cast, get_args
+from typing import Annotated, Final, cast, get_args
 
 import asyncio
 
-from wesearch.fetch import Extractor, Policy, Transport
+from wesearch.fetch import Extractor, PolicyParams, Transport
+from wesearch.fetch.custom_types import FetchBodyParamsSchema, HttpMethod
 from wesearch.types.errors import BotDetectionError, FetchError
 from wesearch.web import fetch_web
 
@@ -26,10 +27,6 @@ from sagent.tools.tool_spec import CLI_SETTABLE
 from sagent.types.runtime import ToolResult
 
 
-# The only HTTP methods this tool supports; enforced at the directive boundary.
-HttpMethod = Literal["GET", "POST"]
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
 class WebFetch:
     """Fetch a web page and extract its main content as clean text."""
@@ -38,66 +35,7 @@ class WebFetch:
     tool_id = "application/x-tool-webfetch"
     clearable_results = True
     description = load_tool_description("WebFetch")
-    directive_schema = json_freeze(
-        {
-            "type": "object",
-            "properties": {
-                "url": {"type": "string", "description": "The URL to fetch."},
-                "method": {
-                    "type": "string",
-                    "enum": ["GET", "POST"],
-                    "description": (
-                        "HTTP method. Defaults to GET. Use POST to call"
-                        " JSON or form APIs."
-                    ),
-                },
-                "transport": {
-                    "type": "string",
-                    "enum": get_args(Transport),
-                    "description": (
-                        "Retrieval path. 'auto' tries curl and escalates to "
-                        "Zendriver when a site bot-blocks it. Set an explicit "
-                        "transport to stress a path."
-                    ),
-                },
-                "extractor": {
-                    "type": "string",
-                    "enum": get_args(Extractor),
-                    "description": (
-                        "How the page becomes text. 'trafilatura' (default) "
-                        "returns only what it scores as the article -- "
-                        "smallest, but it drops the substance of any page "
-                        "that is not article-shaped (a dictionary entry loses "
-                        "its pronunciation, a Q&A thread loses every answer), "
-                        "and the loss is invisible because the output still "
-                        "looks complete. 'html2text' converts every text node "
-                        "to Markdown, losing nothing. 'markdownify' converts "
-                        "the document's elements instead, keeping nested "
-                        "lists and tables a text walk flattens. 'raw' returns "
-                        "the HTML source untouched. Re-fetch with 'html2text' "
-                        "when the answer you expected is missing."
-                    ),
-                },
-                "json": {
-                    "description": (
-                        "JSON-serializable body for POST requests. Sets"
-                        " Content-Type: application/json. Mutually"
-                        " exclusive with 'form'."
-                    ),
-                },
-                "form": {
-                    "type": "object",
-                    "additionalProperties": {"type": "string"},
-                    "description": (
-                        "Form fields for POST requests. Sets Content-Type:"
-                        " application/x-www-form-urlencoded. Mutually"
-                        " exclusive with 'json'."
-                    ),
-                },
-            },
-            "required": ["url"],
-        }
-    )
+    directive_schema = json_freeze(FetchBodyParamsSchema.json_schema())
 
     output: Annotated[Toggle, CLI_SETTABLE] = "off"
     """Whether the result body renders in the pane."""
@@ -129,7 +67,7 @@ class WebFetch:
     def bash_match(self, trees: Sequence[Node]) -> str | None:
         """Emit a tool-use nudge for ``curl URL`` / ``wget URL``.
 
-        Policy only: :func:`walk_commands` supplies every simple command
+        PolicyParams only: :func:`walk_commands` supplies every simple command
         with its context, so a leading ``cd``, an enclosing loop, and a
         sequence all reach this matcher without it re-deriving AST shape.
         Bails on output redirection (``-o``/``-O``/``--output``),
@@ -199,55 +137,34 @@ class WebFetch:
           result: Extracted text body, or a fetch/extraction error.
 
         """
-        raw_url = args.get("url", "")
-        if not isinstance(raw_url, str):
-            # A model can emit a schema-invalid directive, and this method is
-            # where that arrives -- str() would turn ``{"url": []}`` into a
-            # fetch of the literal text "[]" and report the resulting failure as
-            # a network error.
-            return ToolResult(
-                call_id="",
-                content=f"Invalid url: expected a string, got {type(raw_url).__name__}.",
-                is_error=True,
-            )
-        raw_method = str(args.get("method", "GET")).upper()
-        if raw_method not in ("GET", "POST"):
-            return ToolResult(
-                call_id="",
-                content=(
-                    f"Unsupported method {raw_method!r}; only GET and POST allowed."
-                ),
-                is_error=True,
-            )
-        # The guard above admits only "GET"/"POST", narrowing raw_method to
-        # the HttpMethod literal.
-        method: HttpMethod = raw_method
-        raw_transport = args.get("transport", "auto")
-        if not isinstance(raw_transport, str) or raw_transport not in get_args(
-            Transport
-        ):
-            return ToolResult(
-                call_id="",
-                content=(
-                    f"Invalid transport {raw_transport!r}."
-                    f" Valid: {', '.join(get_args(Transport))}."
-                ),
-                is_error=True,
-            )
-        transport = cast(Transport, raw_transport)
-        raw_extractor = args.get("extractor", "trafilatura")
-        if not isinstance(raw_extractor, str) or raw_extractor not in get_args(
-            Extractor
-        ):
-            return ToolResult(
-                call_id="",
-                content=(
-                    f"Invalid extractor {raw_extractor!r}."
-                    f" Valid: {', '.join(get_args(Extractor))}."
-                ),
-                is_error=True,
-            )
-        extractor = cast(Extractor, raw_extractor)
+        # Case-folded before coercion, not by it: a model writes "get" as
+        # readily as "GET", and the spec's job is to say what the accepted
+        # values ARE, not which spellings of them a directive may use.
+        directive = dict(args)
+        if isinstance(directive.get("method"), str):
+            directive["method"] = str(directive["method"]).upper()
+            if directive["method"] not in get_args(HttpMethod):
+                # Named separately from the generic coercion error: a rejected
+                # VERB wants the reason ("this tool does not do PUT") ahead of
+                # the list of accepted values.
+                return ToolResult(
+                    call_id="",
+                    content=(
+                        f"Unsupported method {directive['method']!r};"
+                        " only GET and POST allowed."
+                    ),
+                    is_error=True,
+                )
+        try:
+            # One call replaces a per-parameter validation ladder that restated
+            # every name, type, and default the schema above already declared.
+            params = FetchBodyParamsSchema.coerce(directive)
+        except ValueError as e:
+            return ToolResult(call_id="", content=str(e), is_error=True)
+        raw_url = cast(str, params["url"])
+        method = cast(HttpMethod, params["method"])
+        transport = cast(Transport, params["transport"])
+        extractor = cast(Extractor, params["extractor"])
 
         try:
             json_body, form_body = _request_bodies(method, args)
@@ -278,7 +195,7 @@ class WebFetch:
                 method=method,
                 json_body=json_body,
                 form_body=form_body,
-                policy=Policy(transport=transport, extractor=extractor),
+                policy=PolicyParams(transport=transport, extractor=extractor),
             )
         except BotDetectionError as e:
             # fetch() classified the block at the boundary: surface the SPECIFIC
