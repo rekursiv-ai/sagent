@@ -219,6 +219,8 @@ repos:
         language: system
         stages: [pre-commit]
         require_serial: true
+        # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
+        alias: superseded-at-pre-push
         # Annoyingly there's no good choice.
         #   pass_filenames: true
         #     Pro: Only what you touch is checked.
@@ -303,6 +305,8 @@ repos:
         language: system
         stages: [pre-commit]
         require_serial: true
+        # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
+        alias: superseded-at-pre-push
         types_or: [python, pyi]
         entry: &worker-entry >-
           bash -c '
@@ -380,6 +384,8 @@ repos:
         language: system
         stages: [pre-commit]
         require_serial: true
+        # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
+        alias: superseded-at-pre-push
         types: [python]
         entry: *worker-entry
         args:
@@ -403,6 +409,21 @@ repos:
   # === Pre-Push Gates =========================================================
   # To enable:  uv run pre-commit install --hook-type pre-push
   # To disable: uv run pre-commit uninstall --hook-type pre-push
+  #
+  # Three pre-commit hooks above are churn reduction only -- `ty-check`,
+  # `basedpyright` and `pytest-sidecar` each answer a strictly weaker question
+  # than a hook below (`ty-check-global`, `basedpyright-global`,
+  # `pytest-global`). They carry `alias: superseded-at-pre-push`, which is a
+  # plain `SKIP=` selector: a lane that already runs the pre-push tier sets that
+  # and drops all three in one token, without restating hook ids where they
+  # could drift. pre-commit accepts the same alias on several hooks and skips
+  # every one of them.
+  #
+  # This is not cosmetic. The per-file `basedpyright` turned repo-wide when CI's
+  # periodic lane ran the commit stage `--all-files` -- passing filenames also
+  # voids pyproject's excludes -- and on a 2-vCPU runner ($WORKERS floors at 2)
+  # it blew the 30-minute job cap while `basedpyright-global` had already
+  # answered the same question in 12 minutes in its own job.
   #
   # These sections are NOT independent: every `*worker-entry` below resolves the
   # anchor DEFINED on the pre-commit `basedpyright` hook above. Deleting or
