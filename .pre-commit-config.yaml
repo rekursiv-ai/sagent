@@ -105,6 +105,7 @@ repos:
     hooks:
 
       - id: end-of-file-fixer
+        name: end-of-file-fixer
         stages: [pre-commit]
         exclude: |
           (?x)^(
@@ -112,6 +113,7 @@ repos:
           )
 
       - id: trailing-whitespace
+        name: trailing-whitespace
         stages: [pre-commit]
         exclude: |
           (?x)^(
@@ -119,6 +121,7 @@ repos:
           )
 
       - id: check-added-large-files
+        name: check-added-large-files
         stages: [pre-commit]
         args: [--maxkb=750, --enforce-all]
         exclude: |
@@ -129,13 +132,16 @@ repos:
           )
 
       - id: check-merge-conflict
+        name: check-merge-conflict
         stages: [pre-commit]
         args: [--assume-in-merge]
 
       - id: check-yaml
+        name: check-yaml
         stages: [pre-commit]
 
       - id: check-toml
+        name: check-toml
         stages: [pre-commit]
 
   # Type-checks `${{ }}` expressions, action inputs, runner labels, and shell in
@@ -159,6 +165,7 @@ repos:
     rev: v1.7.12
     hooks:
       - id: actionlint
+        name: actionlint
         stages: [pre-commit]
         args: [-ignore, "SC2016:"]
 
@@ -169,6 +176,7 @@ repos:
     hooks:
 
       - id: uv-lock
+        name: uv-lock
         stages: [pre-commit]
         files: ^(pyproject\.toml|uv\.lock)$
 
@@ -197,11 +205,13 @@ repos:
       # on top of it. Cheap here (ruff is sub-second on the whole tree) but the
       # same defect the `ty-check` and `basedpyright` hooks document.
       - id: ruff-check
+        name: ruff-check
         stages: [pre-commit]
         require_serial: true
         types_or: [python, pyi, jupyter]
         args: [--fix]
       - id: ruff-format
+        name: ruff-format
         stages: [pre-commit]
         require_serial: true
         types_or: [python, pyi, jupyter]
@@ -379,8 +389,8 @@ repos:
       # threshold above exists to avoid, and it stacks on any `-n` we choose --
       # 60 files as 16 forked hooks burned 73s of CPU for 16.3s of wall, the
       # same wall as one hook at -n5 for 36s. One hook, sized once.
-      - id: pytest-sidecar
-        name: pytest-sidecar
+      - id: pytest
+        name: pytest
         language: system
         stages: [pre-commit]
         require_serial: true
@@ -411,7 +421,7 @@ repos:
   # To disable: uv run pre-commit uninstall --hook-type pre-push
   #
   # Three pre-commit hooks above are churn reduction only -- `ty-check`,
-  # `basedpyright` and `pytest-sidecar` each answer a strictly weaker question
+  # `basedpyright` and `pytest` each answer a strictly weaker question
   # than a hook below (`ty-check-global`, `basedpyright-global`,
   # `pytest-global`). They carry `alias: superseded-at-pre-push`, which is a
   # plain `SKIP=` selector: a lane that already runs the pre-push tier sets that
@@ -477,8 +487,8 @@ repos:
             exec env COVERAGE_CORE=ctrace uv --quiet run --frozen --group pre-commit
             pytest -n="$WORKERS" -q --tb=short --testmon-forceselect
 
-      - id: pytest-global-slow
-        name: pytest-global-slow
+      - id: pytest-slow-global
+        name: pytest-slow-global
         language: system
         always_run: true
         pass_filenames: false
@@ -503,8 +513,8 @@ repos:
             -m "slow and not cluster and not cuda and not integration and not performance"
             || test "$?" = 5
 
-      - id: pytest-global-ci-smoke
-        name: pytest-global-ci-smoke
+      - id: pytest-ci-smoke-global
+        name: pytest-ci-smoke-global
         language: system
         always_run: true
         pass_filenames: false
@@ -522,8 +532,8 @@ repos:
             pytest -n="$WORKERS" "${cov[@]}" -q --tb=short --durations=20
             -m ci_smoke || test "$?" = 5
 
-      - id: pytest-global-integration
-        name: pytest-global-integration
+      - id: pytest-integration-global
+        name: pytest-integration-global
         language: system
         always_run: true
         pass_filenames: false
