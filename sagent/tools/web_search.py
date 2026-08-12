@@ -4,29 +4,19 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Annotated, cast, get_args
+from typing import Annotated, cast
 
 import asyncio
 import re
 
 from wesearch.fetch import Transport
 from wesearch.search.custom_types import (
-    DEFAULT_SEARCH_BACKEND,
-    CodeResult,
-    FileResult,
-    ImageResult,
-    MapResult,
-    MediaResult,
-    PackageResult,
-    PaperResult,
     SearchBackends,
     SearchError,
-    SearchResult,
-    TorrentResult,
-    VideoResult,
+    SearxngCategory,
 )
-from wesearch.search.search import search
-from wesearch.search.searxng import SearxngCategory
+from wesearch.search.render import format_result
+from wesearch.search.search import SearchParamsSchema, search
 from wesearch.types.errors import BotDetectionError
 
 from sagent.lib.custom_json import json_freeze
@@ -57,11 +47,15 @@ class WebSearch:
         """
         return load_tool_description("WebSearch")
 
+    # Domain filters stay local: they are a sagent query-building convenience
+    # (spliced into the query string), not a wesearch search parameter.
     directive_schema = json_freeze(
         {
-            "type": "object",
+            **SearchParamsSchema.json_schema(),
             "properties": {
-                "query": {"type": "string", "description": "Search query string."},
+                **cast(
+                    "dict[str, object]", SearchParamsSchema.json_schema()["properties"]
+                ),
                 "allowed_domains": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -72,36 +66,7 @@ class WebSearch:
                     "items": {"type": "string"},
                     "description": "Exclude results from these domains.",
                 },
-                "backend": {
-                    "type": "string",
-                    "enum": get_args(SearchBackends),
-                    "description": (
-                        f'Search backend (default: "{DEFAULT_SEARCH_BACKEND}").'
-                    ),
-                },
-                "transport": {
-                    "type": "string",
-                    "enum": get_args(Transport),
-                    "description": (
-                        "Retrieval path. 'auto' tries curl and escalates to "
-                        "Zendriver when a site bot-blocks it. Set an explicit "
-                        "transport to stress a path."
-                    ),
-                },
-                "categories": {
-                    "type": "string",
-                    "enum": list(get_args(SearxngCategory.__value__)),
-                    "description": (
-                        "SearXNG result category (tab). Non-default values force "
-                        "the SearXNG backend. 'science' returns papers, 'images' "
-                        "image results, 'videos' video metadata, 'news'/'music' "
-                        "dated/media results, 'map' places with coordinates, 'it' "
-                        "packages/code, 'files' files/torrents. Omit for general "
-                        "web results."
-                    ),
-                },
             },
-            "required": ["query"],
         }
     )
 
@@ -159,60 +124,20 @@ class WebSearch:
               carries -- or an error when the backend rejects the query.
 
         """
-        query = args.get("query", "")
-        if not isinstance(query, str):
-            # A model can emit a schema-invalid directive, and this method is
-            # where that arrives -- str() would search for the literal text
-            # "[]" and report the empty result as a legitimate miss.
-            return ToolResult(
-                call_id="",
-                content=f"Invalid query: expected a string, got {type(query).__name__}.",
-                is_error=True,
-            )
-        backend: SearchBackends = DEFAULT_SEARCH_BACKEND
-        backend_val = args.get("backend")
-        if isinstance(backend_val, str) and backend_val in get_args(SearchBackends):
-            backend = cast(SearchBackends, backend_val)
-        elif backend_val is not None:
-            return ToolResult(
-                call_id="",
-                content=(
-                    f"Invalid backend {backend_val!r}."
-                    f" Valid: {', '.join(get_args(SearchBackends))}."
-                ),
-                is_error=True,
-            )
-        transport: Transport = "auto"
-        transport_val = args.get("transport")
-        if isinstance(transport_val, str) and transport_val in get_args(Transport):
-            transport = cast(Transport, transport_val)
-        elif transport_val is not None:
-            return ToolResult(
-                call_id="",
-                content=(
-                    f"Invalid transport {transport_val!r}."
-                    f" Valid: {', '.join(get_args(Transport))}."
-                ),
-                is_error=True,
-            )
-        valid_categories = get_args(SearxngCategory.__value__)
-        categories: SearxngCategory = "general"
-        categories_val = args.get("categories")
-        if isinstance(categories_val, str) and categories_val in valid_categories:
-            categories = cast(SearxngCategory, categories_val)
-        elif categories_val is not None:
-            return ToolResult(
-                call_id="",
-                content=(
-                    f"Invalid category {categories_val!r}."
-                    f" Valid: {', '.join(valid_categories)}."
-                ),
-                is_error=True,
-            )
-        # A non-general category requires SearXNG; force it rather than erroring
-        # when the caller left the backend at its default.
-        if categories != "general":
-            backend = "searxng"
+        try:
+            # One call replaces a per-parameter ladder that restated every
+            # name, type, and default the schema above already declares.
+            params = SearchParamsSchema.coerce(args)
+        except ValueError as e:
+            return ToolResult(call_id="", content=str(e), is_error=True)
+        query = cast(str, params["query"])
+        # ``backend`` stays None when unnamed: ``search`` resolves it, and a
+        # non-general category resolves it to SearXNG. Substituting a constant
+        # here would hide that choice and reinstate the per-adapter override
+        # this tool used to carry.
+        backend = cast("SearchBackends | None", params["backend"])
+        transport = cast(Transport, params["transport"])
+        categories = cast(SearxngCategory, params["categories"])
         try:
             q = _build_query(
                 query,
@@ -252,7 +177,7 @@ class WebSearch:
         if not results:
             text = "(no results)"
         else:
-            text = "\n\n".join(_format_result(r) for r in results)
+            text = "\n\n".join(format_result(r) for r in results)
         return ToolResult(call_id="", content=truncate(text, TOOL_RESULT_MAX_CHARS))
 
 
@@ -307,77 +232,3 @@ def _site_filters(domains: object, *, name: str, prefix: str) -> str:
             raise ValueError(f"{name!r} contains a non-hostname value: {domain!r}.")
         terms += f" {prefix}{domain.strip()}"
     return terms
-
-
-def _format_result(r: SearchResult) -> str:
-    """Render one result as a markdown link plus its structured fields.
-
-    Dispatches on the concrete :class:`SearchResult` subclass so a category's
-    extra fields (a paper's authors/DOI, an image's source URL, a place's
-    coordinates) reach the agent instead of being flattened to title/snippet.
-    The base ``[title](url)`` line and snippet are always emitted; subclass
-    fields follow on an indented detail line when present.
-    """
-    head = f"[{r.title}]({r.url})"
-    detail = _result_detail(r)
-    body = "\n".join(part for part in (r.snippet, detail) if part)
-    return f"{head}\n{body}" if body else head
-
-
-def _result_detail(r: SearchResult) -> str:
-    """Return the category-specific detail line for a result, or empty."""
-    if isinstance(r, PaperResult):
-        parts = [
-            ", ".join(r.authors[:3]) + (" +" if len(r.authors) > 3 else ""),
-            r.journal,
-            str(r.published.year) if r.published else "",
-            f"doi:{r.doi}" if r.doi else "",
-            f"cites:{r.citations}" if r.citations is not None else "",
-            r.pdf_url,
-        ]
-    elif isinstance(r, ImageResult):
-        parts = [r.image_url, r.resolution, r.img_format, r.source]
-    elif isinstance(r, VideoResult):
-        parts = [
-            r.author,
-            r.length,
-            f"{r.views} views" if r.views else "",
-            r.iframe_url,
-        ]
-    elif isinstance(r, MediaResult):
-        parts = [
-            str(r.published.date()) if r.published else "",
-            r.length,
-            r.audio_url or r.iframe_url,
-        ]
-    elif isinstance(r, MapResult):
-        # BOTH or neither: guarding on latitude alone rendered "1.0,None",
-        # which reads as a coordinate pair and is not one.
-        coords = (
-            f"{r.latitude},{r.longitude}"
-            if r.latitude is not None and r.longitude is not None
-            else ""
-        )
-        parts = [coords, ", ".join(r.address.values())]
-    elif isinstance(r, PackageResult):
-        parts = [
-            r.package_name,
-            r.version,
-            r.license_name,
-            r.homepage or r.source_code_url,
-        ]
-    elif isinstance(r, CodeResult):
-        parts = [r.repository, r.filename, r.code_language]
-    elif isinstance(r, FileResult):
-        parts = [r.filename, r.size, r.mimetype]
-    elif isinstance(r, TorrentResult):
-        parts = [
-            r.filesize,
-            f"seed:{r.seed}" if r.seed is not None else "",
-            f"leech:{r.leech}" if r.leech is not None else "",
-            r.magnet_url,
-        ]
-    else:
-        return ""
-    kept = [p for p in parts if p]
-    return "  " + " · ".join(kept) if kept else ""

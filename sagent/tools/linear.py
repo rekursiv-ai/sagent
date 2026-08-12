@@ -26,7 +26,7 @@ import asyncio
 import json
 import os
 
-from wesearch.fetch import Content, RequestParams, Retry, fetch
+from wesearch.fetch import ContentParams, RequestParams, RetryParams, fetch
 from wesearch.types.errors import FetchError
 
 from sagent.lib.custom_json import JSON, MutableJSON, int_val, json_freeze
@@ -62,12 +62,12 @@ async def _gql(
             fetch,
             url="https://api.linear.app/graphql",
             request=RequestParams(
-                content=Content(
+                content=ContentParams(
                     method="POST",
                     json={"query": query, "variables": variables},
                     headers=headers,
                 ),
-                retry=Retry(timeout_sec=timeout_sec),
+                retry=RetryParams(timeout_sec=timeout_sec),
             ),
         )
     except FetchError as e:
