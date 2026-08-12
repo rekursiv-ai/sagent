@@ -27,11 +27,16 @@
 #   worktree is shared.
 #
 #     uv --quiet run --frozen --group pre-commit pre-commit run \
-#       --files $(git status --short | awk '{print $2}')
+#       --files $(git --no-pager diff --name-only --diff-filter=d HEAD)
 #
 #     # Or to just pre-commit on .
 #     uv --quiet run --frozen --group pre-commit pre-commit run \
-#       --files $(git diff --name-only --cached --relative | xargs)
+#       --files $(git --no-pager diff --name-only --cached --relative | xargs)
+#
+#   Use `git --no-pager diff --name-only`, not `git status --short | awk '{print $2}'`.
+#   For a rename status prints `R  old -> new`, so `$2` is the path that no
+#   longer exists; a path containing a space truncates at the space; and
+#   `--diff-filter=d` drops deletions, which are not files a hook can open.
 #
 #   One hook at a time, by id (`ruff-check`, `ty`, `pytest`, ...):
 #     uv --quiet run --frozen --group pre-commit pre-commit run ruff-check --all-files
@@ -92,6 +97,9 @@ fail_fast: false
 default_stages: [pre-commit]
 
 repos:
+
+  # === Pre-Commit Gates =======================================================
+
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
@@ -166,7 +174,6 @@ repos:
 
   - repo: local
     hooks:
-
       - id: codespell
         name: codespell
         language: system
@@ -192,9 +199,9 @@ repos:
         stages: [pre-commit]
         types_or: [python, pyi, jupyter]
 
-  # No official ty pre-commit hook yet (https://github.com/astral-sh/ty/issues/269).
   - repo: local
     hooks:
+      # No official ty pre-commit hook yet (https://github.com/astral-sh/ty/issues/269).
       - id: ty
         name: ty check
         language: system
@@ -217,63 +224,63 @@ repos:
             |(.*/)?docs/
           )
 
-  # To enable:  uv run pre-commit install --hook-type pre-push
-  # To disable: uv run pre-commit uninstall --hook-type pre-push
-  - repo: local
-    hooks:
-      - id: ty-global
-        name: ty check global
+      # `basedpyright-global` at pre-push is the main gate; this is churn
+      # reduction. Do not weaken the global one on the strength of this
+      # passing.
+      #
+      # The exclude list mirrors pyproject.toml's `[tool.basedpyright] exclude`
+      # because passing filenames makes basedpyright ignore it -- the same
+      # duplication the `ty` hook above documents. Monorepo-only paths carry
+      #
+      # This hook DEFINES the `&worker-entry` wrapper every $WORKERS-sizing hook
+      # shares -- a YAML anchor must be declared before it is referenced, and
+      # this is the earliest user in document order. The wrapper sizes $WORKERS,
+      # then runs the hook's own command line, supplied as the single `args`
+      # entry. Per-hook differences (env vars, marker filters, exit-5 tolerance,
+      # capability guards) live in that arg, so the arithmetic exists once.
+      #
+      # Filenames pre-commit appends reach the inner command as "$@": the
+      # wrapper passes them after an explicit `bash` $0, because `bash -c "$@"`
+      # would consume the first FILENAME as $0 and silently drop it from the
+      # check. `pass_filenames: false` hooks see an empty "$@" and are unaffected.
+      #
+      # Inline rather than a script under ops/: this file is copied verbatim into
+      # public package repos that do not receive ops/.
+      #
+      #   WORKERS = max(2, min(perf - 1, round(phys * 3/8)))
+      #
+      # `phys` counts physical cores (SMT siblings deduped); `perf` counts those
+      # at the top clock -- equal to `phys` on a uniform-clock server, smaller on
+      # a hybrid laptop. Both terms were fitted to measured optima, not derived:
+      #
+      #   host                     nproc  phys  perf  optimal  imputed
+      #   tron (Core Ultra 7 255H)    16    16     6        5        5
+      #   colossus (EPYC 9555)       128    64    64       24       24
+      #
+      # `optimal` is the measured best `pytest -n`, `imputed` what the formula
+      # yields. tron: 5 -> 216s vs 6 -> 256s (653 slow tests, sequential, idle
+      # box). colossus: 24 -> 105s vs 20 -> 113s (651 slow tests). tron has no
+      # SMT, so nproc == phys; its 16 cores span three clock domains (6x5.1GHz,
+      # 8x4.4GHz, 2x2.5GHz) and only the first counts as perf. colossus is
+      # uniform at 3.25GHz, so perf == phys and `perf - 1` never binds there.
+      #
+      # `3/8` binds on the server, `perf - 1` only on a power-capped hybrid, `2`
+      # only on a 2-vCPU CI runner. On 2 pinned cores xdist still beats serial
+      # (n=2 5.4s vs n=0 6.4s), so the floor is 2 and never 1.
+      #
+      # Every structural alternative overshot at least one box: physical cores,
+      # top frequency domain, and nproc/2 all did. Do NOT "simplify" this back to
+      # a core count. Note also that the EPYC curve is a sawtooth (24 and 32
+      # fast, 20 and 28 slow, likely CCD alignment), so a nearby value is not
+      # interchangeable.
+      #
+      # Set WORKERS in the environment to override on a host that measures
+      # differently; the formula only runs when it is unset.
+      - id: basedpyright
+        name: basedpyright
         language: system
-        always_run: true
-        pass_filenames: false
-        stages: [pre-push]
-        entry: uv --quiet run --frozen --group pre-commit ty check
-        # Exclusions defined in pyproject.toml.
-
-  # Every heavy pre-push hook below shares this one wrapper. It sizes $WORKERS,
-  # then runs the hook's own command line -- supplied as the single `args`
-  # entry. Per-hook differences (env vars, marker filters, exit-5 tolerance,
-  # capability guards) live in that arg, so the arithmetic exists exactly once.
-  #
-  # Inline rather than a script under ops/: this file is copied verbatim into
-  # public package repos that do not receive ops/.
-  #
-  #   WORKERS = max(2, min(perf - 1, round(phys * 3/8)))
-  #
-  # `phys` counts physical cores (SMT siblings deduped); `perf` counts those at
-  # the top clock -- equal to `phys` on a uniform-clock server, smaller on a
-  # hybrid laptop. Both terms were fitted to measured optima, not derived:
-  #
-  #   host                     nproc  phys  perf  optimal  imputed
-  #   tron (Core Ultra 7 255H)    16    16     6        5        5
-  #   colossus (EPYC 9555)       128    64    64       24       24
-  #
-  # `optimal` is the measured best `pytest -n`, `imputed` what the formula
-  # yields. tron: 5 -> 216s vs 6 -> 256s (653 slow tests, sequential, idle box).
-  # colossus: 24 -> 105s vs 20 -> 113s (651 slow tests). tron has no SMT, so
-  # nproc == phys; its 16 cores span three clock domains (6x5.1GHz, 8x4.4GHz,
-  # 2x2.5GHz) and only the first counts as perf. colossus is uniform at
-  # 3.25GHz, so perf == phys and the `perf - 1` term never binds there.
-  #
-  # `3/8` binds on the server, `perf - 1` only on a power-capped hybrid, `2`
-  # only on a 2-vCPU CI runner. On 2 pinned cores xdist still beats serial
-  # (n=2 5.4s vs n=0 6.4s), so the floor is 2 and never 1.
-  #
-  # Every structural alternative overshot at least one box: physical cores, top
-  # frequency domain, and nproc/2 all did. Do NOT "simplify" this back to a core
-  # count. Note also that the EPYC curve is a sawtooth (24 and 32 fast, 20 and
-  # 28 slow, likely CCD alignment), so a nearby value is not interchangeable.
-  #
-  # Set WORKERS in the environment to override on a host that measures
-  # differently; the formula only runs when it is unset.
-  - repo: local
-    hooks:
-      - id: basedpyright-global
-        name: basedpyright-global
-        language: system
-        always_run: true
-        pass_filenames: false
-        stages: [pre-push]
+        stages: [pre-commit]
+        types_or: [python, pyi]
         entry: &worker-entry >-
           bash -c '
             if [ -z "$WORKERS" ]; then
@@ -297,16 +304,116 @@ repos:
               # max(2, min(perf - 1, round(phys * 3/8))); +4 rounds to nearest.
             fi;
             export WORKERS;
-            exec bash -c "$@"
+            exec bash -c "$1" bash "${@:2}"
           ' bash
+        args:
+          - >-
+            exec env NODE_OPTIONS=--max-old-space-size=2048
+            uv --quiet run --frozen --group pre-commit
+            basedpyright --threads="$WORKERS" "$@"
+        exclude: |
+          (?x)^(
+            typings/
+            |(.*/)?third_party/
+          )
+
+      # Runs the test file that PAIRS with each changed source file -- nothing
+      # transitive. ~1s, versus 120s for the pre-push `pytest` hook's testmon walk.
+      #
+      # Deliberately not an affected-set analysis. Measured on this repo, the
+      # reverse-import closure of a 42-file changeset is 2482 files / 1124 test
+      # files (39% of the tree), because one touched module has 212 importers --
+      # import reachability is not behavioral dependence. `--testmon-forceselect`
+      # at pre-push already selects precisely, from coverage.
+      #
+      # Both sidecar spellings and a mirrored tests/ tree are probed, so the hook
+      # is not specific to this repo's layout. On a layout matching none of them it
+      # runs nothing and exits 0 -- a green here means "no paired test found", not
+      # "tested". That is only acceptable because pre-push is the real gate.
+      #
+      # Runs SERIAL, deliberately. The paired tests of one changeset are ~0.3s;
+      # xdist worker startup alone is seconds, so `-n` makes this hook several
+      # times slower for the tier whose entire value is being fast. It therefore
+      # does not use the `*worker-entry` wrapper -- but it is written so that it
+      # can: swap `entry`/`args` for the commented pair below to have $WORKERS
+      # sized by the same one formula, if a changeset ever gets big enough that
+      # startup cost is amortized.
+      - id: pytest-sidecar
+        name: pytest (sidecar tests)
+        language: system
+        stages: [pre-commit]
+        types: [python]
+        entry: >-
+          bash -c '
+            tests=();
+            for f in "$@"; do
+              dir=$(dirname "$f");
+              stem=$(basename "$f" .py); stem=${stem%_test}; stem=${stem#test_};
+              for cand in "$dir/${stem}_test.py" "$dir/test_${stem}.py" \
+                          "tests/${dir#src/}/${stem}_test.py" \
+                          "tests/${dir#src/}/test_${stem}.py"; do
+                [ -f "$cand" ] && tests+=("$cand");
+              done;
+            done;
+            [ ${#tests[@]} -eq 0 ] && exit 0;
+            printf "%s\n" "${tests[@]}" | sort -u |
+              xargs uv --quiet run --frozen --group pre-commit pytest -q --tb=short
+          ' bash
+        # Parallel variant. To enable, comment out the `entry` above and
+        # uncomment both keys below -- nothing else changes.
+        #
+        # entry: *worker-entry
+        # args:
+        #   - >-
+        #     tests=();
+        #     for f in "$@"; do
+        #       dir=$(dirname "$f");
+        #       stem=$(basename "$f" .py); stem=${stem%_test}; stem=${stem#test_};
+        #       for cand in "$dir/${stem}_test.py" "$dir/test_${stem}.py" \
+        #                   "tests/${dir#src/}/${stem}_test.py" \
+        #                   "tests/${dir#src/}/test_${stem}.py"; do
+        #         [ -f "$cand" ] && tests+=("$cand");
+        #       done;
+        #     done;
+        #     [ ${#tests[@]} -eq 0 ] && exit 0;
+        #     printf "%s\n" "${tests[@]}" | sort -u |
+        #       xargs uv --quiet run --frozen --group pre-commit
+        #       pytest -n="$WORKERS" -q --tb=short
+
+  # === Pre-Push Gates =========================================================
+  # To enable:  uv run pre-commit install --hook-type pre-push
+  # To disable: uv run pre-commit uninstall --hook-type pre-push
+  #
+  # These sections are NOT independent: every `*worker-entry` below resolves the
+  # anchor DEFINED on the pre-commit `basedpyright` hook above. Deleting or
+  # reordering that hook past these is a YAML error, not a silent regression --
+  # `precommit_regex_test.py` also asserts all six entries stay byte-identical,
+  # so copy-pasting the wrapper in place of a reference fails.
+
+  - repo: local
+    hooks:
+      - id: ty-global
+        name: ty check global
+        language: system
+        always_run: true
+        pass_filenames: false
+        stages: [pre-push]
+        entry: uv --quiet run --frozen --group pre-commit ty check
+        # Exclusions defined in pyproject.toml.
+
+      - id: basedpyright-global
+        name: basedpyright-global
+        language: system
+        always_run: true
+        pass_filenames: false
+        stages: [pre-push]
+        entry: *worker-entry
         args:
           - >-
             exec env NODE_OPTIONS=--max-old-space-size=2048
             uv --quiet run --frozen --group pre-commit
             basedpyright --threads="$WORKERS"
 
-  - repo: local
-    hooks:
       - id: pytest
         name: pytest
         language: system
