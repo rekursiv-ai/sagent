@@ -43,12 +43,12 @@ def offload_wrapper(module: torch.nn.Module) -> torch.nn.Module: ...
 def checkpoint_wrapper(
     module: torch.nn.Module,
     checkpoint_impl: CheckpointImpl = ...,
-    checkpoint_fn=...,
+    checkpoint_fn: Callable[..., Any] | None = ...,
     **checkpoint_fn_kwargs,
 ) -> torch.nn.Module: ...
 def apply_activation_checkpointing(
-    model,
-    checkpoint_wrapper_fn=...,
-    check_fn=...,
+    model: nn.Module,
+    checkpoint_wrapper_fn: Callable[[nn.Module], nn.Module] = ...,
+    check_fn: Callable[[nn.Module], bool] = ...,
     auto_wrap_policy: Callable[[nn.Module, bool, int], bool] | None = ...,
 ) -> None: ...

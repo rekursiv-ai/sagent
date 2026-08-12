@@ -19,7 +19,7 @@ Supported operations:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Final, cast
+from typing import Final
 
 import asyncio
 import json
@@ -28,7 +28,7 @@ import logging
 from wesearch.fetch import ContentParams, RequestParams, RetryParams, fetch
 from wesearch.types.errors import FetchError
 
-from sagent.lib.custom_json import JSON, MutableJSON, int_val, json_freeze
+from sagent.lib.custom_json import JSON, dict_val, dicts_val, int_val, json_freeze
 from sagent.tools.core import load_tool_description
 from sagent.types.runtime import ToolResult
 
@@ -53,7 +53,7 @@ async def _slack_call(
     post: bool = False,
     *,
     timeout_sec: float = 30.0,
-) -> MutableJSON | ToolResult:
+) -> dict[str, object] | ToolResult:
     """Call a Slack Web API method and parse the JSON response.
 
     POST methods use a JSON body + ``Authorization: Bearer``; GET
@@ -101,7 +101,7 @@ async def _slack_call(
             content=(f"Slack HTTP {e.status}: {e.body.decode(errors='replace')}"),
             is_error=True,
         )
-    body = cast(MutableJSON, json.loads(raw[0]))
+    body = dict_val(json.loads(raw[0]))
     if not body.get("ok"):
         return ToolResult(
             call_id="",
@@ -274,7 +274,7 @@ class Slack:
         body = await _slack_call("conversations.list", params=params, token=self._token)
         if isinstance(body, ToolResult):
             return body
-        channels = cast(list[MutableJSON], body.get("channels") or [])
+        channels = dicts_val(body.get("channels"))
         if not channels:
             return "(no channels)"
         return "\n".join(
@@ -300,7 +300,7 @@ class Slack:
         )
         if isinstance(body, ToolResult):
             return body
-        messages = cast(list[MutableJSON], body.get("messages") or [])
+        messages = dicts_val(body.get("messages"))
         logger.info("[list_messages] channel=%s count=%d", channel, len(messages))
         return _render_messages(messages)
 
@@ -327,7 +327,7 @@ class Slack:
         )
         if isinstance(body, ToolResult):
             return body
-        messages = cast(list[MutableJSON], body.get("messages") or [])
+        messages = dicts_val(body.get("messages"))
         logger.info(
             "[read_thread] channel=%s thread=%s count=%d",
             channel,
@@ -342,7 +342,7 @@ class Slack:
         body = await _slack_call("users.list", params=params, token=self._token)
         if isinstance(body, ToolResult):
             return body
-        members = cast(list[MutableJSON], body.get("members") or [])
+        members = dicts_val(body.get("members"))
         if not members:
             return "(no users)"
         return "\n".join(
@@ -375,7 +375,7 @@ class Slack:
         )
         if isinstance(body, ToolResult):
             return body
-        ch = cast(MutableJSON, body.get("channel") or {})
+        ch = dict_val(body.get("channel"))
         return f"id={ch.get('id')}"
 
     async def send(
@@ -398,7 +398,7 @@ class Slack:
         return await self._send(channel, text=text, thread_ts=thread_ts)
 
 
-def _render_messages(messages: list[MutableJSON]) -> str:
+def _render_messages(messages: list[dict[str, object]]) -> str:
     """Render messages as ``[ts] <user> text`` lines with reaction tails."""
     if not messages:
         return "(no messages)"
@@ -408,7 +408,7 @@ def _render_messages(messages: list[MutableJSON]) -> str:
         ts = m.get("ts", "?")
         text = m.get("text", "")
         lines.append(f"[{ts}] <{user}> {text}")
-        reactions = cast(list[MutableJSON], m.get("reactions") or [])
+        reactions = dicts_val(m.get("reactions"))
         if reactions:
             parts = [f":{r.get('name', '?')}:x{r.get('count', 0)}" for r in reactions]
             lines.append(f"  reactions: {' '.join(parts)}")

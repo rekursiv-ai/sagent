@@ -5,6 +5,7 @@ from typing import Any, TypeVar
 import os
 
 from ...configuration_utils import PretrainedConfig
+from ...modeling_utils import PreTrainedModel
 
 """Factory function to build auto-model classes."""
 logger = ...
@@ -26,10 +27,9 @@ class _BaseAutoModelClass:
     def from_pretrained(
         cls,
         pretrained_model_name_or_path: str | os.PathLike[str],
-        *model_args,
-        **kwargs,
-    ):  # -> Any:
-        ...
+        *model_args: object,
+        **kwargs: object,
+    ) -> PreTrainedModel: ...
     @classmethod
     def register(cls, config_class, model_class, exist_ok=...) -> None: ...
 

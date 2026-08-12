@@ -98,7 +98,13 @@ else:
 from sagent import types
 from sagent.lib import debug_log
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.custom_json import MutableJSON, int_val, json_unfreeze
+from sagent.lib.custom_json import (
+    MutableJSON,
+    dict_val,
+    float_val,
+    int_val,
+    json_unfreeze,
+)
 from sagent.providers.lib.errors import (
     StreamingResponseNotReadError,
     error_status_code,
@@ -1652,7 +1658,7 @@ def _parse_tool_arguments(
     return {}
 
 
-def _jwt_payload(token: str) -> MutableJSON:
+def _jwt_payload(token: str) -> dict[str, object]:
     """Decode JWT payload without verification."""
     parts = token.split(".")
     if len(parts) < 2:
@@ -1660,19 +1666,16 @@ def _jwt_payload(token: str) -> MutableJSON:
     raw = parts[1]
     raw += "=" * (4 - len(raw) % 4)
     try:
-        return cast(MutableJSON, json.loads(base64.urlsafe_b64decode(raw)))
+        return dict_val(json.loads(base64.urlsafe_b64decode(raw)))
     except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
         return {}
 
 
 def _jwt_exp(token: str) -> float:
     """Extract ``exp`` claim from a JWT without verification."""
-    return float(cast(float, _jwt_payload(token).get("exp", 0)))
+    return float_val(_jwt_payload(token).get("exp"))
 
 
 def _jwt_claim(token: str, namespace: str, key: str) -> str:
     """Extract a nested claim from a JWT namespace object."""
-    ns = _jwt_payload(token).get(namespace, {})
-    if isinstance(ns, dict):
-        return str(cast(MutableJSON, ns).get(key, ""))
-    return ""
+    return str(dict_val(_jwt_payload(token).get(namespace)).get(key, ""))

@@ -140,8 +140,8 @@ class AutoModelForCausalLM(_BaseAutoModelClass):
     def from_pretrained(
         cls: type[AutoModelForCausalLM],
         pretrained_model_name_or_path: str | os.PathLike[str],
-        *model_args,
-        **kwargs,
+        *model_args: object,
+        **kwargs: object,
     ) -> _BaseModelWithGenerate: ...
 
 AutoModelForCausalLM = ...

@@ -29,7 +29,7 @@ import os
 from wesearch.fetch import ContentParams, RequestParams, RetryParams, fetch
 from wesearch.types.errors import FetchError
 
-from sagent.lib.custom_json import JSON, MutableJSON, int_val, json_freeze
+from sagent.lib.custom_json import JSON, MutableJSON, dict_val, int_val, json_freeze
 from sagent.tools.core import load_tool_description
 from sagent.types.runtime import ToolResult
 
@@ -76,7 +76,7 @@ async def _gql(
             content=(f"Linear API HTTP {e.status}: {e.body.decode(errors='replace')}"),
             is_error=True,
         )
-    body = cast(MutableJSON, json.loads(raw[0]))
+    body = dict_val(json.loads(raw[0]))
     if errors := body.get("errors"):
         return ToolResult(
             call_id="",
