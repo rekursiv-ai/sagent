@@ -28,18 +28,9 @@ dependencies = [
     "numpy>=2.1",
     # nlp
     "tiktoken>=0.12.0",
-    # web tooling. Floor at 0.1.1: it is the first release shipping py.typed, so
-    # sagent's type-check (basedpyright/ty) sees wesearch's types instead of
-    # ~670 cascading Unknown warnings from an untyped 0.1.0.
-    # 0.1.8 exports `public_host`, which tools/web_fetch.py threads into
-    # fetch_web as the SSRF host validator.
-    # 0.1.9 exports `Content` and `Retry`, the RequestParams field groups
-    # tools/linear.py and tools/slack.py construct.
-    # 0.1.10 folds the former [extract] extra (trafilatura + defusedxml, which
-    # wesearch.web uses on sagent's behalf) into wesearch's core dependencies.
-    "wesearch>=0.1.10",
     # web client / scraping
     "httpx>=0.27",
+    "wesearch>=0.1.10",
     # web server / api
     "uvicorn>=0.30.0",
     # mcp
