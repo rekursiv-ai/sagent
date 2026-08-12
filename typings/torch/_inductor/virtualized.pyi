@@ -1,3 +1,4 @@
+from torch import Tensor, dtype
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from typing import Any, Generic, TypeVar

@@ -3,7 +3,6 @@ from ....configuration_utils import PretrainedConfig
 """ErnieM model configuration"""
 
 class ErnieMConfig(PretrainedConfig):
-    model_type = ...
     attribute_map: dict[str, str] = ...
     def __init__(
         self,

@@ -1,3 +1,6 @@
+from torch import Tensor
+from typing import Any
+
 THRESHOLD = ...
 
 def conv_picker(func, conv1dOpt, conv2dOpt, conv3dOpt): ...

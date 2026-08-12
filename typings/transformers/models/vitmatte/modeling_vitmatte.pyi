@@ -63,7 +63,7 @@ class VitMatteForImageMatting(VitMattePreTrainedModel):
         output_hidden_states: bool | None = ...,
         labels: torch.Tensor | None = ...,
         return_dict: bool | None = ...,
-    ):  # -> Any | ImageMattingOutput:
+    ):  # -> ImageMattingOutput:
         ...
 
 __all__ = ["VitMatteForImageMatting", "VitMattePreTrainedModel"]

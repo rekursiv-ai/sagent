@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -107,6 +108,7 @@ class M2M100EncoderLayer(GradientCheckpointingLayer):
         layer_head_mask: torch.Tensor,
         output_attentions: bool = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class M2M100DecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: M2M100Config, layer_idx: int | None = ...) -> None: ...

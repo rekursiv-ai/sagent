@@ -1,3 +1,4 @@
+from typing import Any, Self
 from pypdfium2._lazy import cached_property
 
 import pypdfium2.internal as pdfium_i

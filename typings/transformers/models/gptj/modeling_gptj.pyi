@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -44,6 +45,13 @@ class GPTJAttention(nn.Module):
         | tuple[torch.Tensor, tuple[torch.Tensor], tuple[torch.Tensor, ...]]
         | None
     ): ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> (
+        tuple[torch.Tensor, tuple[torch.Tensor]]
+        | tuple[torch.Tensor, tuple[torch.Tensor], tuple[torch.Tensor, ...]]
+        | None
+    ): ...
 
 class GPTJFlashAttention2(GPTJAttention):
     def __init__(self, *args, **kwargs) -> None: ...
@@ -62,12 +70,20 @@ class GPTJFlashAttention2(GPTJAttention):
         | tuple[torch.Tensor, tuple[torch.Tensor], tuple[torch.Tensor, ...]]
         | None
     ): ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> (
+        tuple[torch.Tensor, tuple[torch.Tensor]]
+        | tuple[torch.Tensor, tuple[torch.Tensor], tuple[torch.Tensor, ...]]
+        | None
+    ): ...
 
 GPTJ_ATTENTION_CLASSES = ...
 
 class GPTJMLP(nn.Module):
     def __init__(self, intermediate_size, config) -> None: ...
     def forward(self, hidden_states: torch.FloatTensor | None) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 class GPTJBlock(GradientCheckpointingLayer):
     def __init__(self, config, layer_idx=...) -> None: ...
@@ -81,6 +97,11 @@ class GPTJBlock(GradientCheckpointingLayer):
         use_cache: bool | None = ...,
         output_attentions: bool | None = ...,
         cache_position: torch.LongTensor | None = ...,
+    ) -> (
+        tuple[torch.Tensor] | tuple[torch.Tensor, tuple[torch.FloatTensor, ...]] | None
+    ): ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> (
         tuple[torch.Tensor] | tuple[torch.Tensor, tuple[torch.FloatTensor, ...]] | None
     ): ...

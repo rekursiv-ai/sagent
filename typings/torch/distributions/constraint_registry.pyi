@@ -1,3 +1,6 @@
+from collections.abc import Callable
+from typing import Any
+
 __all__ = ["ConstraintRegistry", "biject_to", "transform_to"]
 
 class ConstraintRegistry:

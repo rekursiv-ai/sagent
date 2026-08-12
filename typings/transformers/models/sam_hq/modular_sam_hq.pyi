@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -79,6 +80,7 @@ class SamHQMaskDecoder(nn.Module):
         attention_similarity: torch.Tensor | None = ...,
         target_embedding: torch.Tensor | None = ...,
     ) -> SamHQMMaskDecoderOutputs: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> SamHQMMaskDecoderOutputs: ...
 
 class SamHQVisionModel(SamVisionModel): ...
 
@@ -105,6 +107,7 @@ class SamHQModel(SamModel):
         intermediate_embeddings: list[torch.FloatTensor] | None = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> list[dict[str, torch.Tensor]]: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> list[dict[str, torch.Tensor]]: ...
 
 __all__ = [
     "SamHQConfig",

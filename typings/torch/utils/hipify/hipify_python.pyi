@@ -1,3 +1,4 @@
+from typing import Any, Literal, Self
 from collections.abc import Iterable, Iterator
 from enum import Enum
 

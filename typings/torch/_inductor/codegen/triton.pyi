@@ -1,3 +1,5 @@
+from collections.abc import Iterator
+from typing import Literal
 from collections.abc import Callable, Sequence
 from functools import lru_cache
 from typing import Any, TypeVar, Union

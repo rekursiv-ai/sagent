@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -202,12 +203,14 @@ class BigBirdPegasusDecoderLayer(GradientCheckpointingLayer):
         use_cache: bool | None = ...,
         cache_position: torch.Tensor | None = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class BigBirdPegasusClassificationHead(nn.Module):
     def __init__(
         self, input_dim: int, inner_dim: int, num_classes: int, pooler_dropout: float
     ) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring
 class BigBirdPegasusPreTrainedModel(PreTrainedModel):

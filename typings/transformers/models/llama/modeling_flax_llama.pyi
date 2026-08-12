@@ -150,8 +150,7 @@ class FlaxLlamaModule(nn.Module):
     ...,
     LLAMA_START_DOCSTRING,
 )
-class FlaxLlamaModel(FlaxLlamaPreTrainedModel):
-    module_class = ...
+class FlaxLlamaModel(FlaxLlamaPreTrainedModel): ...
 
 class FlaxLlamaForCausalLMModule(nn.Module):
     config: LlamaConfig
@@ -176,7 +175,6 @@ class FlaxLlamaForCausalLMModule(nn.Module):
     LLAMA_START_DOCSTRING,
 )
 class FlaxLlamaForCausalLM(FlaxLlamaPreTrainedModel):
-    module_class = ...
     def prepare_inputs_for_generation(
         self, input_ids, max_length, attention_mask: jax.Array | None = ...
     ):  # -> dict[str, Any | Array]:

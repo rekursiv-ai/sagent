@@ -11,7 +11,6 @@ __all__: list[str] = ...
 _T = TypeVar("_T")
 _P = ParamSpec("_P")
 
-@_apply_docstring_templates
 def sum(
     input: Tensor | MaskedTensor,
     dim: DimOrDims = ...,
@@ -20,7 +19,6 @@ def sum(
     dtype: DType | None = ...,
     mask: Tensor | None = ...,
 ) -> Tensor: ...
-@_apply_docstring_templates
 def prod(
     input: Tensor | MaskedTensor,
     dim: DimOrDims = ...,
@@ -29,15 +27,12 @@ def prod(
     dtype: DType | None = ...,
     mask: Tensor | None = ...,
 ) -> Tensor: ...
-@_apply_docstring_templates
 def cumsum(
     input: Tensor, dim: int, *, dtype: DType | None = ..., mask: Tensor | None = ...
 ) -> Tensor: ...
-@_apply_docstring_templates
 def cumprod(
     input: Tensor, dim: int, *, dtype: DType | None = ..., mask: Tensor | None = ...
 ) -> Tensor: ...
-@_apply_docstring_templates
 def amax(
     input: Tensor | MaskedTensor,
     dim: DimOrDims = ...,
@@ -46,7 +41,6 @@ def amax(
     dtype: DType | None = ...,
     mask: Tensor | None = ...,
 ) -> Tensor: ...
-@_apply_docstring_templates
 def amin(
     input: Tensor | MaskedTensor,
     dim: DimOrDims = ...,
@@ -55,7 +49,6 @@ def amin(
     dtype: DType | None = ...,
     mask: Tensor | None = ...,
 ) -> Tensor: ...
-@_apply_docstring_templates
 def argmax(
     input: Tensor | MaskedTensor,
     dim: int | None = ...,
@@ -64,7 +57,6 @@ def argmax(
     dtype: DType | None = ...,
     mask: Tensor | None = ...,
 ) -> Tensor: ...
-@_apply_docstring_templates
 def argmin(
     input: Tensor | MaskedTensor,
     dim: int | None = ...,
@@ -73,7 +65,6 @@ def argmin(
     dtype: DType | None = ...,
     mask: Tensor | None = ...,
 ) -> Tensor: ...
-@_apply_docstring_templates
 def mean(
     input: Tensor | MaskedTensor,
     dim: DimOrDims = ...,
@@ -82,7 +73,6 @@ def mean(
     dtype: DType | None = ...,
     mask: Tensor | None = ...,
 ) -> Tensor: ...
-@_apply_docstring_templates
 def median(
     input: Tensor | MaskedTensor,
     dim: int = ...,
@@ -91,7 +81,6 @@ def median(
     dtype: DType | None = ...,
     mask: Tensor | None = ...,
 ) -> Tensor: ...
-@_apply_docstring_templates
 def logsumexp(
     input: Tensor,
     dim: DimOrDims = ...,
@@ -108,7 +97,6 @@ def logaddexp(
     input_mask: Tensor | None = ...,
     other_mask: Tensor | None = ...,
 ) -> Tensor: ...
-@_apply_docstring_templates
 def norm(
     input: Tensor | MaskedTensor,
     ord: float | None = ...,
@@ -118,7 +106,6 @@ def norm(
     dtype: DType | None = ...,
     mask: Tensor | None = ...,
 ) -> Tensor: ...
-@_apply_docstring_templates
 def var(
     input: Tensor | MaskedTensor,
     dim: DimOrDims = ...,
@@ -129,7 +116,6 @@ def var(
     dtype: DType | None = ...,
     mask: Tensor | None = ...,
 ) -> Tensor: ...
-@_apply_docstring_templates
 def std(
     input: Tensor | MaskedTensor,
     dim: DimOrDims = ...,
@@ -140,7 +126,6 @@ def std(
     dtype: DType | None = ...,
     mask: Tensor | None = ...,
 ) -> Tensor: ...
-@_apply_docstring_templates
 def softmax(
     input: Tensor | MaskedTensor,
     dim: int,
@@ -148,7 +133,6 @@ def softmax(
     dtype: DType | None = ...,
     mask: Tensor | None = ...,
 ) -> Tensor: ...
-@_apply_docstring_templates
 def log_softmax(
     input: Tensor | MaskedTensor,
     dim: int,
@@ -156,7 +140,6 @@ def log_softmax(
     dtype: DType | None = ...,
     mask: Tensor | None = ...,
 ) -> Tensor: ...
-@_apply_docstring_templates
 def softmin(
     input: Tensor | MaskedTensor,
     dim: int,
@@ -164,7 +147,6 @@ def softmin(
     dtype: DType | None = ...,
     mask: Tensor | None = ...,
 ) -> Tensor: ...
-@_apply_docstring_templates
 def normalize(
     input: Tensor | MaskedTensor,
     ord: float,

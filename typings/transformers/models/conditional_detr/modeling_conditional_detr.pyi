@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import Tensor, nn
@@ -115,6 +116,9 @@ class DetrAttention(nn.Module):
         spatial_position_embeddings: torch.Tensor | None = ...,
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class ConditionalDetrAttention(nn.Module):
     def __init__(
@@ -132,6 +136,9 @@ class ConditionalDetrAttention(nn.Module):
         key_states: torch.Tensor | None = ...,
         value_states: torch.Tensor | None = ...,
         output_attentions: bool = ...,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class ConditionalDetrEncoderLayer(nn.Module):

@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -184,6 +185,9 @@ class Zamba2Model(ZambaModel, Zamba2PreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         cache_position: torch.LongTensor | None = ...,
+    ) -> tuple | BaseModelOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPast: ...
 
 class Zamba2ForCausalLM(ZambaForCausalLM): ...

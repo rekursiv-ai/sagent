@@ -1,3 +1,4 @@
+from typing import Self
 from torch import Tensor
 from torch.distributions.distribution import Distribution
 from torch.types import _size
@@ -5,8 +6,6 @@ from torch.types import _size
 __all__ = ["StudentT"]
 
 class StudentT(Distribution):
-    arg_constraints = ...
-    support = ...
     has_rsample = ...
     @property
     def mean(self) -> Tensor: ...

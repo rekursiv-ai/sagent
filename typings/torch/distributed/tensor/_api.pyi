@@ -1,3 +1,4 @@
+from torch import Tensor
 from collections.abc import Callable, Sequence
 from typing import Any, Self
 

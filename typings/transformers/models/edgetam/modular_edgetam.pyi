@@ -24,9 +24,6 @@ from ...utils import auto_docstring
 """PyTorch SAM 2 model."""
 
 class EdgeTamVisionConfig(PretrainedConfig):
-    base_config_key = ...
-    model_type = ...
-    sub_configs = ...
     def __init__(
         self,
         backbone_config=...,

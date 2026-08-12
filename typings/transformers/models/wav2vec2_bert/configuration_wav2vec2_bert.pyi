@@ -4,7 +4,6 @@ from ...configuration_utils import PretrainedConfig
 logger = ...
 
 class Wav2Vec2BertConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         vocab_size=...,
@@ -57,7 +56,7 @@ class Wav2Vec2BertConfig(PretrainedConfig):
         **kwargs,
     ) -> None: ...
     @property
-    def inputs_to_logits_ratio(self):  # -> Any | int:
+    def inputs_to_logits_ratio(self):  # -> int:
         ...
 
 __all__ = ["Wav2Vec2BertConfig"]

@@ -1,3 +1,4 @@
+from typing import Any
 from torch.onnx._internal.torchscript_exporter import jit_utils, symbolic_helper
 
 """
@@ -50,7 +51,7 @@ def mm(g: jit_utils.GraphContext, self, other) -> Any: ...
 @symbolic_helper.parse_args("v", "v", "v", "t", "t")
 def addmm(g: jit_utils.GraphContext, self, mat1, mat2, beta, alpha) -> Any: ...
 @_onnx_symbolic("aten::flatten")
-def flatten(g: jit_utils.GraphContext, input, start_dim, end_dim) -> Any | None: ...
+def flatten(g: jit_utils.GraphContext, input, start_dim, end_dim) -> None: ...
 @_onnx_symbolic("aten::empty")
 @symbolic_helper.parse_args("v", "i", "v", "v", "v", "v")
 def empty(

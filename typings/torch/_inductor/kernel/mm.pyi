@@ -1,3 +1,4 @@
+from torch import Tensor
 from typing import Any
 
 import functools

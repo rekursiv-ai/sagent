@@ -77,6 +77,7 @@ class Kosmos2_5LayerNorm(nn.Module):
 class Kosmos2_5VisionEmbeddings(nn.Module):
     def __init__(self, config: Kosmos2_5VisionConfig) -> None: ...
     def forward(self, flattened_patches: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class Kosmos2_5VisionMlp(nn.Module):
     def __init__(self, config: Kosmos2_5VisionConfig) -> None: ...
@@ -111,6 +112,9 @@ class Kosmos2_5VisionLayer(GradientCheckpointingLayer):
         output_attentions: bool = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
 
 class Kosmos2_5VisionEncoder(nn.Module):
     def __init__(self, config: Kosmos2_5VisionConfig) -> None: ...
@@ -122,6 +126,7 @@ class Kosmos2_5VisionEncoder(nn.Module):
         output_hidden_states: bool = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> BaseModelOutput: ...
 
 class Kosmos2_5TextSinusoidalPositionalEmbedding(nn.Module):
     def __init__(
@@ -175,6 +180,9 @@ class Kosmos2_5TextAttention(nn.Module):
         cache_position: torch.LongTensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class Kosmos2_5TextBlock(GradientCheckpointingLayer):
     def __init__(self, config: Kosmos2_5TextConfig, layer_idx: int) -> None: ...
@@ -187,6 +195,11 @@ class Kosmos2_5TextBlock(GradientCheckpointingLayer):
         use_cache: bool | None = ...,
         cache_position: torch.LongTensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple[
+        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+    ]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[
         torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
     ]: ...
@@ -207,6 +220,9 @@ class Kosmos2_5TextTransformer(nn.Module):
         output_hidden_states: bool | None = ...,
         cache_position: torch.LongTensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
+    ) -> BaseModelOutputWithPastAndCrossAttentions: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> BaseModelOutputWithPastAndCrossAttentions: ...
 
 class Kosmos2_5ImageToTextProjection(nn.Module):
@@ -236,6 +252,7 @@ class Kosmos2_5VisionModel(Kosmos2_5PreTrainedModel):
         output_hidden_states: bool | None = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPooling: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> BaseModelOutputWithPooling: ...
 
 class Kosmos2_5TextModel(Kosmos2_5PreTrainedModel):
     config_class = Kosmos2_5TextConfig

@@ -1,3 +1,4 @@
+from typing import Self
 from collections import namedtuple
 
 import abc

@@ -1,3 +1,6 @@
+from torch import Tensor
+from types import FunctionType, MethodType
+from typing import Any, TypeIs
 import enum
 
 class Module:

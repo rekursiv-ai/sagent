@@ -1,3 +1,6 @@
+from collections.abc import Generator
+from torch import Tensor
+from typing import Literal
 from collections import OrderedDict as OrderedDict
 from collections.abc import (
     Callable as Callable,

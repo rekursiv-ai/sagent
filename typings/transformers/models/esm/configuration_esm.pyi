@@ -6,7 +6,6 @@ from ...configuration_utils import PretrainedConfig
 logger = ...
 
 class EsmConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         vocab_size=...,

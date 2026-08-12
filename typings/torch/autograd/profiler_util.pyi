@@ -1,3 +1,5 @@
+from collections.abc import Generator
+from typing import Any, Literal, Self
 from collections import defaultdict
 from typing_extensions import deprecated
 

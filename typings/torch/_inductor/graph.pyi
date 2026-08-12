@@ -1,3 +1,4 @@
+from collections.abc import Generator
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from types import ModuleType

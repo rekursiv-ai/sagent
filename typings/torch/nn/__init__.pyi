@@ -1,3 +1,4 @@
+from typing import Any
 from torch.nn import (
     attention as attention,
     functional as functional,

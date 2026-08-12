@@ -7,7 +7,6 @@ from ...utils.backbone_utils import BackboneConfigMixin
 """BEiT model configuration"""
 
 class BeitConfig(BackboneConfigMixin, PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         vocab_size=...,

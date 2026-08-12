@@ -1,3 +1,6 @@
+from torch import Tensor
+from typing import Any
+
 def pin_memory(
     data, device=...
 ) -> (

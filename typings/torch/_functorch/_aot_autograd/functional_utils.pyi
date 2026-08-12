@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Literal
 from dataclasses import dataclass
 
 from torch._subclasses.functional_tensor import FunctionalTensor

@@ -1047,7 +1047,7 @@ def _resolve_tokens(args: argparse.Namespace) -> tuple[str, str]:
     if missing:
         _ = sys.stderr.write(f"Missing: {', '.join(missing)}\n")
         sys.exit(1)
-    return app, bot
+    return cast("tuple[str, str]", (app, bot))
 
 
 async def _run(args: argparse.Namespace) -> None:

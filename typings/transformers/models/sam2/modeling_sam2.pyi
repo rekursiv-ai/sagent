@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import Tensor, nn
@@ -66,6 +67,9 @@ class Sam2VisionNeck(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor
     ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]: ...
 
 def eager_attention_forward(
     module: nn.Module,
@@ -90,6 +94,7 @@ class Sam2MultiScaleAttention(nn.Module):
         query_stride: tuple[int, int] | None = ...,
     ) -> None: ...
     def forward(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class Sam2FeedForward(nn.Module):
     def __init__(
@@ -119,6 +124,7 @@ class Sam2MultiScaleBlock(GradientCheckpointingLayer):
     def forward(
         self, hidden_states: torch.Tensor, **kwargs: Unpack[TransformersKwargs]
     ) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 @dataclass
 @auto_docstring(custom_intro=...)
@@ -183,6 +189,9 @@ class Sam2PromptEncoder(nn.Module):
         input_boxes: torch.Tensor | None,
         input_masks: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class Sam2Attention(nn.Module):
     def __init__(self, config, downsample_rate=...) -> None: ...
@@ -193,6 +202,9 @@ class Sam2Attention(nn.Module):
         value: torch.Tensor,
         attention_similarity: torch.Tensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class Sam2TwoWayAttentionBlock(nn.Module):
@@ -221,12 +233,14 @@ class Sam2TwoWayTransformer(nn.Module):
         target_embedding=...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | BaseModelOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | BaseModelOutput: ...
 
 class Sam2LayerNorm(nn.LayerNorm):
     def __init__(
         self, normalized_shape, *, eps=..., data_format=..., **kwargs
     ) -> None: ...
     def forward(self, features: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class Sam2MaskDecoder(nn.Module):
     def __init__(self, config: Sam2MaskDecoderConfig) -> None: ...
@@ -241,6 +255,9 @@ class Sam2MaskDecoder(nn.Module):
         attention_similarity: torch.Tensor | None = ...,
         target_embedding: torch.Tensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 @auto_docstring(custom_intro=...)

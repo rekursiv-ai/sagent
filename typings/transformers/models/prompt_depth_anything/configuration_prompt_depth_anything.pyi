@@ -3,7 +3,6 @@ from ...configuration_utils import PretrainedConfig
 logger = ...
 
 class PromptDepthAnythingConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         backbone_config=...,

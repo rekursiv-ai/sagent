@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -110,6 +111,9 @@ class PegasusXGlobalLocalAttention(nn.Module):
         attention_mask: torch.Tensor | None = ...,
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]: ...
     def compute_global_attention_representations(
         self, global_q, global_k, global_v, local_k, local_v, mask, dim: DimensionInfo
     ):  # -> tuple[Tensor, Tensor]:
@@ -130,6 +134,7 @@ class PegasusXEncoderLayer(GradientCheckpointingLayer):
         attention_mask: torch.Tensor,
         output_attentions: bool = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
     @classmethod
     def pad_local_tokens(
         cls, hidden_states, attention_mask, block_size

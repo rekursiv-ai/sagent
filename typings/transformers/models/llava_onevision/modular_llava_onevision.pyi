@@ -1,3 +1,4 @@
+from typing import Any
 from transformers.models.llava_next.image_processing_llava_next_fast import (
     LlavaNextImageProcessorFast,
 )
@@ -102,6 +103,9 @@ class LlavaOnevisionModel(LlavaNextVideoModel):
         return_dict: bool | None = ...,
         cache_position: torch.LongTensor | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> tuple | LlavaOnevisionModelOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | LlavaOnevisionModelOutputWithPast: ...
 
 class LlavaOnevisionForConditionalGeneration(LlavaNextVideoForConditionalGeneration):

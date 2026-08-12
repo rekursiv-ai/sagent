@@ -1,3 +1,4 @@
+from torch import Size
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import cached_property

@@ -1,3 +1,4 @@
+from typing import Any
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -90,6 +91,7 @@ class Sam2VideoLayerNorm(nn.LayerNorm):
         self, normalized_shape, *, eps=..., data_format=..., **kwargs
     ) -> None: ...
     def forward(self, features: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class Sam2VideoPositionEmbeddingSine(nn.Module):
     def __init__(
@@ -129,6 +131,9 @@ class Sam2VideoAttention(nn.Module):
         value: torch.Tensor,
         attention_similarity: torch.Tensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class Sam2VideoTwoWayAttentionBlock(nn.Module):
@@ -216,6 +221,7 @@ class Sam2VideoRoPEAttention(nn.Module):
         num_k_exclude_rope: int = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...
 
 class Sam2VideoMemoryAttentionLayer(nn.Module):
     def __init__(self, config: Sam2VideoConfig) -> None: ...
@@ -227,6 +233,7 @@ class Sam2VideoMemoryAttentionLayer(nn.Module):
         rope_position_embeddings: tuple[Tensor, Tensor],
         num_k_exclude_rope: int = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class Sam2VideoMemoryAttention(nn.Module):
     def __init__(self, config: Sam2VideoConfig) -> None: ...
@@ -265,6 +272,9 @@ class Sam2VideoMemoryEncoder(nn.Module):
     def forward(
         self, vision_features: torch.Tensor, masks: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 @dataclass
 @auto_docstring(custom_intro="Base class for the vision encoder's outputs.")
@@ -294,6 +304,9 @@ class Sam2VideoPromptEncoder(nn.Module):
         input_boxes: torch.Tensor | None,
         input_masks: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class Sam2VideoTwoWayTransformer(nn.Module):
     def __init__(self, config: Sam2VideoMaskDecoderConfig) -> None: ...
@@ -306,6 +319,7 @@ class Sam2VideoTwoWayTransformer(nn.Module):
         target_embedding=...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | BaseModelOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | BaseModelOutput: ...
 
 class Sam2VideoMaskDecoder(nn.Module):
     def __init__(self, config: Sam2VideoMaskDecoderConfig) -> None: ...
@@ -320,6 +334,9 @@ class Sam2VideoMaskDecoder(nn.Module):
         attention_similarity: torch.Tensor | None = ...,
         target_embedding: torch.Tensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 NO_OBJ_SCORE = ...

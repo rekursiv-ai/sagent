@@ -1,3 +1,4 @@
+from typing import Self
 from torch import Tensor
 from torch.distributions.distribution import Distribution
 from torch.distributions.utils import lazy_property
@@ -6,8 +7,6 @@ from torch.types import Number
 __all__ = ["Geometric"]
 
 class Geometric(Distribution):
-    arg_constraints = ...
-    support = ...
     def __init__(
         self,
         probs: Tensor | Number | None = ...,

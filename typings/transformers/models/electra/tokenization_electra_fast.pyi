@@ -4,7 +4,6 @@ from ...tokenization_utils_fast import PreTrainedTokenizerFast
 VOCAB_FILES_NAMES = ...
 
 class ElectraTokenizerFast(PreTrainedTokenizerFast):
-    vocab_files_names = ...
     slow_tokenizer_class = ElectraTokenizer
     def __init__(
         self,

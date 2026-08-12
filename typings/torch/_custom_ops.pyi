@@ -1,3 +1,7 @@
+from collections.abc import Callable
+from types import FunctionType
+from typing import Any
+
 __all__ = [
     "custom_op",
     "get_ctx",

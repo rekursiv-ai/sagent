@@ -1,3 +1,4 @@
+from typing import Any
 from torch.utils._python_dispatch import TorchDispatchMode
 
 import torch

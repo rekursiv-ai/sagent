@@ -1,3 +1,4 @@
+from typing import Self
 from torch import Tensor
 from torch.distributions.distribution import Distribution
 from torch.distributions.transformed_distribution import TransformedDistribution
@@ -8,8 +9,6 @@ import torch
 __all__ = ["ExpRelaxedCategorical", "RelaxedOneHotCategorical"]
 
 class ExpRelaxedCategorical(Distribution):
-    arg_constraints = ...
-    support = ...
     has_rsample = ...
     def __init__(
         self,
@@ -29,9 +28,6 @@ class ExpRelaxedCategorical(Distribution):
     def log_prob(self, value) -> Tensor: ...
 
 class RelaxedOneHotCategorical(TransformedDistribution):
-    arg_constraints = ...
-    support = ...
-    has_rsample = ...
     base_dist: ExpRelaxedCategorical
     def __init__(
         self,

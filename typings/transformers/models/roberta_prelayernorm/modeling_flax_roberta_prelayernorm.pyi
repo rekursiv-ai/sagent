@@ -244,8 +244,7 @@ class FlaxRobertaPreLayerNormModule(nn.Module):
     ...,
     ROBERTA_PRELAYERNORM_START_DOCSTRING,
 )
-class FlaxRobertaPreLayerNormModel(FlaxRobertaPreLayerNormPreTrainedModel):
-    module_class = ...
+class FlaxRobertaPreLayerNormModel(FlaxRobertaPreLayerNormPreTrainedModel): ...
 
 class FlaxRobertaPreLayerNormForMaskedLMModule(nn.Module):
     config: RobertaPreLayerNormConfig
@@ -271,8 +270,7 @@ class FlaxRobertaPreLayerNormForMaskedLMModule(nn.Module):
     ...,
     ROBERTA_PRELAYERNORM_START_DOCSTRING,
 )
-class FlaxRobertaPreLayerNormForMaskedLM(FlaxRobertaPreLayerNormPreTrainedModel):
-    module_class = ...
+class FlaxRobertaPreLayerNormForMaskedLM(FlaxRobertaPreLayerNormPreTrainedModel): ...
 
 class FlaxRobertaPreLayerNormForSequenceClassificationModule(nn.Module):
     config: RobertaPreLayerNormConfig
@@ -300,8 +298,7 @@ class FlaxRobertaPreLayerNormForSequenceClassificationModule(nn.Module):
 )
 class FlaxRobertaPreLayerNormForSequenceClassification(
     FlaxRobertaPreLayerNormPreTrainedModel
-):
-    module_class = ...
+): ...
 
 class FlaxRobertaPreLayerNormForMultipleChoiceModule(nn.Module):
     config: RobertaPreLayerNormConfig
@@ -327,8 +324,9 @@ class FlaxRobertaPreLayerNormForMultipleChoiceModule(nn.Module):
     ...,
     ROBERTA_PRELAYERNORM_START_DOCSTRING,
 )
-class FlaxRobertaPreLayerNormForMultipleChoice(FlaxRobertaPreLayerNormPreTrainedModel):
-    module_class = ...
+class FlaxRobertaPreLayerNormForMultipleChoice(
+    FlaxRobertaPreLayerNormPreTrainedModel
+): ...
 
 class FlaxRobertaPreLayerNormForTokenClassificationModule(nn.Module):
     config: RobertaPreLayerNormConfig
@@ -356,8 +354,7 @@ class FlaxRobertaPreLayerNormForTokenClassificationModule(nn.Module):
 )
 class FlaxRobertaPreLayerNormForTokenClassification(
     FlaxRobertaPreLayerNormPreTrainedModel
-):
-    module_class = ...
+): ...
 
 class FlaxRobertaPreLayerNormForQuestionAnsweringModule(nn.Module):
     config: RobertaPreLayerNormConfig
@@ -385,8 +382,7 @@ class FlaxRobertaPreLayerNormForQuestionAnsweringModule(nn.Module):
 )
 class FlaxRobertaPreLayerNormForQuestionAnswering(
     FlaxRobertaPreLayerNormPreTrainedModel
-):
-    module_class = ...
+): ...
 
 class FlaxRobertaPreLayerNormForCausalLMModule(nn.Module):
     config: RobertaPreLayerNormConfig
@@ -416,7 +412,6 @@ class FlaxRobertaPreLayerNormForCausalLMModule(nn.Module):
     ROBERTA_PRELAYERNORM_START_DOCSTRING,
 )
 class FlaxRobertaPreLayerNormForCausalLM(FlaxRobertaPreLayerNormPreTrainedModel):
-    module_class = ...
     def prepare_inputs_for_generation(
         self, input_ids, max_length, attention_mask: jax.Array | None = ...
     ):  # -> dict[str, Any | Array]:

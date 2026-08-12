@@ -1,3 +1,4 @@
+from typing import Any
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -53,6 +54,9 @@ class TimesFmAttention(nn.Module):
         attention_mask: torch.Tensor | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class TimesFmDecoderLayer(nn.Module):
     def __init__(self, config: TimesFmConfig, layer_idx: int) -> None: ...
@@ -62,6 +66,9 @@ class TimesFmDecoderLayer(nn.Module):
         attention_mask: torch.Tensor,
         paddings: torch.Tensor,
         output_attentions: bool = ...,
+    ) -> tuple[torch.Tensor | None, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor | None, torch.Tensor]: ...
 
 @auto_docstring

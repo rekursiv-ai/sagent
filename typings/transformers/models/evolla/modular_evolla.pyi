@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import Tensor, nn
@@ -50,6 +51,9 @@ class EvollaSaProtRotaryEmbedding(nn.Module):
     def __init__(self, dim: int) -> None: ...
     def forward(
         self, q: torch.Tensor, k: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class EvollaSaProtSelfAttention(EsmSelfAttention):

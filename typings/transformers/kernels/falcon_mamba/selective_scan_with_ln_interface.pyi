@@ -40,7 +40,7 @@ def selective_scan_fn(
     delta_bias=...,
     delta_softplus=...,
     return_last_state=...,
-):  # -> Any | None:
+):  # -> None:
     ...
 def selective_scan_ref(
     u,
@@ -111,5 +111,5 @@ def mamba_inner_fn(
     c_rms_weight=...,
     dt_rms_weight=...,
     b_c_dt_rms_eps=...,
-):  # -> Any | None:
+):  # -> None:
     ...

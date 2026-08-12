@@ -1,3 +1,4 @@
+from typing import Literal, Self
 from typing_extensions import deprecated
 
 __all__ = ["profile"]

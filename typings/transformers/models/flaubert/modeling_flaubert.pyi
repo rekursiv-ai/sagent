@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -73,6 +74,7 @@ class FlaubertPoolerStartLogits(nn.Module):
         hidden_states: torch.FloatTensor,
         p_mask: torch.FloatTensor | None = ...,
     ) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 class FlaubertPoolerEndLogits(nn.Module):
     def __init__(self, config: FlaubertConfig) -> None: ...
@@ -83,6 +85,7 @@ class FlaubertPoolerEndLogits(nn.Module):
         start_positions: torch.LongTensor | None = ...,
         p_mask: torch.FloatTensor | None = ...,
     ) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 class FlaubertPoolerAnswerClass(nn.Module):
     def __init__(self, config: FlaubertConfig) -> None: ...
@@ -93,6 +96,7 @@ class FlaubertPoolerAnswerClass(nn.Module):
         start_positions: torch.LongTensor | None = ...,
         cls_index: torch.LongTensor | None = ...,
     ) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 class FlaubertSQuADHead(nn.Module):
     def __init__(self, config: FlaubertConfig) -> None: ...
@@ -115,6 +119,7 @@ class FlaubertSequenceSummary(nn.Module):
         hidden_states: torch.FloatTensor,
         cls_index: torch.LongTensor | None = ...,
     ) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 @auto_docstring
 class FlaubertPreTrainedModel(PreTrainedModel):

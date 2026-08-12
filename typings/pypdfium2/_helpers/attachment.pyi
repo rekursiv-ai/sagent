@@ -1,3 +1,4 @@
+from typing import Any
 import pypdfium2.internal as pdfium_i
 
 __all__ = ("PdfAttachment",)

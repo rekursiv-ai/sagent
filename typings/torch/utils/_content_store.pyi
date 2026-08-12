@@ -1,3 +1,6 @@
+from collections.abc import Callable
+from torch import dtype
+from typing import Any
 import torch
 
 def lazy_compile(**compile_kwargs) -> Callable[..., _Wrapped[..., Any, ..., Any]]: ...

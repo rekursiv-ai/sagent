@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -49,6 +50,9 @@ class Wav2Vec2BertSelfAttention(nn.Module):
         attention_mask: torch.Tensor | None = ...,
         relative_position_embeddings: torch.Tensor | None = ...,
         output_attentions: bool = ...,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class Wav2Vec2BertEncoderLayer(GradientCheckpointingLayer):
@@ -170,6 +174,7 @@ class AMSoftmaxLoss(nn.Module):
 class TDNNLayer(nn.Module):
     def __init__(self, config, layer_id=...) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring(custom_intro=...)
 class Wav2Vec2BertForXVector(Wav2Vec2BertPreTrainedModel):

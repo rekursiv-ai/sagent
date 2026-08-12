@@ -1,3 +1,4 @@
+from collections.abc import Generator
 from contextlib import contextmanager as contextmanager
 from functools import lru_cache as _lru_cache
 from typing import Any as Any

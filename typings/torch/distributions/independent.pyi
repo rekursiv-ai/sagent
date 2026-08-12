@@ -1,3 +1,4 @@
+from typing import Self
 from typing import Generic, TypeVar
 
 from torch import Tensor

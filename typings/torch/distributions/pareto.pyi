@@ -6,7 +6,6 @@ from torch.types import _size
 __all__ = ["Pareto"]
 
 class Pareto(TransformedDistribution):
-    arg_constraints = ...
     def __init__(
         self,
         scale: Tensor | float,

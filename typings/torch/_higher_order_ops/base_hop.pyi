@@ -1,3 +1,4 @@
+from typing import Any
 import abc
 
 from torch._ops import HigherOrderOperator
@@ -6,7 +7,7 @@ import torch
 
 class BaseHOP(HigherOrderOperator, abc.ABC):
     def __init__(self, hop_name) -> None: ...
-    def __call__(self, subgraph, *operands, **kwargs) -> Any | None: ...
+    def __call__(self, subgraph, *operands, **kwargs) -> None: ...
     def gen_schema(self, subgraph, *operands, **kwargs) -> FunctionSchema: ...
 
 class BaseHOPFunction(torch.autograd.Function):

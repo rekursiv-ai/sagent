@@ -3,7 +3,6 @@ from ...configuration_utils import PretrainedConfig
 """I-JEPA model configuration"""
 
 class IJepaConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         hidden_size=...,

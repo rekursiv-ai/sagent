@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 from transformers.models.llava.modeling_llava import (
     LlavaCausalLMOutputWithPast,
@@ -74,6 +75,9 @@ class AyaVisionForConditionalGeneration(LlavaForConditionalGeneration):
         logits_to_keep: int | torch.Tensor = ...,
         image_sizes: torch.Tensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple | AyaVisionCausalLMOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | AyaVisionCausalLMOutputWithPast: ...
 
 __all__ = [

@@ -7,7 +7,6 @@ from ...onnx import OnnxConfig
 logger = ...
 
 class PvtConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         image_size: int = ...,

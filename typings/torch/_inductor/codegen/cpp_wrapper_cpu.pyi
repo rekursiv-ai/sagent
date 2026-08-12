@@ -1,3 +1,4 @@
+from typing import LiteralString
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 

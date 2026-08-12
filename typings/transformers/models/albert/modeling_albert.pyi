@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -30,6 +31,7 @@ class AlbertEmbeddings(nn.Module):
         inputs_embeds: torch.FloatTensor | None = ...,
         past_key_values_length: int = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class AlbertAttention(nn.Module):
     def __init__(self, config: AlbertConfig) -> None: ...
@@ -41,6 +43,9 @@ class AlbertAttention(nn.Module):
         head_mask: torch.FloatTensor | None = ...,
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
 
 class AlbertSdpaAttention(AlbertAttention):
     def __init__(self, config) -> None: ...
@@ -50,6 +55,9 @@ class AlbertSdpaAttention(AlbertAttention):
         attention_mask: torch.FloatTensor | None = ...,
         head_mask: torch.FloatTensor | None = ...,
         output_attentions: bool = ...,
+    ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
 
 ALBERT_ATTENTION_CLASSES = ...
@@ -64,6 +72,9 @@ class AlbertLayer(nn.Module):
         output_attentions: bool = ...,
         output_hidden_states: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def ff_chunk(self, attention_output: torch.Tensor) -> torch.Tensor: ...
 
 class AlbertLayerGroup(nn.Module):
@@ -75,6 +86,9 @@ class AlbertLayerGroup(nn.Module):
         head_mask: torch.FloatTensor | None = ...,
         output_attentions: bool = ...,
         output_hidden_states: bool = ...,
+    ) -> tuple[torch.Tensor | tuple[torch.Tensor], ...]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor | tuple[torch.Tensor], ...]: ...
 
 class AlbertTransformer(nn.Module):
@@ -88,6 +102,7 @@ class AlbertTransformer(nn.Module):
         output_hidden_states: bool = ...,
         return_dict: bool = ...,
     ) -> BaseModelOutput | tuple: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> BaseModelOutput | tuple: ...
 
 @auto_docstring
 class AlbertPreTrainedModel(PreTrainedModel):
@@ -156,10 +171,12 @@ class AlbertForPreTraining(AlbertPreTrainedModel):
 class AlbertMLMHead(nn.Module):
     def __init__(self, config: AlbertConfig) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class AlbertSOPHead(nn.Module):
     def __init__(self, config: AlbertConfig) -> None: ...
     def forward(self, pooled_output: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring
 class AlbertForMaskedLM(AlbertPreTrainedModel):

@@ -1,3 +1,6 @@
+from collections import OrderedDict
+from collections.abc import Generator
+from typing import Self
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -292,7 +295,7 @@ class ExportedProgramDeserializer(metaclass=Final):
     ) -> ep.ExportedProgram: ...
 
 class EnumEncoder(json.JSONEncoder):
-    def default(self, obj) -> Any | str: ...
+    def default(self, obj) -> str: ...
 
 def serialize(
     exported_program: ep.ExportedProgram,

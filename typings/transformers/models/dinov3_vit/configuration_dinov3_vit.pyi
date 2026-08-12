@@ -4,7 +4,6 @@ from ...configuration_utils import PretrainedConfig
 logger = ...
 
 class DINOv3ViTConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         patch_size: int = ...,

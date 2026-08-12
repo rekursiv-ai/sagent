@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -41,10 +42,12 @@ class DiaPreTrainedModel(PreTrainedModel):
 class DiaMultiChannelEmbedding(nn.Module):
     def __init__(self, config: DiaDecoderConfig) -> None: ...
     def forward(self, audio_codes: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class DiaMLP(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(self, hidden_states: torch.FloatTensor) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 @use_kernel_forward_from_hub("RMSNorm")
 class DiaRMSNorm(nn.Module):
@@ -108,6 +111,9 @@ class DiaCrossAttention(nn.Module):
         past_key_values: EncoderDecoderCache | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class DiaEncoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: DiaEncoderConfig, layer_idx: int) -> None: ...
@@ -117,6 +123,9 @@ class DiaEncoderLayer(GradientCheckpointingLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         attention_mask: torch.Tensor | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class DiaEncoder(DiaPreTrainedModel):
@@ -144,6 +153,9 @@ class DiaDecoderLayer(GradientCheckpointingLayer):
         past_key_values: EncoderDecoderCache | None = ...,
         cache_position: torch.LongTensor | None = ...,
         **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]: ...
 
 class DiaDecoder(DiaPreTrainedModel):

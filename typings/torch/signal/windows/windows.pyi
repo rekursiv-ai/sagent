@@ -21,7 +21,6 @@ __all__ = [
 _T = TypeVar("_T")
 window_common_args = ...
 
-@_add_docstr(..., ....format(**window_common_args))
 def exponential(
     M: int,
     *,
@@ -33,7 +32,6 @@ def exponential(
     device: torch.device | None = ...,
     requires_grad: bool = ...,
 ) -> Tensor: ...
-@_add_docstr(..., ....format(**window_common_args))
 def cosine(
     M: int,
     *,
@@ -43,7 +41,6 @@ def cosine(
     device: torch.device | None = ...,
     requires_grad: bool = ...,
 ) -> Tensor: ...
-@_add_docstr(..., ....format(**window_common_args))
 def gaussian(
     M: int,
     *,
@@ -54,7 +51,6 @@ def gaussian(
     device: torch.device | None = ...,
     requires_grad: bool = ...,
 ) -> Tensor: ...
-@_add_docstr(..., ....format(**window_common_args))
 def kaiser(
     M: int,
     *,
@@ -65,7 +61,6 @@ def kaiser(
     device: torch.device | None = ...,
     requires_grad: bool = ...,
 ) -> Tensor: ...
-@_add_docstr(..., ....format(**window_common_args))
 def hamming(
     M: int,
     *,
@@ -75,7 +70,6 @@ def hamming(
     device: torch.device | None = ...,
     requires_grad: bool = ...,
 ) -> Tensor: ...
-@_add_docstr(..., ....format(**window_common_args))
 def hann(
     M: int,
     *,
@@ -85,7 +79,6 @@ def hann(
     device: torch.device | None = ...,
     requires_grad: bool = ...,
 ) -> Tensor: ...
-@_add_docstr(..., ....format(**window_common_args))
 def blackman(
     M: int,
     *,
@@ -95,7 +88,6 @@ def blackman(
     device: torch.device | None = ...,
     requires_grad: bool = ...,
 ) -> Tensor: ...
-@_add_docstr(..., ....format(**window_common_args))
 def bartlett(
     M: int,
     *,
@@ -105,7 +97,6 @@ def bartlett(
     device: torch.device | None = ...,
     requires_grad: bool = ...,
 ) -> Tensor: ...
-@_add_docstr(..., ....format(**window_common_args))
 def general_cosine(
     M,
     *,
@@ -116,7 +107,6 @@ def general_cosine(
     device: torch.device | None = ...,
     requires_grad: bool = ...,
 ) -> Tensor: ...
-@_add_docstr(..., ....format(**window_common_args))
 def general_hamming(
     M,
     *,
@@ -127,7 +117,6 @@ def general_hamming(
     device: torch.device | None = ...,
     requires_grad: bool = ...,
 ) -> Tensor: ...
-@_add_docstr(..., ....format(**window_common_args))
 def nuttall(
     M: int,
     *,

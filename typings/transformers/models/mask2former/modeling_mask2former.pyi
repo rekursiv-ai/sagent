@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import Tensor, nn
@@ -131,6 +132,7 @@ class Mask2FormerLoss(nn.Module):
         class_labels: list[torch.Tensor],
         auxiliary_predictions: dict[str, torch.Tensor] | None = ...,
     ) -> dict[str, torch.Tensor]: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> dict[str, torch.Tensor]: ...
     def get_num_masks(
         self, class_labels: torch.Tensor, device: torch.device
     ) -> torch.Tensor: ...
@@ -232,6 +234,9 @@ class Mask2FormerPixelLevelModule(nn.Module):
     def forward(
         self, pixel_values: Tensor, output_hidden_states: bool = ...
     ) -> Mask2FormerPixelLevelModuleOutput: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> Mask2FormerPixelLevelModuleOutput: ...
 
 class Mask2FormerAttention(nn.Module):
     def __init__(
@@ -254,6 +259,9 @@ class Mask2FormerAttention(nn.Module):
         key_value_states: torch.Tensor | None = ...,
         key_value_position_embeddings: torch.Tensor | None = ...,
         output_attentions: bool = ...,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class Mask2FormerMaskedAttentionDecoderLayer(GradientCheckpointingLayer):
@@ -315,12 +323,14 @@ class Mask2FormerMaskedAttentionDecoder(nn.Module):
 class Mask2FormerPredictionBlock(nn.Module):
     def __init__(self, in_dim: int, out_dim: int, activation: nn.Module) -> None: ...
     def forward(self, input: Tensor) -> Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...
 
 class Mask2FormerMLPPredictionHead(nn.Module):
     def __init__(
         self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int = ...
     ) -> None: ...
     def forward(self, input: Tensor) -> Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...
 
 class Mask2FormerMaskPredictor(nn.Module):
     def __init__(
@@ -342,6 +352,9 @@ class Mask2FormerTransformerModule(nn.Module):
         mask_features: Tensor,
         output_hidden_states: bool = ...,
         output_attentions: bool = ...,
+    ) -> Mask2FormerMaskedAttentionDecoderOutput: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> Mask2FormerMaskedAttentionDecoderOutput: ...
 
 @auto_docstring

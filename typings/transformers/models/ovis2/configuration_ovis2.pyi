@@ -1,7 +1,6 @@
 from ...configuration_utils import PretrainedConfig
 
 class Ovis2VisionConfig(PretrainedConfig):
-    base_config_key = ...
     def __init__(
         self,
         hidden_size: int = ...,
@@ -25,8 +24,6 @@ class Ovis2VisionConfig(PretrainedConfig):
     ) -> None: ...
 
 class Ovis2Config(PretrainedConfig):
-    model_type = ...
-    sub_configs = ...
     def __init__(
         self,
         vision_config=...,

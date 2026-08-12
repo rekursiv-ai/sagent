@@ -1,3 +1,4 @@
+from typing import Any
 import torch
 
 from .configuration_phi import PhiConfig
@@ -71,6 +72,7 @@ class PhiModel(LlamaModel):
         cache_position: torch.LongTensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> BaseModelOutputWithPast: ...
 
 class PhiForCausalLM(LlamaForCausalLM):
     def __init__(self, config) -> None: ...

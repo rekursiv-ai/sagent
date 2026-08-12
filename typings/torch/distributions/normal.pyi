@@ -1,3 +1,4 @@
+from typing import Self
 from torch import Tensor
 from torch.distributions.exp_family import ExponentialFamily
 from torch.types import _size
@@ -5,8 +6,6 @@ from torch.types import _size
 __all__ = ["Normal"]
 
 class Normal(ExponentialFamily):
-    arg_constraints = ...
-    support = ...
     has_rsample = ...
     _mean_carrier_measure = ...
     @property

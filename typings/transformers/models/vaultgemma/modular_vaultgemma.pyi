@@ -1,3 +1,4 @@
+from typing import Any
 import torch
 
 from ..gemma2.configuration_gemma2 import Gemma2Config
@@ -19,6 +20,11 @@ class VaultGemmaDecoderLayer(Gemma2DecoderLayer):
         use_cache: bool | None = ...,
         cache_position: torch.LongTensor | None = ...,
         **kwargs,
+    ) -> tuple[
+        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+    ]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[
         torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
     ]: ...

@@ -4,7 +4,6 @@ from ...configuration_utils import PretrainedConfig
 logger = ...
 
 class WavLMConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         vocab_size=...,

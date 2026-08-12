@@ -222,8 +222,7 @@ class FlaxRoFormerModule(nn.Module):
     ...,
     ROFORMER_START_DOCSTRING,
 )
-class FlaxRoFormerModel(FlaxRoFormerPreTrainedModel):
-    module_class = ...
+class FlaxRoFormerModel(FlaxRoFormerPreTrainedModel): ...
 
 class FlaxRoFormerForMaskedLMModule(nn.Module):
     config: RoFormerConfig
@@ -247,8 +246,7 @@ class FlaxRoFormerForMaskedLMModule(nn.Module):
     ...,
     ROFORMER_START_DOCSTRING,
 )
-class FlaxRoFormerForMaskedLM(FlaxRoFormerPreTrainedModel):
-    module_class = ...
+class FlaxRoFormerForMaskedLM(FlaxRoFormerPreTrainedModel): ...
 
 class FlaxRoFormerForSequenceClassificationModule(nn.Module):
     config: RoFormerConfig
@@ -272,8 +270,7 @@ class FlaxRoFormerForSequenceClassificationModule(nn.Module):
     ...,
     ROFORMER_START_DOCSTRING,
 )
-class FlaxRoFormerForSequenceClassification(FlaxRoFormerPreTrainedModel):
-    module_class = ...
+class FlaxRoFormerForSequenceClassification(FlaxRoFormerPreTrainedModel): ...
 
 class FlaxRoFormerForMultipleChoiceModule(nn.Module):
     config: RoFormerConfig
@@ -297,8 +294,7 @@ class FlaxRoFormerForMultipleChoiceModule(nn.Module):
     ...,
     ROFORMER_START_DOCSTRING,
 )
-class FlaxRoFormerForMultipleChoice(FlaxRoFormerPreTrainedModel):
-    module_class = ...
+class FlaxRoFormerForMultipleChoice(FlaxRoFormerPreTrainedModel): ...
 
 class FlaxRoFormerForTokenClassificationModule(nn.Module):
     config: RoFormerConfig
@@ -322,8 +318,7 @@ class FlaxRoFormerForTokenClassificationModule(nn.Module):
     ...,
     ROFORMER_START_DOCSTRING,
 )
-class FlaxRoFormerForTokenClassification(FlaxRoFormerPreTrainedModel):
-    module_class = ...
+class FlaxRoFormerForTokenClassification(FlaxRoFormerPreTrainedModel): ...
 
 class FlaxRoFormerForQuestionAnsweringModule(nn.Module):
     config: RoFormerConfig
@@ -347,8 +342,7 @@ class FlaxRoFormerForQuestionAnsweringModule(nn.Module):
     ...,
     ROFORMER_START_DOCSTRING,
 )
-class FlaxRoFormerForQuestionAnswering(FlaxRoFormerPreTrainedModel):
-    module_class = ...
+class FlaxRoFormerForQuestionAnswering(FlaxRoFormerPreTrainedModel): ...
 
 __all__ = [
     "FlaxRoFormerForMaskedLM",

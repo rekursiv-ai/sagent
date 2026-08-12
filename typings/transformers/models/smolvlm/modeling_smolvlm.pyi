@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -40,6 +41,7 @@ class SmolVLMVisionEmbeddings(nn.Module):
     def forward(
         self, pixel_values: torch.FloatTensor, patch_attention_mask: torch.BoolTensor
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 def eager_attention_forward(
     module: nn.Module,
@@ -61,10 +63,14 @@ class SmolVLMVisionAttention(nn.Module):
         attention_mask: torch.Tensor | None = ...,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class SmolVLMVisionMLP(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class SmolVLMEncoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: SmolVLMVisionConfig) -> None: ...

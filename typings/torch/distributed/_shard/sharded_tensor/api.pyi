@@ -1,3 +1,4 @@
+from typing import Any, Self
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing_extensions import deprecated

@@ -1,3 +1,5 @@
+from collections.abc import Callable
+from typing import Any
 import functools
 
 def autograd_kernel_indirection(custom_op) -> Callable[..., Any]: ...

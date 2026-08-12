@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -63,6 +64,9 @@ class DisentangledSelfAttention(nn.Module):
         relative_pos: torch.Tensor | None = ...,
         rel_embeddings: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def disentangled_att_bias(
         self,
         query_layer: torch.Tensor,
@@ -96,10 +100,14 @@ class DebertaAttention(nn.Module):
         relative_pos=...,
         rel_embeddings=...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class DebertaIntermediate(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class DebertaOutput(nn.Module):
     def __init__(self, config) -> None: ...
@@ -116,6 +124,9 @@ class DebertaLayer(GradientCheckpointingLayer):
         relative_pos=...,
         rel_embeddings=...,
         output_attentions: bool = ...,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class DebertaEncoder(nn.Module):
@@ -179,6 +190,7 @@ class LegacyDebertaLMPredictionHead(nn.Module):
 class LegacyDebertaOnlyMLMHead(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(self, sequence_output: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class DebertaLMPredictionHead(nn.Module):
     def __init__(self, config) -> None: ...

@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -75,6 +76,9 @@ class Data2VecAudioAttention(nn.Module):
         layer_head_mask: torch.Tensor | None = ...,
         output_attentions: bool | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class Data2VecAudioFeedForward(nn.Module):
@@ -207,6 +211,7 @@ class AMSoftmaxLoss(nn.Module):
 class TDNNLayer(nn.Module):
     def __init__(self, config, layer_id=...) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring(custom_intro=...)
 class Data2VecAudioForXVector(Data2VecAudioPreTrainedModel):

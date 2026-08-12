@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -25,6 +26,7 @@ def drop_path(
 class SwiftFormerDropPath(nn.Module):
     def __init__(self, config: SwiftFormerConfig) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
     def extra_repr(self) -> str: ...
 
 class SwiftFormerEmbeddings(nn.Module):
@@ -69,6 +71,9 @@ class SwiftFormerEncoder(nn.Module):
         hidden_states: torch.Tensor,
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
+    ) -> tuple | BaseModelOutputWithNoAttention: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithNoAttention: ...
 
 @auto_docstring

@@ -176,8 +176,7 @@ class FlaxDinov2Module(nn.Module):
     ...,
     DINOV2_START_DOCSTRING,
 )
-class FlaxDinov2Model(FlaxDinov2PreTrainedModel):
-    module_class = ...
+class FlaxDinov2Model(FlaxDinov2PreTrainedModel): ...
 
 FLAX_VISION_MODEL_DOCSTRING = ...
 
@@ -200,8 +199,7 @@ class FlaxDinov2ForImageClassificationModule(nn.Module):
     ...,
     DINOV2_START_DOCSTRING,
 )
-class FlaxDinov2ForImageClassification(FlaxDinov2PreTrainedModel):
-    module_class = ...
+class FlaxDinov2ForImageClassification(FlaxDinov2PreTrainedModel): ...
 
 FLAX_VISION_CLASSIFICATION_DOCSTRING = ...
 __all__ = [

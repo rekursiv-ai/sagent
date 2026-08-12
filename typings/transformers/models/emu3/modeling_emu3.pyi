@@ -1,3 +1,4 @@
+from typing import Any
 from functools import cached_property
 
 from torch import nn
@@ -133,7 +134,7 @@ class Emu3VQVAEResnetBlock(nn.Module):
     ) -> None: ...
     def forward(
         self, hidden_states: torch.Tensor, quant_channels: torch.Tensor | None = ...
-    ):  # -> Any | Tensor:
+    ):  # -> Tensor:
         ...
 
 class Emu3VQVAEAttentionBlock(nn.Module):
@@ -143,6 +144,9 @@ class Emu3VQVAEAttentionBlock(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = ...,
         **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class Emu3VQVAEGroupNorm(nn.GroupNorm):

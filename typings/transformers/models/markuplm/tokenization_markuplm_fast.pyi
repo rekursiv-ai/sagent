@@ -29,7 +29,6 @@ def get_pairs(word):  # -> set[Any]:
     ...
 
 class MarkupLMTokenizerFast(PreTrainedTokenizerFast):
-    vocab_files_names = ...
     slow_tokenizer_class = MarkupLMTokenizer
     def __init__(
         self,

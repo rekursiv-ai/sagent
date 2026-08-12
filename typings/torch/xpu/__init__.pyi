@@ -1,3 +1,4 @@
+from typing import Literal
 from collections.abc import Callable as Callable
 from functools import lru_cache as lru_cache
 from typing import (

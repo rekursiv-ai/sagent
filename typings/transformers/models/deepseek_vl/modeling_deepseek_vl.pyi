@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -34,6 +35,7 @@ class DeepseekVLCausalLMOutputWithPast(ModelOutput):
 class DeepseekVLAligner(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(self, vision_encodings: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring
 class DeepseekVLPreTrainedModel(PreTrainedModel):

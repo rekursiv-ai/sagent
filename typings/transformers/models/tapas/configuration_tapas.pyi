@@ -11,7 +11,6 @@ Hyperparameters are taken from run_task_main.py and hparam_utils.py of the origi
 """
 
 class TapasConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         vocab_size=...,

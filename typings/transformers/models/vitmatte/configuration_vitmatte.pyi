@@ -4,7 +4,6 @@ from ...configuration_utils import PretrainedConfig
 logger = ...
 
 class VitMatteConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         backbone_config: PretrainedConfig | None = ...,

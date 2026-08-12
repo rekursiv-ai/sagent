@@ -1,3 +1,6 @@
+from collections.abc import Generator, Iterator
+from typing import Any
+
 class DiGraph:
     def __init__(self) -> None: ...
     def add_node(self, n, **kwargs) -> None: ...

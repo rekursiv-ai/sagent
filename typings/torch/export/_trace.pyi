@@ -1,3 +1,4 @@
+from collections.abc import Generator
 from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any

@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -42,6 +43,9 @@ class ParakeetEncoderAttention(LlamaAttention):
         attention_mask: torch.Tensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class ParakeetEncoderSubsamplingConv2D(nn.Module):
     def __init__(self, config: ParakeetEncoderConfig) -> None: ...
@@ -61,6 +65,7 @@ class ParakeetEncoderBlock(GradientCheckpointingLayer):
         position_embeddings: torch.Tensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring
 class ParakeetPreTrainedModel(PreTrainedModel):

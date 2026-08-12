@@ -1,3 +1,4 @@
+from typing import Any, Literal
 from dataclasses import dataclass
 
 import sympy

@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -125,8 +126,6 @@ class Qwen3OmniMoeTextConfig(Qwen3MoeConfig):
     ) -> None: ...
 
 class Qwen3OmniMoeThinkerConfig(Qwen2_5OmniThinkerConfig):
-    model_type = ...
-    attribute_map = ...
     def __init__(
         self,
         audio_config=...,
@@ -200,7 +199,6 @@ class Qwen3OmniMoeTalkerTextConfig(Qwen3MoeConfig):
     ) -> None: ...
 
 class Qwen3OmniMoeTalkerConfig(PretrainedConfig):
-    sub_configs = ...
     def __init__(
         self,
         code_predictor_config=...,
@@ -252,8 +250,6 @@ class Qwen3OmniMoeCode2WavConfig(PretrainedConfig):
         ...
 
 class Qwen3OmniMoeConfig(PretrainedConfig):
-    model_type = ...
-    sub_configs = ...
     def __init__(
         self,
         thinker_config=...,
@@ -316,6 +312,7 @@ class Qwen3OmniMoeVisionPatchMerger(nn.Module):
         self, config: Qwen3OmniMoeVisionEncoderConfig, use_postshuffle_norm=...
     ) -> None: ...
     def forward(self, hidden: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class Qwen3OmniMoeVisionEncoder(Qwen3VLMoeVisionModel):
     config: Qwen3OmniMoeVisionEncoderConfig
@@ -336,7 +333,6 @@ class Qwen3OmniMoeThinkerTextDecoderLayer(Qwen3MoeDecoderLayer):
 
 class Qwen3OmniMoeThinkerTextPreTrainedModel(Qwen3MoePreTrainedModel):
     config_class = Qwen3OmniMoeTextConfig
-    config = ...
 
 class Qwen3OmniMoeThinkerTextModel(Qwen3VLMoeTextModel):
     config_class = Qwen3OmniMoeTextConfig
@@ -568,6 +564,11 @@ class Qwen3OmniMoeCode2WavTransformerLayer(GradientCheckpointingLayer):
         use_cache: bool | None = ...,
         cache_position: torch.LongTensor | None = ...,
         **kwargs,
+    ) -> tuple[
+        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+    ]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[
         torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
     ]: ...

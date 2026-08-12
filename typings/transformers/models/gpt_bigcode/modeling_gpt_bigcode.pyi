@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -68,12 +69,19 @@ class GPTBigCodeAttention(nn.Module):
         tuple[torch.Tensor, torch.Tensor | None]
         | tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor, ...]]
     ): ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor | None]
+        | tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor, ...]]
+    ): ...
 
 class GPTBigCodeMLP(nn.Module):
     def __init__(self, intermediate_size, config) -> None: ...
     def forward(
         self, hidden_states: tuple[torch.FloatTensor] | None
     ) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 class GPTBigCodeBlock(nn.Module):
     def __init__(self, config, layer_idx=...) -> None: ...
@@ -89,6 +97,13 @@ class GPTBigCodeBlock(nn.Module):
         output_attentions: bool | None = ...,
         cache_position: torch.Tensor | None = ...,
         **kwargs,
+    ) -> (
+        tuple[torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    ): ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> (
         tuple[torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor]

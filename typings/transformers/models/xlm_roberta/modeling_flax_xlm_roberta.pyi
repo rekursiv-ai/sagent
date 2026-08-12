@@ -244,8 +244,7 @@ class FlaxXLMRobertaModule(nn.Module):
     ...,
     XLM_ROBERTA_START_DOCSTRING,
 )
-class FlaxXLMRobertaModel(FlaxXLMRobertaPreTrainedModel):
-    module_class = ...
+class FlaxXLMRobertaModel(FlaxXLMRobertaPreTrainedModel): ...
 
 class FlaxXLMRobertaForMaskedLMModule(nn.Module):
     config: XLMRobertaConfig
@@ -271,8 +270,7 @@ class FlaxXLMRobertaForMaskedLMModule(nn.Module):
     ...,
     XLM_ROBERTA_START_DOCSTRING,
 )
-class FlaxXLMRobertaForMaskedLM(FlaxXLMRobertaPreTrainedModel):
-    module_class = ...
+class FlaxXLMRobertaForMaskedLM(FlaxXLMRobertaPreTrainedModel): ...
 
 class FlaxXLMRobertaForSequenceClassificationModule(nn.Module):
     config: XLMRobertaConfig
@@ -298,8 +296,7 @@ class FlaxXLMRobertaForSequenceClassificationModule(nn.Module):
     ...,
     XLM_ROBERTA_START_DOCSTRING,
 )
-class FlaxXLMRobertaForSequenceClassification(FlaxXLMRobertaPreTrainedModel):
-    module_class = ...
+class FlaxXLMRobertaForSequenceClassification(FlaxXLMRobertaPreTrainedModel): ...
 
 class FlaxXLMRobertaForMultipleChoiceModule(nn.Module):
     config: XLMRobertaConfig
@@ -325,8 +322,7 @@ class FlaxXLMRobertaForMultipleChoiceModule(nn.Module):
     ...,
     XLM_ROBERTA_START_DOCSTRING,
 )
-class FlaxXLMRobertaForMultipleChoice(FlaxXLMRobertaPreTrainedModel):
-    module_class = ...
+class FlaxXLMRobertaForMultipleChoice(FlaxXLMRobertaPreTrainedModel): ...
 
 class FlaxXLMRobertaForTokenClassificationModule(nn.Module):
     config: XLMRobertaConfig
@@ -352,8 +348,7 @@ class FlaxXLMRobertaForTokenClassificationModule(nn.Module):
     ...,
     XLM_ROBERTA_START_DOCSTRING,
 )
-class FlaxXLMRobertaForTokenClassification(FlaxXLMRobertaPreTrainedModel):
-    module_class = ...
+class FlaxXLMRobertaForTokenClassification(FlaxXLMRobertaPreTrainedModel): ...
 
 class FlaxXLMRobertaForQuestionAnsweringModule(nn.Module):
     config: XLMRobertaConfig
@@ -379,8 +374,7 @@ class FlaxXLMRobertaForQuestionAnsweringModule(nn.Module):
     ...,
     XLM_ROBERTA_START_DOCSTRING,
 )
-class FlaxXLMRobertaForQuestionAnswering(FlaxXLMRobertaPreTrainedModel):
-    module_class = ...
+class FlaxXLMRobertaForQuestionAnswering(FlaxXLMRobertaPreTrainedModel): ...
 
 class FlaxXLMRobertaForCausalLMModule(nn.Module):
     config: XLMRobertaConfig
@@ -410,7 +404,6 @@ class FlaxXLMRobertaForCausalLMModule(nn.Module):
     XLM_ROBERTA_START_DOCSTRING,
 )
 class FlaxXLMRobertaForCausalLM(FlaxXLMRobertaPreTrainedModel):
-    module_class = ...
     def prepare_inputs_for_generation(
         self, input_ids, max_length, attention_mask: jax.Array | None = ...
     ):  # -> dict[str, Any | Array]:

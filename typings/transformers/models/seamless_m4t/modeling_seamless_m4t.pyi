@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import Tensor, nn
@@ -86,6 +87,9 @@ class SeamlessM4TConformerSelfAttention(nn.Module):
         attention_mask: torch.Tensor | None = ...,
         relative_position_embeddings: torch.Tensor | None = ...,
         output_attentions: bool = ...,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class SeamlessM4TConformerEncoderLayer(GradientCheckpointingLayer):
@@ -204,6 +208,7 @@ class SeamlessM4TEncoderLayer(GradientCheckpointingLayer):
         attention_mask: torch.Tensor,
         output_attentions: bool = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class SeamlessM4TDecoderLayer(GradientCheckpointingLayer):
     def __init__(
@@ -251,6 +256,9 @@ class SeamlessM4TSpeechEncoder(SeamlessM4TPreTrainedModel):
         return_dict: bool | None = ...,
         **kwargs,
     ) -> tuple | Wav2Vec2BaseModelOutput: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple | Wav2Vec2BaseModelOutput: ...
 
 @auto_docstring(custom_intro=...)
 class SeamlessM4TEncoder(SeamlessM4TPreTrainedModel):
@@ -270,6 +278,7 @@ class SeamlessM4TEncoder(SeamlessM4TPreTrainedModel):
         return_dict: bool | None = ...,
         **kwargs,
     ) -> tuple | BaseModelOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | BaseModelOutput: ...
 
 @auto_docstring(custom_intro=...)
 class SeamlessM4TDecoder(SeamlessM4TPreTrainedModel):
@@ -314,6 +323,9 @@ class SeamlessM4TTextToUnitModel(SeamlessM4TPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         cache_position: torch.Tensor | None = ...,
+    ) -> tuple[torch.Tensor] | Seq2SeqModelOutput: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor] | Seq2SeqModelOutput: ...
 
 @auto_docstring(custom_intro=...)
@@ -370,10 +382,12 @@ class HifiGanResidualBlock(nn.Module):
 class SeamlessM4TVariancePredictor(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(self, hidden_states: Tensor) -> Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...
 
 class SeamlessM4THifiGan(nn.Module):
     def __init__(self, config: SeamlessM4TConfig) -> None: ...
     def forward(self, input_embeds: torch.FloatTensor) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 @auto_docstring(custom_intro=...)
 class SeamlessM4TCodeHifiGan(PreTrainedModel):
@@ -384,6 +398,7 @@ class SeamlessM4TCodeHifiGan(PreTrainedModel):
     def forward(
         self, input_ids: torch.LongTensor, spkr_id: torch.Tensor, lang_id: torch.Tensor
     ) -> tuple[torch.Tensor]: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple[torch.Tensor]: ...
     def apply_weight_norm(self):  # -> None:
         ...
     def remove_weight_norm(self):  # -> None:

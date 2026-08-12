@@ -276,8 +276,7 @@ class FlaxBertModule(nn.Module):
     ...,
     BERT_START_DOCSTRING,
 )
-class FlaxBertModel(FlaxBertPreTrainedModel):
-    module_class = ...
+class FlaxBertModel(FlaxBertPreTrainedModel): ...
 
 class FlaxBertForPreTrainingModule(nn.Module):
     config: BertConfig
@@ -303,8 +302,7 @@ class FlaxBertForPreTrainingModule(nn.Module):
     ...,
     BERT_START_DOCSTRING,
 )
-class FlaxBertForPreTraining(FlaxBertPreTrainedModel):
-    module_class = ...
+class FlaxBertForPreTraining(FlaxBertPreTrainedModel): ...
 
 FLAX_BERT_FOR_PRETRAINING_DOCSTRING = ...
 
@@ -331,8 +329,7 @@ class FlaxBertForMaskedLMModule(nn.Module):
 @add_start_docstrings(
     """Bert Model with a `language modeling` head on top.""", BERT_START_DOCSTRING
 )
-class FlaxBertForMaskedLM(FlaxBertPreTrainedModel):
-    module_class = ...
+class FlaxBertForMaskedLM(FlaxBertPreTrainedModel): ...
 
 class FlaxBertForNextSentencePredictionModule(nn.Module):
     config: BertConfig
@@ -358,8 +355,7 @@ class FlaxBertForNextSentencePredictionModule(nn.Module):
     ...,
     BERT_START_DOCSTRING,
 )
-class FlaxBertForNextSentencePrediction(FlaxBertPreTrainedModel):
-    module_class = ...
+class FlaxBertForNextSentencePrediction(FlaxBertPreTrainedModel): ...
 
 FLAX_BERT_FOR_NEXT_SENT_PRED_DOCSTRING = ...
 
@@ -387,8 +383,7 @@ class FlaxBertForSequenceClassificationModule(nn.Module):
     ...,
     BERT_START_DOCSTRING,
 )
-class FlaxBertForSequenceClassification(FlaxBertPreTrainedModel):
-    module_class = ...
+class FlaxBertForSequenceClassification(FlaxBertPreTrainedModel): ...
 
 class FlaxBertForMultipleChoiceModule(nn.Module):
     config: BertConfig
@@ -414,8 +409,7 @@ class FlaxBertForMultipleChoiceModule(nn.Module):
     ...,
     BERT_START_DOCSTRING,
 )
-class FlaxBertForMultipleChoice(FlaxBertPreTrainedModel):
-    module_class = ...
+class FlaxBertForMultipleChoice(FlaxBertPreTrainedModel): ...
 
 class FlaxBertForTokenClassificationModule(nn.Module):
     config: BertConfig
@@ -441,8 +435,7 @@ class FlaxBertForTokenClassificationModule(nn.Module):
     ...,
     BERT_START_DOCSTRING,
 )
-class FlaxBertForTokenClassification(FlaxBertPreTrainedModel):
-    module_class = ...
+class FlaxBertForTokenClassification(FlaxBertPreTrainedModel): ...
 
 class FlaxBertForQuestionAnsweringModule(nn.Module):
     config: BertConfig
@@ -468,8 +461,7 @@ class FlaxBertForQuestionAnsweringModule(nn.Module):
     ...,
     BERT_START_DOCSTRING,
 )
-class FlaxBertForQuestionAnswering(FlaxBertPreTrainedModel):
-    module_class = ...
+class FlaxBertForQuestionAnswering(FlaxBertPreTrainedModel): ...
 
 class FlaxBertForCausalLMModule(nn.Module):
     config: BertConfig
@@ -499,7 +491,6 @@ class FlaxBertForCausalLMModule(nn.Module):
     BERT_START_DOCSTRING,
 )
 class FlaxBertForCausalLM(FlaxBertPreTrainedModel):
-    module_class = ...
     def prepare_inputs_for_generation(
         self, input_ids, max_length, attention_mask: jax.Array | None = ...
     ):  # -> dict[str, Any | Array]:

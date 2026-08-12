@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -107,6 +108,7 @@ class GPTNeoXModel(LlamaModel):
         cache_position: torch.LongTensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> BaseModelOutputWithPast: ...
 
 @auto_docstring(custom_intro=...)
 class GPTNeoXForCausalLM(GPTNeoXPreTrainedModel, GenerationMixin):

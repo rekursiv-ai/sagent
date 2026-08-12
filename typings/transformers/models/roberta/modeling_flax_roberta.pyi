@@ -243,8 +243,7 @@ class FlaxRobertaModule(nn.Module):
     ...,
     ROBERTA_START_DOCSTRING,
 )
-class FlaxRobertaModel(FlaxRobertaPreTrainedModel):
-    module_class = ...
+class FlaxRobertaModel(FlaxRobertaPreTrainedModel): ...
 
 class FlaxRobertaForMaskedLMModule(nn.Module):
     config: RobertaConfig
@@ -267,8 +266,7 @@ class FlaxRobertaForMaskedLMModule(nn.Module):
         ...
 
 @add_start_docstrings(..., ROBERTA_START_DOCSTRING)
-class FlaxRobertaForMaskedLM(FlaxRobertaPreTrainedModel):
-    module_class = ...
+class FlaxRobertaForMaskedLM(FlaxRobertaPreTrainedModel): ...
 
 class FlaxRobertaForSequenceClassificationModule(nn.Module):
     config: RobertaConfig
@@ -294,8 +292,7 @@ class FlaxRobertaForSequenceClassificationModule(nn.Module):
     ...,
     ROBERTA_START_DOCSTRING,
 )
-class FlaxRobertaForSequenceClassification(FlaxRobertaPreTrainedModel):
-    module_class = ...
+class FlaxRobertaForSequenceClassification(FlaxRobertaPreTrainedModel): ...
 
 class FlaxRobertaForMultipleChoiceModule(nn.Module):
     config: RobertaConfig
@@ -321,8 +318,7 @@ class FlaxRobertaForMultipleChoiceModule(nn.Module):
     ...,
     ROBERTA_START_DOCSTRING,
 )
-class FlaxRobertaForMultipleChoice(FlaxRobertaPreTrainedModel):
-    module_class = ...
+class FlaxRobertaForMultipleChoice(FlaxRobertaPreTrainedModel): ...
 
 class FlaxRobertaForTokenClassificationModule(nn.Module):
     config: RobertaConfig
@@ -348,8 +344,7 @@ class FlaxRobertaForTokenClassificationModule(nn.Module):
     ...,
     ROBERTA_START_DOCSTRING,
 )
-class FlaxRobertaForTokenClassification(FlaxRobertaPreTrainedModel):
-    module_class = ...
+class FlaxRobertaForTokenClassification(FlaxRobertaPreTrainedModel): ...
 
 class FlaxRobertaForQuestionAnsweringModule(nn.Module):
     config: RobertaConfig
@@ -375,8 +370,7 @@ class FlaxRobertaForQuestionAnsweringModule(nn.Module):
     ...,
     ROBERTA_START_DOCSTRING,
 )
-class FlaxRobertaForQuestionAnswering(FlaxRobertaPreTrainedModel):
-    module_class = ...
+class FlaxRobertaForQuestionAnswering(FlaxRobertaPreTrainedModel): ...
 
 class FlaxRobertaForCausalLMModule(nn.Module):
     config: RobertaConfig
@@ -406,7 +400,6 @@ class FlaxRobertaForCausalLMModule(nn.Module):
     ROBERTA_START_DOCSTRING,
 )
 class FlaxRobertaForCausalLM(FlaxRobertaPreTrainedModel):
-    module_class = ...
     def prepare_inputs_for_generation(
         self, input_ids, max_length, attention_mask: jax.Array | None = ...
     ):  # -> dict[str, Any | Array]:

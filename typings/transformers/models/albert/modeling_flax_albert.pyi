@@ -201,8 +201,7 @@ class FlaxAlbertModule(nn.Module):
     ...,
     ALBERT_START_DOCSTRING,
 )
-class FlaxAlbertModel(FlaxAlbertPreTrainedModel):
-    module_class = ...
+class FlaxAlbertModel(FlaxAlbertPreTrainedModel): ...
 
 class FlaxAlbertForPreTrainingModule(nn.Module):
     config: AlbertConfig
@@ -226,8 +225,7 @@ class FlaxAlbertForPreTrainingModule(nn.Module):
     ...,
     ALBERT_START_DOCSTRING,
 )
-class FlaxAlbertForPreTraining(FlaxAlbertPreTrainedModel):
-    module_class = ...
+class FlaxAlbertForPreTraining(FlaxAlbertPreTrainedModel): ...
 
 FLAX_ALBERT_FOR_PRETRAINING_DOCSTRING = ...
 
@@ -250,8 +248,7 @@ class FlaxAlbertForMaskedLMModule(nn.Module):
         ...
 
 @add_start_docstrings(..., ALBERT_START_DOCSTRING)
-class FlaxAlbertForMaskedLM(FlaxAlbertPreTrainedModel):
-    module_class = ...
+class FlaxAlbertForMaskedLM(FlaxAlbertPreTrainedModel): ...
 
 class FlaxAlbertForSequenceClassificationModule(nn.Module):
     config: AlbertConfig
@@ -275,8 +272,7 @@ class FlaxAlbertForSequenceClassificationModule(nn.Module):
     ...,
     ALBERT_START_DOCSTRING,
 )
-class FlaxAlbertForSequenceClassification(FlaxAlbertPreTrainedModel):
-    module_class = ...
+class FlaxAlbertForSequenceClassification(FlaxAlbertPreTrainedModel): ...
 
 class FlaxAlbertForMultipleChoiceModule(nn.Module):
     config: AlbertConfig
@@ -300,8 +296,7 @@ class FlaxAlbertForMultipleChoiceModule(nn.Module):
     ...,
     ALBERT_START_DOCSTRING,
 )
-class FlaxAlbertForMultipleChoice(FlaxAlbertPreTrainedModel):
-    module_class = ...
+class FlaxAlbertForMultipleChoice(FlaxAlbertPreTrainedModel): ...
 
 class FlaxAlbertForTokenClassificationModule(nn.Module):
     config: AlbertConfig
@@ -325,8 +320,7 @@ class FlaxAlbertForTokenClassificationModule(nn.Module):
     ...,
     ALBERT_START_DOCSTRING,
 )
-class FlaxAlbertForTokenClassification(FlaxAlbertPreTrainedModel):
-    module_class = ...
+class FlaxAlbertForTokenClassification(FlaxAlbertPreTrainedModel): ...
 
 class FlaxAlbertForQuestionAnsweringModule(nn.Module):
     config: AlbertConfig
@@ -350,8 +344,7 @@ class FlaxAlbertForQuestionAnsweringModule(nn.Module):
     ...,
     ALBERT_START_DOCSTRING,
 )
-class FlaxAlbertForQuestionAnswering(FlaxAlbertPreTrainedModel):
-    module_class = ...
+class FlaxAlbertForQuestionAnswering(FlaxAlbertPreTrainedModel): ...
 
 __all__ = [
     "FlaxAlbertForMaskedLM",

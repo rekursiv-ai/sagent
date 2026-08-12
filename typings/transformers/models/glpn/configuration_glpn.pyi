@@ -4,7 +4,6 @@ from ...configuration_utils import PretrainedConfig
 logger = ...
 
 class GLPNConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         num_channels=...,

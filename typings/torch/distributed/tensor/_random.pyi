@@ -1,3 +1,4 @@
+from torch import Tensor
 from torch.distributed.device_mesh import DeviceMesh
 
 import torch

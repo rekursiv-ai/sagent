@@ -14,7 +14,6 @@ def remove_non_printing_char(text):  # -> LiteralString:
     ...
 
 class FlaubertTokenizer(PreTrainedTokenizer):
-    vocab_files_names = ...
     def __init__(
         self,
         vocab_file,

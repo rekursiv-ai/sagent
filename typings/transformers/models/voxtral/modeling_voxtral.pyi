@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -47,6 +48,9 @@ class VoxtralAttention(nn.Module):
         output_attentions: bool = ...,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class VoxtralEncoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: VoxtralConfig) -> None: ...
@@ -57,6 +61,7 @@ class VoxtralEncoderLayer(GradientCheckpointingLayer):
         layer_head_mask: torch.Tensor,
         output_attentions: bool = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring
 class VoxtralPreTrainedModel(PreTrainedModel):

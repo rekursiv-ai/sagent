@@ -8,7 +8,6 @@ def get_pairs(word):  # -> set[Any]:
     ...
 
 class PhobertTokenizer(PreTrainedTokenizer):
-    vocab_files_names = ...
     def __init__(
         self,
         vocab_file,

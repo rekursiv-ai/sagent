@@ -4,7 +4,6 @@ from ...tokenization_utils_fast import PreTrainedTokenizerFast
 VOCAB_FILES_NAMES = ...
 
 class LxmertTokenizerFast(PreTrainedTokenizerFast):
-    vocab_files_names = ...
     slow_tokenizer_class = LxmertTokenizer
     def __init__(
         self,

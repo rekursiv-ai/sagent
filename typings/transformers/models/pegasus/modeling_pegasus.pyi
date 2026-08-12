@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -84,6 +85,7 @@ class PegasusEncoderLayer(GradientCheckpointingLayer):
         layer_head_mask: torch.Tensor,
         output_attentions: bool = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class PegasusDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: PegasusConfig, layer_idx: int | None = ...) -> None: ...

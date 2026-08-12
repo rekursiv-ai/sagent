@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -105,6 +106,7 @@ class MCTCTEncoder(MCTCTPreTrainedModel):
         output_hidden_states: bool = ...,
         return_dict: bool = ...,
     ) -> tuple | BaseModelOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | BaseModelOutput: ...
 
 @add_start_docstrings(
     ...,

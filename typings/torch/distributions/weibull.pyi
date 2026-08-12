@@ -1,11 +1,10 @@
+from typing import Self
 from torch import Tensor
 from torch.distributions.transformed_distribution import TransformedDistribution
 
 __all__ = ["Weibull"]
 
 class Weibull(TransformedDistribution):
-    arg_constraints = ...
-    support = ...
     def __init__(
         self,
         scale: Tensor | float,

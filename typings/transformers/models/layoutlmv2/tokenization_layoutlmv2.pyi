@@ -25,7 +25,6 @@ def subfinder(mylist, pattern):  # -> tuple[Any, Any] | tuple[None, Literal[0]]:
     ...
 
 class LayoutLMv2Tokenizer(PreTrainedTokenizer):
-    vocab_files_names = ...
     def __init__(
         self,
         vocab_file,

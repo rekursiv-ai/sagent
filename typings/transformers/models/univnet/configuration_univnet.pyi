@@ -4,7 +4,6 @@ from ...configuration_utils import PretrainedConfig
 logger = ...
 
 class UnivNetConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         model_in_channels=...,

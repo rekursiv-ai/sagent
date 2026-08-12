@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -105,6 +106,11 @@ class StableLmDecoderLayer(GradientCheckpointingLayer):
         use_cache: bool | None = ...,
         cache_position: torch.LongTensor | None = ...,
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
+    ) -> tuple[
+        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+    ]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[
         torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
     ]: ...

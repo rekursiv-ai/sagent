@@ -4,8 +4,6 @@ from ...configuration_utils import PretrainedConfig
 logger = ...
 
 class SpeechT5Config(PretrainedConfig):
-    model_type = ...
-    attribute_map = ...
     def __init__(
         self,
         vocab_size=...,
@@ -71,7 +69,6 @@ class SpeechT5Config(PretrainedConfig):
         ...
 
 class SpeechT5HifiGanConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         model_in_dim=...,

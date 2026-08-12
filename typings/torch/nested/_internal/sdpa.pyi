@@ -1,3 +1,4 @@
+from torch import Tensor
 import torch
 
 log = ...

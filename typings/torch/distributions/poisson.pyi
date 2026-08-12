@@ -1,3 +1,4 @@
+from typing import Self
 from torch import Tensor
 from torch.distributions.exp_family import ExponentialFamily
 from torch.types import Number
@@ -5,8 +6,6 @@ from torch.types import Number
 __all__ = ["Poisson"]
 
 class Poisson(ExponentialFamily):
-    arg_constraints = ...
-    support = ...
     @property
     def mean(self) -> Tensor: ...
     @property

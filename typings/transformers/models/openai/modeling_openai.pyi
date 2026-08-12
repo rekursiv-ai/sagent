@@ -52,6 +52,7 @@ class OpenAIGPTSequenceSummary(nn.Module):
         hidden_states: torch.FloatTensor,
         cls_index: torch.LongTensor | None = ...,
     ) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 @auto_docstring
 class OpenAIGPTPreTrainedModel(PreTrainedModel):

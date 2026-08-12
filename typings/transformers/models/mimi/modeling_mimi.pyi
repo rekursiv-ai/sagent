@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -120,6 +121,7 @@ def apply_rotary_pos_emb(
 class MimiMLP(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
 
@@ -197,6 +199,9 @@ class MimiTransformerModel(nn.Module):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         cache_position: torch.LongTensor | None = ...,
+    ) -> tuple | BaseModelOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPast: ...
 
 class MimiDecoder(nn.Module):

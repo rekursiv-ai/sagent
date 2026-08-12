@@ -2,7 +2,6 @@ from ...configuration_utils import PretrainedConfig
 from ...utils.backbone_utils import BackboneConfigMixin
 
 class Dinov2WithRegistersConfig(BackboneConfigMixin, PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         hidden_size=...,

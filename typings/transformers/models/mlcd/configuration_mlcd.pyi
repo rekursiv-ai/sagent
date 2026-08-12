@@ -1,8 +1,6 @@
 from ...configuration_utils import PretrainedConfig
 
 class MLCDVisionConfig(PretrainedConfig):
-    model_type = ...
-    base_config_key = ...
     def __init__(
         self,
         hidden_size=...,

@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -93,6 +94,7 @@ class CpmAntEncoder(nn.Module):
 class CpmAntIntermediate(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class CpmAntSegmentPositionEmbedding(nn.Module):
     def __init__(self, config: CpmAntConfig) -> None: ...
@@ -110,6 +112,7 @@ class CpmAntOutput(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring
 class CpmAntPreTrainedModel(PreTrainedModel):

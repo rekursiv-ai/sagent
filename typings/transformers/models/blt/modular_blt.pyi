@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -215,5 +216,6 @@ class BltForCausalLM(MllamaForCausalLM):
         logits_to_keep: int | torch.Tensor = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | CausalLMOutputWithPast: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | CausalLMOutputWithPast: ...
 
 __all__ = ["BltForCausalLM", "BltModel", "BltPatcher", "BltPreTrainedModel"]

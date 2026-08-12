@@ -4,7 +4,6 @@ from ...configuration_utils import PretrainedConfig
 logger = ...
 
 class BltLocalEncoderConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         vocab_size=...,
@@ -27,7 +26,6 @@ class BltLocalEncoderConfig(PretrainedConfig):
     ) -> None: ...
 
 class BltLocalDecoderConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         vocab_size=...,
@@ -50,7 +48,6 @@ class BltLocalDecoderConfig(PretrainedConfig):
     ) -> None: ...
 
 class BltGlobalTransformerConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         hidden_size=...,
@@ -69,7 +66,6 @@ class BltGlobalTransformerConfig(PretrainedConfig):
     ) -> None: ...
 
 class BltPatcherConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         vocab_size=...,
@@ -88,9 +84,7 @@ class BltPatcherConfig(PretrainedConfig):
     ) -> None: ...
 
 class BltConfig(PretrainedConfig):
-    model_type = ...
     keys_to_ignore_at_inference = ...
-    sub_configs = ...
     def __init__(
         self,
         vocab_size=...,

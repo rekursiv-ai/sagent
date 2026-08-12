@@ -71,7 +71,7 @@ class FalconMambaMixer(MambaMixer):
         cache_params: FalconMambaCache | None = ...,
         cache_position: torch.LongTensor | None = ...,
         attention_mask: torch.LongTensor | None = ...,
-    ):  # -> Any | None:
+    ):  # -> None:
         ...
     def slow_forward(
         self,
@@ -87,7 +87,7 @@ class FalconMambaMixer(MambaMixer):
         cache_params: FalconMambaCache | None = ...,
         cache_position: torch.LongTensor | None = ...,
         attention_mask: torch.LongTensor | None = ...,
-    ):  # -> Any | None:
+    ):  # -> None:
         ...
 
 class FalconMambaRMSNorm(MambaRMSNorm):

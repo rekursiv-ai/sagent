@@ -6,7 +6,6 @@ from ...configuration_utils import PretrainedConfig
 logger = ...
 
 class TimmWrapperConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         architecture: str = ...,

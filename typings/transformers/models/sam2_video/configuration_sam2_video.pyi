@@ -1,7 +1,6 @@
 from ...configuration_utils import PretrainedConfig
 
 class Sam2VideoPromptEncoderConfig(PretrainedConfig):
-    base_config_key = ...
     def __init__(
         self,
         hidden_size=...,
@@ -16,7 +15,6 @@ class Sam2VideoPromptEncoderConfig(PretrainedConfig):
     ) -> None: ...
 
 class Sam2VideoMaskDecoderConfig(PretrainedConfig):
-    base_config_key = ...
     def __init__(
         self,
         hidden_size=...,
@@ -35,8 +33,6 @@ class Sam2VideoMaskDecoderConfig(PretrainedConfig):
     ) -> None: ...
 
 class Sam2VideoConfig(PretrainedConfig):
-    model_type = ...
-    sub_configs = ...
     def __init__(
         self,
         vision_config=...,

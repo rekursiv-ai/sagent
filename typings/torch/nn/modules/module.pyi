@@ -1,5 +1,6 @@
+from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping
-from typing import Any, NamedTuple, Self, TypeVar, overload
+from typing import Any, NamedTuple, Protocol, Self, TypeVar, overload
 
 from torch import Tensor, device, dtype, memory_format
 from torch._prims_common import DeviceLikeType
@@ -19,6 +20,11 @@ __all__ = [
 ]
 type _grad_t = tuple[Tensor, ...] | Tensor
 T = TypeVar("T", bound=Module)
+
+class _HasForward[**P, R](Protocol):
+    """Structural view of a module's own `forward`, used to type `__call__`."""
+
+    def forward(self, *args: P.args, **kwargs: P.kwargs) -> R: ...
 
 class _IncompatibleKeys(NamedTuple):
     missing_keys: list[str]
@@ -165,7 +171,16 @@ class Module:
         always_call: bool = ...,
     ) -> RemovableHandle: ...
 
-    __call__: Callable[..., Any] = ...
+    # `__call__` dispatches to `forward`, so it takes and returns whatever the
+    # subclass's own `forward` does. Recovering that needs a self-type bound to a
+    # protocol capturing `forward`'s signature: a plain `-> Any` makes every
+    # `self.layer(x)` site Any, and `-> Tensor` is wrong for modules returning
+    # tuples. It must also be a `def`, not an attribute -- an attribute-form
+    # `__call__` is not overridable, so subclass declarations bind `self`
+    # positionally.
+    def __call__[**P, R](
+        self: _HasForward[P, R], *args: P.args, **kwargs: P.kwargs
+    ) -> R: ...
     def __getstate__(self) -> dict[str, Any]: ...
     def __setstate__(self, state) -> None: ...
     def __getattr__(self, name: str) -> Any: ...

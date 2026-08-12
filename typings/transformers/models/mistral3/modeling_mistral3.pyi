@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -25,6 +26,7 @@ class Mistral3PatchMerger(nn.Module):
     def forward(
         self, image_features: torch.Tensor, image_sizes: torch.Tensor
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class Mistral3MultiModalProjector(nn.Module):
     def __init__(self, config: Mistral3Config) -> None: ...

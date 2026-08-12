@@ -1,3 +1,4 @@
+from torch import Size
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from typing import Any

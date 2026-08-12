@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -98,6 +99,9 @@ class Sam2VisionNeck(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor
     ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]: ...
 
 def do_pool(x: torch.Tensor, query_stride: int | None = ...) -> torch.Tensor: ...
 
@@ -111,6 +115,7 @@ class Sam2MultiScaleAttention(nn.Module):
         query_stride: tuple[int, int] | None = ...,
     ) -> None: ...
     def forward(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class Sam2FeedForward(nn.Module):
     def __init__(
@@ -136,6 +141,7 @@ class Sam2MultiScaleBlock(GradientCheckpointingLayer):
     def forward(
         self, hidden_states: torch.Tensor, **kwargs: Unpack[TransformersKwargs]
     ) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 @dataclass
 @auto_docstring(custom_intro=...)
@@ -201,6 +207,9 @@ class Sam2Attention(nn.Module):
         attention_similarity: torch.Tensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class Sam2TwoWayAttentionBlock(SamTwoWayAttentionBlock, GradientCheckpointingLayer):
     def __init__(
@@ -223,6 +232,9 @@ class Sam2MaskDecoder(SamMaskDecoder):
         attention_similarity: torch.Tensor | None = ...,
         target_embedding: torch.Tensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 @auto_docstring(custom_intro=...)

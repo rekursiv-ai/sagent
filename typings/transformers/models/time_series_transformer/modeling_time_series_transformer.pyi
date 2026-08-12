@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -23,11 +24,15 @@ logger = ...
 class TimeSeriesFeatureEmbedder(nn.Module):
     def __init__(self, cardinalities: list[int], embedding_dims: list[int]) -> None: ...
     def forward(self, features: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class TimeSeriesStdScaler(nn.Module):
     def __init__(self, config: TimeSeriesTransformerConfig) -> None: ...
     def forward(
         self, data: torch.Tensor, observed_indicator: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 class TimeSeriesMeanScaler(nn.Module):
@@ -35,11 +40,17 @@ class TimeSeriesMeanScaler(nn.Module):
     def forward(
         self, data: torch.Tensor, observed_indicator: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 class TimeSeriesNOPScaler(nn.Module):
     def __init__(self, config: TimeSeriesTransformerConfig) -> None: ...
     def forward(
         self, data: torch.Tensor, observed_indicator: torch.Tensor | None = ...
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 def nll(
@@ -115,6 +126,9 @@ class TimeSeriesTransformerEncoderLayer(GradientCheckpointingLayer):
         layer_head_mask: torch.FloatTensor,
         output_attentions: bool | None = ...,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
 
 class TimeSeriesTransformerDecoderLayer(GradientCheckpointingLayer):
     def __init__(
@@ -158,6 +172,7 @@ class TimeSeriesTransformerEncoder(TimeSeriesTransformerPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
     ) -> tuple | BaseModelOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | BaseModelOutput: ...
 
 class TimeSeriesTransformerDecoder(TimeSeriesTransformerPreTrainedModel):
     def __init__(self, config: TimeSeriesTransformerConfig) -> None: ...
@@ -175,6 +190,9 @@ class TimeSeriesTransformerDecoder(TimeSeriesTransformerPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         cache_position: torch.LongTensor | None = ...,
+    ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
 
 @auto_docstring

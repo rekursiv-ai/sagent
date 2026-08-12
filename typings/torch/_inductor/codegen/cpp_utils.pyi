@@ -1,3 +1,5 @@
+from collections.abc import Generator
+from typing import Self
 from collections.abc import Callable
 from typing import Any
 

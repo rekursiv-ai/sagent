@@ -1,3 +1,5 @@
+from collections.abc import Callable, Sequence
+from torch import Tensor
 from typing import (
     IO as IO,
     TYPE_CHECKING as TYPE_CHECKING,

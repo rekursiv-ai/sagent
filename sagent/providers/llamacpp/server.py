@@ -305,7 +305,7 @@ def _http_ok(url: str) -> bool:
     """True if a GET on ``url`` returns a 2xx response within 200ms."""
     try:
         with urllib.request.urlopen(url, timeout=0.2) as response:  # noqa: S310 -- local/provider-supplied readiness URL only.
-            return 200 <= response.status < 300
+            return cast("bool", 200 <= response.status < 300)
     except (OSError, urllib.error.URLError):
         return False
 

@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -44,6 +45,7 @@ class DecisionTransformerGPT2MLP(nn.Module):
     def forward(
         self, hidden_states: tuple[torch.FloatTensor] | None
     ) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 class DecisionTransformerGPT2Block(GradientCheckpointingLayer):
     def __init__(self, config, layer_idx=...) -> None: ...
@@ -96,6 +98,9 @@ class DecisionTransformerGPT2Model(DecisionTransformerGPT2PreTrainedModel):
         output_attentions: bool | None = ...,
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
+    ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
 
 @dataclass

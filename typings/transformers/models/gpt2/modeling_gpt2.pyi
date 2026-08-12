@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -51,6 +52,7 @@ class GPT2MLP(nn.Module):
     def forward(
         self, hidden_states: tuple[torch.FloatTensor] | None
     ) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 class GPT2Block(GradientCheckpointingLayer):
     def __init__(self, config, layer_idx=...) -> None: ...
@@ -78,6 +80,7 @@ class GPT2SequenceSummary(nn.Module):
         hidden_states: torch.FloatTensor,
         cls_index: torch.LongTensor | None = ...,
     ) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 @auto_docstring
 class GPT2PreTrainedModel(PreTrainedModel):

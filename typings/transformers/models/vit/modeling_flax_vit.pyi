@@ -165,8 +165,7 @@ class FlaxViTModule(nn.Module):
     ...,
     VIT_START_DOCSTRING,
 )
-class FlaxViTModel(FlaxViTPreTrainedModel):
-    module_class = ...
+class FlaxViTModel(FlaxViTPreTrainedModel): ...
 
 FLAX_VISION_MODEL_DOCSTRING = ...
 
@@ -189,8 +188,7 @@ class FlaxViTForImageClassificationModule(nn.Module):
     ...,
     VIT_START_DOCSTRING,
 )
-class FlaxViTForImageClassification(FlaxViTPreTrainedModel):
-    module_class = ...
+class FlaxViTForImageClassification(FlaxViTPreTrainedModel): ...
 
 FLAX_VISION_CLASSIF_DOCSTRING = ...
 __all__ = ["FlaxViTForImageClassification", "FlaxViTModel", "FlaxViTPreTrainedModel"]

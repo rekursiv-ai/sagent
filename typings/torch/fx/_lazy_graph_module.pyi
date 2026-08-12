@@ -1,3 +1,5 @@
+from collections.abc import Callable
+from typing import Any
 from torch.fx.graph_module import GraphModule
 from torch.package import PackageExporter
 
@@ -13,8 +15,6 @@ class _LazyGraphModule(GraphModule):
     @staticmethod
     def force_recompile(gm) -> None: ...
     def real_recompile(self) -> None: ...
-
-    forward = ...
     def __reduce_package__(
         self, exporter: PackageExporter
     ) -> tuple[Callable[..., Module], tuple[dict[str, Any], str]]: ...

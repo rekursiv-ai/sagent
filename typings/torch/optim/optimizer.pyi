@@ -109,6 +109,10 @@ class Optimizer:
     @torch._disable_dynamo
     def add_param_group(self, param_group: dict[str, Any]) -> None: ...
 
+    # Deliberately `dict[str, Any]`, matching real torch. A PEP 728 open
+    # TypedDict types `params`/`lr` and removes ~29 casts, but `list` is
+    # invariant: it then rejects every repo optimizer that declares its own
+    # `param_groups: list[dict[str, Any]]`, for 148 new errors.
     param_groups: list[dict[str, Any]]
 
     state: dict[Any, Any]

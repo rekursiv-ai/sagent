@@ -1,3 +1,4 @@
+from typing import Any
 from .cpp_template import CppTemplate
 from .. import ir
 

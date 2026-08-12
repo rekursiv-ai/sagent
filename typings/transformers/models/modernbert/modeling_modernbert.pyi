@@ -1,3 +1,4 @@
+from typing import Any
 from flash_attn.layers.rotary import RotaryEmbedding
 from torch import nn
 
@@ -42,7 +43,7 @@ def apply_rotary_unpadded(
     sin,
     cu_seqlens: torch.Tensor | None = ...,
     max_seqlen: int | None = ...,
-):  # -> Any | None:
+):  # -> None:
     ...
 
 class ModernBertUnpaddedRotaryEmbedding(RotaryEmbedding):
@@ -60,6 +61,9 @@ class ModernBertUnpaddedRotaryEmbedding(RotaryEmbedding):
         cu_seqlens: torch.Tensor,
         max_seqlen: int | None = ...,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]: ...
     def extra_repr(self) -> str: ...
 
 class ModernBertEmbeddings(nn.Module):
@@ -71,10 +75,12 @@ class ModernBertEmbeddings(nn.Module):
         input_ids: torch.LongTensor | None = ...,
         inputs_embeds: torch.Tensor | None = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class ModernBertMLP(nn.Module):
     def __init__(self, config: ModernBertConfig) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class ModernBertRotaryEmbedding(nn.Module):
     inv_freq: torch.Tensor
@@ -138,6 +144,7 @@ class ModernBertAttention(nn.Module):
         output_attentions: bool | None = ...,
         **kwargs,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class ModernBertEncoderLayer(GradientCheckpointingLayer):
     def __init__(
@@ -155,6 +162,7 @@ class ModernBertEncoderLayer(GradientCheckpointingLayer):
         max_seqlen: int | None = ...,
         output_attentions: bool | None = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring
 class ModernBertPreTrainedModel(PreTrainedModel):
@@ -196,6 +204,7 @@ class ModernBertModel(ModernBertPreTrainedModel):
 class ModernBertPredictionHead(nn.Module):
     def __init__(self, config: ModernBertConfig) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring(custom_intro=...)
 class ModernBertForMaskedLM(ModernBertPreTrainedModel):

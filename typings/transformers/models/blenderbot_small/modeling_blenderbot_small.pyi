@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -84,6 +85,9 @@ class BlenderbotSmallEncoderLayer(GradientCheckpointingLayer):
         attention_mask: torch.FloatTensor,
         layer_head_mask: torch.FloatTensor,
         output_attentions: bool | None = ...,
+    ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
 
 class BlenderbotSmallDecoderLayer(GradientCheckpointingLayer):

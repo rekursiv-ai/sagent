@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -72,6 +73,7 @@ class ParakeetEncoderBlock(GradientCheckpointingLayer):
         position_embeddings: torch.Tensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring
 class ParakeetPreTrainedModel(PreTrainedModel):

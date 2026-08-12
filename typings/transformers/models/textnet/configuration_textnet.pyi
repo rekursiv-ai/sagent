@@ -5,7 +5,6 @@ from transformers.utils.backbone_utils import BackboneConfigMixin
 logger = ...
 
 class TextNetConfig(BackboneConfigMixin, PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         stem_kernel_size=...,

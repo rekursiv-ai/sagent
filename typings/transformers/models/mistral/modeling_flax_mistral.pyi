@@ -147,8 +147,7 @@ class FlaxMistralModule(nn.Module):
     ...,
     MISTRAL_START_DOCSTRING,
 )
-class FlaxMistralModel(FlaxMistralPreTrainedModel):
-    module_class = ...
+class FlaxMistralModel(FlaxMistralPreTrainedModel): ...
 
 class FlaxMistralForCausalLMModule(nn.Module):
     config: MistralConfig
@@ -173,7 +172,6 @@ class FlaxMistralForCausalLMModule(nn.Module):
     MISTRAL_START_DOCSTRING,
 )
 class FlaxMistralForCausalLM(FlaxMistralPreTrainedModel):
-    module_class = ...
     def prepare_inputs_for_generation(
         self, input_ids, max_length, attention_mask: jax.Array | None = ...
     ):  # -> dict[str, Any | Array]:

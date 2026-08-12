@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 from transformers.utils.generic import check_model_inputs
 
@@ -24,6 +25,7 @@ class Starcoder2MLP(nn.Module):
     def forward(
         self, hidden_states: tuple[torch.FloatTensor] | None
     ) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 def rotate_half(x):  # -> Tensor:
     ...

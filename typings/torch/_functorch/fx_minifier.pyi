@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Any, Literal
 from collections.abc import Callable
 from dataclasses import dataclass
 

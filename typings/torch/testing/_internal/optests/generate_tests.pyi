@@ -1,3 +1,4 @@
+from typing import Self
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -91,7 +92,7 @@ class OpCheckMode(TorchFunctionMode):
 
 def should_print_better_repro() -> None: ...
 def opcheck(
-    op: torch._ops.OpOverload | torch._ops.OpOverloadPacket | CustomOpDef,
+    op: torch._ops.OpOverload | torch._ops.OpOverloadPacket | CustomOpDef[..., Any],
     args: tuple[Any, ...],
     kwargs: dict[str, Any] | None = ...,
     *,

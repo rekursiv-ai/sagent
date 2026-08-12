@@ -1,7 +1,6 @@
 from ...configuration_utils import PretrainedConfig
 
 class EomtConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         hidden_size=...,

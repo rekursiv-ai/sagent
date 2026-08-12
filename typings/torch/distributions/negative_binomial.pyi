@@ -1,3 +1,4 @@
+from typing import Self
 from torch import Tensor
 from torch.distributions.distribution import Distribution
 from torch.distributions.utils import lazy_property
@@ -7,8 +8,6 @@ import torch
 __all__ = ["NegativeBinomial"]
 
 class NegativeBinomial(Distribution):
-    arg_constraints = ...
-    support = ...
     def __init__(
         self,
         total_count: Tensor | float,

@@ -1,3 +1,4 @@
+from typing import Any
 import os
 
 from torch import nn
@@ -96,6 +97,7 @@ class BlenderbotEncoderLayer(GradientCheckpointingLayer):
         layer_head_mask: torch.Tensor,
         output_attentions: bool = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class BlenderbotDecoderLayer(GradientCheckpointingLayer):
     def __init__(

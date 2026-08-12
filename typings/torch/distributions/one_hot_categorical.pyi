@@ -1,3 +1,4 @@
+from typing import Any, Self
 from torch import Tensor
 from torch.distributions.distribution import Distribution
 from torch.types import _size
@@ -7,8 +8,6 @@ import torch
 __all__ = ["OneHotCategorical", "OneHotCategoricalStraightThrough"]
 
 class OneHotCategorical(Distribution):
-    arg_constraints = ...
-    support = ...
     has_enumerate_support = ...
     def __init__(
         self,

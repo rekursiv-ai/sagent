@@ -689,12 +689,14 @@ def _request_id(e: BaseException) -> str | None:
     """Best-effort request-id extractor for an anthropic error."""
     rid = getattr(e, "request_id", None)
     if rid:
-        return rid
+        return cast("str | None", rid)
     resp = getattr(e, "response", None)
     headers = getattr(resp, "headers", None)
     if headers is not None:
         try:
-            return headers.get("request-id") or headers.get("x-request-id")
+            return cast(
+                "str | None", headers.get("request-id") or headers.get("x-request-id")
+            )
         except Exception:
             return None
     return None

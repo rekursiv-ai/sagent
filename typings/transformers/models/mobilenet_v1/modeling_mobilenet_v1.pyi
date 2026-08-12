@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -30,6 +31,7 @@ class MobileNetV1ConvLayer(nn.Module):
         use_activation: bool | str | None = ...,
     ) -> None: ...
     def forward(self, features: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring
 class MobileNetV1PreTrainedModel(PreTrainedModel):

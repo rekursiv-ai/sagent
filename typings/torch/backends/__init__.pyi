@@ -1,3 +1,5 @@
+from collections.abc import Generator
+from typing import Any
 from contextlib import contextmanager as contextmanager
 
 import types

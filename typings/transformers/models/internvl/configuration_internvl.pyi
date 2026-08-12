@@ -1,8 +1,6 @@
 from ...configuration_utils import PretrainedConfig
 
 class InternVLVisionConfig(PretrainedConfig):
-    model_type = ...
-    base_config_key = ...
     def __init__(
         self,
         hidden_size=...,
@@ -29,8 +27,6 @@ class InternVLVisionConfig(PretrainedConfig):
     ) -> None: ...
 
 class InternVLConfig(PretrainedConfig):
-    model_type = ...
-    sub_configs = ...
     def __init__(
         self,
         vision_config=...,

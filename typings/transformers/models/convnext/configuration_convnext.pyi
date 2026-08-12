@@ -8,7 +8,6 @@ from ...utils.backbone_utils import BackboneConfigMixin
 logger = ...
 
 class ConvNextConfig(BackboneConfigMixin, PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         num_channels=...,

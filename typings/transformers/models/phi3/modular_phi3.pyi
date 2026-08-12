@@ -59,8 +59,7 @@ class Phi3DecoderLayer(MistralDecoderLayer):
         torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
     ]: ...
 
-class Phi3PreTrainedModel(MistralPreTrainedModel):
-    _version = ...
+class Phi3PreTrainedModel(MistralPreTrainedModel): ...
 
 class Phi3ForCausalLM(MistralForCausalLM):
     def prepare_inputs_for_generation(

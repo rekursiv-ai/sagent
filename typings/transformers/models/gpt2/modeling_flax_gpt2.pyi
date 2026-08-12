@@ -145,8 +145,7 @@ class FlaxGPT2Module(nn.Module):
     ...,
     GPT2_START_DOCSTRING,
 )
-class FlaxGPT2Model(FlaxGPT2PreTrainedModel):
-    module_class = ...
+class FlaxGPT2Model(FlaxGPT2PreTrainedModel): ...
 
 class FlaxGPT2LMHeadModule(nn.Module):
     config: GPT2Config
@@ -173,7 +172,6 @@ class FlaxGPT2LMHeadModule(nn.Module):
     GPT2_START_DOCSTRING,
 )
 class FlaxGPT2LMHeadModel(FlaxGPT2PreTrainedModel):
-    module_class = ...
     def prepare_inputs_for_generation(
         self, input_ids, max_length, attention_mask: jax.Array | None = ...
     ):  # -> dict[str, Any | Array]:

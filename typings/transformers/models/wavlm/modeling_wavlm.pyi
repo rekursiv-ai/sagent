@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -46,6 +47,9 @@ class WavLMAttention(nn.Module):
         position_bias: torch.Tensor | None = ...,
         output_attentions: bool = ...,
         index=...,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def torch_multi_head_self_attention(
         self,
@@ -246,6 +250,7 @@ class AMSoftmaxLoss(nn.Module):
 class TDNNLayer(nn.Module):
     def __init__(self, config, layer_id=...) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring(custom_intro=...)
 class WavLMForXVector(WavLMPreTrainedModel):

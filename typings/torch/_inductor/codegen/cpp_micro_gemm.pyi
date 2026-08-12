@@ -1,3 +1,5 @@
+from types import ModuleType
+from typing import Any, Literal, Self
 from collections.abc import Callable
 from enum import Enum
 

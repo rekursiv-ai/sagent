@@ -1,3 +1,4 @@
+from typing import Any
 from collections.abc import Callable
 from functools import total_ordering
 

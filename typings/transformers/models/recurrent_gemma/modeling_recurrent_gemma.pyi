@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -44,6 +45,9 @@ class RecurrentGemmaSdpaAttention(nn.Module):
         cache_position: torch.LongTensor | None = ...,
         use_cache: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class SqrtBoundDerivative(torch.autograd.Function):
     @staticmethod
@@ -56,6 +60,9 @@ class RecurrentGemmaRglru(nn.Module):
     def forward(
         self, activations: torch.Tensor, position_ids: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class RecurrentGemmaRecurrentBlock(nn.Module):
     def __init__(self, config) -> None: ...
@@ -66,6 +73,9 @@ class RecurrentGemmaRecurrentBlock(nn.Module):
         attention_mask: torch.Tensor,
         cache_position: torch.Tensor,
         use_cache: bool = ...,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]: ...
 
 TEMPORAL_BLOCK_CLASSES = ...
@@ -84,6 +94,9 @@ class RecurrentGemmaDecoderLayer(GradientCheckpointingLayer):
         attention_mask: torch.Tensor,
         cache_position: torch.Tensor | None = ...,
         use_cache: bool | None = ...,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]: ...
 
 @auto_docstring

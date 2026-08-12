@@ -1,3 +1,4 @@
+from typing import Any, Self
 from collections import namedtuple
 from typing_extensions import deprecated
 

@@ -1,3 +1,4 @@
+from typing import Any
 from torch.onnx._internal.torchscript_exporter import jit_utils, symbolic_helper
 
 _onnx_symbolic = ...
@@ -74,7 +75,7 @@ def repeat_interleave(
 ) -> None: ...
 @_onnx_symbolic("aten::diagonal")
 @symbolic_helper.parse_args("v", "i", "i", "i")
-def diagonal(g: jit_utils.GraphContext, self, offset, dim1, dim2) -> Any | None: ...
+def diagonal(g: jit_utils.GraphContext, self, offset, dim1, dim2) -> None: ...
 @_onnx_symbolic("quantized::linear")
 def quantized_linear(
     g: jit_utils.GraphContext, q_input, q_weight, bias, op_scale, op_zero_point

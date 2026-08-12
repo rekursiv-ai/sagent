@@ -1,3 +1,6 @@
+from collections.abc import Generator
+from types import NotImplementedType
+from typing import Any, Self
 from collections.abc import MutableMapping
 from weakref import ref
 

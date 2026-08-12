@@ -134,8 +134,7 @@ class FlaxGPTJModule(nn.Module):
     ...,
     GPTJ_START_DOCSTRING,
 )
-class FlaxGPTJModel(FlaxGPTJPreTrainedModel):
-    module_class = ...
+class FlaxGPTJModel(FlaxGPTJPreTrainedModel): ...
 
 class FlaxGPTJForCausalLMModule(nn.Module):
     config: GPTJConfig
@@ -160,7 +159,6 @@ class FlaxGPTJForCausalLMModule(nn.Module):
     GPTJ_START_DOCSTRING,
 )
 class FlaxGPTJForCausalLM(FlaxGPTJPreTrainedModel):
-    module_class = ...
     def prepare_inputs_for_generation(
         self, input_ids, max_length, attention_mask: jax.Array | None = ...
     ):  # -> dict[str, Any | Array]:

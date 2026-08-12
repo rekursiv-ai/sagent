@@ -8,7 +8,6 @@ from ...utils.backbone_utils import BackboneConfigMixin
 logger = ...
 
 class Dinov2Config(BackboneConfigMixin, PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         hidden_size=...,

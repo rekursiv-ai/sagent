@@ -1,3 +1,4 @@
+from torch import Tensor
 from collections.abc import Callable
 from typing_extensions import deprecated
 

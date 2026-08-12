@@ -1,3 +1,4 @@
+from typing import Literal, Self
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass

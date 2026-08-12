@@ -1,3 +1,4 @@
+from typing import Self
 from torch import Tensor
 from torch.distributions.exp_family import ExponentialFamily
 from torch.distributions.utils import lazy_property
@@ -8,8 +9,6 @@ import torch
 __all__ = ["Bernoulli"]
 
 class Bernoulli(ExponentialFamily):
-    arg_constraints = ...
-    support = ...
     has_enumerate_support = ...
     _mean_carrier_measure = ...
     def __init__(

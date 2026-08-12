@@ -1,3 +1,4 @@
+from typing import Any
 from collections.abc import Iterable, Iterator
 
 from torch import nn
@@ -33,6 +34,7 @@ class GraphormerGraphNodeFeature(nn.Module):
         in_degree: torch.LongTensor,
         out_degree: torch.LongTensor,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class GraphormerGraphAttnBias(nn.Module):
     def __init__(self, config: GraphormerConfig) -> None: ...
@@ -44,6 +46,7 @@ class GraphormerGraphAttnBias(nn.Module):
         input_edges: torch.LongTensor,
         attn_edge_type: torch.LongTensor,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class GraphormerMultiheadAttention(nn.Module):
     def __init__(self, config: GraphormerConfig) -> None: ...
@@ -61,6 +64,9 @@ class GraphormerMultiheadAttention(nn.Module):
         before_softmax: bool = ...,
         need_head_weights: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def apply_sparse_mask(
         self, attn_weights: torch.Tensor, tgt_len: int, src_len: int, bsz: int
     ) -> torch.Tensor: ...
@@ -76,6 +82,9 @@ class GraphormerGraphEncoderLayer(nn.Module):
         self_attn_bias: torch.Tensor | None = ...,
         self_attn_mask: torch.Tensor | None = ...,
         self_attn_padding_mask: torch.Tensor | None = ...,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class GraphormerGraphEncoder(nn.Module):
@@ -94,10 +103,14 @@ class GraphormerGraphEncoder(nn.Module):
         token_embeddings: torch.Tensor | None = ...,
         attn_mask: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor | list[torch.LongTensor], torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor | list[torch.LongTensor], torch.Tensor]: ...
 
 class GraphormerDecoderHead(nn.Module):
     def __init__(self, embedding_dim: int, num_classes: int) -> None: ...
     def forward(self, input_nodes: torch.Tensor, **unused) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class GraphormerPreTrainedModel(PreTrainedModel):
     config: GraphormerConfig
@@ -129,6 +142,9 @@ class GraphormerModel(GraphormerPreTrainedModel):
         return_dict: bool | None = ...,
         **unused,
     ) -> tuple[torch.LongTensor] | BaseModelOutputWithNoAttention: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.LongTensor] | BaseModelOutputWithNoAttention: ...
     def max_nodes(self):  # -> Callable[[], ...]:
         ...
 
@@ -146,6 +162,9 @@ class GraphormerForGraphClassification(GraphormerPreTrainedModel):
         labels: torch.LongTensor | None = ...,
         return_dict: bool | None = ...,
         **unused,
+    ) -> tuple[torch.Tensor] | SequenceClassifierOutput: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor] | SequenceClassifierOutput: ...
 
 __all__ = [

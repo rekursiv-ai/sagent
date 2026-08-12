@@ -1,3 +1,4 @@
+from typing import Any, Literal
 from .base_scheduler import BaseScheduler
 
 __all__ = ["CubicSL"]

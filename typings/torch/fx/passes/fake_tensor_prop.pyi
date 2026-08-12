@@ -1,3 +1,4 @@
+from typing import Any
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx import Node
 from torch.fx._compatibility import compatibility

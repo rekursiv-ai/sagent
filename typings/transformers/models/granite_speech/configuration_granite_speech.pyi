@@ -3,7 +3,6 @@ from ...configuration_utils import PretrainedConfig
 """Config class for Granite Speech."""
 
 class GraniteSpeechEncoderConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         input_dim=...,
@@ -22,9 +21,6 @@ class GraniteSpeechEncoderConfig(PretrainedConfig):
     ) -> None: ...
 
 class GraniteSpeechConfig(PretrainedConfig):
-    model_type = ...
-    attribute_map = ...
-    sub_configs = ...
     def __init__(
         self,
         text_config=...,

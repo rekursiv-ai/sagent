@@ -7,7 +7,6 @@ from ...onnx import OnnxConfig
 logger = ...
 
 class MobileViTV2Config(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         num_channels=...,

@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -100,6 +101,9 @@ class PLBartEncoderLayer(GradientCheckpointingLayer):
         layer_head_mask: torch.FloatTensor,
         output_attentions: bool | None = ...,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
 
 class PLBartEncoder(PLBartPreTrainedModel):
     def __init__(
@@ -115,6 +119,7 @@ class PLBartEncoder(PLBartPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
     ) -> tuple | BaseModelOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | BaseModelOutput: ...
 
 class PLBartDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: PLBartConfig, layer_idx: int | None = ...) -> None: ...
@@ -154,6 +159,9 @@ class PLBartDecoder(PLBartPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         cache_position: torch.LongTensor | None = ...,
+    ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
 
 def shift_tokens_right(input_ids: torch.Tensor, pad_token_id: int):  # -> Tensor:
@@ -235,6 +243,7 @@ class PLBartClassificationHead(nn.Module):
         self, input_dim: int, inner_dim: int, num_classes: int, pooler_dropout: float
     ) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring(custom_intro=...)
 class PLBartForSequenceClassification(PLBartPreTrainedModel):

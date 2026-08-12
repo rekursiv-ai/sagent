@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -43,6 +44,7 @@ class MptMLP(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, residual: torch.Tensor
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class MptBlock(GradientCheckpointingLayer):
     def __init__(self, config: MptConfig, layer_idx: int | None = ...) -> None: ...

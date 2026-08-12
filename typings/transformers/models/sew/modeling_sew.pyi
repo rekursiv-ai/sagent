@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -77,6 +78,9 @@ class SEWAttention(nn.Module):
         layer_head_mask: torch.Tensor | None = ...,
         output_attentions: bool | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class SEWFeedForward(nn.Module):

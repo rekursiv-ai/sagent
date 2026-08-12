@@ -1,3 +1,4 @@
+from typing import Any
 import torch
 
 from .configuration_retribert import RetriBertConfig
@@ -42,5 +43,6 @@ class RetriBertModel(RetriBertPreTrainedModel):
         attention_mask_doc: torch.FloatTensor | None,
         checkpoint_batch_size: int = ...,
     ) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 __all__ = ["RetriBertModel", "RetriBertPreTrainedModel"]

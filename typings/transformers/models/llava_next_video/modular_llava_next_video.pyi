@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 from transformers.models.llava_next.modeling_llava_next import (
     LlavaNextCausalLMOutputWithPast,
@@ -18,9 +19,6 @@ from ...processing_utils import Unpack
 logger = ...
 
 class LlavaNextVideoConfig(PretrainedConfig):
-    model_type = ...
-    attribute_map = ...
-    sub_configs = ...
     def __init__(
         self,
         vision_config=...,
@@ -97,6 +95,9 @@ class LlavaNextVideoModel(LlavaNextModel):
         cache_position: torch.LongTensor | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple | LlavaNextVideoModelOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple | LlavaNextVideoModelOutputWithPast: ...
 
 class LlavaNextVideoForConditionalGeneration(LlavaNextForConditionalGeneration):
     def get_video_features(
@@ -126,6 +127,9 @@ class LlavaNextVideoForConditionalGeneration(LlavaNextForConditionalGeneration):
         cache_position: torch.LongTensor | None = ...,
         logits_to_keep: int | torch.Tensor = ...,
         **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple | LlavaNextVideoCausalLMOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | LlavaNextVideoCausalLMOutputWithPast: ...
     def prepare_inputs_for_generation(
         self,

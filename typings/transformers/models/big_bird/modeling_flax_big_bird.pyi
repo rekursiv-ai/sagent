@@ -313,8 +313,7 @@ class FlaxBigBirdModule(nn.Module):
     ...,
     BIG_BIRD_START_DOCSTRING,
 )
-class FlaxBigBirdModel(FlaxBigBirdPreTrainedModel):
-    module_class = ...
+class FlaxBigBirdModel(FlaxBigBirdPreTrainedModel): ...
 
 class FlaxBigBirdForPreTrainingModule(nn.Module):
     config: BigBirdConfig
@@ -340,8 +339,7 @@ class FlaxBigBirdForPreTrainingModule(nn.Module):
     ...,
     BIG_BIRD_START_DOCSTRING,
 )
-class FlaxBigBirdForPreTraining(FlaxBigBirdPreTrainedModel):
-    module_class = ...
+class FlaxBigBirdForPreTraining(FlaxBigBirdPreTrainedModel): ...
 
 FLAX_BIG_BIRD_FOR_PRETRAINING_DOCSTRING = ...
 
@@ -369,8 +367,7 @@ class FlaxBigBirdForMaskedLMModule(nn.Module):
     ...,
     BIG_BIRD_START_DOCSTRING,
 )
-class FlaxBigBirdForMaskedLM(FlaxBigBirdPreTrainedModel):
-    module_class = ...
+class FlaxBigBirdForMaskedLM(FlaxBigBirdPreTrainedModel): ...
 
 class FlaxBigBirdClassificationHead(nn.Module):
     config: BigBirdConfig
@@ -403,8 +400,7 @@ class FlaxBigBirdForSequenceClassificationModule(nn.Module):
     ...,
     BIG_BIRD_START_DOCSTRING,
 )
-class FlaxBigBirdForSequenceClassification(FlaxBigBirdPreTrainedModel):
-    module_class = ...
+class FlaxBigBirdForSequenceClassification(FlaxBigBirdPreTrainedModel): ...
 
 class FlaxBigBirdForMultipleChoiceModule(nn.Module):
     config: BigBirdConfig
@@ -431,7 +427,6 @@ class FlaxBigBirdForMultipleChoiceModule(nn.Module):
     BIG_BIRD_START_DOCSTRING,
 )
 class FlaxBigBirdForMultipleChoice(FlaxBigBirdPreTrainedModel):
-    module_class = ...
     def __init__(
         self,
         config: BigBirdConfig,
@@ -466,8 +461,7 @@ class FlaxBigBirdForTokenClassificationModule(nn.Module):
     ...,
     BIG_BIRD_START_DOCSTRING,
 )
-class FlaxBigBirdForTokenClassification(FlaxBigBirdPreTrainedModel):
-    module_class = ...
+class FlaxBigBirdForTokenClassification(FlaxBigBirdPreTrainedModel): ...
 
 class FlaxBigBirdForQuestionAnsweringHead(nn.Module):
     config: BigBirdConfig
@@ -503,7 +497,6 @@ class FlaxBigBirdForQuestionAnsweringModule(nn.Module):
     BIG_BIRD_START_DOCSTRING,
 )
 class FlaxBigBirdForQuestionAnswering(FlaxBigBirdPreTrainedModel):
-    module_class = ...
     @add_start_docstrings_to_model_forward(
         BIG_BIRD_INPUTS_DOCSTRING.format("batch_size, sequence_length")
     )
@@ -554,7 +547,6 @@ class FlaxBigBirdForCausalLMModule(nn.Module):
     BIG_BIRD_START_DOCSTRING,
 )
 class FlaxBigBirdForCausalLM(FlaxBigBirdPreTrainedModel):
-    module_class = ...
     def prepare_inputs_for_generation(
         self, input_ids, max_length, attention_mask: jax.Array | None = ...
     ):  # -> dict[str, Any | Array]:

@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -36,10 +37,18 @@ class CodeGenAttention(nn.Module):
         | tuple[torch.Tensor, tuple[torch.Tensor], tuple[torch.Tensor, ...]]
         | None
     ): ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> (
+        tuple[torch.Tensor, tuple[torch.Tensor]]
+        | tuple[torch.Tensor, tuple[torch.Tensor], tuple[torch.Tensor, ...]]
+        | None
+    ): ...
 
 class CodeGenMLP(nn.Module):
     def __init__(self, intermediate_size, config) -> None: ...
     def forward(self, hidden_states: torch.FloatTensor | None) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 class CodeGenBlock(GradientCheckpointingLayer):
     def __init__(self, config, layer_idx=...) -> None: ...
@@ -53,6 +62,11 @@ class CodeGenBlock(GradientCheckpointingLayer):
         use_cache: bool | None = ...,
         output_attentions: bool | None = ...,
         cache_position: torch.LongTensor | None = ...,
+    ) -> (
+        tuple[torch.Tensor] | tuple[torch.Tensor, tuple[torch.FloatTensor, ...]] | None
+    ): ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> (
         tuple[torch.Tensor] | tuple[torch.Tensor, tuple[torch.FloatTensor, ...]] | None
     ): ...

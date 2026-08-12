@@ -25,7 +25,6 @@ class BasicTokenizer:
         ...
 
 class HerbertTokenizer(PreTrainedTokenizer):
-    vocab_files_names = ...
     def __init__(
         self,
         vocab_file,

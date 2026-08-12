@@ -387,7 +387,7 @@ def requires_backends(obj, backends):  # -> None:
 
 class DummyObject(type):
     is_dummy = ...
-    def __getattribute__(cls, key):  # -> Any | None:
+    def __getattribute__(cls, key):  # -> None:
         ...
 
 def is_torch_fx_proxy(x):  # -> bool:

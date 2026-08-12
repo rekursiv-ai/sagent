@@ -54,6 +54,7 @@ class BayesianWatermarkDetectorModelOutput(ModelOutput):
 class BayesianDetectorWatermarkedLikelihood(nn.Module):
     def __init__(self, watermarking_depth: int) -> None: ...
     def forward(self, g_values: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class BayesianDetectorModel(PreTrainedModel):
     config: BayesianDetectorConfig
@@ -66,6 +67,9 @@ class BayesianDetectorModel(PreTrainedModel):
         labels: torch.Tensor | None = ...,
         loss_batch_weight=...,
         return_dict=...,
+    ) -> BayesianWatermarkDetectorModelOutput: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> BayesianWatermarkDetectorModelOutput: ...
 
 class SynthIDTextWatermarkDetector:

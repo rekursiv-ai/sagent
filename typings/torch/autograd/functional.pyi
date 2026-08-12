@@ -1,3 +1,6 @@
+from torch import Tensor
+from typing import Any
+
 __all__ = ["hessian", "hvp", "jacobian", "jvp", "vhp", "vjp"]
 
 def vjp(

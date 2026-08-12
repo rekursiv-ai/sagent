@@ -4,7 +4,6 @@ from ...configuration_utils import PretrainedConfig
 logger = ...
 
 class SuperGlueConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         keypoint_detector_config: SuperPointConfig = ...,

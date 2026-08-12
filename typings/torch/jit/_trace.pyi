@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import LiteralString
 from collections.abc import Callable
 from enum import StrEnum
 from typing import Any, TypeVar
@@ -32,6 +34,9 @@ class ONNXTracedModule(torch.nn.Module):
     ) -> None: ...
     def forward(
         self, *args: torch.Tensor
+    ) -> tuple[Graph, Any, Any] | tuple[Graph, Any]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[Graph, Any, Any] | tuple[Graph, Any]: ...
 
 _JIT_TIME = ...

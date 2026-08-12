@@ -15,7 +15,6 @@ def remove_non_printing_char(text):  # -> LiteralString:
 def romanian_preprocessing(text): ...
 
 class XLMTokenizer(PreTrainedTokenizer):
-    vocab_files_names = ...
     def __init__(
         self,
         vocab_file,

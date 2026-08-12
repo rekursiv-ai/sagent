@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import Tensor
@@ -52,6 +53,9 @@ class DPREncoder(DPRPreTrainedModel):
         output_hidden_states: bool = ...,
         return_dict: bool = ...,
     ) -> BaseModelOutputWithPooling | tuple[Tensor, ...]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> BaseModelOutputWithPooling | tuple[Tensor, ...]: ...
     @property
     def embeddings_size(self) -> int: ...
 
@@ -66,6 +70,9 @@ class DPRSpanPredictor(DPRPreTrainedModel):
         output_attentions: bool = ...,
         output_hidden_states: bool = ...,
         return_dict: bool = ...,
+    ) -> DPRReaderOutput | tuple[Tensor, ...]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> DPRReaderOutput | tuple[Tensor, ...]: ...
 
 class DPRPretrainedContextEncoder(DPRPreTrainedModel):

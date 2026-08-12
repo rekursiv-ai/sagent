@@ -124,7 +124,7 @@ def _get_agent_class() -> type[_Agent]:
     the lookup until ``__call__`` time sidesteps the cycle; the class
     is guaranteed to be resolved by then.
     """
-    return agent_lib.Agent
+    return cast("type[_Agent]", agent_lib.Agent)
 
 
 def _build_directive_schema(allow_providers: tuple[str, ...]) -> JSON:

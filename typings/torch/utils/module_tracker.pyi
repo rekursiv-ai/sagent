@@ -1,3 +1,5 @@
+from typing import Self
+
 logger = ...
 __all__ = ["ModuleTracker"]
 

@@ -244,7 +244,6 @@ class FlaxWhisperPreTrainedModel(FlaxPreTrainedModel):
 class FlaxWhisperModel(FlaxWhisperPreTrainedModel):
     config: WhisperConfig
     dtype: jnp.dtype = ...
-    module_class = ...
 
 class FlaxWhisperForConditionalGenerationModule(nn.Module):
     config: WhisperConfig
@@ -270,7 +269,6 @@ class FlaxWhisperForConditionalGenerationModule(nn.Module):
     "The Whisper Model with a language modeling head.", WHISPER_START_DOCSTRING
 )
 class FlaxWhisperForConditionalGeneration(FlaxWhisperPreTrainedModel):
-    module_class = ...
     dtype: jnp.dtype = ...
     @add_start_docstrings(WHISPER_DECODE_INPUTS_DOCSTRING)
     @replace_return_docstrings(
@@ -338,7 +336,6 @@ class FlaxWhisperForAudioClassificationModule(nn.Module):
     WHISPER_START_DOCSTRING,
 )
 class FlaxWhisperForAudioClassification(FlaxWhisperPreTrainedModel):
-    module_class = ...
     dtype: jnp.dtype = ...
     def init_weights(
         self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...

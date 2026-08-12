@@ -6,7 +6,6 @@ from ...onnx import OnnxConfig
 """ALBERT model configuration"""
 
 class AlbertConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         vocab_size=...,

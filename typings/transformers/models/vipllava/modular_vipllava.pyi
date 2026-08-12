@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 from transformers.models.llava.modeling_llava import (
     LlavaCausalLMOutputWithPast,
@@ -74,6 +75,9 @@ class VipLlavaForConditionalGeneration(LlavaForConditionalGeneration):
         cache_position: torch.LongTensor | None = ...,
         logits_to_keep: int | torch.Tensor = ...,
         **lm_kwargs,
+    ) -> tuple | VipLlavaCausalLMOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | VipLlavaCausalLMOutputWithPast: ...
 
 __all__ = [

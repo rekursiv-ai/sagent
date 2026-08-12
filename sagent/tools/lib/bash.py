@@ -454,7 +454,7 @@ def _value_flags_for(exe: str) -> frozenset[str]:
             }
         ),
     }
-    return vocabulary.get(exe, frozenset())
+    return cast("frozenset[str]", vocabulary.get(exe, frozenset()))  # pyright: ignore[reportUnnecessaryCast] -- ty needs the cast; pyright resolves the type
 
 
 def _value_flag_letters(exe: str) -> frozenset[str]:

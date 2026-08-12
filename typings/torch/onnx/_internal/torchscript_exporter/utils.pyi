@@ -1,3 +1,5 @@
+from collections.abc import Generator
+from torch import Tensor
 from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import Any
 from typing_extensions import deprecated

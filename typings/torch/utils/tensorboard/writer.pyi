@@ -1,3 +1,4 @@
+from typing import Self
 from matplotlib.figure import Figure
 
 """Provide an API for writing protocol buffers to event files to be consumed by TensorBoard for visualization."""

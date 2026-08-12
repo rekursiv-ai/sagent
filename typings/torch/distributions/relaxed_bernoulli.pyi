@@ -1,3 +1,4 @@
+from typing import Self
 from torch import Tensor
 from torch.distributions.distribution import Distribution
 from torch.distributions.transformed_distribution import TransformedDistribution
@@ -9,8 +10,6 @@ import torch
 __all__ = ["LogitRelaxedBernoulli", "RelaxedBernoulli"]
 
 class LogitRelaxedBernoulli(Distribution):
-    arg_constraints = ...
-    support = ...
     def __init__(
         self,
         temperature: Tensor,
@@ -29,9 +28,6 @@ class LogitRelaxedBernoulli(Distribution):
     def log_prob(self, value) -> Tensor: ...
 
 class RelaxedBernoulli(TransformedDistribution):
-    arg_constraints = ...
-    support = ...
-    has_rsample = ...
     base_dist: LogitRelaxedBernoulli
     def __init__(
         self,

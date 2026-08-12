@@ -1,9 +1,7 @@
 from ...configuration_utils import PretrainedConfig
 
 class MoonshineConfig(PretrainedConfig):
-    model_type = ...
     keys_to_ignore_at_inference = ...
-    attribute_map = ...
     def __init__(
         self,
         vocab_size=...,

@@ -1,3 +1,5 @@
+from collections.abc import Callable
+from typing import Literal
 from typing import Any
 
 from torch._inductor.select_algorithm import SymbolicGridFn

@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 from transformers.cache_utils import Cache
 
@@ -38,6 +39,9 @@ class HunYuanDenseV1Attention(LlamaAttention):
         past_key_values: Cache | None = ...,
         cache_position: torch.LongTensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class HunYuanDenseV1DecoderLayer(LlamaDecoderLayer):

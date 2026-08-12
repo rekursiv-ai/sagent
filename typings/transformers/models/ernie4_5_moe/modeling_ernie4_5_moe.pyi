@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -76,6 +77,9 @@ class Ernie4_5_MoeSparseMoeBlock(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
         self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 class Ernie4_5_MoeDecoderLayer(GradientCheckpointingLayer):
