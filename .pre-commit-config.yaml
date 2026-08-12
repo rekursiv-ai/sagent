@@ -191,21 +191,34 @@ repos:
     rev: v0.16.0
     hooks:
       # Exclusions defined in pyproject.toml.
+      #
+      # `require_serial: true` on both: ruff is rayon-parallel internally, so
+      # pre-commit's own argv partitioning stacks cpu_count saturating processes
+      # on top of it. Cheap here (ruff is sub-second on the whole tree) but the
+      # same defect the `ty` and `basedpyright` hooks document.
       - id: ruff-check
         stages: [pre-commit]
+        require_serial: true
         types_or: [python, pyi, jupyter]
         args: [--fix]
       - id: ruff-format
         stages: [pre-commit]
+        require_serial: true
         types_or: [python, pyi, jupyter]
 
   - repo: local
     hooks:
       # No official ty pre-commit hook yet (https://github.com/astral-sh/ty/issues/269).
+      # `require_serial: true` for the same reason as `basedpyright` below: ty
+      # is rayon-parallel and saturates every core on its own (17 threads
+      # measured for one invocation on a 16-core box). Left concurrent,
+      # pre-commit partitions the argv into cpu_count chunks and runs them at
+      # once, multiplying that by 16.
       - id: ty
         name: ty check
         language: system
         stages: [pre-commit]
+        require_serial: true
         # Annoyingly there's no good choice.
         #   pass_filenames: true
         #     Pro: Only what you touch is checked.
@@ -217,6 +230,9 @@ repos:
         # pyproject.toml's ``[tool.ty.src]``.
         types_or: [python, pyi]
         entry: uv --quiet run --frozen --group pre-commit ty check
+        args:
+          - --output-format
+          - concise
         exclude: |
           (?x)^(
             typings/
@@ -276,10 +292,17 @@ repos:
       #
       # Set WORKERS in the environment to override on a host that measures
       # differently; the formula only runs when it is unset.
+      # `require_serial: true` because this hook already parallelizes itself.
+      # Without it pre-commit splits the argv into ~cpu_count partitions and runs
+      # them CONCURRENTLY, each an independent basedpyright with its own
+      # `--threads=$WORKERS` -- so a 500-file changeset launched 18 processes and
+      # ~96 Node workers on a 16-core box. $WORKERS is the intended cap; serial
+      # partitioning is what makes it one.
       - id: basedpyright
         name: basedpyright
         language: system
         stages: [pre-commit]
+        require_serial: true
         types_or: [python, pyi]
         entry: &worker-entry >-
           bash -c '
@@ -331,20 +354,36 @@ repos:
       # runs nothing and exits 0 -- a green here means "no paired test found", not
       # "tested". That is only acceptable because pre-push is the real gate.
       #
-      # Runs SERIAL, deliberately. The paired tests of one changeset are ~0.3s;
-      # xdist worker startup alone is seconds, so `-n` makes this hook several
-      # times slower for the tier whose entire value is being fast. It therefore
-      # does not use the `*worker-entry` wrapper -- but it is written so that it
-      # can: swap `entry`/`args` for the commented pair below to have $WORKERS
-      # sized by the same one formula, if a changeset ever gets big enough that
-      # startup cost is amortized.
+      # Parallelism is chosen from the changeset size, because neither setting
+      # wins everywhere. xdist costs a fixed ~5s of worker startup, and a
+      # sidecar file is ~0.23s serial vs ~0.10s spread over workers, so the two
+      # curves cross. Measured on tron (WORKERS=5), sidecar files -> wall:
+      #
+      #   files    8    12    16    20    60
+      #   serial  5.7s  7.6s  6.8s  12.4s 27.8s
+      #   -n5     8.1s  9.0s  7.5s   8.0s 16.3s
+      #
+      # Below ~16 serial wins by up to 40%; above ~20 xdist wins by 1.7x. The
+      # threshold sits at the crossover, one below the first size where -n won,
+      # so a typical few-file commit -- the case this fast tier exists for --
+      # never pays startup, and a sweeping refactor still gets the workers.
+      # SIDECAR_XDIST_MIN overrides it on a host that measures differently.
+      #
+      # `require_serial: true` is a separate axis and is always right here:
+      # it governs pre-commit's OWN argv partitioning, which forks cpu_count
+      # copies of this whole hook. That multiplies the startup cost the
+      # threshold above exists to avoid, and it stacks on any `-n` we choose --
+      # 60 files as 16 forked hooks burned 73s of CPU for 16.3s of wall, the
+      # same wall as one hook at -n5 for 36s. One hook, sized once.
       - id: pytest-sidecar
         name: pytest (sidecar tests)
         language: system
         stages: [pre-commit]
+        require_serial: true
         types: [python]
-        entry: >-
-          bash -c '
+        entry: *worker-entry
+        args:
+          - >-
             tests=();
             for f in "$@"; do
               dir=$(dirname "$f");
@@ -356,29 +395,10 @@ repos:
               done;
             done;
             [ ${#tests[@]} -eq 0 ] && exit 0;
-            printf "%s\n" "${tests[@]}" | sort -u |
-              xargs uv --quiet run --frozen --group pre-commit pytest -q --tb=short
-          ' bash
-        # Parallel variant. To enable, comment out the `entry` above and
-        # uncomment both keys below -- nothing else changes.
-        #
-        # entry: *worker-entry
-        # args:
-        #   - >-
-        #     tests=();
-        #     for f in "$@"; do
-        #       dir=$(dirname "$f");
-        #       stem=$(basename "$f" .py); stem=${stem%_test}; stem=${stem#test_};
-        #       for cand in "$dir/${stem}_test.py" "$dir/test_${stem}.py" \
-        #                   "tests/${dir#src/}/${stem}_test.py" \
-        #                   "tests/${dir#src/}/test_${stem}.py"; do
-        #         [ -f "$cand" ] && tests+=("$cand");
-        #       done;
-        #     done;
-        #     [ ${#tests[@]} -eq 0 ] && exit 0;
-        #     printf "%s\n" "${tests[@]}" | sort -u |
-        #       xargs uv --quiet run --frozen --group pre-commit
-        #       pytest -n="$WORKERS" -q --tb=short
+            mapfile -t tests < <(printf "%s\n" "${tests[@]}" | sort -u);
+            dist=();
+            ((${#tests[@]} >= ${SIDECAR_XDIST_MIN:-16})) && dist=(-n "$WORKERS");
+            exec uv --quiet run --frozen --group pre-commit pytest "${dist[@]}" -q --tb=short "${tests[@]}"
 
   # === Pre-Push Gates =========================================================
   # To enable:  uv run pre-commit install --hook-type pre-push
