@@ -350,7 +350,7 @@ class SelfHosted:
             load_kwargs["dtype"] = dtype
         config = cast(
             MutableJSON,
-            transformers_lib.AutoConfig.from_pretrained(  # pyright: ignore[reportUnknownMemberType] -- no stubs
+            transformers_lib.AutoConfig.from_pretrained(
                 model_id,
                 trust_remote_code=trust_remote_code,
             ).to_dict(),
@@ -369,7 +369,7 @@ class SelfHosted:
             load_kwargs["device_map"] = "auto"
         model = cast(
             "nn.Module",
-            transformers_lib.AutoModelForCausalLM.from_pretrained(  # pyright: ignore[reportUnknownMemberType] -- no stubs
+            transformers_lib.AutoModelForCausalLM.from_pretrained(
                 model_id,
                 **load_kwargs,
             ),
@@ -392,7 +392,7 @@ class SelfHosted:
             )
         tokenizer = cast(
             _Tokenizer,
-            transformers_lib.AutoTokenizer.from_pretrained(  # pyright: ignore[reportUnknownMemberType] -- no stubs
+            transformers_lib.AutoTokenizer.from_pretrained(
                 model_id,
                 trust_remote_code=trust_remote_code,
             ),

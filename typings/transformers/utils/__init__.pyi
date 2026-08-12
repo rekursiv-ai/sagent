@@ -1,5 +1,14 @@
 from functools import lru_cache
 
+from .doc import add_end_docstrings as add_end_docstrings
+from .generic import (
+    ExplicitEnum as ExplicitEnum,
+    PaddingStrategy as PaddingStrategy,
+    TensorType as TensorType,
+)
+from .hub import PushToHubMixin as PushToHubMixin
+from .import_utils import is_tokenizers_available as is_tokenizers_available
+
 WEIGHTS_NAME = ...
 WEIGHTS_INDEX_NAME = ...
 TF2_WEIGHTS_NAME = ...

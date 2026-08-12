@@ -54,6 +54,7 @@ from sagent.lib import debug_log, token_count
 from sagent.lib.custom_json import (
     MutableJSON,
     MutableJSONValue,
+    dict_val,
     int_val,
     json_unfreeze,
 )
@@ -891,7 +892,7 @@ async def consume_stream(
                 saw_done = True
                 break
             try:
-                event = cast(MutableJSON, json.loads(data_str))
+                event = dict_val(json.loads(data_str))
             except json.JSONDecodeError:
                 continue
             if not message_id:

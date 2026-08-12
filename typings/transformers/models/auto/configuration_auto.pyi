@@ -51,9 +51,10 @@ class AutoConfig:
     @classmethod
     @replace_list_option_in_docstrings()
     def from_pretrained(
-        cls, pretrained_model_name_or_path: str | os.PathLike[str], **kwargs
-    ):  # -> PretrainedConfig:
-        ...
+        cls,
+        pretrained_model_name_or_path: str | os.PathLike[str],
+        **kwargs: object,
+    ) -> PretrainedConfig: ...
     @staticmethod
     def register(model_type, config, exist_ok=...) -> None: ...
 

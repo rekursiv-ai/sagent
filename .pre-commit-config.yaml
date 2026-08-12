@@ -50,7 +50,8 @@
 #     uv --quiet run --frozen --group pre-commit pytest -k some_substring path/to/
 #     uv --quiet run --frozen --group pre-commit pytest -n 6 path/to/
 #
-#   Marker tiers mirror the pytest-global-slow / -ci-smoke / -integration hooks; the
+#   Marker tiers mirror the pytest-slow-global / -ci-smoke-global /
+#   -integration-global hooks; the
 #   default `-m` filter lives in pyproject addopts, so ask for them by name:
 #
 #     uv --quiet run --frozen --group pre-commit pytest -m slow path/to/
@@ -58,7 +59,7 @@
 #   Skipping. SKIP takes hook ids, comma-separated, and reports "Skipped":
 #
 #     SKIP=ruff-check uv --quiet run --frozen --group pre-commit pre-commit run --all-files
-#     SKIP=pytest-global,pytest-global-slow uv --quiet run --frozen --group pre-commit pre-commit run --hook-stage pre-push --all-files
+#     SKIP=pytest-global,pytest-slow-global uv --quiet run --frozen --group pre-commit pre-commit run --hook-stage pre-push --all-files
 #
 #   `git commit --no-verify` / `git push --no-verify` bypass every hook. Both
 #   are a last resort, not a way past a red gate -- the gates are house rules
@@ -547,7 +548,7 @@ repos:
         # \"vector\" is not available") -- that is a broken provision, not a
         # machine without a database, and should not be silently skipped.
         #
-        # Tolerate pytest exit 5: see the pytest-global-slow note above.
+        # Tolerate pytest exit 5: see the pytest-slow-global note above.
         entry: *worker-entry
         args:
           - >-
