@@ -15,7 +15,7 @@
 #     if: [ERROR] Cowardly refusing to install hooks with `core.hooksPath` set.
 #
 #   Stages. `default_stages: [pre-commit]` below means a bare `run` sees only
-#   the pre-commit hooks; the heavy ones (ty-global, basedpyright-global,
+#   the pre-commit hooks; the heavy ones (ty-check-global, basedpyright-global,
 #   pytest*) declare `stages: [pre-push]` and need it named explicitly:
 #
 #     uv --quiet run --frozen --group pre-commit pre-commit run --all-files
@@ -38,9 +38,9 @@
 #   longer exists; a path containing a space truncates at the space; and
 #   `--diff-filter=d` drops deletions, which are not files a hook can open.
 #
-#   One hook at a time, by id (`ruff-check`, `ty`, `pytest`, ...):
+#   One hook at a time, by id (`ruff-check`, `ty-check`, `pytest-global`, ...):
 #     uv --quiet run --frozen --group pre-commit pre-commit run ruff-check --all-files
-#     uv --quiet run --frozen --group pre-commit pre-commit run pytest --hook-stage pre-push
+#     uv --quiet run --frozen --group pre-commit pre-commit run pytest-global --hook-stage pre-push
 #
 #   Individual tests: the pytest hooks take no test selector, so call pytest
 #   directly.
@@ -50,7 +50,7 @@
 #     uv --quiet run --frozen --group pre-commit pytest -k some_substring path/to/
 #     uv --quiet run --frozen --group pre-commit pytest -n 6 path/to/
 #
-#   Marker tiers mirror the pytest-slow / -ci-smoke / -integration hooks; the
+#   Marker tiers mirror the pytest-global-slow / -ci-smoke / -integration hooks; the
 #   default `-m` filter lives in pyproject addopts, so ask for them by name:
 #
 #     uv --quiet run --frozen --group pre-commit pytest -m slow path/to/
@@ -58,7 +58,7 @@
 #   Skipping. SKIP takes hook ids, comma-separated, and reports "Skipped":
 #
 #     SKIP=ruff-check uv --quiet run --frozen --group pre-commit pre-commit run --all-files
-#     SKIP=pytest,pytest-slow uv --quiet run --frozen --group pre-commit pre-commit run --hook-stage pre-push --all-files
+#     SKIP=pytest-global,pytest-global-slow uv --quiet run --frozen --group pre-commit pre-commit run --hook-stage pre-push --all-files
 #
 #   `git commit --no-verify` / `git push --no-verify` bypass every hook. Both
 #   are a last resort, not a way past a red gate -- the gates are house rules
@@ -195,7 +195,7 @@ repos:
       # `require_serial: true` on both: ruff is rayon-parallel internally, so
       # pre-commit's own argv partitioning stacks cpu_count saturating processes
       # on top of it. Cheap here (ruff is sub-second on the whole tree) but the
-      # same defect the `ty` and `basedpyright` hooks document.
+      # same defect the `ty-check` and `basedpyright` hooks document.
       - id: ruff-check
         stages: [pre-commit]
         require_serial: true
@@ -214,8 +214,8 @@ repos:
       # measured for one invocation on a 16-core box). Left concurrent,
       # pre-commit partitions the argv into cpu_count chunks and runs them at
       # once, multiplying that by 16.
-      - id: ty
-        name: ty check
+      - id: ty-check
+        name: ty-check
         language: system
         stages: [pre-commit]
         require_serial: true
@@ -246,7 +246,7 @@ repos:
       #
       # The exclude list mirrors pyproject.toml's `[tool.basedpyright] exclude`
       # because passing filenames makes basedpyright ignore it -- the same
-      # duplication the `ty` hook above documents. Monorepo-only paths carry
+      # duplication the `ty-check` hook above documents. Monorepo-only paths carry
       #
       # This hook DEFINES the `&worker-entry` wrapper every $WORKERS-sizing hook
       # shares -- a YAML anchor must be declared before it is referenced, and
@@ -341,7 +341,7 @@ repos:
           )
 
       # Runs the test file that PAIRS with each changed source file -- nothing
-      # transitive. ~1s, versus 120s for the pre-push `pytest` hook's testmon walk.
+      # transitive. ~1s, versus 120s for the pre-push `pytest-global` hook's testmon walk.
       #
       # Deliberately not an affected-set analysis. Measured on this repo, the
       # reverse-import closure of a 42-file changeset is 2482 files / 1124 test
@@ -376,7 +376,7 @@ repos:
       # 60 files as 16 forked hooks burned 73s of CPU for 16.3s of wall, the
       # same wall as one hook at -n5 for 36s. One hook, sized once.
       - id: pytest-sidecar
-        name: pytest (sidecar tests)
+        name: pytest-sidecar
         language: system
         stages: [pre-commit]
         require_serial: true
@@ -412,8 +412,8 @@ repos:
 
   - repo: local
     hooks:
-      - id: ty-global
-        name: ty check global
+      - id: ty-check-global
+        name: ty-check-global
         language: system
         always_run: true
         pass_filenames: false
@@ -434,8 +434,8 @@ repos:
             uv --quiet run --frozen --group pre-commit
             basedpyright --threads="$WORKERS"
 
-      - id: pytest
-        name: pytest
+      - id: pytest-global
+        name: pytest-global
         language: system
         always_run: true
         pass_filenames: false
@@ -456,8 +456,8 @@ repos:
             exec env COVERAGE_CORE=ctrace uv --quiet run --frozen --group pre-commit
             pytest -n="$WORKERS" -q --tb=short --testmon-forceselect
 
-      - id: pytest-slow
-        name: pytest (slow)
+      - id: pytest-global-slow
+        name: pytest-global-slow
         language: system
         always_run: true
         pass_filenames: false
@@ -467,7 +467,7 @@ repos:
         # (only the testmon hook above needs it).
         #
         # Tolerate pytest exit 5 (no tests collected): a tree may ship no tests
-        # for this marker, which is not a failure. The strict `pytest` hook
+        # for this marker, which is not a failure. The strict `pytest-global` hook
         # above still fails on an empty collection, and
         # ops/github/marker_tiers_test.py fails any tier that goes empty
         # without being declared empty -- so tolerance here is not fail-open.
@@ -482,8 +482,8 @@ repos:
             -m "slow and not cluster and not cuda and not integration and not performance"
             || test "$?" = 5
 
-      - id: pytest-ci-smoke
-        name: pytest (ci_smoke)
+      - id: pytest-global-ci-smoke
+        name: pytest-global-ci-smoke
         language: system
         always_run: true
         pass_filenames: false
@@ -501,8 +501,8 @@ repos:
             pytest -n="$WORKERS" "${cov[@]}" -q --tb=short --durations=20
             -m ci_smoke || test "$?" = 5
 
-      - id: pytest-integration
-        name: pytest (integration)
+      - id: pytest-global-integration
+        name: pytest-global-integration
         language: system
         always_run: true
         pass_filenames: false
@@ -516,7 +516,7 @@ repos:
         # \"vector\" is not available") -- that is a broken provision, not a
         # machine without a database, and should not be silently skipped.
         #
-        # Tolerate pytest exit 5: see the pytest-slow note above.
+        # Tolerate pytest exit 5: see the pytest-global-slow note above.
         entry: *worker-entry
         args:
           - >-
