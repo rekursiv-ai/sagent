@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn, tensor
 
 import torch
@@ -35,6 +36,7 @@ class ErnieMEmbeddings(nn.Module):
         inputs_embeds: torch.LongTensor | None = ...,
         past_key_values_length: int = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class ErnieMSelfAttention(nn.Module):
     def __init__(self, config, position_embedding_type=...) -> None: ...
@@ -92,10 +94,14 @@ class ErnieMEncoder(nn.Module):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
 
 class ErnieMPooler(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class ErnieMPreTrainedModel(PreTrainedModel):
     config: ErnieMConfig

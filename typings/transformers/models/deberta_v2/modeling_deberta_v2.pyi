@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -80,10 +81,14 @@ class DebertaV2Attention(nn.Module):
         relative_pos=...,
         rel_embeddings=...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class DebertaV2Intermediate(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class DebertaV2Output(nn.Module):
     def __init__(self, config) -> None: ...
@@ -100,6 +105,9 @@ class DebertaV2Layer(GradientCheckpointingLayer):
         relative_pos=...,
         rel_embeddings=...,
         output_attentions: bool = ...,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class ConvLayer(nn.Module):
@@ -121,7 +129,7 @@ class DebertaV2Embeddings(nn.Module):
 
 class DebertaV2Encoder(nn.Module):
     def __init__(self, config) -> None: ...
-    def get_rel_embedding(self):  # -> Any | Tensor | None:
+    def get_rel_embedding(self):  # -> Tensor | None:
         ...
     def get_attention_mask(self, attention_mask): ...
     def get_rel_pos(

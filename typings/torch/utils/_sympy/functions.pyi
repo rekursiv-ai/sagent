@@ -1,3 +1,4 @@
+from typing import Self
 from typing import SupportsFloat, TypeVar
 from typing_extensions import TypeVarTuple
 

@@ -150,8 +150,7 @@ class FlaxGemmaModule(nn.Module):
     ...,
     GEMMA_START_DOCSTRING,
 )
-class FlaxGemmaModel(FlaxGemmaPreTrainedModel):
-    module_class = ...
+class FlaxGemmaModel(FlaxGemmaPreTrainedModel): ...
 
 class FlaxGemmaForCausalLMModule(nn.Module):
     config: GemmaConfig
@@ -176,7 +175,6 @@ class FlaxGemmaForCausalLMModule(nn.Module):
     GEMMA_START_DOCSTRING,
 )
 class FlaxGemmaForCausalLM(FlaxGemmaPreTrainedModel):
-    module_class = ...
     def prepare_inputs_for_generation(
         self, input_ids, max_length, attention_mask: jax.Array | None = ...
     ):  # -> dict[str, Any | Array]:

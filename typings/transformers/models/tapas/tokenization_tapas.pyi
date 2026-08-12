@@ -56,7 +56,6 @@ def whitespace_tokenize(text):  # -> list[Any]:
 TAPAS_ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING = ...
 
 class TapasTokenizer(PreTrainedTokenizer):
-    vocab_files_names = ...
     def __init__(
         self,
         vocab_file,

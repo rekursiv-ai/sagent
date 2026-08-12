@@ -10,7 +10,6 @@ from ...utils import TensorType
 logger = ...
 
 class LayoutLMv3Config(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         vocab_size=...,

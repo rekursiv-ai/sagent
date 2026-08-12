@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -80,6 +81,7 @@ class NllbMoeTop2Router(nn.Module):
         hidden_states: torch.Tensor,
         padding_mask: torch.LongTensor | None = ...,
     ) -> tuple: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple: ...
 
 class NllbMoeDenseActDense(nn.Module):
     def __init__(self, config: NllbMoeConfig, ffn_dim: int) -> None: ...
@@ -143,6 +145,7 @@ class NllbMoeEncoderLayer(GradientCheckpointingLayer):
         output_attentions: bool = ...,
         output_router_logits: bool = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class NllbMoeDecoderLayer(GradientCheckpointingLayer):
     def __init__(

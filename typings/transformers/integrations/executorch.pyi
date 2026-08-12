@@ -1,3 +1,4 @@
+from typing import Any
 from collections.abc import Callable
 
 import torch
@@ -43,6 +44,7 @@ class TorchExportableModuleForDecoderOnlyLM(torch.nn.Module):
         inputs_embeds: torch.Tensor | None = ...,
         cache_position: torch.Tensor | None = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
     def export(
         self,
         input_ids: torch.Tensor | None = ...,
@@ -100,6 +102,7 @@ class TorchExportableModuleWithHybridCache(torch.nn.Module):
         inputs_embeds: torch.Tensor | None = ...,
         cache_position: torch.Tensor | None = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 def convert_and_export_with_cache(
     model: PreTrainedModel,

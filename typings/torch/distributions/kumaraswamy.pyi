@@ -1,12 +1,10 @@
+from typing import Self
 from torch import Tensor
 from torch.distributions.transformed_distribution import TransformedDistribution
 
 __all__ = ["Kumaraswamy"]
 
 class Kumaraswamy(TransformedDistribution):
-    arg_constraints = ...
-    support = ...
-    has_rsample = ...
     def __init__(
         self,
         concentration1: Tensor | float,

@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 from torch.nn import LayerNorm as FusedLayerNorm
 
@@ -133,6 +134,9 @@ class JukeboxVQVAE(PreTrainedModel):
     def forward(
         self, raw_audio: torch.FloatTensor
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class JukeboxMLP(nn.Module):
     def __init__(self, config) -> None: ...
@@ -213,7 +217,7 @@ class JukeboxConditionalAutoregressive(nn.Module):
         get_preds=...,
         get_acts=...,
         get_sep_loss=...,
-    ):  # -> Any | tuple[tuple[Any, Any] | Any, Any] | tuple[tuple[Any, Any] | Any, None]:
+    ):  # -> tuple[tuple[Any, Any] | Any, Any] | tuple[tuple[Any, Any] | Any, None]:
         ...
     def get_emb(
         self, sample_t, n_samples, tokens, audio_conditioning, metadata_conditioning
@@ -291,7 +295,7 @@ class JukeboxPrior(PreTrainedModel):
         ...
     def prior_postprocess(self, tokens):  # -> Tensor:
         ...
-    def embed_tokens(self, music_tokens_conds):  # -> Any | None:
+    def embed_tokens(self, music_tokens_conds):  # -> None:
         ...
     def encode(self, hidden_states, start_level=..., end_level=..., bs_chunks=...): ...
     def decode(self, music_tokens, start_level=..., end_level=..., bs_chunks=...): ...
@@ -312,11 +316,9 @@ class JukeboxPrior(PreTrainedModel):
         sample_tokens=...,
     ):  # -> Tensor | tuple[Tensor, Tensor | Any | list[Any]]:
         ...
-    def get_encoder_states(self, lyric_tokens, sample=...):  # -> Any | None:
+    def get_encoder_states(self, lyric_tokens, sample=...):  # -> None:
         ...
-    def get_encoder_loss(
-        self, last_encoder_hidden_states, target_lyrics
-    ):  # -> Any | Tensor:
+    def get_encoder_loss(self, last_encoder_hidden_states, target_lyrics):  # -> Tensor:
         ...
     def forward_tokens(
         self,
@@ -334,6 +336,7 @@ class JukeboxPrior(PreTrainedModel):
         decode: bool | None = ...,
         get_preds: bool | None = ...,
     ) -> list[torch.Tensor]: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> list[torch.Tensor]: ...
 
 class JukeboxPreTrainedModel(PreTrainedModel):
     config: JukeboxConfig

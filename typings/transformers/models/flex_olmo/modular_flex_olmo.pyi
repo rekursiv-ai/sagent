@@ -1,3 +1,4 @@
+from typing import Any
 import torch
 
 from ..mixtral.modeling_mixtral import MixtralModel, MixtralPreTrainedModel
@@ -16,10 +17,7 @@ from ...utils import TransformersKwargs, auto_docstring
 from ...utils.generic import check_model_inputs
 
 class FlexOlmoConfig(OlmoeConfig):
-    model_type = ...
     keys_to_ignore_at_inference = ...
-    base_model_tp_plan = ...
-    base_model_pp_plan = ...
     def __init__(
         self,
         vocab_size=...,
@@ -67,6 +65,7 @@ class FlexOlmoDecoderLayer(OlmoeDecoderLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs,
     ) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 class FlexOlmoPreTrainedModel(MixtralPreTrainedModel): ...
 

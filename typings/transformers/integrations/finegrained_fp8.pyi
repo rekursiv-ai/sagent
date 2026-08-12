@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -30,7 +31,6 @@ def w8a8_block_fp8_matmul_compile(
 ) -> torch.Tensor: ...
 
 class FP8Linear(nn.Linear):
-    dtype = ...
     def __init__(
         self,
         in_features: int,
@@ -42,6 +42,7 @@ class FP8Linear(nn.Linear):
         activation_scheme=...,
     ) -> None: ...
     def forward(self, input: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 def replace_with_fp8_linear(
     model, modules_to_not_convert=..., quantization_config=...

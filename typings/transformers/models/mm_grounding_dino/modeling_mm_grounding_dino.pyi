@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import Tensor, nn
@@ -18,6 +19,7 @@ class MMGroundingDinoContrastiveEmbedding(nn.Module):
         text_hidden_state: torch.FloatTensor,
         text_token_mask: torch.BoolTensor,
     ) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 @use_kernel_forward_from_hub("MultiScaleDeformableAttention")
 class MultiScaleDeformableAttention(nn.Module):
@@ -73,6 +75,12 @@ class MMGroundingDinoBiMultiHeadAttention(nn.Module):
         tuple[torch.FloatTensor, torch.FloatTensor],
         tuple[torch.FloatTensor, torch.FloatTensor],
     ]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[
+        tuple[torch.FloatTensor, torch.FloatTensor],
+        tuple[torch.FloatTensor, torch.FloatTensor],
+    ]: ...
 
 def drop_path(
     input: torch.Tensor, drop_prob: float = ..., training: bool = ...
@@ -81,6 +89,7 @@ def drop_path(
 class MMGroundingDinoDropPath(nn.Module):
     def __init__(self, drop_prob: float | None = ...) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
     def extra_repr(self) -> str: ...
 
 class MMGroundingDinoFusionLayer(nn.Module):
@@ -91,6 +100,12 @@ class MMGroundingDinoFusionLayer(nn.Module):
         text_features: torch.FloatTensor,
         attention_mask_vision: torch.BoolTensor | None = ...,
         attention_mask_text: torch.BoolTensor | None = ...,
+    ) -> tuple[
+        tuple[torch.FloatTensor, torch.FloatTensor],
+        tuple[torch.FloatTensor, torch.FloatTensor],
+    ]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[
         tuple[torch.FloatTensor, torch.FloatTensor],
         tuple[torch.FloatTensor, torch.FloatTensor],
@@ -140,6 +155,7 @@ class MMGroundingDinoMultiheadAttention(nn.Module):
         attention_mask: torch.FloatTensor | None = ...,
         output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor]: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple[torch.Tensor]: ...
 
 class MMGroundingDinoTextEnhancerLayer(nn.Module):
     def __init__(self, config) -> None: ...
@@ -152,6 +168,9 @@ class MMGroundingDinoTextEnhancerLayer(nn.Module):
         hidden_states: torch.FloatTensor,
         attention_masks: torch.BoolTensor | None = ...,
         position_embeddings: torch.FloatTensor | None = ...,
+    ) -> tuple[torch.FloatTensor, torch.FloatTensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]: ...
 
 class MMGroundingDinoDeformableLayer(nn.Module):
@@ -338,7 +357,7 @@ class MMGroundingDinoModel(MMGroundingDinoPreTrainedModel):
         output_attentions=...,
         output_hidden_states=...,
         return_dict=...,
-    ):  # -> Any | MMGroundingDinoModelOutput:
+    ):  # -> MMGroundingDinoModelOutput:
         ...
 
 class MMGroundingDinoMLPPredictionHead(nn.Module):

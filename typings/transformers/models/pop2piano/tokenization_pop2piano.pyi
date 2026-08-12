@@ -22,8 +22,6 @@ def token_note_to_note(
 
 @requires(backends=("pretty_midi", "torch"))
 class Pop2PianoTokenizer(PreTrainedTokenizer):
-    model_input_names = ...
-    vocab_files_names = ...
     def __init__(
         self,
         vocab,

@@ -9,7 +9,6 @@ from ...onnx import OnnxConfig
 logger = ...
 
 class DebertaConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         vocab_size=...,

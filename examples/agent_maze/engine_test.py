@@ -6,6 +6,8 @@ and the event-log/clock invariants the replay + metrics depend on.
 
 from __future__ import annotations
 
+from typing import cast
+
 from examples.agent_maze.engine import PRESS_WINDOW, Engine
 from examples.agent_maze.world import make_spawn_level
 
@@ -14,7 +16,10 @@ def _engine() -> tuple[Engine, tuple[int, int], tuple[int, int]]:
     rows, _meta = make_spawn_level(num_locks=2, decoys=2)
     eng = Engine(rows, model="test")
     p = [pl for pl in eng.scene["plates"] if pl["lock"] == 0]
-    return eng, tuple(p[0]["xy"]), tuple(p[1]["xy"])
+    return cast(
+        "tuple[Engine, tuple[int, int], tuple[int, int]]",
+        (eng, tuple(p[0]["xy"]), tuple(p[1]["xy"])),
+    )
 
 
 def test_mutual_partner_press_opens_lock() -> None:

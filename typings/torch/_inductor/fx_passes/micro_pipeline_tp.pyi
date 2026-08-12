@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch.utils._ordered_set import OrderedSet

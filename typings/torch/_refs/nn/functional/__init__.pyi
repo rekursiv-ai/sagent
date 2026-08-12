@@ -79,7 +79,6 @@ def alpha_dropout(
     self: TensorLikeType, p: float = ..., training: bool = ..., inplace: bool = ...
 ) -> TensorLikeType: ...
 @register_decomposition(aten.celu)
-@_inplace_wrapper
 @out_wrapper()
 @elementwise_type_promotion_wrapper(
     type_promoting_args=("a",),
@@ -88,13 +87,11 @@ def alpha_dropout(
 def celu(
     a: TensorLikeType, alpha: NumberType | None = ..., inplace: bool = ...
 ) -> TensorLikeType: ...
-@_inplace_wrapper
 @out_wrapper()
 def dropout(
     a: TensorLikeType, p: float = ..., training: bool = ..., inplace: bool = ...
 ) -> TensorLikeType: ...
 @register_decomposition(aten.elu)
-@_inplace_wrapper
 @out_wrapper()
 @elementwise_type_promotion_wrapper(
     type_promoting_args=("a",),
@@ -108,7 +105,6 @@ def elu(
     inplace: bool = ...,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.relu)
-@_inplace_wrapper
 @out_wrapper()
 @elementwise_type_promotion_wrapper(
     type_promoting_args=("a",),
@@ -133,7 +129,6 @@ def layer_norm(
     eps: float = ...,
 ) -> Tensor: ...
 @register_decomposition(aten.leaky_relu)
-@_inplace_wrapper
 @out_wrapper()
 @elementwise_type_promotion_wrapper(
     type_promoting_args=("a",),
@@ -143,7 +138,6 @@ def leaky_relu(
     a: TensorLikeType, negative_slope: float = ..., inplace: bool = ...
 ) -> TensorLikeType: ...
 @register_decomposition(aten.mish)
-@_inplace_wrapper
 @out_wrapper()
 @elementwise_type_promotion_wrapper(
     type_promoting_args=("a",),
@@ -151,7 +145,6 @@ def leaky_relu(
 )
 def mish(a: TensorLikeType, inplace: bool = ...) -> TensorLikeType: ...
 @register_decomposition(aten.selu)
-@_inplace_wrapper
 @out_wrapper()
 @elementwise_type_promotion_wrapper(
     type_promoting_args=("a",),
@@ -171,7 +164,6 @@ def softmin(
     dtype: torch.dtype | None = ...,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.softplus)
-@_inplace_wrapper
 @out_wrapper()
 @elementwise_type_promotion_wrapper(
     type_promoting_args=("a",),
@@ -280,7 +272,6 @@ def huber_loss(
 )
 def tanhshrink(a: TensorLikeType) -> TensorLikeType: ...
 @register_decomposition(aten.threshold)
-@_inplace_wrapper
 @out_wrapper()
 @elementwise_type_promotion_wrapper(
     type_promoting_args=("a",),
@@ -302,7 +293,6 @@ def triplet_margin_loss(
     reduction: str = ...,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.hardtanh)
-@_inplace_wrapper
 @out_wrapper()
 @elementwise_unary_scalar_wrapper
 @elementwise_type_promotion_wrapper(
@@ -343,7 +333,6 @@ def poisson_nll_loss(
 )
 def prelu(a: TensorLikeType, weight: TensorLikeType) -> TensorLikeType: ...
 @register_decomposition(aten.relu6)
-@_inplace_wrapper
 @out_wrapper()
 def relu6(a: TensorLikeType, inplace: bool = ...) -> TensorLikeType: ...
 @register_decomposition(aten.glu)

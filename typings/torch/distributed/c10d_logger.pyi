@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import TypeVar
 from typing_extensions import ParamSpec
 
@@ -6,3 +7,8 @@ _DEFAULT_DESTINATION = ...
 _c10d_logger = ...
 _T = TypeVar("_T")
 _P = ParamSpec("_P")
+
+# Both wrap and return the function unchanged. Undeclared, they resolve to
+# Unknown and erase every collective in `distributed_c10d` they decorate.
+def _exception_logger(func: Callable[_P, _T]) -> Callable[_P, _T]: ...
+def _time_logger(func: Callable[_P, _T]) -> Callable[_P, _T]: ...

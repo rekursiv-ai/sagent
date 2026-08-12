@@ -1,3 +1,5 @@
+from typing import Any
+
 def format_time(time_us=..., time_ms=..., time_s=...) -> str: ...
 
 class ExecutionStats:

@@ -1,3 +1,4 @@
+from typing import Any, Literal
 from torch._inductor.codegen.rocm.ck_template import CKTemplate
 from torch._inductor.codegen.rocm.rocm_kernel import ROCmTemplateKernel
 from torch._inductor.ir import Buffer, Layout

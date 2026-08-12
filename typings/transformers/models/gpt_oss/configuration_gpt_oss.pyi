@@ -3,9 +3,6 @@ from ...configuration_utils import PretrainedConfig
 """openai model configuration"""
 
 class GptOssConfig(PretrainedConfig):
-    model_type = ...
-    base_model_pp_plan = ...
-    base_model_tp_plan = ...
     def __init__(
         self,
         num_hidden_layers: int = ...,

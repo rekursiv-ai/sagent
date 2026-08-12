@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -95,6 +96,7 @@ class MBartEncoderLayer(GradientCheckpointingLayer):
         layer_head_mask: torch.Tensor,
         output_attentions: bool = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class MBartDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: MBartConfig, layer_idx: int | None = ...) -> None: ...
@@ -118,6 +120,7 @@ class MBartClassificationHead(nn.Module):
         self, input_dim: int, inner_dim: int, num_classes: int, pooler_dropout: float
     ) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring
 class MBartPreTrainedModel(PreTrainedModel):
@@ -147,6 +150,7 @@ class MBartEncoder(MBartPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
     ) -> tuple | BaseModelOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | BaseModelOutput: ...
 
 class MBartDecoder(MBartPreTrainedModel):
     def __init__(
@@ -167,6 +171,9 @@ class MBartDecoder(MBartPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         cache_position: torch.Tensor | None = ...,
+    ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
 
 @auto_docstring

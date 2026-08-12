@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -61,6 +62,7 @@ class Qwen3MoeMLP(nn.Module):
 class Qwen3MoeSparseMoeBlock(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @use_kernel_forward_from_hub("RMSNorm")
 class Qwen3MoeRMSNorm(nn.Module):

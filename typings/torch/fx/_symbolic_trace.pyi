@@ -1,3 +1,6 @@
+from torch import Tensor
+from types import FunctionType
+from typing import Literal, Self
 from collections.abc import Callable
 from types import ModuleType
 from typing import Any, NamedTuple

@@ -1,9 +1,6 @@
 from ...configuration_utils import PretrainedConfig
 
 class EdgeTamVisionConfig(PretrainedConfig):
-    base_config_key = ...
-    model_type = ...
-    sub_configs = ...
     def __init__(
         self,
         backbone_config=...,
@@ -22,7 +19,6 @@ class EdgeTamVisionConfig(PretrainedConfig):
     ) -> None: ...
 
 class EdgeTamPromptEncoderConfig(PretrainedConfig):
-    base_config_key = ...
     def __init__(
         self,
         hidden_size=...,
@@ -37,7 +33,6 @@ class EdgeTamPromptEncoderConfig(PretrainedConfig):
     ) -> None: ...
 
 class EdgeTamMaskDecoderConfig(PretrainedConfig):
-    base_config_key = ...
     def __init__(
         self,
         hidden_size=...,
@@ -56,8 +51,6 @@ class EdgeTamMaskDecoderConfig(PretrainedConfig):
     ) -> None: ...
 
 class EdgeTamConfig(PretrainedConfig):
-    model_type = ...
-    sub_configs = ...
     def __init__(
         self,
         vision_config=...,

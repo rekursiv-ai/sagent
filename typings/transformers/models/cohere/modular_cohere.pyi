@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -92,5 +93,6 @@ class CohereForCausalLM(LlamaForCausalLM):
         logits_to_keep: int | torch.Tensor = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> CausalLMOutputWithPast: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> CausalLMOutputWithPast: ...
 
 __all__ = ["CohereForCausalLM", "CohereModel", "CoherePreTrainedModel"]

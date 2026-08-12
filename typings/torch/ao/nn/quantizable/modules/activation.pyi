@@ -1,3 +1,4 @@
+from typing import Any
 from torch import Tensor, nn
 
 import torch
@@ -39,3 +40,4 @@ class MultiheadAttention(nn.MultiheadAttention):
         average_attn_weights: bool = ...,
         is_causal: bool = ...,
     ) -> tuple[Tensor, Tensor | None]: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple[Tensor, Tensor | None]: ...

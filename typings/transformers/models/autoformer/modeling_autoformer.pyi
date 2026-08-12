@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -49,11 +50,15 @@ class AutoformerModelOutput(ModelOutput):
 class AutoformerFeatureEmbedder(nn.Module):
     def __init__(self, cardinalities: list[int], embedding_dims: list[int]) -> None: ...
     def forward(self, features: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class AutoformerStdScaler(nn.Module):
     def __init__(self, config: AutoformerConfig) -> None: ...
     def forward(
         self, data: torch.Tensor, observed_indicator: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 class AutoformerMeanScaler(nn.Module):
@@ -61,11 +66,17 @@ class AutoformerMeanScaler(nn.Module):
     def forward(
         self, data: torch.Tensor, observed_indicator: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 class AutoformerNOPScaler(nn.Module):
     def __init__(self, config: AutoformerConfig) -> None: ...
     def forward(
         self, data: torch.Tensor, observed_indicator: torch.Tensor | None = ...
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 def weighted_average(
@@ -134,6 +145,9 @@ class AutoformerEncoderLayer(GradientCheckpointingLayer):
         layer_head_mask: torch.FloatTensor,
         output_attentions: bool | None = ...,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
 
 class AutoformerDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: AutoformerConfig, layer_idx=...) -> None: ...
@@ -172,6 +186,7 @@ class AutoformerEncoder(AutoformerPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
     ) -> tuple | BaseModelOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | BaseModelOutput: ...
 
 class AutoformerDecoder(AutoformerPreTrainedModel):
     def __init__(self, config: AutoformerConfig) -> None: ...
@@ -190,6 +205,9 @@ class AutoformerDecoder(AutoformerPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         cache_position: torch.Tensor | None = ...,
+    ) -> tuple | AutoFormerDecoderOutput: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | AutoFormerDecoderOutput: ...
 
 @auto_docstring

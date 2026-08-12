@@ -1,3 +1,4 @@
+from typing import Any
 from transformers.models.instructblip.configuration_instructblip import (
     InstructBlipQFormerConfig,
     InstructBlipVisionConfig,
@@ -24,9 +25,6 @@ class InstructBlipVideoVisionConfig(InstructBlipVisionConfig): ...
 class InstructBlipVideoQFormerConfig(InstructBlipQFormerConfig): ...
 
 class InstructBlipVideoConfig(PretrainedConfig):
-    model_type = ...
-    attribute_map = ...
-    sub_configs = ...
     def __init__(
         self,
         vision_config=...,
@@ -71,6 +69,9 @@ class InstructBlipVideoModel(InstructBlipModel):
         use_cache: bool | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple | InstructBlipVideoForConditionalGenerationModelOutput: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple | InstructBlipVideoForConditionalGenerationModelOutput: ...
 
 class InstructBlipVideoForConditionalGeneration(InstructBlipForConditionalGeneration):
     def get_video_features(
@@ -112,6 +113,9 @@ class InstructBlipVideoForConditionalGeneration(InstructBlipForConditionalGenera
         interpolate_pos_encoding: bool = ...,
         use_cache: bool | None = ...,
         **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple | InstructBlipVideoForConditionalGenerationModelOutput: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | InstructBlipVideoForConditionalGenerationModelOutput: ...
     @torch.no_grad()
     def generate(

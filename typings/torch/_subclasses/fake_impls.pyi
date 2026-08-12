@@ -1,3 +1,5 @@
+from types import NotImplementedType
+from typing import Any, Literal
 from collections.abc import Callable
 
 import functools
@@ -115,7 +117,7 @@ def multi_device_op_default(fake_mode, func, *args, **kwargs) -> FakeTensor: ...
 def multi_device_op_out(fake_mode, func, *args, **kwargs) -> Any: ...
 @register_op_impl(aten.index_put.default)
 @register_op_impl(aten.index_put_.default)
-def index_put_impl(fake_mode, func, *args, **kwargs) -> Any | FakeTensor: ...
+def index_put_impl(fake_mode, func, *args, **kwargs) -> FakeTensor: ...
 @register_op_impl(aten._nested_tensor_from_tensor_list.default)
 @register_op_impl(aten._nested_tensor_from_tensor_list.out)
 @register_op_impl(aten._nested_view_from_buffer.default)

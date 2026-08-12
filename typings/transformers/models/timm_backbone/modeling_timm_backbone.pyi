@@ -1,3 +1,4 @@
+from typing import Any
 from torch import Tensor
 
 import torch
@@ -28,6 +29,9 @@ class TimmBackbone(PreTrainedModel, BackboneMixin):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         **kwargs,
+    ) -> BackboneOutput | tuple[Tensor, ...]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> BackboneOutput | tuple[Tensor, ...]: ...
 
 __all__ = ["TimmBackbone"]

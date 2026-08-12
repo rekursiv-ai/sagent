@@ -4,7 +4,6 @@ from ...configuration_utils import PretrainedConfig
 logger = ...
 
 class SamPromptEncoderConfig(PretrainedConfig):
-    base_config_key = ...
     def __init__(
         self,
         hidden_size=...,
@@ -18,7 +17,6 @@ class SamPromptEncoderConfig(PretrainedConfig):
     ) -> None: ...
 
 class SamMaskDecoderConfig(PretrainedConfig):
-    base_config_key = ...
     def __init__(
         self,
         hidden_size=...,
@@ -35,8 +33,6 @@ class SamMaskDecoderConfig(PretrainedConfig):
     ) -> None: ...
 
 class SamVisionConfig(PretrainedConfig):
-    base_config_key = ...
-    model_type = ...
     def __init__(
         self,
         hidden_size=...,
@@ -62,8 +58,6 @@ class SamVisionConfig(PretrainedConfig):
     ) -> None: ...
 
 class SamConfig(PretrainedConfig):
-    model_type = ...
-    sub_configs = ...
     def __init__(
         self,
         vision_config=...,

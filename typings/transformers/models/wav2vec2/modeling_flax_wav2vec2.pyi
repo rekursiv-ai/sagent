@@ -232,8 +232,7 @@ class FlaxWav2Vec2Module(nn.Module):
     ...,
     WAV2VEC2_START_DOCSTRING,
 )
-class FlaxWav2Vec2Model(FlaxWav2Vec2PreTrainedModel):
-    module_class = ...
+class FlaxWav2Vec2Model(FlaxWav2Vec2PreTrainedModel): ...
 
 FLAX_WAV2VEC2_MODEL_DOCSTRING = ...
 
@@ -259,8 +258,7 @@ class FlaxWav2Vec2ForCTCModule(nn.Module):
     ...,
     WAV2VEC2_START_DOCSTRING,
 )
-class FlaxWav2Vec2ForCTC(FlaxWav2Vec2PreTrainedModel):
-    module_class = ...
+class FlaxWav2Vec2ForCTC(FlaxWav2Vec2PreTrainedModel): ...
 
 FLAX_WAV2VEC2_FOR_CTC_DOCSTRING = ...
 
@@ -288,7 +286,6 @@ class FlaxWav2Vec2ForPreTrainingModule(nn.Module):
     WAV2VEC2_START_DOCSTRING,
 )
 class FlaxWav2Vec2ForPreTraining(FlaxWav2Vec2PreTrainedModel):
-    module_class = ...
     @add_start_docstrings_to_model_forward(WAV2VEC2_INPUTS_DOCSTRING)
     def __call__(
         self,

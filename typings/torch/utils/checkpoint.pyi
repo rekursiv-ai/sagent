@@ -1,3 +1,6 @@
+from collections.abc import Callable, Generator, Iterable
+from torch import Tensor
+from typing import Any, TypeVar
 from typing import *
 from weakref import ReferenceType
 

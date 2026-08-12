@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 from transformers.utils.generic import check_model_inputs
 
@@ -29,6 +30,7 @@ class MixtralBlockSparseTop2MLP(nn.Module):
 class MixtralSparseMoeBlock(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @use_kernel_forward_from_hub("RMSNorm")
 class MixtralRMSNorm(nn.Module):

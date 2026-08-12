@@ -1,3 +1,4 @@
+from typing import Any
 from transformers.models.ijepa.configuration_ijepa import IJepaConfig
 
 import torch
@@ -23,6 +24,7 @@ class IJepaEmbeddings(ViTEmbeddings):
         bool_masked_pos: torch.BoolTensor | None = ...,
         interpolate_pos_encoding: bool = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring
 class IJepaPreTrainedModel(ViTPreTrainedModel): ...
@@ -46,5 +48,6 @@ class IJepaForImageClassification(IJepaPreTrainedModel, ViTForImageClassificatio
         interpolate_pos_encoding: bool | None = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> ImageClassifierOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> ImageClassifierOutput: ...
 
 __all__ = ["IJepaForImageClassification", "IJepaModel", "IJepaPreTrainedModel"]

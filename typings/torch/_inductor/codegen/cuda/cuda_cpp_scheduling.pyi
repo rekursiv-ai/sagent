@@ -1,3 +1,4 @@
+from typing import Any
 from collections.abc import Sequence
 
 from torch.utils._ordered_set import OrderedSet

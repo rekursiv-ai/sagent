@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 from transformers.models.arcee.modeling_arcee import ArceeMLP
 from transformers.models.dinov2.modeling_dinov2 import (
@@ -26,6 +27,7 @@ class DINOv3ViTEmbeddings(nn.Module):
     def forward(
         self, pixel_values: torch.Tensor, bool_masked_pos: torch.Tensor | None = ...
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @compile_compatible_method_lru_cache(maxsize=32)
 def get_patches_center_coordinates(
@@ -44,6 +46,9 @@ class DINOv3ViTRopePositionEmbedding(nn.Module):
     def forward(
         self, pixel_values: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 def apply_rotary_pos_emb(
     q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, **kwargs
@@ -57,6 +62,9 @@ class DINOv3ViTAttention(PixtralAttention):
         attention_mask: torch.Tensor | None = ...,
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class DINOv3ViTLayerScale(Dinov2LayerScale): ...
@@ -72,6 +80,7 @@ class DINOv3ViTLayer(GradientCheckpointingLayer):
         attention_mask: torch.Tensor | None = ...,
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring
 class DINOv3ViTPreTrainedModel(Dinov2PreTrainedModel):

@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -94,6 +95,7 @@ class InformerEncoder(TimeSeriesTransformerEncoder):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
     ) -> tuple | BaseModelOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | BaseModelOutput: ...
 
 class InformerDecoder(TimeSeriesTransformerDecoder):
     def __init__(self, config: InformerConfig) -> None: ...

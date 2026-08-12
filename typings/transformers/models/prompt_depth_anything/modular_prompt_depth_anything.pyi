@@ -17,8 +17,7 @@ from ...modeling_outputs import DepthEstimatorOutput
 from ...modeling_utils import PreTrainedModel
 from ...utils import auto_docstring
 
-class PromptDepthAnythingConfig(DepthAnythingConfig):
-    model_type = ...
+class PromptDepthAnythingConfig(DepthAnythingConfig): ...
 
 class PromptDepthAnythingLayer(nn.Module):
     def __init__(self, config: PromptDepthAnythingConfig) -> None: ...

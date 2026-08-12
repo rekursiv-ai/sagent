@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -76,12 +77,14 @@ class TvpAttention(nn.Module):
 class TvpIntermediate(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class TvpOutputLayer(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
         self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class TvpEncodeLayer(GradientCheckpointingLayer):
     def __init__(self, config) -> None: ...
@@ -110,6 +113,7 @@ class TvpEncoder(nn.Module):
 class TvpPooler(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring
 class TvpPreTrainedModel(PreTrainedModel):
@@ -148,7 +152,7 @@ class TvpModel(TvpPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         interpolate_pos_encoding: bool = ...,
-    ):  # -> Any | BaseModelOutputWithPooling:
+    ):  # -> BaseModelOutputWithPooling:
         ...
 
 class TvpVideoGroundingHead(nn.Module):
@@ -171,7 +175,7 @@ class TvpForVideoGrounding(TvpPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         interpolate_pos_encoding: bool = ...,
-    ):  # -> Any | TvpVideoGroundingOutput:
+    ):  # -> TvpVideoGroundingOutput:
         ...
 
 __all__ = ["TvpForVideoGrounding", "TvpModel", "TvpPreTrainedModel"]

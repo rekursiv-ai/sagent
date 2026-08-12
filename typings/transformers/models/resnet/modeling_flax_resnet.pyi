@@ -183,8 +183,7 @@ class FlaxResNetModule(nn.Module):
     ...,
     RESNET_START_DOCSTRING,
 )
-class FlaxResNetModel(FlaxResNetPreTrainedModel):
-    module_class = ...
+class FlaxResNetModel(FlaxResNetPreTrainedModel): ...
 
 FLAX_VISION_MODEL_DOCSTRING = ...
 
@@ -213,8 +212,7 @@ class FlaxResNetForImageClassificationModule(nn.Module):
     ...,
     RESNET_START_DOCSTRING,
 )
-class FlaxResNetForImageClassification(FlaxResNetPreTrainedModel):
-    module_class = ...
+class FlaxResNetForImageClassification(FlaxResNetPreTrainedModel): ...
 
 FLAX_VISION_CLASSIF_DOCSTRING = ...
 __all__ = [

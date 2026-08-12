@@ -137,7 +137,7 @@ def _split_id_bundle(
     # whole (returned as one id) rather than mangled.
     tokens = [t.strip() for t in re.split(r"[,\n]+", s) if t.strip()]
     if len(tokens) > 1 and all(looks_like_id(t) for t in tokens):
-        return tokens
+        return cast("list[str]", tokens)
     return [raw]
 
 

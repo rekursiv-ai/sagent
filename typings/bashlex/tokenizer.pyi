@@ -1,3 +1,5 @@
+from collections.abc import Generator
+from typing import Any, Literal, LiteralString, Self
 import enum
 
 from bashlex import errors, flags

@@ -1,3 +1,5 @@
+from types import NotImplementedType
+from typing import Literal
 from collections.abc import (
     Callable as Callable,
     Iterable as Iterable,
@@ -334,50 +336,28 @@ def handle_noncontiguous_outputs(input_tlist, output): ...
 
 infer_aten_op = ...
 
-@_make_elementwise_unary_reference(
-    ELEMENTWISE_TYPE_PROMOTION_KIND.COMPLEX_TO_FLOAT, exact_dtype=True
-)
 def abs(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def acos(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def acosh(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def asin(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def asinh(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def atan(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def atanh(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT)
 def bitwise_not(a) -> Any: ...
-@_make_elementwise_unary_reference(
-    ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT, exact_dtype=True
-)
 def ceil(a) -> Any: ...
 @register_decomposition(aten.is_complex)
 def is_complex(input: TensorLikeType) -> bool: ...
 @register_decomposition(aten.conj_physical)
 @out_wrapper()
 def conj_physical(input: TensorLikeType) -> TensorLikeType | Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def cos(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def cosh(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def digamma(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def erf(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def erfinv(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def erfc(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def exp(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def expm1(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def exp2(a) -> Any: ...
 @out_wrapper()
 @elementwise_type_promotion_wrapper(
@@ -389,51 +369,23 @@ def fill_(a: TensorLikeType, value: NumberType) -> TensorLikeType: ...
 @register_decomposition(aten.zero)
 @out_wrapper()
 def zero(input: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_unary_reference(
-    ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT, exact_dtype=True
-)
 def floor(a) -> Any: ...
-@_make_elementwise_unary_reference(
-    ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT, exact_dtype=True
-)
 def frac(x: TensorLikeType) -> TensorLikeType: ...
 def imag(a: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_unary_reference(
-    ELEMENTWISE_TYPE_PROMOTION_KIND.ALWAYS_BOOL, aten_op=None
-)
 def isfinite(a: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.ALWAYS_BOOL)
 def isinf(a: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_unary_reference(
-    ELEMENTWISE_TYPE_PROMOTION_KIND.ALWAYS_BOOL, exact_dtype=True
-)
 def isposinf(a: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_unary_reference(
-    ELEMENTWISE_TYPE_PROMOTION_KIND.ALWAYS_BOOL, exact_dtype=True
-)
 def isneginf(a: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.ALWAYS_BOOL)
 def isnan(a: TensorLikeType) -> TensorLikeType: ...
 
 mvlgamma = ...
 
-@_make_elementwise_unary_reference(
-    ELEMENTWISE_TYPE_PROMOTION_KIND.ALWAYS_BOOL, aten_op=None
-)
 def isreal(a: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_unary_reference(
-    ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT, aten_op=aten.i0
-)
 def i0(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def lgamma(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def log(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def log1p(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def log2(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def log10(a) -> Any: ...
 @out_wrapper()
 def log_softmax(
@@ -456,13 +408,9 @@ def nan_to_num(
     posinf: NumberType | None = ...,
     neginf: NumberType | None = ...,
 ) -> TensorLikeType: ...
-@_make_elementwise_unary_reference(
-    ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT, extra_meta=_neg_meta
-)
 def neg(a) -> Any: ...
 def positive(a: TensorLikeType) -> TensorLikeType: ...
 def real(a: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def reciprocal(a) -> Any: ...
 @register_decomposition(aten.round)
 @out_wrapper()
@@ -471,41 +419,18 @@ def reciprocal(a) -> Any: ...
     type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
 )
 def round(a: TensorLikeType, *, decimals: int = ...) -> TensorLikeType: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def rsqrt(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def sigmoid(a: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_unary_reference(
-    ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT, exact_dtype=True
-)
 def sgn(a) -> Tensor: ...
-@_make_elementwise_unary_reference(
-    ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT, exact_dtype=True
-)
 def sign(a) -> Any: ...
-@_make_elementwise_unary_reference(
-    ELEMENTWISE_TYPE_PROMOTION_KIND.ALWAYS_BOOL, exact_dtype=True
-)
 def signbit(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def sin(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def sinc(a) -> Tensor: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def sinh(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def sqrt(a) -> Any: ...
-@_make_elementwise_unary_reference(
-    ELEMENTWISE_TYPE_PROMOTION_KIND.BOOL_TO_LONG, aten_op=None
-)
 def square(a: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def tan(a) -> Any: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def tanh(a) -> Any: ...
-@_make_elementwise_unary_reference(
-    ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT, exact_dtype=True
-)
 def trunc(a) -> Any: ...
 def view_as_complex(self: TensorLikeType) -> TensorLikeType: ...
 @register_decomposition(aten.add)
@@ -520,36 +445,12 @@ def add(
     *,
     alpha: NumberType | None = ...,
 ) -> Any: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT,
-    supports_lhs_python_scalar=False,
-    supports_rhs_python_scalar=False,
-)
 def atan2(a, b) -> Any: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT
-)
 def bitwise_and(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT
-)
 def bitwise_left_shift(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT
-)
 def bitwise_or(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT
-)
 def bitwise_right_shift(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT
-)
 def bitwise_xor(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT,
-    supports_lhs_python_scalar=False,
-)
 def copysign(a: TensorLikeType | NumberType, b: TensorLikeType | NumberType): ...
 @register_decomposition(aten.div)
 @out_wrapper()
@@ -559,14 +460,7 @@ def div(
     *,
     rounding_mode: str | None = ...,
 ) -> TensorLikeType | Any | None: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.ALWAYS_BOOL,
-    supports_lhs_python_scalar=False,
-)
 def eq(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.BOOL_TO_LONG
-)
 def pow(
     a: TensorLikeType | NumberType, b: TensorLikeType | NumberType
 ) -> TensorLikeType: ...
@@ -574,74 +468,21 @@ def pow(
 def float_power(
     a: TensorLikeType | NumberType, b: TensorLikeType | NumberType
 ) -> Tensor: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=utils.ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
-    supports_two_python_scalars=True,
-    should_register_decomposition=False,
-)
 def floor_divide(
     a: TensorLikeType | NumberType, b: TensorLikeType | NumberType
 ) -> Tensor | None: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
-    supports_lhs_python_scalar=False,
-    supports_rhs_python_scalar=False,
-)
 def fmax(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
-    supports_lhs_python_scalar=False,
-    supports_rhs_python_scalar=False,
-)
 def fmin(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
-    supports_lhs_python_scalar=False,
-    supports_rhs_python_scalar=True,
-)
 def fmod(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
 @register_decomposition(aten.frexp)
 @out_wrapper("mantissa", "exponent")
 def frexp(self: TensorLikeType) -> tuple[TensorLikeType, TensorLikeType]: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
-    supports_lhs_python_scalar=False,
-    supports_rhs_python_scalar=False,
-)
 def gcd(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.ALWAYS_BOOL,
-    supports_lhs_python_scalar=False,
-)
 def ge(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.ALWAYS_BOOL,
-    supports_lhs_python_scalar=False,
-)
 def gt(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
-    supports_lhs_python_scalar=False,
-    supports_rhs_python_scalar=False,
-)
 def heaviside(input: TensorLikeType, values: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
-    supports_lhs_python_scalar=False,
-    supports_rhs_python_scalar=False,
-)
 def hypot(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT,
-    supports_lhs_python_scalar=False,
-    supports_rhs_python_scalar=False,
-)
 def igamma(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT,
-    supports_lhs_python_scalar=False,
-    supports_rhs_python_scalar=False,
-)
 def igammac(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
 def isclose(
     a: TensorLikeType,
@@ -650,75 +491,20 @@ def isclose(
     atol: float = ...,
     equal_nan: bool = ...,
 ) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
-    supports_lhs_python_scalar=False,
-    supports_rhs_python_scalar=False,
-)
 def lcm(a: TensorLikeType, b: TensorLikeType) -> Tensor | Any: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.ALWAYS_BOOL,
-    supports_lhs_python_scalar=False,
-)
 def le(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
-    supports_lhs_python_scalar=False,
-    supports_rhs_python_scalar=False,
-)
 def logaddexp(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
-    supports_lhs_python_scalar=False,
-    supports_rhs_python_scalar=False,
-)
 def logaddexp2(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.ALWAYS_BOOL
-)
 def logical_and(a: TensorLikeType, b: TensorLikeType) -> Tensor: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.ALWAYS_BOOL)
 def logical_not(a: TensorLikeType) -> Tensor: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.ALWAYS_BOOL
-)
 def logical_or(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.ALWAYS_BOOL
-)
 def logical_xor(a: TensorLikeType, b: TensorLikeType) -> Tensor: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.ALWAYS_BOOL,
-    supports_lhs_python_scalar=False,
-)
 def lt(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT
-)
 def maximum(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT
-)
 def minimum(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
-    supports_two_python_scalars=True,
-)
 def mul(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.ALWAYS_BOOL,
-    supports_lhs_python_scalar=False,
-)
 def ne(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.NO_OPMATH,
-    supports_lhs_python_scalar=False,
-    supports_rhs_python_scalar=False,
-)
 def nextafter(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT
-)
 def remainder(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
 @register_decomposition(aten.rsub)
 @out_wrapper()
@@ -739,12 +525,6 @@ def sub(
     *,
     alpha: NumberType = ...,
 ) -> Any: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT,
-    name="true_divide",
-    aten_op=None,
-    supports_two_python_scalars=True,
-)
 def true_divide(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
 @register_decomposition(aten.xlogy)
 @out_wrapper()
@@ -753,11 +533,6 @@ def true_divide(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
     type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT,
 )
 def xlogy(a: TensorLikeType | NumberType, b: TensorLikeType | NumberType) -> Tensor: ...
-@_make_elementwise_binary_reference(
-    type_promotion_kind=utils.ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
-    aten_op=None,
-    supports_two_python_scalars=True,
-)
 def trunc_divide(
     a: TensorLikeType | NumberType, b: TensorLikeType | NumberType
 ) -> Any: ...
@@ -1586,16 +1361,13 @@ def normal(
 ) -> Any: ...
 @register_decomposition(aten.normal_)
 def normal_(self, mean=..., std=..., *, generator=...): ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def rad2deg(self: TensorLikeType) -> Tensor: ...
-@_make_elementwise_unary_reference(ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT)
 def deg2rad(self: TensorLikeType) -> Tensor: ...
 @register_decomposition(aten.count_nonzero)
 @out_wrapper()
 def count_nonzero(self, dim: DimsType | None = ...): ...
 @register_decomposition(aten.dot)
 @out_wrapper(exact_dtype=True)
-@_dot_check_wrapper
 @elementwise_type_promotion_wrapper(
     type_promoting_args=("self", "other"),
     type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
@@ -1603,7 +1375,6 @@ def count_nonzero(self, dim: DimsType | None = ...): ...
 def dot(self, other) -> Tensor: ...
 @register_decomposition(aten.vdot)
 @out_wrapper(exact_dtype=True)
-@_dot_check_wrapper
 @elementwise_type_promotion_wrapper(
     type_promoting_args=("self", "other"),
     type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,

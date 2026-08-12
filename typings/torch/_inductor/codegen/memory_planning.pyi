@@ -1,3 +1,4 @@
+from typing import Literal, Self
 from collections.abc import Iterable
 from typing import Any, Protocol
 

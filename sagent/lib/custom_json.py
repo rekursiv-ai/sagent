@@ -79,7 +79,8 @@ def json_freeze(obj: object) -> JSONValue:
         d = cast(Mapping[str, object], obj)
         return MappingProxyType({k: json_freeze(v) for k, v in d.items()})
     if isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray)):
-        return tuple(json_freeze(v) for v in obj)
+        items = cast(Sequence[object], obj)  # pyright: ignore[reportUnnecessaryCast] -- ty needs the cast; pyright resolves the type
+        return tuple(json_freeze(v) for v in items)
     return cast(JSONValue, obj)
 
 
@@ -607,7 +608,7 @@ def _matching_scalar_member(annotation: object, value: object) -> type | None:
     if not (isinstance(ann, UnionType) or get_origin(ann) is UnionType):
         return None
     args = get_args(ann)
-    specials = [m for m in args if _is_special_scalar(m)]
+    specials: list[type] = [m for m in args if _is_special_scalar(m)]
     if len(specials) < 2 or len(specials) != len(args):
         return None
     for m in specials:

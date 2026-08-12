@@ -7,7 +7,6 @@ from ...onnx import OnnxConfig
 logger = ...
 
 class MobileBertConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         vocab_size=...,

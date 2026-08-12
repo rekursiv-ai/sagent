@@ -250,7 +250,6 @@ class FlaxPegasusPreTrainedModel(FlaxPreTrainedModel):
 class FlaxPegasusModel(FlaxPegasusPreTrainedModel):
     config: PegasusConfig
     dtype: jnp.dtype = ...
-    module_class = ...
 
 class FlaxPegasusForConditionalGenerationModule(nn.Module):
     config: PegasusConfig
@@ -278,7 +277,6 @@ class FlaxPegasusForConditionalGenerationModule(nn.Module):
     PEGASUS_START_DOCSTRING,
 )
 class FlaxPegasusForConditionalGeneration(FlaxPegasusPreTrainedModel):
-    module_class = ...
     dtype: jnp.dtype = ...
     @add_start_docstrings(PEGASUS_DECODE_INPUTS_DOCSTRING)
     @replace_return_docstrings(

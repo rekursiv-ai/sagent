@@ -1,3 +1,4 @@
+from typing import Any
 from contextlib import contextmanager
 
 from torch import nn
@@ -23,6 +24,7 @@ class Mxfp4GptOssExperts(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, routing_data, gather_idx, scatter_idx
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 def routing_torch_dist(logits, n_expts_act):  # -> tuple[Any, Any, Any]:
     ...

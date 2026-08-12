@@ -1,3 +1,4 @@
+from typing import Any
 from collections.abc import Callable
 
 _blocklisted_modules = ...

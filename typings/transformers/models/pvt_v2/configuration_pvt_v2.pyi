@@ -7,7 +7,6 @@ from ...utils.backbone_utils import BackboneConfigMixin
 logger = ...
 
 class PvtV2Config(BackboneConfigMixin, PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         image_size: int | tuple[int, int] = ...,

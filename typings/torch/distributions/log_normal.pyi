@@ -1,3 +1,4 @@
+from typing import Self
 from torch import Tensor
 from torch.distributions.normal import Normal
 from torch.distributions.transformed_distribution import TransformedDistribution
@@ -5,9 +6,6 @@ from torch.distributions.transformed_distribution import TransformedDistribution
 __all__ = ["LogNormal"]
 
 class LogNormal(TransformedDistribution):
-    arg_constraints = ...
-    support = ...
-    has_rsample = ...
     base_dist: Normal
     def __init__(
         self,

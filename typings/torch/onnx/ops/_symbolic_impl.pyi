@@ -50,7 +50,6 @@ class EncodedAttrs:
         self,
     ) -> dict[str, int | float | str | list[int] | list[float] | list[str]]: ...
 
-@_symbolic.register_fake
 def _(
     inputs: Sequence[torch.Tensor],
     op_type: str,
@@ -68,7 +67,6 @@ def _(
     domain: str = ...,
     version: int | None = ...,
 ) -> torch.Tensor: ...
-@_symbolic_multi_out.register_fake
 def _(
     inputs: Sequence[torch.Tensor],
     op_type: str,

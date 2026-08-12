@@ -4,7 +4,6 @@ from ...configuration_utils import PretrainedConfig
 logger = ...
 
 class SeamlessM4TConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         vocab_size=...,

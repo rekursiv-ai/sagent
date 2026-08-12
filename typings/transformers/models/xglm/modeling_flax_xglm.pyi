@@ -129,8 +129,7 @@ class FlaxXGLMPreTrainedModel(FlaxPreTrainedModel):
     ...,
     XGLM_START_DOCSTRING,
 )
-class FlaxXGLMModel(FlaxXGLMPreTrainedModel):
-    module_class = ...
+class FlaxXGLMModel(FlaxXGLMPreTrainedModel): ...
 
 class FlaxXGLMForCausalLMModule(nn.Module):
     config: XGLMConfig
@@ -157,7 +156,6 @@ class FlaxXGLMForCausalLMModule(nn.Module):
     XGLM_START_DOCSTRING,
 )
 class FlaxXGLMForCausalLM(FlaxXGLMPreTrainedModel):
-    module_class = ...
     def prepare_inputs_for_generation(
         self, input_ids, max_length, attention_mask: jax.Array | None = ...
     ):  # -> dict[str, Any | Array]:

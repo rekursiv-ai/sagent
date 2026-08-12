@@ -1,3 +1,4 @@
+from typing import Any
 from typing import TypedDict
 
 from mamba_ssm.ops.triton.selective_state_update import selective_state_update
@@ -158,6 +159,7 @@ class BambaForCausalLM(LlamaForCausalLM):
         logits_to_keep: int | torch.Tensor = ...,
         **kwargs,
     ) -> CausalLMOutputWithPast: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> CausalLMOutputWithPast: ...
     def prepare_inputs_for_generation(
         self,
         input_ids,

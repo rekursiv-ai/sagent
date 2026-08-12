@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -56,6 +57,9 @@ class Wav2Vec2BertSelfAttention(Wav2Vec2ConformerSelfAttention, nn.Module):
         attention_mask: torch.Tensor | None = ...,
         relative_position_embeddings: torch.Tensor | None = ...,
         output_attentions: bool = ...,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class Wav2Vec2BertEncoderLayer(GradientCheckpointingLayer):
@@ -120,6 +124,9 @@ class Wav2Vec2BertModel(Wav2Vec2Model, Wav2Vec2BertPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
     ) -> tuple | Wav2Vec2BertBaseModelOutput: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple | Wav2Vec2BertBaseModelOutput: ...
 
 class Wav2Vec2BertForCTC(Wav2Vec2ConformerForCTC):
     def __init__(self, config, target_lang: str | None = ...) -> None: ...
@@ -133,6 +140,7 @@ class Wav2Vec2BertForCTC(Wav2Vec2ConformerForCTC):
         return_dict: bool | None = ...,
         labels: torch.Tensor | None = ...,
     ) -> tuple | CausalLMOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | CausalLMOutput: ...
 
 class Wav2Vec2BertForSequenceClassification(Wav2Vec2ForSequenceClassification):
     def __init__(self, config) -> None: ...
@@ -149,6 +157,9 @@ class Wav2Vec2BertForSequenceClassification(Wav2Vec2ForSequenceClassification):
         return_dict: bool | None = ...,
         labels: torch.Tensor | None = ...,
     ) -> tuple | SequenceClassifierOutput: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple | SequenceClassifierOutput: ...
 
 class Wav2Vec2BertForAudioFrameClassification(
     Wav2Vec2ConformerForAudioFrameClassification
@@ -164,6 +175,7 @@ class Wav2Vec2BertForAudioFrameClassification(
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
     ) -> tuple | TokenClassifierOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | TokenClassifierOutput: ...
 
 class Wav2Vec2BertForXVector(Wav2Vec2ConformerForXVector):
     def __init__(self, config) -> None: ...
@@ -177,6 +189,7 @@ class Wav2Vec2BertForXVector(Wav2Vec2ConformerForXVector):
         return_dict: bool | None = ...,
         labels: torch.Tensor | None = ...,
     ) -> tuple | XVectorOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | XVectorOutput: ...
 
 __all__ = [
     "Wav2Vec2BertForAudioFrameClassification",

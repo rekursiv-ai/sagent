@@ -1,3 +1,4 @@
+from typing import Any
 from .configuration_dots1 import Dots1Config
 from ..deepseek_v3.modeling_deepseek_v3 import (
     DeepseekV3DecoderLayer,
@@ -36,5 +37,6 @@ class Dots1ForCausalLM(Qwen3ForCausalLM):
     def forward(
         self, **super_kwargs: Unpack[TransformersKwargs]
     ) -> CausalLMOutputWithPast: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> CausalLMOutputWithPast: ...
 
 __all__ = ["Dots1ForCausalLM", "Dots1Model", "Dots1PreTrainedModel"]

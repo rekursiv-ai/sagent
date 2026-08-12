@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -30,6 +31,7 @@ class GPTSanJapaneseDenseActDense(nn.Module):
 class GPTSanJapaneseTop1Router(nn.Module):
     def __init__(self, config: GPTSanJapaneseConfig) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> tuple: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple: ...
 
 class GPTSanJapaneseSparseMLP(nn.Module):
     def __init__(

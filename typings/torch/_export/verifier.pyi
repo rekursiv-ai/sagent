@@ -1,3 +1,4 @@
+from typing import Self
 from typing import Any, final
 
 from torch._ops import OpOverload

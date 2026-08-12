@@ -3,7 +3,6 @@ from typing import Any
 from slack_sdk.models.basic_objects import EnumValidator, JsonObject
 
 class Metadata(JsonObject):
-    attributes = ...
     def __init__(
         self, event_type: str, event_payload: dict[str, Any], **kwargs
     ) -> None: ...
@@ -12,21 +11,17 @@ EntityType = ...
 CustomFieldType = ...
 
 class ExternalRef(JsonObject):
-    attributes = ...
     def __init__(self, id: str, type: str | None = ..., **kwargs) -> None: ...
 
 class FileEntitySlackFile(JsonObject):
-    attributes = ...
     def __init__(self, id: str, type: str | None = ..., **kwargs) -> None: ...
 
 class EntityIconSlackFile(JsonObject):
-    attributes = ...
     def __init__(
         self, id: str | None = ..., url: str | None = ..., **kwargs
     ) -> None: ...
 
 class EntityIconField(JsonObject):
-    attributes = ...
     def __init__(
         self,
         alt_text: str,
@@ -36,7 +31,6 @@ class EntityIconField(JsonObject):
     ) -> None: ...
 
 class EntityEditSelectConfig(JsonObject):
-    attributes = ...
     def __init__(
         self,
         current_value: str | None = ...,
@@ -48,7 +42,6 @@ class EntityEditSelectConfig(JsonObject):
     ) -> None: ...
 
 class EntityEditNumberConfig(JsonObject):
-    attributes = ...
     def __init__(
         self,
         is_decimal_allowed: bool | None = ...,
@@ -58,13 +51,11 @@ class EntityEditNumberConfig(JsonObject):
     ) -> None: ...
 
 class EntityEditTextConfig(JsonObject):
-    attributes = ...
     def __init__(
         self, min_length: int | None = ..., max_length: int | None = ..., **kwargs
     ) -> None: ...
 
 class EntityEditSupport(JsonObject):
-    attributes = ...
     def __init__(
         self,
         enabled: bool,
@@ -78,11 +69,9 @@ class EntityEditSupport(JsonObject):
     ) -> None: ...
 
 class EntityFullSizePreviewError(JsonObject):
-    attributes = ...
     def __init__(self, code: str, message: str | None = ..., **kwargs) -> None: ...
 
 class EntityFullSizePreview(JsonObject):
-    attributes = ...
     def __init__(
         self,
         is_supported: bool,
@@ -93,11 +82,9 @@ class EntityFullSizePreview(JsonObject):
     ) -> None: ...
 
 class EntityUserIDField(JsonObject):
-    attributes = ...
     def __init__(self, user_id: str, **kwargs) -> None: ...
 
 class EntityUserField(JsonObject):
-    attributes = ...
     def __init__(
         self,
         text: str,
@@ -108,7 +95,6 @@ class EntityUserField(JsonObject):
     ) -> None: ...
 
 class EntityRefField(JsonObject):
-    attributes = ...
     def __init__(
         self,
         entity_url: str,
@@ -120,7 +106,6 @@ class EntityRefField(JsonObject):
     ) -> None: ...
 
 class EntityTypedField(JsonObject):
-    attributes = ...
     def __init__(
         self,
         type: str,
@@ -141,7 +126,6 @@ class EntityTypedField(JsonObject):
     ) -> None: ...
 
 class EntityStringField(JsonObject):
-    attributes = ...
     def __init__(
         self,
         value: str,
@@ -157,7 +141,6 @@ class EntityStringField(JsonObject):
     ) -> None: ...
 
 class EntityTimestampField(JsonObject):
-    attributes = ...
     def __init__(
         self,
         value: int,
@@ -168,7 +151,6 @@ class EntityTimestampField(JsonObject):
     ) -> None: ...
 
 class EntityImageField(JsonObject):
-    attributes = ...
     def __init__(
         self,
         alt_text: str,
@@ -181,13 +163,11 @@ class EntityImageField(JsonObject):
     ) -> None: ...
 
 class EntityBooleanCheckboxField(JsonObject):
-    attributes = ...
     def __init__(
         self, type: str, text: str, description: str | None, **kwargs
     ) -> None: ...
 
 class EntityBooleanTextField(JsonObject):
-    attributes = ...
     def __init__(
         self,
         type: str,
@@ -199,7 +179,6 @@ class EntityBooleanTextField(JsonObject):
     ) -> None: ...
 
 class EntityArrayItemField(JsonObject):
-    attributes = ...
     def __init__(
         self,
         type: str | None = ...,
@@ -220,7 +199,6 @@ class EntityArrayItemField(JsonObject):
     ) -> None: ...
 
 class EntityCustomField(JsonObject):
-    attributes = ...
     def __init__(
         self,
         label: str,
@@ -249,7 +227,6 @@ class EntityCustomField(JsonObject):
     def type_valid(self) -> bool: ...
 
 class FileEntityFields(JsonObject):
-    attributes = ...
     def __init__(
         self,
         preview: dict[str, Any] | EntityImageField | None = ...,
@@ -264,7 +241,6 @@ class FileEntityFields(JsonObject):
     ) -> None: ...
 
 class TaskEntityFields(JsonObject):
-    attributes = ...
     def __init__(
         self,
         description: dict[str, Any] | EntityStringField | None = ...,
@@ -279,7 +255,6 @@ class TaskEntityFields(JsonObject):
     ) -> None: ...
 
 class IncidentEntityFields(JsonObject):
-    attributes = ...
     def __init__(
         self,
         status: dict[str, Any] | EntityStringField | None = ...,
@@ -295,7 +270,6 @@ class IncidentEntityFields(JsonObject):
     ) -> None: ...
 
 class ContentItemEntityFields(JsonObject):
-    attributes = ...
     def __init__(
         self,
         preview: dict[str, Any] | EntityImageField | None = ...,
@@ -308,13 +282,11 @@ class ContentItemEntityFields(JsonObject):
     ) -> None: ...
 
 class EntityActionProcessingState(JsonObject):
-    attributes = ...
     def __init__(
         self, enabled: bool, interstitial_text: str | None = ..., **kwargs
     ) -> None: ...
 
 class EntityActionButton(JsonObject):
-    attributes = ...
     def __init__(
         self,
         text: str,
@@ -328,13 +300,11 @@ class EntityActionButton(JsonObject):
     ) -> None: ...
 
 class EntityTitle(JsonObject):
-    attributes = ...
     def __init__(
         self, text: str, edit: dict[str, Any] | EntityEditSupport | None = ..., **kwargs
     ) -> None: ...
 
 class EntityAttributes(JsonObject):
-    attributes = ...
     def __init__(
         self,
         title: dict[str, Any] | EntityTitle,
@@ -349,7 +319,6 @@ class EntityAttributes(JsonObject):
     ) -> None: ...
 
 class EntityActions(JsonObject):
-    attributes = ...
     def __init__(
         self,
         primary_actions: list[dict[str, Any] | EntityActionButton] | None = ...,
@@ -358,7 +327,6 @@ class EntityActions(JsonObject):
     ) -> None: ...
 
 class EntityPayload(JsonObject):
-    attributes = ...
     def __init__(
         self,
         attributes: dict[str, Any] | EntityAttributes,
@@ -383,7 +351,6 @@ class EntityPayload(JsonObject):
     ) -> dict[str, Any] | EntityAttributes | Any | None: ...
 
 class EntityMetadata(JsonObject):
-    attributes = ...
     def __init__(
         self,
         entity_type: str,
@@ -397,7 +364,6 @@ class EntityMetadata(JsonObject):
     def entity_type_valid(self) -> bool: ...
 
 class EventAndEntityMetadata(JsonObject):
-    attributes = ...
     def __init__(
         self,
         event_type: str | None = ...,

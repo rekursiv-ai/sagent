@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -24,6 +25,7 @@ class Mistral3PatchMerger(nn.Module):
     def forward(
         self, image_features: torch.Tensor, image_sizes: torch.Tensor
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class Mistral3MultiModalProjector(nn.Module):
     def __init__(self, config: Mistral3Config) -> None: ...
@@ -62,6 +64,9 @@ class Mistral3Model(LlavaModel):
         image_sizes: torch.Tensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | Mistral3ModelOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple | Mistral3ModelOutputWithPast: ...
 
 class Mistral3ForConditionalGeneration(LlavaForConditionalGeneration):
     def get_image_features(
@@ -89,6 +94,9 @@ class Mistral3ForConditionalGeneration(LlavaForConditionalGeneration):
         logits_to_keep: int | torch.Tensor = ...,
         image_sizes: torch.Tensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple | Mistral3CausalLMOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | Mistral3CausalLMOutputWithPast: ...
 
 __all__ = [

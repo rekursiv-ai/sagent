@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Any
 from torch.autograd import Function
 
 import torch

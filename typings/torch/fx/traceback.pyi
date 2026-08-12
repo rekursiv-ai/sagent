@@ -1,3 +1,4 @@
+from collections.abc import Generator
 from contextlib import contextmanager
 from enum import Enum
 from typing import Any

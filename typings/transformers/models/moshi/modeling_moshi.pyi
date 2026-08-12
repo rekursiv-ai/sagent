@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -110,6 +111,7 @@ class MoshiGatingMLP(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, layer_idx: int | None = ...
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
 
@@ -213,6 +215,9 @@ class MoshiDepthDecoder(MoshiPreTrainedModel, GenerationMixin):
         position_ids: torch.LongTensor | None = ...,
         labels: torch.LongTensor | None = ...,
         cache_position: torch.LongTensor | None = ...,
+    ) -> tuple | BaseModelOutputWithPast: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPast: ...
 
 @auto_docstring

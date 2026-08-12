@@ -1,3 +1,6 @@
+from torch import Tensor
+from types import NotImplementedType
+from typing import Any, Self
 from collections.abc import Callable
 
 from torch._ops import OpOverload

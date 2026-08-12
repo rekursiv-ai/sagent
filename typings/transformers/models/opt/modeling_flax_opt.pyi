@@ -139,7 +139,6 @@ class FlaxOPTModule(nn.Module):
 class FlaxOPTModel(FlaxOPTPreTrainedModel):
     config: OPTConfig
     dtype: jnp.dtype = ...
-    module_class = ...
 
 @add_start_docstrings(
     ...,
@@ -168,7 +167,6 @@ class FlaxOPTForCausalLMModule(nn.Module):
     OPT_START_DOCSTRING,
 )
 class FlaxOPTForCausalLM(FlaxOPTPreTrainedModel):
-    module_class = ...
     def prepare_inputs_for_generation(
         self, input_ids, max_length, attention_mask: jax.Array | None = ...
     ):  # -> dict[str, Any | Array]:

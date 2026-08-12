@@ -158,8 +158,7 @@ class FlaxDistilBertModule(nn.Module):
     ...,
     FLAX_DISTILBERT_START_DOCSTRING,
 )
-class FlaxDistilBertModel(FlaxDistilBertPreTrainedModel):
-    module_class = ...
+class FlaxDistilBertModel(FlaxDistilBertPreTrainedModel): ...
 
 class FlaxDistilBertForMaskedLMModule(nn.Module):
     config: DistilBertConfig
@@ -181,8 +180,7 @@ class FlaxDistilBertForMaskedLMModule(nn.Module):
     ...,
     FLAX_DISTILBERT_START_DOCSTRING,
 )
-class FlaxDistilBertForMaskedLM(FlaxDistilBertPreTrainedModel):
-    module_class = ...
+class FlaxDistilBertForMaskedLM(FlaxDistilBertPreTrainedModel): ...
 
 class FlaxDistilBertForSequenceClassificationModule(nn.Module):
     config: DistilBertConfig
@@ -204,8 +202,7 @@ class FlaxDistilBertForSequenceClassificationModule(nn.Module):
     ...,
     FLAX_DISTILBERT_START_DOCSTRING,
 )
-class FlaxDistilBertForSequenceClassification(FlaxDistilBertPreTrainedModel):
-    module_class = ...
+class FlaxDistilBertForSequenceClassification(FlaxDistilBertPreTrainedModel): ...
 
 class FlaxDistilBertForMultipleChoiceModule(nn.Module):
     config: DistilBertConfig
@@ -227,8 +224,7 @@ class FlaxDistilBertForMultipleChoiceModule(nn.Module):
     ...,
     FLAX_DISTILBERT_START_DOCSTRING,
 )
-class FlaxDistilBertForMultipleChoice(FlaxDistilBertPreTrainedModel):
-    module_class = ...
+class FlaxDistilBertForMultipleChoice(FlaxDistilBertPreTrainedModel): ...
 
 class FlaxDistilBertForTokenClassificationModule(nn.Module):
     config: DistilBertConfig
@@ -250,8 +246,7 @@ class FlaxDistilBertForTokenClassificationModule(nn.Module):
     ...,
     FLAX_DISTILBERT_START_DOCSTRING,
 )
-class FlaxDistilBertForTokenClassification(FlaxDistilBertPreTrainedModel):
-    module_class = ...
+class FlaxDistilBertForTokenClassification(FlaxDistilBertPreTrainedModel): ...
 
 class FlaxDistilBertForQuestionAnsweringModule(nn.Module):
     config: DistilBertConfig
@@ -273,8 +268,7 @@ class FlaxDistilBertForQuestionAnsweringModule(nn.Module):
     ...,
     FLAX_DISTILBERT_START_DOCSTRING,
 )
-class FlaxDistilBertForQuestionAnswering(FlaxDistilBertPreTrainedModel):
-    module_class = ...
+class FlaxDistilBertForQuestionAnswering(FlaxDistilBertPreTrainedModel): ...
 
 __all__ = [
     "FlaxDistilBertForMaskedLM",

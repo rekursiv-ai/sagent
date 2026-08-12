@@ -4,7 +4,6 @@ from ...tokenization_utils import PreTrainedTokenizer
 logger = ...
 
 class DiaTokenizer(PreTrainedTokenizer):
-    model_input_names = ...
     def __init__(
         self,
         pad_token: str | None = ...,

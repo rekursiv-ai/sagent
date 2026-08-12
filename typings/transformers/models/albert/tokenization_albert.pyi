@@ -10,7 +10,6 @@ SPIECE_UNDERLINE = ...
 
 @requires(backends=("sentencepiece",))
 class AlbertTokenizer(PreTrainedTokenizer):
-    vocab_files_names = ...
     def __init__(
         self,
         vocab_file,

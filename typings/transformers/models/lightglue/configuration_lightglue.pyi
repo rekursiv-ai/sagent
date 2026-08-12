@@ -2,8 +2,6 @@ from ..superpoint import SuperPointConfig
 from ...configuration_utils import PretrainedConfig
 
 class LightGlueConfig(PretrainedConfig):
-    model_type = ...
-    sub_configs = ...
     def __init__(
         self,
         keypoint_detector_config: SuperPointConfig = ...,

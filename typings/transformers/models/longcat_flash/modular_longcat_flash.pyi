@@ -1,3 +1,4 @@
+from typing import Any
 import torch
 
 from ..deepseek_v3.modeling_deepseek_v3 import (
@@ -49,6 +50,9 @@ class LongcatFlashMLA(DeepseekV3Attention):
         cache_position: torch.LongTensor | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class LongcatFlashDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config, layer_idx: int) -> None: ...
@@ -63,6 +67,7 @@ class LongcatFlashDecoderLayer(GradientCheckpointingLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class LongcatFlashPreTrainedModel(DeepseekV3PreTrainedModel):
     _can_record_outputs = ...

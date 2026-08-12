@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -29,9 +30,7 @@ _CONFIG_FOR_DOC = ...
 
 class MegaEmbeddings(nn.Module):
     def __init__(self, config: MegaConfig) -> None: ...
-    def forward(
-        self, input_ids=..., token_type_ids=..., inputs_embeds=...
-    ):  # -> Any | None:
+    def forward(self, input_ids=..., token_type_ids=..., inputs_embeds=...):  # -> None:
         ...
 
 class MegaSimpleRelativePositionalBias(nn.Module):
@@ -93,6 +92,7 @@ class MegaMultiDimensionDampedEma(nn.Module):
         prev_state: torch.Tensor | None = ...,
         use_cache: bool = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class MegaGatedCrossAttention(nn.Module):
     def __init__(self, config: MegaConfig) -> None: ...
@@ -108,6 +108,9 @@ class MegaGatedCrossAttention(nn.Module):
         past_key_values: Cache | None = ...,
         output_attentions: bool = ...,
         use_cache: bool = ...,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class MegaMovingAverageGatedAttention(nn.Module):
@@ -149,6 +152,7 @@ class MegaBlock(nn.Module):
 class MegaPooler(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class MegaPreTrainedModel(PreTrainedModel):
     config: MegaConfig

@@ -3,7 +3,6 @@ from ...configuration_utils import PretrainedConfig
 logger = ...
 
 class Florence2VisionConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         in_channels=...,
@@ -28,8 +27,6 @@ class Florence2VisionConfig(PretrainedConfig):
     ) -> None: ...
 
 class Florence2Config(PretrainedConfig):
-    model_type = ...
-    sub_configs = ...
     def __init__(
         self,
         text_config=...,

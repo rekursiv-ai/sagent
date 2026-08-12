@@ -1,3 +1,6 @@
+from collections.abc import Callable
+from typing import Any
+
 def make_fx_check(
     func, args, kwargs, tracing_mode, assert_close=..., randomize_data=...
 ) -> None: ...

@@ -7,7 +7,6 @@ from ...onnx import OnnxConfig
 logger = ...
 
 class YolosConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         hidden_size=...,

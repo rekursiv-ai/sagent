@@ -22,7 +22,6 @@ from ...utils import TransformersKwargs, auto_docstring
 from ...utils.generic import check_model_inputs
 
 class MinistralConfig(MistralConfig, PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         vocab_size=...,

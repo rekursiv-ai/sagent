@@ -1,3 +1,5 @@
+from functools import partial
+from typing import Any
 from typing import TYPE_CHECKING as TYPE_CHECKING
 
 from torch.distributed._shard.op_registry_utils import (

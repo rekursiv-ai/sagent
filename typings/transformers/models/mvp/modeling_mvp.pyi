@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -70,6 +71,9 @@ class MvpEncoderLayer(GradientCheckpointingLayer):
         self_attn_prompt: torch.FloatTensor,
         output_attentions: bool | None = ...,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
 
 class MvpDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: MvpConfig, layer_idx=...) -> None: ...
@@ -97,10 +101,12 @@ class MvpClassificationHead(nn.Module):
         self, input_dim: int, inner_dim: int, num_classes: int, pooler_dropout: float
     ) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class MvpPrompt(nn.Module):
     def __init__(self, config, num_layers, num_heads) -> None: ...
     def forward(self, prompt_ids: torch.Tensor) -> tuple[torch.Tensor]: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple[torch.Tensor]: ...
 
 @auto_docstring
 class MvpPreTrainedModel(PreTrainedModel):
@@ -128,6 +134,7 @@ class MvpEncoder(MvpPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
     ) -> tuple | BaseModelOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | BaseModelOutput: ...
 
 class MvpDecoder(MvpPreTrainedModel):
     def __init__(
@@ -151,6 +158,9 @@ class MvpDecoder(MvpPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         cache_position: torch.Tensor | None = ...,
+    ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
 
 @auto_docstring

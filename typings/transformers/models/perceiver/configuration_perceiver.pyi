@@ -11,7 +11,6 @@ from ...utils import TensorType
 logger = ...
 
 class PerceiverConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         num_latents=...,

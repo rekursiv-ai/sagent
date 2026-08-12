@@ -2,7 +2,6 @@ from ...configuration_utils import PretrainedConfig
 from ...utils.backbone_utils import BackboneConfigMixin
 
 class HGNetV2Config(BackboneConfigMixin, PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         num_channels=...,

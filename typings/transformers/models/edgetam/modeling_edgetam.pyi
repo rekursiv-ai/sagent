@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import Tensor, nn
@@ -22,6 +23,7 @@ class EdgeTamLayerNorm(nn.LayerNorm):
         self, normalized_shape, *, eps=..., data_format=..., **kwargs
     ) -> None: ...
     def forward(self, features: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @dataclass
 @auto_docstring(custom_intro="Base class for the vision encoder's outputs.")
@@ -53,6 +55,9 @@ class EdgeTamAttention(nn.Module):
         value: torch.Tensor,
         attention_similarity: torch.Tensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class EdgeTamTwoWayAttentionBlock(nn.Module):
@@ -114,6 +119,9 @@ class EdgeTamVisionNeck(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor
     ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]: ...
 
 @auto_docstring(custom_intro=...)
 class EdgeTamVisionModel(EdgeTamPreTrainedModel):
@@ -158,6 +166,9 @@ class EdgeTamPromptEncoder(nn.Module):
         input_boxes: torch.Tensor | None,
         input_masks: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class EdgeTamTwoWayTransformer(nn.Module):
     def __init__(self, config: EdgeTamMaskDecoderConfig) -> None: ...
@@ -170,6 +181,7 @@ class EdgeTamTwoWayTransformer(nn.Module):
         target_embedding=...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | BaseModelOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | BaseModelOutput: ...
 
 class EdgeTamMaskDecoder(nn.Module):
     def __init__(self, config: EdgeTamMaskDecoderConfig) -> None: ...
@@ -184,6 +196,9 @@ class EdgeTamMaskDecoder(nn.Module):
         attention_similarity: torch.Tensor | None = ...,
         target_embedding: torch.Tensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 @auto_docstring(custom_intro=...)

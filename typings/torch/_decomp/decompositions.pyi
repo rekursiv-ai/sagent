@@ -1,3 +1,5 @@
+from types import NotImplementedType
+from typing import Any
 from collections.abc import Callable
 from enum import Enum
 
@@ -306,7 +308,7 @@ def logit_backward(
 @register_decomposition(aten.dropout)
 @aten.dropout.default.py_impl(DispatchKey.CompositeImplicitAutograd)
 @aten.dropout.default.py_impl(DispatchKey.Autograd)
-def dropout(input: Tensor, p: float, train: bool | None) -> Any | Tensor: ...
+def dropout(input: Tensor, p: float, train: bool | None) -> Tensor: ...
 @register_decomposition(aten.native_dropout)
 @out_wrapper("out0", "out1")
 def native_dropout(

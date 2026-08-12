@@ -1,3 +1,4 @@
+from typing import Self
 import types
 
 from torch.utils._contextlib import (

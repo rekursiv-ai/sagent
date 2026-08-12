@@ -26,7 +26,6 @@ else:
 logger = ...
 
 class xLSTMConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         vocab_size: int = ...,

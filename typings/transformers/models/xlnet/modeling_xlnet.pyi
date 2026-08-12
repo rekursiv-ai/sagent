@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -87,6 +88,7 @@ class XLNetPoolerStartLogits(nn.Module):
         hidden_states: torch.FloatTensor,
         p_mask: torch.FloatTensor | None = ...,
     ) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 class XLNetPoolerEndLogits(nn.Module):
     def __init__(self, config: XLNetConfig) -> None: ...
@@ -97,6 +99,7 @@ class XLNetPoolerEndLogits(nn.Module):
         start_positions: torch.LongTensor | None = ...,
         p_mask: torch.FloatTensor | None = ...,
     ) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 class XLNetPoolerAnswerClass(nn.Module):
     def __init__(self, config: XLNetConfig) -> None: ...
@@ -107,6 +110,7 @@ class XLNetPoolerAnswerClass(nn.Module):
         start_positions: torch.LongTensor | None = ...,
         cls_index: torch.LongTensor | None = ...,
     ) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 class XLNetSequenceSummary(nn.Module):
     def __init__(self, config: XLNetConfig) -> None: ...
@@ -115,6 +119,7 @@ class XLNetSequenceSummary(nn.Module):
         hidden_states: torch.FloatTensor,
         cls_index: torch.LongTensor | None = ...,
     ) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 @auto_docstring
 class XLNetPreTrainedModel(PreTrainedModel):

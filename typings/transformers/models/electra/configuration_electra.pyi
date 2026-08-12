@@ -7,7 +7,6 @@ from ...onnx import OnnxConfig
 logger = ...
 
 class ElectraConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         vocab_size=...,

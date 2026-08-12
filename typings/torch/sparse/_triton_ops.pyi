@@ -1,3 +1,6 @@
+from collections.abc import Generator
+from torch import Size, Tensor
+from typing import Any, Literal
 from torch.utils._triton import has_triton
 
 import torch
@@ -67,7 +70,7 @@ class TensorAsKey:
     def __hash__(self) -> int: ...
     def __eq__(self, other) -> bool: ...
     @property
-    def obj(self) -> Any | None: ...
+    def obj(self) -> None: ...
 
 def bsr_scatter_mm_indices_data(
     bsr, other, indices_format=..., **meta_input

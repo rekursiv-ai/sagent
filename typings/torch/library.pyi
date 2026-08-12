@@ -90,7 +90,7 @@ def impl_abstract(
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]] | Callable[..., Any]: ...
 
 type _op_identifier = (
-    str | torch._ops.OpOverload | torch._library.custom_ops.CustomOpDef
+    str | torch._ops.OpOverload | torch._library.custom_ops.CustomOpDef[..., Any]
 )
 
 def register_kernel(
@@ -145,7 +145,7 @@ def get_kernel(
 _OPCHECK_DEFAULT_UTILS = ...
 
 def opcheck(
-    op: torch._ops.OpOverload | torch._ops.OpOverloadPacket | CustomOpDef,
+    op: torch._ops.OpOverload | torch._ops.OpOverloadPacket | CustomOpDef[..., Any],
     args: tuple[Any, ...],
     kwargs: dict[str, Any] | None = ...,
     *,

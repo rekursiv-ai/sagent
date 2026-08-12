@@ -1,3 +1,7 @@
+from collections.abc import Callable
+from numpy import ndarray
+from typing import Any
+
 class generic:
     name = ...
     def __new__(cls, value) -> ndarray: ...

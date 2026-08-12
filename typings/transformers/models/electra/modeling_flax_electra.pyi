@@ -243,8 +243,7 @@ class FlaxElectraModule(nn.Module):
     ...,
     ELECTRA_START_DOCSTRING,
 )
-class FlaxElectraModel(FlaxElectraPreTrainedModel):
-    module_class = ...
+class FlaxElectraModel(FlaxElectraPreTrainedModel): ...
 
 class FlaxElectraTiedDense(nn.Module):
     embedding_size: int
@@ -277,8 +276,7 @@ class FlaxElectraForMaskedLMModule(nn.Module):
         ...
 
 @add_start_docstrings(..., ELECTRA_START_DOCSTRING)
-class FlaxElectraForMaskedLM(FlaxElectraPreTrainedModel):
-    module_class = ...
+class FlaxElectraForMaskedLM(FlaxElectraPreTrainedModel): ...
 
 class FlaxElectraForPreTrainingModule(nn.Module):
     config: ElectraConfig
@@ -304,8 +302,7 @@ class FlaxElectraForPreTrainingModule(nn.Module):
     ...,
     ELECTRA_START_DOCSTRING,
 )
-class FlaxElectraForPreTraining(FlaxElectraPreTrainedModel):
-    module_class = ...
+class FlaxElectraForPreTraining(FlaxElectraPreTrainedModel): ...
 
 FLAX_ELECTRA_FOR_PRETRAINING_DOCSTRING = ...
 
@@ -333,8 +330,7 @@ class FlaxElectraForTokenClassificationModule(nn.Module):
     ...,
     ELECTRA_START_DOCSTRING,
 )
-class FlaxElectraForTokenClassification(FlaxElectraPreTrainedModel):
-    module_class = ...
+class FlaxElectraForTokenClassification(FlaxElectraPreTrainedModel): ...
 
 def identity(x, **kwargs): ...
 
@@ -369,8 +365,7 @@ class FlaxElectraForMultipleChoiceModule(nn.Module):
     ...,
     ELECTRA_START_DOCSTRING,
 )
-class FlaxElectraForMultipleChoice(FlaxElectraPreTrainedModel):
-    module_class = ...
+class FlaxElectraForMultipleChoice(FlaxElectraPreTrainedModel): ...
 
 class FlaxElectraForQuestionAnsweringModule(nn.Module):
     config: ElectraConfig
@@ -396,8 +391,7 @@ class FlaxElectraForQuestionAnsweringModule(nn.Module):
     ...,
     ELECTRA_START_DOCSTRING,
 )
-class FlaxElectraForQuestionAnswering(FlaxElectraPreTrainedModel):
-    module_class = ...
+class FlaxElectraForQuestionAnswering(FlaxElectraPreTrainedModel): ...
 
 class FlaxElectraClassificationHead(nn.Module):
     config: ElectraConfig
@@ -430,8 +424,7 @@ class FlaxElectraForSequenceClassificationModule(nn.Module):
     ...,
     ELECTRA_START_DOCSTRING,
 )
-class FlaxElectraForSequenceClassification(FlaxElectraPreTrainedModel):
-    module_class = ...
+class FlaxElectraForSequenceClassification(FlaxElectraPreTrainedModel): ...
 
 class FlaxElectraForCausalLMModule(nn.Module):
     config: ElectraConfig
@@ -461,7 +454,6 @@ class FlaxElectraForCausalLMModule(nn.Module):
     ELECTRA_START_DOCSTRING,
 )
 class FlaxElectraForCausalLM(FlaxElectraPreTrainedModel):
-    module_class = ...
     def prepare_inputs_for_generation(
         self, input_ids, max_length, attention_mask: jax.Array | None = ...
     ):  # -> dict[str, Any | Array]:

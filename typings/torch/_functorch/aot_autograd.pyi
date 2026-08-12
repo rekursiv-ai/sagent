@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Any
 from collections.abc import Callable
 
 import contextlib

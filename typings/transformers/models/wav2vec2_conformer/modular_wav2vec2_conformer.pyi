@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -71,6 +72,9 @@ class Wav2Vec2ConformerSelfAttention(nn.Module):
         attention_mask: torch.Tensor | None = ...,
         relative_position_embeddings: torch.Tensor | None = ...,
         output_attentions: bool = ...,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class Wav2Vec2ConformerEncoderLayer(GradientCheckpointingLayer):

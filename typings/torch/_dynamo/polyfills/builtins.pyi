@@ -1,3 +1,5 @@
+from collections.abc import Generator
+from typing import Any, Self
 from collections.abc import Iterable
 from typing import TypeVar
 

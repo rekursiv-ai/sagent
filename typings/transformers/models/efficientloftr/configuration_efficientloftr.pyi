@@ -1,7 +1,6 @@
 from ...configuration_utils import PretrainedConfig
 
 class EfficientLoFTRConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         stage_num_blocks: list[int] | None = ...,

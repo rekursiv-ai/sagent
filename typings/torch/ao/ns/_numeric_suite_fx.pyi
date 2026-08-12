@@ -1,3 +1,4 @@
+from torch import Tensor
 from collections.abc import Callable
 from typing import Any
 
@@ -115,10 +116,14 @@ class OutputLogger(nn.Module):
         qconfig_str: str | None = ...,
     ) -> None: ...
     def forward(self, x) -> Tensor | tuple[Any, Any] | tuple[Any, ...]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> Tensor | tuple[Any, Any] | tuple[Any, ...]: ...
 
 class OutputComparisonLogger(OutputLogger):
     def __init__(self, *args, **kwargs) -> None: ...
     def forward(self, x, x_ref) -> Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...
 
 class NSTracer(quantize_fx.QuantizationTracer):
     def is_leaf_module(

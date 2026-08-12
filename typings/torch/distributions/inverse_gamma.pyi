@@ -1,3 +1,4 @@
+from typing import Self
 from torch import Tensor
 from torch.distributions.gamma import Gamma
 from torch.distributions.transformed_distribution import TransformedDistribution
@@ -5,9 +6,6 @@ from torch.distributions.transformed_distribution import TransformedDistribution
 __all__ = ["InverseGamma"]
 
 class InverseGamma(TransformedDistribution):
-    arg_constraints = ...
-    support = ...
-    has_rsample = ...
     base_dist: Gamma
     def __init__(
         self,

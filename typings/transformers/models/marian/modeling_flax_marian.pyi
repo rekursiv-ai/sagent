@@ -251,7 +251,6 @@ class FlaxMarianPreTrainedModel(FlaxPreTrainedModel):
 class FlaxMarianModel(FlaxMarianPreTrainedModel):
     config: MarianConfig
     dtype: jnp.dtype = ...
-    module_class = ...
 
 class FlaxMarianMTModule(nn.Module):
     config: MarianConfig
@@ -279,7 +278,6 @@ class FlaxMarianMTModule(nn.Module):
     MARIAN_START_DOCSTRING,
 )
 class FlaxMarianMTModel(FlaxMarianPreTrainedModel):
-    module_class = ...
     dtype: jnp.dtype = ...
     @add_start_docstrings(MARIAN_DECODE_INPUTS_DOCSTRING)
     @replace_return_docstrings(

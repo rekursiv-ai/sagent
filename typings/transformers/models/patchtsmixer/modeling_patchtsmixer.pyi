@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -76,6 +77,9 @@ class PatchTSMixerAttention(nn.Module):
         output_attentions: bool | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class PatchMixerBlock(nn.Module):
     def __init__(self, config: PatchTSMixerConfig) -> None: ...
@@ -151,17 +155,26 @@ class PatchTSMixerStdScaler(nn.Module):
     def forward(
         self, data: torch.Tensor, observed_indicator: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 class PatchTSMixerMeanScaler(nn.Module):
     def __init__(self, config: PatchTSMixerConfig) -> None: ...
     def forward(
         self, data: torch.Tensor, observed_indicator: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 class PatchTSMixerNOPScaler(nn.Module):
     def __init__(self, config: PatchTSMixerConfig) -> None: ...
     def forward(
         self, data: torch.Tensor, observed_indicator: torch.Tensor | None = ...
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 @dataclass

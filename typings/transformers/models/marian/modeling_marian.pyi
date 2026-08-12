@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -86,6 +87,9 @@ class MarianEncoderLayer(GradientCheckpointingLayer):
         layer_head_mask: torch.FloatTensor,
         output_attentions: bool | None = ...,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
 
 class MarianDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: MarianConfig, layer_idx: int | None = ...) -> None: ...
@@ -133,6 +137,9 @@ class MarianEncoder(MarianPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
     ) -> tuple[torch.Tensor] | BaseModelOutput: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor] | BaseModelOutput: ...
 
 class MarianDecoder(MarianPreTrainedModel):
     def __init__(
@@ -153,6 +160,9 @@ class MarianDecoder(MarianPreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         cache_position: torch.Tensor | None = ...,
+    ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
 
 @auto_docstring

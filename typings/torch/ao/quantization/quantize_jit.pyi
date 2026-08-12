@@ -1,3 +1,5 @@
+from typing import Any
+
 __all__ = [
     "convert_dynamic_jit",
     "convert_jit",

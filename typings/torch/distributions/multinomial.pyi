@@ -1,3 +1,4 @@
+from typing import Self
 from torch import Tensor
 from torch.distributions import constraints
 from torch.distributions.distribution import Distribution
@@ -7,7 +8,6 @@ import torch
 __all__ = ["Multinomial"]
 
 class Multinomial(Distribution):
-    arg_constraints = ...
     total_count: int
     @property
     def mean(self) -> Tensor: ...

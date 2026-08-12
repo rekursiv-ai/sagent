@@ -7,7 +7,6 @@ from ...onnx import OnnxConfig
 logger = ...
 
 class BigBirdConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         vocab_size=...,

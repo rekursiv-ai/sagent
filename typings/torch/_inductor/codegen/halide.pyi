@@ -1,3 +1,4 @@
+from typing import Literal, LiteralString
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -260,7 +261,6 @@ class HalideKernel(SIMDKernel):
     ) -> None: ...
 
 class HalideScheduling(SIMDScheduling):
-    kernel_type = ...
     @classmethod
     def get_backend_features(
         cls, device: torch.device

@@ -1,3 +1,4 @@
+from typing import Literal
 from dataclasses import dataclass
 
 from torch.autograd.profiler import profile

@@ -4,7 +4,6 @@ from ...configuration_utils import PretrainedConfig
 logger = ...
 
 class DacConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         encoder_hidden_size=...,

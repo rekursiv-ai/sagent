@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Literal
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, TypeVar, overload
@@ -96,11 +98,11 @@ class FunctionalizeCtxWrapper:
 
 class HopInstance:
     def __init__(self, op: HigherOrderOperator, schema: HopSchema) -> None: ...
-    def __call__(self, *args, **kwargs) -> Any | None: ...
+    def __call__(self, *args, **kwargs) -> None: ...
     @staticmethod
     def create(hop: HigherOrderOperator, *args, **kwargs) -> HopInstance: ...
 
-def call_op(op: OpOverload | HopInstance, args, kwargs) -> Any | None: ...
+def call_op(op: OpOverload | HopInstance, args, kwargs) -> None: ...
 def materialize_as_graph(
     fn: Callable,
     args: tuple[Any],

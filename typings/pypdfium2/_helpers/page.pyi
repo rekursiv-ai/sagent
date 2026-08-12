@@ -1,3 +1,5 @@
+from collections.abc import Generator
+from typing import Any
 import ctypes
 
 from pypdfium2._helpers.bitmap import PdfBitmap

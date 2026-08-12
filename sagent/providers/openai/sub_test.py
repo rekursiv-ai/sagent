@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncio
@@ -1511,7 +1511,11 @@ class TestStreamAuthRetry:
         request = httpx.Request("POST", "https://chatgpt.com/backend-api/codex")
         response = httpx.Response(401, request=request)
         auth_err = openai.AuthenticationError(
-            "Unauthorized", response=response, body=None
+            "Unauthorized",
+            # openai vendors httpx2; the two Response classes are structurally
+            # identical but nominally distinct to the checker.
+            response=cast("Any", response),
+            body=None,
         )
         # Return DIFFERENT SDKs from get_sdk so the test can prove the
         # retry call landed on a freshly-built SDK (with a rotated

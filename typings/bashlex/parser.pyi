@@ -1,3 +1,5 @@
+from collections.abc import Generator
+from typing import Any
 from bashlex import ast
 
 tokens = ...

@@ -1,3 +1,6 @@
+from collections.abc import Callable, Iterator
+from torch import Size
+from typing import Any, Literal, Self, TypeIs
 from torch._dynamo.codegen import PyCodegen
 from torch._dynamo.symbolic_convert import InstructionTranslator
 

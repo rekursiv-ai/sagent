@@ -1,9 +1,6 @@
 from ...configuration_utils import PretrainedConfig
 
 class LlavaNextVideoConfig(PretrainedConfig):
-    model_type = ...
-    attribute_map = ...
-    sub_configs = ...
     def __init__(
         self,
         vision_config=...,

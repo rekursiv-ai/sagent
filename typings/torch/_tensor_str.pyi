@@ -1,3 +1,5 @@
+from collections.abc import Generator
+from torch import Tensor
 from typing import Any
 
 import contextlib

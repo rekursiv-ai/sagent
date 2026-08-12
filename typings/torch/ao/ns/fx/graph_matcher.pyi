@@ -1,3 +1,4 @@
+from typing import Self
 import enum
 
 from torch.fx import GraphModule

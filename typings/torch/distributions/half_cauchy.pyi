@@ -1,3 +1,4 @@
+from typing import Self
 from torch import Tensor
 from torch.distributions.cauchy import Cauchy
 from torch.distributions.transformed_distribution import TransformedDistribution
@@ -5,9 +6,6 @@ from torch.distributions.transformed_distribution import TransformedDistribution
 __all__ = ["HalfCauchy"]
 
 class HalfCauchy(TransformedDistribution):
-    arg_constraints = ...
-    support = ...
-    has_rsample = ...
     base_dist: Cauchy
     def __init__(
         self, scale: Tensor | float, validate_args: bool | None = ...

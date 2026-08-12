@@ -7,7 +7,6 @@ from ...onnx import OnnxConfig
 logger = ...
 
 class PoolFormerConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         num_channels=...,

@@ -84,7 +84,7 @@ class MMBTForClassification(nn.Module):
         inputs_embeds=...,
         labels=...,
         return_dict=...,
-    ):  # -> Any | SequenceClassifierOutput:
+    ):  # -> SequenceClassifierOutput:
         ...
 
 __all__ = ["MMBTForClassification", "MMBTModel", "ModalEmbeddings"]

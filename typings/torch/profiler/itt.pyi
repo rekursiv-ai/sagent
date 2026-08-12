@@ -1,3 +1,5 @@
+from collections.abc import Generator
+from typing import Any
 from contextlib import contextmanager
 
 __all__ = ["is_available", "mark", "range", "range_pop", "range_push"]

@@ -3,7 +3,6 @@ from ...configuration_utils import PretrainedConfig
 logger = ...
 
 class SuperPointConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         encoder_hidden_sizes: list[int] = ...,

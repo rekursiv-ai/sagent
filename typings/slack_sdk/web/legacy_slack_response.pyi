@@ -1,3 +1,5 @@
+from typing import Self
+
 class LegacySlackResponse:
     def __init__(
         self,

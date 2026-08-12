@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from collections.abc import Collection, Mapping
 from enum import Enum
 

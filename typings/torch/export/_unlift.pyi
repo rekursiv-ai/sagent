@@ -1,3 +1,4 @@
+from typing import Any
 import torch
 import torch.utils._pytree as pytree
 
@@ -11,3 +12,4 @@ class _StatefulGraphModule(torch.fx.GraphModule, metaclass=_StatefulGraphModuleF
 
 class GuardsFn(torch.nn.Module):
     def forward(self, *args) -> None: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> None: ...

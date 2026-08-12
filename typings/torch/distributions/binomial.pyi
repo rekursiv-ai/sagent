@@ -1,3 +1,4 @@
+from typing import Self
 from torch import Tensor
 from torch.distributions import constraints
 from torch.distributions.distribution import Distribution
@@ -8,7 +9,6 @@ import torch
 __all__ = ["Binomial"]
 
 class Binomial(Distribution):
-    arg_constraints = ...
     has_enumerate_support = ...
     def __init__(
         self,

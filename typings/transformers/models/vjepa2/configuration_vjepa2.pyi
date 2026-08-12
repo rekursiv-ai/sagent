@@ -3,7 +3,6 @@ from ...configuration_utils import PretrainedConfig
 """VJEPA 2 model configuration"""
 
 class VJEPA2Config(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         patch_size=...,

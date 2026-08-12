@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Any
 from ._normalizations import (
     ArrayLike,
     AxisLike,
@@ -13,9 +15,7 @@ in the 'public' layer.
 Anything here only deals with torch objects, e.g. "dtype" is a torch.dtype instance etc
 """
 
-@_deco_axis_expand
 def count_nonzero(a: ArrayLike, axis: AxisLike = ..., *, keepdims: KeepDims = ...): ...
-@_deco_axis_expand
 def argmax(
     a: ArrayLike,
     axis: AxisLike = ...,
@@ -23,7 +23,6 @@ def argmax(
     *,
     keepdims: KeepDims = ...,
 ) -> Tensor: ...
-@_deco_axis_expand
 def argmin(
     a: ArrayLike,
     axis: AxisLike = ...,
@@ -31,7 +30,6 @@ def argmin(
     *,
     keepdims: KeepDims = ...,
 ) -> Tensor: ...
-@_deco_axis_expand
 def any(
     a: ArrayLike,
     axis: AxisLike = ...,
@@ -40,7 +38,6 @@ def any(
     *,
     where: NotImplementedType = ...,
 ): ...
-@_deco_axis_expand
 def all(
     a: ArrayLike,
     axis: AxisLike = ...,
@@ -49,7 +46,6 @@ def all(
     *,
     where: NotImplementedType = ...,
 ): ...
-@_deco_axis_expand
 def amax(
     a: ArrayLike,
     axis: AxisLike = ...,
@@ -61,7 +57,6 @@ def amax(
 
 max = ...
 
-@_deco_axis_expand
 def amin(
     a: ArrayLike,
     axis: AxisLike = ...,
@@ -73,14 +68,12 @@ def amin(
 
 min = ...
 
-@_deco_axis_expand
 def ptp(
     a: ArrayLike,
     axis: AxisLike = ...,
     out: OutArray | None = ...,
     keepdims: KeepDims = ...,
 ): ...
-@_deco_axis_expand
 def sum(
     a: ArrayLike,
     axis: AxisLike = ...,
@@ -90,7 +83,6 @@ def sum(
     initial: NotImplementedType = ...,
     where: NotImplementedType = ...,
 ): ...
-@_deco_axis_expand
 def prod(
     a: ArrayLike,
     axis: AxisLike = ...,
@@ -103,7 +95,6 @@ def prod(
 
 product = ...
 
-@_deco_axis_expand
 def mean(
     a: ArrayLike,
     axis: AxisLike = ...,
@@ -113,7 +104,6 @@ def mean(
     *,
     where: NotImplementedType = ...,
 ): ...
-@_deco_axis_expand
 def std(
     a: ArrayLike,
     axis: AxisLike = ...,
@@ -124,7 +114,6 @@ def std(
     *,
     where: NotImplementedType = ...,
 ): ...
-@_deco_axis_expand
 def var(
     a: ArrayLike,
     axis: AxisLike = ...,

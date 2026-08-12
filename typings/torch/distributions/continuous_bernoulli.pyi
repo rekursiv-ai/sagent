@@ -1,3 +1,4 @@
+from typing import Self
 from torch import Tensor
 from torch.distributions.exp_family import ExponentialFamily
 from torch.distributions.utils import lazy_property
@@ -8,8 +9,6 @@ import torch
 __all__ = ["ContinuousBernoulli"]
 
 class ContinuousBernoulli(ExponentialFamily):
-    arg_constraints = ...
-    support = ...
     _mean_carrier_measure = ...
     has_rsample = ...
     def __init__(

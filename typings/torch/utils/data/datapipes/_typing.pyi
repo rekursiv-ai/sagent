@@ -1,3 +1,4 @@
+from typing import Self
 from abc import ABCMeta
 from typing import TypeVar
 

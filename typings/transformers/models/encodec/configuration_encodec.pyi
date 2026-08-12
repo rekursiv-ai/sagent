@@ -4,7 +4,6 @@ from ...configuration_utils import PretrainedConfig
 logger = ...
 
 class EncodecConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         target_bandwidths=...,

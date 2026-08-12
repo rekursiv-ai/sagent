@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -56,6 +57,7 @@ class FocalNetEmbeddings(nn.Module):
         pixel_values: torch.FloatTensor | None,
         bool_masked_pos: torch.BoolTensor | None = ...,
     ) -> tuple[torch.Tensor]: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple[torch.Tensor]: ...
 
 class FocalNetPatchEmbeddings(nn.Module):
     def __init__(
@@ -74,6 +76,9 @@ class FocalNetPatchEmbeddings(nn.Module):
     def forward(
         self, pixel_values: torch.FloatTensor | None
     ) -> tuple[torch.Tensor, tuple[int]]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, tuple[int]]: ...
 
 def drop_path(
     input: torch.Tensor, drop_prob: float = ..., training: bool = ...
@@ -82,6 +87,7 @@ def drop_path(
 class FocalNetDropPath(nn.Module):
     def __init__(self, drop_prob: float | None = ...) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
     def extra_repr(self) -> str: ...
 
 class FocalNetModulation(nn.Module):
@@ -107,6 +113,7 @@ class FocalNetStage(GradientCheckpointingLayer):
     def forward(
         self, hidden_states: torch.Tensor, input_dimensions: tuple[int, int]
     ) -> tuple[torch.Tensor]: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple[torch.Tensor]: ...
 
 class FocalNetEncoder(nn.Module):
     def __init__(self, config, grid_size) -> None: ...
@@ -118,6 +125,7 @@ class FocalNetEncoder(nn.Module):
         output_hidden_states_before_downsampling: bool | None = ...,
         return_dict: bool | None = ...,
     ) -> tuple | FocalNetEncoderOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | FocalNetEncoderOutput: ...
 
 @auto_docstring
 class FocalNetPreTrainedModel(PreTrainedModel):
@@ -167,7 +175,6 @@ class FocalNetForImageClassification(FocalNetPreTrainedModel):
 
 @auto_docstring(custom_intro=...)
 class FocalNetBackbone(FocalNetPreTrainedModel, BackboneMixin):
-    has_attentions = ...
     def __init__(self, config: FocalNetConfig) -> None: ...
     @auto_docstring
     def forward(

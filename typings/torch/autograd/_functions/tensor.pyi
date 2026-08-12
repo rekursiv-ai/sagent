@@ -1,3 +1,4 @@
+from typing import Any
 from typing_extensions import deprecated
 
 from torch.autograd.function import Function

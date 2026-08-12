@@ -1,3 +1,4 @@
+from typing import Self
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum

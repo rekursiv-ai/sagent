@@ -1,3 +1,4 @@
+from typing import Self
 from torch import Tensor
 from torch.distributions.distribution import Distribution
 from torch.distributions.utils import lazy_property
@@ -6,8 +7,6 @@ from torch.types import _size
 __all__ = ["LowRankMultivariateNormal"]
 
 class LowRankMultivariateNormal(Distribution):
-    arg_constraints = ...
-    support = ...
     has_rsample = ...
     def __init__(
         self,

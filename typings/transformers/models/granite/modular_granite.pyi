@@ -1,3 +1,4 @@
+from typing import Any
 import torch
 
 from .configuration_granite import GraniteConfig
@@ -54,6 +55,7 @@ class GraniteModel(LlamaModel):
         cache_position: torch.LongTensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> BaseModelOutputWithPast: ...
 
 class GraniteForCausalLM(LlamaForCausalLM):
     def forward(
@@ -71,5 +73,6 @@ class GraniteForCausalLM(LlamaForCausalLM):
         logits_to_keep: int | torch.Tensor = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> CausalLMOutputWithPast: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> CausalLMOutputWithPast: ...
 
 __all__ = ["GraniteForCausalLM", "GraniteModel", "GranitePreTrainedModel"]

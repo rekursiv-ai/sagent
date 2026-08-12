@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -107,6 +108,7 @@ class UMT5Block(GradientCheckpointingLayer):
 class UMT5ClassificationHead(nn.Module):
     def __init__(self, config: UMT5Config) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring
 class UMT5PreTrainedModel(PreTrainedModel):

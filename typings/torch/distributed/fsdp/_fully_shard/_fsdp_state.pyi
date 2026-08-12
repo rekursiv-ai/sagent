@@ -1,3 +1,5 @@
+from collections.abc import Callable
+from typing import Any
 from torch import nn
 from torch.distributed._composable_state import _State
 

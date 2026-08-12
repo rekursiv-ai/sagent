@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -58,6 +59,9 @@ class Qwen2AudioAttention(nn.Module):
         output_attentions: bool = ...,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class Qwen2AudioEncoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: Qwen2AudioConfig) -> None: ...
@@ -68,6 +72,7 @@ class Qwen2AudioEncoderLayer(GradientCheckpointingLayer):
         layer_head_mask: torch.Tensor,
         output_attentions: bool = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring
 class Qwen2AudioPreTrainedModel(PreTrainedModel):

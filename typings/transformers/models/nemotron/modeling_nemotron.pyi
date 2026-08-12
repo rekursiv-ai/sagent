@@ -1,3 +1,4 @@
+from typing import Any
 from torch import Size, Tensor, nn
 
 import torch
@@ -31,6 +32,7 @@ class NemotronLayerNorm1P(nn.LayerNorm):
         dtype=...,
     ) -> None: ...
     def forward(self, input: Tensor) -> Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...
 
 class NemotronRotaryEmbedding(nn.Module):
     inv_freq: torch.Tensor

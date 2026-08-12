@@ -3,7 +3,6 @@ from ...configuration_utils import PretrainedConfig
 """BertGeneration model configuration"""
 
 class BertGenerationConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         vocab_size=...,

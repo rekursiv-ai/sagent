@@ -1,7 +1,6 @@
 from ...configuration_utils import PretrainedConfig
 
 class GotOcr2VisionConfig(PretrainedConfig):
-    base_config_key = ...
     def __init__(
         self,
         hidden_size=...,
@@ -25,9 +24,6 @@ class GotOcr2VisionConfig(PretrainedConfig):
     ) -> None: ...
 
 class GotOcr2Config(PretrainedConfig):
-    model_type = ...
-    attribute_map = ...
-    sub_configs = ...
     def __init__(
         self,
         vision_config=...,

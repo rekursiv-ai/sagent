@@ -9,7 +9,6 @@ VOCAB_FILES_NAMES = ...
 
 @requires(backends=("sentencepiece",))
 class CpmTokenizer(PreTrainedTokenizer):
-    vocab_files_names = ...
     def __init__(
         self,
         vocab_file,

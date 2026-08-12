@@ -1,3 +1,6 @@
+from torch import Tensor
+from typing import Any, Literal
+
 def is_sequence(seq) -> bool: ...
 
 class AxisError(ValueError, IndexError): ...

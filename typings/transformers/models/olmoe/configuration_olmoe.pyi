@@ -3,7 +3,6 @@ from ...configuration_utils import PretrainedConfig
 """OLMoE model configuration"""
 
 class OlmoeConfig(PretrainedConfig):
-    model_type = ...
     keys_to_ignore_at_inference = ...
     def __init__(
         self,

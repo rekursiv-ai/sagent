@@ -16,7 +16,21 @@ from torch import (
 )
 from torch.autograd.graph import GradientEdge
 
-__all__ = ["Device", "FileLike", "Number", "Storage"]
+# The private aliases are re-exported too: `torch._C` imports `_dtype`/`_device`
+# from here, and an __all__ that omits them makes every `Tensor.dtype` Unknown.
+__all__ = [
+    "Device",
+    "FileLike",
+    "Number",
+    "Storage",
+    "_bool",
+    "_complex",
+    "_device",
+    "_dtype",
+    "_float",
+    "_int",
+    "_layout",
+]
 type _TensorOrTensors = Tensor | Sequence[Tensor]
 type _TensorOrTensorsOrGradEdge = (
     Tensor | Sequence[Tensor] | GradientEdge | Sequence[GradientEdge]

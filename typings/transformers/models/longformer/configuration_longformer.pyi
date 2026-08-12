@@ -11,7 +11,6 @@ from ...utils import TensorType
 logger = ...
 
 class LongformerConfig(PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         attention_window: list[int] | int = ...,

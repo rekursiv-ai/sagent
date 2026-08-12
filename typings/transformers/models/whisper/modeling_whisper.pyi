@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -87,6 +88,7 @@ class WhisperEncoderLayer(GradientCheckpointingLayer):
         layer_head_mask: torch.Tensor,
         output_attentions: bool = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class WhisperDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: WhisperConfig, layer_idx: int | None = ...) -> None: ...

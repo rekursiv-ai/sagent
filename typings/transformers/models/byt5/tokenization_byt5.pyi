@@ -4,7 +4,6 @@ from ...tokenization_utils import PreTrainedTokenizer
 logger = ...
 
 class ByT5Tokenizer(PreTrainedTokenizer):
-    model_input_names = ...
     def __init__(
         self,
         eos_token=...,

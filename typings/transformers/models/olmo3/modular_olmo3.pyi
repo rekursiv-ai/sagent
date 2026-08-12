@@ -1,3 +1,4 @@
+from typing import Any
 from transformers.utils.generic import TransformersKwargs
 
 import torch
@@ -17,9 +18,6 @@ from ...modeling_outputs import BaseModelOutputWithPast
 from ...processing_utils import Unpack
 
 class Olmo3Config(Olmo2Config):
-    model_type = ...
-    base_model_tp_plan = ...
-    base_model_pp_plan = ...
     def __init__(
         self,
         vocab_size=...,
@@ -59,6 +57,9 @@ class Olmo3Attention(Olmo2Attention):
         cache_position: torch.LongTensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class Olmo3DecoderLayer(Olmo2DecoderLayer): ...
 
@@ -82,6 +83,7 @@ class Olmo3Model(Olmo2Model):
         use_cache: bool | None = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> BaseModelOutputWithPast: ...
 
 class Olmo3ForCausalLM(Olmo2ForCausalLM): ...
 

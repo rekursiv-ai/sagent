@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import Tensor, nn
@@ -158,6 +159,9 @@ class GroundingDinoTextEnhancerLayer(nn.Module):
         attention_masks: torch.BoolTensor | None = ...,
         position_embeddings: torch.FloatTensor | None = ...,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.FloatTensor, torch.FloatTensor]: ...
 
 class GroundingDinoBiMultiHeadAttention(nn.Module):
     def __init__(self, config) -> None: ...
@@ -171,6 +175,12 @@ class GroundingDinoBiMultiHeadAttention(nn.Module):
         tuple[torch.FloatTensor, torch.FloatTensor],
         tuple[torch.FloatTensor, torch.FloatTensor],
     ]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[
+        tuple[torch.FloatTensor, torch.FloatTensor],
+        tuple[torch.FloatTensor, torch.FloatTensor],
+    ]: ...
 
 def drop_path(
     input: torch.Tensor, drop_prob: float = ..., training: bool = ...
@@ -179,6 +189,7 @@ def drop_path(
 class GroundingDinoDropPath(nn.Module):
     def __init__(self, drop_prob: float | None = ...) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
     def extra_repr(self) -> str: ...
 
 class GroundingDinoFusionLayer(nn.Module):
@@ -189,6 +200,12 @@ class GroundingDinoFusionLayer(nn.Module):
         text_features: torch.FloatTensor,
         attention_mask_vision: torch.BoolTensor | None = ...,
         attention_mask_text: torch.BoolTensor | None = ...,
+    ) -> tuple[
+        tuple[torch.FloatTensor, torch.FloatTensor],
+        tuple[torch.FloatTensor, torch.FloatTensor],
+    ]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[
         tuple[torch.FloatTensor, torch.FloatTensor],
         tuple[torch.FloatTensor, torch.FloatTensor],
@@ -251,6 +268,7 @@ class GroundingDinoMultiheadAttention(nn.Module):
         attention_mask: torch.FloatTensor | None = ...,
         output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor]: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple[torch.Tensor]: ...
 
 class GroundingDinoDecoderLayer(nn.Module):
     def __init__(self, config: GroundingDinoConfig) -> None: ...
@@ -283,6 +301,7 @@ class GroundingDinoContrastiveEmbedding(nn.Module):
         text_hidden_state: torch.FloatTensor,
         text_token_mask: torch.BoolTensor,
     ) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 @auto_docstring
 class GroundingDinoPreTrainedModel(PreTrainedModel):
@@ -366,7 +385,7 @@ class GroundingDinoModel(GroundingDinoPreTrainedModel):
         output_attentions=...,
         output_hidden_states=...,
         return_dict=...,
-    ):  # -> Any | GroundingDinoModelOutput:
+    ):  # -> GroundingDinoModelOutput:
         ...
 
 class GroundingDinoMLPPredictionHead(nn.Module):

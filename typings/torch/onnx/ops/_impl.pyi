@@ -9,7 +9,6 @@ _R = TypeVar("_R")
 ONNX_ATEN_DECOMP_TABLE: dict[torch._ops.OpOverload, Callable] = ...
 _ATTENTION_23_ALLOWED_INTERMEDIATE_PRECISIONS = ...
 
-@_onnx_op("RotaryEmbedding", 23)
 def rotary_embedding_23(
     x: torch.Tensor,
     cos_cache: torch.Tensor,
@@ -20,7 +19,6 @@ def rotary_embedding_23(
     num_heads: int = ...,
     rotary_embedding_dim: int = ...,
 ) -> torch.Tensor: ...
-@_onnx_op("Attention", 23)
 def attention_23(
     Q: torch.Tensor,
     K: torch.Tensor,

@@ -244,7 +244,6 @@ class FlaxBlenderbotSmallPreTrainedModel(FlaxPreTrainedModel):
 class FlaxBlenderbotSmallModel(FlaxBlenderbotSmallPreTrainedModel):
     config: BlenderbotSmallConfig
     dtype: jnp.dtype = ...
-    module_class = ...
 
 class FlaxBlenderbotSmallForConditionalGenerationModule(nn.Module):
     config: BlenderbotSmallConfig
@@ -272,7 +271,6 @@ class FlaxBlenderbotSmallForConditionalGenerationModule(nn.Module):
     BLENDERBOT_SMALL_START_DOCSTRING,
 )
 class FlaxBlenderbotSmallForConditionalGeneration(FlaxBlenderbotSmallPreTrainedModel):
-    module_class = ...
     dtype: jnp.dtype = ...
     @add_start_docstrings(BLENDERBOT_SMALL_DECODE_INPUTS_DOCSTRING)
     @replace_return_docstrings(

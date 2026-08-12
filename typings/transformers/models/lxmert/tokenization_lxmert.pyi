@@ -9,7 +9,6 @@ def whitespace_tokenize(text):  # -> list[Any]:
     ...
 
 class LxmertTokenizer(PreTrainedTokenizer):
-    vocab_files_names = ...
     def __init__(
         self,
         vocab_file,

@@ -1,3 +1,4 @@
+from typing import Any, Literal
 from collections.abc import Callable
 
 from .triton_compat import triton

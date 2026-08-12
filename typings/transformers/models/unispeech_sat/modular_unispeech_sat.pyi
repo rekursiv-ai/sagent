@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 import torch
@@ -70,6 +71,9 @@ class UniSpeechSatModel(UniSpeechSatPreTrainedModel, Wav2Vec2Model):
         output_attentions: bool | None = ...,
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
+    ) -> tuple | UniSpeechSatBaseModelOutput: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | UniSpeechSatBaseModelOutput: ...
 
 @auto_docstring(custom_intro=...)

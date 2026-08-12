@@ -1,3 +1,5 @@
+from collections.abc import Generator
+from typing import Any
 from enum import IntEnum
 
 from torch.utils.data.datapipes._decorator import functional_datapipe

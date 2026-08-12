@@ -1319,7 +1319,7 @@ class _FakeBridge:
     def drain_detached_results(self) -> list[ToolResult]:
         self.drain_calls += 1
         out, self._pending = self._pending, []
-        return out
+        return cast("list[ToolResult]", out)  # pyright: ignore[reportUnnecessaryCast] -- ty needs the cast; pyright resolves the type
 
     def update_tools(self, tools: object) -> None:
         del tools

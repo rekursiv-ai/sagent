@@ -1,3 +1,4 @@
+from typing import Any, LiteralString, Self
 from collections.abc import Callable
 from enum import Enum
 from typing import NamedTuple, NotRequired, TypedDict

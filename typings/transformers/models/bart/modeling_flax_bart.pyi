@@ -258,7 +258,6 @@ class FlaxBartPreTrainedModel(FlaxPreTrainedModel):
 class FlaxBartModel(FlaxBartPreTrainedModel):
     config: BartConfig
     dtype: jnp.dtype = ...
-    module_class = ...
 
 class FlaxBartForConditionalGenerationModule(nn.Module):
     config: BartConfig
@@ -286,7 +285,6 @@ class FlaxBartForConditionalGenerationModule(nn.Module):
     BART_START_DOCSTRING,
 )
 class FlaxBartForConditionalGeneration(FlaxBartPreTrainedModel):
-    module_class = ...
     dtype: jnp.dtype = ...
     @add_start_docstrings(BART_DECODE_INPUTS_DOCSTRING)
     @replace_return_docstrings(
@@ -348,7 +346,6 @@ class FlaxBartForSequenceClassificationModule(nn.Module):
     BART_START_DOCSTRING,
 )
 class FlaxBartForSequenceClassification(FlaxBartPreTrainedModel):
-    module_class = ...
     dtype = jnp.float32
 
 class FlaxBartForQuestionAnsweringModule(nn.Module):
@@ -377,7 +374,6 @@ class FlaxBartForQuestionAnsweringModule(nn.Module):
     BART_START_DOCSTRING,
 )
 class FlaxBartForQuestionAnswering(FlaxBartPreTrainedModel):
-    module_class = ...
     dtype = jnp.float32
 
 class FlaxBartDecoderPreTrainedModel(FlaxPreTrainedModel):
@@ -449,7 +445,6 @@ class FlaxBartForCausalLMModule(nn.Module):
     BART_START_DOCSTRING,
 )
 class FlaxBartForCausalLM(FlaxBartDecoderPreTrainedModel):
-    module_class = ...
     def prepare_inputs_for_generation(
         self, input_ids, max_length, attention_mask: jax.Array | None = ...
     ):  # -> dict[str, Any | Array]:

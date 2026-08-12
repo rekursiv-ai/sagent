@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -92,6 +93,9 @@ class FastSpeech2ConformerAttention(nn.Module):
         attention_mask: torch.Tensor | None = ...,
         pos_emb: torch.Tensor | None = ...,
         output_attentions: torch.Tensor | None = ...,
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class FastSpeech2ConformerConvolutionModule(nn.Module):

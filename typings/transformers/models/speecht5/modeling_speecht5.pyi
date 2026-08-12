@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -231,6 +232,7 @@ class SpeechT5Encoder(SpeechT5PreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
     ) -> tuple | BaseModelOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | BaseModelOutput: ...
 
 class SpeechT5EncoderWithSpeechPrenet(SpeechT5PreTrainedModel):
     def __init__(self, config: SpeechT5Config) -> None: ...
@@ -243,6 +245,7 @@ class SpeechT5EncoderWithSpeechPrenet(SpeechT5PreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
     ) -> tuple | BaseModelOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | BaseModelOutput: ...
 
 class SpeechT5EncoderWithTextPrenet(SpeechT5PreTrainedModel):
     def __init__(self, config: SpeechT5Config) -> None: ...
@@ -259,6 +262,7 @@ class SpeechT5EncoderWithTextPrenet(SpeechT5PreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
     ) -> tuple | BaseModelOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | BaseModelOutput: ...
 
 class SpeechT5EncoderWithoutPrenet(SpeechT5PreTrainedModel):
     def __init__(self, config: SpeechT5Config) -> None: ...
@@ -271,6 +275,7 @@ class SpeechT5EncoderWithoutPrenet(SpeechT5PreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
     ) -> tuple | BaseModelOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | BaseModelOutput: ...
 
 class SpeechT5Decoder(SpeechT5PreTrainedModel):
     def __init__(self, config: SpeechT5Config) -> None: ...
@@ -288,6 +293,9 @@ class SpeechT5Decoder(SpeechT5PreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         cache_position: torch.Tensor | None = ...,
+    ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
 
 class SpeechT5DecoderWithSpeechPrenet(SpeechT5PreTrainedModel):
@@ -307,6 +315,9 @@ class SpeechT5DecoderWithSpeechPrenet(SpeechT5PreTrainedModel):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
         cache_position: torch.Tensor | None = ...,
+    ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
 
 class SpeechT5DecoderWithTextPrenet(SpeechT5PreTrainedModel):
@@ -330,6 +341,9 @@ class SpeechT5DecoderWithTextPrenet(SpeechT5PreTrainedModel):
         return_dict: bool | None = ...,
         cache_position: torch.Tensor | None = ...,
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
 
 class SpeechT5DecoderWithoutPrenet(SpeechT5PreTrainedModel):
     def __init__(self, config: SpeechT5Config) -> None: ...
@@ -348,6 +362,9 @@ class SpeechT5DecoderWithoutPrenet(SpeechT5PreTrainedModel):
         return_dict: bool | None = ...,
         cache_position: torch.Tensor | None = ...,
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
 
 class SpeechT5GuidedMultiheadAttentionLoss(nn.Module):
     def __init__(self, config: SpeechT5Config) -> None: ...
@@ -357,6 +374,7 @@ class SpeechT5GuidedMultiheadAttentionLoss(nn.Module):
         input_masks: torch.BoolTensor,
         output_masks: torch.BoolTensor,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class SpeechT5SpectrogramLoss(nn.Module):
     def __init__(self, config: SpeechT5Config) -> None: ...
@@ -369,6 +387,7 @@ class SpeechT5SpectrogramLoss(nn.Module):
         labels: torch.FloatTensor,
         cross_attentions: torch.FloatTensor | None = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring(custom_intro=...)
 class SpeechT5Model(SpeechT5PreTrainedModel):

@@ -1,3 +1,4 @@
+from typing import Self
 import torch
 
 class Stream(torch._C._CudaStreamBase):

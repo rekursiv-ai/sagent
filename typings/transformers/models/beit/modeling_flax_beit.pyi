@@ -211,8 +211,7 @@ class FlaxBeitModule(nn.Module):
     ...,
     BEIT_START_DOCSTRING,
 )
-class FlaxBeitModel(FlaxBeitPreTrainedModel):
-    module_class = ...
+class FlaxBeitModel(FlaxBeitPreTrainedModel): ...
 
 FLAX_BEIT_MODEL_DOCSTRING = ...
 
@@ -236,8 +235,7 @@ class FlaxBeitForMaskedImageModelingModule(nn.Module):
     ...,
     BEIT_START_DOCSTRING,
 )
-class FlaxBeitForMaskedImageModeling(FlaxBeitPreTrainedModel):
-    module_class = ...
+class FlaxBeitForMaskedImageModeling(FlaxBeitPreTrainedModel): ...
 
 FLAX_BEIT_MLM_DOCSTRING = ...
 
@@ -261,8 +259,7 @@ class FlaxBeitForImageClassificationModule(nn.Module):
     ...,
     BEIT_START_DOCSTRING,
 )
-class FlaxBeitForImageClassification(FlaxBeitPreTrainedModel):
-    module_class = ...
+class FlaxBeitForImageClassification(FlaxBeitPreTrainedModel): ...
 
 FLAX_BEIT_CLASSIF_DOCSTRING = ...
 __all__ = [

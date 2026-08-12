@@ -1,7 +1,6 @@
 from ...configuration_utils import PretrainedConfig
 
 class SamHQPromptEncoderConfig(PretrainedConfig):
-    base_config_key = ...
     def __init__(
         self,
         hidden_size=...,
@@ -15,8 +14,6 @@ class SamHQPromptEncoderConfig(PretrainedConfig):
     ) -> None: ...
 
 class SamHQVisionConfig(PretrainedConfig):
-    base_config_key = ...
-    model_type = ...
     def __init__(
         self,
         hidden_size=...,
@@ -42,7 +39,6 @@ class SamHQVisionConfig(PretrainedConfig):
     ) -> None: ...
 
 class SamHQMaskDecoderConfig(PretrainedConfig):
-    base_config_key = ...
     def __init__(
         self,
         hidden_size=...,
@@ -60,8 +56,6 @@ class SamHQMaskDecoderConfig(PretrainedConfig):
     ) -> None: ...
 
 class SamHQConfig(PretrainedConfig):
-    model_type = ...
-    sub_configs = ...
     def __init__(
         self,
         vision_config=...,

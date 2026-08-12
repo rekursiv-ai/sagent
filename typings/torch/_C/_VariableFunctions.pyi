@@ -5477,3 +5477,2515 @@ def zeros_like(
     pin_memory: _bool | None = ...,
     requires_grad: _bool | None = ...,
 ) -> Tensor: ...
+
+# Backfilled from the installed torch stub: these are named in __all__ but the
+# generator dropped their definitions, so every call site inferred Unknown.
+def _adaptive_avg_pool2d(
+    input: Tensor,
+    output_size: _int | SymInt | Sequence[_int | SymInt],
+) -> Tensor: ...
+def _adaptive_avg_pool3d(
+    input: Tensor,
+    output_size: _int | SymInt | Sequence[_int | SymInt],
+) -> Tensor: ...
+def _add_batch_dim(input: Tensor, batch_dim: _int, level: _int) -> Tensor: ...
+@overload
+def _add_relu(
+    input: Tensor,
+    other: Tensor,
+    *,
+    alpha: Number | _complex = 1,
+    out: Tensor | None = None,
+) -> Tensor: ...
+@overload
+def _add_relu(
+    input: Tensor,
+    other: Number | _complex,
+    alpha: Number | _complex = 1,
+) -> Tensor: ...
+@overload
+def _add_relu_(
+    input: Tensor,
+    other: Tensor,
+    *,
+    alpha: Number | _complex = 1,
+) -> Tensor: ...
+@overload
+def _add_relu_(
+    input: Tensor,
+    other: Number | _complex,
+    alpha: Number | _complex = 1,
+) -> Tensor: ...
+def _addmm_activation(
+    input: Tensor,
+    mat1: Tensor,
+    mat2: Tensor,
+    *,
+    beta: Number | _complex = 1,
+    alpha: Number | _complex = 1,
+    use_gelu: _bool = False,
+    out: Tensor | None = None,
+) -> Tensor: ...
+@overload
+def _aminmax(input: Tensor) -> tuple[Tensor, Tensor]: ...
+@overload
+def _aminmax(
+    input: Tensor,
+    dim: _int,
+    keepdim: _bool = False,
+) -> tuple[Tensor, Tensor]: ...
+def _amp_foreach_non_finite_check_and_unscale_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    found_inf: Tensor,
+    inv_scale: Tensor,
+) -> None: ...
+def _amp_update_scale_(
+    input: Tensor,
+    growth_tracker: Tensor,
+    found_inf: Tensor,
+    scale_growth_factor: _float,
+    scale_backoff_factor: _float,
+    growth_interval: _int,
+) -> Tensor: ...
+@overload
+def _assert_async(input: Tensor) -> None:
+    r"""
+    _assert_async(tensor) -> void
+
+    Asynchronously assert that the contents of tensor are nonzero.  For CPU tensors,
+    this is equivalent to ``assert tensor`` or ``assert tensor.is_nonzero()``; for
+    CUDA tensors, we DO NOT synchronize and you may only find out the assertion
+    failed at a later CUDA kernel launch.  Asynchronous assertion can be helpful for
+    testing invariants in CUDA tensors without giving up performance.  This function
+    is NOT intended to be used for regular error checking, as it will trash your CUDA
+    context if the assert fails (forcing you to restart your PyTorch process.)
+
+    Args:
+        tensor (Tensor): a one element tensor to test to see if it is nonzero.  Zero
+            elements (including False for boolean tensors) cause an assertion failure
+            to be raised.
+    """
+
+@overload
+def _assert_async(input: Tensor, assert_msg: str) -> None:
+    r"""
+    _assert_async(tensor) -> void
+
+    Asynchronously assert that the contents of tensor are nonzero.  For CPU tensors,
+    this is equivalent to ``assert tensor`` or ``assert tensor.is_nonzero()``; for
+    CUDA tensors, we DO NOT synchronize and you may only find out the assertion
+    failed at a later CUDA kernel launch.  Asynchronous assertion can be helpful for
+    testing invariants in CUDA tensors without giving up performance.  This function
+    is NOT intended to be used for regular error checking, as it will trash your CUDA
+    context if the assert fails (forcing you to restart your PyTorch process.)
+
+    Args:
+        tensor (Tensor): a one element tensor to test to see if it is nonzero.  Zero
+            elements (including False for boolean tensors) cause an assertion failure
+            to be raised.
+    """
+
+def _assert_scalar(self: Number | _complex, assert_msg: str) -> None: ...
+def _assert_tensor_metadata(
+    a: Tensor,
+    size: Sequence[_int | SymInt] | None = None,
+    stride: Sequence[_int | SymInt] | None = None,
+    dtype: _dtype | None = None,
+    *,
+    device: DeviceLikeType | None = None,
+    layout: _layout | None = None,
+) -> None: ...
+def _batch_norm_impl_index(
+    input: Tensor,
+    weight: Tensor | None,
+    bias: Tensor | None,
+    running_mean: Tensor | None,
+    running_var: Tensor | None,
+    training: _bool,
+    momentum: _float,
+    eps: _float,
+    cudnn_enabled: _bool,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, _int]: ...
+def _cast_Byte(input: Tensor, non_blocking: _bool = False) -> Tensor: ...
+def _cast_Char(input: Tensor, non_blocking: _bool = False) -> Tensor: ...
+def _cast_Double(input: Tensor, non_blocking: _bool = False) -> Tensor: ...
+def _cast_Float(input: Tensor, non_blocking: _bool = False) -> Tensor: ...
+def _cast_Half(input: Tensor, non_blocking: _bool = False) -> Tensor: ...
+def _cast_Int(input: Tensor, non_blocking: _bool = False) -> Tensor: ...
+def _cast_Long(input: Tensor, non_blocking: _bool = False) -> Tensor: ...
+def _cast_Short(input: Tensor, non_blocking: _bool = False) -> Tensor: ...
+def _choose_qparams_per_tensor(
+    input: Tensor,
+    reduce_range: _bool = False,
+) -> tuple[_float, _int]: ...
+def _chunk_cat(
+    tensors: tuple[Tensor, ...] | list[Tensor] | None,
+    dim: _int,
+    num_chunks: _int,
+    *,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _coalesce(input: Tensor) -> Tensor: ...
+def _compute_linear_combination(
+    input: Tensor,
+    coefficients: Tensor,
+    *,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _conj(input: Tensor) -> Tensor: ...
+def _conj_copy(input: Tensor, *, out: Tensor | None = None) -> Tensor: ...
+def _conj_physical(input: Tensor) -> Tensor: ...
+def _convert_indices_from_coo_to_csr(
+    input: Tensor,
+    size: _int,
+    *,
+    out_int32: _bool = False,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _convert_indices_from_csr_to_coo(
+    crow_indices: Tensor,
+    col_indices: Tensor,
+    *,
+    out_int32: _bool = False,
+    transpose: _bool = False,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _convert_weight_to_int4pack(input: Tensor, innerKTiles: _int) -> Tensor: ...
+def _convert_weight_to_int4pack_for_cpu(
+    input: Tensor,
+    innerKTiles: _int,
+) -> Tensor: ...
+@overload
+def _convolution(
+    input: Tensor,
+    weight: Tensor,
+    bias: Tensor | None,
+    stride: Sequence[_int | SymInt],
+    padding: Sequence[_int | SymInt],
+    dilation: Sequence[_int | SymInt],
+    transposed: _bool,
+    output_padding: _size,
+    groups: _int | SymInt,
+    benchmark: _bool,
+    deterministic: _bool,
+    cudnn_enabled: _bool,
+) -> Tensor: ...
+@overload
+def _convolution(
+    input: Tensor,
+    weight: Tensor,
+    bias: Tensor | None,
+    stride: Sequence[_int | SymInt],
+    padding: Sequence[_int | SymInt],
+    dilation: Sequence[_int | SymInt],
+    transposed: _bool,
+    output_padding: Sequence[_int | SymInt],
+    groups: _int | SymInt,
+    benchmark: _bool,
+    deterministic: _bool,
+    cudnn_enabled: _bool,
+    allow_tf32: _bool,
+) -> Tensor: ...
+def _convolution_mode(
+    input: Tensor,
+    weight: Tensor,
+    bias: Tensor | None,
+    stride: Sequence[_int | SymInt],
+    padding: str,
+    dilation: Sequence[_int | SymInt],
+    groups: _int | SymInt,
+) -> Tensor: ...
+def _copy_from(
+    input: Tensor,
+    dst: Tensor,
+    non_blocking: _bool = False,
+) -> Tensor: ...
+def _copy_from_and_resize(input: Tensor, dst: Tensor) -> Tensor: ...
+def _cslt_compress(input: Tensor) -> Tensor: ...
+def _cslt_sparse_mm(
+    compressed_A: Tensor,
+    dense_B: Tensor,
+    bias: Tensor | None = None,
+    alpha: Tensor | None = None,
+    out_dtype: _dtype | None = None,
+    transpose_result: _bool = False,
+    alg_id: _int = 0,
+    split_k: _int = 1,
+    split_k_mode: _int = -1,
+) -> Tensor: ...
+def _cslt_sparse_mm_search(
+    compressed_A: Tensor,
+    dense_B: Tensor,
+    bias: Tensor | None = None,
+    alpha: Tensor | None = None,
+    out_dtype: _dtype | None = None,
+    transpose_result: _bool = False,
+) -> _int: ...
+@overload
+def _ctc_loss(
+    log_probs: Tensor,
+    targets: Tensor,
+    input_lengths: _size,
+    target_lengths: _size,
+    blank: _int = 0,
+    zero_infinity: _bool = False,
+) -> tuple[Tensor, Tensor]: ...
+@overload
+def _ctc_loss(
+    log_probs: Tensor,
+    targets: Tensor,
+    input_lengths: Tensor,
+    target_lengths: Tensor,
+    blank: _int = 0,
+    zero_infinity: _bool = False,
+) -> tuple[Tensor, Tensor]: ...
+@overload
+def _cudnn_ctc_loss(
+    log_probs: Tensor,
+    targets: Tensor,
+    input_lengths: _size,
+    target_lengths: _size,
+    blank: _int,
+    deterministic: _bool,
+    zero_infinity: _bool,
+) -> tuple[Tensor, Tensor]: ...
+@overload
+def _cudnn_ctc_loss(
+    log_probs: Tensor,
+    targets: Tensor,
+    input_lengths: Tensor,
+    target_lengths: Tensor,
+    blank: _int,
+    deterministic: _bool,
+    zero_infinity: _bool,
+) -> tuple[Tensor, Tensor]: ...
+def _cudnn_init_dropout_state(
+    dropout: _float,
+    train: _bool,
+    dropout_seed: _int,
+    *,
+    dtype: _dtype | None = None,
+    layout: _layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: _bool | None = False,
+    requires_grad: _bool | None = False,
+) -> Tensor: ...
+def _cudnn_rnn(
+    input: Tensor,
+    weight: tuple[Tensor, ...] | list[Tensor] | None,
+    weight_stride0: _int,
+    weight_buf: Tensor | None,
+    hx: Tensor,
+    cx: Tensor | None,
+    mode: _int,
+    hidden_size: _int | SymInt,
+    proj_size: _int | SymInt,
+    num_layers: _int,
+    batch_first: _bool,
+    dropout: _float,
+    train: _bool,
+    bidirectional: _bool,
+    batch_sizes: Sequence[_int | SymInt],
+    dropout_state: Tensor | None,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]: ...
+def _cudnn_rnn_flatten_weight(
+    weight_arr: tuple[Tensor, ...] | list[Tensor] | None,
+    weight_stride0: _int,
+    input_size: _int | SymInt,
+    mode: _int,
+    hidden_size: _int | SymInt,
+    proj_size: _int | SymInt,
+    num_layers: _int,
+    batch_first: _bool,
+    bidirectional: _bool,
+) -> Tensor: ...
+def _cufft_clear_plan_cache(device_index: _int) -> None: ...
+def _cufft_get_plan_cache_max_size(device_index: _int) -> _int: ...
+def _cufft_get_plan_cache_size(device_index: _int) -> _int: ...
+def _cufft_set_plan_cache_max_size(
+    device_index: _int,
+    max_size: _int,
+) -> None: ...
+def _cummax_helper(
+    input: Tensor,
+    values: Tensor,
+    indices: Tensor,
+    dim: _int,
+) -> None: ...
+def _cummin_helper(
+    input: Tensor,
+    values: Tensor,
+    indices: Tensor,
+    dim: _int,
+) -> None: ...
+def _debug_has_internal_overlap(input: Tensor) -> _int: ...
+def _dim_arange(like: Tensor, dim: _int) -> Tensor: ...
+def _dirichlet_grad(x: Tensor, alpha: Tensor, total: Tensor) -> Tensor: ...
+def _disable_functionalization(): ...
+def _dyn_quant_matmul_4bit(
+    inp: Tensor,
+    packed_weights: Tensor,
+    block_size: _int,
+    in_features: _int,
+    out_features: _int,
+) -> Tensor: ...
+def _dyn_quant_pack_4bit_weight(
+    weights: Tensor,
+    scales_zeros: Tensor,
+    bias: Tensor | None,
+    block_size: _int,
+    in_features: _int,
+    out_features: _int,
+) -> Tensor: ...
+@overload
+def _efficientzerotensor(
+    size: Sequence[_int | SymInt],
+    *,
+    dtype: _dtype | None = None,
+    layout: _layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: _bool | None = False,
+    requires_grad: _bool | None = False,
+) -> Tensor: ...
+@overload
+def _efficientzerotensor(
+    *size: _int | SymInt,
+    dtype: _dtype | None = None,
+    layout: _layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: _bool | None = False,
+    requires_grad: _bool | None = False,
+) -> Tensor: ...
+def _embedding_bag(
+    weight: Tensor,
+    indices: Tensor,
+    offsets: Tensor,
+    scale_grad_by_freq: _bool = False,
+    mode: _int = 0,
+    sparse: _bool = False,
+    per_sample_weights: Tensor | None = None,
+    include_last_offset: _bool = False,
+    padding_idx: _int = -1,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]: ...
+def _embedding_bag_forward_only(
+    weight: Tensor,
+    indices: Tensor,
+    offsets: Tensor,
+    scale_grad_by_freq: _bool = False,
+    mode: _int = 0,
+    sparse: _bool = False,
+    per_sample_weights: Tensor | None = None,
+    include_last_offset: _bool = False,
+    padding_idx: _int = -1,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]: ...
+@overload
+def _empty_affine_quantized(
+    size: Sequence[_int | SymInt],
+    *,
+    scale: _float = 1,
+    zero_point: _int = 0,
+    memory_format: memory_format | None = contiguous_format,
+    dtype: _dtype | None = None,
+    layout: _layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: _bool | None = False,
+    requires_grad: _bool | None = False,
+) -> Tensor: ...
+@overload
+def _empty_affine_quantized(
+    *size: _int | SymInt,
+    scale: _float = 1,
+    zero_point: _int = 0,
+    memory_format: memory_format | None = contiguous_format,
+    dtype: _dtype | None = None,
+    layout: _layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: _bool | None = False,
+    requires_grad: _bool | None = False,
+) -> Tensor: ...
+@overload
+def _empty_per_channel_affine_quantized(
+    size: Sequence[_int | SymInt],
+    *,
+    scales: Tensor,
+    zero_points: Tensor,
+    axis: _int,
+    memory_format: memory_format | None = contiguous_format,
+    dtype: _dtype | None = None,
+    layout: _layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: _bool | None = False,
+    requires_grad: _bool | None = False,
+) -> Tensor: ...
+@overload
+def _empty_per_channel_affine_quantized(
+    *size: _int | SymInt,
+    scales: Tensor,
+    zero_points: Tensor,
+    axis: _int,
+    memory_format: memory_format | None = contiguous_format,
+    dtype: _dtype | None = None,
+    layout: _layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: _bool | None = False,
+    requires_grad: _bool | None = False,
+) -> Tensor: ...
+def _enable_functionalization(*, reapply_views: _bool = False) -> None: ...
+def _euclidean_dist(x1: Tensor, x2: Tensor) -> Tensor: ...
+def _fake_quantize_learnable_per_channel_affine(
+    input: Tensor,
+    scale: Tensor,
+    zero_point: Tensor,
+    axis: _int,
+    quant_min: _int,
+    quant_max: _int,
+    grad_factor: _float = 1.0,
+) -> Tensor: ...
+def _fake_quantize_learnable_per_tensor_affine(
+    input: Tensor,
+    scale: Tensor,
+    zero_point: Tensor,
+    quant_min: _int,
+    quant_max: _int,
+    grad_factor: _float = 1.0,
+) -> Tensor: ...
+def _fft_c2c(
+    input: Tensor,
+    dim: Sequence[_int | SymInt],
+    normalization: _int,
+    forward: _bool,
+    *,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _fft_c2r(
+    input: Tensor,
+    dim: _size,
+    normalization: _int,
+    last_dim_size: _int | SymInt,
+    *,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _fft_r2c(
+    input: Tensor,
+    dim: _size,
+    normalization: _int,
+    onesided: _bool,
+    *,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _fill_mem_eff_dropout_mask_(
+    input: Tensor,
+    dropout_p: _float,
+    seed: _int,
+    offset: _int,
+) -> Tensor: ...
+def _foobar(
+    input: Tensor,
+    arg1: _bool = True,
+    arg2: _bool = True,
+    *,
+    arg3: _bool = True,
+) -> Tensor: ...
+def _foreach_abs(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_abs(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.abs` to each Tensor of the input list.
+    """
+
+def _foreach_abs_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_abs_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.abs` to each Tensor of the input list.
+    """
+
+def _foreach_acos(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_acos(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.acos` to each Tensor of the input list.
+    """
+
+def _foreach_acos_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_acos_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.acos` to each Tensor of the input list.
+    """
+
+@overload
+def _foreach_add(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Sequence[Number | _complex],
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_add(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: tuple[Tensor, ...] | list[Tensor] | None,
+    *,
+    alpha: Number | _complex = 1,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_add(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: Tensor,
+    *,
+    alpha: Number | _complex = 1,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_add(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalar: Number | _complex,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_add_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Sequence[Number | _complex],
+) -> None: ...
+@overload
+def _foreach_add_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: tuple[Tensor, ...] | list[Tensor] | None,
+    *,
+    alpha: Number | _complex = 1,
+) -> None: ...
+@overload
+def _foreach_add_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: Tensor,
+    *,
+    alpha: Number | _complex = 1,
+) -> None: ...
+@overload
+def _foreach_add_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalar: Number | _complex,
+) -> None: ...
+@overload
+def _foreach_addcdiv(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor1: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor2: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Sequence[Number | _complex],
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_addcdiv(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor1: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor2: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Tensor,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_addcdiv(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor1: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor2: tuple[Tensor, ...] | list[Tensor] | None,
+    value: Number | _complex = 1,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_addcdiv_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor1: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor2: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Sequence[Number | _complex],
+) -> None: ...
+@overload
+def _foreach_addcdiv_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor1: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor2: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Tensor,
+) -> None: ...
+@overload
+def _foreach_addcdiv_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor1: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor2: tuple[Tensor, ...] | list[Tensor] | None,
+    value: Number | _complex = 1,
+) -> None: ...
+@overload
+def _foreach_addcmul(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor1: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor2: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Sequence[Number | _complex],
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_addcmul(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor1: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor2: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Tensor,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_addcmul(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor1: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor2: tuple[Tensor, ...] | list[Tensor] | None,
+    value: Number | _complex = 1,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_addcmul_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor1: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor2: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Sequence[Number | _complex],
+) -> None: ...
+@overload
+def _foreach_addcmul_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor1: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor2: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Tensor,
+) -> None: ...
+@overload
+def _foreach_addcmul_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor1: tuple[Tensor, ...] | list[Tensor] | None,
+    tensor2: tuple[Tensor, ...] | list[Tensor] | None,
+    value: Number | _complex = 1,
+) -> None: ...
+def _foreach_asin(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_asin(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.asin` to each Tensor of the input list.
+    """
+
+def _foreach_asin_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_asin_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.asin` to each Tensor of the input list.
+    """
+
+def _foreach_atan(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_atan(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.atan` to each Tensor of the input list.
+    """
+
+def _foreach_atan_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_atan_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.atan` to each Tensor of the input list.
+    """
+
+def _foreach_ceil(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_ceil(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.ceil` to each Tensor of the input list.
+    """
+
+def _foreach_ceil_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_ceil_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.ceil` to each Tensor of the input list.
+    """
+
+@overload
+def _foreach_clamp_max(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Sequence[Number | _complex],
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_clamp_max(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalar: Number | _complex,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_clamp_max(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_clamp_max_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Sequence[Number | _complex],
+) -> None: ...
+@overload
+def _foreach_clamp_max_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalar: Number | _complex,
+) -> None: ...
+@overload
+def _foreach_clamp_max_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: tuple[Tensor, ...] | list[Tensor] | None,
+) -> None: ...
+@overload
+def _foreach_clamp_min(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Sequence[Number | _complex],
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_clamp_min(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalar: Number | _complex,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_clamp_min(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_clamp_min_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Sequence[Number | _complex],
+) -> None: ...
+@overload
+def _foreach_clamp_min_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalar: Number | _complex,
+) -> None: ...
+@overload
+def _foreach_clamp_min_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: tuple[Tensor, ...] | list[Tensor] | None,
+) -> None: ...
+def _foreach_cos(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_cos(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.cos` to each Tensor of the input list.
+    """
+
+def _foreach_cos_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_cos_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.cos` to each Tensor of the input list.
+    """
+
+def _foreach_cosh(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_cosh(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.cosh` to each Tensor of the input list.
+    """
+
+def _foreach_cosh_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_cosh_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.cosh` to each Tensor of the input list.
+    """
+
+@overload
+def _foreach_div(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Sequence[Number | _complex],
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_div(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: Tensor,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_div(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalar: Number | _complex,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_div(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_div_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Sequence[Number | _complex],
+) -> None: ...
+@overload
+def _foreach_div_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: Tensor,
+) -> None: ...
+@overload
+def _foreach_div_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalar: Number | _complex,
+) -> None: ...
+@overload
+def _foreach_div_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: tuple[Tensor, ...] | list[Tensor] | None,
+) -> None: ...
+def _foreach_erf(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_erf(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.erf` to each Tensor of the input list.
+    """
+
+def _foreach_erf_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_erf_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.erf` to each Tensor of the input list.
+    """
+
+def _foreach_erfc(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_erfc(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.erfc` to each Tensor of the input list.
+    """
+
+def _foreach_erfc_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_erfc_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.erfc` to each Tensor of the input list.
+    """
+
+def _foreach_exp(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_exp(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.exp` to each Tensor of the input list.
+    """
+
+def _foreach_exp_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_exp_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.exp` to each Tensor of the input list.
+    """
+
+def _foreach_expm1(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_expm1(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.expm1` to each Tensor of the input list.
+    """
+
+def _foreach_expm1_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_expm1_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.expm1` to each Tensor of the input list.
+    """
+
+def _foreach_floor(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_floor(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.floor` to each Tensor of the input list.
+    """
+
+def _foreach_floor_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_floor_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.floor` to each Tensor of the input list.
+    """
+
+def _foreach_frac(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_frac(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.frac` to each Tensor of the input list.
+    """
+
+def _foreach_frac_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_frac_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.frac` to each Tensor of the input list.
+    """
+
+@overload
+def _foreach_lerp(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    tensors1: tuple[Tensor, ...] | list[Tensor] | None,
+    weight: Number | _complex,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_lerp(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    tensors1: tuple[Tensor, ...] | list[Tensor] | None,
+    weight: Sequence[Number | _complex],
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_lerp(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    tensors1: tuple[Tensor, ...] | list[Tensor] | None,
+    weights: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_lerp_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    tensors1: tuple[Tensor, ...] | list[Tensor] | None,
+    weight: Number | _complex,
+) -> None: ...
+@overload
+def _foreach_lerp_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    tensors1: tuple[Tensor, ...] | list[Tensor] | None,
+    weight: Sequence[Number | _complex],
+) -> None: ...
+@overload
+def _foreach_lerp_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    tensors1: tuple[Tensor, ...] | list[Tensor] | None,
+    weights: tuple[Tensor, ...] | list[Tensor] | None,
+) -> None: ...
+def _foreach_lgamma(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_lgamma(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.lgamma` to each Tensor of the input list.
+    """
+
+def _foreach_lgamma_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> None:
+    r"""
+    _foreach_lgamma_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.lgamma` to each Tensor of the input list.
+    """
+
+def _foreach_log(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_log(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.log` to each Tensor of the input list.
+    """
+
+def _foreach_log1p(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_log1p(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.log1p` to each Tensor of the input list.
+    """
+
+def _foreach_log1p_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_log1p_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.log1p` to each Tensor of the input list.
+    """
+
+def _foreach_log2(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_log2(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.log2` to each Tensor of the input list.
+    """
+
+def _foreach_log2_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_log2_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.log2` to each Tensor of the input list.
+    """
+
+def _foreach_log10(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_log10(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.log10` to each Tensor of the input list.
+    """
+
+def _foreach_log10_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_log10_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.log10` to each Tensor of the input list.
+    """
+
+def _foreach_log_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_log_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.log` to each Tensor of the input list.
+    """
+
+def _foreach_max(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_maximum(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Sequence[Number | _complex],
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_maximum(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalar: Number | _complex,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_maximum(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_maximum_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Sequence[Number | _complex],
+) -> None: ...
+@overload
+def _foreach_maximum_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalar: Number | _complex,
+) -> None: ...
+@overload
+def _foreach_maximum_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: tuple[Tensor, ...] | list[Tensor] | None,
+) -> None: ...
+@overload
+def _foreach_minimum(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Sequence[Number | _complex],
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_minimum(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalar: Number | _complex,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_minimum(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_minimum_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Sequence[Number | _complex],
+) -> None: ...
+@overload
+def _foreach_minimum_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalar: Number | _complex,
+) -> None: ...
+@overload
+def _foreach_minimum_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: tuple[Tensor, ...] | list[Tensor] | None,
+) -> None: ...
+@overload
+def _foreach_mul(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Sequence[Number | _complex],
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_mul(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: Tensor,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_mul(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalar: Number | _complex,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_mul(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_mul_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Sequence[Number | _complex],
+) -> None: ...
+@overload
+def _foreach_mul_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: Tensor,
+) -> None: ...
+@overload
+def _foreach_mul_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalar: Number | _complex,
+) -> None: ...
+@overload
+def _foreach_mul_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: tuple[Tensor, ...] | list[Tensor] | None,
+) -> None: ...
+def _foreach_neg(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_neg(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.neg` to each Tensor of the input list.
+    """
+
+def _foreach_neg_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_neg_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.neg` to each Tensor of the input list.
+    """
+
+def _foreach_norm(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    ord: Number | _complex = 2,
+    dtype: _dtype | None = None,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_pow(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    exponent: Sequence[Number | _complex],
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_pow(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    exponent: Number | _complex,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_pow(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    exponent: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_pow(
+    self: Number | _complex,
+    exponent: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_pow_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    exponent: Sequence[Number | _complex],
+) -> None: ...
+@overload
+def _foreach_pow_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    exponent: Number | _complex,
+) -> None: ...
+@overload
+def _foreach_pow_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    exponent: tuple[Tensor, ...] | list[Tensor] | None,
+) -> None: ...
+def _foreach_reciprocal(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_reciprocal(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.reciprocal` to each Tensor of the input list.
+    """
+
+def _foreach_reciprocal_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> None:
+    r"""
+    _foreach_reciprocal_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.reciprocal` to each Tensor of the input list.
+    """
+
+def _foreach_round(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_round(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.round` to each Tensor of the input list.
+    """
+
+def _foreach_round_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_round_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.round` to each Tensor of the input list.
+    """
+
+def _foreach_rsqrt(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]: ...
+def _foreach_rsqrt_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None: ...
+def _foreach_sigmoid(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_sigmoid(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.sigmoid` to each Tensor of the input list.
+    """
+
+def _foreach_sigmoid_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> None:
+    r"""
+    _foreach_sigmoid_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.sigmoid` to each Tensor of the input list.
+    """
+
+def _foreach_sign(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]: ...
+def _foreach_sign_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None: ...
+def _foreach_sin(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_sin(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.sin` to each Tensor of the input list.
+    """
+
+def _foreach_sin_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_sin_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.sin` to each Tensor of the input list.
+    """
+
+def _foreach_sinh(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_sinh(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.sinh` to each Tensor of the input list.
+    """
+
+def _foreach_sinh_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_sinh_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.sinh` to each Tensor of the input list.
+    """
+
+def _foreach_sqrt(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_sqrt(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.sqrt` to each Tensor of the input list.
+    """
+
+def _foreach_sqrt_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_sqrt_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.sqrt` to each Tensor of the input list.
+    """
+
+@overload
+def _foreach_sub(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Sequence[Number | _complex],
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_sub(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: tuple[Tensor, ...] | list[Tensor] | None,
+    *,
+    alpha: Number | _complex = 1,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_sub(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalar: Number | _complex,
+) -> tuple[Tensor, ...]: ...
+@overload
+def _foreach_sub_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalars: Sequence[Number | _complex],
+) -> None: ...
+@overload
+def _foreach_sub_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    other: tuple[Tensor, ...] | list[Tensor] | None,
+    *,
+    alpha: Number | _complex = 1,
+) -> None: ...
+@overload
+def _foreach_sub_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    scalar: Number | _complex,
+) -> None: ...
+def _foreach_tan(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_tan(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.tan` to each Tensor of the input list.
+    """
+
+def _foreach_tan_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_tan_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.tan` to each Tensor of the input list.
+    """
+
+def _foreach_tanh(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_tanh(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.tanh` to each Tensor of the input list.
+    """
+
+def _foreach_tanh_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_tanh_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.tanh` to each Tensor of the input list.
+    """
+
+def _foreach_trunc(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]:
+    r"""
+    _foreach_trunc(self: List[Tensor]) -> List[Tensor]
+
+    Apply :func:`torch.trunc` to each Tensor of the input list.
+    """
+
+def _foreach_trunc_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_trunc_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.trunc` to each Tensor of the input list.
+    """
+
+def _foreach_zero_(self: tuple[Tensor, ...] | list[Tensor] | None) -> None:
+    r"""
+    _foreach_zero_(self: List[Tensor]) -> None
+
+    Apply :func:`torch.zero` to each Tensor of the input list.
+    """
+
+def _from_functional_tensor(t: Tensor) -> Tensor: ...
+def _functional_assert_async(
+    input: Tensor,
+    assert_msg: str,
+    dep_token: Tensor,
+) -> Tensor: ...
+def _functional_assert_scalar(
+    self: Number | _complex,
+    assert_msg: str,
+    dep_token: Tensor,
+) -> Tensor: ...
+def _functional_sym_constrain_range(
+    size: Number | _complex,
+    min: _int | None,
+    max: _int | None,
+    dep_token: Tensor,
+) -> Tensor: ...
+def _functional_sym_constrain_range_for_size(
+    size: Number | _complex,
+    min: _int | None,
+    max: _int | None,
+    dep_token: Tensor,
+) -> Tensor: ...
+def _functionalize_apply_view_metas(tensor: Tensor, base: Tensor) -> Tensor: ...
+def _functionalize_commit_update(t: Tensor) -> None: ...
+def _functionalize_has_metadata_mutation(tensor: Tensor) -> _bool: ...
+def _functionalize_inductor_storage_resized_counter(t: Tensor) -> _int: ...
+def _functionalize_is_symbolic(tensor: Tensor) -> _bool: ...
+def _functionalize_mark_mutation_hidden_from_autograd(t: Tensor) -> None: ...
+def _functionalize_mark_storage_changed(tensor: Tensor) -> _bool: ...
+def _functionalize_mutation_counter(t: Tensor) -> _int: ...
+def _functionalize_replace(self_: Tensor, other: Tensor) -> None: ...
+def _functionalize_storage_changed_counter(t: Tensor) -> _int: ...
+def _functionalize_sync(t: Tensor) -> None: ...
+def _functionalize_unsafe_set(dst: Tensor, src: Tensor) -> None: ...
+def _functionalize_was_inductor_storage_resized(t: Tensor) -> _bool: ...
+def _functionalize_was_storage_changed(tensor: Tensor) -> _bool: ...
+@overload
+def _fused_adagrad_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    grads: tuple[Tensor, ...] | list[Tensor] | None,
+    state_sums: tuple[Tensor, ...] | list[Tensor] | None,
+    state_steps: tuple[Tensor, ...] | list[Tensor] | None,
+    *,
+    lr: Tensor,
+    lr_decay: _float,
+    weight_decay: _float,
+    eps: _float,
+    maximize: _bool,
+    grad_scale: Tensor | None = None,
+    found_inf: Tensor | None = None,
+) -> None: ...
+@overload
+def _fused_adagrad_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    grads: tuple[Tensor, ...] | list[Tensor] | None,
+    state_sums: tuple[Tensor, ...] | list[Tensor] | None,
+    state_steps: tuple[Tensor, ...] | list[Tensor] | None,
+    *,
+    lr: _float,
+    lr_decay: _float,
+    weight_decay: _float,
+    eps: _float,
+    maximize: _bool,
+    grad_scale: Tensor | None = None,
+    found_inf: Tensor | None = None,
+) -> None: ...
+@overload
+def _fused_adam_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    grads: tuple[Tensor, ...] | list[Tensor] | None,
+    exp_avgs: tuple[Tensor, ...] | list[Tensor] | None,
+    exp_avg_sqs: tuple[Tensor, ...] | list[Tensor] | None,
+    max_exp_avg_sqs: tuple[Tensor, ...] | list[Tensor] | None,
+    state_steps: tuple[Tensor, ...] | list[Tensor] | None,
+    *,
+    lr: Tensor,
+    beta1: _float,
+    beta2: _float,
+    weight_decay: _float,
+    eps: _float,
+    amsgrad: _bool,
+    maximize: _bool,
+    grad_scale: Tensor | None = None,
+    found_inf: Tensor | None = None,
+) -> None: ...
+@overload
+def _fused_adam_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    grads: tuple[Tensor, ...] | list[Tensor] | None,
+    exp_avgs: tuple[Tensor, ...] | list[Tensor] | None,
+    exp_avg_sqs: tuple[Tensor, ...] | list[Tensor] | None,
+    max_exp_avg_sqs: tuple[Tensor, ...] | list[Tensor] | None,
+    state_steps: tuple[Tensor, ...] | list[Tensor] | None,
+    *,
+    lr: _float,
+    beta1: _float,
+    beta2: _float,
+    weight_decay: _float,
+    eps: _float,
+    amsgrad: _bool,
+    maximize: _bool,
+    grad_scale: Tensor | None = None,
+    found_inf: Tensor | None = None,
+) -> None: ...
+@overload
+def _fused_adamw_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    grads: tuple[Tensor, ...] | list[Tensor] | None,
+    exp_avgs: tuple[Tensor, ...] | list[Tensor] | None,
+    exp_avg_sqs: tuple[Tensor, ...] | list[Tensor] | None,
+    max_exp_avg_sqs: tuple[Tensor, ...] | list[Tensor] | None,
+    state_steps: tuple[Tensor, ...] | list[Tensor] | None,
+    *,
+    lr: Tensor,
+    beta1: _float,
+    beta2: _float,
+    weight_decay: _float,
+    eps: _float,
+    amsgrad: _bool,
+    maximize: _bool,
+    grad_scale: Tensor | None = None,
+    found_inf: Tensor | None = None,
+) -> None: ...
+@overload
+def _fused_adamw_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    grads: tuple[Tensor, ...] | list[Tensor] | None,
+    exp_avgs: tuple[Tensor, ...] | list[Tensor] | None,
+    exp_avg_sqs: tuple[Tensor, ...] | list[Tensor] | None,
+    max_exp_avg_sqs: tuple[Tensor, ...] | list[Tensor] | None,
+    state_steps: tuple[Tensor, ...] | list[Tensor] | None,
+    *,
+    lr: _float,
+    beta1: _float,
+    beta2: _float,
+    weight_decay: _float,
+    eps: _float,
+    amsgrad: _bool,
+    maximize: _bool,
+    grad_scale: Tensor | None = None,
+    found_inf: Tensor | None = None,
+) -> None: ...
+def _fused_dropout(
+    input: Tensor,
+    p: _float,
+    generator: Generator | None = None,
+) -> tuple[Tensor, Tensor]: ...
+def _fused_moving_avg_obs_fq_helper(
+    input: Tensor,
+    observer_on: Tensor,
+    fake_quant_on: Tensor,
+    running_min: Tensor,
+    running_max: Tensor,
+    scale: Tensor,
+    zero_point: Tensor,
+    averaging_const: _float,
+    quant_min: _int,
+    quant_max: _int,
+    ch_axis: _int,
+    per_row_fake_quant: _bool = False,
+    symmetric_quant: _bool = False,
+) -> torch.return_types._fused_moving_avg_obs_fq_helper: ...
+def _fused_rms_norm(
+    input: Tensor,
+    normalized_shape: _size,
+    weight: Tensor | None,
+    eps: _float | None,
+) -> tuple[Tensor, Tensor]: ...
+def _fused_sdp_choice(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    attn_mask: Tensor | None = None,
+    dropout_p: _float = 0.0,
+    is_causal: _bool = False,
+    *,
+    scale: _float | None = None,
+    enable_gqa: _bool = False,
+) -> _int: ...
+@overload
+def _fused_sgd_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    grads: tuple[Tensor, ...] | list[Tensor] | None,
+    momentum_buffer_list: tuple[Tensor, ...] | list[Tensor] | None,
+    *,
+    weight_decay: _float,
+    momentum: _float,
+    lr: Tensor,
+    dampening: _float,
+    nesterov: _bool,
+    maximize: _bool,
+    is_first_step: _bool,
+    grad_scale: Tensor | None = None,
+    found_inf: Tensor | None = None,
+) -> None: ...
+@overload
+def _fused_sgd_(
+    self: tuple[Tensor, ...] | list[Tensor] | None,
+    grads: tuple[Tensor, ...] | list[Tensor] | None,
+    momentum_buffer_list: tuple[Tensor, ...] | list[Tensor] | None,
+    *,
+    weight_decay: _float,
+    momentum: _float,
+    lr: _float,
+    dampening: _float,
+    nesterov: _bool,
+    maximize: _bool,
+    is_first_step: _bool,
+    grad_scale: Tensor | None = None,
+    found_inf: Tensor | None = None,
+) -> None: ...
+def _fw_primal_copy(
+    input: Tensor,
+    level: _int,
+    *,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _grid_sampler_2d_cpu_fallback(
+    input: Tensor,
+    grid: Tensor,
+    interpolation_mode: _int,
+    padding_mode: _int,
+    align_corners: _bool,
+) -> Tensor: ...
+def _grouped_mm(
+    input: Tensor,
+    mat2: Tensor,
+    offs: Tensor | None = None,
+    bias: Tensor | None = None,
+    out_dtype: _dtype | None = None,
+) -> Tensor: ...
+def _has_compatible_shallow_copy_type(
+    input: Tensor,
+    from_: Tensor,
+) -> _bool: ...
+def _histogramdd_bin_edges(
+    input: Tensor,
+    bins: _size,
+    *,
+    range: Sequence[_float] | None = None,
+    weight: Tensor | None = None,
+    density: _bool = False,
+) -> tuple[Tensor, ...]: ...
+def _histogramdd_from_bin_cts(
+    input: Tensor,
+    bins: _size,
+    *,
+    range: Sequence[_float] | None = None,
+    weight: Tensor | None = None,
+    density: _bool = False,
+) -> Tensor: ...
+def _histogramdd_from_bin_tensors(
+    input: Tensor,
+    bins: tuple[Tensor, ...] | list[Tensor] | None,
+    *,
+    weight: Tensor | None = None,
+    density: _bool = False,
+) -> Tensor: ...
+def _index_put_impl_(
+    input: Tensor,
+    indices: tuple[Tensor, ...] | list[Tensor] | None,
+    values: Tensor,
+    accumulate: _bool = False,
+    unsafe: _bool = False,
+) -> Tensor: ...
+def _indices_copy(input: Tensor, *, out: Tensor | None = None) -> Tensor: ...
+def _int_mm(
+    input: Tensor,
+    mat2: Tensor,
+    *,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _is_all_true(input: Tensor) -> Tensor: ...
+def _is_any_true(input: Tensor) -> Tensor: ...
+def _is_functional_tensor(t: Tensor) -> _bool: ...
+def _is_functional_tensor_base(t: Tensor) -> _bool: ...
+def _is_zerotensor(input: Tensor) -> _bool: ...
+def _lazy_clone(input: Tensor) -> Tensor: ...
+def _linalg_check_errors(
+    info: Tensor,
+    api_name: str,
+    *,
+    is_matrix: _bool,
+) -> None: ...
+def _linalg_det(
+    A: Tensor,
+    *,
+    out: Tensor | tuple[Tensor, ...] | list[Tensor] | None = None,
+) -> torch.return_types._linalg_det: ...
+def _linalg_eigh(
+    A: Tensor,
+    UPLO: str = "L",
+    compute_v: _bool = True,
+    *,
+    out: Tensor | tuple[Tensor, ...] | list[Tensor] | None = None,
+) -> torch.return_types._linalg_eigh: ...
+def _linalg_slogdet(
+    A: Tensor,
+    *,
+    out: Tensor | tuple[Tensor, ...] | list[Tensor] | None = None,
+) -> torch.return_types._linalg_slogdet: ...
+def _linalg_solve_ex(
+    A: Tensor,
+    B: Tensor,
+    *,
+    left: _bool = True,
+    check_errors: _bool = False,
+    out: Tensor | tuple[Tensor, ...] | list[Tensor] | None = None,
+) -> torch.return_types._linalg_solve_ex: ...
+def _linalg_svd(
+    A: Tensor,
+    full_matrices: _bool = False,
+    compute_uv: _bool = True,
+    *,
+    driver: str | None = None,
+    out: Tensor | tuple[Tensor, ...] | list[Tensor] | None = None,
+) -> torch.return_types._linalg_svd: ...
+def _log_softmax(
+    input: Tensor,
+    dim: _int,
+    half_to_float: _bool,
+    *,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _log_softmax_backward_data(
+    grad_output: Tensor,
+    output: Tensor,
+    dim: _int,
+    input_dtype: _dtype,
+    *,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _logcumsumexp(
+    input: Tensor,
+    dim: _int,
+    *,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _lstm_mps(
+    input: Tensor,
+    hx: tuple[Tensor, ...] | list[Tensor] | None,
+    params: tuple[Tensor, ...] | list[Tensor] | None,
+    has_biases: _bool,
+    num_layers: _int,
+    dropout: _float,
+    train: _bool,
+    bidirectional: _bool,
+    batch_first: _bool,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]: ...
+def _lu_with_info(
+    input: Tensor,
+    pivot: _bool = True,
+    check_errors: _bool = True,
+) -> torch.return_types._lu_with_info: ...
+def _make_dep_token(
+    *,
+    memory_format: memory_format | None = None,
+    dtype: _dtype | None = None,
+    layout: _layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: _bool | None = False,
+    requires_grad: _bool | None = False,
+) -> Tensor: ...
+def _make_dual(primal: Tensor, tangent: Tensor, level: _int) -> Tensor: ...
+def _make_dual_copy(
+    primal: Tensor,
+    tangent: Tensor,
+    level: _int,
+    *,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _make_per_channel_quantized_tensor(
+    input: Tensor,
+    scale: Tensor,
+    zero_point: Tensor,
+    axis: _int,
+) -> Tensor: ...
+def _make_per_tensor_quantized_tensor(
+    input: Tensor,
+    scale: _float,
+    zero_point: _int,
+) -> Tensor: ...
+def _masked_scale(input: Tensor, mask: Tensor, scale: _float) -> Tensor: ...
+def _masked_softmax(
+    input: Tensor,
+    mask: Tensor,
+    dim: _int | None = None,
+    mask_type: _int | None = None,
+) -> Tensor: ...
+def _mixed_dtypes_linear(
+    input: Tensor,
+    weight: Tensor,
+    scale: Tensor,
+    *,
+    bias: Tensor | None = None,
+    activation: str | None = None,
+) -> Tensor: ...
+def _mkldnn_reshape(input: Tensor, shape: _size) -> Tensor: ...
+def _mkldnn_transpose(input: Tensor, dim0: _int, dim1: _int) -> Tensor: ...
+def _mkldnn_transpose_(input: Tensor, dim0: _int, dim1: _int) -> Tensor: ...
+def _mps_convolution(
+    input: Tensor,
+    weight: Tensor,
+    bias: Tensor | None,
+    padding: Sequence[_int | SymInt],
+    stride: Sequence[_int | SymInt],
+    dilation: Sequence[_int | SymInt],
+    groups: _int | SymInt,
+) -> Tensor: ...
+def _mps_convolution_transpose(
+    input: Tensor,
+    weight: Tensor,
+    padding: Sequence[_int | SymInt],
+    output_padding: Sequence[_int | SymInt],
+    stride: Sequence[_int | SymInt],
+    dilation: Sequence[_int | SymInt],
+    groups: _int | SymInt,
+) -> Tensor: ...
+@overload
+def _native_batch_norm_legit(
+    input: Tensor,
+    weight: Tensor | None,
+    bias: Tensor | None,
+    running_mean: Tensor,
+    running_var: Tensor,
+    training: _bool,
+    momentum: _float,
+    eps: _float,
+    *,
+    out: Tensor | tuple[Tensor, ...] | list[Tensor] | None = None,
+) -> tuple[Tensor, Tensor, Tensor]: ...
+@overload
+def _native_batch_norm_legit(
+    input: Tensor,
+    weight: Tensor | None,
+    bias: Tensor | None,
+    training: _bool,
+    momentum: _float,
+    eps: _float,
+    *,
+    out: Tensor | tuple[Tensor, ...] | list[Tensor] | None = None,
+) -> tuple[Tensor, Tensor, Tensor]: ...
+def _native_batch_norm_legit_no_training(
+    input: Tensor,
+    weight: Tensor | None,
+    bias: Tensor | None,
+    running_mean: Tensor,
+    running_var: Tensor,
+    momentum: _float,
+    eps: _float,
+) -> tuple[Tensor, Tensor, Tensor]: ...
+def _native_multi_head_attention(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    embed_dim: _int,
+    num_head: _int,
+    qkv_weight: Tensor,
+    qkv_bias: Tensor,
+    proj_weight: Tensor,
+    proj_bias: Tensor,
+    mask: Tensor | None = None,
+    need_weights: _bool = True,
+    average_attn_weights: _bool = True,
+    mask_type: _int | None = None,
+) -> tuple[Tensor, Tensor]: ...
+def _neg_view(input: Tensor) -> Tensor: ...
+def _neg_view_copy(input: Tensor, *, out: Tensor | None = None) -> Tensor: ...
+def _nested_compute_contiguous_strides_offsets(
+    nested_size: Tensor,
+) -> tuple[Tensor, Tensor]: ...
+def _nested_from_padded(
+    padded: Tensor,
+    cpu_nested_shape_example: Tensor,
+    fuse_transform_0213: _bool = False,
+) -> Tensor: ...
+def _nested_from_padded_and_nested_example(
+    padded: Tensor,
+    nt_example: Tensor,
+) -> Tensor: ...
+def _nested_from_padded_tensor(
+    padded: Tensor,
+    offsets: Tensor,
+    dummy: Tensor,
+    ragged_idx: _int = 1,
+    min_seqlen: Tensor | None = None,
+    max_seqlen: Tensor | None = None,
+    sum_S: _int | SymInt | None = None,
+) -> Tensor: ...
+def _nested_get_jagged_dummy(any: Tensor) -> Tensor: ...
+def _nested_get_lengths(input: Tensor) -> Tensor: ...
+def _nested_get_max_seqlen(input: Tensor) -> Tensor: ...
+def _nested_get_min_seqlen(input: Tensor) -> Tensor: ...
+def _nested_get_offsets(input: Tensor) -> Tensor: ...
+def _nested_get_ragged_idx(input: Tensor) -> _int: ...
+def _nested_get_values(input: Tensor) -> Tensor: ...
+def _nested_get_values_copy(
+    input: Tensor,
+    *,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _nested_tensor_from_mask(
+    t: Tensor,
+    mask: Tensor,
+    mask_check: _bool = True,
+) -> Tensor: ...
+def _nested_tensor_from_mask_left_aligned(t: Tensor, mask: Tensor) -> _bool: ...
+def _nested_tensor_from_tensor_list(
+    list: tuple[Tensor, ...] | list[Tensor] | None,
+    dtype: _dtype | None = None,
+    layout: _layout | None = None,
+    device: DeviceLikeType | None = None,
+    pin_memory: _bool | None = None,
+) -> Tensor: ...
+def _nested_tensor_softmax_with_shape(
+    input: Tensor,
+    query: Tensor,
+) -> Tensor: ...
+def _nested_view_from_buffer(
+    input: Tensor,
+    nested_size: Tensor,
+    nested_strides: Tensor,
+    offsets: Tensor,
+) -> Tensor: ...
+def _nested_view_from_buffer_copy(
+    input: Tensor,
+    nested_size: Tensor,
+    nested_strides: Tensor,
+    offsets: Tensor,
+    *,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _nested_view_from_jagged(
+    input: Tensor,
+    offsets: Tensor,
+    dummy: Tensor,
+    lengths: Tensor | None = None,
+    ragged_idx: _int = 1,
+    min_seqlen: Tensor | None = None,
+    max_seqlen: Tensor | None = None,
+) -> Tensor: ...
+def _nested_view_from_jagged_copy(
+    input: Tensor,
+    offsets: Tensor,
+    dummy: Tensor,
+    lengths: Tensor | None = None,
+    ragged_idx: _int = 1,
+    min_seqlen: Tensor | None = None,
+    max_seqlen: Tensor | None = None,
+    *,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _nnpack_available() -> _bool: ...
+def _nnpack_spatial_convolution(
+    input: Tensor,
+    weight: Tensor,
+    bias: Tensor | None,
+    padding: _int | SymInt | Sequence[_int | SymInt],
+    stride: _int | SymInt | Sequence[_int | SymInt] = 1,
+) -> Tensor: ...
+def _pack_padded_sequence(
+    input: Tensor,
+    lengths: Tensor,
+    batch_first: _bool,
+) -> tuple[Tensor, Tensor]: ...
+def _pad_packed_sequence(
+    data: Tensor,
+    batch_sizes: Tensor,
+    batch_first: _bool,
+    padding_value: Number | _complex,
+    total_length: _int,
+) -> tuple[Tensor, Tensor]: ...
+def _pin_memory(
+    input: Tensor,
+    device: DeviceLikeType | None = None,
+) -> Tensor: ...
+def _prelu_kernel(input: Tensor, weight: Tensor) -> Tensor: ...
+def _print(s: str) -> None: ...
+def _propagate_xla_data(input: Tensor, output: Tensor) -> None: ...
+def _remove_batch_dim(
+    input: Tensor,
+    level: _int,
+    batch_size: _int | SymInt,
+    out_dim: _int,
+) -> Tensor: ...
+def _reshape_alias_copy(
+    input: Tensor,
+    size: Sequence[_int | SymInt],
+    stride: Sequence[_int | SymInt],
+    *,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _reshape_from_tensor(input: Tensor, shape: Tensor) -> Tensor: ...
+def _resize_output_(
+    input: Tensor,
+    size: Sequence[_int | SymInt],
+    device: DeviceLikeType | None,
+) -> Tensor: ...
+def _rowwise_prune(
+    weight: Tensor,
+    mask: Tensor,
+    compressed_indices_dtype: _dtype,
+) -> tuple[Tensor, Tensor]: ...
+def _safe_softmax(
+    input: Tensor,
+    dim: _int,
+    dtype: _dtype | None = None,
+) -> Tensor: ...
+def _sample_dirichlet(
+    input: Tensor,
+    generator: Generator | None = None,
+) -> Tensor: ...
+def _saturate_weight_to_fp16(weight: Tensor) -> Tensor: ...
+def _scaled_dot_product_attention_math(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    attn_mask: Tensor | None = None,
+    dropout_p: _float = 0.0,
+    is_causal: _bool = False,
+    dropout_mask: Tensor | None = None,
+    *,
+    scale: _float | None = None,
+    enable_gqa: _bool = False,
+) -> tuple[Tensor, Tensor]: ...
+def _scaled_dot_product_attention_math_for_mps(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    attn_mask: Tensor | None = None,
+    dropout_p: _float = 0.0,
+    is_causal: _bool = False,
+    dropout_mask: Tensor | None = None,
+    *,
+    scale: _float | None = None,
+) -> tuple[Tensor, Tensor]: ...
+def _scaled_dot_product_cudnn_attention(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    attn_bias: Tensor | None,
+    compute_log_sumexp: _bool,
+    dropout_p: _float = 0.0,
+    is_causal: _bool = False,
+    return_debug_mask: _bool = False,
+    *,
+    scale: _float | None = None,
+) -> torch.return_types._scaled_dot_product_cudnn_attention: ...
+def _scaled_dot_product_efficient_attention(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    attn_bias: Tensor | None,
+    compute_log_sumexp: _bool,
+    dropout_p: _float = 0.0,
+    is_causal: _bool = False,
+    *,
+    scale: _float | None = None,
+) -> torch.return_types._scaled_dot_product_efficient_attention: ...
+@overload
+def _scaled_dot_product_flash_attention(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    q_descale: Tensor | None,
+    k_descale: Tensor | None,
+    v_descale: Tensor | None,
+    dropout_p: _float = 0.0,
+    is_causal: _bool = False,
+    return_debug_mask: _bool = False,
+    *,
+    scale: _float | None = None,
+) -> torch.return_types._scaled_dot_product_flash_attention: ...
+@overload
+def _scaled_dot_product_flash_attention(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    dropout_p: _float = 0.0,
+    is_causal: _bool = False,
+    return_debug_mask: _bool = False,
+    *,
+    scale: _float | None = None,
+) -> torch.return_types._scaled_dot_product_flash_attention: ...
+def _scaled_dot_product_flash_attention_for_cpu(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    dropout_p: _float = 0.0,
+    is_causal: _bool = False,
+    *,
+    attn_mask: Tensor | None = None,
+    scale: _float | None = None,
+) -> torch.return_types._scaled_dot_product_flash_attention_for_cpu: ...
+def _scaled_grouped_mm(
+    input: Tensor,
+    mat2: Tensor,
+    scale_a: Tensor,
+    scale_b: Tensor,
+    offs: Tensor | None = None,
+    bias: Tensor | None = None,
+    scale_result: Tensor | None = None,
+    out_dtype: _dtype | None = None,
+    use_fast_accum: _bool = False,
+) -> Tensor: ...
+def _scaled_mm(
+    input: Tensor,
+    mat2: Tensor,
+    scale_a: Tensor,
+    scale_b: Tensor,
+    bias: Tensor | None = None,
+    scale_result: Tensor | None = None,
+    out_dtype: _dtype | None = None,
+    use_fast_accum: _bool = False,
+    *,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _shape_as_tensor(input: Tensor) -> Tensor: ...
+def _sobol_engine_draw(
+    quasi: Tensor,
+    n: _int,
+    sobolstate: Tensor,
+    dimension: _int,
+    num_generated: _int,
+    dtype: _dtype | None,
+) -> tuple[Tensor, Tensor]: ...
+def _sobol_engine_ff_(
+    input: Tensor,
+    n: _int,
+    sobolstate: Tensor,
+    dimension: _int,
+    num_generated: _int,
+) -> Tensor: ...
+def _sobol_engine_initialize_state_(
+    input: Tensor,
+    dimension: _int,
+) -> Tensor: ...
+def _sobol_engine_scramble_(
+    input: Tensor,
+    ltm: Tensor,
+    dimension: _int,
+) -> Tensor: ...
+def _softmax(
+    input: Tensor,
+    dim: _int,
+    half_to_float: _bool,
+    *,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _softmax_backward_data(
+    grad_output: Tensor,
+    output: Tensor,
+    dim: _int,
+    input_dtype: _dtype,
+    *,
+    grad_input: Tensor | None = None,
+) -> Tensor: ...
+def _sparse_broadcast_to(input: Tensor, size: _size) -> Tensor: ...
+def _sparse_broadcast_to_copy(
+    input: Tensor,
+    size: _size,
+    *,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _sparse_csr_prod(
+    input: Tensor,
+    dim: _int | _size,
+    keepdim: _bool = False,
+    *,
+    dtype: _dtype | None = None,
+) -> Tensor: ...
+def _sparse_csr_sum(
+    input: Tensor,
+    dim: _int | _size,
+    keepdim: _bool = False,
+    *,
+    dtype: _dtype | None = None,
+) -> Tensor: ...
+def _sparse_log_softmax_backward_data(
+    grad_output: Tensor,
+    output: Tensor,
+    dim: _int,
+    input: Tensor,
+) -> Tensor: ...
+def _sparse_semi_structured_addmm(
+    input: Tensor,
+    mat1: Tensor,
+    mat1_meta: Tensor,
+    mat2: Tensor,
+    *,
+    alpha: Number | _complex = 1,
+    beta: Number | _complex = 1,
+    out_dtype: _dtype | None = None,
+) -> Tensor: ...
+def _sparse_semi_structured_apply(
+    input: Tensor,
+    thread_masks: Tensor,
+) -> tuple[Tensor, Tensor]: ...
+def _sparse_semi_structured_apply_dense(
+    input: Tensor,
+    thread_masks: Tensor,
+) -> Tensor: ...
+def _sparse_semi_structured_linear(
+    input: Tensor,
+    weight: Tensor,
+    meta: Tensor,
+    *,
+    bias: Tensor | None = None,
+    activation: str | None = None,
+    out_dtype: _dtype | None = None,
+) -> Tensor: ...
+def _sparse_semi_structured_mm(
+    mat1: Tensor,
+    mat1_meta: Tensor,
+    mat2: Tensor,
+    *,
+    out_dtype: _dtype | None = None,
+) -> Tensor: ...
+def _sparse_semi_structured_tile(
+    input: Tensor,
+    algorithm: str = "",
+    use_cutlass: _bool = True,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]: ...
+def _sparse_softmax_backward_data(
+    grad_output: Tensor,
+    output: Tensor,
+    dim: _int,
+    input: Tensor,
+) -> Tensor: ...
+def _sparse_sparse_matmul(input: Tensor, other: Tensor) -> Tensor: ...
+@overload
+def _sparse_sum(input: Tensor) -> Tensor: ...
+@overload
+def _sparse_sum(input: Tensor, *, dtype: _dtype) -> Tensor: ...
+@overload
+def _sparse_sum(input: Tensor, dim: _int | _size) -> Tensor: ...
+@overload
+def _sparse_sum(
+    input: Tensor,
+    dim: _int | _size,
+    *,
+    dtype: _dtype,
+) -> Tensor: ...
+def _stack(
+    tensors: tuple[Tensor, ...] | list[Tensor] | None,
+    dim: _int = 0,
+    *,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _standard_gamma(
+    input: Tensor,
+    generator: Generator | None = None,
+) -> Tensor: ...
+def _standard_gamma_grad(input: Tensor, output: Tensor) -> Tensor: ...
+def _sync(t: Tensor) -> None: ...
+@overload
+def _test_autograd_multiple_dispatch(input: Tensor) -> Tensor: ...
+@overload
+def _test_autograd_multiple_dispatch(input: Tensor, b: _bool) -> Tensor: ...
+def _test_autograd_multiple_dispatch_view(input: Tensor) -> Tensor: ...
+def _test_autograd_multiple_dispatch_view_copy(
+    input: Tensor,
+    *,
+    out: Tensor | None = None,
+) -> Tensor: ...
+def _test_check_tensor(input: Tensor) -> Tensor: ...
+def _test_functorch_fallback(input: Tensor, other: Tensor) -> Tensor: ...
+def _test_parallel_materialize(
+    input: Tensor,
+    num_parallel: _int,
+    skip_first: _bool = False,
+) -> Tensor: ...
+def _test_serialization_subcmul(
+    input: Tensor,
+    other: Tensor,
+    alpha: Number | _complex = 1,
+) -> Tensor: ...
+def _to_cpu(
+    tensors: tuple[Tensor, ...] | list[Tensor] | None,
+) -> tuple[Tensor, ...]: ...
+def _to_functional_tensor(t: Tensor) -> Tensor: ...
+def _to_sparse_semi_structured(dense: Tensor) -> tuple[Tensor, Tensor]: ...
+def _transform_bias_rescale_qkv(
+    qkv: Tensor,
+    qkv_bias: Tensor,
+    num_heads: _int,
+) -> tuple[Tensor, Tensor, Tensor]: ...
+def _transformer_encoder_layer_fwd(
+    src: Tensor,
+    embed_dim: _int,
+    num_heads: _int,
+    qkv_weight: Tensor,
+    qkv_bias: Tensor,
+    proj_weight: Tensor,
+    proj_bias: Tensor,
+    use_gelu: _bool,
+    norm_first: _bool,
+    eps: _float,
+    norm_weight_1: Tensor,
+    norm_bias_1: Tensor,
+    norm_weight_2: Tensor,
+    norm_bias_2: Tensor,
+    ffn_weight_1: Tensor,
+    ffn_bias_1: Tensor,
+    ffn_weight_2: Tensor,
+    ffn_bias_2: Tensor,
+    mask: Tensor | None = None,
+    mask_type: _int | None = None,
+) -> Tensor: ...
+def _trilinear(
+    i1: Tensor,
+    i2: Tensor,
+    i3: Tensor,
+    expand1: _size,
+    expand2: _size,
+    expand3: _size,
+    sumdim: _size,
+    unroll_dim: _int = 1,
+) -> Tensor: ...
+def _triton_multi_head_attention(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    embed_dim: _int,
+    num_head: _int,
+    qkv_weight: Tensor,
+    qkv_bias: Tensor,
+    proj_weight: Tensor,
+    proj_bias: Tensor,
+    mask: Tensor | None = None,
+) -> Tensor: ...
+def _triton_scaled_dot_attention(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    dropout_p: _float = 0.0,
+) -> Tensor: ...
+def _unique(
+    input: Tensor,
+    sorted: _bool = True,
+    return_inverse: _bool = False,
+) -> tuple[Tensor, Tensor]: ...
+def _unique2(
+    input: Tensor,
+    sorted: _bool = True,
+    return_inverse: _bool = False,
+    return_counts: _bool = False,
+) -> tuple[Tensor, Tensor, Tensor]: ...
+def _unpack_dual(
+    dual: Tensor,
+    level: _int,
+) -> torch.return_types._unpack_dual: ...
+def _unsafe_index(
+    input: Tensor,
+    indices: tuple[Tensor, ...] | list[Tensor] | None,
+) -> Tensor: ...
+def _unsafe_index_put(
+    input: Tensor,
+    indices: tuple[Tensor, ...] | list[Tensor] | None,
+    values: Tensor,
+    accumulate: _bool = False,
+) -> Tensor: ...
+def _unsafe_masked_index(
+    input: Tensor,
+    mask: Tensor,
+    indices: tuple[Tensor, ...] | list[Tensor] | None,
+    fill: Number | _complex,
+) -> Tensor: ...
+def _unsafe_masked_index_put_accumulate(
+    input: Tensor,
+    mask: Tensor,
+    indices: tuple[Tensor, ...] | list[Tensor] | None,
+    values: Tensor,
+) -> Tensor: ...
+@overload
+def _use_cudnn_ctc_loss(
+    log_probs: Tensor,
+    targets: Tensor,
+    input_lengths: Tensor,
+    target_lengths: Tensor,
+    blank: _int,
+) -> _bool: ...
+@overload
+def _use_cudnn_ctc_loss(
+    log_probs: Tensor,
+    targets: Tensor,
+    input_lengths: _size,
+    target_lengths: _size,
+    blank: _int,
+) -> _bool: ...
+def _use_cudnn_rnn_flatten_weight() -> _bool: ...
+def _validate_compressed_sparse_indices(
+    is_crow: _bool,
+    compressed_idx: Tensor,
+    plain_idx: Tensor,
+    cdim: _int,
+    dim: _int,
+    nnz: _int,
+) -> None: ...
+def _validate_sparse_bsc_tensor_args(
+    ccol_indices: Tensor,
+    row_indices: Tensor,
+    values: Tensor,
+    size: _size,
+    check_pinning: _bool | None = None,
+) -> None: ...
+def _validate_sparse_bsr_tensor_args(
+    crow_indices: Tensor,
+    col_indices: Tensor,
+    values: Tensor,
+    size: _size,
+    check_pinning: _bool | None = None,
+) -> None: ...
+def _validate_sparse_compressed_tensor_args(
+    compressed_indices: Tensor,
+    plain_indices: Tensor,
+    values: Tensor,
+    size: _size,
+    layout: _layout,
+    check_pinning: _bool | None = None,
+) -> None: ...
+def _validate_sparse_coo_tensor_args(
+    indices: Tensor,
+    values: Tensor,
+    size: _size,
+    is_coalesced: _bool | None = None,
+    check_pinning: _bool | None = None,
+) -> None: ...
+def _validate_sparse_csc_tensor_args(
+    ccol_indices: Tensor,
+    row_indices: Tensor,
+    values: Tensor,
+    size: _size,
+    check_pinning: _bool | None = None,
+) -> None: ...
+def _validate_sparse_csr_tensor_args(
+    crow_indices: Tensor,
+    col_indices: Tensor,
+    values: Tensor,
+    size: _size,
+    check_pinning: _bool | None = None,
+) -> None: ...
+def _values_copy(input: Tensor, *, out: Tensor | None = None) -> Tensor: ...
+def _weight_int4pack_mm(
+    input: Tensor,
+    mat2: Tensor,
+    qGroupSize: _int,
+    qScaleAndZeros: Tensor,
+) -> Tensor: ...
+def _weight_int4pack_mm_for_cpu(
+    input: Tensor,
+    mat2: Tensor,
+    qGroupSize: _int,
+    qScaleAndZeros: Tensor,
+) -> Tensor: ...
+def _weight_int4pack_mm_with_scales_and_zeros(
+    input: Tensor,
+    mat2: Tensor,
+    qGroupSize: _int,
+    qScale: Tensor,
+    qZeros: Tensor,
+) -> Tensor: ...
+def _weight_int8pack_mm(
+    input: Tensor,
+    mat2: Tensor,
+    scales: Tensor,
+) -> Tensor: ...
+def _weight_norm(v: Tensor, g: Tensor, dim: _int = 0) -> Tensor: ...
+def _weight_norm_interface(
+    v: Tensor,
+    g: Tensor,
+    dim: _int = 0,
+) -> tuple[Tensor, Tensor]: ...
+def _wrapped_linear_prepack(
+    weight: Tensor,
+    weight_scale: Tensor,
+    weight_zero_point: Tensor,
+    bias: Tensor,
+) -> Tensor: ...
+def _wrapped_quantized_linear_prepacked(
+    input: Tensor,
+    input_scale: Tensor,
+    input_zero_point: Tensor,
+    packed_weight: Tensor,
+    output_scale: Tensor,
+    output_zero_point: Tensor,
+    out_channel: _int,
+) -> Tensor: ...

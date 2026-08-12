@@ -1,3 +1,5 @@
+from torch import Tensor
+from typing import Literal
 from typing import Any
 
 """Provides optimal triton kernel parameters.

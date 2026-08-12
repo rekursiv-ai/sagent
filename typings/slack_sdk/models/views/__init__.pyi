@@ -5,7 +5,6 @@ from slack_sdk.models.blocks import Block, Option, PlainTextObject
 
 class View(JsonObject):
     types = ...
-    attributes = ...
     def __init__(
         self,
         type: str,
@@ -37,7 +36,6 @@ class View(JsonObject):
     callback_id_max_length: int = ...
 
 class ViewState(JsonObject):
-    attributes = ...
     logger = ...
     def __init__(
         self, *, values: dict[str, dict[str, dict | ViewStateValue]]
@@ -45,7 +43,6 @@ class ViewState(JsonObject):
     def to_dict(self, *args) -> dict[str, dict[str, dict[str, dict]]]: ...
 
 class ViewStateValue(JsonObject):
-    attributes = ...
     def __init__(
         self,
         *,

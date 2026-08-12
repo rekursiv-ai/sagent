@@ -1,3 +1,4 @@
+from typing import Any
 import torch
 
 def is_batch_first(expanded_args_and_kwargs) -> bool | None: ...

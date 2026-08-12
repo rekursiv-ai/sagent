@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -53,6 +54,9 @@ class PixtralAttention(nn.Module):
         output_attentions: bool | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class PixtralMLP(nn.Module):
     def __init__(self, config) -> None: ...
@@ -75,6 +79,7 @@ class PixtralAttentionLayer(GradientCheckpointingLayer):
         output_attentions: bool | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.FloatTensor]: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple[torch.FloatTensor]: ...
 
 class PixtralTransformer(nn.Module):
     def __init__(self, config) -> None: ...
@@ -88,6 +93,7 @@ class PixtralTransformer(nn.Module):
         return_dict: bool | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple | BaseModelOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | BaseModelOutput: ...
 
 @auto_docstring
 class PixtralPreTrainedModel(PreTrainedModel):

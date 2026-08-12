@@ -1,8 +1,6 @@
 from ...configuration_utils import PretrainedConfig
 
 class Cohere2VisionConfig(PretrainedConfig):
-    model_type = ...
-    sub_configs = ...
     def __init__(
         self,
         vision_config=...,

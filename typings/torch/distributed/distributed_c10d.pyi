@@ -1,3 +1,4 @@
+from typing import Self
 from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
@@ -323,7 +324,9 @@ def reduce(
     group_dst: int | None = ...,
 ) -> Work | None: ...
 @_exception_logger
-def all_gather_object(object_list, obj, group=...) -> None: ...
+def all_gather_object(
+    object_list: list[Any], obj: Any, group: ProcessGroup | None = ...
+) -> None: ...
 @_exception_logger
 def gather_object(
     obj: Any,
@@ -417,7 +420,7 @@ def all_to_all_single(
     input_split_sizes=...,
     group=...,
     async_op=...,
-) -> Any | Work | None: ...
+) -> Work | None: ...
 def all_to_all(
     output_tensor_list: list[Tensor],
     input_tensor_list: list[Tensor],

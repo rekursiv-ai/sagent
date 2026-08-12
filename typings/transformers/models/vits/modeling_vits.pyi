@@ -71,6 +71,7 @@ class VitsHifiGan(nn.Module):
         spectrogram: torch.FloatTensor,
         global_conditioning: torch.FloatTensor | None = ...,
     ) -> torch.FloatTensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 class VitsResidualCouplingLayer(nn.Module):
     def __init__(self, config: VitsConfig) -> None: ...
@@ -114,7 +115,7 @@ class VitsStochasticDurationPredictor(nn.Module):
         durations=...,
         reverse=...,
         noise_scale=...,
-    ):  # -> Any | Tensor:
+    ):  # -> Tensor:
         ...
 
 class VitsDurationPredictor(nn.Module):
@@ -130,6 +131,9 @@ class VitsAttention(nn.Module):
         attention_mask: torch.Tensor | None = ...,
         layer_head_mask: torch.Tensor | None = ...,
         output_attentions: bool = ...,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class VitsFeedForward(nn.Module):
@@ -158,6 +162,7 @@ class VitsEncoder(nn.Module):
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
     ) -> tuple | BaseModelOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | BaseModelOutput: ...
 
 class VitsTextEncoder(nn.Module):
     def __init__(self, config: VitsConfig) -> None: ...
@@ -169,6 +174,9 @@ class VitsTextEncoder(nn.Module):
         output_attentions: bool | None = ...,
         output_hidden_states: bool | None = ...,
         return_dict: bool | None = ...,
+    ) -> tuple[torch.Tensor] | VitsTextEncoderOutput: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor] | VitsTextEncoderOutput: ...
 
 @auto_docstring

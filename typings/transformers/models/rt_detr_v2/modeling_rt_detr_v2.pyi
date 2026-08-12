@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import Tensor, nn
@@ -49,6 +50,9 @@ class RTDetrV2MultiheadAttention(nn.Module):
         attention_mask: torch.Tensor | None = ...,
         position_embeddings: torch.Tensor | None = ...,
         output_attentions: bool = ...,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class RTDetrV2DecoderLayer(nn.Module):
@@ -186,6 +190,7 @@ class RTDetrV2Encoder(nn.Module):
     def forward(
         self, src, src_mask=..., pos_embed=..., output_attentions: bool = ...
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class RTDetrV2HybridEncoder(nn.Module):
     def __init__(self, config: RTDetrV2Config) -> None: ...

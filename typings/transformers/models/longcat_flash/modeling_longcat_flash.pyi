@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -103,6 +104,7 @@ class LongcatFlashDecoderLayer(GradientCheckpointingLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring
 class LongcatFlashPreTrainedModel(PreTrainedModel):

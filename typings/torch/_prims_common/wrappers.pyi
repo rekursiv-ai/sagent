@@ -1,3 +1,4 @@
+from typing import Any
 from collections.abc import Callable, Sequence
 from typing import TypeVar
 from typing_extensions import ParamSpec

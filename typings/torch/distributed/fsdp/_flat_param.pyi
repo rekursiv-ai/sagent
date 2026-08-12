@@ -67,7 +67,7 @@ class FlatParamShardMetadata(NamedTuple):
     param_offsets: tuple[tuple[int, int], ...]
 
 class _FlatParameterMeta(_ParameterMeta):
-    def __instancecheck__(self, instance) -> Any | bool: ...
+    def __instancecheck__(self, instance) -> bool: ...
 
 class FlatParameter(nn.Parameter, metaclass=_FlatParameterMeta):
     _unpadded_unsharded_size: torch.Size

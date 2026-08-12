@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -99,6 +100,7 @@ class Speech2TextEncoderLayer(GradientCheckpointingLayer):
         layer_head_mask: torch.Tensor,
         output_attentions: bool = ...,
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class Speech2TextDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: Speech2TextConfig, layer_idx=...) -> None: ...

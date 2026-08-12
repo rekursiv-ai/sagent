@@ -220,9 +220,7 @@ class Trainer:
         prediction_loss_only: bool,
         ignore_keys: list[str] | None = ...,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]: ...
-    def floating_point_ops(
-        self, inputs: dict[str, torch.Tensor | Any]
-    ):  # -> Any | int:
+    def floating_point_ops(self, inputs: dict[str, torch.Tensor | Any]):  # -> int:
         ...
     def init_hf_repo(self, token: str | None = ...):  # -> None:
         ...

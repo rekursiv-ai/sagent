@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -47,6 +48,9 @@ class PatchTSTAttention(nn.Module):
         output_attentions: bool | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class PatchTSTBatchNorm(nn.Module):
     def __init__(self, config: PatchTSTConfig) -> None: ...
@@ -95,7 +99,7 @@ class PatchTSTPreTrainedModel(PreTrainedModel):
 
 class PatchTSTEmbedding(nn.Module):
     def __init__(self, config: PatchTSTConfig) -> None: ...
-    def forward(self, patch_input: torch.Tensor):  # -> Any | Tensor:
+    def forward(self, patch_input: torch.Tensor):  # -> Tensor:
         ...
 
 class PatchTSTPositionalEncoding(nn.Module):
@@ -111,6 +115,7 @@ class PatchTSTEncoder(PatchTSTPreTrainedModel):
         output_hidden_states: bool | None = ...,
         output_attentions: bool | None = ...,
     ) -> BaseModelOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> BaseModelOutput: ...
 
 @dataclass
 @auto_docstring(custom_intro=...)
@@ -174,11 +179,17 @@ class PatchTSTStdScaler(nn.Module):
     def forward(
         self, data: torch.Tensor, observed_indicator: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 class PatchTSTMeanScaler(nn.Module):
     def __init__(self, config: PatchTSTConfig) -> None: ...
     def forward(
         self, data: torch.Tensor, observed_indicator: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 class PatchTSTNOPScaler(nn.Module):
@@ -186,11 +197,17 @@ class PatchTSTNOPScaler(nn.Module):
     def forward(
         self, data: torch.Tensor, observed_indicator: torch.Tensor | None = ...
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 class PatchTSTScaler(nn.Module):
     def __init__(self, config: PatchTSTConfig) -> None: ...
     def forward(
         self, data: torch.Tensor, observed_indicator: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 @auto_docstring
@@ -205,10 +222,12 @@ class PatchTSTModel(PatchTSTPreTrainedModel):
         output_attentions: bool | None = ...,
         return_dict: bool | None = ...,
     ) -> tuple | PatchTSTModelOutput: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | PatchTSTModelOutput: ...
 
 class PatchTSTMaskPretrainHead(nn.Module):
     def __init__(self, config: PatchTSTConfig) -> None: ...
     def forward(self, embedding: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 @auto_docstring(
     custom_intro="""
@@ -224,6 +243,9 @@ class PatchTSTForPretraining(PatchTSTPreTrainedModel):
         output_hidden_states: bool | None = ...,
         output_attentions: bool | None = ...,
         return_dict: bool | None = ...,
+    ) -> tuple | PatchTSTForPretrainingOutput: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | PatchTSTForPretrainingOutput: ...
 
 class PatchTSTClassificationHead(nn.Module):
@@ -276,6 +298,9 @@ class PatchTSTForPrediction(PatchTSTPreTrainedModel):
         output_hidden_states: bool | None = ...,
         output_attentions: bool | None = ...,
         return_dict: bool | None = ...,
+    ) -> tuple | PatchTSTForPredictionOutput: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple | PatchTSTForPredictionOutput: ...
     @torch.no_grad()
     def generate(

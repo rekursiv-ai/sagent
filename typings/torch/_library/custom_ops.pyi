@@ -1,6 +1,8 @@
+from collections.abc import Generator
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager
-from typing import Any, TypeVar, overload
+from typing import Any, Generic, Protocol, TypeVar, overload
+from typing_extensions import ParamSpec
 
 import weakref
 
@@ -12,7 +14,14 @@ import torch
 
 type device_types_t = str | Sequence[str] | None
 _F = TypeVar("_F", bound=Callable[..., object])
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
 log = ...
+
+class _CustomOpDecorator(Protocol):
+    # Generic __call__, not a generic alias: the typevars must be solved where
+    # the decorator is applied, not at the custom_op() call that returns it.
+    def __call__[**P, R](self, fn: Callable[P, R], /) -> CustomOpDef[P, R]: ...
 
 @overload
 def custom_op(
@@ -23,30 +32,30 @@ def custom_op(
     mutates_args: str | Iterable[str],
     device_types: device_types_t = ...,
     schema: str | None = ...,
-) -> Callable[[Callable[..., object]], CustomOpDef]: ...
+) -> _CustomOpDecorator: ...
 @overload
 def custom_op(
     name: str,
-    fn: Callable[..., object],
+    fn: Callable[_P, _R],
     /,
     *,
     mutates_args: str | Iterable[str],
     device_types: device_types_t = ...,
     schema: str | None = ...,
-) -> CustomOpDef: ...
+) -> CustomOpDef[_P, _R]: ...
 @exposed_in("torch.library")
 def custom_op(
     name: str,
-    fn: Callable | None = ...,
+    fn: Callable[_P, _R] | None = ...,
     /,
     *,
     mutates_args: str | Iterable[str],
     device_types: device_types_t = ...,
     schema: str | None = ...,
     tags: Sequence[_C.Tag] | None = ...,
-) -> Callable[[Callable[..., object]], CustomOpDef] | CustomOpDef: ...
+) -> _CustomOpDecorator | CustomOpDef[_P, _R]: ...
 
-class CustomOpDef:
+class CustomOpDef(Generic[_P, _R]):
     def __init__(
         self,
         namespace: str,
@@ -76,7 +85,7 @@ class CustomOpDef:
         *,
         setup_context: Callable[..., object] | None = ...,
     ) -> None: ...
-    def __call__(self, *args, **kwargs) -> Any: ...
+    def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> _R: ...
     def register_vmap(
         self, func: Callable | None = ...
     ) -> Callable[..., None] | None: ...

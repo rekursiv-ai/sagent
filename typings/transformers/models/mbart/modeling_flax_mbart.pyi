@@ -258,7 +258,6 @@ class FlaxMBartPreTrainedModel(FlaxPreTrainedModel):
 class FlaxMBartModel(FlaxMBartPreTrainedModel):
     config: MBartConfig
     dtype: jnp.dtype = ...
-    module_class = ...
 
 class FlaxMBartForConditionalGenerationModule(nn.Module):
     config: MBartConfig
@@ -286,7 +285,6 @@ class FlaxMBartForConditionalGenerationModule(nn.Module):
     MBART_START_DOCSTRING,
 )
 class FlaxMBartForConditionalGeneration(FlaxMBartPreTrainedModel):
-    module_class = ...
     dtype: jnp.dtype = ...
     @add_start_docstrings(MBART_DECODE_INPUTS_DOCSTRING)
     @replace_return_docstrings(
@@ -348,7 +346,6 @@ class FlaxMBartForSequenceClassificationModule(nn.Module):
     MBART_START_DOCSTRING,
 )
 class FlaxMBartForSequenceClassification(FlaxMBartPreTrainedModel):
-    module_class = ...
     dtype = jnp.float32
 
 class FlaxMBartForQuestionAnsweringModule(nn.Module):
@@ -377,7 +374,6 @@ class FlaxMBartForQuestionAnsweringModule(nn.Module):
     MBART_START_DOCSTRING,
 )
 class FlaxMBartForQuestionAnswering(FlaxMBartPreTrainedModel):
-    module_class = ...
     dtype = jnp.float32
 
 __all__ = [

@@ -141,8 +141,7 @@ class FlaxGPTNeoModule(nn.Module):
     ...,
     GPT_NEO_START_DOCSTRING,
 )
-class FlaxGPTNeoModel(FlaxGPTNeoPreTrainedModel):
-    module_class = ...
+class FlaxGPTNeoModel(FlaxGPTNeoPreTrainedModel): ...
 
 class FlaxGPTNeoForCausalLMModule(nn.Module):
     config: GPTNeoConfig
@@ -167,7 +166,6 @@ class FlaxGPTNeoForCausalLMModule(nn.Module):
     GPT_NEO_START_DOCSTRING,
 )
 class FlaxGPTNeoForCausalLM(FlaxGPTNeoPreTrainedModel):
-    module_class = ...
     def prepare_inputs_for_generation(
         self, input_ids, max_length, attention_mask: jax.Array | None = ...
     ):  # -> dict[str, Any | Array]:

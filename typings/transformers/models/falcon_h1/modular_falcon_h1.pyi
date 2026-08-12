@@ -183,6 +183,7 @@ class FalconH1ForCausalLM(LlamaForCausalLM):
         logits_to_keep: int | torch.Tensor = ...,
         **kwargs,
     ) -> tuple | CausalLMOutputWithPast: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple | CausalLMOutputWithPast: ...
     def prepare_inputs_for_generation(
         self,
         input_ids,

@@ -1,3 +1,4 @@
+from typing import Any
 from dataclasses import dataclass
 
 from torch import nn
@@ -44,6 +45,7 @@ class Ovis2VisionMLP(nn.Module):
 class Ovis2VisionEmbeddings(nn.Module):
     def __init__(self, config: Ovis2VisionConfig) -> None: ...
     def forward(self, pixel_values: torch.FloatTensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 def eager_attention_forward(
     module: nn.Module,
@@ -65,6 +67,9 @@ class Ovis2VisionAttention(nn.Module):
         attention_mask: torch.Tensor | None = ...,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class Ovis2MLP(nn.Module):
     def __init__(self, config) -> None: ...
@@ -79,6 +84,9 @@ class Ovis2Attention(nn.Module):
         attention_mask: torch.Tensor | None = ...,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class Ovis2VisionEncoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: Ovis2VisionConfig) -> None: ...
@@ -88,6 +96,7 @@ class Ovis2VisionEncoderLayer(GradientCheckpointingLayer):
         attention_mask: torch.Tensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class Ovis2VisionEncoder(nn.Module):
     def __init__(self, config: Ovis2VisionConfig) -> None: ...
@@ -110,6 +119,7 @@ class Ovis2VisionTransformer(nn.Module):
 
 class Ovis2VisualEmbeddingTable(nn.Embedding):
     def forward(self, visual_tokens: torch.Tensor) -> torch.Tensor: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class Ovis2PreTrainedModel(PreTrainedModel):
     config: Ovis2Config
@@ -132,6 +142,9 @@ class Ovis2VisionModel(Ovis2PreTrainedModel):
     def __init__(self, config: Ovis2VisionConfig) -> None: ...
     def forward(
         self, pixel_values: torch.FloatTensor, **kwargs
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 @auto_docstring(custom_intro=...)

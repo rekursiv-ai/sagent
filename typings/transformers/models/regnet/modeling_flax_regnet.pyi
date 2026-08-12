@@ -203,8 +203,7 @@ class FlaxRegNetModule(nn.Module):
     ...,
     REGNET_START_DOCSTRING,
 )
-class FlaxRegNetModel(FlaxRegNetPreTrainedModel):
-    module_class = ...
+class FlaxRegNetModel(FlaxRegNetPreTrainedModel): ...
 
 FLAX_VISION_MODEL_DOCSTRING = ...
 
@@ -233,8 +232,7 @@ class FlaxRegNetForImageClassificationModule(nn.Module):
     ...,
     REGNET_START_DOCSTRING,
 )
-class FlaxRegNetForImageClassification(FlaxRegNetPreTrainedModel):
-    module_class = ...
+class FlaxRegNetForImageClassification(FlaxRegNetPreTrainedModel): ...
 
 FLAX_VISION_CLASSIF_DOCSTRING = ...
 __all__ = [

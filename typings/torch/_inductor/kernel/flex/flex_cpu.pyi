@@ -1,3 +1,5 @@
+from typing import Any
+
 def check_cpu_supported() -> bool: ...
 def lower_cpu(
     query,

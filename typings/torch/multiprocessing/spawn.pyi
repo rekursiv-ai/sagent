@@ -1,3 +1,4 @@
+from typing import Self
 from torch.numa.binding import NumaOptions
 
 ENV_VAR_PARALLEL_START = ...

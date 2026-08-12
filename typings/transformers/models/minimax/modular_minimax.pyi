@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -118,6 +119,7 @@ class MiniMaxModel(MixtralModel):
         cache_position: torch.LongTensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> MoeModelOutputWithPast: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> MoeModelOutputWithPast: ...
 
 class MiniMaxForCausalLM(MixtralForCausalLM):
     def forward(self, **super_kwargs):  # -> MoeCausalLMOutputWithPast:

@@ -1,3 +1,6 @@
+from collections.abc import Generator
+from torch import Tensor
+from typing import Self
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -73,6 +76,7 @@ class DistributedDataParallel(Module, Joinable):
     @contextmanager
     def no_sync(self) -> Generator[None, Any, None]: ...
     def forward(self, *inputs, **kwargs) -> RRef[PyTree] | PyTree: ...
+    def __call__(self, *args: Any, **kwargs: Any) -> RRef[PyTree] | PyTree: ...
     def scatter(
         self, inputs, kwargs, device_ids
     ) -> tuple[tuple[Any, ...], tuple[dict[str, Any], ...]]: ...

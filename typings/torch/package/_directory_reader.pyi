@@ -1,3 +1,5 @@
+from typing import Any, Literal
+
 __serialization_id_record_name__ = ...
 
 class _HasStorage:

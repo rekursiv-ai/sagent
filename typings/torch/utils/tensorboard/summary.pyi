@@ -1,3 +1,6 @@
+from numpy.typing import NDArray
+from typing import Any
+
 __all__ = [
     "audio",
     "compute_curve",

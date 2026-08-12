@@ -1,3 +1,4 @@
+from typing import Any
 from collections.abc import Sequence
 
 import torch

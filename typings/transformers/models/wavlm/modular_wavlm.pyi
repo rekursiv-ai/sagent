@@ -1,3 +1,4 @@
+from typing import Any
 from torch import nn
 
 import torch
@@ -40,6 +41,9 @@ class WavLMAttention(nn.Module):
         position_bias: torch.Tensor | None = ...,
         output_attentions: bool = ...,
         index=...,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
+    def __call__(
+        self, *args: Any, **kwargs: Any
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def torch_multi_head_self_attention(
         self,

@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,

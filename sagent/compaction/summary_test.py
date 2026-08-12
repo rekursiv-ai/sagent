@@ -107,9 +107,12 @@ async def _apply_compact(
 
 def _last_prompt_text(model: _ScriptedModel) -> str:
     """Concatenated text of the last request's messages (the compaction prompt)."""
-    return "\n".join(
-        getattr(m, "text", "") or getattr(m, "content", "")
-        for m in model.received[-1].messages
+    return cast(
+        "str",
+        "\n".join(
+            getattr(m, "text", "") or getattr(m, "content", "")
+            for m in model.received[-1].messages
+        ),
     )
 
 

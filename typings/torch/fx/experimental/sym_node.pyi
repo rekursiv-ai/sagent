@@ -1,3 +1,6 @@
+from collections.abc import Callable
+from types import NotImplementedType
+from typing import Any, Literal, Self
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 log = ...

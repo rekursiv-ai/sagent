@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import Any, Concatenate, TypeVar
+from typing import Any, Concatenate, Protocol, TypeVar
 from typing_extensions import ParamSpec, deprecated
 
 from torch import _C
@@ -43,21 +43,39 @@ class BackwardCFunction(_C._FunctionBase, FunctionCtx, _HookMixin):
 class FunctionMeta(type):
     def __init__(cls, name, bases, attrs) -> None: ...
 
+class _HasStaticForward[**_FP, _FR](Protocol):
+    """Structural view of a subclass's own `forward`, used to type `apply`."""
+
+    @staticmethod
+    def forward(*args: _FP.args, **kwargs: _FP.kwargs) -> _FR: ...
+
 class _SingleLevelFunction(
     _C._FunctionBase, FunctionCtx, _HookMixin, metaclass=FunctionMeta
 ):
     @staticmethod
     def forward(*args: Any, **kwargs: Any) -> Any: ...
+
+    # Autograd invokes these positionally, so the parameter NAMES must not
+    # bind: an override is free to call the context `context` rather than
+    # `ctx`. Without `/` every subclass trips `invalid-method-override` on the
+    # name alone, which reads as an `Any` problem and is not one.
     @staticmethod
-    def setup_context(ctx: Any, inputs: tuple[Any, ...], output: Any) -> Any: ...
+    def setup_context(ctx: Any, inputs: Any, output: Any, /) -> Any: ...
     @staticmethod
-    def backward(ctx: Any, *grad_outputs: Any) -> Any: ...
+    def backward(ctx: Any, /, *grad_outputs: Any) -> Any: ...
 
     vjp = ...
     @staticmethod
-    def jvp(ctx: Any, *grad_inputs: Any) -> Any: ...
+    def jvp(ctx: Any, /, *grad_inputs: Any) -> Any: ...
+
+    # `apply` forwards to the subclass's own static `forward`, so it takes and
+    # returns whatever that does. A plain `-> Any` makes every call site Any,
+    # which is what the repo's `cast("Tensor", X.apply(...))` wrappers existed
+    # to undo.
     @classmethod
-    def apply(cls, *args: Any, **kwargs: Any) -> Any: ...
+    def apply[**_AP, _AR](
+        cls: type[_HasStaticForward[_AP, _AR]], *args: _AP.args, **kwargs: _AP.kwargs
+    ) -> _AR: ...
 
 class Function(_SingleLevelFunction):
     def __init__(self, *args, **kwargs) -> None: ...
@@ -66,8 +84,8 @@ class Function(_SingleLevelFunction):
     generate_vmap_rule = ...
     @staticmethod
     def vmap(info, in_dims, *args): ...
-    @classmethod
-    def apply(cls, *args, **kwargs) -> Any: ...
+
+    # No `apply` override: it would re-erase the inherited generic one to `Any`.
 
 def once_differentiable(
     fn: Callable[Concatenate[_T, _P], _R],
@@ -84,8 +102,6 @@ _map_tensor_data = ...
 
 class NestedIOFunction(Function):
     def backward(self, *gradients: Any) -> Any: ...
-
-    __call__ = ...
     def forward(self, *args: Any) -> Any: ...
     def save_for_backward(self, *args: Any) -> None: ...
     @property

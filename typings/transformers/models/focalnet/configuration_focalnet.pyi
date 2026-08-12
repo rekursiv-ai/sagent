@@ -5,7 +5,6 @@ from ...utils.backbone_utils import BackboneConfigMixin
 logger = ...
 
 class FocalNetConfig(BackboneConfigMixin, PretrainedConfig):
-    model_type = ...
     def __init__(
         self,
         image_size=...,
