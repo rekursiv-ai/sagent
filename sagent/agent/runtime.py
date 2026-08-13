@@ -2,14 +2,13 @@ r"""AgentRuntime: inbox-driven event loop.
 
 One loop, one pipe, one match block. Everything is a ``RuntimeEvent``.
 
-This module is the canonical sagent runtime, locked per
-``docs/private/agent_v4_contract.md``. It owns the history dataclasses
+This module is the canonical sagent runtime. It owns the history dataclasses
 (``UserMessage``, ``AssistantMessage``, ``ToolResult``, ``ToolCall``,
-``BytesMessage``, ``SessionMessage``), the ``RuntimeEvent`` union, the
-dispatch loop, the gate logic, the detach machinery, the AWAIT
-mechanism, and the minimal ``Tool`` / ``Model`` / ``Compactor``
-protocols. Adapters and wrappers in ``agent/agent.py`` present richer
-protocols inward; the runtime sees only its minimal protocols.
+ ``BytesMessage``, ``SessionMessage``), the ``RuntimeEvent`` union, the
+dispatch loop, the gate logic, the detach machinery, the AWAIT mechanism, and
+the minimal ``Tool`` / ``Model`` / ``Compactor`` protocols. Adapters and
+wrappers in ``agent/agent.py`` present richer protocols inward; the runtime
+sees only its minimal protocols.
 
 Architecture
 ~~~~~~~~~~~~
@@ -1581,8 +1580,7 @@ class AgentRuntime:
 
         The original ``tool_use`` keeps its permanent ``[detached]`` stub; the
         real result is committed later as a synthetic ``DetachedArrived`` pair
-        (``_flush_pending``), preserving full ``ToolResult`` structure. See
-        ``docs/private/design_detached_tool_results.md``.
+        (``_flush_pending``), preserving full ``ToolResult`` structure.
 
         Idempotent per ``call_id``: a second delivery for an id already
         forwarded (or already queued) is dropped, so no two
@@ -2209,8 +2207,7 @@ class AgentRuntime:
                             # the result arrives forward so nothing the model
                             # already read is silently rewritten. Compaction
                             # cannot drop it -- delivery keys off the inbox, not
-                            # a tape anchor. See
-                            # ``docs/private/design_detached_tool_results.md``.
+                            # a tape anchor.
                             self._defer_detached_forward(item.result)
                             self.publish(item)
 
