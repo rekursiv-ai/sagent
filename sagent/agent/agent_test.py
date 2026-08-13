@@ -6337,11 +6337,9 @@ async def test_cancelled_background_tool_splices_placeholder() -> None:
     ]
     assert len(detached) == 1
 
-    # The cancelled background job posts a ``[cancelled]`` result. Its
-    # delivery into history (foreground-splice) is the BackgroundTask
-    # foreground path, tracked separately under
-    # ``docs/private/design_detached_tool_results.md`` scope 2; here we
-    # assert the posted result itself.
+    # The cancelled background job posts a ``[cancelled]`` result. Its delivery
+    # into history (foreground-splice) is the BackgroundTask foreground path;
+    # here we assert the posted result itself.
     result = detached[0].result
     assert result.content == types.runtime.CANCELLED_PLACEHOLDER
     assert result.is_error

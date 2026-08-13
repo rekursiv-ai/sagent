@@ -1122,7 +1122,7 @@ async def test_detach_and_result_arrives_later() -> None:
 
     The ``[detached]`` stub stays as the honest answer to the original call;
     the real result is delivered forward as a ``DetachedArrived`` pair (no
-    silent back-patch). See ``docs/private/design_detached_tool_results.md``.
+    silent back-patch).
     """
     slow = StubTool(response="late result", delay_sec=0.1)
     agent, _ = make_agent(

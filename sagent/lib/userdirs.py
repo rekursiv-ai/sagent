@@ -1,12 +1,42 @@
-"""Per-user filesystem locations following OS conventions.
+"""Utilities for per-user filesystem locations following OS conventions.
 
-Rolled in-house rather than depending on ``platformdirs``: the surface
-we need is a handful of lines of platform branching, and a 100KB
-third-party module earns its keep only when it handles complexity the
-caller cannot trivially reproduce. The corners ``platformdirs``
-covers that we skip -- AppData redirection via ``SHGetKnownFolderPath``,
-roaming profiles, appauthor/version subdirs, Android, iOS -- do not
-apply to our development tools.
+These helpers satisfy the XDG Base Directory Specification:
+https://specifications.freedesktop.org/basedir/latest/
+
+Each function reads one environment variable and falls back to a platform
+default when it is unset *or empty*, per spec:
+
+==========  =================  ==============  =============================
+Function    Env var (POSIX)    Linux/BSD       macOS
+==========  =================  ==============  =============================
+data_dir    XDG_DATA_HOME      ~/.local/share  ~/Library/Application Support
+config_dir  XDG_CONFIG_HOME    ~/.config       ~/Library/Application Support
+cache_dir   XDG_CACHE_HOME     ~/.cache        ~/Library/Caches
+state_dir   XDG_STATE_HOME     ~/.local/state  ~/Library/Application Support
+==========  =================  ==============  =============================
+
+On Windows all four read ``LOCALAPPDATA`` (default ``~/AppData/Local``) and
+ignore the XDG variables; only ``cache_dir`` differs, appending a ``Cache``
+leaf. That branch reads the variable rather than calling
+``SHGetKnownFolderPath``, so AppData redirected via group policy is not
+detected -- acceptable for development tools, not for shipped end-user
+software.
+
+Two deliberate deviations from the specification:
+
+* A relative ``XDG_*_HOME`` is honored, where the spec says to treat it as
+  invalid and ignore it. Tests and sandboxes point these at relative scratch
+  dirs, and silently substituting ``$HOME`` would write outside the sandbox --
+  a wrong path that is loud beats a right-looking one that escapes isolation.
+* The ``XDG_*`` variables are honored on macOS too, ahead of
+  ``Library/Application Support``. The spec is silent on macOS; an operator who
+  exports the variable means it on every platform.
+
+Consequently the returned path is absolute only when the consulted variable is
+absolute, which is the usual case but not guaranteed.
+
+Note: we opted to not use the third-party ``platformdirs`` because we only need
+a very tiny surface: four base directories on Linux, macOS, and Windows.
 """
 
 from __future__ import annotations
@@ -21,7 +51,6 @@ __all__ = [
     "cache_dir",
     "config_dir",
     "data_dir",
-    "resolve_working_dir",
     "state_dir",
 ]
 
@@ -29,12 +58,12 @@ __all__ = [
 def data_dir(app: str, platform: str = sys.platform) -> Path:
     """Resolve the per-user data directory for ``app``.
 
-    POSIX systems honor an explicit ``XDG_DATA_HOME``. Without one, macOS uses
-    ``Application Support`` and Linux/BSD use ``~/.local/share``. Windows uses
-    ``LOCALAPPDATA``. The Windows branch reads the env var rather than calling
-    ``SHGetKnownFolderPath``, so AppData redirected via group policy is not
-    detected -- acceptable for development tools, not for shipped end-user
-    software.
+    Holds user-specific data files: the durable, portable content a user would
+    expect to keep -- the things worth backing up and carrying to another
+    machine. State that is merely resumable belongs in :func:`state_dir`, and
+    regenerable content in :func:`cache_dir`.
+
+    Reads ``XDG_DATA_HOME``, or ``LOCALAPPDATA`` on Windows.
 
     Args:
       app: Application name. Used as the leaf directory.
@@ -42,11 +71,12 @@ def data_dir(app: str, platform: str = sys.platform) -> Path:
         default closes over the host's ``sys.platform``.
 
     Returns:
-      path: Absolute path to the application's data directory. The
-        directory is not created.
+      path: Path to the application's data directory, absolute unless the
+        consulted environment variable was relative. The directory is not
+        created.
 
     References:
-      https://specifications.freedesktop.org/basedir-spec/latest/
+      https://specifications.freedesktop.org/basedir/latest/
 
     """
     if platform == "win32":
@@ -62,9 +92,11 @@ def data_dir(app: str, platform: str = sys.platform) -> Path:
 def config_dir(app: str, platform: str = sys.platform) -> Path:
     """Resolve the per-user config directory for ``app``.
 
-    POSIX systems honor an explicit ``XDG_CONFIG_HOME``. Without one, this is
-    distinct from :func:`data_dir` on Linux/BSD (``~/.config`` vs
-    ``~/.local/share``), while macOS and Windows collapse the two locations.
+    Holds user-specific configuration files: settings the user chose, which the
+    application reads to decide how to behave. Anything the application itself
+    wrote to remember what it was doing is state, not config.
+
+    Reads ``XDG_CONFIG_HOME``, or ``LOCALAPPDATA`` on Windows.
 
     Args:
       app: Application name. Used as the leaf directory.
@@ -72,11 +104,12 @@ def config_dir(app: str, platform: str = sys.platform) -> Path:
         default closes over the host's ``sys.platform``.
 
     Returns:
-      path: Absolute path to the application's config directory. The
-        directory is not created.
+      path: Path to the application's config directory, absolute unless the
+        consulted environment variable was relative. The directory is not
+        created.
 
     References:
-      https://specifications.freedesktop.org/basedir-spec/latest/
+      https://specifications.freedesktop.org/basedir/latest/
 
     """
     if platform == "win32":
@@ -91,10 +124,12 @@ def config_dir(app: str, platform: str = sys.platform) -> Path:
 def cache_dir(app: str, platform: str = sys.platform) -> Path:
     """Resolve the per-user cache directory for ``app``.
 
-    XDG ``$XDG_CACHE_HOME`` is for non-essential, regenerable data --
-    downloaded model weights, build artifacts, memoized computation. POSIX
-    systems honor an explicit override. Without one, the cache is distinct from
-    :func:`data_dir` on Linux/BSD, while macOS and Windows use native locations.
+    Holds user-specific non-essential (cached) data -- downloaded model
+    weights, build artifacts, memoized computation. Every file here must be
+    reconstructible: deleting the whole tree may cost time but must not lose
+    anything.
+
+    Reads ``XDG_CACHE_HOME``, or ``LOCALAPPDATA`` on Windows.
 
     Args:
       app: Application name. Used as the leaf directory.
@@ -102,11 +137,12 @@ def cache_dir(app: str, platform: str = sys.platform) -> Path:
         default closes over the host's ``sys.platform``.
 
     Returns:
-      path: Absolute path to the application's cache directory. The
-        directory is not created.
+      path: Path to the application's cache directory, absolute unless the
+        consulted environment variable was relative. The directory is not
+        created.
 
     References:
-      https://specifications.freedesktop.org/basedir-spec/latest/
+      https://specifications.freedesktop.org/basedir/latest/
 
     """
     if platform == "win32":
@@ -122,11 +158,13 @@ def cache_dir(app: str, platform: str = sys.platform) -> Path:
 def state_dir(app: str, platform: str = sys.platform) -> Path:
     """Resolve the per-user state directory for ``app``.
 
-    XDG ``$XDG_STATE_HOME`` is for state that should persist between runs but
-    is not configuration or user data -- session captures, logs, undo
-    histories. POSIX systems honor an explicit override. Without one, the
-    state directory is distinct on Linux/BSD, while macOS and Windows use their
-    native application-data location.
+    Holds state that should persist across restarts but is not important or
+    portable enough for :func:`data_dir`. The spec names two kinds: action
+    history (logs, recently-used files, session captures) and the state needed
+    to resume where the application left off (view, layout, open files, undo
+    history).
+
+    Reads ``XDG_STATE_HOME``, or ``LOCALAPPDATA`` on Windows.
 
     Args:
       app: Application name. Used as the leaf directory.
@@ -134,11 +172,12 @@ def state_dir(app: str, platform: str = sys.platform) -> Path:
         default closes over the host's ``sys.platform``.
 
     Returns:
-      path: Absolute path to the application's state directory. The
-        directory is not created.
+      path: Path to the application's state directory, absolute unless the
+        consulted environment variable was relative. The directory is not
+        created.
 
     References:
-      https://specifications.freedesktop.org/basedir-spec/latest/
+      https://specifications.freedesktop.org/basedir/latest/
 
     """
     if platform == "win32":
@@ -148,30 +187,3 @@ def state_dir(app: str, platform: str = sys.platform) -> Path:
     if platform == "darwin":
         return data_dir(app, platform=platform)
     return Path.home() / ".local" / "state" / app
-
-
-def resolve_working_dir(
-    base_dir: Path | str | None,
-    working_dir: Path | str,
-) -> Path:
-    """Resolve a Config's ``working_dir`` against an optional ``base_dir``.
-
-    The one path-composition rule every path-owning Config shares: when
-    ``base_dir`` is ``None`` the ``working_dir`` is its own absolute logical
-    root; otherwise ``working_dir`` is made relative (its leading slash
-    stripped) and joined beneath ``base_dir``. Stripping the slash is required
-    because ``Path("/a") / "/b" == Path("/b")`` -- an absolute right operand
-    discards the base (POSIX semantics), so a logical root like
-    ``"/checkpoints"`` would otherwise ignore its owner's ``base_dir``.
-
-    Args:
-      base_dir: Owner-supplied root, or ``None`` when the Config is its own root.
-      working_dir: The Config's opinionated logical location.
-
-    Returns:
-      resolved: ``working_dir`` as a ``Path``, beneath ``base_dir`` when given.
-
-    """
-    if base_dir is None:
-        return Path(working_dir)
-    return Path(base_dir) / str(working_dir).lstrip("/")
