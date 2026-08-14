@@ -605,7 +605,7 @@ def _setup_homes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path,
     """
     claude = tmp_path / "claude"
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
-    sagent = data_dir("rekursiv-ai") / "sagent"
+    sagent = data_dir() / "rekursiv-ai" / "sagent"
     monkeypatch.setattr(
         sessions, "_LEGACY_SAGENT_HOME", tmp_path / "nonexistent-sagent"
     )

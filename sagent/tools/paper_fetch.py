@@ -6,7 +6,7 @@ rate-gated open-access lookups; the tool owns schema, the on-disk PDF cache,
 and result rendering.
 
 Downloads are content-addressed under
-``cache_dir("rekursiv-ai")/wesearch/papers/``; repeated calls for
+``cache_dir() / "rekursiv-ai" / "wesearch" / "papers"``; repeated calls for
 the same id return the cached path.
 """
 
@@ -85,7 +85,7 @@ class PaperFetch:
 
     def __init__(self, *, cache_dir: Path | None = None) -> None:
         self._cache_dir = (
-            cache_dir or userdirs_cache_dir("rekursiv-ai") / "wesearch" / "papers"
+            cache_dir or userdirs_cache_dir() / "rekursiv-ai" / "wesearch" / "papers"
         )
 
     def summary(self, args: Mapping[str, object]) -> str:

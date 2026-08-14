@@ -23,77 +23,103 @@ def home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return tmp_path
 
 
-@pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
-def test_data_dir_shape(home: Path, platform: str) -> None:
-    result = data_dir("myapp", platform=platform)
+@pytest.mark.parametrize("plat", ["linux", "darwin", "win32"])
+def test_data_dir_shape(home: Path, plat: str) -> None:
+    result = data_dir(platform=plat)
 
-    if platform == "linux":
-        assert result == home / ".local" / "share" / "myapp"
-    elif platform == "darwin":
-        assert result == home / "Library" / "Application Support" / "myapp"
+    if plat == "linux":
+        assert result == home / ".local" / "share"
+    elif plat == "darwin":
+        assert result == home / "Library" / "Application Support"
     else:
-        assert result == home / "AppData" / "Local" / "myapp"
+        assert result == home / "AppData" / "Local"
 
 
-@pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
-def test_config_dir_shape(home: Path, platform: str) -> None:
-    result = config_dir("myapp", platform=platform)
+@pytest.mark.parametrize("plat", ["linux", "darwin", "win32"])
+def test_config_dir_shape(home: Path, plat: str) -> None:
+    result = config_dir(platform=plat)
 
-    if platform == "linux":
-        assert result == home / ".config" / "myapp"
-    elif platform == "darwin":
-        assert result == home / "Library" / "Application Support" / "myapp"
+    if plat == "linux":
+        assert result == home / ".config"
+    elif plat == "darwin":
+        assert result == home / "Library" / "Application Support"
     else:
-        assert result == home / "AppData" / "Local" / "myapp"
+        assert result == home / "AppData" / "Local"
 
 
-def test_data_dir_win32_single_leaf(home: Path) -> None:
-    # ``home`` fixture isolates env/home; its presence is the effect.
+@pytest.mark.parametrize("plat", ["linux", "darwin", "win32"])
+def test_cache_dir_shape(home: Path, plat: str) -> None:
+    result = cache_dir(platform=plat)
+
+    if plat == "linux":
+        assert result == home / ".cache"
+    elif plat == "darwin":
+        assert result == home / "Library" / "Caches"
+    else:
+        assert result == home / "AppData" / "Local"
+
+
+@pytest.mark.parametrize("plat", ["linux", "darwin", "win32"])
+def test_state_dir_shape(home: Path, plat: str) -> None:
+    result = state_dir(platform=plat)
+
+    if plat == "linux":
+        assert result == home / ".local" / "state"
+    elif plat == "darwin":
+        assert result == home / "Library" / "Application Support"
+    else:
+        assert result == home / "AppData" / "Local"
+
+
+def test_base_dir_carries_no_app_leaf(home: Path) -> None:
+    """The base is a base: the caller's namespace is the next segment.
+
+    Guards the CORE-004 shape from the other direction -- previously the
+    risk was a doubled ``app`` leaf; now it is a base that smuggles one.
+    """
     del home
-    # Leaf appears exactly once -- no base/app/app double-nest (CORE-004).
-    result = data_dir("loop", platform="win32")
-    assert result.name == "loop"
-    assert result.parent.name != "loop"
+    assert data_dir(platform="win32").name == "Local"
+    assert (data_dir(platform="win32") / "rekursiv-ai").name == "rekursiv-ai"
 
 
-@pytest.mark.parametrize("platform", ["linux", "darwin"])
+@pytest.mark.parametrize("plat", ["linux", "darwin"])
 def test_data_dir_xdg_override(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    platform: str,
+    plat: str,
 ) -> None:
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "custom"))
-    assert data_dir("myapp", platform=platform) == tmp_path / "custom" / "myapp"
+    assert data_dir(platform=plat) == tmp_path / "custom"
 
 
-@pytest.mark.parametrize("platform", ["linux", "darwin"])
+@pytest.mark.parametrize("plat", ["linux", "darwin"])
 def test_config_dir_xdg_override(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    platform: str,
+    plat: str,
 ) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
-    assert config_dir("myapp", platform=platform) == tmp_path / "cfg" / "myapp"
+    assert config_dir(platform=plat) == tmp_path / "cfg"
 
 
-@pytest.mark.parametrize("platform", ["linux", "darwin"])
+@pytest.mark.parametrize("plat", ["linux", "darwin"])
 def test_cache_dir_xdg_override(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    platform: str,
+    plat: str,
 ) -> None:
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-    assert cache_dir("myapp", platform=platform) == tmp_path / "cache" / "myapp"
+    assert cache_dir(platform=plat) == tmp_path / "cache"
 
 
-@pytest.mark.parametrize("platform", ["linux", "darwin"])
+@pytest.mark.parametrize("plat", ["linux", "darwin"])
 def test_state_dir_xdg_override(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    platform: str,
+    plat: str,
 ) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    assert state_dir("myapp", platform=platform) == tmp_path / "state" / "myapp"
+    assert state_dir(platform=plat) == tmp_path / "state"
 
 
 def test_data_dir_localappdata_override(
@@ -101,9 +127,7 @@ def test_data_dir_localappdata_override(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
-    assert (
-        data_dir("myapp", platform="win32") == tmp_path / "AppData" / "Local" / "myapp"
-    )
+    assert data_dir(platform="win32") == tmp_path / "AppData" / "Local"
 
 
 if __name__ == "__main__":

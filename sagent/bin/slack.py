@@ -1022,7 +1022,7 @@ def parse_slack_args(
     _ = parser.add_argument(
         "--session-dir",
         dest="session_dir",
-        default=str(data_dir("rekursiv-ai") / "sagent" / "slack"),
+        default=str(data_dir() / "rekursiv-ai" / "sagent" / "slack"),
         help="Directory for session persistence (default: ~/.sagent/slack).",
     )
     _ = parser.add_argument(

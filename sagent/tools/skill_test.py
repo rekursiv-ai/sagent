@@ -67,7 +67,7 @@ def test_user_skill_root_follows_xdg_data_home(
     constant instead of just setting the environment.
     """
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
-    expected = data_dir("rekursiv-ai") / "sagent" / "skills"
+    expected = data_dir() / "rekursiv-ai" / "sagent" / "skills"
     assert sk.user_skill_roots() == (expected,), (
         "user skill roots must follow a late XDG_DATA_HOME"
     )

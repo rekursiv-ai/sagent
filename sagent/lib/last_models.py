@@ -1,6 +1,6 @@
 """Cross-session memory of the last model_id used per provider.
 
-Stored at ``data_dir("rekursiv-ai")/sagent/last-models.json`` as a flat
+Stored at ``data_dir() / "rekursiv-ai"/sagent/last-models.json`` as a flat
 ``{provider_class_name: model_id}`` map. Updated on every
 ``Agent.swap_model`` (and at initial agent construction when a
 ``ModelRecipe`` is supplied). Looked up by the ``/model`` slash
@@ -40,7 +40,7 @@ def load() -> dict[str, str]:
 
     """
     try:
-        raw = (data_dir("rekursiv-ai") / "sagent" / "last-models.json").read_text(
+        raw = (data_dir() / "rekursiv-ai" / "sagent" / "last-models.json").read_text(
             encoding="utf-8"
         )
     except (FileNotFoundError, OSError):
@@ -50,7 +50,7 @@ def load() -> dict[str, str]:
     except json.JSONDecodeError:
         logger.warning(
             "Corrupt %s; treating as empty.",
-            data_dir("rekursiv-ai") / "sagent" / "last-models.json",
+            data_dir() / "rekursiv-ai" / "sagent" / "last-models.json",
         )
         return {}
     if not isinstance(data, dict):
@@ -98,13 +98,14 @@ def record(provider: str, model_id: str) -> None:
             f"got provider={provider!r}, model_id={model_id!r}."
         )
     try:
-        (data_dir("rekursiv-ai") / "sagent" / "last-models.json").parent.mkdir(
+        (data_dir() / "rekursiv-ai" / "sagent" / "last-models.json").parent.mkdir(
             parents=True, exist_ok=True
         )
         lock_path = (
-            data_dir("rekursiv-ai") / "sagent" / "last-models.json"
+            data_dir() / "rekursiv-ai" / "sagent" / "last-models.json"
         ).with_suffix(
-            (data_dir("rekursiv-ai") / "sagent" / "last-models.json").suffix + ".lock"
+            (data_dir() / "rekursiv-ai" / "sagent" / "last-models.json").suffix
+            + ".lock"
         )
         fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
@@ -114,7 +115,7 @@ def record(provider: str, model_id: str) -> None:
                 return
             current[provider] = model_id
             atomic_write_bytes(
-                data_dir("rekursiv-ai") / "sagent" / "last-models.json",
+                data_dir() / "rekursiv-ai" / "sagent" / "last-models.json",
                 json.dumps(current, indent=2).encode("utf-8"),
             )
         finally:
@@ -122,6 +123,6 @@ def record(provider: str, model_id: str) -> None:
     except OSError:
         logger.warning(
             "Could not persist last-models to %s",
-            data_dir("rekursiv-ai") / "sagent" / "last-models.json",
+            data_dir() / "rekursiv-ai" / "sagent" / "last-models.json",
             exc_info=True,
         )
