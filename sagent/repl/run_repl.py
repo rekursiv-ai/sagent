@@ -84,7 +84,7 @@ async def run_repl(
         state directory.
 
     """
-    history_path = history or state_dir("rekursiv-ai") / "sagent" / "repl-history"
+    history_path = history or state_dir() / "rekursiv-ai" / "sagent" / "repl-history"
     # ``FileHistory.store_string`` opens with ``"ab"`` and never creates
     # parents. ``Buffer.append_to_history`` runs BEFORE ``buf.reset()`` in
     # ``_kb_submit``, so a missing directory makes Enter dispatch the

@@ -1,7 +1,7 @@
 """Structured JSON-line debug log for diagnosing wire-layer errors.
 
 Writes to ``$SAGENT_DEBUG_LOG`` (default
-``data_dir("rekursiv-ai")/sagent/debug.log``). Two
+``data_dir() / "rekursiv-ai"/sagent/debug.log``). Two
 entry points:
 
 - ``trace(event, **data)`` - verbose, gated on ``SAGENT_DEBUG=1``.
@@ -40,7 +40,9 @@ def log_path() -> Path:
     """
     override = os.environ.get("SAGENT_DEBUG_LOG")
     return (
-        Path(override) if override else data_dir("rekursiv-ai") / "sagent" / "debug.log"
+        Path(override)
+        if override
+        else data_dir() / "rekursiv-ai" / "sagent" / "debug.log"
     )
 
 

@@ -3,8 +3,15 @@
 These helpers satisfy the XDG Base Directory Specification:
 https://specifications.freedesktop.org/basedir/latest/
 
-Each function reads one environment variable and falls back to a platform
-default when it is unset *or empty*, per spec:
+Each function returns a BASE directory and takes no arguments. The
+namespace is a path segment the caller joins, exactly like every other
+segment::
+
+    config_dir() / "rekursiv-ai" / "secrets"
+    cache_dir() / "uv"                          # another vendor's dir
+
+Each reads one environment variable and falls back to a platform default
+when it is unset *or empty*, per spec:
 
 ==========  =================  ==============  =============================
 Function    Env var (POSIX)    Linux/BSD       macOS
@@ -16,11 +23,17 @@ state_dir   XDG_STATE_HOME     ~/.local/state  ~/Library/Application Support
 ==========  =================  ==============  =============================
 
 On Windows all four read ``LOCALAPPDATA`` (default ``~/AppData/Local``) and
-ignore the XDG variables; only ``cache_dir`` differs, appending a ``Cache``
-leaf. That branch reads the variable rather than calling
+ignore the XDG variables. That branch reads the variable rather than calling
 ``SHGetKnownFolderPath``, so AppData redirected via group policy is not
 detected -- acceptable for development tools, not for shipped end-user
 software.
+
+Windows convention places a ``Cache`` leaf *below* the application name
+(``…/Local/<app>/Cache``). A base directory has no application name to sit
+above, so that leaf is not expressible here and ``cache_dir`` returns the
+same ``LOCALAPPDATA`` root as the others. No shell caller runs on Windows
+(see ``userdirs.sh``), and callers that care can append ``"Cache"`` after
+their own namespace segment.
 
 Two deliberate deviations from the specification:
 
@@ -55,8 +68,8 @@ __all__ = [
 ]
 
 
-def data_dir(app: str, platform: str = sys.platform) -> Path:
-    """Resolve the per-user data directory for ``app``.
+def data_dir(*, platform: str | None = None) -> Path:
+    """Resolve the per-user data base directory.
 
     Holds user-specific data files: the durable, portable content a user would
     expect to keep -- the things worth backing up and carrying to another
@@ -66,31 +79,31 @@ def data_dir(app: str, platform: str = sys.platform) -> Path:
     Reads ``XDG_DATA_HOME``, or ``LOCALAPPDATA`` on Windows.
 
     Args:
-      app: Application name. Used as the leaf directory.
-      platform: ``sys.platform`` string. Override for testing; the
-        default closes over the host's ``sys.platform``.
+      platform: ``sys.platform`` string. Override for testing; ``None``
+        reads ``sys.platform`` at CALL time. A ``= sys.platform`` default
+        would bind at import, freezing the value before any monkeypatch.
 
     Returns:
-      path: Path to the application's data directory, absolute unless the
-        consulted environment variable was relative. The directory is not
-        created.
+      path: The data base directory, absolute unless the consulted
+        environment variable was relative. Join your own namespace segment;
+        nothing is created.
 
     References:
       https://specifications.freedesktop.org/basedir/latest/
 
     """
+    platform = platform or sys.platform
     if platform == "win32":
-        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
-        return base / app
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
     if xdg_data_home := os.environ.get("XDG_DATA_HOME"):
-        return Path(xdg_data_home) / app
+        return Path(xdg_data_home)
     if platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / app
-    return Path.home() / ".local" / "share" / app
+        return Path.home() / "Library" / "Application Support"
+    return Path.home() / ".local" / "share"
 
 
-def config_dir(app: str, platform: str = sys.platform) -> Path:
-    """Resolve the per-user config directory for ``app``.
+def config_dir(*, platform: str | None = None) -> Path:
+    """Resolve the per-user config base directory.
 
     Holds user-specific configuration files: settings the user chose, which the
     application reads to decide how to behave. Anything the application itself
@@ -99,30 +112,31 @@ def config_dir(app: str, platform: str = sys.platform) -> Path:
     Reads ``XDG_CONFIG_HOME``, or ``LOCALAPPDATA`` on Windows.
 
     Args:
-      app: Application name. Used as the leaf directory.
-      platform: ``sys.platform`` string. Override for testing; the
-        default closes over the host's ``sys.platform``.
+      platform: ``sys.platform`` string. Override for testing; ``None``
+        reads ``sys.platform`` at CALL time. A ``= sys.platform`` default
+        would bind at import, freezing the value before any monkeypatch.
 
     Returns:
-      path: Path to the application's config directory, absolute unless the
-        consulted environment variable was relative. The directory is not
-        created.
+      path: The config base directory, absolute unless the consulted
+        environment variable was relative. Join your own namespace segment;
+        nothing is created.
 
     References:
       https://specifications.freedesktop.org/basedir/latest/
 
     """
+    platform = platform or sys.platform
     if platform == "win32":
-        return data_dir(app, platform=platform)
+        return data_dir(platform=platform)
     if xdg_config_home := os.environ.get("XDG_CONFIG_HOME"):
-        return Path(xdg_config_home) / app
+        return Path(xdg_config_home)
     if platform == "darwin":
-        return data_dir(app, platform=platform)
-    return Path.home() / ".config" / app
+        return data_dir(platform=platform)
+    return Path.home() / ".config"
 
 
-def cache_dir(app: str, platform: str = sys.platform) -> Path:
-    """Resolve the per-user cache directory for ``app``.
+def cache_dir(*, platform: str | None = None) -> Path:
+    """Resolve the per-user cache base directory.
 
     Holds user-specific non-essential (cached) data -- downloaded model
     weights, build artifacts, memoized computation. Every file here must be
@@ -132,31 +146,31 @@ def cache_dir(app: str, platform: str = sys.platform) -> Path:
     Reads ``XDG_CACHE_HOME``, or ``LOCALAPPDATA`` on Windows.
 
     Args:
-      app: Application name. Used as the leaf directory.
-      platform: ``sys.platform`` string. Override for testing; the
-        default closes over the host's ``sys.platform``.
+      platform: ``sys.platform`` string. Override for testing; ``None``
+        reads ``sys.platform`` at CALL time. A ``= sys.platform`` default
+        would bind at import, freezing the value before any monkeypatch.
 
     Returns:
-      path: Path to the application's cache directory, absolute unless the
-        consulted environment variable was relative. The directory is not
-        created.
+      path: The cache base directory, absolute unless the consulted
+        environment variable was relative. Join your own namespace segment;
+        nothing is created.
 
     References:
       https://specifications.freedesktop.org/basedir/latest/
 
     """
+    platform = platform or sys.platform
     if platform == "win32":
-        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
-        return base / app / "Cache"
+        return data_dir(platform=platform)
     if xdg_cache_home := os.environ.get("XDG_CACHE_HOME"):
-        return Path(xdg_cache_home) / app
+        return Path(xdg_cache_home)
     if platform == "darwin":
-        return Path.home() / "Library" / "Caches" / app
-    return Path.home() / ".cache" / app
+        return Path.home() / "Library" / "Caches"
+    return Path.home() / ".cache"
 
 
-def state_dir(app: str, platform: str = sys.platform) -> Path:
-    """Resolve the per-user state directory for ``app``.
+def state_dir(*, platform: str | None = None) -> Path:
+    """Resolve the per-user state base directory.
 
     Holds state that should persist across restarts but is not important or
     portable enough for :func:`data_dir`. The spec names two kinds: action
@@ -167,23 +181,24 @@ def state_dir(app: str, platform: str = sys.platform) -> Path:
     Reads ``XDG_STATE_HOME``, or ``LOCALAPPDATA`` on Windows.
 
     Args:
-      app: Application name. Used as the leaf directory.
-      platform: ``sys.platform`` string. Override for testing; the
-        default closes over the host's ``sys.platform``.
+      platform: ``sys.platform`` string. Override for testing; ``None``
+        reads ``sys.platform`` at CALL time. A ``= sys.platform`` default
+        would bind at import, freezing the value before any monkeypatch.
 
     Returns:
-      path: Path to the application's state directory, absolute unless the
-        consulted environment variable was relative. The directory is not
-        created.
+      path: The state base directory, absolute unless the consulted
+        environment variable was relative. Join your own namespace segment;
+        nothing is created.
 
     References:
       https://specifications.freedesktop.org/basedir/latest/
 
     """
+    platform = platform or sys.platform
     if platform == "win32":
-        return data_dir(app, platform=platform)
+        return data_dir(platform=platform)
     if xdg_state_home := os.environ.get("XDG_STATE_HOME"):
-        return Path(xdg_state_home) / app
+        return Path(xdg_state_home)
     if platform == "darwin":
-        return data_dir(app, platform=platform)
-    return Path.home() / ".local" / "state" / app
+        return data_dir(platform=platform)
+    return Path.home() / ".local" / "state"

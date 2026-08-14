@@ -1,6 +1,6 @@
 """Auto-memory: persistent project-scoped memory across sessions.
 
-- Storage: ``data_dir("rekursiv-ai")/sagent/projects/<cwd-slug>/memory/``
+- Storage: ``data_dir() / "rekursiv-ai"/sagent/projects/<cwd-slug>/memory/``
 - Entrypoint: ``MEMORY.md`` - always loaded into the system prompt
   (truncated to 200 lines / 25 KB)
 - Per-memory files: ``<type>_<name>.md`` with YAML frontmatter

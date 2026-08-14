@@ -78,7 +78,7 @@ def user_skill_roots() -> tuple[Path, ...]:
       roots: User-global skill directories, outermost first.
 
     """
-    return (data_dir("rekursiv-ai") / "sagent" / "skills",)
+    return (data_dir() / "rekursiv-ai" / "sagent" / "skills",)
 
 
 def discover(

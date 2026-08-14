@@ -2,7 +2,7 @@
 
 Session storage layout:
 
-- Root: ``data_dir("rekursiv-ai")/sagent/projects/<cwd-slug>/``
+- Root: ``data_dir() / "rekursiv-ai"/sagent/projects/<cwd-slug>/``
 - Per session: a ``<uuid4-hex>/`` directory holding ``session.jsonl``
 - Slug: ``/`` maps to ``_``, alphanumerics pass through, every other
   byte escapes as ``-<hex>-`` (see :func:`cwd_slug`; superseded schemes
@@ -142,14 +142,14 @@ def _migrate_real_sagent_home() -> None:
     the just-created destination and recurse unboundedly.
     """
     legacy = _LEGACY_SAGENT_HOME.resolve()
-    home = (data_dir("rekursiv-ai") / "sagent").resolve()
+    home = (data_dir() / "rekursiv-ai" / "sagent").resolve()
     if home == legacy or legacy in home.parents:
         return
-    _copy_tree_merge(_LEGACY_SAGENT_HOME, data_dir("rekursiv-ai") / "sagent")
+    _copy_tree_merge(_LEGACY_SAGENT_HOME, data_dir() / "rekursiv-ai" / "sagent")
     logger.info(
         "migrated legacy sagent home %s -> %s",
         _LEGACY_SAGENT_HOME,
-        data_dir("rekursiv-ai") / "sagent",
+        data_dir() / "rekursiv-ai" / "sagent",
     )
 
 
@@ -168,7 +168,7 @@ def _migrate_legacy_projects() -> None:
         ]
         if not sess_dirs:
             continue
-        dst = (data_dir("rekursiv-ai") / "sagent" / "projects") / proj.name
+        dst = (data_dir() / "rekursiv-ai" / "sagent" / "projects") / proj.name
         copied = False
         for sd in sess_dirs:
             tgt = dst / sd.name
@@ -189,7 +189,7 @@ def _migrate_legacy_papers() -> None:
     """Copy the sagent papers cache out of the Claude tree."""
     src = _LEGACY_CLAUDE_HOME / "papers"
     if src.is_dir():
-        _copy_tree_merge(src, data_dir("rekursiv-ai") / "sagent" / "papers")
+        _copy_tree_merge(src, data_dir() / "rekursiv-ai" / "sagent" / "papers")
 
 
 def _bridge_shared_dirs() -> None:
@@ -203,7 +203,7 @@ def _bridge_shared_dirs() -> None:
     # get copied, not symlinked.
     for name in ("skills",):
         claude_dir = _LEGACY_CLAUDE_HOME / name
-        sagent_path = data_dir("rekursiv-ai") / "sagent" / name
+        sagent_path = data_dir() / "rekursiv-ai" / "sagent" / name
         if not claude_dir.is_dir() or sagent_path.exists() or sagent_path.is_symlink():
             continue
         try:
@@ -366,7 +366,7 @@ def project_dirs(
       paths: Project directories, current slug first; always non-empty.
 
     """
-    root = projects_dir or (data_dir("rekursiv-ai") / "sagent" / "projects")
+    root = projects_dir or (data_dir() / "rekursiv-ai" / "sagent" / "projects")
     current = root / cwd_slug(cwd)
     prior = [
         root / slug
@@ -395,7 +395,7 @@ def new_session_dir(cwd: str | Path, *, projects_dir: Path | None = None) -> Pat
     # is read-biased (it falls back to a migrated legacy ``-``-slug for resume);
     # writing through it would keep new sessions in the legacy dir and never
     # create the current slug. So derive the write path directly here.
-    root = projects_dir or (data_dir("rekursiv-ai") / "sagent" / "projects")
+    root = projects_dir or (data_dir() / "rekursiv-ai" / "sagent" / "projects")
     sid = uuid.uuid4().hex[:12]
     d = root / cwd_slug(cwd) / sid
     d.mkdir(parents=True, exist_ok=True)
@@ -450,7 +450,9 @@ def session_dir_for_scope(scope: str, base: Path | None = None) -> Path:
 
     """
     root = (
-        base if base is not None else (data_dir("rekursiv-ai") / "sagent" / "projects")
+        base
+        if base is not None
+        else (data_dir() / "rekursiv-ai" / "sagent" / "projects")
     )
     d = root / _safe_scope(scope) / uuid.uuid4().hex[:12]
     d.mkdir(parents=True, exist_ok=True)
@@ -471,7 +473,9 @@ def existing_scope_dir(scope: str, base: Path | None = None) -> Path | None:
 
     """
     root = (
-        base if base is not None else (data_dir("rekursiv-ai") / "sagent" / "projects")
+        base
+        if base is not None
+        else (data_dir() / "rekursiv-ai" / "sagent" / "projects")
     )
     scope_dir = root / _safe_scope(scope)
     if not scope_dir.exists():
@@ -647,7 +651,7 @@ def list_all_sessions(*, projects_dir: Path | None = None) -> list[SessionInfo]:
       sessions: Session metadata across all projects, sorted by mtime descending.
 
     """
-    root = projects_dir or (data_dir("rekursiv-ai") / "sagent" / "projects")
+    root = projects_dir or (data_dir() / "rekursiv-ai" / "sagent" / "projects")
     if not root.exists():
         return []
     # Walk to any depth rather than assuming ``<root>/<proj>/<session>``:

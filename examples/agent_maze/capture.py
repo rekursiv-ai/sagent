@@ -27,7 +27,9 @@ MODEL = "claude-sonnet-4-6"  # config-globals: ignore -- model choice, user retu
 
 def _key() -> str:
     return (
-        (config_dir("rekursiv-ai") / "sagent" / "anthropic_api_key").read_text().strip()
+        (config_dir() / "rekursiv-ai" / "sagent" / "anthropic_api_key")
+        .read_text()
+        .strip()
     )
 
 

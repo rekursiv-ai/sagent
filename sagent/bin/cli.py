@@ -1229,7 +1229,7 @@ def _install_repl_logging(
         base = (
             Path(session_dir)
             if session_dir is not None
-            else data_dir("rekursiv-ai") / "sagent"
+            else data_dir() / "rekursiv-ai" / "sagent"
         )
         log_path = base / "repl.log"
     else:
