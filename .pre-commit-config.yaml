@@ -26,17 +26,11 @@
 #   fires on a dirty tree) STASHES your changes -- a git mutation, and this
 #   worktree is shared.
 #
-#     uv --quiet run --frozen --group pre-commit pre-commit run \
-#       --files $(git --no-pager diff --name-only --diff-filter=d HEAD)
+#   # Harvest all changed files from the perspective of CWD.
+#     uv --quiet run --frozen --group pre-commit pre-commit run --files $(git --no-pager diff --name-only --diff-filter=d HEAD | sed "s|^|$(git rev-parse --show-cdup)|")
 #
-#     # Or to just pre-commit on .
-#     uv --quiet run --frozen --group pre-commit pre-commit run \
-#       --files $(git --no-pager diff --name-only --cached --relative | xargs)
-#
-#   Use `git --no-pager diff --name-only`, not `git status --short | awk '{print $2}'`.
-#   For a rename status prints `R  old -> new`, so `$2` is the path that no
-#   longer exists; a path containing a space truncates at the space; and
-#   `--diff-filter=d` drops deletions, which are not files a hook can open.
+#   # Run only the files from the CWD.
+#     uv --quiet run --frozen --group pre-commit pre-commit run --files $(git --no-pager diff --name-only --cached --relative | xargs)
 #
 #   One hook at a time, by id (`ruff-check`, `ty-check`, `pytest-global`, ...):
 #     uv --quiet run --frozen --group pre-commit pre-commit run ruff-check --all-files
