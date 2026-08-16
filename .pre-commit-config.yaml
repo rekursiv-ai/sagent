@@ -384,6 +384,9 @@ repos:
       # never pays startup, and a sweeping refactor still gets the workers.
       # SIDECAR_XDIST_MIN overrides it on a host that measures differently.
       #
+      # `read -d ''`, not `mapfile`: mapfile is bash 4.0 and macOS ships 3.2.
+      # `printf '\0'` supplies the NUL, so read exits 0 instead of on EOF.
+      #
       # `require_serial: true` is a separate axis and is always right here:
       # it governs pre-commit's OWN argv partitioning, which forks cpu_count
       # copies of this whole hook. That multiplies the startup cost the
@@ -412,7 +415,7 @@ repos:
               done;
             done;
             [ ${#tests[@]} -eq 0 ] && exit 0;
-            mapfile -t tests < <(printf "%s\n" "${tests[@]}" | sort -u);
+            IFS=$'\n' read -r -d '' -a tests < <(printf "%s\n" "${tests[@]}" | sort -u && printf '\0');
             dist=();
             ((${#tests[@]} >= ${SIDECAR_XDIST_MIN:-16})) && dist=(-n "$WORKERS");
             uv --quiet run --frozen --group pre-commit pytest "${dist[@]}" -q --tb=short "${tests[@]}"
