@@ -166,7 +166,7 @@ async def run_repl(
                     # structured cancellation, so re-raise in that case.
                     if not pump_task.cancelled():
                         raise
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 -- pump shutdown catches any slash-handler exception; UserFacingError routed to warning, others to exception
                     log_exception_or_warning(
                         logger, "REPL input pump raised during shutdown", exc
                     )

@@ -1022,7 +1022,7 @@ class Agent:
                     tool_result_budget_chars=self.budget.message_budget_chars,
                 ),
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- token estimator may invoke provider classification
             types.exceptions.log_exception_or_warning(
                 logger, "swap_model: token estimate failed; skipping compact", exc
             )
@@ -2368,7 +2368,7 @@ class Agent:
                 self.runtime.mint_ref,
                 custom_instructions=None,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- compaction calls the model; catch-all routes UserFacingError to warning, others to exception
             types.exceptions.log_exception_or_warning(
                 logger,
                 "synchronous compaction failed during overflow recovery",
@@ -3355,7 +3355,7 @@ class _AgentCompactor:
                     tool_result_budget_chars=self._agent.budget.message_budget_chars,
                 ),
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- token estimator may invoke provider classification; catch-all routes UserFacingError to warning, others to exception
             types.exceptions.log_exception_or_warning(
                 logger, "post-compact token estimate failed; skipping enrich", exc
             )
@@ -3373,7 +3373,7 @@ class _AgentCompactor:
                     estimate_tokens=self._agent.max_request_tokens - used,
                     headroom=headroom,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 -- post_compact_enrich calls the model; catch-all routes UserFacingError to warning, others to exception
                 types.exceptions.log_exception_or_warning(
                     logger, "post_compact_enrich failed; continuing", exc
                 )
@@ -3414,7 +3414,7 @@ class _AgentCompactor:
                         ),
                     ),
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 -- token estimator may invoke provider classification
                 types.exceptions.log_exception_or_warning(
                     logger, "pre-scrunch token estimate failed; skipping scrunch", exc
                 )
@@ -3486,7 +3486,7 @@ class _AgentCompactor:
                 fallback_reason = (
                     f"{fallback_reason}; {msg}" if fallback_reason else msg
                 )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 -- token estimator may invoke provider classification; a failed retrigger probe must not abort an otherwise-successful compaction (matches the sibling estimate blocks above)
             types.exceptions.log_exception_or_warning(
                 logger, "willRetriggerNextTurn estimate skipped; continuing", exc
             )
