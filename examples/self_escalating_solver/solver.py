@@ -288,7 +288,7 @@ async def run_condition(
     try:
         async for _ev in agent.run(UserMessage(text=TASK)):
             pass
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         err = f"{type(e).__name__}: {str(e)[:100]}"
 
     timeline = _build_timeline(agent.history, tool, model.spec.tagged_model_id)

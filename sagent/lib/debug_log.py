@@ -134,7 +134,7 @@ def _write(event: str, data: dict[str, object]) -> None:
         record = {"ts": time.time(), "event": event, **safe}
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, default=str) + "\n")
-    except Exception:  # noqa: S110 -- debug logging must never crash callers; there's no safer channel to report the failure to
+    except Exception:  # noqa: BLE001, S110 -- debug logging must never crash callers; there's no safer channel to report the failure to
         pass
 
 

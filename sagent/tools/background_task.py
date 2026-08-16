@@ -357,7 +357,7 @@ async def _await_detached(
                     kind=ToolResultKind.CANCELLED,
                 )
             raise
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             if fut.done():
                 return fut.result()
             return ToolResult(

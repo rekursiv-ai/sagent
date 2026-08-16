@@ -1,5 +1,5 @@
 #!/bin/sh
-# ruff: noqa: EXE003, D300, T201 -- Polyglot shell/Python repro; prints diagnostics.
+# ruff: noqa: EXE003, D300 -- Polyglot shell/Python repro; prints diagnostics.
 # fmt: off
 '''' 2>/dev/null #
 exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"

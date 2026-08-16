@@ -697,7 +697,7 @@ def _request_id(e: BaseException) -> str | None:
             return cast(
                 "str | None", headers.get("request-id") or headers.get("x-request-id")
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 -- best-effort, must not mask the original error
             return None
     return None
 

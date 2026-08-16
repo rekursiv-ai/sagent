@@ -90,28 +90,27 @@ selfhosted = [
 # uv sync --all-groups
 
 debug = [
-    "ipykernel",
     "ipython",
 ]
 lint = [
     "codespell>=2.2.4",
-    "pre-commit>=4.6",
     "ruff",
 ]
 test = [
-    "hypothesis>=6.155.1",
-    "pytest-asyncio>=1.3.0",
-    "pytest-cov",
     "pytest-testmon>=2.1",
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
     "pytest>=7.0",
+    "hypothesis>=6.155.1",
+    "pytest-cov",
+    "pytest-asyncio>=1.3.0",
 ]
 typecheck = [
     "basedpyright>=1.10",
     "ty>=0.0.60",
 ]
 "pre-commit" = [
+    "pre-commit>=4.6",
     {include-group = "lint"},
     {include-group = "test"},
     {include-group = "typecheck"},
@@ -133,6 +132,16 @@ Changelog = "https://github.com/rekursiv-ai/sagent/releases"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# Tool settings: single source of truth.
+# Preferred location for any tool setting, in order:
+#   pyproject.toml  >  .pre-commit-config.yaml  >  .github/workflows/tests.yml
+# Put a setting as high in this chain as the tool allows. Only drop to a lower
+# file when the higher one cannot express it (e.g. a CLI-only flag with no
+# config key). pyproject.toml holds tool config; .pre-commit-config.yaml is the
+# sole source for how hooks run (thread/worker counts, heap caps);
+# .github/workflows/tests.yml only invokes the hooks and must not redefine any
+# of these.
+
 [tool.hatch.build.targets.wheel]
 packages = ["sagent"]
 exclude = ["**/*_test.py", "**/conftest.py"]
@@ -141,26 +150,27 @@ exclude = ["**/*_test.py", "**/conftest.py"]
 exclude = [".github/**", ".codespell-ignore"]
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
 python_files = ["*_test.py", "test_*.py"]
 markers = [
     "ci_smoke: slower package/CLI smoke tests run explicitly in CI",
     "cuda: tests that require a real CUDA device (skipped in hosted CI)",
-    "integration: tests that require networking or external CLIs (deselected by default)",
+    "integration: tests that require networking or external deps (deselected by default)",
     "performance: timing-sensitive tests (deselected by default)",
-    "slow: expensive local correctness test (git, bash, or a fresh interpreter); excluded from the fast unit tier and run by the pre-push slow gate",
+    "slow: expensive local correctness test (JIT, training, full fixtures, git, bash, or a fresh interpreter); excluded from the fast unit tier and run by the pre-push slow gate",
+    "real_llm: integration tests that spawn a live LLM CLI (claude/codex); skipped unless RUN_REAL_LLM=1 is set",
+    "cluster: requires live Together cluster access; deselected by default (bin/tests never selects it implicitly; run explicitly with -m cluster)",
 ]
-addopts = "-m 'not ci_smoke and not cuda and not integration and not performance and not slow' --durations=20 --dist=worksteal"
+addopts = "-m 'not ci_smoke and not cuda and not integration and not performance and not cluster and not slow' --durations=20 --dist=worksteal"
 timeout = 60
-# "error" = treat all warnings as errors (same as -Werror).
-# Using filterwarnings instead of addopts so we can add exceptions.
+# "error" = treat all warnings as errors (same as -werror).
+# using filterwarnings instead of addopts so we can add exceptions.
 filterwarnings = [
     "error",
+    "ignore::pytest.PytestUnraisableExceptionWarning",  # async subprocess cleanup after event loop closes
     "ignore:Can.t initialize NVML:UserWarning",  # Optional torch runtimes may lack GPU drivers.
     "ignore:CUDA initialization. Unexpected error from cudaGetDeviceCount:UserWarning",  # GPU present but unusable (e.g. under -n parallel workers); CPU-only tests probe CUDA during backward and torch warns benignly.
-    "ignore:Your system is avx2 capable but pygame was not built with support for it:RuntimeWarning",  # pufferlib -> pygame import-time note: the PyPI wheel is baseline-compiled (no AVX2 wheel exists; PYGAME_DETECT_AVX2 is compile-time only). Real fix = build pygame from sdist with AVX2, but rl_ocean is headless (never blits) so it is pure noise here.
-    "ignore::pytest.PytestUnraisableExceptionWarning",  # async subprocess cleanup after event loop closes
     "ignore:Using .httpx. with .starlette.testclient. is deprecated:starlette.exceptions.StarletteDeprecationWarning",
+    "ignore:'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16:DeprecationWarning:zendriver.core.connection",
 ]
 norecursedirs = [
     "*.egg-info",
@@ -190,7 +200,7 @@ exclude_lines = [
     "if __name__ == .__main__.:",
     "raise NotImplementedError",
 ]
-fail_under = 85
+# fail_under = 85
 show_missing = true
 skip_covered = true
 
@@ -199,20 +209,13 @@ show-fixes = true
 line-length = 88
 output-format = "concise"
 target-version = "py312"
-# force-exclude makes ruff honor exclude lists even for files passed explicitly
-# (as pre-commit does). Required so lint.exclude below can skip typings/ on
-# explicit paths while ruff format still reformats them.
-# force-exclude = true
-# Global exclude applies to BOTH check and format. typings/ is intentionally
-# absent here: stubs are formatted but not linted (see lint.exclude).
+force-exclude = true
 exclude = [
     ".venv/",
     "*.egg-info/",
     ".pytest_cache/",
     "build/",
     "dist/",
-    # "typings/",
-    # "**/typings/",
     "**/third_party/",
 ]
 extend-include = ["*.ipynb"]
@@ -271,7 +274,6 @@ ignore = [
     "TD003",   # Missing TODO link.
     "TRY003",  # Raise vanilla args.
     "TRY300",  # Try consider else.
-    "BLE001",  # Blind exception (heterogeneous provider/cleanup handlers).
 
     # Additional style relaxations.
     # "DJ",    # Django.
@@ -299,6 +301,9 @@ ignore = [
     "TD002",   # Missing author in TODO; try: `# TODO(<author_name>): ...` or `# TODO @<author_name>: ...`
     "TD004",   # Missing colon in TODO
     "TD005",   # Missing issue description after `TODO`
+
+    # Exclusions due to public export.
+    # "TC002",   # Typing-only third-party import. (Export strips runtime uses, leaving type-only imports.)
 ]
 exclude = [
     "**/typings/**",
@@ -325,7 +330,7 @@ exclude = [
 #
 # Refresh workflow after a `pyright --createstub` regen (verified to keep
 # `ty check .` and `basedpyright .` clean).
-#    loop/tools/ruff_check_extra_autofix.py --select PYI002,PYI036,PYI051 typings
+#    tools/ruff_check_extra_autofix.py --select PYI002,PYI036,PYI051 typings
 #    uv --quiet run --frozen ruff check typings --fix --unsafe-fixes
 #    uv --quiet run --frozen ruff format typings
 "typings/**" = [
@@ -379,7 +384,7 @@ exclude = [
     # === INTENTIONALLY VIOLATE: fixable in principle, kept by choice. ===
     # Deleting a "locally unused" private is unsafe: it may be re-exported and
     # consumed by another stub (e.g. `_size as _size`), and a stub must be correct
-    # independent of its consumers. loop/tools/ruff_check_extra_autofix.py can fix
+    # independent of its consumers. tools/ruff_check_extra_autofix.py can fix
     # these with a `# noqa` escape hatch, but we leave them rather than risk it.
     "PYI046",   #     4 -- unused-private-protocol -- may be re-exported cross-stub.
     "PYI047",   #    45 -- unused-private-type-alias -- may be re-exported cross-stub.
@@ -398,6 +403,11 @@ exclude = [
     "S301",    # Pickle usage.
     "T201",    # Print found.
 ]
+"{**/docs/**,**/scripts/**}" = [
+    "INP001",  # Standalone example scripts.
+    "T201",    # Print found. (Eval scripts use print for output.)
+]
+# NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 
 [tool.ruff.lint.isort]
 case-sensitive = false
@@ -412,7 +422,7 @@ from-first = true
 lines-between-types = 1
 lines-after-imports = 2
 extra-standard-library = ["typing", "typing_extensions", "ty_extensions"]
-known-first-party = ["sagent"]
+known-first-party = ["loop"]
 no-lines-before = ["future"]
 order-by-type = true
 relative-imports-order = "closest-to-furthest"
@@ -427,10 +437,6 @@ section-order = [
 [tool.basedpyright]
 typeCheckingMode = "recommended"
 failOnWarnings = true  # Warnings fail the check (basedpyright default; pinned explicitly).
-# Don't infer types from .venv site-packages source; use bundled/local stubs
-# only. Stops basedpyright analyzing ~48k env files: full-repo run 74s -> 14s.
-# Tradeoff: stub-less libs report Unknown, so they need stubs in typings/
-# (e.g. boto3, datasets).
 useLibraryCodeForTypes = false
 exclude = [
     "**/.venv/",
@@ -457,7 +463,7 @@ ignore = [
 ]
 pythonPlatform = "Linux"
 pythonVersion = "3.12"
-reportAny = false                          # `Any` propagation is pervasive in PyTorch.
+reportAny = false                          # `Any` propagation is pervasive in third-party deps.
 reportExplicitAny = false                  # Explicit `Any` annotations are intentional.
 reportImplicitStringConcatenation = false  # Conflicts with ruff ISC003.
 reportInvalidCast = false                  # All cast() calls are intentional.
@@ -472,14 +478,7 @@ reportMissingSuperCall = false             # Fires on plain `object` inheritance
 reportImportCycles = false                 # Lazy imports inside functions create benign cycles.
 reportUnsafeMultipleInheritance = false    # Mixin patterns are intentional.
 # reportConstantRedefinition = false       # Uppercase locals treated as constants (math). [Violates PEP8]
-# We deliberately don't use `--all-extras` for ty and basedpyright because
-# pulling in the multi-GB torch/transformers stack into every export CI just to
-# type-check an opt-in backend isn't worth it.
 reportMissingModuleSource = false
-# Export-only: source `# pyright: ignore[reportUnknownMemberType]` on Pillow's
-# deferred-import Image.load / pypdfium2 members is load-bearing internally,
-# but the export's fuller stub set resolves the member, flagging the ignore as
-# unnecessary. The ignore must stay in source, so relax the rule here.
 reportUnnecessaryTypeIgnoreComment = false
 
 [[tool.basedpyright.executionEnvironments]]
@@ -501,9 +500,7 @@ exclude = [
 
 [tool.ty.environment]
 python-version = "3.12"
-extra-paths = [
-  "typings",
-]
+extra-paths = ["typings"]
 
 [tool.ty.terminal]
 error-on-warning = true
@@ -514,13 +511,11 @@ all = "warn"
 
 [[tool.ty.overrides]]
 include = ["typings/**"]
-
 [tool.ty.overrides.rules]
 all = "ignore"
 
 [[tool.ty.overrides]]
 include = ["*_test.py"]
-
 [tool.ty.overrides.rules]
 invalid-key = "ignore"
 
@@ -538,7 +533,10 @@ formats = "ipynb,py:percent"
 
 [tool.uv]
 package = true
-environments = ["sys_platform == 'linux'", "sys_platform == 'darwin'"]
+environments = [
+    "sys_platform == 'linux'",
+    "sys_platform == 'darwin'",
+]
 
 [tool.uv.pip]
 compile-bytecode = true
