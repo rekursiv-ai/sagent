@@ -476,18 +476,18 @@ repos:
         # split then re-partitions whatever survives. Measured: one shard with a
         # warm database ran 8 tests where the cold run ran 118, and the four
         # shards' union covered 76 of 257 rather than all of them. Tests went
-        # unrun and the gate stayed green. Sharding is what keeps this hook
-        # inside the runner's memory; test selection is not worth an unsound
-        # union on top of it.
+        # unrun and the gate stayed green. Test selection is not worth an
+        # unsound union over the tiers that ARE sharded to fit memory.
         #
-        # PYTEST_SPLIT_ARGS is empty locally, so a local pre-push runs the WHOLE
-        # suite in one process exactly as before. CI sets it per matrix job to
-        # `--splits N --group K` (plus `--store-durations`, so the run that uses
-        # the timings is also the run that records them -- there is no second
-        # measuring pass), because a pytest process's RSS grows monotonically
-        # and never releases; see the `pre-push` job in
-        # .github/workflows/tests.yml for the measurements. Unquoted on purpose:
-        # it must word-split into flags, and it is set only by the workflow.
+        # This hook is not one of them: at the single worker CI pins it to, all
+        # ~31.5k tests fit one process in 6.30 GiB of the runner's 8. So
+        # PYTEST_SPLIT_ARGS is empty here in practice, locally AND on CI --
+        # `matrix_entries` in ops/github/precommit_hooks.py decides which hooks
+        # split. The variable stays because it is the one place a tier's
+        # `--splits N --group K` arrives (with `--store-durations`, so the run
+        # that uses the timings also records them -- there is no second
+        # measuring pass). Unquoted on purpose: it must word-split into flags,
+        # and it is set only by the workflow.
         #
         # --no-cov only when pytest-cov is installed: the flag is an error
         # without the plugin ("unrecognized arguments: --no-cov"), and this file
