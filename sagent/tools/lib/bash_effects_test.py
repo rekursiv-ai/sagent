@@ -167,8 +167,8 @@ def _git_init(root: Path) -> None:
         )
 
 
-def _mutates(command: str) -> bool:
-    """Run ``command`` in a sandbox; report whether the tree changed."""
+def _mutation_result(command: str) -> tuple[bool, int]:
+    """Run ``command``; return whether the tree changed and its exit code."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         _ = (root / "a.txt").write_text("x\ny\n")
@@ -179,14 +179,20 @@ def _mutates(command: str) -> bool:
         _ = (root / "script.sed").write_text("w out.txt")
         _git_init(root)
         before = _snapshot(root)
-        _ = subprocess.run(  # noqa: S603 -- fixed argv over a fixed command table
+        result = subprocess.run(  # noqa: S603 -- fixed argv over a fixed command table
             ["/bin/bash", "-c", command],
             cwd=td,
             timeout=10,
             capture_output=True,
             check=False,
         )
-        return _snapshot(root) != before
+        return _snapshot(root) != before, result.returncode
+
+
+def _mutates(command: str) -> bool:
+    """Run ``command`` in a sandbox; report whether the tree changed."""
+    changed, _ = _mutation_result(command)
+    return changed
 
 
 def _skip_if_missing(command: str) -> None:
@@ -202,13 +208,16 @@ def _skip_if_missing(command: str) -> None:
 def test_a_command_that_writes_is_never_classified_read_only(command: str) -> None:
     """The failure that costs data, asserted against the filesystem."""
     _skip_if_missing(command)
-    assert _mutates(command), f"fixture drift: {command!r} no longer writes"
     trees = parse_bash(command)
     verdict = trees is not None and is_read_only(trees)
     assert not verdict, (
         f"{command!r} was blessed as read-only but CHANGED the sandbox;"
         " two such calls run concurrently and one clobbers the other"
     )
+    changed, returncode = _mutation_result(command)
+    if returncode != 0 and not changed:
+        pytest.skip(f"utility syntax unsupported on this platform: {command!r}")
+    assert changed, f"fixture drift: {command!r} no longer writes"
 
 
 @pytest.mark.slow

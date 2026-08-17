@@ -526,7 +526,7 @@ async def _background_electing_turn_one(
             _skip_if_bridge_unavailable(exc)
             raise
         await model.close()
-    pytest.fail(
+    raise AssertionError(
         f"real claude declined to background the tool in {attempts} fresh "
         f"sessions (ran it inline or skipped it); last turn-1 text was {last!r}"
     )
