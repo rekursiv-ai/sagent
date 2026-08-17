@@ -139,23 +139,21 @@ repos:
         name: check-toml
         stages: [pre-commit]
 
-  # Type-checks `${{ }}` expressions, action inputs, runner labels, and shell in
-  # `run:` blocks. A workflow expression error fails the job in 0 seconds with no
-  # log, so nothing downstream catches it -- `check-yaml` above only proves the
-  # file parses. The upstream hook self-selects on `^\.github/workflows/`.
+  # Type-checks `${{ }}` expressions, action inputs, runner labels, and `run:`
+  # shell. A workflow expression error fails the job in 0s with no log, so
+  # nothing downstream catches it; `check-yaml` only proves the file parses.
+  # Self-selects on `^\.github/workflows/`.
   #
-  # `actionlint`, not `actionlint-docker`/`-system`: the golang hook is the only
-  # one that provisions itself. pre-commit bootstraps its own Go toolchain into
-  # the hook env, whereas `-docker` needs a daemon this host does not run and
-  # `-system` needs a manually installed binary -- both fail closed on a fresh
-  # checkout, which is how the tool went uninstalled while the docs cited it.
+  # `actionlint`, not `-docker`/`-system`: only the golang hook provisions
+  # itself. `-docker` needs a daemon this host lacks, `-system` a hand-installed
+  # binary -- both fail closed on a fresh checkout, which is how the tool went
+  # uninstalled while the docs cited it.
   #
-  # SC2016 is suppressed, and only SC2016: the export/import workflows pass
-  # `--validation-command 'wheel="$wheel" ...'` deliberately single-quoted --
-  # those `$` belong to the inner shell that runs the command later, so the
-  # "expressions don't expand" advice inverts the intent. Every other shellcheck
-  # rule stays live; note shellcheck runs only where it is installed, so this
-  # hook is stricter on a CI runner than on a dev box without it.
+  # SC2016 only: the export workflows single-quote
+  # `--validation-command 'wheel="$wheel" ...'` deliberately -- those `$` belong
+  # to the inner shell, so "expressions don't expand" inverts the intent. Every
+  # other shellcheck rule stays live, and shellcheck runs only where installed,
+  # so this is stricter on CI than on a dev box.
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.12
     hooks:
@@ -195,10 +193,9 @@ repos:
     hooks:
       # Exclusions defined in pyproject.toml.
       #
-      # `require_serial: true` on both: ruff is rayon-parallel internally, so
-      # pre-commit's own argv partitioning stacks cpu_count saturating processes
-      # on top of it. Cheap here (ruff is sub-second on the whole tree) but the
-      # same defect the `ty-check` and `basedpyright` hooks document.
+      # `require_serial: true` on both: ruff is rayon-parallel, so pre-commit's
+      # argv partitioning stacks cpu_count saturating processes on top. Cheap
+      # here (sub-second tree-wide), same defect `basedpyright` below documents.
       - id: ruff-check
         name: ruff-check
         stages: [pre-commit]
@@ -213,12 +210,11 @@ repos:
 
   - repo: local
     hooks:
-      # No official ty pre-commit hook yet (https://github.com/astral-sh/ty/issues/269).
+      # No official ty hook yet (https://github.com/astral-sh/ty/issues/269).
       # `require_serial: true` for the same reason as `basedpyright` below: ty
-      # is rayon-parallel and saturates every core on its own (17 threads
-      # measured for one invocation on a 16-core box). Left concurrent,
-      # pre-commit partitions the argv into cpu_count chunks and runs them at
-      # once, multiplying that by 16.
+      # is rayon-parallel and saturates every core alone (17 threads measured
+      # for one invocation on a 16-core box); concurrent, pre-commit multiplies
+      # that by cpu_count.
       - id: ty-check
         name: ty-check
         language: system
@@ -226,15 +222,9 @@ repos:
         require_serial: true
         # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
         alias: superseded-at-pre-push
-        # Annoyingly there's no good choice.
-        #   pass_filenames: true
-        #     Pro: Only what you touch is checked.
-        #     Con: pyproject.toml ``[tool.ty.src].exclude`` are ignored.
-        #   pass_filenames: false
-        #     Pro: pyproject.toml ``[tool.ty.src].exclude`` is honored.
-        #     Con: repo-wide
-        # Compromise: duplication; the exclusion list below must mirror
-        # pyproject.toml's ``[tool.ty.src]``.
+        # Passing filenames makes ty ignore `[tool.ty.src].exclude`; not passing
+        # them makes every commit repo-wide. Hence the duplication: the exclude
+        # below must mirror pyproject.toml's `[tool.ty.src]`.
         types_or: [python, pyi]
         entry: uv --quiet run --frozen --group pre-commit ty check
         args:
@@ -247,64 +237,51 @@ repos:
             |(.*/)?docs/
           )
 
-      # `basedpyright-global` at pre-push is the main gate; this is churn
-      # reduction. Do not weaken the global one on the strength of this
-      # passing.
+      # Churn reduction; `basedpyright-global` at pre-push is the real gate. Do
+      # not weaken that one on the strength of this passing.
       #
-      # The exclude list mirrors pyproject.toml's `[tool.basedpyright] exclude`
-      # because passing filenames makes basedpyright ignore it -- the same
-      # duplication the `ty-check` hook above documents. Monorepo-only paths carry
+      # The exclude mirrors pyproject's `[tool.basedpyright] exclude` for the
+      # reason `ty-check` above documents. Monorepo-only paths carry
       #
-      # This hook DEFINES the `&worker-entry` wrapper every $WORKERS-sizing hook
-      # shares -- a YAML anchor must be declared before it is referenced, and
-      # this is the earliest user in document order. The wrapper sizes $WORKERS,
-      # then runs the hook's own command line, supplied as the single `args`
-      # entry. Per-hook differences (env vars, marker filters, exit-5 tolerance,
-      # capability guards) live in that arg, so the arithmetic exists once.
+      # `require_serial: true` because this hook parallelizes itself. Without
+      # it pre-commit forks ~cpu_count partitions CONCURRENTLY, each its own
+      # basedpyright at `--threads=$WORKERS` -- a 500-file changeset launched 18
+      # processes and ~96 Node workers on a 16-core box. Serial partitioning is
+      # what makes $WORKERS a cap.
       #
-      # Filenames pre-commit appends reach the inner command as "$@": the
-      # wrapper passes them after an explicit `bash` $0, because `bash -c "$@"`
-      # would consume the first FILENAME as $0 and silently drop it from the
-      # check. `pass_filenames: false` hooks see an empty "$@" and are unaffected.
+      # -- the `&worker-entry` wrapper -------------------------------------
       #
-      # Inline rather than a script under ops/: this file is copied verbatim into
-      # public package repos that do not receive ops/.
+      # Defined here because a YAML anchor must precede its references and this
+      # is the earliest user. It sizes $WORKERS, then runs the hook's command
+      # line from the single `args` entry; per-hook differences (env vars,
+      # marker filters, exit-5 tolerance, capability guards) live in that arg,
+      # so the arithmetic exists once. Inline rather than under ops/ because
+      # this file is copied verbatim into public repos that get no ops/.
+      #
+      # Appended filenames reach the inner command as "$@" after an explicit
+      # `bash` $0: plain `bash -c "$@"` would eat the first FILENAME as $0 and
+      # drop it from the check.
       #
       #   WORKERS = max(2, min(perf - 1, round(phys * 3/8)))
       #
-      # `phys` counts physical cores (SMT siblings deduped); `perf` counts those
-      # at the top clock -- equal to `phys` on a uniform-clock server, smaller on
-      # a hybrid laptop. Both terms were fitted to measured optima, not derived:
+      # `phys` counts physical cores (SMT deduped), `perf` those at the top
+      # clock. Both terms were FITTED to measured optima, not derived:
       #
       #   host                     nproc  phys  perf  optimal  imputed
       #   tron (Core Ultra 7 255H)    16    16     6        5        5
       #   colossus (EPYC 9555)       128    64    64       24       24
       #
-      # `optimal` is the measured best `pytest -n`, `imputed` what the formula
-      # yields. tron: 5 -> 216s vs 6 -> 256s (653 slow tests, sequential, idle
-      # box). colossus: 24 -> 105s vs 20 -> 113s (651 slow tests). tron has no
-      # SMT, so nproc == phys; its 16 cores span three clock domains (6x5.1GHz,
-      # 8x4.4GHz, 2x2.5GHz) and only the first counts as perf. colossus is
-      # uniform at 3.25GHz, so perf == phys and `perf - 1` never binds there.
+      # `optimal` is the measured best `pytest -n`. tron: 5 -> 216s vs 6 -> 256s
+      # (653 slow tests, idle box); its 16 cores span three clock domains
+      # (6x5.1GHz, 8x4.4GHz, 2x2.5GHz), only the first counting as perf.
+      # colossus: 24 -> 105s vs 20 -> 113s (651 slow tests); uniform 3.25GHz, so
+      # perf == phys and `perf - 1` never binds. The floor of 2 binds only on a
+      # 2-vCPU runner, where xdist still beats serial (5.4s vs 6.4s).
       #
-      # `3/8` binds on the server, `perf - 1` only on a power-capped hybrid, `2`
-      # only on a 2-vCPU CI runner. On 2 pinned cores xdist still beats serial
-      # (n=2 5.4s vs n=0 6.4s), so the floor is 2 and never 1.
-      #
-      # Every structural alternative overshot at least one box: physical cores,
-      # top frequency domain, and nproc/2 all did. Do NOT "simplify" this back to
-      # a core count. Note also that the EPYC curve is a sawtooth (24 and 32
-      # fast, 20 and 28 slow, likely CCD alignment), so a nearby value is not
-      # interchangeable.
-      #
-      # Set WORKERS in the environment to override on a host that measures
-      # differently; the formula only runs when it is unset.
-      # `require_serial: true` because this hook already parallelizes itself.
-      # Without it pre-commit splits the argv into ~cpu_count partitions and runs
-      # them CONCURRENTLY, each an independent basedpyright with its own
-      # `--threads=$WORKERS` -- so a 500-file changeset launched 18 processes and
-      # ~96 Node workers on a 16-core box. $WORKERS is the intended cap; serial
-      # partitioning is what makes it one.
+      # Do NOT "simplify" this to a core count: physical cores, top frequency
+      # domain, and nproc/2 each overshot a box. The EPYC curve is a sawtooth
+      # (24, 32 fast; 20, 28 slow -- likely CCD alignment), so a nearby value is
+      # not interchangeable. Set WORKERS in the environment to override.
       - id: basedpyright
         name: basedpyright
         language: system
@@ -349,50 +326,46 @@ repos:
             |(.*/)?third_party/
           )
 
-      # Runs the test file that PAIRS with each changed source file -- nothing
-      # transitive. ~1s, versus 120s for the pre-push `pytest-global` hook's testmon walk.
+      # Runs the test file PAIRED with each changed source file, nothing
+      # transitive: ~1s, versus 120s for the pre-push testmon walk.
       #
-      # Deliberately not an affected-set analysis. Measured on this repo, the
-      # reverse-import closure of a 42-file changeset is 2482 files / 1124 test
-      # files (39% of the tree), because one touched module has 212 importers --
-      # import reachability is not behavioral dependence. `--testmon-forceselect`
-      # at pre-push already selects precisely, from coverage.
+      # Deliberately not an affected-set analysis. The reverse-import closure of
+      # a 42-file changeset here is 2482 files / 1124 test files (39% of the
+      # tree) because one touched module has 212 importers -- import
+      # reachability is not behavioral dependence, and pre-push's
+      # `--testmon-forceselect` already selects precisely, from coverage.
       #
-      # Both sidecar spellings and a mirrored tests/ tree are probed, so the hook
-      # is not specific to this repo's layout. On a layout matching none of them it
-      # runs nothing and exits 0 -- a green here means "no paired test found", not
-      # "tested". That is only acceptable because pre-push is the real gate.
+      # Probes both sidecar spellings and a mirrored tests/ tree; a layout
+      # matching none runs nothing and exits 0. Green here means "no paired test
+      # found", not "tested" -- acceptable only because pre-push is the gate.
       #
-      # Tolerate pytest exit 5 (nothing collected) for the same reason the
-      # pre-push tiers do: a paired test file whose every test carries a
-      # deselected marker (`integration`, `slow`) collects zero, which is not a
-      # failure. Editing `chrome/echo.py` reported RED on a sidecar of seven
-      # passing integration tests. A REAL failure is exit 1 and still fails.
+      # Tolerate exit 5 (nothing collected): a sidecar whose every test carries
+      # a deselected marker collects zero, which is not a failure -- editing
+      # `chrome/echo.py` reported RED on seven passing integration tests. A real
+      # failure is exit 1 and still fails.
       #
-      # Parallelism is chosen from the changeset size, because neither setting
-      # wins everywhere. xdist costs a fixed ~5s of worker startup, and a
-      # sidecar file is ~0.23s serial vs ~0.10s spread over workers, so the two
-      # curves cross. Measured on tron (WORKERS=5), sidecar files -> wall:
+      # `-n` is chosen from changeset size because neither setting wins
+      # everywhere: xdist costs a fixed ~5s startup, a sidecar is ~0.23s serial
+      # vs ~0.10s spread, so the curves cross. Measured on tron (WORKERS=5),
+      # files -> wall:
       #
       #   files    8    12    16    20    60
       #   serial  5.7s  7.6s  6.8s  12.4s 27.8s
       #   -n5     8.1s  9.0s  7.5s   8.0s 16.3s
       #
-      # Below ~16 serial wins by up to 40%; above ~20 xdist wins by 1.7x. The
-      # threshold sits at the crossover, one below the first size where -n won,
-      # so a typical few-file commit -- the case this fast tier exists for --
-      # never pays startup, and a sweeping refactor still gets the workers.
-      # SIDECAR_XDIST_MIN overrides it on a host that measures differently.
+      # The threshold sits at the crossover, one below the first size where -n
+      # won, so a few-file commit -- what this tier exists for -- never pays
+      # startup and a sweeping refactor still gets workers. SIDECAR_XDIST_MIN
+      # overrides.
       #
       # `read -d ''`, not `mapfile`: mapfile is bash 4.0 and macOS ships 3.2.
       # `printf '\0'` supplies the NUL, so read exits 0 instead of on EOF.
       #
-      # `require_serial: true` is a separate axis and is always right here:
-      # it governs pre-commit's OWN argv partitioning, which forks cpu_count
-      # copies of this whole hook. That multiplies the startup cost the
-      # threshold above exists to avoid, and it stacks on any `-n` we choose --
-      # 60 files as 16 forked hooks burned 73s of CPU for 16.3s of wall, the
-      # same wall as one hook at -n5 for 36s. One hook, sized once.
+      # `require_serial: true` is a separate axis, governing pre-commit's OWN
+      # argv partitioning: it forks cpu_count copies of this whole hook, which
+      # multiplies the startup cost the threshold avoids and stacks on any `-n`.
+      # 60 files as 16 forked hooks burned 73s of CPU for the same 16.3s wall
+      # one hook at -n5 reaches on 36s.
       - id: pytest
         name: pytest
         language: system
@@ -425,26 +398,21 @@ repos:
   # To enable:  uv run pre-commit install --hook-type pre-push
   # To disable: uv run pre-commit uninstall --hook-type pre-push
   #
-  # Three pre-commit hooks above are churn reduction only -- `ty-check`,
-  # `basedpyright` and `pytest` each answer a strictly weaker question
-  # than a hook below (`ty-check-global`, `basedpyright-global`,
-  # `pytest-global`). They carry `alias: superseded-at-pre-push`, which is a
-  # plain `SKIP=` selector: a lane that already runs the pre-push tier sets that
-  # and drops all three in one token, without restating hook ids where they
-  # could drift. pre-commit accepts the same alias on several hooks and skips
-  # every one of them.
+  # `ty-check`, `basedpyright` and `pytest` above each answer a strictly weaker
+  # question than a hook here, so all three carry
+  # `alias: superseded-at-pre-push` -- a plain `SKIP=` selector letting a lane
+  # that runs the pre-push tier drop them in one token, with no hook ids to
+  # drift. pre-commit skips every hook sharing an alias.
   #
-  # This is not cosmetic. The per-file `basedpyright` turned repo-wide when CI's
-  # periodic lane ran the commit stage `--all-files` -- passing filenames also
-  # voids pyproject's excludes -- and on a 2-vCPU runner ($WORKERS floors at 2)
-  # it blew the 30-minute job cap while `basedpyright-global` had already
-  # answered the same question in 12 minutes in its own job.
+  # Not cosmetic: the per-file `basedpyright` turned repo-wide when CI's
+  # periodic lane ran the commit stage `--all-files` (passing filenames also
+  # voids pyproject's excludes), and on a 2-vCPU runner it blew the 30-minute
+  # job cap while `basedpyright-global` answered the same question in 12.
   #
-  # These sections are NOT independent: every `*worker-entry` below resolves the
-  # anchor DEFINED on the pre-commit `basedpyright` hook above. Deleting or
-  # reordering that hook past these is a YAML error, not a silent regression --
-  # `precommit_regex_test.py` also asserts all six entries stay byte-identical,
-  # so copy-pasting the wrapper in place of a reference fails.
+  # Every `*worker-entry` below resolves the anchor DEFINED on the pre-commit
+  # `basedpyright` hook, so reordering that hook past these is a YAML error, not
+  # a silent regression. `precommit_regex_test.py` asserts all six stay
+  # byte-identical, so pasting the wrapper in place of a reference fails.
 
   - repo: local
     hooks:
@@ -477,12 +445,12 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         # --testmon-forceselect runs only tests whose covered code changed since
-        # the cached .testmondata baseline (huge speedup on the full suite).
-        # It must be -forceselect, NOT plain --testmon: this repo's pyproject
-        # addopts carries a default `-m 'not ci_smoke and ...'` marker filter,
-        # and plain --testmon silently self-deactivates whenever -m is present
-        # (tarpas/pytest-testmon#238). -forceselect overrides that. On a cache
-        # miss / new environment testmon runs the whole suite, so it is fail-safe.
+        # the cached .testmondata baseline; on a cache miss it runs everything,
+        # so it is fail-safe. It must be -forceselect, NOT plain --testmon:
+        # pyproject addopts carries a default `-m 'not ci_smoke and ...'`, and
+        # plain --testmon self-deactivates whenever -m is present
+        # (tarpas/pytest-testmon#238).
+        #
         # COVERAGE_CORE=ctrace: coverage defaults to core=sysmon on 3.14, which
         # cannot carry the dynamic contexts testmon switches per test. Testmon
         # builds Coverage with config_file=False, so only the env var reaches it.
@@ -498,15 +466,13 @@ repos:
         always_run: true
         pass_filenames: false
         stages: [pre-push]
-        # --no-cov only when pytest-cov is installed: the flag is an error
-        # without the plugin, and these tiers gain nothing from coverage
-        # (only the testmon hook above needs it).
+        # --no-cov only when pytest-cov is installed: the flag errors without
+        # the plugin, and only the testmon hook above needs coverage.
         #
-        # Tolerate pytest exit 5 (no tests collected): a tree may ship no tests
-        # for this marker, which is not a failure. The strict `pytest-global` hook
-        # above still fails on an empty collection, and
-        # ops/github/marker_tiers_test.py fails any tier that goes empty
-        # without being declared empty -- so tolerance here is not fail-open.
+        # Tolerate exit 5 (nothing collected): a tree may ship no tests for this
+        # marker. Not fail-open -- `pytest-global` above still fails on an empty
+        # collection, and ops/github/marker_tiers_test.py fails any tier that
+        # goes empty without being declared empty.
         entry: *worker-entry
         args:
           - >-
@@ -525,8 +491,7 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         # Slower package/CLI smoke tests, deselected by the pyproject marker
-        # filter. Tolerate pytest exit 5 (no tests collected) so the hook does
-        # not fail a tree that happens to ship none.
+        # filter. Exit 5 tolerated: see pytest-slow-global above.
         entry: *worker-entry
         args:
           - >-
@@ -543,16 +508,16 @@ repos:
         always_run: true
         pass_filenames: false
         stages: [pre-push]
-        # Gated on the CAPABILITY, not an env var: these tests need a real
-        # Postgres, so skip when `pg_config` is absent and RUN it when the
-        # toolchain is there. An RUN_INTEGRATION=1 opt-in meant the pgvector
-        # this image installs was provisioned and never exercised.
+        # Gated on the CAPABILITY, not an env var: these need a real Postgres,
+        # so skip when `pg_config` is absent and RUN when it is there. A
+        # RUN_INTEGRATION=1 opt-in left the pgvector this image installs
+        # provisioned and never exercised.
         #
         # `pg_config` present but pgvector missing still fails loudly ("extension
-        # \"vector\" is not available") -- that is a broken provision, not a
-        # machine without a database, and should not be silently skipped.
+        # \"vector\" is not available") -- a broken provision, not a machine
+        # without a database, and must not be silently skipped.
         #
-        # Tolerate pytest exit 5: see the pytest-slow-global note above.
+        # Exit 5 tolerated: see pytest-slow-global above.
         entry: *worker-entry
         args:
           - >-

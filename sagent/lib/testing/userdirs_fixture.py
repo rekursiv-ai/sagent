@@ -38,13 +38,10 @@ explicit path rather than trusting isolation.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from pathlib import Path
+from typing import cast
 
 import pytest
-
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -123,6 +120,7 @@ def isolate_user_dirs(
     # there fails 15 of them (``temp file leaked: ['userdirs']``). The XDG root
     # must be invisible to the directory under test.
     root = tmp_path_factory.mktemp("userdirs")
+    assert isinstance(root, Path)
     for variable, leaf in (
         ("XDG_CONFIG_HOME", "config"),
         ("XDG_DATA_HOME", "data"),
