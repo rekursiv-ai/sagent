@@ -329,13 +329,13 @@ repos:
           )
 
       # Runs the test file PAIRED with each changed source file, nothing
-      # transitive: ~1s, versus 120s for the pre-push testmon walk.
+      # transitive: ~1s, versus the whole suite at pre-push.
       #
       # Deliberately not an affected-set analysis. The reverse-import closure of
       # a 42-file changeset here is 2482 files / 1124 test files (39% of the
       # tree) because one touched module has 212 importers -- import
-      # reachability is not behavioral dependence, and pre-push's
-      # `--testmon-forceselect` already selects precisely, from coverage.
+      # reachability is not behavioral dependence, so the cheap pairing buys
+      # nearly as much and pre-push runs everything regardless.
       #
       # Probes both sidecar spellings and a mirrored tests/ tree; a layout
       # matching none runs nothing and exits 0. Green here means "no paired test
@@ -485,7 +485,7 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         # --no-cov only when pytest-cov is installed: the flag errors without
-        # the plugin, and only the testmon hook above needs coverage.
+        # the plugin, and no pre-push tier needs coverage.
         #
         # Tolerate exit 5 (nothing collected): a tree may ship no tests for this
         # marker. Not fail-open -- `pytest-global` above still fails on an empty
