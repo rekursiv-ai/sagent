@@ -2,10 +2,12 @@
 # Pre-commit/pre-push checks _and_ source-of-truth for Github workflows.
 #
 # Usage:
-#   The `precommit` dependency group supplies every tool the hooks below
-#   invoke. [tool.uv] default-groups is unset, so name it -- an already-synced
-#   .venv makes a bare `uv run` look fine and it is not reproducible on a
-#   fresh checkout.
+#   The `pre-commit` dependency group supplies every tool the hooks below
+#   invoke. Naming it explicitly is belt-and-braces, NOT a requirement: uv
+#   defaults `default-groups` to `["dev"]`, and pyproject's `dev` includes
+#   `pre-commit`, so a bare `uv run` already resolves the tools (verified on a
+#   scratch project). Name it anyway so the command does not depend on that
+#   chain staying intact.
 #
 #     uv --quiet run --frozen --group pre-commit pre-commit install
 #     uv --quiet run --frozen --group pre-commit pre-commit autoupdate
@@ -42,7 +44,7 @@
 #     uv --quiet run --frozen --group pre-commit pytest path/to/thing_test.py
 #     uv --quiet run --frozen --group pre-commit pytest path/to/thing_test.py::test_name
 #     uv --quiet run --frozen --group pre-commit pytest -k some_substring path/to/
-#     uv --quiet run --frozen --group pre-commit pytest -n 6 path/to/
+#     uv --quiet run --frozen --group pre-commit pytest -n 5 path/to/
 #
 #   Marker tiers mirror the pytest-slow-global / -ci-smoke-global /
 #   -integration-global hooks; the
@@ -444,21 +446,37 @@ repos:
         always_run: true
         pass_filenames: false
         stages: [pre-push]
-        # --testmon-forceselect runs only tests whose covered code changed since
-        # the cached .testmondata baseline; on a cache miss it runs everything,
-        # so it is fail-safe. It must be -forceselect, NOT plain --testmon:
-        # pyproject addopts carries a default `-m 'not ci_smoke and ...'`, and
-        # plain --testmon self-deactivates whenever -m is present
-        # (tarpas/pytest-testmon#238).
+        # Deliberately NO testmon. It deselects in `pytest_ignore_collect`, a
+        # COLLECTION hook, while pytest-split partitions in
+        # `pytest_collection_modifyitems` -- so testmon filters first and the
+        # split then re-partitions whatever survives. Measured: one shard with a
+        # warm database ran 8 tests where the cold run ran 118, and the four
+        # shards' union covered 76 of 257 rather than all of them. Tests went
+        # unrun and the gate stayed green. Sharding is what keeps this hook
+        # inside the runner's memory; test selection is not worth an unsound
+        # union on top of it.
         #
-        # COVERAGE_CORE=ctrace: coverage defaults to core=sysmon on 3.14, which
-        # cannot carry the dynamic contexts testmon switches per test. Testmon
-        # builds Coverage with config_file=False, so only the env var reaches it.
+        # PYTEST_SPLIT_ARGS is empty locally, so a local pre-push runs the WHOLE
+        # suite in one process exactly as before. CI sets it per matrix job to
+        # `--splits N --group K` (plus `--store-durations`, so the run that uses
+        # the timings is also the run that records them -- there is no second
+        # measuring pass), because a pytest process's RSS grows monotonically
+        # and never releases; see the `pre-push` job in
+        # .github/workflows/tests.yml for the measurements. Unquoted on purpose:
+        # it must word-split into flags, and it is set only by the workflow.
+        #
+        # --no-cov only when pytest-cov is installed: the flag is an error
+        # without the plugin ("unrecognized arguments: --no-cov"), and this file
+        # is copied into every exported package, not all of which carry it.
         entry: *worker-entry
         args:
           - >-
-            exec env COVERAGE_CORE=ctrace uv --quiet run --frozen --group pre-commit
-            pytest -n="$WORKERS" -q --tb=short --testmon-forceselect
+            cov=();
+            uv --quiet run --frozen --group pre-commit
+            python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
+            exec uv --quiet run --frozen --group pre-commit
+            pytest -n="$WORKERS" "${cov[@]}" -q --tb=short
+            $PYTEST_SPLIT_ARGS
 
       - id: pytest-slow-global
         name: pytest-slow-global
