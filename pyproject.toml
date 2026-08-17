@@ -157,9 +157,8 @@ markers = [
     "performance: timing-sensitive tests (deselected by default)",
     "slow: expensive local correctness test (JIT, training, full fixtures, git, bash, or a fresh interpreter); excluded from the fast unit tier and run by the pre-push slow gate",
     "real_llm: integration tests that spawn a live LLM CLI (claude/codex); skipped unless RUN_REAL_LLM=1 is set",
-    "cluster: requires live Together cluster access; deselected by default (bin/tests never selects it implicitly; run explicitly with -m cluster)",
 ]
-addopts = "-m 'not ci_smoke and not cuda and not integration and not performance and not cluster and not slow' --durations=20 --dist=worksteal"
+addopts = "-m 'not ci_smoke and not cuda and not integration and not performance and not slow' --durations=20 --dist=worksteal"
 timeout = 60
 # "error" = treat all warnings as errors (same as -werror).
 # using filterwarnings instead of addopts so we can add exceptions.
