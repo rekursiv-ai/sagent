@@ -212,6 +212,84 @@ repos:
 
   - repo: local
     hooks:
+      # Single definition of `&worker-entry` anchor.
+      #
+      # It sizes $WORKERS, then runs the hook's command line from the single
+      # `args` entry; per-hook differences (env vars, marker filters, exit-5
+      # tolerance, capability guards) live in that arg, so the arithmetic exists
+      # once. Inline rather than under ops/ because this file is copied verbatim
+      # into public repos that get no ops/.
+      #
+      # Appended filenames reach the inner command as "$@" after an explicit
+      # `bash` $0: plain `bash -c "$@"` would eat the first FILENAME as $0 and
+      # drop it from the check.
+      #
+      #   WORKERS = max(2, min(perf - 1, round(phys * 3/8)))
+      #
+      # `phys` counts physical cores (SMT deduped), `perf` those at the top
+      # clock. Both terms were FITTED to measured optima, not derived:
+      #
+      #   host                     nproc  phys  perf  optimal  imputed
+      #   tron (Core Ultra 7 255H)    16    16     6        5        5
+      #   colossus (EPYC 9555)       128    64    64       24       24
+      #
+      # `optimal` is the measured best `pytest -n`. tron: 5 -> 216s vs 6 -> 256s
+      # (653 slow tests, idle box); its 16 cores span three clock domains
+      # (6x5.1GHz, 8x4.4GHz, 2x2.5GHz), only the first counting as perf.
+      # colossus: 24 -> 105s vs 20 -> 113s (651 slow tests); uniform 3.25GHz, so
+      # perf == phys and `perf - 1` never binds. The floor of 2 binds only on a
+      # 2-vCPU runner, where xdist still beats serial (5.4s vs 6.4s).
+      #
+      # Do NOT "simplify" this to a core count: physical cores, top frequency
+      # domain, and nproc/2 each overshot a box. The EPYC curve is a sawtooth
+      # (24, 32 fast; 20, 28 slow -- likely CCD alignment), so a nearby value is
+      # not interchangeable.
+      #
+      # Overriding, most specific first: each hook honors the variable named as
+      # its FIRST arg (`WORKERS_PYTEST_INTEGRATION_GLOBAL=1`), then
+      # `WORKERS_DEFAULT`, then this formula. Per-hook is what CI needs -- the
+      # integration tier holds ~1.8 GB of torch/jax per worker and OOM-killed a
+      # 2-vCPU runner at two workers, while basedpyright on the same box wants
+      # more. A bare `WORKERS=` is deliberately NOT read: the wrapper exports
+      # `WORKERS`, so reusing that name as the input would leak one hook's
+      # resolved count into every later hook in the same shell.
+      - id: worker-sizing
+        name: worker-sizing (anchor only; never runs)
+        language: fail
+        stages: [manual]
+        files: $^
+        # $1 is the name of the variable this hook's count may be OVERRIDDEN by;
+        # `$WORKERS` is the resolved value every `args` command reads. Two names
+        # because the override is optional -- a command reading
+        # `$WORKERS_PYTEST_GLOBAL` directly would emit `-n=` on the usual run
+        # where nobody set it, and never reach the formula below.
+        entry: &worker-entry >-
+          bash -c '
+            eval "WORKERS=\${$1:-\${WORKERS_DEFAULT:-}}"; shift;
+            if [ -z "$WORKERS" ]; then
+              cpu=/sys/devices/system/cpu;
+              if [ -d "$cpu/cpu0/topology" ]; then
+                phys=$(cat $cpu/cpu*/topology/core_id 2>/dev/null | sort -u | wc -l);
+                top=$(sort -rn $cpu/cpu*/cpufreq/cpuinfo_max_freq 2>/dev/null | head -1);
+                perf=$([ -n "$top" ] && grep -lx "$top" $cpu/cpu*/cpufreq/cpuinfo_max_freq | xargs -n1 dirname | xargs -n1 dirname | xargs -I@ cat @/topology/core_id | sort -u | wc -l || echo "$phys");
+              else
+                phys=$(sysctl -n hw.physicalcpu 2>/dev/null || getconf _NPROCESSORS_ONLN);
+                perf=0;
+                for i in $(seq 0 $(( $(sysctl -n hw.nperflevels 2>/dev/null || echo 1) - 1 ))); do
+                  [ "$(sysctl -n hw.perflevel$i.name 2>/dev/null)" = Efficiency ] && continue;
+                  perf=$(( perf + $(sysctl -n hw.perflevel$i.physicalcpu 2>/dev/null || echo 0) ));
+                done;
+                ((perf < 1)) && perf=$phys;
+              fi;
+              WORKERS=$(( (phys * 3 + 4) / 8 ));
+              ((WORKERS > perf - 1)) && WORKERS=$(( perf - 1 ));
+              ((WORKERS < 2)) && WORKERS=2;
+              # max(2, min(perf - 1, round(phys * 3/8))); +4 rounds to nearest.
+            fi;
+            export WORKERS;
+            exec bash -c "$1" bash "${@:2}"
+          ' bash
+
       # No official ty hook yet (https://github.com/astral-sh/ty/issues/269).
       # `require_serial: true` for the same reason as `basedpyright` below: ty
       # is rayon-parallel and saturates every core alone (17 threads measured
@@ -239,8 +317,8 @@ repos:
             |(.*/)?docs/
           )
 
-      # Churn reduction; `basedpyright-global` at pre-push is the real gate. Do
-      # not weaken that one on the strength of this passing.
+      # `basedpyright-global` at pre-push is the real gate.
+      # Do not weaken that one on the strength of this passing.
       #
       # The exclude mirrors pyproject's `[tool.basedpyright] exclude` for the
       # reason `ty-check` above documents. Monorepo-only paths carry
@@ -250,40 +328,6 @@ repos:
       # basedpyright at `--threads=$WORKERS` -- a 500-file changeset launched 18
       # processes and ~96 Node workers on a 16-core box. Serial partitioning is
       # what makes $WORKERS a cap.
-      #
-      # -- the `&worker-entry` wrapper -------------------------------------
-      #
-      # Defined here because a YAML anchor must precede its references and this
-      # is the earliest user. It sizes $WORKERS, then runs the hook's command
-      # line from the single `args` entry; per-hook differences (env vars,
-      # marker filters, exit-5 tolerance, capability guards) live in that arg,
-      # so the arithmetic exists once. Inline rather than under ops/ because
-      # this file is copied verbatim into public repos that get no ops/.
-      #
-      # Appended filenames reach the inner command as "$@" after an explicit
-      # `bash` $0: plain `bash -c "$@"` would eat the first FILENAME as $0 and
-      # drop it from the check.
-      #
-      #   WORKERS = max(2, min(perf - 1, round(phys * 3/8)))
-      #
-      # `phys` counts physical cores (SMT deduped), `perf` those at the top
-      # clock. Both terms were FITTED to measured optima, not derived:
-      #
-      #   host                     nproc  phys  perf  optimal  imputed
-      #   tron (Core Ultra 7 255H)    16    16     6        5        5
-      #   colossus (EPYC 9555)       128    64    64       24       24
-      #
-      # `optimal` is the measured best `pytest -n`. tron: 5 -> 216s vs 6 -> 256s
-      # (653 slow tests, idle box); its 16 cores span three clock domains
-      # (6x5.1GHz, 8x4.4GHz, 2x2.5GHz), only the first counting as perf.
-      # colossus: 24 -> 105s vs 20 -> 113s (651 slow tests); uniform 3.25GHz, so
-      # perf == phys and `perf - 1` never binds. The floor of 2 binds only on a
-      # 2-vCPU runner, where xdist still beats serial (5.4s vs 6.4s).
-      #
-      # Do NOT "simplify" this to a core count: physical cores, top frequency
-      # domain, and nproc/2 each overshot a box. The EPYC curve is a sawtooth
-      # (24, 32 fast; 20, 28 slow -- likely CCD alignment), so a nearby value is
-      # not interchangeable. Set WORKERS in the environment to override.
       - id: basedpyright
         name: basedpyright
         language: system
@@ -292,32 +336,9 @@ repos:
         # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
         alias: superseded-at-pre-push
         types_or: [python, pyi]
-        entry: &worker-entry >-
-          bash -c '
-            if [ -z "$WORKERS" ]; then
-              cpu=/sys/devices/system/cpu;
-              if [ -d "$cpu/cpu0/topology" ]; then
-                phys=$(cat $cpu/cpu*/topology/core_id 2>/dev/null | sort -u | wc -l);
-                top=$(sort -rn $cpu/cpu*/cpufreq/cpuinfo_max_freq 2>/dev/null | head -1);
-                perf=$([ -n "$top" ] && grep -lx "$top" $cpu/cpu*/cpufreq/cpuinfo_max_freq | xargs -n1 dirname | xargs -n1 dirname | xargs -I@ cat @/topology/core_id | sort -u | wc -l || echo "$phys");
-              else
-                phys=$(sysctl -n hw.physicalcpu 2>/dev/null || getconf _NPROCESSORS_ONLN);
-                perf=0;
-                for i in $(seq 0 $(( $(sysctl -n hw.nperflevels 2>/dev/null || echo 1) - 1 ))); do
-                  [ "$(sysctl -n hw.perflevel$i.name 2>/dev/null)" = Efficiency ] && continue;
-                  perf=$(( perf + $(sysctl -n hw.perflevel$i.physicalcpu 2>/dev/null || echo 0) ));
-                done;
-                ((perf < 1)) && perf=$phys;
-              fi;
-              WORKERS=$(( (phys * 3 + 4) / 8 ));
-              ((WORKERS > perf - 1)) && WORKERS=$(( perf - 1 ));
-              ((WORKERS < 2)) && WORKERS=2;
-              # max(2, min(perf - 1, round(phys * 3/8))); +4 rounds to nearest.
-            fi;
-            export WORKERS;
-            exec bash -c "$1" bash "${@:2}"
-          ' bash
+        entry: *worker-entry
         args:
+          - WORKERS_BASEDPYRIGHT
           - >-
             exec env NODE_OPTIONS=--max-old-space-size=2048
             uv --quiet run --frozen --group pre-commit
@@ -378,6 +399,7 @@ repos:
         types: [python]
         entry: *worker-entry
         args:
+          - WORKERS_PYTEST
           - >-
             tests=();
             for f in "$@"; do
@@ -397,6 +419,7 @@ repos:
             || test "$?" = 5
 
   # === Pre-Push Gates =========================================================
+  #
   # To enable:  uv run pre-commit install --hook-type pre-push
   # To disable: uv run pre-commit uninstall --hook-type pre-push
   #
@@ -435,6 +458,7 @@ repos:
         stages: [pre-push]
         entry: *worker-entry
         args:
+          - WORKERS_BASEDPYRIGHT_GLOBAL
           - >-
             exec env NODE_OPTIONS=--max-old-space-size=2048
             uv --quiet run --frozen --group pre-commit
@@ -470,6 +494,7 @@ repos:
         # is copied into every exported package, not all of which carry it.
         entry: *worker-entry
         args:
+          - WORKERS_PYTEST_GLOBAL
           - >-
             cov=();
             uv --quiet run --frozen --group pre-commit
@@ -493,6 +518,7 @@ repos:
         # goes empty without being declared empty.
         entry: *worker-entry
         args:
+          - WORKERS_PYTEST_SLOW_GLOBAL
           - >-
             cov=();
             uv --quiet run --frozen --group pre-commit
@@ -512,6 +538,7 @@ repos:
         # filter. Exit 5 tolerated: see pytest-slow-global above.
         entry: *worker-entry
         args:
+          - WORKERS_PYTEST_CI_SMOKE_GLOBAL
           - >-
             cov=();
             uv --quiet run --frozen --group pre-commit
@@ -538,6 +565,7 @@ repos:
         # Exit 5 tolerated: see pytest-slow-global above.
         entry: *worker-entry
         args:
+          - WORKERS_PYTEST_INTEGRATION_GLOBAL
           - >-
             command -v pg_config >/dev/null 2>&1 || exit 0;
             cov=();
