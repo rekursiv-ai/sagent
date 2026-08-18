@@ -603,7 +603,8 @@ repos:
             python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
             env PYTHONUNBUFFERED=1 uv --quiet run --frozen --group pre-commit
             pytest -n="$WORKERS" "${cov[@]}" -q --tb=short --durations=20
-            -m ci_smoke || test "$?" = 5
+            -m ci_smoke
+            || test "$?" = 5
 
       - id: pytest-integration-global
         name: pytest-integration-global
@@ -636,4 +637,6 @@ repos:
             python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
             env PYTHONUNBUFFERED=1 uv --quiet run --frozen --group pre-commit
             pytest -n="$WORKERS" "${cov[@]}" -q --tb=short --dist=loadgroup
-            -m integration $PYTEST_SPLIT_ARGS || test "$?" = 5
+            -m integration
+            $PYTEST_SPLIT_ARGS
+            || test "$?" = 5
