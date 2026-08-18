@@ -438,6 +438,28 @@ repos:
   # `basedpyright` hook, so reordering that hook past these is a YAML error, not
   # a silent regression. `precommit_regex_test.py` asserts all six stay
   # byte-identical, so pasting the wrapper in place of a reference fails.
+  #
+  # progress output. Every pytest tier here runs for minutes and used to emit a
+  # single verdict line, which is also why the OOM that killed one looked like a
+  # hang. TWO layers suppress the transcript and both are undone below; fixing
+  # either alone still leaves a silent hook.
+  #
+  #   `verbose: true` -- pre-commit captures a hook's stdout and stderr into one
+  #   buffer and prints it only `if verbose or hook.verbose or retcode or
+  #   files_modified`, so a PASSING hook's output is discarded. Set per hook
+  #   rather than relying on a `--verbose` the caller may not pass.
+  #
+  #   `env PYTHONUNBUFFERED=1` -- that buffer is a PIPE, not a tty, so libc
+  #   block-buffers pytest's writes. Measured on the ci_smoke tier: piped
+  #   default and piped `-v` both held 0 bytes for 24s and flushed everything at
+  #   exit, while PYTHONUNBUFFERED had 709 bytes out by t=8s. Without it the
+  #   progress exists only once the process ends, which is exactly when an OOM
+  #   kill has already discarded it.
+  #
+  # Deliberately NOT `-v`: it changes what pytest writes (one line per test),
+  # not when, and measured no earlier than the default. The per-file `pytest`
+  # hook is excluded from both -- it finishes in ~1s, and a pytest transcript on
+  # every commit would bury the hooks that failed.
 
   - repo: local
     hooks:
@@ -470,37 +492,61 @@ repos:
         always_run: true
         pass_filenames: false
         stages: [pre-push]
+        # See `progress output` at the head of the Pre-Push Gates section.
+        verbose: true
         # Deliberately NO testmon. It deselects in `pytest_ignore_collect`, a
         # COLLECTION hook, while pytest-split partitions in
-        # `pytest_collection_modifyitems` -- so testmon filters first and the
-        # split then re-partitions whatever survives. Measured: one shard with a
-        # warm database ran 8 tests where the cold run ran 118, and the four
-        # shards' union covered 76 of 257 rather than all of them. Tests went
-        # unrun and the gate stayed green. Test selection is not worth an
-        # unsound union over the tiers that ARE sharded to fit memory.
+        # `pytest_collection_modifyitems` -- and testmon ALSO registers that
+        # hook, `trylast=True`, exactly as pytest-split does. Which one wins is
+        # plugin registration order, not anything either declares. Measured when
+        # they last ran together: one shard with a warm database ran 8 tests
+        # where the cold run ran 118, and the four shards' union covered 76 of
+        # 257 rather than all of them. Tests went unrun and the gate stayed
+        # green.
         #
-        # This hook is not one of them: at the single worker CI pins it to, all
-        # ~31.5k tests fit one process in 6.30 GiB of the runner's 8. So
-        # PYTEST_SPLIT_ARGS is empty here in practice, locally AND on CI --
-        # `matrix_entries` in ops/github/precommit_hooks.py decides which hooks
-        # split. The variable stays because it is the one place a tier's
-        # `--splits N --group K` arrives (with `--store-durations`, so the run
-        # that uses the timings also records them -- there is no second
-        # measuring pass). Unquoted on purpose: it must word-split into flags,
-        # and it is set only by the workflow.
+        # So the two are mutually exclusive, and the choice is DERIVED rather
+        # than configured twice: `$PYTEST_SPLIT_ARGS` non-empty means this run is
+        # one shard of several, so it must run every test it was handed and
+        # selection is off; empty means one process owns the whole tier and
+        # testmon selects. The workflow sets that variable per matrix job (from
+        # `matrix_entries` in ops/github/precommit_hooks.py) and nothing sets it
+        # locally, so a local pre-push selects and a sharded CI job does not,
+        # with no second switch to keep in step. ops/github/testmon_gate_test.py
+        # runs this shell both ways to prove it.
         #
-        # --no-cov only when pytest-cov is installed: the flag is an error
-        # without the plugin ("unrecognized arguments: --no-cov"), and this file
-        # is copied into every exported package, not all of which carry it.
+        # Unquoted on purpose: it must word-split into flags.
+        #
+        # It must be `--testmon-forceselect`, NOT plain `--testmon`: pyproject's
+        # addopts carries a default `-m 'not ci_smoke and ...'`, and testmon
+        # self-deactivates whenever `-m` is present, collecting a database and
+        # selecting nothing -- indistinguishable from working
+        # (tarpas/pytest-testmon#238). On a cache miss it runs everything, so it
+        # is fail-safe.
+        #
+        # COVERAGE_CORE=ctrace: coverage defaults to core=sysmon on 3.14, which
+        # cannot carry the dynamic contexts testmon switches per test. It warns,
+        # and pyproject's `filterwarnings = ["error"]` turns that into an
+        # INTERNALERROR collecting zero tests. Testmon builds Coverage with
+        # config_file=False, so only the env var reaches it.
+        #
+        # --no-cov only when pytest-cov is installed AND testmon is not
+        # selecting: the flag is an error without the plugin ("unrecognized
+        # arguments: --no-cov"), and testmon needs coverage to see which tests
+        # touched changed code. This file is copied into every exported package,
+        # not all of which carry either plugin.
         entry: *worker-entry
         args:
           - WORKERS_PYTEST_GLOBAL
           - >-
-            cov=();
+            select=(); cov=();
+            has() { uv --quiet run --frozen --group pre-commit python -c "$1" 2>/dev/null; };
+            if [ -z "$PYTEST_SPLIT_ARGS" ] && has "import testmon"; then
+            select=(--testmon-forceselect);
+            else has "import pytest_cov" && cov=(--no-cov);
+            fi;
+            exec env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
             uv --quiet run --frozen --group pre-commit
-            python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
-            exec uv --quiet run --frozen --group pre-commit
-            pytest -n="$WORKERS" "${cov[@]}" -q --tb=short
+            pytest -n="$WORKERS" "${cov[@]}" "${select[@]}" -q --tb=short
             $PYTEST_SPLIT_ARGS
 
       - id: pytest-slow-global
@@ -509,6 +555,8 @@ repos:
         always_run: true
         pass_filenames: false
         stages: [pre-push]
+        # See `progress output` at the head of the Pre-Push Gates section.
+        verbose: true
         # --no-cov only when pytest-cov is installed: the flag errors without
         # the plugin, and no pre-push tier needs coverage.
         #
@@ -523,7 +571,7 @@ repos:
             cov=();
             uv --quiet run --frozen --group pre-commit
             python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
-            uv --quiet run --frozen --group pre-commit
+            env PYTHONUNBUFFERED=1 uv --quiet run --frozen --group pre-commit
             pytest -n="$WORKERS" "${cov[@]}" -q --tb=short
             -m "slow and not cluster and not cuda and not integration and not performance"
             || test "$?" = 5
@@ -534,6 +582,8 @@ repos:
         always_run: true
         pass_filenames: false
         stages: [pre-push]
+        # See `progress output` at the head of the Pre-Push Gates section.
+        verbose: true
         # Slower package/CLI smoke tests, deselected by the pyproject marker
         # filter. Exit 5 tolerated: see pytest-slow-global above.
         entry: *worker-entry
@@ -543,7 +593,7 @@ repos:
             cov=();
             uv --quiet run --frozen --group pre-commit
             python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
-            uv --quiet run --frozen --group pre-commit
+            env PYTHONUNBUFFERED=1 uv --quiet run --frozen --group pre-commit
             pytest -n="$WORKERS" "${cov[@]}" -q --tb=short --durations=20
             -m ci_smoke || test "$?" = 5
 
@@ -553,6 +603,8 @@ repos:
         always_run: true
         pass_filenames: false
         stages: [pre-push]
+        # See `progress output` at the head of the Pre-Push Gates section.
+        verbose: true
         # Gated on the CAPABILITY, not an env var: these need a real Postgres,
         # so skip when `pg_config` is absent and RUN when it is there. A
         # RUN_INTEGRATION=1 opt-in left the pgvector this image installs
@@ -571,6 +623,6 @@ repos:
             cov=();
             uv --quiet run --frozen --group pre-commit
             python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
-            uv --quiet run --frozen --group pre-commit
+            env PYTHONUNBUFFERED=1 uv --quiet run --frozen --group pre-commit
             pytest -n="$WORKERS" "${cov[@]}" -q --tb=short --dist=loadgroup
             -m integration || test "$?" = 5
