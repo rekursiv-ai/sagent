@@ -183,11 +183,21 @@ jobs:
           ref: ${{ steps.refs.outputs.head_ref }}
           path: public-head
 
+      - name: Cache apt packages
+        if: steps.settings.outputs.enabled == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-${{ runner.os }}-8787f28218a2ad65
       - name: Install system packages
         if: steps.settings.outputs.enabled == 'true'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ripgrep fd-find
+          for attempt in 1 2 3; do
+            timeout 120 sudo apt-get update && break
+            echo "apt-get update stalled (attempt $attempt)" >&2
+            sleep $((attempt * 10))
+          done
+          timeout 300 sudo apt-get install -y --no-install-recommends ripgrep fd-find
       - name: Import public tree into target repository
         if: steps.settings.outputs.enabled == 'true'
         run: |
