@@ -564,6 +564,13 @@ repos:
         # marker. Not fail-open -- `pytest-global` above still fails on an empty
         # collection, and ops/github/marker_tiers_test.py fails any tier that
         # goes empty without being declared empty.
+        #
+        # $PYTEST_SPLIT_ARGS is what makes this tier's four CI jobs distinct.
+        # Omitting it was silent for four runs: the workflow set the variable,
+        # this hook ignored it, and all four "shards" ran the identical 725
+        # tests at ~23 minutes each -- no split, no memory bound, 4x the billed
+        # time. Unquoted on purpose: it must word-split into flags, and it is
+        # empty for every local run.
         entry: *worker-entry
         args:
           - WORKERS_PYTEST_SLOW_GLOBAL
@@ -574,6 +581,7 @@ repos:
             env PYTHONUNBUFFERED=1 uv --quiet run --frozen --group pre-commit
             pytest -n="$WORKERS" "${cov[@]}" -q --tb=short
             -m "slow and not cluster and not cuda and not integration and not performance"
+            $PYTEST_SPLIT_ARGS
             || test "$?" = 5
 
       - id: pytest-ci-smoke-global
@@ -615,6 +623,9 @@ repos:
         # without a database, and must not be silently skipped.
         #
         # Exit 5 tolerated: see pytest-slow-global above.
+        #
+        # $PYTEST_SPLIT_ARGS: see pytest-slow-global above -- this tier was
+        # unsharded in practice for the same reason.
         entry: *worker-entry
         args:
           - WORKERS_PYTEST_INTEGRATION_GLOBAL
@@ -625,4 +636,4 @@ repos:
             python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
             env PYTHONUNBUFFERED=1 uv --quiet run --frozen --group pre-commit
             pytest -n="$WORKERS" "${cov[@]}" -q --tb=short --dist=loadgroup
-            -m integration || test "$?" = 5
+            -m integration $PYTEST_SPLIT_ARGS || test "$?" = 5
