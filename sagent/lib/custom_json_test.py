@@ -429,6 +429,12 @@ class _Doc(JsonCodec):
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _Sets(JsonCodec):
+    tags: frozenset[str] = frozenset()
+    seen: set[int] = dataclasses.field(default_factory=set[int])
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class _SpecialUnions(JsonCodec):
     # Non-Optional unions of special scalars: neither member is None, so
     # ``_strip_optional`` must not collapse them; each must decode by value.
@@ -465,8 +471,19 @@ class TestDataclassCodec:
     def test_type_tag_present_and_ignored_on_decode(self) -> None:
         encoded = _Child(n=3).to_json()
         assert encoded["__type__"] == "_Child"
-        # Extra/unknown keys (and the tag) are ignored on decode.
-        assert dataclass_from_json(_Child, {**encoded, "bogus": 1}) == _Child(n=3)
+        # The tag is the codec's own; it decodes without being a field.
+        assert dataclass_from_json(_Child, encoded) == _Child(n=3)
+
+    def test_unknown_key_is_rejected(self) -> None:
+        # A key naming no field is a schema violation, not a value to drop:
+        # silently ignoring it turned a misspelling into a silent default.
+        with pytest.raises(ValueError, match="bogus"):
+            dataclass_from_json(_Child, {"n": 3, "bogus": 1})
+
+    def test_unknown_key_names_the_class_and_valid_fields(self) -> None:
+        with pytest.raises(ValueError, match="_Child") as excinfo:
+            dataclass_from_json(_Child, {"nn": 3})
+        assert "n" in str(excinfo.value)
 
     def test_to_json_rejects_non_dataclass(self) -> None:
         with pytest.raises(TypeError):
@@ -489,6 +506,16 @@ class TestDataclassCodec:
         back = _SpecialUnions.from_json(doc.to_json())
         assert back == doc
         assert all(isinstance(v, Path) for v in back.mapping.values())
+
+    def test_set_and_frozenset_fields_round_trip(self) -> None:
+        # A JSON array decodes to the DECLARED container. Returning a list for
+        # a ``frozenset`` field left an unhashable, mutable value on a frozen
+        # dataclass, which no isinstance guard downstream would catch.
+        doc = _Sets(tags=frozenset({"a", "b"}), seen={1, 2})
+        back = _Sets.from_json(doc.to_json())
+        assert back == doc
+        assert isinstance(back.tags, frozenset)
+        assert isinstance(back.seen, set)
 
     def test_plain_and_optional_path_keep_bare_wire_form(self) -> None:
         # Regression: only ambiguous unions get the wrapper. Plain and

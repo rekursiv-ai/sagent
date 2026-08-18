@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, MutableMapping, MutableSequence, Sequence
+from collections.abc import (
+    Mapping,
+    MutableMapping,
+    MutableSequence,
+    Sequence,
+    Set as AbstractSet,
+)
 from dataclasses import fields, is_dataclass
 from datetime import datetime
 from enum import Enum
@@ -539,10 +545,6 @@ _TYPE_TAG: Final = "__type__"
 _SCALAR_TAG: Final = "__scalar__"
 _VALUE_TAG: Final = "__value__"
 
-# Scalar types JSON cannot represent natively; encoded as strings (Enum as its
-# value). A non-Optional union of two or more of these is ambiguous on decode.
-_SPECIAL_SCALARS: tuple[type, ...] = (bytes, Path, UUID, datetime, Enum)
-
 
 def dataclass_to_json(obj: object) -> JSON:
     """Encode a dataclass instance to a tagged JSON object.
@@ -567,14 +569,31 @@ def dataclass_from_json[T](cls: type[T], data: Mapping[str, object]) -> T:
     parsed against its real annotation (nested dataclass, union, tuple,
     ``bytes`` / ``Path`` / ``UUID`` / ``datetime`` / ``Enum``, or scalar).
     The ``"__type__"`` tag is ignored here (the caller already chose ``cls``).
+
+    The hints ARE the schema, so a key naming no field is a schema violation
+    and raises. Dropping it instead turned every misspelling into a silent
+    default -- a caller reading ``{"min_digit": 7}`` got the default 5 and no
+    signal. A caller that must tolerate foreign keys filters them first.
+
+    Raises:
+      ValueError: A key in ``data`` names no field on ``cls``. The message
+        carries the offending keys and the valid field names.
+
     """
     hints = _hints(cls)
-    kwargs: dict[str, object] = {}
-    for name, raw in data.items():
-        if name == _TYPE_TAG or name not in hints:
-            continue
-        kwargs[name] = decode(hints[name], raw)
-    return cls(**kwargs)
+    unknown = sorted(k for k in data if k != _TYPE_TAG and k not in hints)
+    if unknown:
+        raise ValueError(
+            f"{cls.__name__}: unknown field(s) {unknown}; "
+            f"valid: {sorted(k for k in hints if not k.startswith('_'))}"
+        )
+    return cls(
+        **{
+            name: decode(hints[name], raw)
+            for name, raw in data.items()
+            if name != _TYPE_TAG
+        }
+    )
 
 
 @cache
@@ -592,9 +611,22 @@ def _union_members(annotation: object) -> dict[str, type]:
     }
 
 
-def _is_special_scalar(member: object) -> bool:
-    """Whether ``member`` is a special scalar type the codec string-encodes."""
-    return isinstance(member, type) and issubclass(member, _SPECIAL_SCALARS)
+def _is_special_scalar(
+    member: object,
+    *,
+    special_scalars: tuple[type, ...] = (bytes, Path, UUID, datetime, Enum),
+) -> bool:
+    """Whether ``member`` is a special scalar type the codec string-encodes.
+
+    Args:
+      member: Candidate type from a union's members.
+      special_scalars: Types JSON cannot represent natively, so the codec
+        encodes each as a string (an ``Enum`` as its value). A non-Optional
+        union of two or more of these is ambiguous on decode, which is what
+        the ``__scalar__`` wrapper exists to disambiguate.
+
+    """
+    return isinstance(member, type) and issubclass(member, special_scalars)
 
 
 def _matching_scalar_member(annotation: object, value: object) -> type | None:
@@ -652,6 +684,12 @@ def _encode(value: object, annotation: object = None) -> JSONValue:
         }
     if isinstance(value, Sequence):
         return [_encode(v) for v in value]
+    # A set is not a Sequence, so it reached the raise below. Sorted by the
+    # encoded element's repr rather than left in iteration order: set order
+    # varies between processes (string hashing is salted), and an unstable
+    # encoding makes any golden or checksum over the JSON flap between runs.
+    if isinstance(value, AbstractSet):
+        return sorted((_encode(v) for v in value), key=repr)
     raise TypeError(f"cannot encode {type(value).__name__} to JSON")
 
 
@@ -689,12 +727,15 @@ def decode(annotation: object, raw: object) -> object:
                 # ``member`` is a runtime ``type`` with no static parameter, so
                 # the generic return is Unknown; the value is correct.
                 return dataclass_from_json(member, raw_map)  # pyright: ignore[reportUnknownVariableType]
-    # Homogeneous tuple / list.
-    if origin in (tuple, list) and isinstance(raw, list):
+    # Homogeneous collection. Every JSON array decodes to a list, so the
+    # DECLARED container is what the result must be: returning a list for a
+    # ``frozenset`` field left an unhashable, mutable value on a frozen
+    # dataclass that no downstream isinstance guard would catch.
+    if origin in (tuple, list, set, frozenset) and isinstance(raw, list):
         args = get_args(ann)
         elem: object = args[0] if args else object
         decoded = [decode(elem, v) for v in cast("list[object]", raw)]
-        return tuple(decoded) if origin is tuple else decoded
+        return decoded if origin is list else cast("type", origin)(decoded)
     # Mapping (dict[K, V]): decode each value against the value annotation.
     if origin in (dict, Mapping) and isinstance(raw, Mapping):
         args = get_args(ann)
