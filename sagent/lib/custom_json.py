@@ -546,6 +546,16 @@ _SCALAR_TAG: Final = "__scalar__"
 _VALUE_TAG: Final = "__value__"
 
 
+class SchemaError(ValueError):
+    """Decoded JSON does not match the target dataclass's schema.
+
+    A ``ValueError`` so existing ``except ValueError`` callers keep working,
+    but named so a boundary can catch it specifically. The API maps it to
+    422: a stray key in a client-supplied body is a malformed request, and a
+    bare ``ValueError`` matched no registered handler, making it a 500.
+    """
+
+
 def dataclass_to_json(obj: object) -> JSON:
     """Encode a dataclass instance to a tagged JSON object.
 
@@ -557,8 +567,13 @@ def dataclass_to_json(obj: object) -> JSON:
         raise TypeError(f"dataclass_to_json expects a dataclass instance, got {obj!r}")
     hints = _hints(type(obj))
     out: dict[str, JSONValue] = {_TYPE_TAG: type(obj).__name__}
+    # ``init=False`` fields are skipped, not written: the generated
+    # ``__init__`` rejects them by name, so emitting one produced a payload
+    # its own decoder could not read. Such a field is derived from the others
+    # in ``__post_init__``, so it reconstructs itself.
     for f in fields(obj):
-        out[f.name] = _encode(getattr(obj, f.name), hints.get(f.name))
+        if f.init:
+            out[f.name] = _encode(getattr(obj, f.name), hints.get(f.name))
     return out
 
 
@@ -570,30 +585,50 @@ def dataclass_from_json[T](cls: type[T], data: Mapping[str, object]) -> T:
     ``bytes`` / ``Path`` / ``UUID`` / ``datetime`` / ``Enum``, or scalar).
     The ``"__type__"`` tag is ignored here (the caller already chose ``cls``).
 
-    The hints ARE the schema, so a key naming no field is a schema violation
-    and raises. Dropping it instead turned every misspelling into a silent
-    default -- a caller reading ``{"min_digit": 7}`` got the default 5 and no
-    signal. A caller that must tolerate foreign keys filters them first.
+    The CONSTRUCTOR's parameters are the schema, so a key naming no settable
+    field is a schema violation and raises. Dropping it instead turned every
+    misspelling into a silent default -- a caller reading ``{"min_digit": 7}``
+    got the default 5 and no signal. A caller that must tolerate foreign keys
+    filters them first.
+
+    Gating on ``fields()`` rather than the type hints is what makes the error
+    the documented one: ``get_type_hints`` also yields ``ClassVar``s and other
+    non-field annotations, which passed the check and then died in ``cls(**)``
+    with a bare ``TypeError``. An ``init=False`` field is excluded for the
+    same reason -- it is encoded (it is a field) but the generated ``__init__``
+    rejects it by name, so it is skipped rather than forwarded.
 
     Raises:
-      ValueError: A key in ``data`` names no field on ``cls``. The message
-        carries the offending keys and the valid field names.
+      SchemaError: A key in ``data`` names no settable field on ``cls``. The
+        message carries the offending keys and the valid field names.
 
     """
     hints = _hints(cls)
-    unknown = sorted(k for k in data if k != _TYPE_TAG and k not in hints)
+    settable = _settable_fields(cls)
+    unknown = sorted(k for k in data if k != _TYPE_TAG and k not in settable)
     if unknown:
-        raise ValueError(
-            f"{cls.__name__}: unknown field(s) {unknown}; "
-            f"valid: {sorted(k for k in hints if not k.startswith('_'))}"
+        raise SchemaError(
+            f"{cls.__name__}: unknown field(s) {unknown}; valid: {sorted(settable)}"
         )
     return cls(
         **{
-            name: decode(hints[name], raw)
+            name: decode(hints.get(name), raw)
             for name, raw in data.items()
             if name != _TYPE_TAG
         }
     )
+
+
+@cache
+def _settable_fields(cls: type) -> frozenset[str]:
+    """Names ``cls``'s generated ``__init__`` accepts, cached.
+
+    ``init=False`` fields are omitted: they round-trip through the encoder
+    but cannot be passed back, so accepting one produces a ``TypeError``
+    instead of the schema error this module promises.
+    """
+    assert is_dataclass(cls)
+    return frozenset(f.name for f in fields(cls) if f.init)
 
 
 @cache
@@ -632,14 +667,20 @@ def _is_special_scalar(
 def _matching_scalar_member(annotation: object, value: object) -> type | None:
     """Return the special-scalar union member ``value`` is, if union ambiguous.
 
-    Returns ``None`` unless ``annotation`` is a non-Optional union of two or
-    more special scalars, in which case it returns the member type matching
-    ``value`` so the encoder can tag the otherwise-ambiguous bare string.
+    Returns ``None`` unless ``annotation`` is a union of two or more special
+    scalars, in which case it returns the member type matching ``value`` so
+    the encoder can tag the otherwise-ambiguous bare string.
+
+    ``None`` is discounted before the count rather than disqualifying the
+    union: it encodes as JSON null, which is ambiguous with nothing, so
+    ``Path | bytes | None`` needs the wrapper exactly as much as
+    ``Path | bytes`` does. Requiring every member to be special suppressed it
+    and let both members encode to indistinguishable bare strings.
     """
     ann = _resolve_alias(annotation)
     if not (isinstance(ann, UnionType) or get_origin(ann) is UnionType):
         return None
-    args = get_args(ann)
+    args = [m for m in get_args(ann) if m is not type(None)]
     specials: list[type] = [m for m in args if _is_special_scalar(m)]
     if len(specials) < 2 or len(specials) != len(args):
         return None
@@ -679,17 +720,29 @@ def _encode(value: object, annotation: object = None) -> JSONValue:
     if isinstance(value, Enum):
         return cast(JSONValue, value.value)
     if isinstance(value, Mapping):
+        val_ann = _value_annotation(annotation)
         return {
-            str(k): _encode(v) for k, v in cast(Mapping[object, object], value).items()
+            str(k): _encode(v, val_ann)
+            for k, v in cast(Mapping[object, object], value).items()
         }
+    # The element annotation has to travel with the element: it is what marks
+    # an ambiguous union (``Path | bytes``) for the ``__scalar__`` wrapper
+    # above, and a container that recursed bare emitted two indistinguishable
+    # strings that decode could not tell apart.
     if isinstance(value, Sequence):
-        return [_encode(v) for v in value]
+        items = list(value)
+        elems = _element_annotations(annotation, count=len(items))
+        return [_encode(v, a) for v, a in zip(items, elems, strict=True)]
     # A set is not a Sequence, so it reached the raise below. Sorted by the
     # encoded element's repr rather than left in iteration order: set order
     # varies between processes (string hashing is salted), and an unstable
     # encoding makes any golden or checksum over the JSON flap between runs.
     if isinstance(value, AbstractSet):
-        return sorted((_encode(v) for v in value), key=repr)
+        members = list(value)
+        elems = _element_annotations(annotation, count=len(members))
+        return sorted(
+            (_encode(v, a) for v, a in zip(members, elems, strict=True)), key=repr
+        )
     raise TypeError(f"cannot encode {type(value).__name__} to JSON")
 
 
@@ -709,7 +762,14 @@ def decode(annotation: object, raw: object) -> object:
       value: ``raw`` coerced to ``annotation``.
 
     """
-    ann = _strip_optional(_resolve_alias(annotation))
+    # JSON null decodes to ``None`` for EVERY annotation, so the check runs
+    # before any dispatch. Below the nested-dataclass branch it was
+    # unreachable for an ``Optional[dataclass]`` field: ``_strip_optional``
+    # had already reduced the annotation to the bare dataclass, which then
+    # rejected the ``None`` as a non-Mapping.
+    if raw is None:
+        return None
+    ann: object = _strip_optional(_resolve_alias(annotation))
     origin = get_origin(ann)
     # Nested dataclass.
     if isinstance(ann, type) and is_dataclass(ann):
@@ -727,15 +787,26 @@ def decode(annotation: object, raw: object) -> object:
                 # ``member`` is a runtime ``type`` with no static parameter, so
                 # the generic return is Unknown; the value is correct.
                 return dataclass_from_json(member, raw_map)  # pyright: ignore[reportUnknownVariableType]
-    # Homogeneous collection. Every JSON array decodes to a list, so the
-    # DECLARED container is what the result must be: returning a list for a
+    # Collection. Every JSON array decodes to a list, so the DECLARED
+    # container is what the result must be: returning a list for a
     # ``frozenset`` field left an unhashable, mutable value on a frozen
     # dataclass that no downstream isinstance guard would catch.
-    if origin in (tuple, list, set, frozenset) and isinstance(raw, list):
-        args = get_args(ann)
-        elem: object = args[0] if args else object
-        decoded = [decode(elem, v) for v in cast("list[object]", raw)]
-        return decoded if origin is list else cast("type", origin)(decoded)
+    #
+    # ``AbstractSet`` is listed because a field may be annotated with the abc
+    # rather than the concrete type, and its origin is then
+    # ``collections.abc.Set`` -- not ``set``, so it fell through to the
+    # scalar passthrough and stayed a list. It materializes as ``frozenset``:
+    # the abc names no constructor, and an immutable value is the safe
+    # reading of an unqualified "set" on a frozen dataclass.
+    if origin in (tuple, list, set, frozenset, AbstractSet) and isinstance(raw, list):
+        items = cast("list[object]", raw)
+        elems = _element_annotations(cast(object, ann), count=len(items))
+        decoded = [decode(a, v) for v, a in zip(items, elems, strict=True)]
+        if origin is list:
+            return decoded
+        if origin is AbstractSet:
+            return frozenset(decoded)
+        return cast("type", origin)(decoded)
     # Mapping (dict[K, V]): decode each value against the value annotation.
     if origin in (dict, Mapping) and isinstance(raw, Mapping):
         args = get_args(ann)
@@ -761,8 +832,6 @@ def decode(annotation: object, raw: object) -> object:
     # ``bool`` by token via ``bool_val`` -- ``bool("False")`` is ``True``, so a
     # plain ``bool(raw)`` would mis-read a ``"false"`` token -- the others by
     # their constructor. Coercion is idempotent for an already-correct value.
-    if raw is None:
-        return None
     if ann is bool:
         # ``raw`` is the ``object``-typed decode input; pyright tracks it as
         # partially ``Unknown`` through the recursive cast sites above.
@@ -814,6 +883,42 @@ def _strip_optional(annotation: object) -> object:
         if len(non_none) == 1:
             return non_none[0]
     return annotation
+
+
+def _element_annotations(annotation: object, *, count: int) -> tuple[object, ...]:
+    """Per-element annotations for a container, or ``None`` where unknown.
+
+    A fixed-length ``tuple[A, B]`` gives each position its own annotation; a
+    homogeneous ``tuple[T, ...]`` / ``list[T]`` / ``set[T]`` repeats one. Any
+    other shape yields ``None``s, which every caller reads as "no context" --
+    the same state a container reached before annotations were threaded at
+    all, so an unrecognized shape degrades to the old behavior.
+
+    Args:
+      annotation: The container's declared type.
+      count: How many elements the value actually holds.
+
+    Returns:
+      elements: One annotation per element, positionally aligned.
+
+    """
+    ann = _strip_optional(_resolve_alias(annotation))
+    args = get_args(ann)
+    if not args:
+        return (None,) * count
+    if len(args) == 2 and args[1] is Ellipsis:
+        return (args[0],) * count
+    if get_origin(ann) is tuple:
+        # A fixed-length tuple annotation whose arity disagrees with the value
+        # cannot be aligned, so no element gets a claim it may not satisfy.
+        return args if len(args) == count else (None,) * count
+    return (args[0],) * count
+
+
+def _value_annotation(annotation: object) -> object:
+    """The value annotation of a ``Mapping[K, V]``, or None when unknown."""
+    args = get_args(_strip_optional(_resolve_alias(annotation)))
+    return args[1] if len(args) == 2 else None
 
 
 class JsonCodec:
