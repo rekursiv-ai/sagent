@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import (
+    Callable,
+    Hashable,
+    Mapping,
+    Set as AbstractSet,
+)
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
+from types import GenericAlias, UnionType
+from typing import ClassVar, Protocol, cast
 from uuid import UUID
 
 import dataclasses
@@ -14,7 +21,9 @@ import json
 import pytest
 
 from sagent.lib.custom_json import (
+    JSON,
     JsonCodec,
+    SchemaError,
     bool_val,
     dataclass_from_json,
     dataclass_to_json,
@@ -432,6 +441,51 @@ class _Doc(JsonCodec):
 class _Sets(JsonCodec):
     tags: frozenset[str] = frozenset()
     seen: set[int] = dataclasses.field(default_factory=set[int])
+    # ``AbstractSet`` is the declared-container case the origin check missed:
+    # its ``get_origin`` is ``collections.abc.Set``, not ``set``.
+    named: AbstractSet[str] = frozenset()
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _ClassVarred(JsonCodec):
+    tag: ClassVar[str] = "c"
+    n: int = 0
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _Derived(JsonCodec):
+    x: int = 1
+    doubled: int = dataclasses.field(init=False, default=2)
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _Pair(JsonCodec):
+    # A FIXED-length tuple: each position has its own annotation, unlike the
+    # homogeneous ``tuple[T, ...]`` the decoder assumed everywhere.
+    value: tuple[int, str] = (0, "")
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _AmbiguousElements(JsonCodec):
+    # The element annotation is what makes ``Path | bytes`` decodable; a
+    # container that drops it encodes both members to bare strings.
+    values: tuple[Path | bytes, ...] = ()
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _OptionalChild(JsonCodec):
+    # An absent nested dataclass. ``_strip_optional`` reduces the annotation
+    # to ``_Child`` before dispatch, so the None has to survive a branch that
+    # only accepts a Mapping.
+    child: _Child | None = None
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _OptionalSpecialUnion(JsonCodec):
+    # An ambiguous special-scalar union that is ALSO optional. ``None`` is not
+    # ambiguous with the others (it encodes as JSON null), so the wrapper must
+    # still be emitted for the two members that are.
+    scalar: Path | bytes | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
@@ -480,6 +534,26 @@ class TestDataclassCodec:
         with pytest.raises(ValueError, match="bogus"):
             dataclass_from_json(_Child, {"n": 3, "bogus": 1})
 
+    def test_unknown_key_raises_schema_error(self) -> None:
+        # The rejection reaches HTTP callers: a bare ValueError matches no
+        # registered handler, so a client's stray key became a 500 rather
+        # than a 422. A named subclass gives the API something to catch.
+        with pytest.raises(SchemaError):
+            dataclass_from_json(_Child, {"n": 3, "bogus": 1})
+
+    def test_a_classvar_key_is_unknown(self) -> None:
+        # ``get_type_hints`` includes ClassVars, which the constructor does
+        # not accept, so gating on hints let the key through to a TypeError
+        # -- losing the message this check exists to produce.
+        with pytest.raises(SchemaError, match="tag"):
+            dataclass_from_json(_ClassVarred, {"n": 1, "tag": "other"})
+
+    def test_a_non_init_field_round_trips(self) -> None:
+        # ``fields()`` yields init=False fields and the encoder writes them,
+        # but the generated __init__ rejects them by name.
+        doc = _Derived(x=3)
+        assert _Derived.from_json(doc.to_json()) == doc
+
     def test_unknown_key_names_the_class_and_valid_fields(self) -> None:
         with pytest.raises(ValueError, match="_Child") as excinfo:
             dataclass_from_json(_Child, {"nn": 3})
@@ -511,11 +585,28 @@ class TestDataclassCodec:
         # A JSON array decodes to the DECLARED container. Returning a list for
         # a ``frozenset`` field left an unhashable, mutable value on a frozen
         # dataclass, which no isinstance guard downstream would catch.
-        doc = _Sets(tags=frozenset({"a", "b"}), seen={1, 2})
+        doc = _Sets(tags=frozenset({"a", "b"}), seen={1, 2}, named=frozenset({"c"}))
         back = _Sets.from_json(doc.to_json())
         assert back == doc
         assert isinstance(back.tags, frozenset)
         assert isinstance(back.seen, set)
+        # ``AbstractSet`` is spelled as an abc, so its origin is not ``set``.
+        assert isinstance(back.named, AbstractSet)
+
+    def test_a_fixed_length_tuple_decodes_each_position(self) -> None:
+        # Using ``args[0]`` for every position coerced "2" to the int 2.
+        doc = _Pair(value=(1, "2"))
+        assert _Pair.from_json(doc.to_json()) == doc
+
+    def test_an_ambiguous_union_inside_a_container_round_trips(self) -> None:
+        # The ``__scalar__`` wrapper disambiguates ``Path | bytes``; a
+        # container that recursed without the element annotation never
+        # emitted it, so both members came back as bare strings.
+        doc = _AmbiguousElements(values=(Path("/x"), b"y"))
+        back = _AmbiguousElements.from_json(doc.to_json())
+        assert back == doc
+        assert isinstance(back.values[0], Path)
+        assert isinstance(back.values[1], bytes)
 
     def test_plain_and_optional_path_keep_bare_wire_form(self) -> None:
         # Regression: only ambiguous unions get the wrapper. Plain and
@@ -525,6 +616,196 @@ class TestDataclassCodec:
         assert encoded["where"] == "/x/y"
         with_when = _Doc(when=datetime(2026, 1, 1, tzinfo=UTC)).to_json()
         assert with_when["when"] == "2026-01-01T00:00:00+00:00"
+
+    def test_an_absent_nested_dataclass_round_trips(self) -> None:
+        # ``None`` for an ``Optional[dataclass]`` field. ``_strip_optional``
+        # reduces the annotation to the bare dataclass before dispatch, so
+        # the nested-dataclass branch saw a None it refused to accept -- the
+        # ``raw is None`` guard sat below it and never ran.
+        doc = _OptionalChild()
+        assert _OptionalChild.from_json(doc.to_json()) == doc
+
+    def test_a_present_optional_nested_dataclass_still_decodes(self) -> None:
+        doc = _OptionalChild(child=_Child(n=4))
+        back = _OptionalChild.from_json(doc.to_json())
+        assert back == doc
+        assert isinstance(back.child, _Child)
+
+    def test_an_optional_ambiguous_scalar_union_round_trips(self) -> None:
+        # ``Path | bytes | None``: adding ``None`` to an ambiguous union must
+        # not suppress the ``__scalar__`` wrapper. It did, because the
+        # encoder required EVERY member to be a special scalar, and ``None``
+        # is not -- so both members encoded to indistinguishable bare strings.
+        for value in (Path("/a"), b"b"):
+            doc = _OptionalSpecialUnion(scalar=value)
+            back = _OptionalSpecialUnion.from_json(doc.to_json())
+            assert back == doc
+            assert isinstance(back.scalar, type(value))
+
+    def test_an_optional_ambiguous_scalar_union_keeps_none(self) -> None:
+        doc = _OptionalSpecialUnion()
+        assert _OptionalSpecialUnion.from_json(doc.to_json()) == doc
+
+
+# -- Generated round-trip property ---------------------------------------------
+#
+# Every defect this module has carried lived in a shape nobody hand-wrote a
+# dataclass for: a ClassVar, an ``init=False`` field, a heterogeneous tuple, an
+# abc-spelled set, an ambiguous union inside a container. Enumerating scalars
+# CROSSED WITH containers reaches those combinations without naming them, so a
+# shape added to either axis is exercised in every wrapper automatically.
+#
+# ``hypothesis`` is deliberately not used: this module is exported verbatim into
+# several standalone packages (see each ``copy.barista.toml``), and not all of
+# their pinned test groups carry it. A table needs no dependency.
+
+_SCALAR_CASES: list[tuple[str, type | UnionType, object, object]] = [
+    ("int", int, 1, 2),
+    ("str", str, "a", "b"),
+    ("float", float, 1.5, 2.5),
+    ("bool", bool, True, False),
+    ("bytes", bytes, b"\x00", b"\x01"),
+    ("path", Path, Path("/a"), Path("/b")),
+    ("uuid", UUID, UUID(int=1), UUID(int=2)),
+    (
+        "datetime",
+        datetime,
+        datetime(2026, 1, 1, tzinfo=UTC),
+        datetime(2026, 1, 2, tzinfo=UTC),
+    ),
+    ("enum", _Color, _Color.RED, _Color.BLUE),
+    ("dataclass", _Child, _Child(n=1), _Child(n=2)),
+    ("ambiguous_union", Path | bytes, Path("/a"), b"b"),
+]
+"""``(label, annotation, first, second)`` -- every value type the codec claims
+to handle. ``first``/``second`` differ so a container holding both catches an
+encoder that collapses positions or drops an element."""
+
+
+class _Carrier(Protocol):
+    """The generated one-field carrier: a ``JsonCodec`` whose field is ``value``.
+
+    ``make_dataclass`` is typed as returning a bare ``type``, so nothing about
+    the generated class is statically known. Naming the shape the assertions
+    actually use restores ``value`` and the two codec methods, so the dynamism
+    stays in the *annotation* under test rather than leaking into the checker.
+    """
+
+    value: object
+
+    def to_json(self) -> JSON: ...
+
+
+def _assert_round_trips(annotation: object, value: object) -> None:
+    """Assert a one-field ``JsonCodec`` dataclass survives encode then decode.
+
+    Generating the carrier rather than declaring it is the point: the field's
+    annotation is the codec's entire schema, so a generated annotation tests a
+    shape no hand-written fixture covers.
+
+    The carrier is built ONCE and compared against itself. Two ``make_dataclass``
+    calls yield distinct classes, and a dataclass ``__eq__`` returns
+    ``NotImplemented`` for a foreign class, so a second carrier would make every
+    comparison false regardless of what the codec did.
+
+    Args:
+      annotation: The field's declared type, as a runtime value.
+      value: The value to store, encode, and decode back.
+
+    """
+    cls = dataclasses.make_dataclass(
+        "_Generated",
+        [("value", annotation)],
+        bases=(JsonCodec,),
+        frozen=True,
+        slots=True,
+        kw_only=True,
+    )
+    original = cast("Callable[..., _Carrier]", cls)(value=value)
+    # Through real JSON text, not just the dict: a value that survives the
+    # in-memory round trip but is not serializable (a raw Path, bytes) would
+    # otherwise pass while the JSONB write it stands in for fails.
+    wire = dict_val(json.loads(json.dumps(original.to_json())))
+    back = cast("_Carrier", cast("type[JsonCodec]", cls).from_json(wire))
+    assert back == original
+    # The container type is half the contract: a ``frozenset`` field decoding
+    # to a list is what this catches, and ``==`` alone would not.
+    assert type(back.value) is type(original.value)
+
+
+@pytest.mark.parametrize(("label", "annotation", "first", "second"), _SCALAR_CASES)
+class TestGeneratedRoundTrip:
+    """Each value type round-trips bare, optional, and in every container."""
+
+    def test_bare(
+        self, label: str, annotation: type | UnionType, first: object, second: object
+    ) -> None:
+        del label, second
+        _assert_round_trips(annotation, first)
+
+    def test_optional_holding_a_value(
+        self, label: str, annotation: type | UnionType, first: object, second: object
+    ) -> None:
+        del label, second
+        _assert_round_trips(annotation | None, first)
+
+    def test_optional_holding_none(
+        self, label: str, annotation: type | UnionType, first: object, second: object
+    ) -> None:
+        del label, first, second
+        _assert_round_trips(annotation | None, None)
+
+    def test_list(
+        self, label: str, annotation: type | UnionType, first: object, second: object
+    ) -> None:
+        del label
+        _assert_round_trips(GenericAlias(list, annotation), [first, second])
+
+    def test_variadic_tuple(
+        self, label: str, annotation: type | UnionType, first: object, second: object
+    ) -> None:
+        del label
+        _assert_round_trips(GenericAlias(tuple, (annotation, ...)), (first, second))
+
+    def test_fixed_tuple(
+        self, label: str, annotation: type | UnionType, first: object, second: object
+    ) -> None:
+        # A FIXED-length tuple decodes positionally; a homogeneous one repeats
+        # a single annotation. Both spellings must reach the same value.
+        del label
+        _assert_round_trips(
+            GenericAlias(tuple, (annotation, annotation)), (first, second)
+        )
+
+    def test_dict_value(
+        self, label: str, annotation: type | UnionType, first: object, second: object
+    ) -> None:
+        del label
+        _assert_round_trips(
+            GenericAlias(dict, (str, annotation)), {"a": first, "b": second}
+        )
+
+    def test_frozenset(
+        self, label: str, annotation: type | UnionType, first: object, second: object
+    ) -> None:
+        del label
+        if not isinstance(first, Hashable):
+            pytest.skip("unhashable value cannot inhabit a set")
+        _assert_round_trips(
+            GenericAlias(frozenset, annotation), frozenset({first, second})
+        )
+
+    def test_abstract_set(
+        self, label: str, annotation: type | UnionType, first: object, second: object
+    ) -> None:
+        # The abc spelling, whose origin is ``collections.abc.Set`` rather
+        # than ``set`` -- the shape that silently decoded to a list.
+        del label
+        if not isinstance(first, Hashable):
+            pytest.skip("unhashable value cannot inhabit a set")
+        _assert_round_trips(
+            GenericAlias(AbstractSet, annotation), frozenset({first, second})
+        )
 
 
 if __name__ == "__main__":

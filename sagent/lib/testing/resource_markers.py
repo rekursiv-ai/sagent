@@ -136,17 +136,20 @@ def resource_marker_timeout(
         ("network", 180),
     ),
     specific_timeouts: tuple[tuple[str, int], ...] = (
-        ("cli_claude", 300),
-        ("cli_codex", 300),
+        ("bench_throughput", 600),
+        ("cli_claude", 1800),
+        ("cli_codex", 1800),
         ("cli_docker", 300),
         ("cli_precommit", 300),
         ("cli_rsync", 180),
         ("cli_ssh", 300),
         ("cli_uv", 180),
         ("compute_large_fixture", 180),
+        ("compute_torch_compile", 900),
+        ("db_pglite", 180),
         ("network_openml", 60),
         ("network_shadeform", 300),
-        ("network_together", 300),
+        ("network_together", 4800),
     ),
 ) -> int:
     """Return a marker's specific timeout, falling back to its category."""
