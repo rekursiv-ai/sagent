@@ -646,22 +646,19 @@ def _union_members(annotation: object) -> dict[str, type]:
     }
 
 
-def _is_special_scalar(
-    member: object,
-    *,
-    special_scalars: tuple[type, ...] = (bytes, Path, UUID, datetime, Enum),
-) -> bool:
+def _is_special_scalar(member: object) -> bool:
     """Whether ``member`` is a special scalar type the codec string-encodes.
 
-    Args:
-      member: Candidate type from a union's members.
-      special_scalars: Types JSON cannot represent natively, so the codec
-        encodes each as a string (an ``Enum`` as its value). A non-Optional
-        union of two or more of these is ambiguous on decode, which is what
-        the ``__scalar__`` wrapper exists to disambiguate.
-
+    These are the types JSON cannot represent natively, so the codec encodes
+    each as a string (an ``Enum`` as its value). A union of two or more of
+    them is ambiguous on decode, which is what the ``__scalar__`` wrapper
+    resolves. The tuple is inline rather than a module constant or a
+    parameter: one call site, and the encode branch for each member is
+    already spelled out in ``_encode``.
     """
-    return isinstance(member, type) and issubclass(member, special_scalars)
+    return isinstance(member, type) and issubclass(
+        member, (bytes, Path, UUID, datetime, Enum)
+    )
 
 
 def _matching_scalar_member(annotation: object, value: object) -> type | None:
