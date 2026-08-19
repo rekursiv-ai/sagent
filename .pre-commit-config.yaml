@@ -70,13 +70,13 @@
 # On Source of Truthness:
 #
 #   Preferred location for any tool setting, in order:
-#     pyproject.toml  >  .pre-commit-config.yaml  >  .github/workflows/tests.yml
+#     pyproject.toml  >  .pre-commit-config.yaml  >  .github/workflows/ci.yml
 #
 #   Put a setting as high in this chain as the tool allows. Only drop to a
 #   lower file when the higher one cannot express it (e.g. a CLI-only flag with
 #   no config key). pyproject.toml holds tool config; .pre-commit-config.yaml
 #   is the sole source for how hooks run (thread/worker counts, heap caps);
-#   .github/workflows/tests.yml only invokes the hooks and must not redefine
+#   .github/workflows/ci.yml only invokes the hooks and must not redefine
 #   any of these.
 #
 #
