@@ -38,6 +38,9 @@
 #     uv --quiet run --frozen --group pre-commit pre-commit run ruff-check --all-files
 #     uv --quiet run --frozen --group pre-commit pre-commit run pytest-global --hook-stage pre-push
 #
+#   Force full pytest tiers despite testmon's warm dependency database:
+#     PYTEST_FORCE_ALL=1 uv --quiet run --frozen --group pre-commit pre-commit run pytest-global --hook-stage pre-push
+#
 #   Individual tests: the pytest hooks take no test selector, so call pytest
 #   directly.
 #
@@ -494,8 +497,8 @@ repos:
         stages: [pre-push]
         # See `progress output` at the head of the Pre-Push Gates section.
         verbose: true
-        # Deliberately NO testmon. It deselects in `pytest_ignore_collect`, a
-        # COLLECTION hook, while pytest-split partitions in
+        # Deliberately no testmon when this hook is sharded. It deselects in
+        # `pytest_ignore_collect`, a COLLECTION hook, while pytest-split partitions in
         # `pytest_collection_modifyitems` -- and testmon ALSO registers that
         # hook, `trylast=True`, exactly as pytest-split does. Which one wins is
         # plugin registration order, not anything either declares. Measured when
@@ -538,16 +541,29 @@ repos:
         args:
           - WORKERS_PYTEST_GLOBAL
           - >-
+            CI_TESTMON=1;
+            nodeids=();
+            if [ -n "${PYTEST_NODEIDS_FILE:-}" ]; then
+            while IFS= read -r nodeid; do [ -n "$nodeid" ] && nodeids+=("$nodeid"); done < "$PYTEST_NODEIDS_FILE";
+            [ ${#nodeids[@]} -eq 0 ] && exit 0;
+            fi;
             select=(); cov=();
             has() { uv --quiet run --frozen --group pre-commit python -c "$1" 2>/dev/null; };
-            if [ -z "$PYTEST_SPLIT_ARGS" ] && has "import testmon"; then
+            if [ -z "${PYTEST_FORCE_ALL:-}" ] && [ -z "$PYTEST_SPLIT_ARGS" ] && has "import testmon"; then
             select=(--testmon-forceselect);
             else has "import pytest_cov" && cov=(--no-cov);
+            fi;
+            if [ -n "${PYTEST_COLLECT_SELECTED:-}" ]; then
+            env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
+            uv --quiet run --frozen --group pre-commit
+            pytest -n="$WORKERS" "${select[@]}" -q --tb=short --collect-only
+            > "$PYTEST_COLLECT_SELECTED";
+            status="$?"; test "$status" = 0 || test "$status" = 5; exit "$?";
             fi;
             exec env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
             uv --quiet run --frozen --group pre-commit
             pytest -n="$WORKERS" "${cov[@]}" "${select[@]}" -q --tb=short
-            $PYTEST_SPLIT_ARGS
+            $PYTEST_SPLIT_ARGS "${nodeids[@]}"
 
       - id: pytest-slow-global
         name: pytest-slow-global
@@ -575,13 +591,30 @@ repos:
         args:
           - WORKERS_PYTEST_SLOW_GLOBAL
           - >-
-            cov=();
+            nodeids=();
+            if [ -n "${PYTEST_NODEIDS_FILE:-}" ]; then
+            while IFS= read -r nodeid; do [ -n "$nodeid" ] && nodeids+=("$nodeid"); done < "$PYTEST_NODEIDS_FILE";
+            [ ${#nodeids[@]} -eq 0 ] && exit 0;
+            fi;
+            select=(); cov=();
+            has() { uv --quiet run --frozen --group pre-commit python -c "$1" 2>/dev/null; };
+            if [ -z "${PYTEST_FORCE_ALL:-}" ] && [ -z "$PYTEST_SPLIT_ARGS" ] && { [ -n "${PYTEST_COLLECT_SELECTED:-}" ] || [ -z "${GITHUB_ACTIONS:-}" ]; } && has "import testmon"; then
+            select=(--testmon-forceselect);
+            else has "import pytest_cov" && cov=(--no-cov);
+            fi;
+            if [ -n "${PYTEST_COLLECT_SELECTED:-}" ]; then
+            env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
             uv --quiet run --frozen --group pre-commit
-            python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
-            env PYTHONUNBUFFERED=1 uv --quiet run --frozen --group pre-commit
-            pytest -n="$WORKERS" "${cov[@]}" -q --tb=short
+            pytest -n="$WORKERS" "${select[@]}" -q --tb=short --collect-only
             -m "slow and not cluster and not cuda and not integration and not performance"
-            $PYTEST_SPLIT_ARGS
+            > "$PYTEST_COLLECT_SELECTED";
+            status="$?"; test "$status" = 0 || test "$status" = 5; exit "$?";
+            fi;
+            env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
+            uv --quiet run --frozen --group pre-commit
+            pytest -n="$WORKERS" "${cov[@]}" "${select[@]}" -q --tb=short
+            -m "slow and not cluster and not cuda and not integration and not performance"
+            $PYTEST_SPLIT_ARGS "${nodeids[@]}"
             || test "$?" = 5
 
       - id: pytest-ci-smoke-global
@@ -598,12 +631,29 @@ repos:
         args:
           - WORKERS_PYTEST_CI_SMOKE_GLOBAL
           - >-
-            cov=();
+            nodeids=();
+            if [ -n "${PYTEST_NODEIDS_FILE:-}" ]; then
+            while IFS= read -r nodeid; do [ -n "$nodeid" ] && nodeids+=("$nodeid"); done < "$PYTEST_NODEIDS_FILE";
+            [ ${#nodeids[@]} -eq 0 ] && exit 0;
+            fi;
+            select=(); cov=();
+            has() { uv --quiet run --frozen --group pre-commit python -c "$1" 2>/dev/null; };
+            if [ -z "${PYTEST_FORCE_ALL:-}" ] && [ -z "$PYTEST_SPLIT_ARGS" ] && { [ -n "${PYTEST_COLLECT_SELECTED:-}" ] || [ -z "${GITHUB_ACTIONS:-}" ]; } && has "import testmon"; then
+            select=(--testmon-forceselect);
+            else has "import pytest_cov" && cov=(--no-cov);
+            fi;
+            if [ -n "${PYTEST_COLLECT_SELECTED:-}" ]; then
+            env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
             uv --quiet run --frozen --group pre-commit
-            python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
-            env PYTHONUNBUFFERED=1 uv --quiet run --frozen --group pre-commit
-            pytest -n="$WORKERS" "${cov[@]}" -q --tb=short --durations=20
+            pytest -n="$WORKERS" "${select[@]}" -q --tb=short --durations=20
+            --collect-only -m ci_smoke > "$PYTEST_COLLECT_SELECTED";
+            status="$?"; test "$status" = 0 || test "$status" = 5; exit "$?";
+            fi;
+            env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
+            uv --quiet run --frozen --group pre-commit
+            pytest -n="$WORKERS" "${cov[@]}" "${select[@]}" -q --tb=short --durations=20
             -m ci_smoke
+            $PYTEST_SPLIT_ARGS "${nodeids[@]}"
             || test "$?" = 5
 
       - id: pytest-integration-global
@@ -632,11 +682,27 @@ repos:
           - WORKERS_PYTEST_INTEGRATION_GLOBAL
           - >-
             command -v pg_config >/dev/null 2>&1 || exit 0;
-            cov=();
+            nodeids=();
+            if [ -n "${PYTEST_NODEIDS_FILE:-}" ]; then
+            while IFS= read -r nodeid; do [ -n "$nodeid" ] && nodeids+=("$nodeid"); done < "$PYTEST_NODEIDS_FILE";
+            [ ${#nodeids[@]} -eq 0 ] && exit 0;
+            fi;
+            select=(); cov=();
+            has() { uv --quiet run --frozen --group pre-commit python -c "$1" 2>/dev/null; };
+            if [ -z "${PYTEST_FORCE_ALL:-}" ] && [ -z "$PYTEST_SPLIT_ARGS" ] && { [ -n "${PYTEST_COLLECT_SELECTED:-}" ] || [ -z "${GITHUB_ACTIONS:-}" ]; } && has "import testmon"; then
+            select=(--testmon-forceselect);
+            else has "import pytest_cov" && cov=(--no-cov);
+            fi;
+            if [ -n "${PYTEST_COLLECT_SELECTED:-}" ]; then
+            env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
             uv --quiet run --frozen --group pre-commit
-            python -c "import pytest_cov" 2>/dev/null && cov=(--no-cov);
-            env PYTHONUNBUFFERED=1 uv --quiet run --frozen --group pre-commit
-            pytest -n="$WORKERS" "${cov[@]}" -q --tb=short --dist=loadgroup
+            pytest -n="$WORKERS" "${select[@]}" -q --tb=short --dist=loadgroup
+            --collect-only -m integration > "$PYTEST_COLLECT_SELECTED";
+            status="$?"; test "$status" = 0 || test "$status" = 5; exit "$?";
+            fi;
+            env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
+            uv --quiet run --frozen --group pre-commit
+            pytest -n="$WORKERS" "${cov[@]}" "${select[@]}" -q --tb=short --dist=loadgroup
             -m integration
-            $PYTEST_SPLIT_ARGS
+            $PYTEST_SPLIT_ARGS "${nodeids[@]}"
             || test "$?" = 5
