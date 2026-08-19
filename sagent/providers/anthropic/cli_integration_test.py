@@ -47,13 +47,7 @@ from sagent.types.runtime import UserMessage
 from sagent.types.tools import Tool
 
 
-pytestmark = [
-    pytest.mark.integration,
-    # Spawns the real ``claude`` binary: a heavy subprocess with model-latency
-    # turns. Availability is gated by ``_requires_claude`` (skips precisely when
-    # the CLI/credentials are absent), not an env var. Prefer low parallelism
-    # (avoid ``-n 8``) so the CLI gets enough CPU to finish within the timeout.
-]
+pytestmark = pytest.mark.cli_claude
 
 
 def _claude_available() -> bool:

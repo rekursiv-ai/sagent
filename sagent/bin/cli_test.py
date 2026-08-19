@@ -1130,7 +1130,7 @@ def test_resolve_session_dir_fresh_when_no_flags() -> None:
     assert out  # non-empty path string
 
 
-@pytest.mark.ci_smoke
+@pytest.mark.cli_python_subprocess
 def test_direct_script_bootstraps_dependencies() -> None:
     """Polyglot-shebang `cli.py --help` runs to completion and prints help."""
     script = Path(__file__).resolve().parent / "cli.py"

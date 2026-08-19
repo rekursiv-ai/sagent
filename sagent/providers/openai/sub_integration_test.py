@@ -20,7 +20,7 @@ from sagent.types.model import ModelRequest
 from sagent.types.runtime import UserMessage
 
 
-pytestmark = [pytest.mark.integration]
+pytestmark = pytest.mark.cli_codex
 
 
 def _subscription_credentials_available() -> bool:
