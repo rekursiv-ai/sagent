@@ -203,7 +203,7 @@ def _skip_if_missing(command: str) -> None:
     pytest.skip(f"{exe} not available")
 
 
-@pytest.mark.slow
+@pytest.mark.cli_bash
 @pytest.mark.parametrize("command", _WRITES)
 def test_a_command_that_writes_is_never_classified_read_only(command: str) -> None:
     """The failure that costs data, asserted against the filesystem."""
@@ -220,7 +220,7 @@ def test_a_command_that_writes_is_never_classified_read_only(command: str) -> No
     assert changed, f"fixture drift: {command!r} no longer writes"
 
 
-@pytest.mark.slow
+@pytest.mark.cli_bash
 @pytest.mark.parametrize("command", _READS)
 def test_a_read_only_verdict_is_never_given_to_a_writer(command: str) -> None:
     """A blessed command must leave the tree byte-identical.
@@ -263,7 +263,7 @@ _EXECUTORS = [
 ]
 
 
-@pytest.mark.slow
+@pytest.mark.cli_bash
 @pytest.mark.parametrize("command", _EXECUTORS)
 def test_a_command_that_executes_is_never_classified_read_only(
     command: str,

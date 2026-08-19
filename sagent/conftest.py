@@ -13,6 +13,7 @@ from sagent.agent.state import (
     agent_registry,
     fresh_default_tool_state,
 )
+from sagent.lib.testing.resource_markers import pytest_collection_modifyitems
 from sagent.lib.testing.userdirs_fixture import (
     isolate_user_dirs,
     pytest_configure as _register_real_user_dirs_marker,
@@ -25,7 +26,7 @@ from sagent.tools.agent_spawn import _persistent_tasks
 os.environ.setdefault("PYTHONSAFEPATH", "1")
 
 
-__all__ = ["isolate_user_dirs"]
+__all__ = ["isolate_user_dirs", "pytest_collection_modifyitems"]
 
 
 def pytest_configure(config: pytest.Config) -> None:
