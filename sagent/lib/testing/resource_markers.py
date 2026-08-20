@@ -2,11 +2,28 @@
 
 from __future__ import annotations
 
-from typing import cast
+from collections.abc import Iterator, Sequence
+from typing import Protocol, cast
 
 import os
 
 import pytest
+
+
+class MarkedItem(Protocol):
+    """The marker surface the rollup reads and writes on a collected test.
+
+    Narrower than ``pytest.Item`` on purpose: this is the whole contract, so a
+    caller holding anything marker-shaped satisfies it.
+    """
+
+    def iter_markers(self, name: str | None = ...) -> Iterator[pytest.Mark]: ...
+
+    def get_closest_marker(self, name: str) -> pytest.Mark | None: ...
+
+    def add_marker(
+        self, marker: str | pytest.MarkDecorator, *, append: bool = ...
+    ) -> None: ...
 
 
 def resource_marker_family(
@@ -120,7 +137,10 @@ def resource_marker_aliases(
     for candidate, candidate_aliases in aliases:
         if marker == candidate:
             return candidate_aliases
-    raise ValueError(f"Unknown resource marker: {marker}")
+    # UsageError, not ValueError: this is reached from a collection hook, and
+    # pytest renders anything else as an INTERNALERROR traceback that buries the
+    # marker name.
+    raise pytest.UsageError(f"Unknown resource marker: {marker}")
 
 
 def resource_marker_timeout(
@@ -160,7 +180,7 @@ def resource_marker_timeout(
 
 
 def apply_resource_markers(
-    items: list[pytest.Item],
+    items: Sequence[MarkedItem],
     *,
     resource_markers: tuple[str, ...],
     ci_skipped_marks: tuple[str, ...] = (
@@ -194,42 +214,63 @@ def apply_resource_markers(
                 continue
             resource_timeouts.append(resource_marker_timeout(marker))
             resource_aliases.update(resource_marker_aliases(marker))
-        if resource_aliases:
-            for alias in sorted(resource_aliases):
-                alias_marker = cast(pytest.MarkDecorator, getattr(pytest.mark, alias))
-                item.add_marker(alias_marker)
-        if resource_timeouts and item.get_closest_marker("timeout") is None:
+        # A root conftest and a package conftest both bind this hook, so an item
+        # is walked once per binding. EVERY mark added below is therefore guarded
+        # by what the item already carries -- one rule, rather than a per-branch
+        # check that the next branch forgets.
+        existing = {marker.name for marker in item.iter_markers()}
+        for alias in sorted(resource_aliases - existing):
+            alias_marker = cast(pytest.MarkDecorator, getattr(pytest.mark, alias))
+            item.add_marker(alias_marker)
+        if resource_timeouts and "timeout" not in existing:
             item.add_marker(pytest.mark.timeout(max(resource_timeouts)))
-        for mark in live_llm_marks:
-            if item.get_closest_marker(mark) is not None and not os.environ.get(
-                live_llm_env_var
-            ):
+        if "skip" not in existing:
+            _apply_skip_policy(
+                item,
+                live_llm_marks=live_llm_marks,
+                live_llm_env_var=live_llm_env_var,
+                ci_skipped_marks=ci_skipped_marks,
+            )
+
+
+def _apply_skip_policy(
+    item: MarkedItem,
+    *,
+    live_llm_marks: tuple[str, ...],
+    live_llm_env_var: str,
+    ci_skipped_marks: tuple[str, ...],
+) -> None:
+    """Skip an item whose resource is unavailable in this environment."""
+    for mark in live_llm_marks:
+        if item.get_closest_marker(mark) is not None and not os.environ.get(
+            live_llm_env_var
+        ):
+            item.add_marker(
+                pytest.mark.skip(
+                    reason=(
+                        f"{mark} test skipped"
+                        f" (set {live_llm_env_var}=1 to run live model CLIs)"
+                    )
+                )
+            )
+            return
+    if os.environ.get("CI") and not os.environ.get("RUN_INTEGRATION"):
+        for mark in ci_skipped_marks:
+            if item.get_closest_marker(mark) is not None:
                 item.add_marker(
                     pytest.mark.skip(
                         reason=(
-                            f"{mark} test skipped"
-                            f" (set {live_llm_env_var}=1 to run live model CLIs)"
+                            f"{mark} test skipped in CI"
+                            " (no live credentials/services/devices;"
+                            " set RUN_INTEGRATION=1 to opt in)"
                         )
                     )
                 )
-                break
-        if os.environ.get("CI") and not os.environ.get("RUN_INTEGRATION"):
-            for mark in ci_skipped_marks:
-                if item.get_closest_marker(mark) is not None:
-                    item.add_marker(
-                        pytest.mark.skip(
-                            reason=(
-                                f"{mark} test skipped in CI"
-                                " (no live credentials/services/devices;"
-                                " set RUN_INTEGRATION=1 to opt in)"
-                            )
-                        )
-                    )
-                    break
+                return
 
 
 def _fail_on_unknown_resource_markers(
-    item: pytest.Item,
+    item: MarkedItem,
     *,
     resource_markers: tuple[str, ...],
     resource_families: tuple[str, ...] = (
@@ -247,4 +288,4 @@ def _fail_on_unknown_resource_markers(
     for marker in item.iter_markers():
         family, separator, _specific = marker.name.partition("_")
         if separator and family in resource_families and marker.name not in known:
-            raise ValueError(f"Unknown resource marker: {marker.name}")
+            raise pytest.UsageError(f"Unknown resource marker: {marker.name}")
