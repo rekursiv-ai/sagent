@@ -537,6 +537,14 @@ repos:
         # arguments: --no-cov"), and testmon needs coverage to see which tests
         # touched changed code. This file is copied into every exported package,
         # not all of which carry either plugin.
+        #
+        # The nodeid reader keeps only lines containing `::`. `--collect-only -q`
+        # writes a trailing summary plus whatever banners the installed plugins
+        # print, so the selection file is never byte-empty even when testmon
+        # selected nothing -- and the `-eq 0` guard below exists precisely for
+        # that case. Passing those non-nodeid lines to pytest as arguments
+        # collects zero tests and exits 5, which failed the gate on every PR
+        # that legitimately needed no reruns.
         entry: *worker-entry
         args:
           - WORKERS_PYTEST_GLOBAL
@@ -544,7 +552,7 @@ repos:
             CI_TESTMON=1;
             nodeids=();
             if [ -n "${PYTEST_NODEIDS_FILE:-}" ]; then
-            while IFS= read -r nodeid; do [ -n "$nodeid" ] && nodeids+=("$nodeid"); done < "$PYTEST_NODEIDS_FILE";
+            while IFS= read -r nodeid; do case "$nodeid" in *::*) nodeids+=("$nodeid") ;; esac; done < "$PYTEST_NODEIDS_FILE";
             [ ${#nodeids[@]} -eq 0 ] && exit 0;
             fi;
             select=(); cov=();
@@ -593,7 +601,7 @@ repos:
           - >-
             nodeids=();
             if [ -n "${PYTEST_NODEIDS_FILE:-}" ]; then
-            while IFS= read -r nodeid; do [ -n "$nodeid" ] && nodeids+=("$nodeid"); done < "$PYTEST_NODEIDS_FILE";
+            while IFS= read -r nodeid; do case "$nodeid" in *::*) nodeids+=("$nodeid") ;; esac; done < "$PYTEST_NODEIDS_FILE";
             [ ${#nodeids[@]} -eq 0 ] && exit 0;
             fi;
             select=(); cov=();
@@ -633,7 +641,7 @@ repos:
           - >-
             nodeids=();
             if [ -n "${PYTEST_NODEIDS_FILE:-}" ]; then
-            while IFS= read -r nodeid; do [ -n "$nodeid" ] && nodeids+=("$nodeid"); done < "$PYTEST_NODEIDS_FILE";
+            while IFS= read -r nodeid; do case "$nodeid" in *::*) nodeids+=("$nodeid") ;; esac; done < "$PYTEST_NODEIDS_FILE";
             [ ${#nodeids[@]} -eq 0 ] && exit 0;
             fi;
             select=(); cov=();
@@ -684,7 +692,7 @@ repos:
             command -v pg_config >/dev/null 2>&1 || exit 0;
             nodeids=();
             if [ -n "${PYTEST_NODEIDS_FILE:-}" ]; then
-            while IFS= read -r nodeid; do [ -n "$nodeid" ] && nodeids+=("$nodeid"); done < "$PYTEST_NODEIDS_FILE";
+            while IFS= read -r nodeid; do case "$nodeid" in *::*) nodeids+=("$nodeid") ;; esac; done < "$PYTEST_NODEIDS_FILE";
             [ ${#nodeids[@]} -eq 0 ] && exit 0;
             fi;
             select=(); cov=();
