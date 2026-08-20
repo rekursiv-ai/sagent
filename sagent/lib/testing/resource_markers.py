@@ -161,6 +161,12 @@ def resource_marker_timeout(
         ("cli_codex", 1800),
         ("cli_docker", 300),
         ("cli_precommit", 300),
+        # A spawned interpreter re-imports the tree it collects, which the
+        # 120s `cli` default does not cover: marker_tiers_test's collection
+        # measured 69s on a developer box and timed out 108 times on a loaded
+        # 2-vCPU CI runner. A timeout is a ceiling, not a schedule, so this
+        # cannot slow a subprocess test that already finishes quickly.
+        ("cli_python_subprocess", 300),
         ("cli_rsync", 180),
         ("cli_ssh", 300),
         ("cli_uv", 180),

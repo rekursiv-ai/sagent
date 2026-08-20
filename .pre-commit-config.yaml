@@ -538,13 +538,14 @@ repos:
         # touched changed code. This file is copied into every exported package,
         # not all of which carry either plugin.
         #
-        # The nodeid reader keeps only lines containing `::`. `--collect-only -q`
-        # writes a trailing summary plus whatever banners the installed plugins
-        # print, so the selection file is never byte-empty even when testmon
-        # selected nothing -- and the `-eq 0` guard below exists precisely for
-        # that case. Passing those non-nodeid lines to pytest as arguments
-        # collects zero tests and exits 5, which failed the gate on every PR
-        # that legitimately needed no reruns.
+        # The selection file is written by `selected_nodeids_plugin`, which
+        # emits node ids and nothing else, so an empty selection is a byte-empty
+        # file and the `-eq 0` guard below sees it. The reader still keeps only
+        # lines containing `::`: the plugin is probed for, not assumed, and an
+        # exported package that answers no falls back to a plain collection
+        # whose stdout a caller might still redirect here. One non-node-id
+        # argument makes pytest collect ZERO tests -- not the rest minus one --
+        # so the filter is cheap insurance against reintroducing that.
         entry: *worker-entry
         args:
           - WORKERS_PYTEST_GLOBAL
@@ -555,8 +556,10 @@ repos:
             while IFS= read -r nodeid; do case "$nodeid" in *::*) nodeids+=("$nodeid") ;; esac; done < "$PYTEST_NODEIDS_FILE";
             [ ${#nodeids[@]} -eq 0 ] && exit 0;
             fi;
-            select=(); cov=();
+            select=(); cov=(); sel=();
             has() { uv --quiet run --frozen --group pre-commit python -c "$1" 2>/dev/null; };
+            has "import ops.github.selected_nodeids_plugin" &&
+            sel=(-p ops.github.selected_nodeids_plugin);
             if [ -z "${PYTEST_FORCE_ALL:-}" ] && [ -z "$PYTEST_SPLIT_ARGS" ] && has "import testmon"; then
             select=(--testmon-forceselect);
             else has "import pytest_cov" && cov=(--no-cov);
@@ -564,8 +567,8 @@ repos:
             if [ -n "${PYTEST_COLLECT_SELECTED:-}" ]; then
             env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
             uv --quiet run --frozen --group pre-commit
-            pytest -n="$WORKERS" "${select[@]}" -q --tb=short --collect-only
-            > "$PYTEST_COLLECT_SELECTED";
+            pytest -n="$WORKERS" "${select[@]}" "${sel[@]}" -q --tb=short
+            --collect-only;
             status="$?"; test "$status" = 0 || test "$status" = 5; exit "$?";
             fi;
             exec env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
@@ -604,8 +607,10 @@ repos:
             while IFS= read -r nodeid; do case "$nodeid" in *::*) nodeids+=("$nodeid") ;; esac; done < "$PYTEST_NODEIDS_FILE";
             [ ${#nodeids[@]} -eq 0 ] && exit 0;
             fi;
-            select=(); cov=();
+            select=(); cov=(); sel=();
             has() { uv --quiet run --frozen --group pre-commit python -c "$1" 2>/dev/null; };
+            has "import ops.github.selected_nodeids_plugin" &&
+            sel=(-p ops.github.selected_nodeids_plugin);
             if [ -z "${PYTEST_FORCE_ALL:-}" ] && [ -z "$PYTEST_SPLIT_ARGS" ] && { [ -n "${PYTEST_COLLECT_SELECTED:-}" ] || [ -z "${GITHUB_ACTIONS:-}" ]; } && has "import testmon"; then
             select=(--testmon-forceselect);
             else has "import pytest_cov" && cov=(--no-cov);
@@ -615,7 +620,7 @@ repos:
             uv --quiet run --frozen --group pre-commit
             pytest -n="$WORKERS" "${select[@]}" -q --tb=short --collect-only
             -m "slow and not cluster and not cuda and not integration and not performance"
-            > "$PYTEST_COLLECT_SELECTED";
+            "${sel[@]}";
             status="$?"; test "$status" = 0 || test "$status" = 5; exit "$?";
             fi;
             env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
@@ -644,8 +649,10 @@ repos:
             while IFS= read -r nodeid; do case "$nodeid" in *::*) nodeids+=("$nodeid") ;; esac; done < "$PYTEST_NODEIDS_FILE";
             [ ${#nodeids[@]} -eq 0 ] && exit 0;
             fi;
-            select=(); cov=();
+            select=(); cov=(); sel=();
             has() { uv --quiet run --frozen --group pre-commit python -c "$1" 2>/dev/null; };
+            has "import ops.github.selected_nodeids_plugin" &&
+            sel=(-p ops.github.selected_nodeids_plugin);
             if [ -z "${PYTEST_FORCE_ALL:-}" ] && [ -z "$PYTEST_SPLIT_ARGS" ] && { [ -n "${PYTEST_COLLECT_SELECTED:-}" ] || [ -z "${GITHUB_ACTIONS:-}" ]; } && has "import testmon"; then
             select=(--testmon-forceselect);
             else has "import pytest_cov" && cov=(--no-cov);
@@ -654,7 +661,7 @@ repos:
             env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
             uv --quiet run --frozen --group pre-commit
             pytest -n="$WORKERS" "${select[@]}" -q --tb=short --durations=20
-            --collect-only -m ci_smoke > "$PYTEST_COLLECT_SELECTED";
+            --collect-only -m ci_smoke "${sel[@]}";
             status="$?"; test "$status" = 0 || test "$status" = 5; exit "$?";
             fi;
             env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
@@ -695,8 +702,10 @@ repos:
             while IFS= read -r nodeid; do case "$nodeid" in *::*) nodeids+=("$nodeid") ;; esac; done < "$PYTEST_NODEIDS_FILE";
             [ ${#nodeids[@]} -eq 0 ] && exit 0;
             fi;
-            select=(); cov=();
+            select=(); cov=(); sel=();
             has() { uv --quiet run --frozen --group pre-commit python -c "$1" 2>/dev/null; };
+            has "import ops.github.selected_nodeids_plugin" &&
+            sel=(-p ops.github.selected_nodeids_plugin);
             if [ -z "${PYTEST_FORCE_ALL:-}" ] && [ -z "$PYTEST_SPLIT_ARGS" ] && { [ -n "${PYTEST_COLLECT_SELECTED:-}" ] || [ -z "${GITHUB_ACTIONS:-}" ]; } && has "import testmon"; then
             select=(--testmon-forceselect);
             else has "import pytest_cov" && cov=(--no-cov);
@@ -705,7 +714,7 @@ repos:
             env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
             uv --quiet run --frozen --group pre-commit
             pytest -n="$WORKERS" "${select[@]}" -q --tb=short --dist=loadgroup
-            --collect-only -m integration > "$PYTEST_COLLECT_SELECTED";
+            --collect-only -m integration "${sel[@]}";
             status="$?"; test "$status" = 0 || test "$status" = 5; exit "$?";
             fi;
             env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
