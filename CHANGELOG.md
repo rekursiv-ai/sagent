@@ -5,6 +5,57 @@ All notable sagent changes are documented here. This project follows
 
 ## Unreleased
 
+## 0.1.17 - 2026-08-19
+
+### Added
+
+- `sagent.lib.custom_json` round-trips sets: a `set`, `frozenset`, or
+  `Set`-annotated field encodes to a JSON array and decodes back to the
+  declared container. A `frozenset` field used to come back as a list,
+  leaving an unhashable, mutable value on a frozen dataclass.
+
+### Changed
+
+- Requires wesearch 0.1.11 or newer.
+- `WebFetch` and `WebSearch` build their directive schemas from wesearch's
+  shared parameter spec instead of restating every parameter's name, type,
+  and default locally, so the tool and MCP surfaces can no longer drift
+  apart. `WebFetch` also accepts a lowercase `method`, which a model writes
+  as readily as the uppercase form.
+- `WebSearch` no longer rewrites an explicit `backend` when `categories`
+  names a non-general tab. Asking for `duckduckgo` with `science` silently
+  ran against SearXNG and returned results the caller had not asked for;
+  that combination is now rejected, and an unnamed backend is left for
+  wesearch to resolve.
+- The `WebFetch` description now gives a measured extractor rule: reach for
+  `trafilatura` only when the page is one contiguous prose body. Over an
+  11-page corpus it dropped 12 of 37 content probes where `html2text`
+  dropped none, and no property of the page predicts which.
+- The default system prompt is firmer about evidence gathered to confirm a
+  position already held, and about treating an opinion request as an input
+  to build on rather than a claim to adjudicate.
+- `sagent.lib.userdirs` functions take no application name. `data_dir()`
+  and its siblings return the base directory and the caller joins its own
+  namespace (`data_dir() / "rekursiv-ai" / "sagent"`), spelled the same way
+  as any other vendor's directory; `resolve_working_dir` is gone. Existing
+  files stay where they are.
+- `dataclass_from_json` raises `SchemaError` (a `ValueError`) when the
+  payload names a field the target cannot accept. Dropping the key turned
+  every misspelling into a silent default, so a caller reading
+  `{"min_digit": 7}` got the default and no indication of it.
+
+### Fixed
+
+- An optional nested-dataclass field accepts a null: the `None` check runs
+  before annotation dispatch, which `_strip_optional` had been reducing
+  past and then rejecting.
+- `dataclass_to_json` skips `init=False` fields. The generated `__init__`
+  rejects them by name, so the encoder had been emitting a payload its own
+  decoder could not read.
+- An ambiguous scalar union keeps its type tag when `None` is a member, so
+  a `Path | bytes | None` field no longer encodes to a bare string that
+  decode cannot attribute to either member.
+
 ## 0.1.16 - 2026-08-11
 
 ### Added
