@@ -512,7 +512,7 @@ repos:
         # one shard of several, so it must run every test it was handed and
         # selection is off; empty means one process owns the whole tier and
         # testmon selects. The workflow sets that variable per matrix job (from
-        # `matrix_entries` in ops/github/precommit_hooks.py) and nothing sets it
+        # `matrix_entries` in ops/github/precommit_matrix.py) and nothing sets it
         # locally, so a local pre-push selects and a sharded CI job does not,
         # with no second switch to keep in step. ops/github/testmon_gate_test.py
         # runs this shell both ways to prove it.
@@ -574,7 +574,7 @@ repos:
             exec env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
             uv --quiet run --frozen --group pre-commit
             pytest -n="$WORKERS" "${cov[@]}" "${select[@]}" -q --tb=short
-            $PYTEST_SPLIT_ARGS "${nodeids[@]}"
+            $PYTEST_PROGRESS_ARGS $PYTEST_SPLIT_ARGS "${nodeids[@]}"
 
       - id: pytest-slow-global
         name: pytest-slow-global
@@ -626,6 +626,7 @@ repos:
             env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
             uv --quiet run --frozen --group pre-commit
             pytest -n="$WORKERS" "${cov[@]}" "${select[@]}" -q --tb=short
+            $PYTEST_PROGRESS_ARGS
             -m "slow and not cluster and not cuda and not integration and not performance"
             $PYTEST_SPLIT_ARGS "${nodeids[@]}"
             || test "$?" = 5
@@ -667,7 +668,7 @@ repos:
             env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
             uv --quiet run --frozen --group pre-commit
             pytest -n="$WORKERS" "${cov[@]}" "${select[@]}" -q --tb=short --durations=20
-            -m ci_smoke
+            $PYTEST_PROGRESS_ARGS -m ci_smoke
             $PYTEST_SPLIT_ARGS "${nodeids[@]}"
             || test "$?" = 5
 
@@ -720,6 +721,6 @@ repos:
             env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
             uv --quiet run --frozen --group pre-commit
             pytest -n="$WORKERS" "${cov[@]}" "${select[@]}" -q --tb=short --dist=loadgroup
-            -m integration
+            $PYTEST_PROGRESS_ARGS -m integration
             $PYTEST_SPLIT_ARGS "${nodeids[@]}"
             || test "$?" = 5
