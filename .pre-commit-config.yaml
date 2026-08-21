@@ -562,6 +562,8 @@ repos:
             sel=(-p ops.github.selected_nodeids_plugin);
             if [ -z "${PYTEST_FORCE_ALL:-}" ] && [ -z "$PYTEST_SPLIT_ARGS" ] && has "import testmon"; then
             select=(--testmon-forceselect);
+            elif [ -n "${PYTEST_TESTMON_ARGS:-}" ]; then
+            :;
             else has "import pytest_cov" && cov=(--no-cov);
             fi;
             if [ -n "${PYTEST_COLLECT_SELECTED:-}" ]; then
@@ -573,7 +575,7 @@ repos:
             fi;
             exec env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
             uv --quiet run --frozen --group pre-commit
-            pytest -n="$WORKERS" "${cov[@]}" "${select[@]}" -q --tb=short
+            pytest -n="$WORKERS" "${cov[@]}" "${select[@]}" $PYTEST_TESTMON_ARGS -q --tb=short
             $PYTEST_PROGRESS_ARGS $PYTEST_SPLIT_ARGS "${nodeids[@]}"
 
       - id: pytest-slow-global
@@ -613,6 +615,8 @@ repos:
             sel=(-p ops.github.selected_nodeids_plugin);
             if [ -z "${PYTEST_FORCE_ALL:-}" ] && [ -z "$PYTEST_SPLIT_ARGS" ] && { [ -n "${PYTEST_COLLECT_SELECTED:-}" ] || [ -z "${GITHUB_ACTIONS:-}" ]; } && has "import testmon"; then
             select=(--testmon-forceselect);
+            elif [ -n "${PYTEST_TESTMON_ARGS:-}" ]; then
+            :;
             else has "import pytest_cov" && cov=(--no-cov);
             fi;
             if [ -n "${PYTEST_COLLECT_SELECTED:-}" ]; then
@@ -625,7 +629,7 @@ repos:
             fi;
             env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
             uv --quiet run --frozen --group pre-commit
-            pytest -n="$WORKERS" "${cov[@]}" "${select[@]}" -q --tb=short
+            pytest -n="$WORKERS" "${cov[@]}" "${select[@]}" $PYTEST_TESTMON_ARGS -q --tb=short
             $PYTEST_PROGRESS_ARGS
             -m "slow and not cluster and not cuda and not integration and not performance"
             $PYTEST_SPLIT_ARGS "${nodeids[@]}"
@@ -656,6 +660,8 @@ repos:
             sel=(-p ops.github.selected_nodeids_plugin);
             if [ -z "${PYTEST_FORCE_ALL:-}" ] && [ -z "$PYTEST_SPLIT_ARGS" ] && { [ -n "${PYTEST_COLLECT_SELECTED:-}" ] || [ -z "${GITHUB_ACTIONS:-}" ]; } && has "import testmon"; then
             select=(--testmon-forceselect);
+            elif [ -n "${PYTEST_TESTMON_ARGS:-}" ]; then
+            :;
             else has "import pytest_cov" && cov=(--no-cov);
             fi;
             if [ -n "${PYTEST_COLLECT_SELECTED:-}" ]; then
@@ -667,7 +673,7 @@ repos:
             fi;
             env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
             uv --quiet run --frozen --group pre-commit
-            pytest -n="$WORKERS" "${cov[@]}" "${select[@]}" -q --tb=short --durations=20
+            pytest -n="$WORKERS" "${cov[@]}" "${select[@]}" $PYTEST_TESTMON_ARGS -q --tb=short --durations=20
             $PYTEST_PROGRESS_ARGS -m ci_smoke
             $PYTEST_SPLIT_ARGS "${nodeids[@]}"
             || test "$?" = 5
@@ -709,6 +715,8 @@ repos:
             sel=(-p ops.github.selected_nodeids_plugin);
             if [ -z "${PYTEST_FORCE_ALL:-}" ] && [ -z "$PYTEST_SPLIT_ARGS" ] && { [ -n "${PYTEST_COLLECT_SELECTED:-}" ] || [ -z "${GITHUB_ACTIONS:-}" ]; } && has "import testmon"; then
             select=(--testmon-forceselect);
+            elif [ -n "${PYTEST_TESTMON_ARGS:-}" ]; then
+            :;
             else has "import pytest_cov" && cov=(--no-cov);
             fi;
             if [ -n "${PYTEST_COLLECT_SELECTED:-}" ]; then
@@ -720,7 +728,7 @@ repos:
             fi;
             env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
             uv --quiet run --frozen --group pre-commit
-            pytest -n="$WORKERS" "${cov[@]}" "${select[@]}" -q --tb=short --dist=loadgroup
+            pytest -n="$WORKERS" "${cov[@]}" "${select[@]}" $PYTEST_TESTMON_ARGS -q --tb=short --dist=loadgroup
             $PYTEST_PROGRESS_ARGS -m integration
             $PYTEST_SPLIT_ARGS "${nodeids[@]}"
             || test "$?" = 5
