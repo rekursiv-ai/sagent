@@ -1,5 +1,7 @@
-from collections.abc import Callable
-from collections.abc import Iterator as Iterator
+from collections.abc import (
+    Callable,
+    Iterator as Iterator,
+)
 from contextlib import contextmanager as contextmanager
 from typing import Any as Any
 

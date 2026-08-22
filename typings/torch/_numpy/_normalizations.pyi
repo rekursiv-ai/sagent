@@ -1,8 +1,10 @@
 from collections.abc import Callable
+from typing import Any
+
+import typing
+
 from numpy import ndarray
 from torch import Tensor
-from typing import Any
-import typing
 
 """ "Normalize" arguments: convert array_likes to tensors, dtypes to torch dtypes and so on."""
 ArrayLike = typing.TypeVar("ArrayLike")

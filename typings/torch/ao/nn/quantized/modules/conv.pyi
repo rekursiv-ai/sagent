@@ -1,5 +1,4 @@
-from typing import Any, Self
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal, Self
 
 from torch import nn
 from torch.nn.common_types import _size_1_t

@@ -1,7 +1,5 @@
-from collections.abc import Generator
-from typing import Self
-from collections.abc import Callable, Iterator
-from typing import Any, ClassVar, Concatenate, Generic, final
+from collections.abc import Callable, Generator, Iterator
+from typing import Any, ClassVar, Concatenate, Generic, Self, final
 from typing_extensions import ParamSpec, TypeVar
 
 import abc
@@ -20,7 +18,7 @@ _P = ParamSpec("_P", default=...)
 _SET_GLOBAL_FLAGS = ...
 
 @contextlib.contextmanager
-def dl_open_guard() -> Generator[None, Any, None]: ...
+def dl_open_guard() -> Generator[None, Any]: ...
 
 class OperatorBase:
     def __init__(self) -> None: ...

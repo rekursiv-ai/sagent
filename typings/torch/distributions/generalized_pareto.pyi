@@ -1,5 +1,6 @@
-from torch import Tensor
 from typing import Self
+
+from torch import Tensor
 from torch.distributions import Distribution, constraints
 
 __all__ = ["GeneralizedPareto"]

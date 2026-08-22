@@ -1,4 +1,5 @@
 from typing import Self
+
 from torch import Tensor
 from torch.distributions.exp_family import ExponentialFamily
 from torch.types import _size

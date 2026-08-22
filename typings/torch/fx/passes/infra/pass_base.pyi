@@ -1,5 +1,5 @@
-from typing import Self
 from collections import namedtuple
+from typing import Self
 
 import abc
 

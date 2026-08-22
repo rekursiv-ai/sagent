@@ -1,6 +1,6 @@
-from torch import Tensor
 from typing import Any
 
+from torch import Tensor
 from torch.ao.quantization.observer import (
     AffineQuantizedObserverBase,
     Granularity,

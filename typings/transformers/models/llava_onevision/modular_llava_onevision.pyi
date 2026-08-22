@@ -1,4 +1,5 @@
 from typing import Any
+
 from transformers.models.llava_next.image_processing_llava_next_fast import (
     LlavaNextImageProcessorFast,
 )

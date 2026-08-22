@@ -1,5 +1,4 @@
-from typing import Any
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from torch import nn
 

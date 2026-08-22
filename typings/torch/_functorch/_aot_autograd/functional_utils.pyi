@@ -1,7 +1,7 @@
-from torch import Tensor
-from typing import Literal
 from dataclasses import dataclass
+from typing import Literal
 
+from torch import Tensor
 from torch._subclasses.functional_tensor import FunctionalTensor
 from torch.fx.experimental.symbolic_shapes import SymIntEqByExpr
 

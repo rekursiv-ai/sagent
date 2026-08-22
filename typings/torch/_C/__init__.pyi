@@ -29,6 +29,8 @@ from typing_extensions import (
     runtime_checkable as runtime_checkable,
 )
 
+import builtins
+
 from torch import (
     SymInt as SymInt,
     Tensor as Tensor,
@@ -78,7 +80,6 @@ from torch.types import (
 )
 from torch.utils._python_dispatch import TorchDispatchMode as TorchDispatchMode
 
-import builtins
 import numpy as np
 import torch
 
@@ -1172,8 +1173,8 @@ type _Index = (
     | slice
     | EllipsisType
     | Tensor
-    | None
     | _NestedSequence[_bool | _int | slice | EllipsisType | Tensor | None]
+    | None
 )
 
 class TensorBase(metaclass=_TensorMeta):
@@ -1507,7 +1508,7 @@ class TensorBase(metaclass=_TensorMeta):
     ) -> Tensor: ...
     # `builtins.type`, not the `type()` method this class defines below: the
     # method shadows the builtin inside the class body, leaving `cls` Unknown.
-    def as_subclass[_S: TensorBase](self, cls: builtins.type[_S]) -> _S: ...
+    def as_subclass[S: TensorBase](self, cls: builtins.type[S]) -> S: ...
     def asin(self) -> Tensor: ...
     def asin_(self) -> Tensor: ...
     def asinh(self) -> Tensor: ...

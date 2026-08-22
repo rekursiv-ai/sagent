@@ -1,8 +1,8 @@
 from collections.abc import Callable
-from torch import Tensor
-from typing import Any, Self
 from typing import *
+from typing import Any, Self
 
+from torch import Tensor
 from torch.utils.weak import WeakTensorKeyDictionary
 
 import torch

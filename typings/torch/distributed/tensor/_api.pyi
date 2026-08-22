@@ -1,8 +1,7 @@
-from torch import Tensor
 from collections.abc import Callable, Sequence
 from typing import Any, Self
 
-from torch import nn
+from torch import Tensor, nn
 from torch._export.wrappers import mark_subclass_constructor_exportable_experimental
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor._dtensor_spec import DTensorSpec

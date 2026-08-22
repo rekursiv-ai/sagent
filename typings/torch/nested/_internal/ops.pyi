@@ -1,8 +1,8 @@
 from collections.abc import Callable
-from torch import Tensor, layout
-from typing import Any
 from typing import *
+from typing import Any
 
+from torch import Tensor, layout
 from torch._higher_order_ops.flex_attention import (
     flex_attention as flex_attention_hop,
     flex_attention_backward as flex_attention_backward_hop,

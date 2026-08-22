@@ -1,5 +1,5 @@
-from typing import Any
 from collections.abc import Sequence
+from typing import Any
 
 from torch import Tensor
 from torch.nn.common_types import _size_2_t, _size_4_t, _size_6_t

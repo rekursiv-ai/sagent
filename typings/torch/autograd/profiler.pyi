@@ -1,8 +1,7 @@
-from typing import Literal, Self
 from collections.abc import Iterable
 from contextlib import ContextDecorator as _ContextDecorator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, Self
 
 import types
 

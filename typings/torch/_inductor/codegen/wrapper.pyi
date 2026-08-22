@@ -1,6 +1,5 @@
-from typing import Literal
 from collections.abc import Callable, Iterator, Sequence
-from typing import Any
+from typing import Any, Literal
 
 import contextlib
 import dataclasses

@@ -1,6 +1,5 @@
 from functools import partial
-from typing import Literal, Self
-from typing import Any
+from typing import Any, Literal, Self
 from typing_extensions import deprecated
 
 import types

@@ -1,4 +1,5 @@
 from typing import Any, Self
+
 from torch import Tensor
 from torch.distributions import constraints
 from torch.distributions.distribution import Distribution

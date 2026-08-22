@@ -1,9 +1,10 @@
 from collections.abc import Generator
-from torch import Tensor
 from typing import Any
 
 import contextlib
 import dataclasses
+
+from torch import Tensor
 
 @dataclasses.dataclass
 class __PrinterOptions:
@@ -25,7 +26,7 @@ def set_printoptions(
 ) -> None: ...
 def get_printoptions() -> dict[str, Any]: ...
 @contextlib.contextmanager
-def printoptions(**kwargs) -> Generator[None, Any, None]: ...
+def printoptions(**kwargs) -> Generator[None, Any]: ...
 def tensor_totype(t): ...
 
 class _Formatter:

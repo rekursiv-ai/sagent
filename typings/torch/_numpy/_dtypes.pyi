@@ -1,6 +1,7 @@
 from collections.abc import Callable
-from numpy import ndarray
 from typing import Any
+
+from numpy import ndarray
 
 class generic:
     name = ...

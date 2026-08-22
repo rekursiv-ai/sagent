@@ -1,5 +1,3 @@
-from types import NotImplementedType
-from typing import Literal
 from collections.abc import (
     Callable as Callable,
     Iterable as Iterable,
@@ -12,8 +10,10 @@ from functools import (
     singledispatch as singledispatch,
     wraps as wraps,
 )
+from types import NotImplementedType
 from typing import (
     Any as Any,
+    Literal,
     Optional as Optional,
     Union as Union,
     cast as cast,
@@ -60,7 +60,6 @@ from torch._prims_common.wrappers import (
 )
 
 import torch
-import torch._prims_common as utils
 import torch._refs._conversions
 import torch._refs.fft
 import torch._refs.linalg
@@ -616,7 +615,7 @@ def any(
 @register_decomposition([aten.sum.dim_IntList, aten.sum.IntList_out])
 def sum(
     a: TensorLikeType,
-    dim: None | int | list[int] = ...,
+    dim: int | list[int] | None = ...,
     keepdim: bool = ...,
     *,
     dtype: torch.dtype | None = ...,
@@ -626,7 +625,7 @@ def sum_to_size(a: Tensor, *shape) -> Tensor: ...
 @register_decomposition(aten.prod)
 def prod(
     a: TensorLikeType,
-    dim: None | int | list[int] = ...,
+    dim: int | list[int] | None = ...,
     keepdim: bool = ...,
     *,
     dtype=...,
@@ -662,7 +661,7 @@ def var(
 @out_wrapper()
 def std(
     a: TensorLikeType,
-    dim: None | int | list[int] = ...,
+    dim: int | list[int] | None = ...,
     unbiased: bool | None = ...,
     keepdim: bool = ...,
     *,

@@ -1,8 +1,6 @@
-from typing import Any
-from torch import Tensor
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
-from torch import nn
+from torch import Tensor, nn
 from torch.nn.common_types import _size_1_t, _size_2_t, _size_3_t
 
 __all__ = ["Conv1d", "Conv2d", "Conv3d"]

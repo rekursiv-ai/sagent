@@ -1,6 +1,5 @@
 from collections.abc import Callable
-from typing import Any
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from torch._C._functorch import TransformType
 from torch._ops import HigherOrderOperator

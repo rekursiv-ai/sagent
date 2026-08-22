@@ -1,4 +1,5 @@
 from typing import Any, Self
+
 import torch
 
 from .utils import WeightedQuantizedModule

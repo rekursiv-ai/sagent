@@ -1,9 +1,7 @@
-from collections.abc import Generator
-from typing import Literal
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from dataclasses import dataclass
-from typing import Any, Generic, TypeVar, override
+from typing import Any, Generic, Literal, TypeVar, override
 
 import contextlib
 import functools
@@ -59,7 +57,7 @@ class AOTAutogradCachePickler(FxGraphCachePickler):
 @contextlib.contextmanager
 def normalize_placeholder_names(
     gm: torch.fx.GraphModule,
-) -> Generator[None, Any, None]: ...
+) -> Generator[None, Any]: ...
 def autograd_cache_key(
     gm: torch.fx.GraphModule,
     example_inputs,
@@ -165,7 +163,7 @@ class BundledAOTAutogradCacheEntry(
 ): ...
 
 @contextlib.contextmanager
-def sanitize_gm_for_cache(gm: torch.fx.GraphModule) -> Generator[None, Any, None]: ...
+def sanitize_gm_for_cache(gm: torch.fx.GraphModule) -> Generator[None, Any]: ...
 
 @CacheArtifactFactory.register
 class AOTAutogradCacheArtifact(CacheArtifact):

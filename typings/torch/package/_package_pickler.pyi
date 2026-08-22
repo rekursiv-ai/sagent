@@ -1,5 +1,5 @@
-from typing import Any
 from pickle import _Pickler
+from typing import Any
 
 from .importer import Importer
 

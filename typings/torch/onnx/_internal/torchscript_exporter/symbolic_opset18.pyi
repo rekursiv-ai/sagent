@@ -1,5 +1,5 @@
-from typing import Any
 from collections.abc import Sequence
+from typing import Any
 
 from torch import _C
 from torch.onnx._internal.torchscript_exporter import jit_utils, symbolic_helper

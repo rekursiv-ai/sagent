@@ -1,7 +1,6 @@
-from typing import Any, LiteralString, Self
 from collections.abc import Callable
 from enum import Enum
-from typing import NamedTuple, NotRequired, TypedDict
+from typing import Any, LiteralString, NamedTuple, NotRequired, Self, TypedDict
 
 from torch import Tensor
 from torch._prims_common import DeviceLikeType

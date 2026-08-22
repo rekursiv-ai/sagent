@@ -1,7 +1,8 @@
-from numpy import ndarray
-from torch import dtype
 from typing import Any, Self
+
+from numpy import ndarray
 from PIL import Image
+from torch import dtype
 
 import pypdfium2.internal as pdfium_i
 

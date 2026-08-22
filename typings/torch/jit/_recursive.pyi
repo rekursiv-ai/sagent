@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from typing import Any, Literal
+
 from torch.nn import Module
 
 import torch

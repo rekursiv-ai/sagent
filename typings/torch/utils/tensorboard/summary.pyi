@@ -1,5 +1,6 @@
-from numpy.typing import NDArray
 from typing import Any
+
+from numpy.typing import NDArray
 
 __all__ = [
     "audio",

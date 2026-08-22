@@ -1,5 +1,6 @@
-from torch import device
 from typing import Any
+
+from torch import device
 from torch.distributed._shard.sharded_tensor import _sharded_op_impl
 
 import torch

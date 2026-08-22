@@ -1,5 +1,5 @@
-from typing import Any, Literal
 from dataclasses import dataclass
+from typing import Any, Literal
 
 import sympy
 import torch

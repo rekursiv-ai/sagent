@@ -26,7 +26,7 @@ __all__ = [
     "rfft2",
     "rfftn",
 ]
-type NormType = None | Literal["forward", "backward", "ortho"]
+type NormType = Literal["forward", "backward", "ortho"] | None
 _NORM_VALUES = ...
 aten = ...
 

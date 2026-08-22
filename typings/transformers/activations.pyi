@@ -1,5 +1,5 @@
-from typing import Any
 from collections import OrderedDict
+from typing import Any
 
 from torch import Tensor, nn
 

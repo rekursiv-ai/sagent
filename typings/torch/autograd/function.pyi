@@ -43,11 +43,9 @@ class BackwardCFunction(_C._FunctionBase, FunctionCtx, _HookMixin):
 class FunctionMeta(type):
     def __init__(cls, name, bases, attrs) -> None: ...
 
-class _HasStaticForward[**_FP, _FR](Protocol):
-    """Structural view of a subclass's own `forward`, used to type `apply`."""
-
+class _HasStaticForward[**FP, FR](Protocol):
     @staticmethod
-    def forward(*args: _FP.args, **kwargs: _FP.kwargs) -> _FR: ...
+    def forward(*args: FP.args, **kwargs: FP.kwargs) -> FR: ...
 
 class _SingleLevelFunction(
     _C._FunctionBase, FunctionCtx, _HookMixin, metaclass=FunctionMeta
@@ -73,9 +71,9 @@ class _SingleLevelFunction(
     # which is what the repo's `cast("Tensor", X.apply(...))` wrappers existed
     # to undo.
     @classmethod
-    def apply[**_AP, _AR](
-        cls: type[_HasStaticForward[_AP, _AR]], *args: _AP.args, **kwargs: _AP.kwargs
-    ) -> _AR: ...
+    def apply[**AP, AR](
+        cls: type[_HasStaticForward[AP, AR]], *args: AP.args, **kwargs: AP.kwargs
+    ) -> AR: ...
 
 class Function(_SingleLevelFunction):
     def __init__(self, *args, **kwargs) -> None: ...

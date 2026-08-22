@@ -1,7 +1,6 @@
-from typing import Any, Self
 from collections.abc import Callable
 from types import ModuleType
-from typing import Generic
+from typing import Any, Generic, Self
 from typing_extensions import ParamSpec, deprecated
 
 import torch

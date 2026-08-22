@@ -1,5 +1,5 @@
-from typing import Any
 from collections.abc import Callable
+from typing import Any
 
 _blocklisted_modules = ...
 _marked_safe_globals_set: set[Callable | tuple[Callable, str]] = ...

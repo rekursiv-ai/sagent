@@ -1,7 +1,5 @@
-from collections.abc import Generator
-from typing import Any, Self
-from collections.abc import Iterable
-from typing import TypeVar
+from collections.abc import Generator, Iterable
+from typing import Any, Self, TypeVar
 
 import builtins
 
@@ -31,4 +29,4 @@ class _SENTINEL_MISSING: ...
 
 def iter_(
     fn_or_iterable, sentinel=..., /
-) -> Generator[Any, Any, None] | _CallableIterator: ...
+) -> Generator[Any, Any] | _CallableIterator: ...

@@ -1,8 +1,8 @@
-from functools import partial
-from typing import Any
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
+from typing import Any
 
 from torch.distributed._shard.metadata import ShardMetadata
 from torch.distributed._shard.sharded_tensor import ShardedTensor

@@ -1,4 +1,5 @@
 from typing import Any
+
 from torch import Tensor
 from torch.nn.modules.pooling import MaxPool2d as MaxPool2d
 

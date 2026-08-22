@@ -1,5 +1,6 @@
-from torch import Tensor
 from typing import Any, Literal
+
+from torch import Tensor
 
 class ReferenceAnalysis:
     @staticmethod

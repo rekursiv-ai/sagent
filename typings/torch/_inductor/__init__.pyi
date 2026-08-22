@@ -1,5 +1,4 @@
 from collections.abc import Callable, Sequence
-from torch import Tensor
 from typing import (
     IO as IO,
     TYPE_CHECKING as TYPE_CHECKING,
@@ -9,6 +8,7 @@ from typing import (
     Union as Union,
 )
 
+from torch import Tensor
 from torch._inductor.utils import InputType as InputType
 from torch.export import ExportedProgram as ExportedProgram
 from torch.export.pt2_archive._package import AOTICompiledModel as AOTICompiledModel

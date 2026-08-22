@@ -1,6 +1,5 @@
-from typing import Literal
 from collections.abc import Iterator, Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
 import dataclasses
 

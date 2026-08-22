@@ -1,5 +1,7 @@
-from numpy import ndarray
 from typing import Any
+
+from numpy import ndarray
+
 from ._normalizations import ArrayLike, normalizer
 
 """Wrapper to mimic (parts of) np.random API surface.

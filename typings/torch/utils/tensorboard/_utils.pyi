@@ -1,7 +1,8 @@
+from typing import Any
+
 from numpy import ndarray
 from numpy.typing import NDArray
 from torch import dtype
-from typing import Any
 
 def figure_to_image(figures, close=...) -> NDArray[Any]: ...
 def make_grid(I, ncols=...) -> ndarray[tuple[int, int, int], dtype[Any]]: ...

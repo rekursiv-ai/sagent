@@ -1,6 +1,5 @@
-from typing import Self
 from collections.abc import Callable, Sequence
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol, Self, TypeVar
 
 import functools
 

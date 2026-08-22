@@ -1,7 +1,7 @@
-from torch import Tensor
 from abc import ABC, abstractmethod
 from typing import Any
 
+from torch import Tensor
 from torch.nn import Module
 
 import torch

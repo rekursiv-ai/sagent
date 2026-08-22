@@ -3169,7 +3169,7 @@ dev = [
     { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
     { name = "ruff" },
-    { name = "ty", specifier = ">=0.0.60" },
+    { name = "ty", specifier = ">=0.0.60,!=0.0.73" },
 ]
 lint = [
     { name = "codespell", specifier = ">=2.2.4" },
@@ -3186,7 +3186,7 @@ pre-commit = [
     { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
     { name = "ruff" },
-    { name = "ty", specifier = ">=0.0.60" },
+    { name = "ty", specifier = ">=0.0.60,!=0.0.73" },
 ]
 test = [
     { name = "hypothesis", specifier = ">=6.155.1" },
@@ -3198,7 +3198,7 @@ test = [
 ]
 typecheck = [
     { name = "basedpyright", specifier = ">=1.10" },
-    { name = "ty", specifier = ">=0.0.60" },
+    { name = "ty", specifier = ">=0.0.60,!=0.0.73" },
 ]
 
 [[package]]
@@ -3860,7 +3860,7 @@ wheels = [
 [[package]]
 name = "wesearch"
 version = "0.1.11"
-source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#4e8e1d159538eeabaa91d384ae82d7277e0dd0a3" }
+source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#19788885a57a002bfe40e92c65012afe7f0ee390" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "brotli" },

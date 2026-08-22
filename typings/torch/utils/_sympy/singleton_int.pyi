@@ -1,4 +1,5 @@
 from typing import Any, Self
+
 import sympy
 
 __all__ = ["SingletonInt"]

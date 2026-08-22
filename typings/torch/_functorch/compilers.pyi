@@ -1,6 +1,6 @@
+from collections.abc import Callable
 from functools import partial
 from typing import Any
-from collections.abc import Callable
 
 from torch import fx, nn
 

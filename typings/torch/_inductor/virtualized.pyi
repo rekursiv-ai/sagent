@@ -1,8 +1,8 @@
-from torch import Tensor, dtype
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from typing import Any, Generic, TypeVar
 
+from torch import Tensor, dtype
 from torch._inductor.choices import InductorChoices
 from torch._inductor.codegen.cpp_utils import LocalBufferContext
 from torch._inductor.debug import DebugContext

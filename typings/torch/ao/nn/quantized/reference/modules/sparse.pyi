@@ -1,5 +1,4 @@
-from typing import Self
-from typing import Any
+from typing import Any, Self
 
 from torch import Tensor, nn
 

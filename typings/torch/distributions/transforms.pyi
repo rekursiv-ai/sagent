@@ -1,8 +1,7 @@
-from torch import Size
-from typing import Any, Self
 from collections.abc import Sequence
+from typing import Any, Self
 
-from torch import Tensor
+from torch import Size, Tensor
 from torch.distributions import constraints
 from torch.distributions.distribution import Distribution
 from torch.distributions.utils import lazy_property

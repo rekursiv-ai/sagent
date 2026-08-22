@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+
 from torch._C import (
     _add_docstr as _add_docstr,
     _fft as _fft,

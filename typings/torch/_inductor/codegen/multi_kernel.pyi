@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Any
+
 from ..utils import cache_on_self
 
 log = ...

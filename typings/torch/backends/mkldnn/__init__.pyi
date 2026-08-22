@@ -1,7 +1,11 @@
 from collections.abc import Generator
-from typing import Any, Literal, Self
 from contextlib import contextmanager as contextmanager
-from typing import TYPE_CHECKING as TYPE_CHECKING
+from typing import (
+    TYPE_CHECKING as TYPE_CHECKING,
+    Any,
+    Literal,
+    Self,
+)
 
 from torch.backends import (
     ContextProp as ContextProp,
@@ -29,7 +33,7 @@ def set_flags(
 @contextmanager
 def flags(
     enabled=..., deterministic=..., allow_tf32=..., fp32_precision=...
-) -> Generator[None, Any, None]: ...
+) -> Generator[None, Any]: ...
 
 class MkldnnModule(PropModule):
     def __init__(self, m, name) -> None: ...

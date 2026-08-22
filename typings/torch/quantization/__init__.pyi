@@ -53,13 +53,11 @@ __all__ = [
     "observer",
     "prepare",
     "prepare_qat",
-    "prepare_qat",
     "propagate_qconfig_",
     "quantize",
     "quantize_dynamic",
     "quantize_dynamic_jit",
     "quantize_jit",
-    "quantize_qat",
     "quantize_qat",
     "swap_module",
 ]

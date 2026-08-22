@@ -1,5 +1,5 @@
-from typing import Any
 from enum import Enum
+from typing import Any
 
 from torch import Tensor
 from torch.nn.modules import Module

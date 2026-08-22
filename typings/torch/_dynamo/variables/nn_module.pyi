@@ -1,8 +1,8 @@
 from collections.abc import Generator
-from torch import Tensor
-from typing import Any
 from contextlib import contextmanager
+from typing import Any
 
+from torch import Tensor
 from torch._dynamo.symbolic_convert import InstructionTranslator
 
 import torch.nn
@@ -37,7 +37,7 @@ def initialize_lazy_module(tx: InstructionTranslator, mod, args, kwargs) -> None
 @contextmanager
 def record_nn_module_stack(
     module_key: str, source, tx, mod: torch.nn.Module
-) -> Generator[None, Any, None]: ...
+) -> Generator[None, Any]: ...
 def guard_to_detect_forward_monkeypatching(source, mod) -> None: ...
 
 class NNModuleVariable(VariableTracker):

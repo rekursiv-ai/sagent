@@ -1,6 +1,7 @@
-from torch import Tensor
-from typing import Any
 from collections.abc import Callable
+from typing import Any
+
+from torch import Tensor
 
 r"""Contains definitions of the methods used by the _BaseDataLoaderIter workers.
 

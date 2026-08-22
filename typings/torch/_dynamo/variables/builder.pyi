@@ -1,12 +1,10 @@
-from torch import Tensor
-from typing import Literal
-from typing import Any, NamedTuple, Union
+from typing import Any, Literal, NamedTuple, Union
 
 import dataclasses
 import re
 import weakref
 
-from torch import SymInt
+from torch import SymInt, Tensor
 from torch._dynamo.codegen import PyCodegen
 from torch._dynamo.symbolic_convert import InstructionTranslator
 from torch._subclasses.fake_tensor import FakeTensor

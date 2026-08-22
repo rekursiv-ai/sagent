@@ -1,7 +1,7 @@
-from torch import Tensor
 from collections.abc import Callable
 from typing_extensions import deprecated
 
+from torch import Tensor
 from torch.types import _TensorOrTensors
 
 import torch

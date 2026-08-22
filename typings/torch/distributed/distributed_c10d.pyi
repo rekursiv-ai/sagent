@@ -1,7 +1,6 @@
-from typing import Self
 from collections.abc import Callable
 from datetime import timedelta
-from typing import Any
+from typing import Any, Self
 from typing_extensions import deprecated
 
 import pickle

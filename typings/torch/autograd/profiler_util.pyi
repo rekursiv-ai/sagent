@@ -1,6 +1,6 @@
+from collections import defaultdict
 from collections.abc import Generator
 from typing import Any, Literal, Self
-from collections import defaultdict
 from typing_extensions import deprecated
 
 __all__ = [
@@ -145,7 +145,7 @@ class StringTable(defaultdict):
 
 class MemRecordsAcc:
     def __init__(self, mem_records) -> None: ...
-    def in_interval(self, start_us, end_us) -> Generator[Any, Any, None]: ...
+    def in_interval(self, start_us, end_us) -> Generator[Any, Any]: ...
 
 MEMORY_EVENT_NAME = ...
 OUT_OF_MEMORY_EVENT_NAME = ...

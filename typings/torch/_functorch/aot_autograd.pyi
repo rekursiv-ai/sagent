@@ -1,10 +1,9 @@
-from torch import Tensor
-from typing import Any
 from collections.abc import Callable
+from typing import Any
 
 import contextlib
 
-from torch import nn
+from torch import Tensor, nn
 from torch._inductor.cudagraph_utils import BoxedDeviceIndex
 from torch._inductor.utils import BoxedBool
 from torch._subclasses import FakeTensorMode

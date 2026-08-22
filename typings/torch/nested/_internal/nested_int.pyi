@@ -1,5 +1,5 @@
-from typing import Any
 from typing import *
+from typing import Any
 
 from torch.fx.experimental._constant_symnode import ConstantIntNode
 

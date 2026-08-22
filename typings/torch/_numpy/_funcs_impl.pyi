@@ -1,7 +1,8 @@
+from collections.abc import Sequence
+from typing import Any, Literal
+
 from numpy import ndarray
 from torch import Tensor
-from typing import Any, Literal
-from collections.abc import Sequence
 
 from ._normalizations import (
     ArrayLike,

@@ -1,9 +1,8 @@
-from torch import Tensor
-from typing import Any, Literal
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any, Literal
 
-from torch import fx
+from torch import Tensor, fx
 
 import torch
 

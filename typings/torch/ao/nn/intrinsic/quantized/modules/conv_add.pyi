@@ -1,4 +1,5 @@
 from typing import Any, Self
+
 import torch.ao.nn.quantized as nnq
 
 _reverse_repeat_padding = ...

@@ -1,5 +1,4 @@
-from typing import Self
-from typing import Any, TypeVar, overload
+from typing import Self, TypeVar, overload
 
 """A Python module for interacting and consuming responses from Slack."""
 T = TypeVar("T")

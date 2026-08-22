@@ -1,6 +1,5 @@
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, MutableSet
 from typing import Any, Self
-from collections.abc import Mapping, MutableSet
 
 class typedset(MutableSet):
     def __init__(self, type_, iterable=...) -> None: ...

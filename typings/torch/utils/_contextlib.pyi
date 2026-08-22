@@ -1,7 +1,5 @@
-from collections.abc import Generator
-from typing import Self
-from collections.abc import Callable
-from typing import Any, TypeVar
+from collections.abc import Callable, Generator
+from typing import Any, Self, TypeVar
 
 import types
 

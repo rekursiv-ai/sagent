@@ -1,7 +1,6 @@
-from typing import Any
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from torch import nn
 from xlstm.xlstm_large.model import mLSTMStateType

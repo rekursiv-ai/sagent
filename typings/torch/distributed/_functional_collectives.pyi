@@ -1,10 +1,10 @@
 from collections.abc import Generator
-from numpy import ndarray
-from torch import Tensor, dtype
 from typing import Any
 
 import contextlib
 
+from numpy import ndarray
+from torch import Tensor, dtype
 from torch.distributed.device_mesh import DeviceMesh
 
 import torch
@@ -109,7 +109,7 @@ class _FromTorchTensor(torch.autograd.Function):
 @contextlib.contextmanager
 def allow_inflight_collective_as_graph_input_ctx(
     value: bool = ...,
-) -> Generator[None, Any, None]: ...
+) -> Generator[None, Any]: ...
 
 lib_impl = ...
 legacy_lib = ...

@@ -1,6 +1,5 @@
 from collections.abc import Callable
-from typing import Self
-from typing import Any
+from typing import Any, Self
 
 import os
 

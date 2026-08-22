@@ -1,13 +1,11 @@
-from collections.abc import Generator
-from torch import Tensor
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Generator, Mapping, Sequence
 from typing import Any
 from typing_extensions import deprecated
 
 import contextlib
 import inspect
 
-from torch import _C
+from torch import _C, Tensor
 
 import torch
 import torch._C._onnx as _C_onnx
@@ -70,7 +68,7 @@ _params_dict = ...
 @contextlib.contextmanager
 def select_model_mode_for_export(
     model, mode: _C_onnx.TrainingMode
-) -> Generator[None, Any, None]: ...
+) -> Generator[None, Any]: ...
 @deprecated(
     "Please remove usage of this function. Copy its logic if it is required in user code",
     category=None,
@@ -78,10 +76,10 @@ def select_model_mode_for_export(
 @contextlib.contextmanager
 def disable_apex_o2_state_dict_hook(
     model: torch.nn.Module | torch.jit.ScriptFunction,
-) -> Generator[None, Any, None]: ...
+) -> Generator[None, Any]: ...
 @deprecated("The feature will be removed. Please remove usage of this function")
 @contextlib.contextmanager
-def setup_onnx_logging(verbose: bool) -> Generator[None, Any, None]: ...
+def setup_onnx_logging(verbose: bool) -> Generator[None, Any]: ...
 @deprecated(
     "The feature will be removed. Please remove usage of this function and implement equivalent logic if needed",
     category=None,
@@ -89,7 +87,7 @@ def setup_onnx_logging(verbose: bool) -> Generator[None, Any, None]: ...
 @contextlib.contextmanager
 def exporter_context(
     model, mode: _C_onnx.TrainingMode, verbose: bool
-) -> Generator[tuple[None, None, None], Any, None]: ...
+) -> Generator[tuple[None, None, None], Any]: ...
 def export(
     model: torch.nn.Module | torch.jit.ScriptModule | torch.jit.ScriptFunction,
     args: tuple[Any, ...] | torch.Tensor,

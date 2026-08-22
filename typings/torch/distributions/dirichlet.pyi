@@ -1,4 +1,5 @@
 from typing import Self
+
 from torch import Tensor
 from torch.autograd import Function
 from torch.autograd.function import once_differentiable

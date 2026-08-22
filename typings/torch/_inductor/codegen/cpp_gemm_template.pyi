@@ -1,7 +1,7 @@
-from torch import Tensor
-from typing import Literal
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
+
+from torch import Tensor
 
 import torch
 

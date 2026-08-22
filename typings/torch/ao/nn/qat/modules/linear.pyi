@@ -1,7 +1,6 @@
-from typing import Any
-from torch import Tensor
-from typing import Self
-from torch import nn
+from typing import Any, Self
+
+from torch import Tensor, nn
 
 __all__ = ["Linear"]
 

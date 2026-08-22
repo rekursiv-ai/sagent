@@ -108,7 +108,9 @@ test = [
 ]
 typecheck = [
     "basedpyright>=1.10",
-    "ty>=0.0.60",
+    # 0.0.72 and basedpyright 1.39.10 work correctly.
+    # https://github.com/astral-sh/ty/issues/4352
+    "ty>=0.0.60,!=0.0.73",
 ]
 "pre-commit" = [
     "pre-commit>=4.6",
@@ -159,6 +161,7 @@ markers = [
     "performance: timing-sensitive tests (deselected by default)",
     "slow: expensive local correctness test (JIT, training, full fixtures, git, bash, or a fresh interpreter); excluded from the fast unit tier and run by the pre-push slow gate",
     "real_llm: integration tests that spawn a live LLM CLI (claude/codex); skipped unless RUN_REAL_LLM=1 is set",
+    "cluster: requires live cluster access; deselected by default (run explicitly with -m cluster)",
     "bench_compile_time: asserts a compile-time budget or comparison",
     "bench_memory: asserts a memory-use budget or comparison",
     "bench_statistical: asserts a statistical performance contract",
@@ -206,7 +209,7 @@ markers = [
     "network_together: reaches Together over the network",
     "network_wandb: reaches Weights & Biases over the network",
 ]
-addopts = "-m 'not ci_smoke and not cuda and not integration and not performance and not slow' --durations=20 --dist=worksteal"
+addopts = "-m 'not ci_smoke and not cuda and not integration and not performance and not cluster and not slow' --durations=20 --dist=worksteal"
 timeout = 60
 # "error" = treat all warnings as errors (same as -werror).
 # using filterwarnings instead of addopts so we can add exceptions.
@@ -350,9 +353,6 @@ ignore = [
 
     # Exclusions due to public export.
     # "TC002",   # Typing-only third-party import. (Export strips runtime uses, leaving type-only imports.)
-]
-exclude = [
-    "**/typings/**",
 ]
 
 [tool.ruff.lint.per-file-ignores]

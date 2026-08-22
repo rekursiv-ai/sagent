@@ -1,6 +1,7 @@
 from collections.abc import Callable
-from torch import Size, Tensor
 from typing import Any, Self
+
+from torch import Size, Tensor
 
 class StorageWeakRef:
     __slots__ = ...

@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from types import ModuleType
 from typing import Any, Literal, Self, TypeIs
+
 import dataclasses
 import functools
 import random

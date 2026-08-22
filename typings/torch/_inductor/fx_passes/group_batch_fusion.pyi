@@ -1,7 +1,5 @@
-from collections.abc import Callable
-from typing import Literal
-from collections.abc import Iterable, Iterator
-from typing import Any
+from collections.abc import Callable, Iterable, Iterator
+from typing import Any, Literal
 
 import collections
 

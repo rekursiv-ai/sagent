@@ -1,4 +1,5 @@
 from typing import Self
+
 from torch import Tensor
 from torch.distributions.distribution import Distribution
 from torch.distributions.utils import lazy_property

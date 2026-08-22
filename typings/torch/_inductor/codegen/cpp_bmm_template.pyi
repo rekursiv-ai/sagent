@@ -1,6 +1,5 @@
-from typing import Literal
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 from .cpp_gemm_template import CppGemmTemplate
 from .cpp_template_kernel import CppTemplateKernel

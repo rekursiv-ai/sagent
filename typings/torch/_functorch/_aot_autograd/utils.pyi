@@ -1,8 +1,8 @@
-from collections.abc import Generator
-from torch import Tensor
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from typing import Any, TypeVar
 from typing_extensions import ParamSpec
+
+from torch import Tensor
 
 import torch
 import torch.utils._pytree as pytree

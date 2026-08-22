@@ -1,4 +1,5 @@
 from typing import Any
+
 from torch import Tensor, nn
 
 from .configuration_rt_detr_resnet import RTDetrResNetConfig

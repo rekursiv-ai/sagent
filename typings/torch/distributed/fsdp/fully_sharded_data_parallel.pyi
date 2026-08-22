@@ -50,8 +50,8 @@ class FullyShardedDataParallel(nn.Module, _FSDPState):
         limit_all_gathers: bool = ...,
         use_orig_params: bool = ...,
         ignored_states: Iterable[torch.nn.Parameter]
-        | None
-        | Iterable[torch.nn.Module] = ...,
+        | Iterable[torch.nn.Module]
+        | None = ...,
         device_mesh: DeviceMesh | None = ...,
     ) -> None: ...
     @property

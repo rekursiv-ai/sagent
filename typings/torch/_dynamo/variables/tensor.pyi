@@ -1,7 +1,8 @@
 from collections.abc import Callable
+from typing import Any, Literal, Self, TypeIs
+
 from numpy import ndarray
 from torch import Tensor
-from typing import Any, Literal, Self, TypeIs
 from torch._dynamo.codegen import PyCodegen
 from torch._dynamo.symbolic_convert import InstructionTranslator
 

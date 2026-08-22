@@ -1,7 +1,6 @@
-from typing import Literal, LiteralString, Self
 from collections.abc import Callable, Sequence
 from enum import Enum
-from typing import Any
+from typing import Any, Literal, LiteralString, Self
 
 from ..codegen import PyCodegen
 from ..source import Source

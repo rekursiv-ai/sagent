@@ -1,12 +1,10 @@
-from torch import Tensor
-from types import FunctionType
-from typing import Literal, Self
 from collections.abc import Callable
-from types import ModuleType
-from typing import Any, NamedTuple
+from types import FunctionType, ModuleType
+from typing import Any, Literal, NamedTuple, Self
 
 import functools
 
+from torch import Tensor
 from torch._library.fake_class_registry import FakeScriptObject
 
 import torch

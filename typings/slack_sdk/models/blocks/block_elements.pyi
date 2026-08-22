@@ -264,7 +264,7 @@ class ExternalDataSelectElement(InputInteractiveElement):
         *,
         action_id: str | None = ...,
         placeholder: str | TextObject | None = ...,
-        initial_option: Option | None | OptionGroup = ...,
+        initial_option: Option | OptionGroup | None = ...,
         min_query_length: int | None = ...,
         confirm: dict | ConfirmObject | None = ...,
         focus_on_load: bool | None = ...,

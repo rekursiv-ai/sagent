@@ -1,4 +1,5 @@
 from typing import Any
+
 from .base import VariableTracker
 from .user_defined import UserDefinedObjectVariable
 

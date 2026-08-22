@@ -1,6 +1,6 @@
-from typing import Any
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from torch import nn
 

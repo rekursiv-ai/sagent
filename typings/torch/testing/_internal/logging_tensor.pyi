@@ -1,6 +1,5 @@
-from collections.abc import Generator
+from collections.abc import Generator, Iterator
 from typing import Any, Literal
-from collections.abc import Iterator
 
 import contextlib
 import logging
@@ -50,4 +49,4 @@ def capture_logs(
 @contextlib.contextmanager
 def capture_logs_with_logging_tensor_mode(
     python_tb=..., script_tb=..., cpp_tb=...
-) -> Generator[list[str], Any, None]: ...
+) -> Generator[list[str], Any]: ...

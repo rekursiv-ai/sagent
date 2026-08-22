@@ -1,12 +1,12 @@
 from collections.abc import Callable, Generator, Iterable
-from torch import Tensor
-from typing import Any, TypeVar
 from typing import *
+from typing import Any, TypeVar
 from weakref import ReferenceType
 
 import contextlib
 import enum
 
+from torch import Tensor
 from torch.utils._python_dispatch import TorchDispatchMode
 
 import torch
@@ -35,7 +35,7 @@ _checkpoint_debug_enabled: Optional[bool] = ...
 @contextlib.contextmanager
 def set_checkpoint_debug_enabled(
     enabled: Optional[bool],
-) -> Generator[None, Any, None]: ...
+) -> Generator[None, Any]: ...
 def detach_variable(inputs: Tuple[Any, ...]) -> Tuple[torch.Tensor, ...]: ...
 def check_backward_validity(inputs: Iterable[Any]) -> None: ...
 
@@ -75,7 +75,7 @@ def checkpoint_sequential(functions, segments, input, use_reentrant=..., **kwarg
 _enable_checkpoint_early_stop: Optional[bool] = ...
 
 @contextlib.contextmanager
-def set_checkpoint_early_stop(enable: bool) -> Generator[None, Any, None]: ...
+def set_checkpoint_early_stop(enable: bool) -> Generator[None, Any]: ...
 
 class _Handle: ...
 

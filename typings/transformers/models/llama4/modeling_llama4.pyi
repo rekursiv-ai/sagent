@@ -1,5 +1,5 @@
-from typing import Any
 from dataclasses import dataclass
+from typing import Any
 
 from torch import nn
 from transformers.models.llama4.configuration_llama4 import Llama4VisionConfig

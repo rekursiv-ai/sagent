@@ -1,7 +1,6 @@
-from typing import Any, Literal
 from collections.abc import Callable, Sequence
 from enum import Enum
-from typing import TypeVar
+from typing import Any, Literal, TypeVar
 from typing_extensions import ParamSpec
 
 from torch import Tensor

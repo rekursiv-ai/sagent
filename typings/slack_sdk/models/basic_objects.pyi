@@ -1,6 +1,5 @@
 from abc import ABCMeta, abstractmethod
 from collections.abc import Callable, Iterable
-from typing import Any
 
 class BaseObject: ...
 

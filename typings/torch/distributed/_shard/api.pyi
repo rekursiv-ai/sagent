@@ -1,6 +1,6 @@
 from collections.abc import Generator
-from typing import Any
 from contextlib import contextmanager
+from typing import Any
 
 from torch import nn
 
@@ -21,7 +21,7 @@ def shard_parameter(
 _CURRENT_PROCESS_GROUP: dist.ProcessGroup | None = ...
 
 @contextmanager
-def load_with_process_group(process_group) -> Generator[Any, Any, None]: ...
+def load_with_process_group(process_group) -> Generator[Any, Any]: ...
 def shard_module(
     module: nn.Module, plan: ShardingPlan, src_rank=..., process_group=...
 ) -> None: ...

@@ -1,7 +1,8 @@
-from torch import Tensor
 from typing import NamedTuple
 
 import types
+
+from torch import Tensor
 
 import torch
 

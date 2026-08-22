@@ -1,4 +1,5 @@
 from typing import Any, Literal
+
 import torch
 
 from ..ir import ShapeAsConstantBuffer, Subgraph, TensorBox

@@ -1,8 +1,7 @@
-from typing import Self
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Self
 
 from torch.types import FileLike
 from torch.utils.hooks import RemovableHandle

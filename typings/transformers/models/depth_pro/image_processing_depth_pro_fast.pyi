@@ -19,7 +19,7 @@ class DepthProImageProcessorFast(BaseImageProcessorFast):
     def post_process_depth_estimation(
         self,
         outputs: DepthProDepthEstimatorOutput,
-        target_sizes: None | TensorType | list[tuple[int, int]] = ...,
+        target_sizes: TensorType | list[tuple[int, int]] | None = ...,
     ) -> list[dict[str, TensorType]]: ...
 
 __all__ = ["DepthProImageProcessorFast"]
