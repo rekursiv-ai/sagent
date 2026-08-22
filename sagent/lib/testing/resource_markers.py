@@ -211,20 +211,23 @@ def apply_resource_markers(
     live_llm_env_var: str = "RUN_REAL_LLM",
 ) -> None:
     """Apply virtual family markers, timeout budgets, and skip policy."""
+    known_resources = set(resource_markers)
     for item in items:
-        _fail_on_unknown_resource_markers(item, resource_markers=resource_markers)
-        resource_timeouts: list[int] = []
-        resource_aliases: set[str] = set()
-        for marker in resource_markers:
-            if item.get_closest_marker(marker) is None:
-                continue
-            resource_timeouts.append(resource_marker_timeout(marker))
-            resource_aliases.update(resource_marker_aliases(marker))
+        # ONE marker walk per item. ``get_closest_marker`` re-walks the whole
+        # parent chain per name, so asking it about every registered resource
+        # marker was quadratic: 47 walks x 29k items x 7 conftest hook bindings
+        # cost 36s of every repo-wide collection.
+        existing = {marker.name for marker in item.iter_markers()}
+        _fail_on_unknown_resource_markers(existing, resource_markers=known_resources)
+        carried = existing & known_resources
+        resource_timeouts = [resource_marker_timeout(marker) for marker in carried]
+        resource_aliases = {
+            alias for marker in carried for alias in resource_marker_aliases(marker)
+        }
         # A root conftest and a package conftest both bind this hook, so an item
         # is walked once per binding. EVERY mark added below is therefore guarded
         # by what the item already carries -- one rule, rather than a per-branch
         # check that the next branch forgets.
-        existing = {marker.name for marker in item.iter_markers()}
         for alias in sorted(resource_aliases - existing):
             alias_marker = cast(pytest.MarkDecorator, getattr(pytest.mark, alias))
             item.add_marker(alias_marker)
@@ -233,6 +236,7 @@ def apply_resource_markers(
         if "skip" not in existing:
             _apply_skip_policy(
                 item,
+                names=existing,
                 live_llm_marks=live_llm_marks,
                 live_llm_env_var=live_llm_env_var,
                 ci_skipped_marks=ci_skipped_marks,
@@ -242,15 +246,14 @@ def apply_resource_markers(
 def _apply_skip_policy(
     item: MarkedItem,
     *,
+    names: set[str],
     live_llm_marks: tuple[str, ...],
     live_llm_env_var: str,
     ci_skipped_marks: tuple[str, ...],
 ) -> None:
     """Skip an item whose resource is unavailable in this environment."""
     for mark in live_llm_marks:
-        if item.get_closest_marker(mark) is not None and not os.environ.get(
-            live_llm_env_var
-        ):
+        if mark in names and not os.environ.get(live_llm_env_var):
             item.add_marker(
                 pytest.mark.skip(
                     reason=(
@@ -262,7 +265,7 @@ def _apply_skip_policy(
             return
     if os.environ.get("CI") and not os.environ.get("RUN_INTEGRATION"):
         for mark in ci_skipped_marks:
-            if item.get_closest_marker(mark) is not None:
+            if mark in names:
                 item.add_marker(
                     pytest.mark.skip(
                         reason=(
@@ -276,9 +279,9 @@ def _apply_skip_policy(
 
 
 def _fail_on_unknown_resource_markers(
-    item: MarkedItem,
+    names: set[str],
     *,
-    resource_markers: tuple[str, ...],
+    resource_markers: set[str],
     resource_families: tuple[str, ...] = (
         "bench",
         "browser",
@@ -290,8 +293,7 @@ def _fail_on_unknown_resource_markers(
     ),
 ) -> None:
     """Fail collection when a resource-prefixed marker is not registered."""
-    known = set(resource_markers)
-    for marker in item.iter_markers():
-        family, separator, _specific = marker.name.partition("_")
-        if separator and family in resource_families and marker.name not in known:
-            raise pytest.UsageError(f"Unknown resource marker: {marker.name}")
+    for name in names - resource_markers:
+        family, separator, _specific = name.partition("_")
+        if separator and family in resource_families:
+            raise pytest.UsageError(f"Unknown resource marker: {name}")
