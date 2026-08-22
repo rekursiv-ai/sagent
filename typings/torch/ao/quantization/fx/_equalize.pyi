@@ -1,9 +1,7 @@
-from torch import Tensor
-from typing import Self
 from collections import namedtuple
-from typing import Any
+from typing import Any, Self
 
-from torch import nn
+from torch import Tensor, nn
 from torch.fx import GraphModule
 from torch.fx.graph import Node
 

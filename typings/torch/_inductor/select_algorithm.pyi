@@ -1,15 +1,13 @@
-from collections.abc import Generator
+from collections.abc import Callable, Generator, Sequence
 from functools import partial
-from torch import Tensor
-from typing import Literal
-from collections.abc import Callable, Sequence
 from types import ModuleType
-from typing import Any, NamedTuple, Self
+from typing import Any, Literal, NamedTuple, Self
 
 import contextlib
 import dataclasses
 import functools
 
+from torch import Tensor
 from torch._inductor.codegen.simd import IterationRangesRoot
 from torch.utils._ordered_set import OrderedSet
 
@@ -127,9 +125,9 @@ class TritonTemplateKernel(TritonKernel):
     def record_input_dependent_tracked_event(self) -> Callable[..., Any]: ...
     def replay_cached_events(self, events: RecordedEventsType) -> None: ...
     @contextlib.contextmanager
-    def set_subgraph_body(self, body_name: str) -> Generator[None, Any, None]: ...
+    def set_subgraph_body(self, body_name: str) -> Generator[None, Any]: ...
     @contextlib.contextmanager
-    def create_subgraph_body(self, body_name: str) -> Generator[None, Any, None]: ...
+    def create_subgraph_body(self, body_name: str) -> Generator[None, Any]: ...
     def need_numel_args(self) -> Literal[False]: ...
     def estimate_kernel_num_bytes(self) -> int: ...
     def estimate_flops(self) -> int: ...

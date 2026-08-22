@@ -1,6 +1,5 @@
-from typing import Any, Self
 from collections.abc import Hashable
-from typing import TypeVar
+from typing import Any, Self, TypeVar
 
 T = TypeVar("T", bound=_Union)
 

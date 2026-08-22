@@ -1,13 +1,11 @@
-from collections.abc import Callable, Iterator
-from numpy import ndarray
+from collections.abc import Callable, Iterator, Sequence
 from types import NotImplementedType
-from typing import Self
-from collections.abc import Sequence
-from typing import Any, TypeVar, overload
+from typing import Any, Self, TypeVar, overload
 from typing_extensions import ParamSpec
 
 import enum
 
+from numpy import ndarray
 from torch import _C
 
 import torch

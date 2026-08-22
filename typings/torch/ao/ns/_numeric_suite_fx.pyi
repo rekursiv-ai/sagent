@@ -1,8 +1,7 @@
-from torch import Tensor
 from collections.abc import Callable
 from typing import Any
 
-from torch import nn
+from torch import Tensor, nn
 from torch.ao.ns.fx.qconfig_multi_mapping import QConfigMultiMapping
 from torch.ao.quantization import quantize_fx
 from torch.ao.quantization.backend_config import BackendConfig

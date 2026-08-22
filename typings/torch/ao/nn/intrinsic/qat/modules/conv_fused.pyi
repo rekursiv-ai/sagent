@@ -1,8 +1,6 @@
-from torch import Tensor
-from typing import Any, Self
-from typing import ClassVar
+from typing import Any, ClassVar, Self
 
-from torch import nn
+from torch import Tensor, nn
 
 import torch.ao.nn.intrinsic as nni
 import torch.ao.nn.qat as nnqat

@@ -200,8 +200,8 @@ class FreeSymbolsOpsHandler(DefaultHandler):
         dtype: torch.dtype,
         src_dtype: torch.dtype,
         reduction_type: ReductionType,
-        value: None | tuple[None, ...],
-    ) -> None | tuple[None, ...]: ...
+        value: tuple[None, ...] | None,
+    ) -> tuple[None, ...] | None: ...
     def masked(self, mask: Any, body: Callable[..., Any], other: Any) -> None: ...
 
 def extract_free_symbols(

@@ -1,6 +1,7 @@
-from torch import Tensor
 from collections.abc import Callable
 from typing import Any
+
+from torch import Tensor
 
 __all__ = [
     "Constraint",

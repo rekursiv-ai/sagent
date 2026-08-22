@@ -1,6 +1,6 @@
 from collections.abc import Generator
-from typing import Any
 from contextlib import contextmanager
+from typing import Any
 
 """
 Contains utils for logging in AOTAutograd, including managing the names of the graphs under
@@ -17,7 +17,7 @@ def get_aot_graph_name() -> str: ...
 get_graph_being_compiled = ...
 
 @contextmanager
-def track_graph_compiling(aot_config, graph_name) -> Generator[None, Any, None]: ...
+def track_graph_compiling(aot_config, graph_name) -> Generator[None, Any]: ...
 
 callback_set = ...
 

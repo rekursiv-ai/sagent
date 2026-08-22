@@ -1,11 +1,9 @@
-from collections.abc import Generator
-from torch import Tensor
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from typing import Any, NamedTuple
 
 import contextlib
 
-from torch import nn
+from torch import Tensor, nn
 from torch.distributed.tensor import Shard
 from torch.utils.hooks import RemovableHandle
 
@@ -71,7 +69,7 @@ class FSDPParamGroup:
     @contextlib.contextmanager
     def use_training_state(
         self, training_state: TrainingState
-    ) -> Generator[None, Any, None]: ...
+    ) -> Generator[None, Any]: ...
 
 class RegisterPostBackwardFunction(torch.autograd.Function):
     @staticmethod

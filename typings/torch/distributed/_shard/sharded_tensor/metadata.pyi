@@ -1,6 +1,6 @@
-from typing import Literal
 from dataclasses import dataclass
 from enum import Enum
+from typing import Literal
 
 from torch.distributed._shard.metadata import ShardMetadata
 

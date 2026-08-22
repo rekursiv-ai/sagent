@@ -1,8 +1,7 @@
-from typing import Literal, Self
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, Self
 
 from torch import Tensor
 from torch._C import DispatchKey

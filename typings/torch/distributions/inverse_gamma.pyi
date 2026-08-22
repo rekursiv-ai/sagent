@@ -1,4 +1,5 @@
 from typing import Self
+
 from torch import Tensor
 from torch.distributions.gamma import Gamma
 from torch.distributions.transformed_distribution import TransformedDistribution

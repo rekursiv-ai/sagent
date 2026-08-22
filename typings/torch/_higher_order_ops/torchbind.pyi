@@ -1,6 +1,6 @@
 from collections.abc import Generator
-from typing import Any
 from contextlib import contextmanager
+from typing import Any
 
 from torch._C import DispatchKey
 from torch._ops import HigherOrderOperator
@@ -22,7 +22,7 @@ _orig_scriptmethod_call = ...
 
 def torchbind_method_redispatch(self, *args, **kwargs) -> None: ...
 @contextmanager
-def enable_torchbind_tracing() -> Generator[None, Any, None]: ...
+def enable_torchbind_tracing() -> Generator[None, Any]: ...
 @call_torchbind.py_impl(DispatchKey.CompositeExplicitAutograd)
 def call_torchbind_impl(obj, method, *args, **kwargs) -> Any: ...
 @call_torchbind.py_impl(ProxyTorchDispatchMode)

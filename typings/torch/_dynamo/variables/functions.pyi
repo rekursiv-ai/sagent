@@ -1,14 +1,12 @@
-from functools import partial
-from torch import Tensor
-from types import MethodType
-from typing import Literal, Self, TypeIs
 from collections.abc import Callable, Sequence
-from types import FunctionType
-from typing import Any, Never, TypeVar
+from functools import partial
+from types import FunctionType, MethodType
+from typing import Any, Literal, Never, Self, TypeIs, TypeVar
 
 import builtins
 import types
 
+from torch import Tensor
 from torch._dynamo.codegen import PyCodegen
 from torch._dynamo.symbolic_convert import InstructionTranslator
 from torch._higher_order_ops.triton_kernel_wrap import (

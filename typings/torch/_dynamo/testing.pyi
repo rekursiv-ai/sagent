@@ -1,11 +1,10 @@
-from torch import Tensor
 from collections.abc import Callable, Sequence
 from typing import Any, TypeVar, overload
 from typing_extensions import ParamSpec
 
 import types
 
-from torch import fx
+from torch import Tensor, fx
 
 import numpy as np
 import torch

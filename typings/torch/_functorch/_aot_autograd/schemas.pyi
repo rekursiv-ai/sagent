@@ -80,8 +80,8 @@ class SubclassCreationMeta:
     arg_count: int
     included_subclass_symints: bool
     attrs: dict[str, SubclassCreationMeta | PlainTensorMeta]
-    outer_size: Iterable[None | int | torch.SymInt]
-    outer_stride: Iterable[None | int | torch.SymInt]
+    outer_size: Iterable[int | torch.SymInt | None]
+    outer_stride: Iterable[int | torch.SymInt | None]
     meta: Any
     original_subclass: torch.Tensor | None
     original_subclass_type: type | None = ...

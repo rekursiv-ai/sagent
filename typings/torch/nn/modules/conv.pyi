@@ -1,5 +1,4 @@
-from typing import Any
-from typing import Literal
+from typing import Any, Literal
 from typing_extensions import deprecated
 
 from torch import Tensor

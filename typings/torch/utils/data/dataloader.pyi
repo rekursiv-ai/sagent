@@ -1,5 +1,4 @@
-from collections.abc import Generator
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Generator, Iterable, Sequence
 from typing import Any, Generic, Self, TypeVar
 
 from torch.utils.data.dataset import Dataset

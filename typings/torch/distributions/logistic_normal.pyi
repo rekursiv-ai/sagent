@@ -1,4 +1,5 @@
 from typing import Self
+
 from torch import Tensor
 from torch.distributions import Independent
 from torch.distributions.normal import Normal

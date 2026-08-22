@@ -1,5 +1,5 @@
-from typing import Any, Self
 from collections import namedtuple
+from typing import Any, Self
 from typing_extensions import deprecated
 
 from torch.ao.quantization.fake_quantize import FakeQuantizeBase

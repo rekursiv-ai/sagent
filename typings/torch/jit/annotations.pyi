@@ -1,7 +1,9 @@
-from torch import Tensor
 from types import FunctionType, MethodType
 from typing import Any, TypeIs
+
 import enum
+
+from torch import Tensor
 
 class Module:
     def __init__(self, name, members) -> None: ...

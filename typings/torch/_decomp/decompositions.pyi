@@ -1,7 +1,7 @@
-from types import NotImplementedType
-from typing import Any
 from collections.abc import Callable
 from enum import Enum
+from types import NotImplementedType
+from typing import Any
 
 from torch import Tensor
 from torch._decomp import register_decomposition

@@ -1,6 +1,6 @@
 from collections.abc import Callable
-from typing import Any
 from dataclasses import dataclass
+from typing import Any
 
 from torch._C import DispatchKey
 from torch._higher_order_ops.utils import FunctionalizeCtxWrapper, register_fake

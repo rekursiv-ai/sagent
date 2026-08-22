@@ -1,5 +1,4 @@
-from collections.abc import Generator
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Generator, Iterable, Sequence
 from contextlib import contextmanager
 from typing import Any, Generic, Protocol, TypeVar, overload
 from typing_extensions import ParamSpec
@@ -67,7 +66,7 @@ class CustomOpDef(Generic[_P, _R]):
     @contextmanager
     def set_kernel_enabled(
         self, device_type: str, enabled: bool = ...
-    ) -> Generator[None, Any, None]: ...
+    ) -> Generator[None, Any]: ...
     @overload
     def register_kernel(self, device_types: device_types_t, fn: _F, /) -> _F: ...
     @overload

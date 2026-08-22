@@ -1,5 +1,5 @@
-from typing import Any
 from dataclasses import dataclass
+from typing import Any
 
 from torch import Tensor, nn
 from transformers.utils.generic import TransformersKwargs, check_model_inputs

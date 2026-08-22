@@ -1,10 +1,10 @@
-from typing import Literal
 from collections.abc import Callable as Callable
 from functools import lru_cache as lru_cache
 from pathlib import Path as Path
 from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,
+    Literal,
     NewType as NewType,
     Optional as Optional,
     Union as Union,

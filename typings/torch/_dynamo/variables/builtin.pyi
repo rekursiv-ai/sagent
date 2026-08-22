@@ -1,12 +1,10 @@
-from collections.abc import Generator
-from torch import dtype
-from typing import Self
-from collections.abc import Callable, Sequence
-from typing import Any
+from collections.abc import Callable, Generator, Sequence
+from typing import Any, Self
 
 import contextlib
 import typing
 
+from torch import dtype
 from torch._dynamo.codegen import PyCodegen
 from torch._dynamo.symbolic_convert import InstructionTranslator
 
@@ -246,4 +244,4 @@ class BuiltinVariable(VariableTracker):
     ) -> VariableTracker: ...
 
 @contextlib.contextmanager
-def dynamo_disable_grad(tx) -> Generator[None, Any, None]: ...
+def dynamo_disable_grad(tx) -> Generator[None, Any]: ...

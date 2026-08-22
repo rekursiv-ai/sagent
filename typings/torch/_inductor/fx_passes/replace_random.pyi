@@ -1,4 +1,5 @@
 from typing import Any
+
 import torch
 
 from ..pattern_matcher import CallFunctionVarArgs, Match, register_graph_pattern

@@ -1,6 +1,5 @@
-from typing import Literal
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import functools
 

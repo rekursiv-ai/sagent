@@ -1,7 +1,6 @@
-from typing import LiteralString
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, LiteralString
 
 import abc
 

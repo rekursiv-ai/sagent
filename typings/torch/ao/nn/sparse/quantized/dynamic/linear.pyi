@@ -1,4 +1,5 @@
 from typing import Any, Self
+
 import torch
 
 __all__ = ["Linear"]

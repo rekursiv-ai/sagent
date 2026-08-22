@@ -1,6 +1,5 @@
-from typing import Self
 from collections.abc import Callable
-from typing import TypeVar
+from typing import Self, TypeVar
 
 from torch.fx import Graph
 from torch.fx._compatibility import compatibility

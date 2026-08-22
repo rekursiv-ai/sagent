@@ -1,6 +1,5 @@
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from typing import Any
-from collections.abc import Callable
 from typing_extensions import deprecated
 
 import contextlib
@@ -27,7 +26,7 @@ def get_none() -> None: ...
 global_ctx_getter: Callable = ...
 
 @contextlib.contextmanager
-def set_ctx_getter(ctx_getter) -> Generator[None, Any, None]: ...
+def set_ctx_getter(ctx_getter) -> Generator[None, Any]: ...
 
 class FakeImplCtx:
     def __init__(self, _fake_mode, _op) -> None: ...

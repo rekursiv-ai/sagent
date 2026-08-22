@@ -1,7 +1,5 @@
-from collections.abc import Generator
-from typing import Self
-from collections.abc import Callable, Iterable
-from typing import Any, TypeVar
+from collections.abc import Callable, Generator, Iterable
+from typing import Any, Self, TypeVar
 from typing_extensions import ParamSpec
 
 import contextlib
@@ -78,4 +76,4 @@ class BaseTorchFunctionMode(TorchFunctionMode):
     def __torch_function__(self, func, types, args=..., kwargs=...): ...
 
 @contextlib.contextmanager
-def enable_reentrant_dispatch() -> Generator[None, Any, None]: ...
+def enable_reentrant_dispatch() -> Generator[None, Any]: ...

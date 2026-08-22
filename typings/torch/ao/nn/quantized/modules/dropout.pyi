@@ -1,6 +1,7 @@
-from typing import Any
+from typing import Any, Self
+
 from torch import Tensor
-from typing import Self
+
 import torch
 
 __all__ = ["Dropout"]

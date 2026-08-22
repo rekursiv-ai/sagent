@@ -1,5 +1,5 @@
-from typing import Any, Literal
 from collections.abc import Callable
+from typing import Any, Literal
 
 from .triton_compat import triton
 

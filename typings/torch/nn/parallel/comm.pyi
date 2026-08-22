@@ -1,5 +1,6 @@
-from torch import Tensor
 from typing import Any
+
+from torch import Tensor
 
 def broadcast(tensor, devices=..., *, out=...) -> list[Tensor]: ...
 def broadcast_coalesced(tensors, devices, buffer_size=...) -> list[list[Tensor]]: ...

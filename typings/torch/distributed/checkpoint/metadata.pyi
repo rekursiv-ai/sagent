@@ -1,8 +1,7 @@
-from typing import Literal
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 import os
 

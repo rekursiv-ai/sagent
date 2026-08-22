@@ -22,8 +22,6 @@ type _grad_t = tuple[Tensor, ...] | Tensor
 T = TypeVar("T", bound=Module)
 
 class _HasForward[**P, R](Protocol):
-    """Structural view of a module's own `forward`, used to type `__call__`."""
-
     def forward(self, *args: P.args, **kwargs: P.kwargs) -> R: ...
 
 class _IncompatibleKeys(NamedTuple):
@@ -63,13 +61,13 @@ def register_module_forward_hook(
     hook: Callable[..., None], *, with_kwargs: bool = ..., always_call: bool = ...
 ) -> RemovableHandle: ...
 def register_module_backward_hook(
-    hook: Callable[[Module, _grad_t, _grad_t], None | _grad_t],
+    hook: Callable[[Module, _grad_t, _grad_t], _grad_t | None],
 ) -> RemovableHandle: ...
 def register_module_full_backward_pre_hook(
-    hook: Callable[[Module, _grad_t], None | _grad_t],
+    hook: Callable[[Module, _grad_t], _grad_t | None],
 ) -> RemovableHandle: ...
 def register_module_full_backward_hook(
-    hook: Callable[[Module, _grad_t, _grad_t], None | _grad_t],
+    hook: Callable[[Module, _grad_t, _grad_t], _grad_t | None],
 ) -> RemovableHandle: ...
 
 class Module:
@@ -141,14 +139,14 @@ class Module:
     def to(self, *, memory_format: memory_format) -> Self: ...
     def to(self, *args, **kwargs) -> Self: ...
     def register_full_backward_pre_hook(
-        self, hook: Callable[[Module, _grad_t], None | _grad_t], prepend: bool = ...
+        self, hook: Callable[[Module, _grad_t], _grad_t | None], prepend: bool = ...
     ) -> RemovableHandle: ...
     def register_backward_hook(
-        self, hook: Callable[[Module, _grad_t, _grad_t], None | _grad_t]
+        self, hook: Callable[[Module, _grad_t, _grad_t], _grad_t | None]
     ) -> RemovableHandle: ...
     def register_full_backward_hook(
         self,
-        hook: Callable[[Module, _grad_t, _grad_t], None | _grad_t],
+        hook: Callable[[Module, _grad_t, _grad_t], _grad_t | None],
         prepend: bool = ...,
     ) -> RemovableHandle: ...
     def register_forward_pre_hook(

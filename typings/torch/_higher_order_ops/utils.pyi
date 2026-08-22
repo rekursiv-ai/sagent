@@ -1,9 +1,8 @@
-from torch import Tensor
-from typing import Literal
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, TypeVar, overload
+from typing import Any, Literal, TypeVar, overload
 
+from torch import Tensor
 from torch._higher_order_ops.schema import HopSchema
 from torch._ops import HigherOrderOperator, OperatorBase, OpOverload
 from torch._subclasses.fake_tensor import FakeTensor

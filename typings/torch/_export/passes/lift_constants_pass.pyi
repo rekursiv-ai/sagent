@@ -1,9 +1,9 @@
-from collections.abc import Generator
-from torch import Tensor
+from collections.abc import Iterator
 from typing import Any
 
 import collections
 
+from torch import Tensor
 from torch.export.exported_program import ExportGraphSignature
 from torch.fx._symbolic_trace import _ConstantAttributeType
 
@@ -19,7 +19,7 @@ class ConstantAttrMap(collections.abc.MutableMapping):
     def __delitem__(self, key: _ConstantAttributeType) -> None: ...
     def __iter__(
         self,
-    ) -> Generator[ScriptObject | Tensor | FakeScriptObject | Any, Any, None]: ...
+    ) -> Iterator[ScriptObject | Tensor | FakeScriptObject | Any]: ...
     def __len__(self) -> int: ...
     def __contains__(self, key: object) -> bool: ...
 

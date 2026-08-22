@@ -1,4 +1,5 @@
 from typing import Any
+
 from torch.ao.nn.intrinsic.modules.fused import _FusedModule
 
 import torch

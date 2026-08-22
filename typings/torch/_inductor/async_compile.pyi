@@ -1,5 +1,4 @@
-from collections.abc import Generator
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
@@ -44,7 +43,7 @@ class CompiledTritonKernels:
     def remove_future(kernel_src: str) -> None: ...
 
 @contextlib.contextmanager
-def async_compile_pool_manager() -> Generator[None, Any, None]: ...
+def async_compile_pool_manager() -> Generator[None, Any]: ...
 
 class AsyncCompile:
     _ready_future: Future[Any] | None = ...

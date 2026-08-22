@@ -1,5 +1,5 @@
-from typing import Any
 from collections.abc import Iterable, Iterator
+from typing import Any
 
 from torch.distributed import ProcessGroup
 

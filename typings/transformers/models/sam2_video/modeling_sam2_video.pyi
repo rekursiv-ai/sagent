@@ -1,6 +1,6 @@
-from typing import Any
 from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Any
 
 from torch import Tensor, nn
 

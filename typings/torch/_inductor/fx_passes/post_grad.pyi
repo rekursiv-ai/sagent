@@ -1,6 +1,5 @@
-from typing import Literal
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 from typing_extensions import ParamSpec
 
 import operator

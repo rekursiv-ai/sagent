@@ -1,4 +1,5 @@
 from typing import Any, Self
+
 from torch import Tensor
 
 import torch

@@ -1,6 +1,9 @@
 from collections.abc import Sequence
-from torch import Tensor as Tensor
-from torch import return_types
+
+from torch import (
+    Tensor as Tensor,
+    return_types,
+)
 from torch._C import (
     _add_docstr as _add_docstr,
     _linalg as _linalg,

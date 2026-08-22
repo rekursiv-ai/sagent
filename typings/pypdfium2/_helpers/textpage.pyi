@@ -1,4 +1,5 @@
 from typing import Any
+
 import ctypes
 
 import pypdfium2.internal as pdfium_i

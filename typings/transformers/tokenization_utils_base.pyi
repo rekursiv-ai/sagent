@@ -84,7 +84,7 @@ class BatchEncoding(UserDict):
         self,
         data: dict[str, Any] | None = ...,
         encoding: EncodingFast | Sequence[EncodingFast] | None = ...,
-        tensor_type: None | str | TensorType = ...,
+        tensor_type: str | TensorType | None = ...,
         prepend_batch_axis: bool = ...,
         n_sequences: int | None = ...,
     ) -> None: ...

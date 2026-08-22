@@ -1,6 +1,6 @@
 from collections.abc import Generator
-from typing import Any
 from contextlib import contextmanager as contextmanager
+from typing import Any
 
 from torch.backends import (
     ContextProp as ContextProp,
@@ -10,7 +10,7 @@ from torch.backends import (
 
 def set_flags(_immediate=...) -> tuple[bool]: ...
 @contextmanager
-def flags(immediate=...) -> Generator[None, Any, None]: ...
+def flags(immediate=...) -> Generator[None, Any]: ...
 
 class MiopenModule(PropModule):
     def __init__(self, m, name) -> None: ...

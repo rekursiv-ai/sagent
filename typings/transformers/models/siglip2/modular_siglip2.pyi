@@ -1,4 +1,5 @@
 from typing import Any
+
 from torch import nn
 from transformers.models.siglip.configuration_siglip import (
     SiglipConfig,

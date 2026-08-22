@@ -1,11 +1,10 @@
-from collections import OrderedDict
-from torch import Tensor
 from abc import abstractmethod
+from collections import OrderedDict
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from torch import nn
+from torch import Tensor, nn
 from torch.fx import Node
 
 import torch

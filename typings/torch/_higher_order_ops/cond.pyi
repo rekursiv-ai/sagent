@@ -1,7 +1,7 @@
-from torch import Tensor
 from collections.abc import Callable
 from typing import Any
 
+from torch import Tensor
 from torch._C import DispatchKey
 from torch._functorch.utils import exposed_in
 from torch._ops import HigherOrderOperator

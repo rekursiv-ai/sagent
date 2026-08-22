@@ -1,5 +1,4 @@
-from typing import Self
-from typing import Any, final
+from typing import Any, Self, final
 
 from torch._ops import OpOverload
 from torch.export.exported_program import ExportedProgram

@@ -1,7 +1,6 @@
-from collections.abc import Generator
-from typing import Any
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
+from typing import Any
 
 from torch import Tensor
 from torch.nn.modules.container import Module, ModuleList
@@ -20,7 +19,7 @@ _cache_enabled = ...
 _cache: dict[tuple[int, str], Tensor | None] = ...
 
 @contextmanager
-def cached() -> Generator[None, Any, None]: ...
+def cached() -> Generator[None, Any]: ...
 
 class ParametrizationList(ModuleList):
     original: Tensor

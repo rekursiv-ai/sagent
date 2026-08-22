@@ -1,5 +1,5 @@
-from typing import Any
 from dataclasses import dataclass
+from typing import Any
 
 from PIL import Image
 from torch import nn

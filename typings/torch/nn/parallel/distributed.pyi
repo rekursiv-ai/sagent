@@ -1,12 +1,10 @@
-from collections.abc import Generator
-from torch import Tensor
-from typing import Self
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Self
 
+from torch import Tensor
 from torch.autograd import Function
 from torch.distributed.algorithms.join import Joinable, JoinHook
 from torch.nn.modules import Module
@@ -74,7 +72,7 @@ class DistributedDataParallel(Module, Joinable):
     def __getstate__(self) -> MappingProxyType[str, Any]: ...
     def __setstate__(self, state) -> None: ...
     @contextmanager
-    def no_sync(self) -> Generator[None, Any, None]: ...
+    def no_sync(self) -> Generator[None, Any]: ...
     def forward(self, *inputs, **kwargs) -> RRef[PyTree] | PyTree: ...
     def __call__(self, *args: Any, **kwargs: Any) -> RRef[PyTree] | PyTree: ...
     def scatter(

@@ -1,8 +1,7 @@
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from typing import Any, Literal
+
 from torch import Tensor
-from typing import Literal
-from collections.abc import Sequence
-from typing import Any
 
 import torch
 

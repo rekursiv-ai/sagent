@@ -1,7 +1,8 @@
-from torch import Tensor
 from typing import Any
 
 import functools
+
+from torch import Tensor
 
 from ..codegen.subgraph import SubgraphChoiceCaller, SubgraphTemplate
 from ..ir import Buffer, Layout

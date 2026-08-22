@@ -1,5 +1,5 @@
-from typing import Any
-from typing import Self
+from typing import Any, Self
+
 from torch import Tensor, nn
 
 __all__ = ["Embedding", "EmbeddingBag"]

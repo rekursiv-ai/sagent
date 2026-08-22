@@ -1,5 +1,6 @@
-from torch import Tensor
 from typing import Any
+
+from torch import Tensor
 from torch.autograd import Function
 
 def broadcast(tensor, src, group=...) -> None: ...

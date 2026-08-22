@@ -1,5 +1,4 @@
-from torch import dtype
-from torch import Tensor
+from torch import Tensor, dtype
 
 """Various linear algebra utility methods for internal use."""
 

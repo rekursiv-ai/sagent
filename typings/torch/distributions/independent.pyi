@@ -1,5 +1,4 @@
-from typing import Self
-from typing import Generic, TypeVar
+from typing import Generic, Self, TypeVar
 
 from torch import Tensor
 from torch.distributions import constraints

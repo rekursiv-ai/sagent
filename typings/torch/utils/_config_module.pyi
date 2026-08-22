@@ -12,7 +12,7 @@ from typing_extensions import deprecated
 import contextlib
 
 CONFIG_TYPES = ...
-T = TypeVar("T", bound=int | float | bool | None | str | list | set | tuple | dict)
+T = TypeVar("T", bound=int | float | bool | str | list | set | tuple | dict | None)
 _UNSET_SENTINEL = ...
 
 @dataclass

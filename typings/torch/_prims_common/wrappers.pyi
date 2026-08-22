@@ -1,6 +1,5 @@
-from typing import Any
 from collections.abc import Callable, Sequence
-from typing import TypeVar
+from typing import Any, TypeVar
 from typing_extensions import ParamSpec
 
 from torch._prims_common import (

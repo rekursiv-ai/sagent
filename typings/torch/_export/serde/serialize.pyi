@@ -1,10 +1,8 @@
 from collections import OrderedDict
-from collections.abc import Generator
-from typing import Self
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, final
+from typing import Any, Self, final
 
 import dataclasses
 import json
@@ -139,7 +137,7 @@ class GraphModuleSerializer(metaclass=Final):
         module_call_graph: list[ep.ModuleCallEntry],
     ) -> None: ...
     @contextmanager
-    def save_graph_state(self) -> Generator[None, Any, None]: ...
+    def save_graph_state(self) -> Generator[None, Any]: ...
     def handle_placeholder(self, node: torch.fx.Node) -> None: ...
     def handle_output(self, node: torch.fx.Node) -> None: ...
     def serialize_operator(self, target) -> str: ...

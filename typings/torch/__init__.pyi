@@ -1,9 +1,7 @@
-from collections.abc import Sequence
-from types import NotImplementedType
-from typing import Any, Self
 from collections.abc import (
     Callable as Callable,
     Callable as _Callable,
+    Sequence,
 )
 from math import (
     e as e,
@@ -11,9 +9,12 @@ from math import (
     nan as nan,
     pi as pi,
 )
+from types import NotImplementedType
 from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
+    Any,
     Any as _Any,
+    Self,
     TypeVar as _TypeVar,
     overload as _overload,
 )
@@ -482,7 +483,7 @@ class _TorchCompileWrapper:
 _InputT = _ParamSpec("_InputT")
 _RetT = _TypeVar("_RetT")
 
-_ModuleT = _TypeVar("_ModuleT", bound="torch.nn.Module")
+_ModuleT = _TypeVar("_ModuleT", bound=torch.nn.Module)
 
 # `compile` returns the module itself (an `OptimizedModule` proxying it), so the
 # module type must survive; matching it against `Callable` cannot solve the

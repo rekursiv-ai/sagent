@@ -1,5 +1,5 @@
-from typing import Any
-from typing import Self
+from typing import Any, Self
+
 import torch
 import torch.ao.nn.intrinsic as nni
 import torch.ao.nn.quantized as nnq

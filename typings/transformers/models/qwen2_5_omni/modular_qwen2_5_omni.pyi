@@ -1,5 +1,5 @@
-from typing import Any
 from dataclasses import dataclass
+from typing import Any
 
 from torch import nn
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (

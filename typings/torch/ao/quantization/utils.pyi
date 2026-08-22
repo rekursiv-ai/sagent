@@ -1,6 +1,5 @@
-from typing import Literal
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 from torch.fx import Node
 

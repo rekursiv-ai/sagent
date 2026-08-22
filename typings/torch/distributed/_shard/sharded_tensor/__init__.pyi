@@ -1,6 +1,8 @@
 from functools import partial
-from typing import Any
-from typing import TYPE_CHECKING as TYPE_CHECKING
+from typing import (
+    TYPE_CHECKING as TYPE_CHECKING,
+    Any,
+)
 
 from torch.distributed._shard.op_registry_utils import (
     _decorator_func as _decorator_func,

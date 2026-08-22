@@ -1,6 +1,5 @@
-from typing import Literal, Self
 from collections.abc import Iterable
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol, Self
 
 import dataclasses
 

@@ -1,8 +1,8 @@
-from torch import Tensor
 from typing import Any
 
 import inspect
 
+from torch import Tensor
 from torch._guards import Source
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.export import Constraint

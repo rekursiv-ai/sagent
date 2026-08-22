@@ -387,7 +387,7 @@ def lp_pool1d(
     input: Tensor,
     norm_type: float,
     kernel_size: _size_1_t,
-    stride: _size | None | int = ...,
+    stride: _size | int | None = ...,
     ceil_mode: bool = ...,
 ) -> Tensor: ...
 
@@ -397,7 +397,7 @@ def lp_pool2d(
     input: Tensor,
     norm_type: float,
     kernel_size: _size_2_t,
-    stride: _size | None | int = ...,
+    stride: _size | int | None = ...,
     ceil_mode: bool = ...,
 ) -> Tensor: ...
 
@@ -407,7 +407,7 @@ def lp_pool3d(
     input: Tensor,
     norm_type: float,
     kernel_size: _size_3_t,
-    stride: _size | None | int = ...,
+    stride: _size | int | None = ...,
     ceil_mode: bool = ...,
 ) -> Tensor: ...
 

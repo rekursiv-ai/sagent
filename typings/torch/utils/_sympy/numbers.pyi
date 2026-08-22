@@ -1,5 +1,6 @@
 from types import NotImplementedType
 from typing import Any, Self
+
 from sympy.core.decorators import _sympifyit
 from sympy.core.numbers import Number
 from sympy.core.singleton import Singleton

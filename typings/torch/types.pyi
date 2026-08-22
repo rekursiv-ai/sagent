@@ -12,7 +12,7 @@ from torch import (
     Tensor as Tensor,
     device as _device,
     dtype as _dtype,
-    layout as _layout,  # noqa: F401
+    layout as _layout,
 )
 from torch.autograd.graph import GradientEdge
 

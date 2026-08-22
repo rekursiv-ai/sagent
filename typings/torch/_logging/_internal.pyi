@@ -1,5 +1,4 @@
-from collections.abc import Generator
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from typing import Any, Generic
 from typing_extensions import ParamSpec
@@ -153,7 +152,7 @@ def user_warning_filter(
     message, category, filename, lineno, file=..., line=...
 ) -> bool: ...
 @contextlib.contextmanager
-def hide_warnings(filter_fn=...) -> Generator[None, Any, None]: ...
+def hide_warnings(filter_fn=...) -> Generator[None, Any]: ...
 
 class LazyString(Generic[_P]):
     def __init__(

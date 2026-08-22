@@ -1,14 +1,12 @@
-from collections.abc import Generator
-from torch import Tensor
-from types import NotImplementedType
-from typing import Self
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from contextlib import AbstractContextManager
-from typing import Any
+from types import NotImplementedType
+from typing import Any, Self
 
 import contextlib
 
+from torch import Tensor
 from torch.utils._python_dispatch import TorchDispatchMode
 
 import torch
@@ -54,7 +52,7 @@ class FunctionalTensorMode(TorchDispatchMode):
     def is_infra_mode(cls) -> bool: ...
 
 @contextlib.contextmanager
-def disable_functional_mode() -> Generator[TorchDispatchMode | None, Any, None]: ...
+def disable_functional_mode() -> Generator[TorchDispatchMode | None, Any]: ...
 def dispatch_functionalize(
     func, mode: FunctionalTensorMode = ...
 ) -> Callable[..., PyTree]: ...

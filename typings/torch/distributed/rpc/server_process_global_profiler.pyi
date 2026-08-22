@@ -1,4 +1,5 @@
 from typing import Literal, Self
+
 from torch.autograd.profiler_legacy import profile
 
 __all__: list[str] = ...

@@ -1,6 +1,7 @@
 from collections import defaultdict
-from torch import Tensor
 from typing import Any
+
+from torch import Tensor
 from torch.distributed.algorithms.model_averaging import averagers
 
 import torch

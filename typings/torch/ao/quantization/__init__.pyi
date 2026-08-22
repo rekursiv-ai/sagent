@@ -1,6 +1,6 @@
-from typing import Any
 from collections.abc import Callable as Callable
 from typing import (
+    Any,
     Optional as Optional,
     TypeAliasType as TypeAliasType,
     Union as Union,

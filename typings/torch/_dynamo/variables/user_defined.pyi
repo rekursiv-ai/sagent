@@ -2,6 +2,7 @@ from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Iterable
 from types import FunctionType
 from typing import Any, Literal, Self, TypeIs
+
 import functools
 
 from torch._dynamo.codegen import PyCodegen

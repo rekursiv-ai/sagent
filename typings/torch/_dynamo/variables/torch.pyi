@@ -1,6 +1,5 @@
-from typing import Literal, Self, TypeIs
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, Literal, Self, TypeIs
 
 import functools
 

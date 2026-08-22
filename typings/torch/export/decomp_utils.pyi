@@ -1,7 +1,6 @@
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from functools import partial
 from typing import Any
-from collections.abc import Callable
 
 import torch
 

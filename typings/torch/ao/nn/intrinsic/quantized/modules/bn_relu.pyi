@@ -1,4 +1,5 @@
 from typing import Any, Self
+
 import torch
 import torch.ao.nn.intrinsic
 import torch.ao.nn.quantized as nnq

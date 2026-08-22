@@ -1,5 +1,7 @@
-from torch import Tensor
 from typing import Any, Self
+
+from torch import Tensor
+
 import torch
 
 __all__ = [

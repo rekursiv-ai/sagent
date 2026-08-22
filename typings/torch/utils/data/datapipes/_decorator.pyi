@@ -1,5 +1,4 @@
-from collections.abc import Generator
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from typing import Any
 
 import types
@@ -48,4 +47,4 @@ class runtime_validation_disabled:
         traceback: types.TracebackType | None,
     ) -> None: ...
 
-def runtime_validation(f) -> _Wrapped[..., Any, ..., Generator[Any, Any, None]]: ...
+def runtime_validation(f) -> _Wrapped[..., Any, ..., Generator[Any, Any]]: ...

@@ -1,5 +1,4 @@
-from collections.abc import Generator
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from typing import Any
 
 import operator
@@ -206,7 +205,7 @@ class GetItem(CallFunction):
     def __init__(self, arg, index, _users=...) -> None: ...
     def find_anchor_nodes(
         self, ctx: MatchContext, searched: OrderedSet[torch.fx.Node]
-    ) -> Generator[Node, Any, None]: ...
+    ) -> Generator[Node, Any]: ...
 
 @register_graph_pattern(
     RepeatedExpr(

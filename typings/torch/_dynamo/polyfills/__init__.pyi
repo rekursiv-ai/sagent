@@ -1,9 +1,7 @@
-from collections.abc import Generator
-from torch import Tensor
-from typing import Literal
 from collections import OrderedDict as OrderedDict
 from collections.abc import (
     Callable as Callable,
+    Generator,
     Hashable as Hashable,
     Iterable as Iterable,
     MutableMapping as MutableMapping,
@@ -12,8 +10,10 @@ from collections.abc import (
 from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,
+    Literal,
 )
 
+from torch import Tensor
 from torch.overrides import BaseTorchFunctionMode as BaseTorchFunctionMode
 
 from . import (
@@ -37,7 +37,7 @@ class NoEnterTorchFunctionMode(BaseTorchFunctionMode):
     def __enter__(self) -> None: ...
 
 def index(iterator, item, start=..., end=...) -> int: ...
-def repeat(item, count) -> Generator[Any, Any, None]: ...
+def repeat(item, count) -> Generator[Any, Any]: ...
 def radians(x): ...
 def impl_CONTAINS_OP_fallback(a, b) -> bool: ...
 def accumulate_grad(x, new_grad) -> None: ...

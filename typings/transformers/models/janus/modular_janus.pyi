@@ -1,6 +1,6 @@
-from typing import Any
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
 from torch import nn
 from transformers.models.blip.image_processing_blip import BlipImageProcessor

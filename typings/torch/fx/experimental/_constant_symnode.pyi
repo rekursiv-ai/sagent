@@ -1,5 +1,5 @@
-from typing import Any
 from typing import *
+from typing import Any
 
 class ConstantIntNode:
     def __init__(self, val: int) -> None: ...

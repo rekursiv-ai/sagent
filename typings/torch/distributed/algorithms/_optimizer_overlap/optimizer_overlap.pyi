@@ -1,6 +1,6 @@
+from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Any
-from abc import ABC, abstractmethod
 
 from torch.distributed.fsdp import FullyShardedDataParallel
 from torch.nn.parallel import DistributedDataParallel

@@ -1,6 +1,5 @@
-from typing import LiteralString
 from collections.abc import Callable, Sequence
-from typing import Any, Protocol
+from typing import Any, LiteralString, Protocol
 
 import functools
 
@@ -15,7 +14,7 @@ from .wrapper import PythonWrapperCodegen
 from .. import ir
 from ..utils import DeferredLineBase, LineContext
 
-type _OUTPUT_ARGS_TYPE = list[str | None | list[str | None]]
+type _OUTPUT_ARGS_TYPE = list[str | list[str | None] | None]
 
 class HasWriteLine(Protocol):
     def writeline(self, line: LineContext | DeferredLineBase | str) -> None: ...

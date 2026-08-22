@@ -1,4 +1,5 @@
 from typing import Any
+
 from torch.distributed._shard.metadata import ShardMetadata
 
 def validate_non_overlapping_shards_metadata(shards: list[ShardMetadata]) -> None: ...

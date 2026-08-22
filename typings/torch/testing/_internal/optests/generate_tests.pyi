@@ -1,6 +1,5 @@
-from typing import Self
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, Self
 
 from torch._library.custom_ops import CustomOpDef
 from torch.overrides import TorchFunctionMode

@@ -1,6 +1,5 @@
-from typing import Literal, LiteralString
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, Literal, LiteralString
 
 import dataclasses
 

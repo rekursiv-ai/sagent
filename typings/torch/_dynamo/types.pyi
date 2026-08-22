@@ -74,7 +74,7 @@ class DynamoCallbackFn(Protocol):
         frame_state: FrameState,
     ) -> ConvertFrameReturn: ...
 
-type DynamoCallback = DynamoCallbackFn | None | bool
+type DynamoCallback = DynamoCallbackFn | bool | None
 
 class DynamoGuardHook(Protocol):
     def __call__(

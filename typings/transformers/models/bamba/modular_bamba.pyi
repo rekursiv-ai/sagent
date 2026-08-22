@@ -1,5 +1,4 @@
-from typing import Any
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from mamba_ssm.ops.triton.selective_state_update import selective_state_update
 from torch import nn

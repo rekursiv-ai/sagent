@@ -1,6 +1,5 @@
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from typing import Any
-from collections.abc import Callable
 
 import contextlib
 
@@ -9,5 +8,5 @@ import torch
 INTERMEDIATE_HOOKS: list[Callable[[str, torch.Tensor], None]] = ...
 
 @contextlib.contextmanager
-def intermediate_hook(fn) -> Generator[None, Any, None]: ...
+def intermediate_hook(fn) -> Generator[None, Any]: ...
 def run_intermediate_hooks(name, val) -> None: ...

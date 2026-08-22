@@ -1,9 +1,7 @@
 from collections import defaultdict
-from collections.abc import Generator
+from collections.abc import Callable, Generator, Iterable, Sequence
 from functools import partial
-from typing import Literal
-from collections.abc import Callable, Iterable, Sequence
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 from typing_extensions import ParamSpec
 
 import contextlib
@@ -950,4 +948,4 @@ def prepare_softmax_online(
     x, dim
 ) -> tuple[TensorBox | ShapeAsConstantBuffer, TensorBox | ShapeAsConstantBuffer]: ...
 @contextlib.contextmanager
-def force_fallback(op: torch._ops.OpOverload) -> Generator[None, Any, None]: ...
+def force_fallback(op: torch._ops.OpOverload) -> Generator[None, Any]: ...

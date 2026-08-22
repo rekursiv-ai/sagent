@@ -130,6 +130,6 @@ def lookup_inner(
     name: str | None = ...,
     filename: str | None = ...,
     is_direct_call: bool = ...,
-    reasons: None | set[str] = ...,
+    reasons: set[str] | None = ...,
 ) -> type[VariableTracker] | None: ...
 def clear_lru_cache() -> None: ...

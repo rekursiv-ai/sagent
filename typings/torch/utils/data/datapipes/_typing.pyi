@@ -1,6 +1,5 @@
-from typing import Self
 from abc import ABCMeta
-from typing import TypeVar
+from typing import Self, TypeVar
 
 import numbers
 

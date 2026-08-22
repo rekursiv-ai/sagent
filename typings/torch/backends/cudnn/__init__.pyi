@@ -1,7 +1,9 @@
 from collections.abc import Generator
-from typing import Any
 from contextlib import contextmanager as contextmanager
-from typing import Optional as Optional
+from typing import (
+    Any,
+    Optional as Optional,
+)
 
 from torch._C import _cudnn as _cudnn
 from torch.backends import (
@@ -39,7 +41,7 @@ def flags(
     deterministic=...,
     allow_tf32=...,
     fp32_precision=...,
-) -> Generator[None, Any, None]: ...
+) -> Generator[None, Any]: ...
 
 class CudnnModule(PropModule):
     def __init__(self, m, name) -> None: ...

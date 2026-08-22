@@ -1,5 +1,6 @@
 from collections.abc import Callable, Generator
 from typing import Any
+
 import contextlib
 
 type in_dims_t = int | tuple
@@ -11,9 +12,7 @@ def vmap_impl(
 ) -> PyTree | tuple[Any, ...]: ...
 def get_chunk_sizes(total_elems, chunk_size): ...
 @contextlib.contextmanager
-def vmap_increment_nesting(
-    batch_size, randomness
-) -> Generator[Any | int, Any, None]: ...
+def vmap_increment_nesting(batch_size, randomness) -> Generator[Any | int, Any]: ...
 def restore_vmap(
     func, in_dims, batch_size, randomness
 ) -> Callable[..., tuple[Any, tuple[()]] | tuple[PyTree, PyTree]]: ...

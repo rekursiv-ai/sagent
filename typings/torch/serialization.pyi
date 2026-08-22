@@ -1,9 +1,7 @@
-from collections.abc import Generator
-from typing import Literal
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from enum import Enum
-from typing import IO, Any, Generic, TypeVar
+from typing import IO, Any, Generic, Literal, TypeVar
 
 import os
 import threading
@@ -66,7 +64,7 @@ _serialization_tls = ...
 class SourceChangeWarning(Warning): ...
 
 @contextmanager
-def mkdtemp() -> Generator[str, Any, None]: ...
+def mkdtemp() -> Generator[str, Any]: ...
 
 _package_registry: list[
     tuple[

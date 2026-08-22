@@ -1,6 +1,6 @@
-from typing import Any, Literal, Self
 from collections.abc import Iterable, Iterator
 from enum import Enum
+from typing import Any, Literal, Self
 
 """ The Python Hipify script.
 ##
@@ -57,7 +57,6 @@ __all__ = [
     "get_hip_file_path",
     "hip_header_magic",
     "hipify",
-    "is_caffe2_gpu_file",
     "is_caffe2_gpu_file",
     "is_cusparse_file",
     "is_out_of_place",

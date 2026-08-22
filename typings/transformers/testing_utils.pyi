@@ -418,7 +418,7 @@ def cleanup(device: str, gc_collect=...):  # -> None:
     ...
 
 type DeviceProperties = tuple[str | None, int | None, int | None]
-type PackedDeviceProperties = tuple[str | None, None | int | tuple[int, int]]
+type PackedDeviceProperties = tuple[str | None, int | tuple[int, int] | None]
 
 @cache
 def get_device_properties() -> DeviceProperties: ...

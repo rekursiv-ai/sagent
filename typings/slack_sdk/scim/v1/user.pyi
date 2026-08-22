@@ -4,22 +4,22 @@ from .default_arg import DefaultArg
 from .types import TypeAndValue
 
 class UserAddress:
-    country: str | None | DefaultArg
-    locality: str | None | DefaultArg
-    postal_code: str | None | DefaultArg
-    primary: bool | None | DefaultArg
-    region: str | None | DefaultArg
-    street_address: str | None | DefaultArg
+    country: str | DefaultArg | None
+    locality: str | DefaultArg | None
+    postal_code: str | DefaultArg | None
+    primary: bool | DefaultArg | None
+    region: str | DefaultArg | None
+    street_address: str | DefaultArg | None
     unknown_fields: dict[str, Any]
     def __init__(
         self,
         *,
-        country: str | None | DefaultArg = ...,
-        locality: str | None | DefaultArg = ...,
-        postal_code: str | None | DefaultArg = ...,
-        primary: bool | None | DefaultArg = ...,
-        region: str | None | DefaultArg = ...,
-        street_address: str | None | DefaultArg = ...,
+        country: str | DefaultArg | None = ...,
+        locality: str | DefaultArg | None = ...,
+        postal_code: str | DefaultArg | None = ...,
+        primary: bool | DefaultArg | None = ...,
+        region: str | DefaultArg | None = ...,
+        street_address: str | DefaultArg | None = ...,
         **kwargs,
     ) -> None: ...
     def to_dict(self) -> dict: ...
@@ -29,95 +29,95 @@ class UserPhoneNumber(TypeAndValue): ...
 class UserRole(TypeAndValue): ...
 
 class UserGroup:
-    display: str | None | DefaultArg
-    value: str | None | DefaultArg
+    display: str | DefaultArg | None
+    value: str | DefaultArg | None
     unknown_fields: dict[str, Any]
     def __init__(
         self,
         *,
-        display: str | None | DefaultArg = ...,
-        value: str | None | DefaultArg = ...,
+        display: str | DefaultArg | None = ...,
+        value: str | DefaultArg | None = ...,
         **kwargs,
     ) -> None: ...
     def to_dict(self) -> dict: ...
 
 class UserMeta:
-    created: str | None | DefaultArg
-    location: str | None | DefaultArg
+    created: str | DefaultArg | None
+    location: str | DefaultArg | None
     unknown_fields: dict[str, Any]
     def __init__(
         self,
-        created: str | None | DefaultArg = ...,
-        location: str | None | DefaultArg = ...,
+        created: str | DefaultArg | None = ...,
+        location: str | DefaultArg | None = ...,
         **kwargs,
     ) -> None: ...
     def to_dict(self) -> dict: ...
 
 class UserName:
-    family_name: str | None | DefaultArg
-    given_name: str | None | DefaultArg
+    family_name: str | DefaultArg | None
+    given_name: str | DefaultArg | None
     unknown_fields: dict[str, Any]
     def __init__(
         self,
-        family_name: str | None | DefaultArg = ...,
-        given_name: str | None | DefaultArg = ...,
+        family_name: str | DefaultArg | None = ...,
+        given_name: str | DefaultArg | None = ...,
         **kwargs,
     ) -> None: ...
     def to_dict(self) -> dict: ...
 
 class UserPhoto:
-    type: str | None | DefaultArg
-    value: str | None | DefaultArg
+    type: str | DefaultArg | None
+    value: str | DefaultArg | None
     unknown_fields: dict[str, Any]
     def __init__(
         self,
-        type: str | None | DefaultArg = ...,
-        value: str | None | DefaultArg = ...,
+        type: str | DefaultArg | None = ...,
+        value: str | DefaultArg | None = ...,
         **kwargs,
     ) -> None: ...
     def to_dict(self) -> dict: ...
 
 class User:
-    active: bool | None | DefaultArg
-    addresses: list[UserAddress] | None | DefaultArg
-    display_name: str | None | DefaultArg
-    emails: list[TypeAndValue] | None | DefaultArg
-    external_id: str | None | DefaultArg
-    groups: list[UserGroup] | None | DefaultArg
-    id: str | None | DefaultArg
-    meta: UserMeta | None | DefaultArg
-    name: UserName | None | DefaultArg
-    nick_name: str | None | DefaultArg
-    phone_numbers: list[TypeAndValue] | None | DefaultArg
-    photos: list[UserPhoto] | None | DefaultArg
-    profile_url: str | None | DefaultArg
-    roles: list[TypeAndValue] | None | DefaultArg
-    schemas: list[str] | None | DefaultArg
-    timezone: str | None | DefaultArg
-    title: str | None | DefaultArg
-    user_name: str | None | DefaultArg
+    active: bool | DefaultArg | None
+    addresses: list[UserAddress] | DefaultArg | None
+    display_name: str | DefaultArg | None
+    emails: list[TypeAndValue] | DefaultArg | None
+    external_id: str | DefaultArg | None
+    groups: list[UserGroup] | DefaultArg | None
+    id: str | DefaultArg | None
+    meta: UserMeta | DefaultArg | None
+    name: UserName | DefaultArg | None
+    nick_name: str | DefaultArg | None
+    phone_numbers: list[TypeAndValue] | DefaultArg | None
+    photos: list[UserPhoto] | DefaultArg | None
+    profile_url: str | DefaultArg | None
+    roles: list[TypeAndValue] | DefaultArg | None
+    schemas: list[str] | DefaultArg | None
+    timezone: str | DefaultArg | None
+    title: str | DefaultArg | None
+    user_name: str | DefaultArg | None
     unknown_fields: dict[str, Any]
     def __init__(
         self,
         *,
-        active: bool | None | DefaultArg = ...,
-        addresses: list[UserAddress | dict[str, Any]] | None | DefaultArg = ...,
-        display_name: str | None | DefaultArg = ...,
-        emails: list[TypeAndValue | dict[str, Any]] | None | DefaultArg = ...,
-        external_id: str | None | DefaultArg = ...,
-        groups: list[UserGroup | dict[str, Any]] | None | DefaultArg = ...,
-        id: str | None | DefaultArg = ...,
-        meta: UserMeta | dict[str, Any] | None | DefaultArg = ...,
-        name: UserName | dict[str, Any] | None | DefaultArg = ...,
-        nick_name: str | None | DefaultArg = ...,
-        phone_numbers: list[TypeAndValue | dict[str, Any]] | None | DefaultArg = ...,
-        photos: list[UserPhoto | dict[str, Any]] | None | DefaultArg = ...,
-        profile_url: str | None | DefaultArg = ...,
-        roles: list[TypeAndValue | dict[str, Any]] | None | DefaultArg = ...,
-        schemas: list[str] | None | DefaultArg = ...,
-        timezone: str | None | DefaultArg = ...,
-        title: str | None | DefaultArg = ...,
-        user_name: str | None | DefaultArg = ...,
+        active: bool | DefaultArg | None = ...,
+        addresses: list[UserAddress | dict[str, Any]] | DefaultArg | None = ...,
+        display_name: str | DefaultArg | None = ...,
+        emails: list[TypeAndValue | dict[str, Any]] | DefaultArg | None = ...,
+        external_id: str | DefaultArg | None = ...,
+        groups: list[UserGroup | dict[str, Any]] | DefaultArg | None = ...,
+        id: str | DefaultArg | None = ...,
+        meta: UserMeta | dict[str, Any] | DefaultArg | None = ...,
+        name: UserName | dict[str, Any] | DefaultArg | None = ...,
+        nick_name: str | DefaultArg | None = ...,
+        phone_numbers: list[TypeAndValue | dict[str, Any]] | DefaultArg | None = ...,
+        photos: list[UserPhoto | dict[str, Any]] | DefaultArg | None = ...,
+        profile_url: str | DefaultArg | None = ...,
+        roles: list[TypeAndValue | dict[str, Any]] | DefaultArg | None = ...,
+        schemas: list[str] | DefaultArg | None = ...,
+        timezone: str | DefaultArg | None = ...,
+        title: str | DefaultArg | None = ...,
+        user_name: str | DefaultArg | None = ...,
         **kwargs,
     ) -> None: ...
     def to_dict(self) -> dict[Any, Any]: ...
