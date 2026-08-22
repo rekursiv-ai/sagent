@@ -952,14 +952,14 @@ async def test_long_matching_line_is_not_dropped(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("bad", ["abc", {"a": 1}, [1]])
-def test_run_reports_bad_context_arg_as_error(bad: object) -> None:
+def test_run_reports_bad_context_arg_as_error(bad: object, tmp_path: Path) -> None:
     """``Tool.run`` must not raise; it returns ``is_error`` instead.
 
     ``types.tools`` states the contract outright, and ``Read`` carries
     an explicit defense-in-depth check for direct ``_run`` callers.
     Grep coerces with a bare ``int()`` and propagates the exception.
     """
-    result = asyncio.run(grep.run({"pattern": "x", "-B": bad}))
+    result = asyncio.run(grep.run({"pattern": "x", "path": str(tmp_path), "-B": bad}))
     assert isinstance(result, ToolResult), "run() must return, not raise"
 
 
