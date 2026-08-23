@@ -75,6 +75,9 @@ from sagent.types.tools import Tool
 
 
 if TYPE_CHECKING:
+    # Type-only, and every runtime ``cast`` below quotes them: a runtime
+    # ``from torch import ...`` here would defeat the lazy import and make the
+    # torch-free sagent package unimportable.
     from torch import Tensor, nn
 
     import torch

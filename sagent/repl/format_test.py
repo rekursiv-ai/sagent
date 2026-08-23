@@ -73,7 +73,7 @@ def test_print_user_bar_narrow_terminal_path() -> None:
             del style
             captured.append(str(text))
 
-    print_user_bar(cast("Console", Stub()), "hi")
+    print_user_bar(cast(Console, Stub()), "hi")
     assert any("> hi" in line for line in captured)
 
 

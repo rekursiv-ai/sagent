@@ -85,8 +85,8 @@ def _expected_modules() -> frozenset[str]:
         .get("targets", {})
         .get("wheel", {})
     )
-    packages: list[str] = wheel.get("packages", [])
-    excludes: list[str] = wheel.get("exclude", [])
+    packages = [str(v) for v in wheel.get("packages", [])]
+    excludes = [str(v) for v in wheel.get("exclude", [])]
     expected: set[str] = set()
     for package in packages:
         for path in Path(package).rglob("*.py"):

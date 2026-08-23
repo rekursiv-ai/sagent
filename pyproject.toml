@@ -201,6 +201,7 @@ markers = [
     "network_github: reaches GitHub over the network",
     "network_huggingface: reaches Hugging Face over the network",
     "network_kaggle: reaches Kaggle over the network",
+    "network_localhost: opens a loopback network socket",
     "network_openai: reaches OpenAI over the network",
     "network_openml: reaches OpenML over the network",
     "network_openreview: reaches OpenReview over the network",

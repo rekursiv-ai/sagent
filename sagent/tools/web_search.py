@@ -54,7 +54,7 @@ class WebSearch:
             **SearchParamsSchema.json_schema(),
             "properties": {
                 **cast(
-                    "dict[str, object]", SearchParamsSchema.json_schema()["properties"]
+                    dict[str, object], SearchParamsSchema.json_schema()["properties"]
                 ),
                 "allowed_domains": {
                     "type": "array",
@@ -130,7 +130,7 @@ class WebSearch:
             params = SearchParamsSchema.coerce(args)
         except ValueError as e:
             return ToolResult(call_id="", content=str(e), is_error=True)
-        query = cast(str, params["query"])
+        query = str(params["query"])
         # ``backend`` stays None when unnamed: ``search`` resolves it, and a
         # non-general category resolves it to SearXNG. Substituting a constant
         # here would hide that choice and reinstate the per-adapter override
@@ -227,7 +227,7 @@ def _site_filters(domains: object, *, name: str, prefix: str) -> str:
     # Iterated as `object`, not cast to a value type: the cast asserted a
     # member type the very next line has to check anyway, and left the sequence
     # itself partially unknown.
-    for domain in cast("Sequence[object]", domains):
+    for domain in cast(Sequence[object], domains):
         if not isinstance(domain, str) or not _HOSTNAME_RE.match(domain.strip()):
             raise ValueError(f"{name!r} contains a non-hostname value: {domain!r}.")
         terms += f" {prefix}{domain.strip()}"

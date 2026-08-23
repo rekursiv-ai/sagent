@@ -1553,7 +1553,7 @@ def test_repair_dangling_tape_handles_legacy_consecutive_assistants(
             "text": "first",
         },
         cast(
-            "dict[str, object]",
+            dict[str, object],
             {
                 "kind": "history",
                 "ref": {"session_id": "abc", "ordinal": 2},
@@ -1588,7 +1588,7 @@ def test_repair_dangling_tape_handles_legacy_duplicate_tool_call_id(
         session_file,
         {"kind": "meta", "session_id": "abc"},
         cast(
-            "dict[str, object]",
+            dict[str, object],
             {
                 "kind": "history",
                 "ref": {"session_id": "abc", "ordinal": 0},
@@ -1597,7 +1597,7 @@ def test_repair_dangling_tape_handles_legacy_duplicate_tool_call_id(
             },
         ),
         cast(
-            "dict[str, object]",
+            dict[str, object],
             {
                 "kind": "history",
                 "ref": {"session_id": "abc", "ordinal": 1},

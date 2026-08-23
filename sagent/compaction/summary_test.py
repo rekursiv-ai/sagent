@@ -11,6 +11,7 @@ import logging
 import httpx
 import pytest
 
+from sagent.agent import retry
 from sagent.agent.context import resolve_context
 from sagent.compaction.history import estimate_entry_tokens
 from sagent.compaction.summary import (
@@ -108,7 +109,7 @@ async def _apply_compact(
 def _last_prompt_text(model: _ScriptedModel) -> str:
     """Concatenated text of the last request's messages (the compaction prompt)."""
     return cast(
-        "str",
+        str,
         "\n".join(
             getattr(m, "text", "") or getattr(m, "content", "")
             for m in model.received[-1].messages
@@ -459,6 +460,7 @@ async def test_compact_warns_when_keep_recent_dropped_by_unresolved_prefix(
 
 
 @pytest.mark.asyncio
+@pytest.mark.compute_large_fixture
 async def test_safe_split_handles_large_unresolved_prefix_quickly() -> None:
     history: list[ModelContextEvent] = []
     for idx in range(10_000):
@@ -876,7 +878,9 @@ async def test_custom_instructions_are_fenced_in_compactor_prompt() -> None:
 
 
 @pytest.mark.asyncio
-async def test_compact_retries_on_transient_transport_error() -> None:
+async def test_compact_retries_on_transient_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A transient ``httpx.TransportError`` mid-stream is retried, not fatal.
 
     The production failure (session ``bc528d70``) ended with
@@ -889,6 +893,7 @@ async def test_compact_retries_on_transient_transport_error() -> None:
     "context window exhausted". Wrapping the compactor's stream in
     ``send_with_retry`` makes one transient drop recoverable.
     """
+    monkeypatch.setattr(retry, "RETRY_BASE_SEC", 0.0)
     err = httpx.RemoteProtocolError("peer closed connection")
     model = _ScriptedModel(
         stream_responses=[err, _summary_resp("recovered after retry")]

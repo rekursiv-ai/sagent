@@ -13,6 +13,7 @@ import pytest
 
 from sagent.agent.agent import ActivityTracker, Agent
 from sagent.agent.cost_tracker import CostTracker
+from sagent.lib.custom_json import float_val
 from sagent.repl.status_pane import render_status_pane
 from sagent.types.cost import TokenCost
 from sagent.types.model import ContextBudget, TokenCount
@@ -97,21 +98,21 @@ def _agent(**overrides: object) -> _FakeAgent:
                 ),
             )
         elif k == "total_cost_usd":
-            a.cost_tracker.spend = TokenCost(request=cast(float, v))
+            a.cost_tracker.spend = TokenCost(request=float_val(v))
         elif k == "elapsed_seconds":
-            a.activity.elapsed_seconds = cast(float, v)
+            a.activity.elapsed_seconds = float_val(v)
         elif k == "active":
-            a.activity.active = cast(bool, v)
+            a.activity.active = bool(v)
         elif k == "current_call_start":
-            a.activity.current_call_start = cast(float, v)
+            a.activity.current_call_start = float_val(v)
         elif k == "current_compact_start":
-            a.activity.current_compact_start = cast(float, v)
+            a.activity.current_compact_start = float_val(v)
         elif k == "live_response_text":
-            a.activity.live_response_text = cast(str, v)
+            a.activity.live_response_text = str(v)
         elif k == "compact_task":
             a.runtime.compact_task = v
         elif k == "service_suspended_until":
-            a.runtime.service_suspended_until = cast(float, v)
+            a.runtime.service_suspended_until = float_val(v)
     return a
 
 

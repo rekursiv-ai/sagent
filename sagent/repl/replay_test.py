@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import time
 
+from sagent.agent.agent import Agent
 from sagent.compaction.files import MICROCOMPACTED_ARGS_KEY
 from sagent.repl.render import RecordingPrinter
 from sagent.repl.replay import replay_messages
@@ -27,10 +28,6 @@ from sagent.types.tape import (
     TapeEvent,
     TapeRef,
 )
-
-
-if TYPE_CHECKING:
-    from sagent.agent.agent import Agent
 
 
 @dataclass(slots=True, kw_only=True)
@@ -76,7 +73,7 @@ class _StubAgent:
         return self
 
     tools_map: Mapping[str, _StubTool] = field(
-        default_factory=lambda: cast("Mapping[str, _StubTool]", {}),
+        default_factory=lambda: cast(Mapping[str, _StubTool], {}),
     )
     cost_tracker: _StubCostTracker = field(default_factory=_StubCostTracker_factory)
     show_thinking: bool = True
@@ -109,7 +106,7 @@ def _agent(
     ]
     stub = _StubAgent(
         history=list(history) if history else [],
-        tape=list(tape) if tape is not None else cast("list[object]", history_records),
+        tape=list(tape) if tape is not None else cast(list[object], history_records),
         tools_map=tools_map or {},
         cost_tracker=_StubCostTracker(spend=TokenCost(request=total_cost_usd)),
         show_thinking=show_thinking,
@@ -120,7 +117,7 @@ def _agent(
         service_tier=service_tier,
         latency=latency,
     )
-    return cast("Agent", stub)
+    return cast(Agent, stub)
 
 
 def test_replay_empty_history_no_output() -> None:

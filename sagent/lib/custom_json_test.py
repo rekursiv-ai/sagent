@@ -6,6 +6,7 @@ from collections.abc import (
     Callable,
     Hashable,
     Mapping,
+    Sequence,
     Set as AbstractSet,
 )
 from datetime import UTC, datetime
@@ -17,6 +18,7 @@ from uuid import UUID
 
 import dataclasses
 import json
+import math
 
 import pytest
 
@@ -36,6 +38,7 @@ from sagent.lib.custom_json import (
     json_freeze,
     json_unfreeze,
     list_val,
+    optional_val,
     str_val,
     validate_json_schema,
 )
@@ -161,6 +164,45 @@ class TestIntVal:
         # expected is a shape mismatch, not the value 1/0.
         assert int_val(True, 7) == 7
         assert int_val(False, 7) == 7
+
+
+class TestOptionalVal:
+    """One lenient reader for a field whose absence must not become a default.
+
+    The strict codec raises on a shape mismatch, which is right for a schema
+    it owns and wrong at a network boundary: a malformed search result must
+    read as "absent", not abort the response.
+    """
+
+    @pytest.mark.parametrize("target", [int, float])
+    def test_bool_is_not_a_number(self, target: type) -> None:
+        assert optional_val(target, True) is None
+        assert optional_val(target, False) is None
+
+    @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+    def test_non_finite_json_literals_are_none(self, literal: str) -> None:
+        value = json.loads(literal)
+        assert optional_val(float, value) is None
+        assert optional_val(int, value) is None
+
+    def test_fractional_float_is_refused_for_int(self) -> None:
+        assert optional_val(int, 1.9) is None
+        assert optional_val(float, 1.9) == 1.9
+        assert optional_val(int, 3.0) == 3
+
+    def test_numbers_pass_through(self) -> None:
+        assert optional_val(float, 1.5) == 1.5
+        assert optional_val(int, 42) == 42
+
+    def test_str_target_reads_strings_only(self) -> None:
+        assert optional_val(str, "hi") == "hi"
+        assert optional_val(str, 42) is None
+
+    @pytest.mark.parametrize("value", ["12", None, object()])
+    def test_non_numeric_is_none(self, value: object) -> None:
+        # A quoted number is a shape mismatch in machine JSON, not a value.
+        assert optional_val(float, value) is None
+        assert optional_val(int, value) is None
 
 
 class TestStrVal:
@@ -488,6 +530,34 @@ class _OptionalSpecialUnion(JsonCodec):
     scalar: Path | bytes | None = None
 
 
+type _NestedAtt = _Att | _Child
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _NestedUnion(JsonCodec):
+    # A union whose FIRST member is itself a PEP-695 alias. ``get_args``
+    # returns the alias object, not its members, so a single-level walk drops
+    # every class inside it.
+    att: _NestedAtt | None = None
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _MixedScalarUnion(JsonCodec):
+    # One special scalar and one plain ``str``: both encode to a bare string,
+    # so without a tag the decoder cannot tell base64 from text.
+    blob: bytes | str = b""
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _Floats(JsonCodec):
+    ratio: float = 0.0
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _Keyed(JsonCodec):
+    table: Mapping[str, str] = dataclasses.field(default_factory=dict[str, str])
+
+
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class _SpecialUnions(JsonCodec):
     # Non-Optional unions of special scalars: neither member is None, so
@@ -647,6 +717,110 @@ class TestDataclassCodec:
         assert _OptionalSpecialUnion.from_json(doc.to_json()) == doc
 
 
+class TestUnionFlattening:
+    """A union member may itself be a PEP-695 alias for another union.
+
+    ``get_args`` returns that alias unexpanded, so a single-level walk sees a
+    non-class member and silently drops every dataclass inside it. The value
+    then fell through decode's final passthrough and came back a raw dict.
+    """
+
+    def test_a_union_nested_in_an_alias_decodes_to_its_member(self) -> None:
+        for value in (_Bytes(data=b"z"), _Link(url="u"), _Child(n=3)):
+            doc = _NestedUnion(att=value)
+            back = _NestedUnion.from_json(doc.to_json())
+            assert back == doc
+            assert isinstance(back.att, type(value))
+
+
+class TestStrictDecode:
+    """An annotation the decoder cannot satisfy must raise, never pass through.
+
+    ``decode`` ended in ``return raw``, so every unmatched shape -- a bool for
+    a float, an object for an int, a dict for a scalar -- reached the caller
+    as itself. That fallthrough is what made each union defect silent.
+    """
+
+    @pytest.mark.parametrize("annotation", [float | None, int | None])
+    def test_bool_is_not_a_number(self, annotation: UnionType) -> None:
+        for value in (True, False):
+            with pytest.raises(TypeError):
+                decode(annotation, value)
+
+    @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+    def test_non_finite_floats_are_refused(self, literal: str) -> None:
+        with pytest.raises(TypeError):
+            decode(float | None, json.loads(literal))
+
+    def test_fractional_float_is_refused_for_int(self) -> None:
+        # Truncating reports a number the source never sent.
+        with pytest.raises(TypeError):
+            decode(int | None, 1.9)
+        assert decode(int | None, 3.0) == 3
+
+    def test_a_structural_mismatch_raises(self) -> None:
+        with pytest.raises(TypeError):
+            decode(float | None, {})
+        with pytest.raises(TypeError):
+            decode(int, object())
+
+    def test_an_untagged_union_member_raises(self) -> None:
+        encoded = _Doc(atts=(_Bytes(data=b"z"),)).to_json()
+        atts = cast("Sequence[Mapping[str, object]]", encoded["atts"])
+        untagged = {k: v for k, v in atts[0].items() if k != "__type__"}
+        payload: dict[str, object] = {**encoded, "atts": [untagged]}
+        with pytest.raises(TypeError):
+            _Doc.from_json(payload)
+
+
+class TestMixedScalarUnion:
+    """``bytes | str``: both members encode to a bare JSON string.
+
+    The wrapper only fired when EVERY member was a special scalar, so this
+    union got no tag and base64 round-tripped as its own text.
+    """
+
+    def test_bytes_and_str_stay_distinct(self) -> None:
+        for value in (b"raw", "raw"):
+            doc = _MixedScalarUnion(blob=value)
+            back = _MixedScalarUnion.from_json(doc.to_json())
+            assert back == doc
+            assert isinstance(back.blob, type(value))
+
+
+class TestNonFiniteEncoding:
+    """``json.dumps`` writes bare ``NaN``; strict readers reject it."""
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_floats_round_trip(self, value: float) -> None:
+        doc = _Floats(ratio=value)
+        # ``allow_nan=False`` is what a strict reader enforces: an untagged
+        # non-finite raises here rather than emitting invalid JSON.
+        text = json.dumps(doc.to_json(), allow_nan=False)
+        back = _Floats.from_json(json.loads(text))
+        if math.isnan(value):
+            assert math.isnan(back.ratio)
+        else:
+            assert back.ratio == value
+
+
+class TestNonStrMappingKeys:
+    """A non-str mapping key was coerced with ``str(k)`` and never restored.
+
+    Silently rewriting ``1`` to ``"1"`` hands back a mapping the caller never
+    stored, so the encoder refuses rather than lying about the key type.
+    """
+
+    def test_a_non_str_key_is_refused(self) -> None:
+        table = cast("Mapping[str, str]", {1: "a"})
+        with pytest.raises(TypeError):
+            dataclass_to_json(_Keyed(table=table))
+
+    def test_str_keys_still_round_trip(self) -> None:
+        doc = _Keyed(table={"k": "v"})
+        assert _Keyed.from_json(doc.to_json()) == doc
+
+
 # -- Generated round-trip property ---------------------------------------------
 #
 # Every defect this module has carried lived in a shape nobody hand-wrote a
@@ -721,12 +895,12 @@ def _assert_round_trips(annotation: object, value: object) -> None:
         slots=True,
         kw_only=True,
     )
-    original = cast("Callable[..., _Carrier]", cls)(value=value)
+    original = cast(Callable[..., _Carrier], cls)(value=value)
     # Through real JSON text, not just the dict: a value that survives the
     # in-memory round trip but is not serializable (a raw Path, bytes) would
     # otherwise pass while the JSONB write it stands in for fails.
     wire = dict_val(json.loads(json.dumps(original.to_json())))
-    back = cast("_Carrier", cast("type[JsonCodec]", cls).from_json(wire))
+    back = cast(_Carrier, cast(type[JsonCodec], cls).from_json(wire))
     assert back == original
     # The container type is half the contract: a ``frozenset`` field decoding
     # to a list is what this catches, and ``==`` alone would not.

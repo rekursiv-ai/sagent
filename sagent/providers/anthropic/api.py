@@ -34,7 +34,6 @@ if TYPE_CHECKING:
     from anthropic._models import FinalRequestOptions
     from anthropic._streaming import AsyncStream
     from anthropic.lib.streaming import AsyncMessageStream
-    from anthropic.types.raw_message_stream_event import RawMessageStreamEvent
 
     import anthropic
     import httpx
@@ -48,6 +47,8 @@ else:
     AsyncMessageStream = lazy_import("anthropic.lib.streaming", "AsyncMessageStream")
     AsyncStream = lazy_import("anthropic._streaming", "AsyncStream")
     image_lib = lazy_import("sagent.lib.image")
+
+from anthropic.types.raw_message_stream_event import RawMessageStreamEvent
 
 from sagent import types
 from sagent.lib import debug_log
@@ -957,7 +958,7 @@ class _AnthropicModel(ModelDefaults):
         # agent already clears an effort the model does not accept.
         if request.effort is not None and self.spec.supported_thinking_efforts:
             effort = self.spec.supported_thinking_efforts.get(
-                cast("ThinkingEffort", request.effort)
+                cast(ThinkingEffort, request.effort)
             )
             if effort is None:
                 valid = ", ".join(self.spec.supported_thinking_efforts)
@@ -1155,7 +1156,7 @@ async def _raw_message_stream(
     _response_headers_var.set(response.headers)
     return AsyncStream(
         cast_to=cast(
-            "type[RawMessageStreamEvent]", anthropic.types.RawMessageStreamEvent
+            type[RawMessageStreamEvent], anthropic.types.RawMessageStreamEvent
         ),
         response=response,
         client=sdk,

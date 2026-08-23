@@ -587,7 +587,7 @@ class OpenAICompatModel(ModelDefaults):
             # keyed off a different vocabulary let ``off``/``min`` pass every
             # agent-side gate and then raise here.
             mapped = self.spec.supported_thinking_efforts.get(
-                cast("ThinkingEffort", request.effort)
+                cast(ThinkingEffort, request.effort)
             )
             if mapped is None:
                 valid = ", ".join(self.spec.supported_thinking_efforts)

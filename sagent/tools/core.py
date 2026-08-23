@@ -536,7 +536,7 @@ class _ToolImpl:
     def summary(self, args: Mapping[str, object]) -> str:
         """Return a short label for this tool invocation."""
         del args
-        return cast("str", self.name)
+        return str(self.name)
 
     def prompt(self) -> str:
         """Return supplemental prompt text for this tool."""

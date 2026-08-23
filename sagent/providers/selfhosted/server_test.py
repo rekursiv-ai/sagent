@@ -214,7 +214,7 @@ def test_inline_tool_preamble_no_system_prepends_one() -> None:
 
     _inline_tool_preamble(
         msgs,
-        cast("list[Tool]", [_StubTool()]),
+        cast(list[Tool], [_StubTool()]),
     )
     assert msgs[0]["role"] == "system"
     assert "tool_call" in str(msgs[0]["content"])
@@ -231,7 +231,7 @@ def test_inline_tool_preamble_extends_existing_system_message() -> None:
         description: str = "shell"
         directive_schema: Mapping[str, object] = MappingProxyType({"type": "object"})
 
-    _inline_tool_preamble(msgs, cast("list[Tool]", [_StubTool()]))
+    _inline_tool_preamble(msgs, cast(list[Tool], [_StubTool()]))
     assert "existing system" in str(msgs[0]["content"])
     assert "tool_call" in str(msgs[0]["content"])
 
@@ -243,7 +243,7 @@ class _StubBash:
 
 
 def test_tool_schema_wraps_as_function() -> None:
-    schema = _tool_schema(cast("Tool", _StubBash()))
+    schema = _tool_schema(cast(Tool, _StubBash()))
     assert schema["type"] == "function"
     func = cast(MutableJSON, schema["function"])
     assert func["name"] == "Bash"
@@ -251,7 +251,7 @@ def test_tool_schema_wraps_as_function() -> None:
 
 
 def test_tool_preamble_contains_marker_and_tool_name() -> None:
-    out = _tool_preamble(cast("list[Tool]", [_StubBash()]))
+    out = _tool_preamble(cast(list[Tool], [_StubBash()]))
     assert "<tool_call>" in out
     assert "Bash" in out
 

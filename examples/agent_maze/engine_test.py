@@ -17,7 +17,7 @@ def _engine() -> tuple[Engine, tuple[int, int], tuple[int, int]]:
     eng = Engine(rows, model="test")
     p = [pl for pl in eng.scene["plates"] if pl["lock"] == 0]
     return cast(
-        "tuple[Engine, tuple[int, int], tuple[int, int]]",
+        tuple[Engine, tuple[int, int], tuple[int, int]],
         (eng, tuple(p[0]["xy"]), tuple(p[1]["xy"])),
     )
 

@@ -166,7 +166,7 @@ def supported_provider_options(provider_name: str) -> frozenset[str]:
     cls = getattr(providers, provider_name, None)
     if cls is None:
         raise AttributeError(f"unknown provider {provider_name!r}")
-    return cast("frozenset[str]", getattr(cls, "supported_options", frozenset[str]()))
+    return cast(frozenset[str], getattr(cls, "supported_options", frozenset[str]()))
 
 
 def default_auth_for_provider(provider_name: str) -> str:

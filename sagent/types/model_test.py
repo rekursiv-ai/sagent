@@ -445,8 +445,8 @@ def test_chars_per_token_survives_meet_and_narrow() -> None:
 
 def _spec(*, budgets: frozenset[str], outputs: frozenset[str]) -> ModelSpec:
     return ModelSpec(
-        supported_thinking_budgets=cast("frozenset[ThinkingBudget]", budgets),
-        supported_thinking_outputs=cast("frozenset[ThinkingOutput]", outputs),
+        supported_thinking_budgets=cast(frozenset[ThinkingBudget], budgets),
+        supported_thinking_outputs=cast(frozenset[ThinkingOutput], outputs),
     )
 
 
@@ -510,11 +510,14 @@ def test_valid_thinking_states_derive_from_the_three_axes(
 
 def test_valid_thinking_states_always_includes_off() -> None:
     """``off-hide`` is reachable on every model."""
-    cases: tuple[tuple[frozenset[str], frozenset[str]], ...] = (
-        (frozenset(), frozenset()),
-        (frozenset({"auto", "fixed"}), frozenset({"text"})),
-        (frozenset({"auto"}), frozenset({"redacted"})),
-        (frozenset({"fixed"}), frozenset({"text", "redacted"})),
+    cases = cast(
+        tuple[tuple[frozenset[str], frozenset[str]], ...],
+        (
+            (frozenset(), frozenset()),
+            (frozenset({"auto", "fixed"}), frozenset({"text"})),
+            (frozenset({"auto"}), frozenset({"redacted"})),
+            (frozenset({"fixed"}), frozenset({"text", "redacted"})),
+        ),
     )
     for budgets, outputs in cases:
         spec = _spec(budgets=budgets, outputs=outputs)

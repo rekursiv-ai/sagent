@@ -101,7 +101,7 @@ class _DashScopeModel(OpenAICompatModel):
         # drifted from it -- ``xhigh`` billed 24_576 reasoning tokens where
         # the row (and the UI reading it) said 20_480.
         budget = self.spec.supported_thinking_efforts.get(
-            cast("ThinkingEffort", request.effort)
+            cast(ThinkingEffort, request.effort)
         )
         if budget is None:
             valid = ", ".join(self.spec.supported_thinking_efforts)

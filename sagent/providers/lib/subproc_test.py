@@ -18,6 +18,9 @@ from sagent.providers.lib.subproc import (
 )
 
 
+pytestmark = pytest.mark.cli_python_subprocess
+
+
 def test_default_read_idle_timeout_is_one_minute() -> None:
     proc = Subproc(["python3", "-c", "pass"])
     assert proc._read_timeout_sec == 60.0

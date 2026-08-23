@@ -77,7 +77,7 @@ def test_iter_v4_records_user_multipart_with_image() -> None:
     assert converted["text"] == "look:"
     atts = converted["attachments"]
     assert isinstance(atts, list)
-    att0 = cast("dict[str, str]", atts[0])
+    att0 = cast(dict[str, str], atts[0])
     assert att0["mime"] == "image/png"
     assert base64.b64decode(att0["data"]) == image_bytes
 
@@ -128,11 +128,11 @@ def test_iter_v4_records_assistant_multipart() -> None:
     assert converted["text"] == "reply A\nreply B"
     thinking = converted["thinking_blocks"]
     assert isinstance(thinking, list)
-    thinking0 = cast("dict[str, object]", thinking[0])
+    thinking0 = cast(dict[str, object], thinking[0])
     assert thinking0["text"] == "internal"
     tcs = converted["tool_calls"]
     assert isinstance(tcs, list)
-    tc0 = cast("dict[str, object]", tcs[0])
+    tc0 = cast(dict[str, object], tcs[0])
     assert tc0["id"] == "q1"
     assert tc0["name"] == "Echo"
     assert tc0["args"] == {"msg": "hi"}

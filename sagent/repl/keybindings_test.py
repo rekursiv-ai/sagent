@@ -78,7 +78,7 @@ def _make_runtime() -> agent_runtime.AgentRuntime:
     runtime = agent_runtime.AgentRuntime(
         model=cast(agent_runtime.Model, _TrivialModel())
     )
-    runtime.inbox = cast("agent_runtime.GatedDeque[RuntimeEvent]", _ListInbox())
+    runtime.inbox = cast(agent_runtime.GatedDeque[RuntimeEvent], _ListInbox())
     return runtime
 
 
@@ -89,7 +89,7 @@ def _sentinel_task() -> asyncio.Task[None]:
     ``Task`` is never awaited here, so an opaque sentinel typed as the
     field's declared type suffices and keeps the checkers honest.
     """
-    return cast("asyncio.Task[None]", object())
+    return cast(asyncio.Task[None], object())
 
 
 @dataclass(slots=True, kw_only=True)

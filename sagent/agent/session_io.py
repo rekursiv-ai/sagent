@@ -393,7 +393,7 @@ def _splice_from_json(
                 ):
                     payload.append(entry)
     raw_paired = rec.get("paired_externally")
-    paired: frozenset[str] = frozenset()
+    paired: frozenset[str] = frozenset[str]()
     if isinstance(raw_paired, list):
         paired = frozenset(
             str(item)
@@ -474,7 +474,7 @@ def _legacy_override_to_splice(
                 ):
                     payload.append(entry)
     raw_paired = rec.get("paired_externally")
-    paired: frozenset[str] = frozenset()
+    paired: frozenset[str] = frozenset[str]()
     if isinstance(raw_paired, list):
         paired = frozenset(
             str(item)
@@ -1119,7 +1119,7 @@ def _provider_options_from_json(raw: object) -> ProviderOptions:
 def _persistent_state(raw: object) -> PersistentAgentState | None:
     """Decode a persistent-agent state string."""
     if raw in get_args(PersistentAgentState):
-        return cast("PersistentAgentState", raw)
+        return cast(PersistentAgentState, raw)
     return None
 
 

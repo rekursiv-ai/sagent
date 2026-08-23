@@ -259,7 +259,7 @@ def audit_catalogs() -> int:
         catalog = getattr(cls, "CAPABILITIES", None)
         if not isinstance(catalog, Mapping):
             continue
-        rows = cast("Mapping[str, ModelCapability]", catalog)
+        rows = cast(Mapping[str, ModelCapability], catalog)
         for mid, cap in rows.items():
             if cap.model_id != mid:
                 _out(f"  {name}.{mid}: model_id is {cap.model_id!r}, not the key")

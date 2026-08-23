@@ -38,7 +38,13 @@ import subprocess
 import tempfile
 
 from sagent import types
-from sagent.lib.custom_json import JSON, MutableJSON, int_val, validate_json_schema
+from sagent.lib.custom_json import (
+    JSON,
+    MutableJSON,
+    float_val,
+    int_val,
+    validate_json_schema,
+)
 from sagent.providers.anthropic import catalog as anthropic_catalog
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.lib.cli_respawn import respawn_for_cadence
@@ -360,7 +366,7 @@ class AnthropicCLI(Anthropic):
     TRANSPORT: ClassVar[ModelCapability] = anthropic_catalog.CLI
     """The subprocess exposes no effort, latency, cache, or redaction knob."""
 
-    supported_options: ClassVar[frozenset[str]] = frozenset()
+    supported_options: ClassVar[frozenset[str]] = frozenset[str]()
     """``from_credentials`` (the CLI wrapper) takes no construction options.
 
     Declared for the class's primary (credentials) auth. ``from_key``
@@ -1678,9 +1684,9 @@ def _parse_cli_credentials(raw: MutableJSON) -> AnthropicCLICredentials:
     """Extract access/refresh/expiry from Claude CLI credential JSON."""
     oauth = cast(MutableJSON, raw["claudeAiOauth"])
     creds = AnthropicCLICredentials(
-        access_token=cast(str, oauth["accessToken"]),
-        refresh_token=cast(str, oauth["refreshToken"]),
-        expires_at=cast(float, oauth["expiresAt"]) / 1000.0,
+        access_token=str(oauth["accessToken"]),
+        refresh_token=str(oauth["refreshToken"]),
+        expires_at=float_val(oauth["expiresAt"]) / 1000.0,
     )
     if "scopes" in oauth:
         creds["scopes"] = cast(list[str], oauth["scopes"])
@@ -1692,11 +1698,11 @@ def _parse_cli_credentials(raw: MutableJSON) -> AnthropicCLICredentials:
     if isinstance(token_account_raw, dict):
         token_account = cast(MutableJSON, token_account_raw)
         if token_account.get("uuid"):
-            creds["account_uuid"] = cast(str, token_account["uuid"])
+            creds["account_uuid"] = str(token_account["uuid"])
         if token_account.get("emailAddress"):
-            creds["email"] = cast(str, token_account["emailAddress"])
+            creds["email"] = str(token_account["emailAddress"])
         if token_account.get("organizationUuid"):
-            creds["organization_uuid"] = cast(str, token_account["organizationUuid"])
+            creds["organization_uuid"] = str(token_account["organizationUuid"])
     if "billingType" in oauth:
         creds["billing_type"] = cast(str | None, oauth["billingType"])
     if "accountCreatedAt" in oauth:
@@ -2070,8 +2076,8 @@ def _dispatch_stream_event(
         state = tool_use_blocks.pop(idx, None)
         if state is None:
             return
-        tool_name = cast(str, state["name"])
-        tool_id = cast(str, state["id"])
+        tool_name = str(state["name"])
+        tool_id = str(state["id"])
         json_parts = cast(list[str], state["json_parts"])
         args_summary = _render_tool_args("".join(json_parts))
         label_text = f"{tool_name} {args_summary}".rstrip()

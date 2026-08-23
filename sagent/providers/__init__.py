@@ -14,7 +14,7 @@ Pass ``base_url=`` to ``from_env`` / ``from_key`` to point any of
 them at a localhost inference server.
 """
 
-from typing import Literal, get_args
+from typing import Literal, cast, get_args
 
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.anthropic.cli import AnthropicCLI
@@ -54,7 +54,9 @@ ProviderName = Literal[
     "SelfHosted",
 ]
 
-PROVIDER_NAMES: tuple[ProviderName, ...] = get_args(ProviderName)
+PROVIDER_NAMES: tuple[ProviderName, ...] = cast(
+    tuple[ProviderName, ...], get_args(ProviderName)
+)
 
 __all__ = [
     "PROVIDER_NAMES",

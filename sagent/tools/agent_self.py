@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import dataclasses
 
@@ -21,6 +21,7 @@ from sagent import (
     providers as providers_module,
     types,
 )
+from sagent.agent.agent import Agent
 from sagent.agent.state import current_agent_var
 from sagent.lib.custom_json import JSON, json_freeze
 from sagent.providers import (
@@ -39,10 +40,6 @@ from sagent.types.model import (
     ModelCapability,
     base_model_id,
 )
-
-
-if TYPE_CHECKING:
-    from sagent.agent.agent import Agent
 
 
 _allow_providers_var: ContextVar[tuple[str, ...]] = ContextVar(
@@ -299,7 +296,7 @@ def _apply_patch(d: Mapping[str, object]) -> types.runtime.ToolResult:
         return types.runtime.ToolResult(
             call_id="", content="No active agent.", is_error=True
         )
-    agent = cast("Agent", active)
+    agent = cast(Agent, active)
     plan_or_err = _build_patch_plan(agent, d)
     if isinstance(plan_or_err, types.runtime.ToolResult):
         return plan_or_err

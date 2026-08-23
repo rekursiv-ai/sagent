@@ -803,7 +803,7 @@ async def test_exchange_turn_returns_current_output_only() -> None:
         publish: Callable[[RuntimeEvent], None] | None,
     ) -> str | None:
         del proc, thinking_parts
-        text = cast(str, prompt_blocks[0]["text"])
+        text = str(prompt_blocks[0]["text"])
         text_parts.append(text)
         if publish is not None:
             publish(ModelResponsePartial(text))

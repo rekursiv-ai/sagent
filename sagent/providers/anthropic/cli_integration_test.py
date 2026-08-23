@@ -146,7 +146,7 @@ def _probe_claude_auth() -> str:
         return ""  # unparseable but exit 0: let the real test surface it
     if not isinstance(parsed, dict):
         return ""
-    result = cast("dict[str, object]", parsed)
+    result = cast(dict[str, object], parsed)
     if result.get("is_error"):
         detail = str(result.get("result", ""))
         if _looks_like_auth_failure(detail):

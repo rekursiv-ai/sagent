@@ -161,7 +161,7 @@ class WebFetch:
             params = FetchBodyParamsSchema.coerce(directive)
         except ValueError as e:
             return ToolResult(call_id="", content=str(e), is_error=True)
-        raw_url = cast(str, params["url"])
+        raw_url = str(params["url"])
         method = cast(HttpMethod, params["method"])
         transport = cast(Transport, params["transport"])
         extractor = cast(Extractor, params["extractor"])
@@ -245,7 +245,7 @@ def _request_bodies(
     # strings. cast() to a value-typed dict so the check narrows rather than
     # asserting.
     form: dict[str, str] = {}
-    for key, value in cast("dict[str, object]", unfrozen_form).items():
+    for key, value in cast(dict[str, object], unfrozen_form).items():
         if not isinstance(value, str):
             raise ValueError(  # noqa: TRY004 -- caller catches ValueError uniformly.
                 f"'form' field {key!r} must be a string, got {type(value).__name__}."

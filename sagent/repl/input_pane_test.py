@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, cast
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import asyncio
@@ -12,7 +12,10 @@ from prompt_toolkit.formatted_text import FormattedText
 
 import pytest
 
-from sagent.agent.agent import Agent as _RealAgent
+from sagent.agent.agent import (
+    Agent,
+    Agent as _RealAgent,
+)
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.state import (
     AgentLike,
@@ -57,10 +60,6 @@ from sagent.types.runtime import (
     UserDeferredMessage,
     UserMessage,
 )
-
-
-if TYPE_CHECKING:
-    from sagent.agent.agent import Agent
 
 
 class _StubInbox:
@@ -115,11 +114,11 @@ class _StubAgent:
 
 
 def _agent() -> Agent:
-    return cast("Agent", _StubAgent())
+    return cast(Agent, _StubAgent())
 
 
 def _persistent_agent() -> Agent:
-    return cast("Agent", _StubAgent(is_subagent=True))
+    return cast(Agent, _StubAgent(is_subagent=True))
 
 
 @pytest.mark.asyncio
@@ -374,7 +373,7 @@ def test_resolve_targets_includes_oneshot_subagent() -> None:
     stable label. Target resolution gates on ``is_subagent``, not on the
     old serviced-only ``_persistent`` flag, so a oneshot child resolves.
     """
-    oneshot = cast("Agent", _StubAgent(name="oneshot-child", is_subagent=True))
+    oneshot = cast(Agent, _StubAgent(name="oneshot-child", is_subagent=True))
     agent_registry.update({"oneshot-child": oneshot})
     try:
         assert _resolve_targets("oneshot-child") == ["oneshot-child"]
@@ -390,8 +389,8 @@ def test_resolve_targets_star_excludes_caller_and_root() -> None:
     or to the root.
     """
     root = _agent()  # is_subagent=False -> the root
-    me = cast("Agent", _StubAgent(name="me", is_subagent=True))
-    peer = cast("Agent", _StubAgent(name="peer", is_subagent=True))
+    me = cast(Agent, _StubAgent(name="me", is_subagent=True))
+    peer = cast(Agent, _StubAgent(name="peer", is_subagent=True))
     agent_registry.update({"root": root, "me": me, "peer": peer})
     label_token = agent_label_var.set("me")
     try:

@@ -56,7 +56,7 @@ def test_full_delivery_scenario() -> None:
     assert diamond.xy is not None
     assert _nav(w, "a", diamond.xy), "agent should reach the diamond"
     got = w.pick("a")
-    assert diamond.name in cast("list[str]", got["got"])
+    assert diamond.name in cast(list[str], got["got"])
     assert diamond.name in w.agents["a"].inventory
     assert _nav(w, "a", w.exit_xy), "agent should reach the exit"
     w.drop("a", at_exit=True)
@@ -70,11 +70,11 @@ def test_fog_is_limited() -> None:
     w = World(LEVEL_V1, sight=2)
     w.spawn(["a"])
     view = w.view("a")
-    cells = cast("list[dict[str, object]]", view["visible_cells"])
+    cells = cast(list[dict[str, object]], view["visible_cells"])
     # A sight-2 square is at most 5x5 = 25 tiles (fewer at the edge).
     assert len(cells) <= 25
     # The far diamond must NOT be visible from spawn.
-    items = cast("list[dict[str, object]]", view["visible_items"])
+    items = cast(list[dict[str, object]], view["visible_items"])
     names = {str(i["name"]) for i in items}
     assert not any("diamond" in n for n in names)
 

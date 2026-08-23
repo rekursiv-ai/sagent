@@ -548,7 +548,7 @@ class Agent:
             # Unknown provider class: no known capabilities, so send no
             # options -- ``build_provider`` raises the canonical unknown-
             # provider error itself (tests stub it with fake names).
-            supported = frozenset()
+            supported = frozenset[str]()
         options = self._provider_options
         masked = {name: None for name in options.set_fields() if name not in supported}
         if masked:

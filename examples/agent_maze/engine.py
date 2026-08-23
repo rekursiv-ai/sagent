@@ -235,7 +235,7 @@ class Engine:
         w = self.world
         a = w.agents[aid]
         v = w.view(aid)
-        vis = cast("list[dict[str, Any]]", v["visible_plates"])
+        vis = cast(list[dict[str, Any]], v["visible_plates"])
         plates = (
             "; ".join(
                 f"'{p['lock']}'@({p['xy'][0]},{p['xy'][1]}){' OPEN' if p['open'] else ''}"

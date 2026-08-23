@@ -79,7 +79,6 @@ import time
 
 
 if TYPE_CHECKING:
-    from openai.lib.streaming.responses import AsyncResponseStream
     from openai.types.responses.response_input_param import FunctionCallOutput
 
     import httpx
@@ -94,6 +93,8 @@ else:
     openai = lazy_import("openai")  # 493ms cold
     oai_responses = lazy_import("openai.types.responses")
     image_lib = lazy_import("sagent.lib.image")
+
+from openai.lib.streaming.responses import AsyncResponseStream
 
 from sagent import types
 from sagent.lib import debug_log
@@ -480,7 +481,7 @@ class OpenAISubscription(OpenAI):
                 raise RuntimeError(f"Token exchange failed ({r.status_code}): {body}")
             data: MutableJSON = cast(MutableJSON, r.json())
 
-        access_token = cast(str, data["access_token"])
+        access_token = str(data["access_token"])
         account_id = _jwt_claim(
             access_token,
             "https://api.openai.com/auth",
@@ -488,7 +489,7 @@ class OpenAISubscription(OpenAI):
         )
         creds = cls.Credentials(
             access_token=access_token,
-            refresh_token=cast(str, data["refresh_token"]),
+            refresh_token=str(data["refresh_token"]),
             account_id=account_id,
             # Anchor on the JWT ``exp`` claim, matching ``load`` and ``_refresh``.
             # A local-clock ``time.time() + expires_in`` value would disagree with
@@ -735,8 +736,8 @@ class OpenAISubscription(OpenAI):
                 )
             r.raise_for_status()
             data: MutableJSON = cast(MutableJSON, r.json())
-        self._access_token = cast(str, data["access_token"])
-        self._refresh_token = cast(str, data["refresh_token"])
+        self._access_token = str(data["access_token"])
+        self._refresh_token = str(data["refresh_token"])
         # Anchor expiry on the JWT ``exp`` claim, matching ``load``. Deriving it
         # from ``time.time() + expires_in`` (the local clock) would disagree
         # with the value a later ``load`` reads back, so under clock skew the
@@ -1021,7 +1022,7 @@ class _OpenAISubModel(_OpenAIModel):
         try:
             try:
                 event_stream: AsyncResponseStream = cast(
-                    "AsyncResponseStream",
+                    AsyncResponseStream,
                     await sdk.responses.create(**create_kwargs),  # pyright: ignore[reportCallIssue, reportArgumentType]  # ty: ignore[no-matching-overload] -- dynamic kwargs; SDK overload resolution fails on stream=True literal
                 )
             except openai.AuthenticationError:
@@ -1031,7 +1032,7 @@ class _OpenAISubModel(_OpenAIModel):
                 await self._provider.handle_auth_error()
                 sdk = await self._provider.get_sdk()
                 event_stream = cast(
-                    "AsyncResponseStream",
+                    AsyncResponseStream,
                     await sdk.responses.create(**create_kwargs),  # pyright: ignore[reportCallIssue, reportArgumentType]  # ty: ignore[no-matching-overload] -- dynamic kwargs; SDK overload resolution fails on stream=True literal
                 )
             return await _consume_stream(
@@ -1068,7 +1069,7 @@ class _OpenAISubModel(_OpenAIModel):
             # The catalog holds the wire value; the Responses rows differ from
             # the Chat rows only in how ``max`` maps, which is data, not code.
             wire = self.spec.supported_thinking_efforts.get(
-                cast("ThinkingEffort", request.effort)
+                cast(ThinkingEffort, request.effort)
             )
             if wire is None:
                 valid = ", ".join(self.spec.supported_thinking_efforts)
@@ -1189,7 +1190,7 @@ def _build_assistant_items(
             # OpenAI documents replaying the reasoning output item verbatim in
             # stateless mode. Copy the opaque mapping so persisted session data
             # never mutates while the SDK serializes the request.
-            items.append(cast("oai_responses.ResponseReasoningItemParam", dict(block)))
+            items.append(cast(oai_responses.ResponseReasoningItemParam, dict(block)))
     if entry.text:
         items.append({"role": "assistant", "content": entry.text})
     for tc in entry.tool_calls:

@@ -6,7 +6,6 @@ from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 
 import asyncio
-import gc
 import threading
 
 import pytest
@@ -157,7 +156,6 @@ def test_a_closed_loop_does_not_leak_its_value() -> None:
 
     for _ in range(3):
         asyncio.run(take())
-    gc.collect()
     assert per.size() == 0
 
 
@@ -182,7 +180,6 @@ def test_a_contended_lock_does_not_pin_its_loop() -> None:
 
     for _ in range(3):
         asyncio.run(contend())
-    gc.collect()
     assert per.size() == 0
 
 
