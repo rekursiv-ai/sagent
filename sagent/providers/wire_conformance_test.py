@@ -274,6 +274,6 @@ def test_every_catalog_backed_provider_has_a_wire_builder() -> None:
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing import test_main
+    from sagent.lib.testing.main import test_main
 
     test_main(__file__)
