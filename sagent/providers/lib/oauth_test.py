@@ -11,6 +11,7 @@ import fcntl
 import hashlib
 import inspect
 import os
+import threading
 import urllib.error
 import urllib.request
 
@@ -229,7 +230,10 @@ async def test_credential_file_lock_blocks_on_external_holder(
 
 
 @pytest.mark.asyncio
-async def test_cancelled_acquire_leaves_no_orphaned_lock(tmp_path: Path) -> None:
+async def test_cancelled_acquire_leaves_no_orphaned_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Cancelling a blocked acquire must not strand the ``flock``.
 
     Needs a REAL suspension: without one the waiter is cancelled before it
@@ -237,10 +241,8 @@ async def test_cancelled_acquire_leaves_no_orphaned_lock(tmp_path: Path) -> None
     defect. Nothing fakes ``asyncio.sleep`` any more, so the duration below
     is load-bearing -- do not replace it with a bare yield.
 
-    ``asyncio.to_thread`` cannot cancel the worker it dispatched: the
-    thread goes on to acquire, while the cancelled coroutine never
-    reaches the release in its ``finally``. The lock is then held by
-    nobody and no process can ever take it again.
+    The waiter must reach the real nonblocking ``flock`` before cancellation;
+    otherwise the test never exercises acquisition cleanup.
     """
     cred = tmp_path / "creds.json"
     lock_path = cred.with_suffix(".json.lock")
@@ -248,18 +250,26 @@ async def test_cancelled_acquire_leaves_no_orphaned_lock(tmp_path: Path) -> None
     blocker = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(blocker, fcntl.LOCK_EX)
+        attempted = threading.Event()
+        real_flock = fcntl.flock
+
+        def observed_flock(fd: int, operation: int) -> None:
+            if fd != blocker and operation & fcntl.LOCK_EX:
+                attempted.set()
+            real_flock(fd, operation)
+
+        monkeypatch.setattr(fcntl, "flock", observed_flock)
 
         async def waiter() -> None:
             async with credential_file_lock(cred):
                 pass
 
         task = asyncio.create_task(waiter())
-        await asyncio.sleep(0.05)  # let it reach the blocking flock
+        assert await asyncio.to_thread(attempted.wait, 2)
         _ = task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
-        fcntl.flock(blocker, fcntl.LOCK_UN)
-        await asyncio.sleep(0.05)  # let any orphan thread take it
+        real_flock(blocker, fcntl.LOCK_UN)
     finally:
         os.close(blocker)
     probe = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)

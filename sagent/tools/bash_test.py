@@ -360,7 +360,7 @@ def test_reason_replaces_the_exit_code() -> None:
         returncode = -9
 
     text = _process_output(
-        cast("asyncio.subprocess.Process", _Proc()),
+        cast(asyncio.subprocess.Process, _Proc()),
         "out\n",
         "err\n",
         sentinel="__S__",
@@ -422,7 +422,7 @@ def test_stderr_is_bounded_with_the_body() -> None:
         returncode = 1
 
     out = _process_output(
-        cast("asyncio.subprocess.Process", _Proc()),
+        cast(asyncio.subprocess.Process, _Proc()),
         "",
         "e" * (2 * TOOL_RESULT_MAX_CHARS),
         sentinel="__S__",
@@ -567,7 +567,7 @@ async def test_timeout_keeps_output_produced_before_the_kill(
     state = ToolState()
     state.bash_cwd = str(tmp_path)
     state.start_cwd = str(tmp_path)
-    out = await _run_foreground("echo before; sleep 30", state=state, timeout_s=1)
+    out = await _run_foreground("echo before; sleep 30", state=state, timeout_s=0.02)
     assert "before" in out, out
     assert "__SAGENT_CWD_" not in out, out
     assert "timeout" in out

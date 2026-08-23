@@ -43,7 +43,7 @@ def _engine() -> Engine:
 def _register(labels: list[str]) -> dict[str, _FakeAgent]:
     fakes = {lbl: _FakeAgent() for lbl in labels}
     for lbl, fake in fakes.items():
-        agent_registry[lbl] = cast("Any", fake)  # stand-in for a runtime AgentLike
+        agent_registry[lbl] = cast(Any, fake)  # stand-in for a runtime AgentLike
     return fakes
 
 

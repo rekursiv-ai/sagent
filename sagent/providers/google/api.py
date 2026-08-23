@@ -605,7 +605,7 @@ def _thinking_config(request: ModelRequest, spec: ModelSpec) -> MutableJSON | No
         # The catalog holds the wire budget as data; a parallel ladder here
         # drifted from it, so the reader saw one number and the server another.
         budget = spec.supported_thinking_efforts.get(
-            cast("ThinkingEffort", request.effort)
+            cast(ThinkingEffort, request.effort)
         )
         if budget is None:
             valid = ", ".join(spec.supported_thinking_efforts)
@@ -712,7 +712,7 @@ async def _consume_gemini_stream(
                     # Gemini 3.x attaches the model's thought signature to its
                     # answer part; capture it so it can be echoed back next turn.
                     if "thoughtSignature" in part:
-                        text_signature = cast(str, part["thoughtSignature"])
+                        text_signature = str(part["thoughtSignature"])
                     chunk = part.get("text")
                     if isinstance(chunk, str) and part.get("thought") is True:
                         thinking_chunks.append(chunk)

@@ -1005,7 +1005,7 @@ async def test_send_with_retry_429_with_unread_streaming_body_still_classified(
         slept.append(delay_sec)
 
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-    err = _HTTPError(cast("_FakeResponse", _UnreadStreamingResponse()))
+    err = _HTTPError(cast(_FakeResponse, _UnreadStreamingResponse()))
     assert is_rate_limited(err) is True
     model = _ScriptedModel(stream_responses=[err, _resp("ok")])
     resp = await send_with_retry(
@@ -1443,7 +1443,7 @@ class _UnreadStreamingResponse:
 
 
 def test_service_error_snapshot_survives_unread_streaming_body() -> None:
-    err = _HTTPError(cast("_FakeResponse", _UnreadStreamingResponse()))
+    err = _HTTPError(cast(_FakeResponse, _UnreadStreamingResponse()))
     snapshot = service_error_snapshot(err)
     assert snapshot.status == 429
     assert snapshot.body == ""
@@ -1451,7 +1451,7 @@ def test_service_error_snapshot_survives_unread_streaming_body() -> None:
 
 
 def test_error_diagnostics_survives_unread_streaming_body() -> None:
-    err = _HTTPError(cast("_FakeResponse", _UnreadStreamingResponse()))
+    err = _HTTPError(cast(_FakeResponse, _UnreadStreamingResponse()))
     diag = error_diagnostics(err)
     assert "status=429" in diag
 
@@ -1765,7 +1765,7 @@ def test_entitlement_429_is_not_retryable() -> None:
     independently, so a 429 reads retryable there unless carved out.
     """
     model = _ScriptedModel()
-    assert is_retryable(_EntitlementError(), cast("Model", model)) is False
+    assert is_retryable(_EntitlementError(), cast(Model, model)) is False
 
 
 def test_ordinary_429_stays_rate_limited() -> None:

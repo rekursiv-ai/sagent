@@ -481,7 +481,7 @@ def test_dispatch_handles_unknown_events_silently() -> None:
     # The dispatcher should hit the ``case _`` branch -- no observable effect.
     obs(
         cast(
-            "RuntimeEvent",
+            RuntimeEvent,
             ToolCall(id="x", name="y", args={}),
         )
     )

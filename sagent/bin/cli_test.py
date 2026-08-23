@@ -244,7 +244,7 @@ async def test_resume_does_not_resurrect_completed_oneshot(tmp_path: Path) -> No
     ``load_persistent_agents`` (state=='running' only), so a completed
     oneshot never comes back on resume.
     """
-    parent = cast("Agent", FakeAgent())
+    parent = cast(Agent, FakeAgent())
     append_session(
         tmp_path / "session.jsonl",
         persistent_agents=[

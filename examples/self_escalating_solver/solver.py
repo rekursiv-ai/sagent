@@ -255,7 +255,7 @@ def _build_timeline(
 def _final_text(history: list[Any]) -> str:
     for m in reversed(history):
         if isinstance(m, AssistantMessage) and m.text:
-            return cast("str", m.text.strip())  # pyright: ignore[reportUnnecessaryCast] -- ty needs the cast; pyright resolves the type
+            return cast(str, m.text.strip())  # pyright: ignore[reportUnnecessaryCast] -- ty needs the cast; pyright resolves the type
     return ""
 
 

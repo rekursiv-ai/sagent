@@ -200,7 +200,7 @@ class _BridgeServer:
         assert self._uvicorn_server is not None
         for srv in self._uvicorn_server.servers:
             for sock in srv.sockets:
-                return cast(int, sock.getsockname()[1])
+                return int(sock.getsockname()[1])
         raise RuntimeError("MCP bridge: uvicorn started without sockets")
 
 
@@ -410,7 +410,7 @@ class ToolsBridge:
                     name=t.name,
                     description=t.description,
                     input_schema=cast(
-                        "dict[str, object]",
+                        dict[str, object],
                         json_unfreeze(bg_augmented_schema(t.directive_schema)),
                     ),
                 )

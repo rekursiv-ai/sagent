@@ -380,7 +380,7 @@ def test_build_input_preserves_user_image_attachment() -> None:
     types = [b.get("type") for b in cast(list[Mapping[str, object]], content)]
     assert types == ["input_text", "input_image"]
     image_block = cast(list[Mapping[str, object]], content)[1]
-    image_url = cast(str, image_block["image_url"])
+    image_url = str(image_block["image_url"])
     assert image_url.startswith("data:image/")
     assert ";base64," in image_url
 
@@ -1514,7 +1514,7 @@ class TestStreamAuthRetry:
             "Unauthorized",
             # openai vendors httpx2; the two Response classes are structurally
             # identical but nominally distinct to the checker.
-            response=cast("Any", response),
+            response=cast(Any, response),
             body=None,
         )
         # Return DIFFERENT SDKs from get_sdk so the test can prove the

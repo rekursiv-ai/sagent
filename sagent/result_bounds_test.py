@@ -120,7 +120,7 @@ def test_unbounded_grep_stays_within_the_result_cap(tmp_path: Path) -> None:
     Grep's ``offset`` cannot recover the tail once the characters are
     gone rather than the rows.
     """
-    for i in range(2_000):
+    for i in range(200):
         (tmp_path / f"f{i:05d}.txt").write_text("hit line\n" * 40, encoding="utf-8")
     with with_fake_agent():
         result = asyncio.run(

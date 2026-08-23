@@ -970,8 +970,8 @@ async def test_persistent_child_does_not_overwrite_parent_registry_entry() -> No
             # Yield to scheduler so the child's task enters
             # serve_forever -> _install_contextvars (the bug site).
             for _ in range(20):
-                await asyncio.sleep(0.005)
-                if agent_registry.get("Agent") is not parent:
+                await asyncio.sleep(0)
+                if agent_registry.get("child1") is child:
                     break
 
             assert agent_registry.get("Agent") is parent, (

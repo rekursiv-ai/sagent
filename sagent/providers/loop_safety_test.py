@@ -169,7 +169,7 @@ def peak_concurrent_holders(
                 with guard:
                     active += 1
                     peak = max(peak, active)
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.01)
                 with guard:
                     active -= 1
 
@@ -217,7 +217,7 @@ def test_file_write_lock_excludes_across_loops(tmp_path: Path) -> None:
         with guard:
             active += 1
             peak = max(peak, active)
-        time.sleep(0.1)
+        time.sleep(0.01)
         with guard:
             active -= 1
 

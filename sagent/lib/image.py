@@ -140,8 +140,8 @@ def decode_webp_libwebp(
         # struct members are opaque to static type checkers. The current
         # bindings also don't expose crop options on WebPDecoderOptions,
         # so we decode full and slice below.
-        ffi = cast("Any", webp.ffi)
-        lib = cast("Any", webp.lib)
+        ffi = cast(Any, webp.ffi)
+        lib = cast(Any, webp.lib)
         config_ptr = ffi.new("WebPDecoderConfig *")
         if not lib.WebPInitDecoderConfig(config_ptr):
             return None
@@ -150,12 +150,12 @@ def decode_webp_libwebp(
         config.output.colorspace = lib.MODE_RGB
 
         buf = ffi.from_buffer(image_bytes)
-        status: int = lib.WebPDecode(buf, len(image_bytes), config_ptr)
+        status = int(lib.WebPDecode(buf, len(image_bytes), config_ptr))
         if status != lib.VP8_STATUS_OK:
             return None
 
         rgba = config.output.u.RGBA
-        output_buffer: bytes = ffi.buffer(rgba.rgba, rgba.size)
+        output_buffer = cast(bytes, ffi.buffer(rgba.rgba, rgba.size))
 
         # Copy before WebPFreeDecBuffer — output_buffer points into the
         # libwebp-owned memory that we're about to release.

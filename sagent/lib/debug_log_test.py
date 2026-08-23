@@ -171,7 +171,7 @@ def test_summarize_messages_block_tool_result_complex() -> None:
     )
     block = out[0]["blocks"]
     assert isinstance(block, list)
-    entry = cast("dict[str, object]", block[0])
+    entry = cast(dict[str, object], block[0])
     assert entry["is_error"] is True
     assert isinstance(entry["preview"], str)
 

@@ -34,6 +34,8 @@ from hypothesis.strategies import (
     text,
 )
 
+import pytest
+
 from sagent.agent.context import (
     InvalidContextError,
     validate_context,
@@ -59,6 +61,9 @@ from sagent.types.tape import (
     TapeRef,
     splice_safe_repair,
 )
+
+
+pytestmark = pytest.mark.compute_large_fixture
 
 
 _TEXT = text(min_size=0, max_size=20)
@@ -312,7 +317,7 @@ def test_last_assistant_result_picks_most_recent_send(
     if not sends:
         return  # composite always produces at least one but defensive
     expected = sends[-1].args["content"]
-    typed_history = cast("list[ModelContextEvent]", history)
+    typed_history = cast(list[ModelContextEvent], history)
     r = _last_assistant_result(typed_history)
     assert r.content == expected, (
         f"expected last AgentSend's content {expected!r}; got {r.content!r}"

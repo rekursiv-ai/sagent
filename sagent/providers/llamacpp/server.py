@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
-from typing import ClassVar, Final, Self, cast, override
+from typing import ClassVar, Final, Self, override
 
 import atexit
 import os
@@ -298,14 +298,14 @@ def _free_port() -> int:
     """Return an OS-assigned free localhost TCP port."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
-        return cast(int, sock.getsockname()[1])
+        return int(sock.getsockname()[1])
 
 
 def _http_ok(url: str) -> bool:
     """True if a GET on ``url`` returns a 2xx response within 200ms."""
     try:
         with urllib.request.urlopen(url, timeout=0.2) as response:  # noqa: S310 -- local/provider-supplied readiness URL only.
-            return cast("bool", 200 <= response.status < 300)
+            return bool(200 <= response.status < 300)
     except (OSError, urllib.error.URLError):
         return False
 

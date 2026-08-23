@@ -358,7 +358,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    root: Path = args.path
+    root: Path = cast(Path, args.path)
     if not root.exists():
         logger.error("path does not exist: %s", root)
         return 1

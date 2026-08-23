@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import asyncio
 import contextlib
@@ -17,6 +17,7 @@ from sagent.agent import (
     runtime as agent_runtime,
     session_io,
 )
+from sagent.agent.agent import Agent
 from sagent.agent.context import (
     InvalidContextError,
     validate_context,
@@ -83,10 +84,6 @@ from sagent.types.tape import (
     TapeRef,
     mask_contains_ref,
 )
-
-
-if TYPE_CHECKING:
-    from sagent.agent.agent import Agent
 
 
 def _summary_override(
@@ -1124,7 +1121,7 @@ async def test_detach_and_result_arrives_later() -> None:
     the real result is delivered forward as a ``DetachedArrived`` pair (no
     silent back-patch).
     """
-    slow = StubTool(response="late result", delay_sec=0.1)
+    slow = StubTool(response="late result", delay_sec=0.01)
     agent, _ = make_agent(
         [
             AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),)),
@@ -1141,7 +1138,7 @@ async def test_detach_and_result_arrives_later() -> None:
     agent.observers.append(_quit_when_arrived)
 
     async def detach_then_wait() -> None:
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0.001)
         agent.inbox.push_back(Detach(call_id="t1"))
         await wait_until(
             lambda: _detached_arrival_result(agent, "t1") is not None,
@@ -1187,7 +1184,7 @@ async def test_detached_result_preserves_tool_result_metadata() -> None:
 
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.01)
             return ToolResult(
                 call_id="",
                 content="late result",
@@ -1210,7 +1207,7 @@ async def test_detached_result_preserves_tool_result_metadata() -> None:
     agent.inbox.push_back(UserMessage(text="go"))
 
     async def detach_then_wait() -> None:
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0.001)
         agent.inbox.push_back(Detach(call_id="t1"))
         await wait_until(
             lambda: _detached_arrival_result(agent, "t1") is not None,
@@ -1532,9 +1529,7 @@ async def test_self_clear_does_not_wedge_deferred_repl_input() -> None:
         runtime: agent_runtime.AgentRuntime
 
     holder = _Holder(runtime=agent)
-    agent.observers.append(
-        _input_queue_committer_observer(cast("Agent", holder), queues)
-    )
+    agent.observers.append(_input_queue_committer_observer(cast(Agent, holder), queues))
     agent.inbox.push_back(UserMessage(text="go"))
 
     async def driver() -> None:
@@ -1568,6 +1563,7 @@ async def test_self_clear_does_not_wedge_deferred_repl_input() -> None:
 async def test_undetach_gates_model() -> None:
     """Undetach re-gates the model on a detached tool."""
     tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
 
     @dataclass(kw_only=True, slots=True)
     class SignalingTool2:
@@ -1584,7 +1580,7 @@ async def test_undetach_gates_model() -> None:
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             tool_started.set()
-            await asyncio.sleep(0.15)
+            await release_tool.wait()
             return ToolResult(call_id="", content="waited for")
 
     agent, _ = make_agent(
@@ -1600,6 +1596,7 @@ async def test_undetach_gates_model() -> None:
         await tool_started.wait()
         agent.inbox.push_back(Detach(call_id="t1"))
         agent.inbox.push_back(Undetach(call_id="t1"))
+        release_tool.set()
 
     await asyncio.gather(
         run_with_quit(agent, timeout_sec=3.0),
@@ -2010,7 +2007,7 @@ async def test_irrecoverable_error_gates_on_user() -> None:
     agent.inbox.push_back(UserMessage(text="go"))
 
     async def resume_after_error() -> None:
-        await asyncio.sleep(0.1)
+        await wait_until(lambda: collector.has(ModelResponseError))
         agent.inbox.push_back(UserMessage(text="retry"))
 
     await asyncio.gather(
@@ -2114,10 +2111,29 @@ async def test_streaming_chunks_published() -> None:
 @pytest.mark.asyncio
 async def test_model_waits_for_all_tools() -> None:
     """Model doesn't fire until all tool results are in."""
-    t1 = StubTool(_name="a", response="r1", delay_sec=0.05)
-    t2 = StubTool(_name="b", response="r2", delay_sec=0.1)
-    agent, _ = make_agent(
-        [
+    started = {"a": asyncio.Event(), "b": asyncio.Event()}
+    release = {"a": asyncio.Event(), "b": asyncio.Event()}
+
+    @dataclass(kw_only=True, slots=True)
+    class GatedTool:
+        _name: str
+
+        @property
+        def name(self) -> str:
+            return self._name
+
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            del args
+            started[self._name].set()
+            await release[self._name].wait()
+            return ToolResult(call_id="", content=f"r-{self._name}")
+
+    model = ScriptedModel(
+        responses=[
             AssistantMessage(
                 tool_calls=(
                     ToolCall(id="c1", name="a", args={}),
@@ -2125,15 +2141,34 @@ async def test_model_waits_for_all_tools() -> None:
                 ),
             ),
             AssistantMessage(text="both in"),
-        ],
-        tools=[t1, t2],
+        ]
     )
+    agent = agent_runtime.AgentRuntime(
+        model=model,
+        tools=[GatedTool(_name="a"), GatedTool(_name="b")],
+    )
+    first_result_seen = asyncio.Event()
+
+    def record_first_result(event: RuntimeEvent) -> None:
+        if isinstance(event, ToolResult) and event.call_id == "c1":
+            first_result_seen.set()
+
+    agent.observers.append(record_first_result)
     agent.inbox.push_back(UserMessage(text="go"))
 
-    await run_with_quit(agent)
+    task = asyncio.create_task(run_with_quit(agent))
+    await started["a"].wait()
+    await started["b"].wait()
+    release["a"].set()
+    await first_result_seen.wait()
+    await asyncio.sleep(0)
+    assert model._call_idx == 1
+    release["b"].set()
+    await task
 
     results = [t for t in agent.context().messages if isinstance(t, ToolResult)]
     assert len(results) == 2
+    assert model._call_idx == 2
     assistant_msgs = [
         t for t in agent.context().messages if isinstance(t, AssistantMessage)
     ]
@@ -2295,6 +2330,7 @@ async def test_await_user_releases_on_agent_send_deferred_message() -> None:
 async def test_queued_message_waits_for_cohort() -> None:
     """UserQueuedMessage doesn't preempt; model sees it after tools complete."""
     tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
 
     @dataclass(kw_only=True, slots=True)
     class SlowEcho:
@@ -2311,7 +2347,7 @@ async def test_queued_message_waits_for_cohort() -> None:
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             tool_started.set()
-            await asyncio.sleep(0.1)
+            await release_tool.wait()
             return ToolResult(call_id="", content="tool done")
 
     agent, _collector = make_agent(
@@ -2326,6 +2362,7 @@ async def test_queued_message_waits_for_cohort() -> None:
     async def queue_after_start() -> None:
         await tool_started.wait()
         agent.inbox.push_back(UserQueuedMessage(text="btw check tests"))
+        release_tool.set()
 
     await asyncio.gather(
         run_with_quit(agent),
@@ -3578,8 +3615,12 @@ async def test_compact_cancels_running_model_call() -> None:
         agent.inbox.push_back(Compact())
 
     async def quit_after_compact() -> None:
-        # Wait long enough for CompactComplete to splice the summary.
-        await asyncio.sleep(0.1)
+        await wait_until(
+            lambda: any(
+                isinstance(item, UserMessage) and item.text == "[summary]"
+                for item in agent.context().messages
+            )
+        )
         agent.inbox.push_back(Quit())
 
     await asyncio.gather(
@@ -4081,7 +4122,12 @@ async def test_lifecycle_mid_stream_enter_stays_pending_before_drain() -> None:
         # "hey" arrived mid-stream: must be pending only.
         assert _assert_exactly_one_surface(agent, "hey", published) == "pending"
         release_stream.set()
-        await asyncio.sleep(0.1)
+        await wait_until(
+            lambda: any(
+                isinstance(item, AssistantMessage) and item.text == "resp1"
+                for item in agent.context().messages
+            )
+        )
         agent.inbox.push_back(Quit())
 
     await asyncio.gather(run_until_quit(agent, timeout_sec=3.0), inject_and_observe())
@@ -4664,7 +4710,7 @@ async def test_user_queued_message_mid_stream_fires_followup_round() -> None:
         agent.inbox.push_back(UserQueuedMessage(text="hey"))
         await asyncio.sleep(0)
         release_stream.set()
-        await asyncio.sleep(0.2)
+        await wait_until(lambda: len(model.call_histories) == 2)
         agent.inbox.push_back(Quit())
 
     await asyncio.gather(
@@ -5313,8 +5359,8 @@ async def test_agent_idle_suppressed_while_compact_task_running() -> None:
         )
         # While the compactor blocks, AgentIdle must not fire.
         idles_during_compact = []
-        for _ in range(20):
-            await asyncio.sleep(0.01)
+        for _ in range(10):
+            await asyncio.sleep(0)
             idles_during_compact = [
                 e for e in collector.events if isinstance(e, AgentIdle)
             ]

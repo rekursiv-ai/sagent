@@ -42,7 +42,7 @@ import tempfile
 
 from sagent import types
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.custom_json import JSON, MutableJSON, validate_json_schema
+from sagent.lib.custom_json import JSON, MutableJSON, float_val, validate_json_schema
 from sagent.providers.google import catalog as google_catalog
 from sagent.providers.google.api import Google
 from sagent.providers.lib.cli_respawn import respawn_for_cadence
@@ -750,9 +750,9 @@ def _hash_system(system: str | None) -> str:
 def _parse_cli_credentials(raw: MutableJSON) -> GoogleCLICredentials:
     """Extract access/refresh/expiry from Gemini CLI credential JSON."""
     creds = GoogleCLICredentials(
-        access_token=cast(str, raw["access_token"]),
-        refresh_token=cast(str, raw["refresh_token"]),
-        expiry_date=float(cast(float, raw["expiry_date"])),
+        access_token=str(raw["access_token"]),
+        refresh_token=str(raw["refresh_token"]),
+        expiry_date=float_val(raw["expiry_date"]),
     )
     for opt_key in ("project_id", "scope", "token_type"):
         value = raw.get(opt_key)

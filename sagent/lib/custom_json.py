@@ -15,10 +15,21 @@ from enum import Enum
 from functools import cache
 from pathlib import Path
 from types import MappingProxyType, UnionType
-from typing import Final, Self, cast, get_args, get_origin, get_type_hints, overload
+from typing import (
+    Final,
+    Literal,
+    Self,
+    TypeVar,
+    cast,
+    get_args,
+    get_origin,
+    get_type_hints,
+    overload,
+)
 from uuid import UUID
 
 import base64
+import math
 
 
 type JSONScalar = str | int | float | bool | None
@@ -396,6 +407,54 @@ def int_val(value: object, default: int) -> int:
 
 
 @overload
+def optional_val(target: type[bool], value: object) -> None: ...  # pragma: no cover
+
+
+@overload
+def optional_val[T](target: type[T], value: object) -> T | None: ...  # pragma: no cover
+
+
+def optional_val[T](target: type[T], value: object) -> T | None:
+    """Read ``value`` as ``target``, or ``None`` when it is not one.
+
+    The lenient sibling of :func:`decode`, for a field whose absence is
+    meaningful and must NOT collapse to a default. :func:`decode` raises on a
+    shape mismatch, which is right for a schema this codebase owns and wrong
+    at a network boundary: a malformed third-party field means "absent", not
+    "abort the response".
+
+    Callers reached for ``float_val(v) if isinstance(v, (int, float)) else
+    None`` and that guard is wrong three ways, each of which shipped: ``bool``
+    passes ``isinstance`` (``bool`` subclasses ``int``) and then takes
+    ``float_val``'s ``0.0`` default, so a JSON ``true`` latitude became a real
+    coordinate; and ``NaN`` / ``Infinity``, which :func:`json.loads` accepts by
+    default, pass through as themselves. A fractional float is likewise refused
+    for an ``int`` rather than truncated -- ``1.9`` seeders is not ``1``
+    seeders, and dropping the fraction reports a number the source never sent.
+
+    A numeric STRING is deliberately not parsed: these read machine JSON, where
+    a quoted number is a shape mismatch rather than a value to recover.
+
+    Args:
+      target: The type to read, e.g. ``int``, ``float``, or ``str``.
+      value: Value to read.
+
+    Returns:
+      result: The value as ``target``, or ``None``.
+
+    """
+    # A str is never coerced FROM another scalar and never parsed INTO one:
+    # ``decode`` does both for a schema it owns, but at this boundary a
+    # quoted number and a stringified int are both shape mismatches.
+    if isinstance(value, str) != (target is str):
+        return None
+    try:
+        return cast("T", decode(target, value))
+    except (TypeError, ValueError):
+        return None
+
+
+@overload
 def dict_val(value: object) -> dict[str, object]: ...  # pragma: no cover
 
 
@@ -428,7 +487,7 @@ def dict_val[T](value: object, item: type[T | object] = object) -> dict[str, T]:
     # ``type[T | object]`` default (needed to accept the no-arg overload) widens
     # the static narrowing to ``object``; the overloads carry the exact type.
     kept = {str(k): v for k, v in src.items() if isinstance(v, item)}
-    return cast("dict[str, T]", kept)
+    return cast(dict[str, T], kept)
 
 
 @overload
@@ -459,11 +518,11 @@ def list_val[T](value: object, item: type[T | object] = object) -> list[T]:
     """
     if not isinstance(value, list):
         return []
-    src = cast("list[object]", value)
+    src = cast(list[object], value)
     # See ``dict_val``: the runtime ``isinstance`` proves ``T``; the defaulted
     # ``type[T | object]`` widens the static narrowing, so cast to the contract.
     kept = [x for x in src if isinstance(x, item)]
-    return cast("list[T]", kept)
+    return cast(list[T], kept)
 
 
 def dicts_val(value: object) -> list[dict[str, object]]:
@@ -544,6 +603,7 @@ def datetime_val(value: object, default: datetime | None = None) -> datetime | N
 _TYPE_TAG: Final = "__type__"
 _SCALAR_TAG: Final = "__scalar__"
 _VALUE_TAG: Final = "__value__"
+_FLOAT_TAG: Final = "__float__"
 
 
 class SchemaError(ValueError):
@@ -637,11 +697,32 @@ def _hints(cls: type) -> Mapping[str, object]:
     return get_type_hints(cls)
 
 
+def _union_args(annotation: object) -> tuple[object, ...]:
+    """Flatten a union's members, expanding any member that is itself a union.
+
+    A PEP-695 alias member (``type Inner = A | B`` inside ``Inner | C``) comes
+    back from ``get_args`` as the alias object, not as ``A``/``B``. A single
+    level of expansion therefore saw a non-class member and dropped everything
+    inside it, and the value fell through decode to the raw passthrough.
+    """
+    resolved = _resolve_alias(annotation)
+    if not (isinstance(resolved, UnionType) or get_origin(resolved) is UnionType):
+        return (resolved,)
+    flattened: list[object] = []
+    for member in get_args(resolved):
+        inner = _resolve_alias(member)
+        if isinstance(inner, UnionType) or get_origin(inner) is UnionType:
+            flattened.extend(_union_args(inner))
+        else:
+            flattened.append(inner)
+    return tuple(flattened)
+
+
 def _union_members(annotation: object) -> dict[str, type]:
     """For a union of dataclasses, map each member's name to its class."""
     return {
         m.__name__: m
-        for m in get_args(annotation)
+        for m in _union_args(annotation)
         if isinstance(m, type) and is_dataclass(m)
     }
 
@@ -673,15 +754,25 @@ def _matching_scalar_member(annotation: object, value: object) -> type | None:
     ``Path | bytes | None`` needs the wrapper exactly as much as
     ``Path | bytes`` does. Requiring every member to be special suppressed it
     and let both members encode to indistinguishable bare strings.
+
+    ``str`` counts as ambiguous alongside a special scalar: every special
+    scalar encodes TO a string, so ``bytes | str`` has the same collision
+    ``Path | bytes`` does -- base64 came back as its own text.
     """
     ann = _resolve_alias(annotation)
     if not (isinstance(ann, UnionType) or get_origin(ann) is UnionType):
         return None
-    args = [m for m in get_args(ann) if m is not type(None)]
-    specials: list[type] = [m for m in args if _is_special_scalar(m)]
-    if len(specials) < 2 or len(specials) != len(args):
+    args = [m for m in _union_args(ann) if m is not type(None)]
+    ambiguous: list[type] = [
+        m for m in args if isinstance(m, type) and (_is_special_scalar(m) or m is str)
+    ]
+    if (
+        not any(_is_special_scalar(m) for m in ambiguous)
+        or len(ambiguous) < 2
+        or len(ambiguous) != len(args)
+    ):
         return None
-    for m in specials:
+    for m in ambiguous:
         if isinstance(value, m):
             return m
     return None
@@ -695,6 +786,26 @@ def _scalar_member(members: tuple[object, ...], name: str) -> type | None:
     return None
 
 
+def _mapping_key(key: object) -> str:
+    """Return a str mapping key, refusing any other key type."""
+    if isinstance(key, str):
+        return key
+    raise TypeError(f"cannot encode {type(key).__name__} mapping key to JSON")
+
+
+def _encode_float(value: float) -> JSONValue:
+    """Encode a float, tagging the non-finite values JSON cannot express.
+
+    ``json.dumps`` writes bare ``NaN`` / ``Infinity`` by default, which is
+    invalid JSON that a strict reader rejects -- and ``allow_nan=False``
+    raises instead. Both outcomes lose the value, so a non-finite float
+    becomes a tagged token (configgle's ``py/float`` does the same).
+    """
+    if math.isfinite(value):
+        return value
+    return {_FLOAT_TAG: repr(value)}
+
+
 def _encode(value: object, annotation: object = None) -> JSONValue:
     if is_dataclass(value) and not isinstance(value, type):
         return dataclass_to_json(value)
@@ -704,8 +815,12 @@ def _encode(value: object, annotation: object = None) -> JSONValue:
     member = _matching_scalar_member(annotation, value)
     if member is not None:
         return {_SCALAR_TAG: member.__name__, _VALUE_TAG: _encode(value)}
-    if isinstance(value, bool | int | float | str) or value is None:
+    if isinstance(value, bool | int | str) or value is None:
         return value
+    # After the bool/int branch, only a true float reaches here, so the
+    # non-finite tagging cannot swallow a bool.
+    if isinstance(value, float):
+        return _encode_float(value)
     if isinstance(value, bytes):
         return base64.b64encode(value).decode("ascii")
     if isinstance(value, Path):
@@ -718,8 +833,11 @@ def _encode(value: object, annotation: object = None) -> JSONValue:
         return cast(JSONValue, value.value)
     if isinstance(value, Mapping):
         val_ann = _value_annotation(annotation)
+        # A non-str key was coerced with ``str(k)`` and never restored, so the
+        # decoded mapping was keyed by something the caller never stored.
+        # Refusing beats silently rewriting the key type.
         return {
-            str(k): _encode(v, val_ann)
+            _mapping_key(k): _encode(v, val_ann)
             for k, v in cast(Mapping[object, object], value).items()
         }
     # The element annotation has to travel with the element: it is what marks
@@ -777,7 +895,7 @@ def decode(annotation: object, raw: object) -> object:
     if isinstance(ann, UnionType) or origin is UnionType:
         members = _union_members(cast(object, ann))
         if members and isinstance(raw, Mapping):
-            raw_map = cast("Mapping[str, object]", raw)
+            raw_map = cast(Mapping[str, object], raw)
             tag = raw_map.get(_TYPE_TAG)
             member: type | None = members.get(tag) if isinstance(tag, str) else None
             if member is not None:
@@ -795,34 +913,47 @@ def decode(annotation: object, raw: object) -> object:
     # scalar passthrough and stayed a list. It materializes as ``frozenset``:
     # the abc names no constructor, and an immutable value is the safe
     # reading of an unqualified "set" on a frozen dataclass.
-    if origin in (tuple, list, set, frozenset, AbstractSet) and isinstance(raw, list):
+    if origin in (
+        tuple,
+        list,
+        set,
+        frozenset,
+        AbstractSet,
+        Sequence,
+    ) and isinstance(raw, list):
         items = cast("list[object]", raw)
         elems = _element_annotations(cast(object, ann), count=len(items))
         decoded = [decode(a, v) for v, a in zip(items, elems, strict=True)]
-        if origin is list:
+        # ``Sequence`` names no constructor, and JSON arrays decode to lists;
+        # a list already satisfies the abc.
+        if origin in (list, Sequence):
             return decoded
         if origin is AbstractSet:
             return frozenset(decoded)
-        return cast("type", origin)(decoded)
+        return cast(type, origin)(decoded)
     # Mapping (dict[K, V]): decode each value against the value annotation.
     if origin in (dict, Mapping) and isinstance(raw, Mapping):
         args = get_args(ann)
         val_ann: object = args[1] if len(args) == 2 else object
         return {
-            k: decode(val_ann, v)
-            for k, v in cast("Mapping[object, object]", raw).items()
+            k: decode(val_ann, v) for k, v in cast(Mapping[object, object], raw).items()
         }
     # Non-Optional union of special scalars (e.g. ``Path | bytes``): the
     # encoder tags these with a ``{"__scalar__": name, "__value__": ...}``
     # wrapper because both members would otherwise serialize to a bare string
     # with no way to tell them apart on decode.
-    if (isinstance(ann, UnionType) or origin is UnionType) and isinstance(raw, Mapping):
-        raw_map = cast("Mapping[str, object]", raw)
-        name = raw_map.get(_SCALAR_TAG)
-        if isinstance(name, str):
-            member = _scalar_member(get_args(ann), name)
-            if member is not None:
-                return decode(member, raw_map.get(_VALUE_TAG))
+    if isinstance(ann, UnionType) or origin is UnionType:
+        if isinstance(raw, Mapping):
+            raw_map = cast("Mapping[str, object]", raw)
+            name = raw_map.get(_SCALAR_TAG)
+            if isinstance(name, str):
+                member = _scalar_member(_union_args(cast(object, ann)), name)
+                if member is not None:
+                    return decode(member, raw_map.get(_VALUE_TAG))
+        # An untagged value in a MIXED union (``str | Attachment``): the
+        # dataclass members are tagged, so an untagged value must be one of
+        # the plain members. Decode against the one it already matches.
+        return _decode_untagged_union(cast(object, ann), cast(object, raw))
     # Plain scalars. ``raw`` may already match the declared scalar, or be a
     # different scalar that should coerce to it (an ``int`` for a ``float``
     # field, a ``str`` token for a ``bool``). Coerce to the declared type:
@@ -834,14 +965,10 @@ def decode(annotation: object, raw: object) -> object:
         # partially ``Unknown`` through the recursive cast sites above.
         # ``bool_val`` accepts ``object``, so the value is correct.
         return bool_val(raw)  # pyright: ignore[reportUnknownArgumentType]
-    if ann is int and isinstance(raw, (str, int, float)) and not isinstance(raw, bool):
-        return int(raw)
-    if (
-        ann is float
-        and isinstance(raw, (str, int, float))
-        and not isinstance(raw, bool)
-    ):
-        return float(raw)
+    if ann is int:
+        return _decode_int(raw)  # pyright: ignore[reportUnknownArgumentType] -- see ``bool_val`` above
+    if ann is float:
+        return _decode_float(raw)  # pyright: ignore[reportUnknownArgumentType] -- see ``bool_val`` above
     if ann is str:
         if isinstance(raw, str):
             return raw
@@ -862,9 +989,88 @@ def decode(annotation: object, raw: object) -> object:
         return datetime.fromisoformat(raw)
     if isinstance(ann, type) and issubclass(ann, Enum):
         return ann(raw)
-    # ``raw`` is JSON-decoded; its static type is partially unknown after the
-    # isinstance chain above, but a passthrough scalar is the right value.
-    return raw  # pyright: ignore[reportUnknownVariableType]
+    # An unannotated field (``object`` / no hint) is the one shape with no
+    # claim to check, so its value passes through. Everything else reaching
+    # here is a shape the annotation does not describe: returning it unchanged
+    # is what made every union defect in this module silent.
+    # A ``Literal`` names permitted VALUES, not a type to coerce to, so its
+    # members are the check: a match passes through, anything else is a
+    # violation the caller must hear about.
+    if origin is Literal:
+        if raw in get_args(ann):
+            return raw  # pyright: ignore[reportUnknownVariableType]
+        raise TypeError(f"cannot decode {raw!r} as {ann}")
+    if ann is None or ann is object or isinstance(ann, TypeVar):
+        return raw  # pyright: ignore[reportUnknownVariableType]
+    raise TypeError(f"cannot decode {raw!r} as {ann}")
+
+
+def _decode_untagged_union(annotation: object, raw: object) -> object:
+    """Decode a value whose union member carries no encoded tag."""
+    members = [m for m in _union_args(annotation) if m is not type(None)]
+    plain: list[type] = [
+        m for m in members if isinstance(m, type) and not is_dataclass(m)
+    ]
+    # ``bool`` before ``int``: ``isinstance(True, int)`` is true, so a bool
+    # would otherwise decode as the int member of ``int | bool``.
+    for member in sorted(plain, key=lambda m: m is not bool):
+        if isinstance(raw, member) and (member is bool or not isinstance(raw, bool)):
+            return decode(member, raw)
+    # A parameterized member (``Sequence[JSONValue]``, ``Mapping[str, ...]``)
+    # is not a ``type``, so it cannot be isinstance-tested against ``raw``.
+    # Its origin can: a container value belongs to whichever member's origin
+    # it already is, and its elements decode against that member.
+    for member in members:
+        origin = get_origin(member)
+        if isinstance(origin, type) and isinstance(raw, origin):
+            return decode(member, raw)
+    raise TypeError(f"cannot decode {raw!r} as {annotation}")
+
+
+def _decode_int(raw: object) -> int:
+    """Decode an int, refusing bool, non-finite, and fractional values."""
+    if isinstance(raw, bool):
+        raise TypeError(f"cannot decode {raw!r} as int: bool is not a number")
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        if not math.isfinite(raw):
+            raise TypeError(f"cannot decode {raw!r} as int")
+        if not raw.is_integer():
+            # 1.9 seeders is not 1 seeder; truncating reports a number the
+            # source never sent.
+            raise TypeError(f"cannot decode {raw!r} as int: not integral")
+        return int(raw)
+    if isinstance(raw, str):
+        try:
+            return int(raw.strip())
+        except ValueError as exc:
+            raise TypeError(f"cannot decode {raw!r} as int") from exc
+    raise TypeError(f"cannot decode {raw!r} as int")
+
+
+def _decode_float(raw: object) -> float:
+    """Decode a float, refusing bool and restoring tagged non-finite values."""
+    if isinstance(raw, bool):
+        raise TypeError(f"cannot decode {raw!r} as float: bool is not a number")
+    if isinstance(raw, Mapping):
+        token = cast("Mapping[str, object]", raw).get(_FLOAT_TAG)
+        if isinstance(token, str):
+            return float(token)
+        raise TypeError(f"cannot decode {raw!r} as float")
+    if isinstance(raw, (int, float)):
+        if not math.isfinite(raw):
+            raise TypeError(f"cannot decode {raw!r} as float: not finite")
+        return float(raw)
+    if isinstance(raw, str):
+        try:
+            parsed = float(raw.strip())
+        except ValueError as exc:
+            raise TypeError(f"cannot decode {raw!r} as float") from exc
+        if not math.isfinite(parsed):
+            raise TypeError(f"cannot decode {raw!r} as float: not finite")
+        return parsed
+    raise TypeError(f"cannot decode {raw!r} as float")
 
 
 def _resolve_alias(annotation: object) -> object:
@@ -874,11 +1080,16 @@ def _resolve_alias(annotation: object) -> object:
 
 
 def _strip_optional(annotation: object) -> object:
-    """Reduce ``T | None`` to ``T`` for decode dispatch; leave others alone."""
+    """Reduce ``T | None`` to ``T`` for decode dispatch; leave others alone.
+
+    The survivor is alias-resolved: ``Alias | None`` where ``Alias`` is itself
+    a union reduced to the bare alias object, which is not a ``UnionType``, so
+    the union branch below never ran and the value fell through.
+    """
     if isinstance(annotation, UnionType) or get_origin(annotation) is UnionType:
         non_none = [a for a in get_args(annotation) if a is not type(None)]
         if len(non_none) == 1:
-            return non_none[0]
+            return _resolve_alias(non_none[0])
     return annotation
 
 

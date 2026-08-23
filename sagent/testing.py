@@ -109,7 +109,7 @@ class MockModelCaps:
                 )
             ),
             supported_thinking_efforts=MappingProxyType(
-                {cast("ThinkingEffort", e): e for e in self.valid_efforts}
+                {cast(ThinkingEffort, e): e for e in self.valid_efforts}
             ),
             supported_thinking_budgets=(
                 frozenset({"auto", "fixed"}) if self.supports_thinking else frozenset()

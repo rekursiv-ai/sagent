@@ -272,6 +272,7 @@ async def test_call_tool_detaches_background_args() -> None:
         await bridge.stop()
 
 
+@pytest.mark.network_localhost
 @pytest.mark.asyncio
 async def test_registered_handler_routes_call_over_http() -> None:
     """A real MCP client over HTTP reaches the registered call handler.
@@ -509,13 +510,13 @@ async def test_stop_leaks_no_asyncio_tasks() -> None:
     first = ToolsBridge([])
     await first.start()
     await first.stop()
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(0)
     baseline = live_count()
     for _ in range(4):
         bridge = ToolsBridge([])
         await bridge.start()
         await bridge.stop()
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)
         assert live_count() == baseline, "ToolsBridge.stop leaked a loop task"
 
 

@@ -79,7 +79,7 @@ def test_strip_additional_properties_scalar_passthrough() -> None:
 def _make_request(messages: list[ModelContextEvent], **kw: object) -> ModelRequest:
     # Use explicit kwargs to keep the type checker happy.
     if "system" in kw:
-        return ModelRequest(messages=messages, system=cast(str, kw["system"]))
+        return ModelRequest(messages=messages, system=str(kw["system"]))
     return ModelRequest(messages=messages)
 
 
@@ -669,7 +669,7 @@ def test_build_request_tools_strip_additional_properties() -> None:
     tool = _StubTool()
     req = ModelRequest(
         messages=[UserMessage(text="hi")],
-        tools=cast("list[Tool]", [tool]),
+        tools=cast(list[Tool], [tool]),
     )
     body = _wire(req)
     tools_section = cast(list[MutableJSON], body["tools"])

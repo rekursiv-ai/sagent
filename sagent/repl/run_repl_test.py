@@ -398,7 +398,7 @@ class _FakeModel:
                 max_request_tokens=200_000, max_response_tokens=8_192
             ),
             supported_thinking_efforts=MappingProxyType(
-                {cast("ThinkingEffort", e): e for e in self.valid_efforts}
+                {cast(ThinkingEffort, e): e for e in self.valid_efforts}
             ),
             supported_thinking_budgets=(
                 frozenset({"auto", "fixed"}) if self.supports_thinking else frozenset()
@@ -2409,7 +2409,7 @@ def test_subagent_phase_stopped_when_task_done() -> None:
     task.cancelled.return_value = False
     task.exception.return_value = None
     job = BackgroundTaskEntry(
-        task=cast("asyncio.Task[object]", task),
+        task=cast(asyncio.Task[object], task),
         tool_name="AgentSpawn",
         queue_id="child-1",
         started=0.0,
@@ -2432,7 +2432,7 @@ def test_format_tasks_non_persistent_job_crashed_shows_errored() -> None:
     task.cancelled.return_value = False
     task.exception.return_value = RuntimeError("boom")
     crashed_job = BackgroundTaskEntry(
-        task=cast("asyncio.Task[object]", task),
+        task=cast(asyncio.Task[object], task),
         tool_name="Bash",
         queue_id="job-x",
         started=0.0,
@@ -2466,7 +2466,7 @@ def test_subagent_phase_errored_when_task_crashed() -> None:
     task.cancelled.return_value = False
     task.exception.return_value = RuntimeError("boom")
     job = BackgroundTaskEntry(
-        task=cast("asyncio.Task[object]", task),
+        task=cast(asyncio.Task[object], task),
         tool_name="AgentSpawn",
         queue_id="child-crashed",
         started=0.0,

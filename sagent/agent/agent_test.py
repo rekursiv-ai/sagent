@@ -25,9 +25,11 @@ from sagent import (
     providers as providers_module,
     types,
 )
-from sagent.agent import runtime as agent_runtime
+from sagent.agent import (
+    agent as agent_module,
+    runtime as agent_runtime,
+)
 from sagent.agent.agent import (
-    _TOOL_REGISTRY_MAX,
     MAX_OVERFLOW_RECOVERY,
     ActivityTracker,
     Agent,
@@ -169,7 +171,7 @@ class StubModel:
                 )
             ),
             supported_thinking_efforts=MappingProxyType(
-                {cast("ThinkingEffort", e): e for e in self.valid_efforts}
+                {cast(ThinkingEffort, e): e for e in self.valid_efforts}
             ),
             supported_thinking_budgets=(
                 frozenset({"auto", "fixed"}) if self.supports_thinking else frozenset()
@@ -1248,7 +1250,7 @@ def test_fully_drained_ignores_background_when_callback_unset() -> None:
     term must then drop out entirely, leaving the predicate byte-identical
     to its pre-callback form. Pins the standalone-runtime safety property.
     """
-    runtime = agent_runtime.AgentRuntime(model=cast("agent_runtime.Model", StubModel()))
+    runtime = agent_runtime.AgentRuntime(model=cast(agent_runtime.Model, StubModel()))
     assert runtime.has_pending_background is None
     # Fresh runtime, empty inbox, no work -> fully drained, as before.
     assert runtime._fully_drained() is True
@@ -8303,10 +8305,14 @@ async def test_drive_until_first_idle_propagates_a_driver_crash() -> None:
         _ = await a.drive_until_first_idle(types.runtime.UserMessage(text="hi"))
 
 
-def test_tool_registry_is_bounded_across_a_long_session() -> None:
+def test_tool_registry_is_bounded_across_a_long_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """One entry per tool call, never pruned, grows for the whole session."""
+    registry_max = 8
+    monkeypatch.setattr(agent_module, "_TOOL_REGISTRY_MAX", registry_max)
     a = _build_agent()
-    for i in range(_TOOL_REGISTRY_MAX + 500):
+    for i in range(registry_max + 2):
         a._track_tool_registry(
             types.runtime.ModelResponseComplete(
                 message=types.runtime.AssistantMessage(
@@ -8317,15 +8323,19 @@ def test_tool_registry_is_bounded_across_a_long_session() -> None:
                 ),
             ),
         )
-    assert len(a._tool_registry) <= _TOOL_REGISTRY_MAX
+    assert len(a._tool_registry) <= registry_max
 
 
-def test_tool_registry_keeps_detached_calls_however_old() -> None:
+def test_tool_registry_keeps_detached_calls_however_old(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A detached result lands later; forgetting it loses its attribution."""
+    registry_max = 8
+    monkeypatch.setattr(agent_module, "_TOOL_REGISTRY_MAX", registry_max)
     a = _build_agent()
-    a.runtime.detached["old"] = cast("asyncio.Task[None]", None)
+    a.runtime.detached["old"] = cast(asyncio.Task[None], None)
     a._tool_registry["old"] = ("Bash", 0.0)
-    for i in range(_TOOL_REGISTRY_MAX + 500):
+    for i in range(registry_max + 2):
         a._track_tool_registry(
             types.runtime.ModelResponseComplete(
                 message=types.runtime.AssistantMessage(

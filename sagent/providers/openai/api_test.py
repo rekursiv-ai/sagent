@@ -146,6 +146,7 @@ def test_openai_gpt_56_image_tokens_use_32px_patches(
 
 
 @pytest.mark.anyio
+@pytest.mark.compute_large_fixture
 async def test_openai_gpt_56_uses_o200k_tokenizer() -> None:
     model = OpenAI.from_key("k").model("gpt-5.6-sol")
     text = "GPT-5.6 token counting: 東京 and function_call(arg=42)"

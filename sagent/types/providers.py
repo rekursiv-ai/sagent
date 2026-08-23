@@ -81,7 +81,7 @@ def resolve(
           understate the caller's budget by up to 4x.
 
     """
-    tagged: str = roles.get(cast("ModelRole", model_id), model_id)
+    tagged: str = roles.get(cast(ModelRole, model_id), model_id)
     # ``split_model_id`` is the one tag parser; it accepts the tags in any
     # order, which a hand-rolled suffix strip here did not.
     base, id_tags = split_model_id(tagged)
@@ -92,8 +92,9 @@ def resolve(
         known = ", ".join(sorted(models))
         raise UnknownModelError(f"Unknown model {model_id!r}. Known models: {known}")
     limits = cap.context_limits
-    offered_contexts: Mapping[str, Limits] = (
-        {} if isinstance(limits, Limits) else limits
+    offered_contexts = cast(
+        Mapping[str, Limits],
+        ({} if isinstance(limits, Limits) else limits),
     )
     if context and context not in offered_contexts:
         offered = ", ".join(sorted(t for t in offered_contexts if t)) or "(none)"
