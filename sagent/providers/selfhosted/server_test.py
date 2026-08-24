@@ -352,10 +352,23 @@ class _StubProvider:
     hosted_model_id: str = "stub/qwen"
     hosted_max_response_tokens: int = 567
 
+    @property
+    def tokenizer(self) -> _CountingTokenizer:
+        """``approx_text_tokens`` reads the real tokenizer now, not a ratio."""
+        return _CountingTokenizer()
+
+
+class _CountingTokenizer:
+    """One token per 4 characters, matching the old ratio the test asserts."""
+
+    def encode(self, text: str, **kwargs: object) -> list[int]:
+        del kwargs
+        return list(range(len(text) // 4))
+
 
 def test_self_hosted_model_properties() -> None:
-    # Structural-only stub; the model only reads ``hosted_*`` properties
-    # here so the missing ``native_model`` / ``tokenizer`` are never touched.
+    # Structural-only stub: the model reads ``hosted_*`` and ``tokenizer``
+    # here, so only ``native_model`` stays absent.
     stub = _StubProvider()
     m = SelfHostedModel(provider=stub)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- partial protocol stub
     assert m.max_request_tokens == 1234

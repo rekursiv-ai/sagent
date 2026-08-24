@@ -29,7 +29,6 @@ from typing import TYPE_CHECKING, ClassVar, Self, cast, override
 
 import asyncio
 import base64
-import contextlib
 import dataclasses
 import json
 import logging
@@ -60,6 +59,7 @@ from sagent.lib.custom_json import (
 )
 from sagent.providers.lib.errors import (
     error_status_code,
+    is_context_overflow_text,
     is_request_too_large,
     raise_if_request_too_large,
 )
@@ -231,34 +231,25 @@ class OpenAICompat:
         return self.model("utility")
 
 
-def _is_context_overflow_text(msg: str) -> bool:
-    """True if the error body text describes a context-window overflow.
+def _resized_dims(dims: tuple[int, int], max_edge: int) -> tuple[int, int]:
+    """Dimensions after the aspect-preserving resize serialization applies.
 
-    Callers MUST run ``is_request_too_large`` first and short-circuit on a
-    byte wire-limit: the ``"input too large"`` phrase below is byte-ambiguous,
-    so this helper is only sound when the byte case has already been excluded
-    (see :meth:`OpenAICompatModel.is_context_overflow`).
+    ``max_edge <= 0`` means the transport sends the image untouched.
+
+    Args:
+      dims: Source ``(width, height)``.
+      max_edge: Long-edge ceiling from the model's limits.
+
+    Returns:
+      resized: ``(width, height)`` as they will cross the wire.
+
     """
-    with contextlib.suppress(json.JSONDecodeError):
-        raw_body = json.loads(msg)
-        if isinstance(raw_body, Mapping):
-            body = cast(Mapping[str, object], raw_body)
-            raw_error = body.get("error")
-            if isinstance(raw_error, Mapping):
-                error = cast(Mapping[str, object], raw_error)
-                code = error.get("code")
-                if code is not None:
-                    return code == "context_length_exceeded"
-    lower = msg.lower()
-    if "context_length_exceeded" in lower or "prompt too long" in lower:
-        return True
-    if "maximum context length" in lower or "input too large" in lower:
-        return True
-    if "context window" in lower and (
-        "exceed" in lower or "overflow" in lower or "maximum" in lower
-    ):
-        return True
-    return "model context" in lower and "exceed" in lower
+    width, height = dims
+    longest = max(width, height)
+    if max_edge <= 0 or longest <= max_edge:
+        return width, height
+    scale = max_edge / longest
+    return max(1, int(width * scale)), max(1, int(height * scale))
 
 
 class OpenAICompatModel(ModelDefaults):
@@ -436,8 +427,21 @@ class OpenAICompatModel(ModelDefaults):
 
     @override
     def approx_text_tokens(self, text: str) -> int:
-        """Local estimate via ``len(text) // 4``."""
-        return len(text) // 4
+        """Exact tiktoken count when an encoding for ``model_id`` exists.
+
+        tiktoken is local, synchronous, and OpenAI's own tokenizer, so
+        there is no reason for the hot path to guess: this was
+        ``len(text) // 4`` while the exact count sat behind an ``async``
+        method nothing on the budget path could await. Measured 0.3ms for
+        a 4 KB tool result, 17ms for a turn's appends.
+
+        Falls back to the spec ratio for non-OpenAI models whose ids
+        tiktoken does not recognize (Kimi, Qwen, MiniMax, ...).
+        """
+        enc = self._tiktoken_encoding()
+        if enc is None:
+            return int(len(text) / self.spec.chars_per_token)
+        return len(enc.encode(text))
 
     @override
     def approx_image_tokens(self, data: bytes) -> int:
@@ -454,20 +458,13 @@ class OpenAICompatModel(ModelDefaults):
             # GPT-5.6 ``auto``/``original`` preserves dimensions and bills one
             # token unit per 32x32 patch, with patches rounded up per edge.
             return math.ceil(dims[0] / 32) * math.ceil(dims[1] / 32)
-        tiles = math.ceil(dims[0] / 512) * math.ceil(dims[1] / 512)
+        # Count the image as it will SHIP. Serialization resizes the long
+        # edge to ``max_image_edge_px`` before sending, so tiling the
+        # source dimensions charged a 4096px image for 64 tiles when 16
+        # cross the wire -- a 4x overcount that fires compaction early.
+        width, height = _resized_dims(dims, self.spec.context_limits.max_image_edge_px)
+        tiles = math.ceil(width / 512) * math.ceil(height / 512)
         return 85 + tiles * 170
-
-    @override
-    async def actual_text_tokens(self, text: str) -> int:
-        """Local tiktoken count when an encoding for ``model_id`` exists.
-
-        Falls back to :meth:`approx_text_tokens` for non-OpenAI models
-        whose ids tiktoken doesn't recognize (Kimi, Qwen, MiniMax, etc.).
-        """
-        enc = self._tiktoken_encoding()
-        if enc is None:
-            return self.approx_text_tokens(text)
-        return len(enc.encode(text))
 
     @override
     async def actual_request_tokens(self, request: ModelRequest) -> int:
@@ -532,7 +529,7 @@ class OpenAICompatModel(ModelDefaults):
         """
         if is_request_too_large(error_status_code(error), str(error)):
             return False
-        return _is_context_overflow_text(str(error))
+        return is_context_overflow_text(str(error))
 
     @property
     def _endpoint(self) -> str:
@@ -660,7 +657,7 @@ class OpenAICompatModel(ModelDefaults):
             if 400 <= r.status_code < 500:
                 err_body = (await r.aread()).decode(errors="replace")
                 raise_if_request_too_large(r.status_code, err_body)
-                if _is_context_overflow_text(err_body):
+                if is_context_overflow_text(err_body):
                     raise PromptTooLongError(err_body)
             r.raise_for_status()
             self._last_usage = openai_usage(r.headers)

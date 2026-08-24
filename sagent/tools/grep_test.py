@@ -15,9 +15,7 @@ import pytest
 from sagent.lib.tool_validation import validate_tool_input
 from sagent.testing import FakeAgent, with_fake_agent
 from sagent.tools.grep import (
-    _ASSUMED_CHARS_PER_MATCH,
     Grep,
-    _default_keep_first,
 )
 from sagent.tools.lib.bash import parse_bash
 from sagent.types.runtime import ToolResult
@@ -971,25 +969,6 @@ def test_context_knobs_reject_floats() -> None:
     assert err is not None, "a float context arg passed schema validation"
 
 
-@pytest.mark.parametrize("ceiling", [20_000, 60_000, 150_000, 600_000])
-def test_the_default_entry_cap_stays_under_the_result_ceiling(ceiling: int) -> None:
-    """The default must fit ONE reply, at every budget the agent derives.
-
-    ``max(1000, ceiling // 150)`` is a floor, not a bound: the smallest
-    ``ContextBudget.from_model`` produces is ``persist_threshold=20_000``,
-    where 1000 entries at ~150 chars is 150_000 chars -- 7.5x over the
-    ceiling the cap exists to respect, so the result is off-loaded to
-    disk and the caller sees a preview instead of matches.
-    """
-    with with_fake_agent() as agent:
-        agent.max_result_chars = ceiling
-        entries = _default_keep_first()
-    assert entries * _ASSUMED_CHARS_PER_MATCH <= ceiling, (
-        f"{entries} entries x {_ASSUMED_CHARS_PER_MATCH} chars exceeds {ceiling}"
-    )
-    assert entries >= 1, "a positive ceiling must still allow matches"
-
-
 @pytest.mark.asyncio
 async def test_a_missing_root_errors_in_both_backends(tmp_path: Path) -> None:
     """Rg exits 2 on a missing path; the fallback returned ``(no matches)``.
@@ -1034,13 +1013,20 @@ async def test_a_ripgrep_timeout_returns_a_tool_error(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_offset_with_context_says_it_was_ignored(tmp_path: Path) -> None:
-    """A silently dropped knob is a wrong answer with no way to notice.
+async def test_offset_applies_with_context_lines(tmp_path: Path) -> None:
+    """``offset`` must page context output, not be dropped.
 
-    ``offset`` is zeroed when context lines are requested, and the only
-    record was a ``logger.warning`` the model never sees.
+    It used to be zeroed whenever context was requested, with a notice
+    saying so -- while the truncation note in the same reply still told
+    the reader to pass ``offset``. One reply both refused the knob and
+    demanded it, so the omitted rows were unreachable either way.
+
+    Pagination slices rendered lines and is agnostic to how they were
+    produced, so context rows page like any others.
     """
-    (tmp_path / "a.txt").write_text("hit\n" * 10, encoding="utf-8")
+    (tmp_path / "a.txt").write_text(
+        "".join(f"hit{i}\n" for i in range(10)), encoding="utf-8"
+    )
     result = await _run_grep(
         {
             "pattern": "hit",
@@ -1051,10 +1037,11 @@ async def test_offset_with_context_says_it_was_ignored(tmp_path: Path) -> None:
         },
         tmp_path,
     )
-    assert "offset" in result.content.lower(), result.content
-    # The notice must be a real line, not the word appearing inside a
-    # matched path -- assert on the sentence the tool emits.
-    assert "offset ignored" in result.content.lower(), result.content
+    assert "offset ignored" not in result.content.lower(), result.content
+    # Offset 5 skips the first five rendered rows, so hit0 is gone and
+    # the tail is present.
+    assert "hit0\n" not in result.content, result.content
+    assert "hit9" in result.content, result.content
 
 
 if __name__ == "__main__":

@@ -20,7 +20,14 @@ Tool-calling:
 
 Models can be downloaded, for example, via,
 
-hf download Qwen/Qwen3.6-27B --local-dir /opt/models/qwen3.6-27b
+hf download Qwen/Qwen3.6-27B
+
+No ``--local-dir``: ``HF_HOME`` is provisioned (see ``ops/env``) so the
+download lands in the shared hub cache at
+``$HF_HOME/hub/models--Qwen--Qwen3.6-27B`` and every later load reuses
+it. Passing an explicit directory writes a second private copy that no
+other checkout or user can hit, which is what the shared cache exists to
+avoid -- and ``from_key`` takes the repo id, so nothing needs the path.
 
 """
 
@@ -565,8 +572,13 @@ class SelfHostedModel(ModelDefaults):
 
     @override
     def approx_text_tokens(self, text: str) -> int:
-        """Local estimate via ``len(text) // 4``."""
-        return len(text) // 4
+        """Exact count from the loaded HF tokenizer.
+
+        The model's real tokenization, available locally and
+        synchronously -- no reason for the budget path to divide by a
+        ratio when the tokenizer that will actually run is in-process.
+        """
+        return len(self._provider.tokenizer.encode(text, add_special_tokens=False))
 
     @override
     def approx_image_tokens(self, data: bytes) -> int:
@@ -577,13 +589,6 @@ class SelfHostedModel(ModelDefaults):
         """
         dims = image_lib.get_dimensions(data)
         return dims[0] * dims[1] // (32 * 32) if dims is not None else 0
-
-    @override
-    async def actual_text_tokens(self, text: str) -> int:
-        """Local HF tokenizer count -- the true tokenization for this model."""
-        return len(
-            self._provider.tokenizer.encode(text, add_special_tokens=False),
-        )
 
     @override
     async def actual_request_tokens(self, request: ModelRequest) -> int:

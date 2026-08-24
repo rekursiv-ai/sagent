@@ -199,12 +199,15 @@ class FakeAgent:
     max_request_bytes: int = 32 * 1024 * 1024
     """Active model's request byte ceiling (mirrors ``Agent.max_request_bytes``)."""
 
-    max_result_chars: int = 150_000
-    """Per-result character ceiling (mirrors ``Agent.max_result_chars``).
+    max_result_tokens: int = 50_000
+    """Per-result token ceiling (mirrors ``Agent.max_result_tokens``).
 
-    Defaults to the value a 200k-token model derives, so tools under test
-    size their limits the way they would in production.
+    Defaults to what a 200k-token model derives (``window // 4``), so
+    tools under test bound themselves the way they would in production.
     """
+
+    chars_per_token: int = 4
+    """Divisor backing :meth:`approx_text_tokens`."""
 
     runtime: agent_runtime.AgentRuntime = field(default_factory=_new_runtime)
     """Real ``AgentRuntime`` with a null model; its observers list
@@ -233,6 +236,10 @@ class FakeAgent:
 
     def __post_init__(self) -> None:
         self.runtime.observers.append(self.events.append)
+
+    def approx_text_tokens(self, text: str) -> int:
+        """Ratio-based stand-in for the active model's tokenizer."""
+        return len(text) // self.chars_per_token
 
     @property
     def background(self) -> Mapping[str, BackgroundTaskEntry]:

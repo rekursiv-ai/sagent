@@ -25,21 +25,17 @@ import os
 import tempfile
 import uuid
 
+from sagent.agent.state import approx_tokens
 from sagent.types.runtime import ToolResult
 
 
 logger = logging.getLogger(__name__)
 
-PREVIEW_CHARS = 2_000  # config-globals: ignore -- in-history preview length budget
 PERSISTED_TAG: Final = "<persisted-output>"
 
 _FALLBACK_STORAGE_DIR = (
     Path(tempfile.gettempdir()) / "sagent_results" / f"{os.getpid()}-{uuid.uuid4().hex}"
 )
-
-PERSIST_EXEMPT_TOOLS: frozenset[str] = frozenset({"Read"})
-"""Tool names whose results bypass disk offloading (output already
-bounded by the tool's own internal cap)."""
 
 
 def post_process_result(
@@ -47,9 +43,9 @@ def post_process_result(
     tool_name: str,
     *,
     session_dir: Path | None,
-    persist_threshold: int,
-    message_budget_chars: int = 0,
-    used_message_chars: int = 0,
+    persist_tokens: int,
+    message_budget_tokens: int = 0,
+    used_message_tokens: int = 0,
 ) -> ToolResult:
     """Persist oversized content and inject the empty-output marker.
 
@@ -65,13 +61,13 @@ def post_process_result(
       tool_name: Originating tool name (gates exempt-from-persist).
       session_dir: Directory where ``tool-results/<id>.txt`` lives;
           ``None`` falls back to the OS temp dir.
-      persist_threshold: Per-result content-length threshold. ``0``
-          disables persistence; results above the threshold are
-          off-loaded to disk and replaced with a preview.
-      message_budget_chars: Aggregate live tool-result budget. ``0`` disables it.
-      used_message_chars: Persist-budget characters already in context;
-          excludes results whose tool is in ``PERSIST_EXEMPT_TOOLS`` and
-          error results, since ``_should_persist`` skips both.
+      persist_tokens: Per-result token threshold. ``0`` disables
+          persistence; results above it are off-loaded to disk and
+          replaced with a preview.
+      message_budget_tokens: Aggregate live tool-result budget, in
+          tokens. ``0`` disables it.
+      used_message_tokens: Persist-budget tokens already in context;
+          excludes error results, since ``_should_persist`` skips them.
 
     Returns:
       processed: Possibly-modified ``ToolResult``. ``call_id`` /
@@ -91,11 +87,9 @@ def post_process_result(
         )
     if _should_persist(
         content,
-        tool_name,
-        is_error=result.is_error,
-        persist_threshold=persist_threshold,
-        message_budget_chars=message_budget_chars,
-        used_message_chars=used_message_chars,
+        persist_tokens=persist_tokens,
+        message_budget_tokens=message_budget_tokens,
+        used_message_tokens=used_message_tokens,
     ):
         preview = _persist_oversized(result.call_id, content, session_dir=session_dir)
         if preview is not None:
@@ -105,21 +99,72 @@ def post_process_result(
 
 def _should_persist(
     content: str,
-    tool_name: str,
     *,
-    is_error: bool,
-    persist_threshold: int,
-    message_budget_chars: int,
-    used_message_chars: int,
+    persist_tokens: int,
+    message_budget_tokens: int,
+    used_message_tokens: int,
 ) -> bool:
-    """Return True when result content should be off-loaded."""
-    if tool_name in PERSIST_EXEMPT_TOOLS or is_error:
+    """Return True when result content should be off-loaded.
+
+    Nothing is exempt -- not a tool, not a failure.
+
+    ``Read`` was, on the stated grounds that its "output already bounded
+    by the tool's own internal cap" -- which became false when that cap
+    was re-expressed in lines, leaving the 11.1M-character result of
+    session ``190b6baec7ed`` with no bound at all.
+
+    Error results were too, but ``materialize_request`` elides any
+    over-budget result regardless, so the exemption did not keep a large
+    traceback whole: it only ensured the traceback was replaced by a
+    placeholder with no path, while the identical body as a SUCCESS was
+    written to disk and stayed readable. Exactly backwards, since the
+    failing case is the one whose detail is wanted.
+    """
+    tokens = approx_tokens(content)
+    # Never off-load a result the stub would not shrink. The stub is a
+    # tag, a path, a size line, and up to ``preview_chars`` of the content,
+    # so below about that size persisting COSTS tokens instead of saving
+    # them -- a 159-byte result came back as a ~600-byte preview. Only the
+    # aggregate branch makes that reachable for a small result: it charges
+    # the newest result for the size of everything before it, so once the
+    # aggregate is spent EVERY later result off-loads however tiny.
+    if tokens <= stub_cost_tokens(content):
         return False
-    if persist_threshold > 0 and len(content) > persist_threshold:
+    if persist_tokens > 0 and tokens > persist_tokens:
         return True
+    # Aggregate pressure off-loads as well. It is the only thing standing
+    # between many mid-size results and the wire, where
+    # ``materialize_request`` replaces an over-budget result with a
+    # placeholder carrying no path back; off-loading here keeps the
+    # content reachable on disk instead.
     return (
-        message_budget_chars > 0
-        and used_message_chars + len(content) > message_budget_chars
+        message_budget_tokens > 0
+        and used_message_tokens + tokens > message_budget_tokens
+    )
+
+
+def stub_cost_tokens(content: str, *, preview_chars: int = 2_000) -> int:
+    """Tokens the persisted stub would occupy for ``content``.
+
+    Off-loading only pays when the stub is SMALLER than what it replaces,
+    and the stub is not free: a tag, a filesystem path, a size line, and
+    up to ``preview_chars`` of the content itself. Measured against the
+    real stub rather than guessed, so the floor in :func:`_should_persist`
+    tracks any change to the stub's shape.
+
+    Args:
+      content: The result body that would be off-loaded.
+      preview_chars: Must match :func:`_persist_oversized`.
+
+    Returns:
+      tokens: Token cost of the stub that would replace ``content``.
+
+    """
+    return approx_tokens(
+        f"{PERSISTED_TAG}\nOutput too large ({_format_size(len(content))}). "
+        f"Full output saved to: {_FALLBACK_STORAGE_DIR}/{'x' * 40}.txt\n\n"
+        f"Preview (first {_format_size(preview_chars)}):\n"
+        f"{content[:preview_chars]}\n...\n</persisted-output>"
     )
 
 
@@ -128,6 +173,7 @@ def _persist_oversized(
     content: str,
     *,
     session_dir: Path | None,
+    preview_chars: int = 2_000,
 ) -> str | None:
     """Write ``content`` to disk and return a preview replacement.
 
@@ -135,6 +181,7 @@ def _persist_oversized(
       call_id: Originating call id; used to build a stable filename.
       content: Full tool result content.
       session_dir: Session directory (None falls back to OS tmp).
+      preview_chars: How much of ``content`` the in-history stub keeps.
 
     Returns:
       preview: Preview text with embedded path, or ``None`` on write failure.
@@ -156,9 +203,9 @@ def _persist_oversized(
     except OSError:
         logger.exception("could not persist tool result to %s", filepath)
         return None
-    preview = content[:PREVIEW_CHARS]
-    if len(content) > PREVIEW_CHARS:
-        nl = preview.rfind("\n", PREVIEW_CHARS // 2)
+    preview = content[:preview_chars]
+    if len(content) > preview_chars:
+        nl = preview.rfind("\n", preview_chars // 2)
         if nl > 0:
             preview = preview[:nl]
     has_more = len(content) > len(preview)
@@ -167,7 +214,7 @@ def _persist_oversized(
         f"{PERSISTED_TAG}\n"
         f"Output too large ({_format_size(len(content))}). "
         f"Full output saved to: {filepath}\n\n"
-        f"Preview (first {_format_size(PREVIEW_CHARS)}):\n"
+        f"Preview (first {_format_size(preview_chars)}):\n"
         f"{preview}{more}"
         "</persisted-output>"
     )

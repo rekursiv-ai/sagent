@@ -566,12 +566,24 @@ class RequestTooLargeError(UserFacingError):
 
 
 class StreamInterruptedError(Exception):
-    """Stream indicated tool use but delivered no tool blocks."""
+    """A stream ended before delivering what it announced.
+
+    Two shapes arrive here: a turn that declared ``tool_use`` and sent no
+    tool blocks, and an SSE stream that ended without its terminator. The
+    message names whichever happened -- it used to claim tool use in both
+    cases, so a text-only connection drop was reported as a tool-call
+    failure and sent the reader hunting for tools never in play.
+    """
 
     def __init__(self, response: ModelResponse) -> None:
         tokens = response.tokens
+        what = (
+            "indicated tool_use but delivered no tool blocks"
+            if response.stop_reason == "tool_use"
+            else "ended before completing"
+        )
         super().__init__(
-            "Stream indicated tool_use but delivered no tool blocks "
+            f"Stream {what} "
             f"(input_tokens={tokens.request}, "
             f"output_tokens={tokens.response}, "
             f"stop_reason={response.stop_reason!r}).",
@@ -845,7 +857,12 @@ class ContextBudget:
     """Maximum output tokens reserved for the response."""
 
     chars_per_token: int = 4
-    """Approximate characters per token for budget math."""
+    """Approximate characters per token, for the two re-attach caps only.
+
+    Every OTHER field below is a token count. Re-attach reads whole files
+    off disk before any tokenizer sees them, so its two caps stay in
+    characters; nothing else may reintroduce the conversion.
+    """
 
     buffer_tokens: int = 0
     """Headroom (tokens) before force-compaction triggers."""
@@ -859,11 +876,11 @@ class ContextBudget:
     reattach_budget: int = 0
     """Total character budget for all re-attached files."""
 
-    persist_threshold: int = 0
-    """Per-result character threshold for disk offloading."""
+    persist_tokens: int = 0
+    """Per-result token threshold for disk offloading."""
 
-    message_budget_chars: int = 0
-    """Per-request aggregate character budget for tool results."""
+    message_budget_tokens: int = 0
+    """Per-request aggregate token budget for tool results."""
 
     keep_recent_on_compact: int | None = None
     """Recent entries the compactor keeps verbatim; ``None`` lets it choose."""
@@ -894,13 +911,11 @@ class ContextBudget:
             raise ValueError(
                 f"reattach_budget must be >= 0, got {self.reattach_budget}"
             )
-        if self.persist_threshold < 0:
+        if self.persist_tokens < 0:
+            raise ValueError(f"persist_tokens must be >= 0, got {self.persist_tokens}")
+        if self.message_budget_tokens < 0:
             raise ValueError(
-                f"persist_threshold must be >= 0, got {self.persist_threshold}"
-            )
-        if self.message_budget_chars < 0:
-            raise ValueError(
-                f"message_budget_chars must be >= 0, got {self.message_budget_chars}"
+                f"message_budget_tokens must be >= 0, got {self.message_budget_tokens}"
             )
         if self.keep_recent_on_compact is not None and self.keep_recent_on_compact < 0:
             raise ValueError(
@@ -922,9 +937,8 @@ class ContextBudget:
         """
         inp = model.spec.context_limits.max_request_tokens
         out = model.spec.context_limits.max_response_tokens
-        # The spec carries the measured ratio (2.83 for the opus-5
-        # generation, 4.83 for the 4-5s); planning at a flat 4 made every
-        # derived char budget wrong by that model's whole error.
+        # Only the two re-attach caps still need the ratio: they bound
+        # file bytes read off disk, before any tokenizer sees them.
         cpt = max(1, round(model.spec.chars_per_token))
         buffer = default_buffer_tokens(inp)
         return cls(
@@ -935,8 +949,13 @@ class ContextBudget:
             reattach_count=5,
             reattach_max_chars=cpt * max(inp // 40, 2_000),
             reattach_budget=cpt * max(inp // 4, 10_000),
-            persist_threshold=cpt * max(inp // 4, 20_000),
-            message_budget_chars=cpt * max(inp // 2, 20_000),
+            # No floor. A floor is not a bound: at ``gpt-4``'s 8_192-token
+            # window a 20_000-token floor let ONE tool result exceed the
+            # whole context 2.4x. ``offset`` reaches whatever a smaller
+            # cap left behind, so erring small is recoverable and erring
+            # large is not.
+            persist_tokens=inp // 4,
+            message_budget_tokens=inp // 2,
             # ``None`` defers to the compactor's own ``keep_recent``
             # default, which adapts per-strategy; baking a number here
             # would override that without the caller knowing.

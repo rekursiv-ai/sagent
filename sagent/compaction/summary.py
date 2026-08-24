@@ -361,7 +361,9 @@ class SummaryCompactor:
         summary_text: str | None = None
         entries: list[ModelContextEvent] = []
         for attempt in range(self._max_attempts):
-            entries = _request_entries(groups)
+            entries = _request_entries(
+                groups, tool_result_cap_chars=self._retry_tool_result_cap_chars
+            )
             request = ModelRequest(
                 messages=[*entries, UserMessage(text=prompt)],
                 system=read_asset(recipe_dict("compactor")["system"]).strip(),
@@ -490,7 +492,13 @@ class SummaryCompactor:
         response: ModelResponse | None = None
         for attempt in range(self._max_attempts):
             request = ModelRequest(
-                messages=[*_request_entries(groups), UserMessage(text=probe)],
+                messages=[
+                    *_request_entries(
+                        groups,
+                        tool_result_cap_chars=self._retry_tool_result_cap_chars,
+                    ),
+                    UserMessage(text=probe),
+                ],
                 system=read_asset(recipe_dict("compactor")["system"]).strip(),
                 tools=None,
             )
@@ -531,6 +539,15 @@ class SummaryCompactor:
             raise PromptTooLongError("summary verification prompt too long")
         improved = response.message.text.strip()
         if not improved or improved.upper() == "IDENTICAL":
+            return raw_summary
+        # Only accept a replacement that still satisfies the contract the
+        # ORIGINAL already met. Verification is an optional refinement,
+        # so it may not turn a success into a failure: unvalidated prose
+        # ("Looks complete.") passed here, then failed ``_format_summary``
+        # downstream and took the whole compaction to fallback -- losing
+        # the valid summary the first call had produced.
+        if _format_summary(improved) is None:
+            logger.warning("verifier returned no <summary> block; keeping the original")
             return raw_summary
         return improved
 
@@ -618,14 +635,56 @@ def _build_fallback_splice(
     )
 
 
-def _request_entries(groups: list[list[ModelContextEvent]]) -> list[ModelContextEvent]:
-    """Flatten request groups and normalize provider-facing shape."""
+def _request_entries(
+    groups: list[list[ModelContextEvent]],
+    *,
+    tool_result_cap_chars: int = 0,
+) -> list[ModelContextEvent]:
+    """Flatten request groups and normalize provider-facing shape.
+
+    Caps oversized tool results up front rather than waiting for the
+    provider to reject them. The main model path budgets via
+    ``materialize_request``; the compactor builds its ``ModelRequest``
+    directly, so before this cap an 11.1M-character result reached the
+    wire intact -- and because compaction is what should have SHED it,
+    the failure recurred on every retry and every later turn
+    (session ``190b6baec7ed``).
+
+    Args:
+      groups: Round-grouped history to summarize.
+      tool_result_cap_chars: Per-result character cap. ``0`` disables it.
+
+    Returns:
+      entries: Provider-facing entries, oversized results capped.
+
+    """
     entries = [entry for group in groups for entry in group]
     entries = _elide_skill_results(entries)
     entries = _drop_orphan_tool_results(entries)
+    if tool_result_cap_chars > 0:
+        entries = _cap_tool_results(entries, cap_chars=tool_result_cap_chars)
     if entries and not isinstance(entries[0], (AgentSendMessage, UserMessage)):
         return [UserMessage(text="[earlier messages elided]"), *entries]
     return entries
+
+
+def _cap_tool_results(
+    entries: list[ModelContextEvent], *, cap_chars: int
+) -> list[ModelContextEvent]:
+    """Truncate any ``ToolResult`` body above ``cap_chars``, idempotently."""
+    return [
+        dataclasses.replace(
+            entry,
+            content=f"{_COMPACTOR_TOOL_RESULT_NOTICE}\n{entry.content[:cap_chars]}",
+        )
+        if (
+            isinstance(entry, ToolResult)
+            and len(entry.content) > cap_chars
+            and not entry.content.startswith(_COMPACTOR_TOOL_RESULT_NOTICE)
+        )
+        else entry
+        for entry in entries
+    ]
 
 
 def _elide_skill_results(

@@ -57,10 +57,7 @@ from sagent.agent.compaction import (
     post_compact_enrich,
 )
 from sagent.agent.cost_tracker import CostTracker
-from sagent.agent.result_storage import (
-    PERSIST_EXEMPT_TOOLS,
-    post_process_result,
-)
+from sagent.agent.result_storage import post_process_result
 from sagent.agent.retry import send_with_retry, service_error_snapshot
 from sagent.agent.session_io import (
     SessionMeta,
@@ -120,6 +117,30 @@ MAX_OVERFLOW_RECOVERY = 3  # config-globals: ignore -- overflow-recovery retry c
 # line does not re-fire the advisory every response.
 _USAGE_WARN_FRACTION = 0.75  # config-globals: ignore -- UI advisory warn threshold
 _USAGE_CLEAR_FRACTION = 0.60  # config-globals: ignore -- UI advisory clear threshold
+
+
+def _reject_budget_over_model(
+    budget: types.model.ContextBudget, model: types.model.Model
+) -> None:
+    """Reject an explicit budget that exceeds the model's own limits.
+
+    Mirrors the ``max_request_tokens`` / ``max_response_tokens`` setters,
+    which are the only other way to change these. Raises here rather than
+    clamping: a caller who named a window the model cannot serve has a
+    wrong belief, and silently shrinking it hides that until the numbers
+    stop adding up somewhere else.
+
+    Raises:
+      ValueError: When either window exceeds the model's ceiling.
+
+    """
+    limits = model.spec.context_limits
+    for name, requested, ceiling in (
+        ("max_request_tokens", budget.max_request_tokens, limits.max_request_tokens),
+        ("max_response_tokens", budget.max_response_tokens, limits.max_response_tokens),
+    ):
+        if ceiling > 0 and requested > ceiling:
+            raise ValueError(f"budget {name}={requested:,} exceeds model's {ceiling:,}")
 
 
 def _reject_bad_system_arg(system: object) -> None:
@@ -245,6 +266,12 @@ class Agent:
         self.compactor = compactor
         if budget is None:
             budget = types.model.ContextBudget.from_model(model)
+        # An explicit budget goes through the same ceiling check the
+        # setters apply. Without it, construction was the one way past
+        # them: ``ContextBudget`` validates only non-negativity, so a
+        # budget above the model's window was accepted here and shipped
+        # on the first request, where the provider rejects it.
+        _reject_budget_over_model(budget, model)
         self._budget = budget
         self.max_attempts = max_attempts
         self.max_tool_call_rounds = max_tool_call_rounds
@@ -334,7 +361,6 @@ class Agent:
         self._tools_version: int = 0
         self._live_tools_cache: tuple[int, list[types.tools.Tool]] | None = None
         self._persist_budget_cache: tuple[int, int] | None = None
-        self._live_tool_result_cache: tuple[int, int] | None = None
         agent_tools: list[agent_runtime.Tool] = []
         for t in self._tools_list:
             self._tools_map[t.name] = t
@@ -390,16 +416,32 @@ class Agent:
         return self.model.spec.context_limits.max_request_bytes
 
     @property
-    def max_result_chars(self) -> int:
-        """Characters one tool result may occupy and still arrive whole.
+    def max_result_tokens(self) -> int:
+        """Tokens one tool result may occupy and still arrive whole.
 
         The persist threshold is the binding constraint: a result above
         it is off-loaded to disk and replaced by a short preview, and one
-        above ``message_budget_chars`` is elided outright. Sizing tool
-        defaults from the persist threshold keeps a single result clear
-        of both.
+        above ``message_budget_tokens`` is elided outright. Sizing tool
+        bounds from the persist threshold keeps a single result clear of
+        both.
         """
-        return self._budget.persist_threshold
+        return self._budget.persist_tokens
+
+    def approx_text_tokens(self, text: str) -> int:
+        """Delegate to the active model's tokenizer.
+
+        Tools reach this through ``current_agent_var`` to bound their own
+        output; routing through the model means a provider with a real
+        tokenizer answers exactly rather than through a ratio.
+
+        Args:
+          text: Text to score.
+
+        Returns:
+          tokens: Approximate token count.
+
+        """
+        return self.model.approx_text_tokens(text)
 
     @property
     def max_request_tokens(self) -> int:
@@ -791,35 +833,12 @@ class Agent:
         merged.update(self._bg)
         return merged
 
-    def live_tool_result_chars(self) -> int:
-        """Return live tool-result characters in the current context.
+    def persist_budget_used_tokens(self) -> int:
+        """Return live tool-result tokens that still occupy the persist budget.
 
-        Counts every ``ToolResult`` -- including persist-exempt tools --
-        because the bytes still travel on the wire until ``materialize_request``
-        elides them. Use ``persist_budget_used_chars`` instead when feeding
-        ``post_process_result.used_message_chars``.
-
-        Cached against ``runtime.context().version`` (mirrors
-        ``persist_budget_used_chars``); a new tape record invalidates it.
-        """
-        resolved = self.runtime.context()
-        cached = self._live_tool_result_cache
-        if cached is not None and cached[0] == resolved.version:
-            return cached[1]
-        total = 0
-        for entry in resolved.messages:
-            if isinstance(entry, types.runtime.ToolResult):
-                total += len(entry.content)
-        self._live_tool_result_cache = (resolved.version, total)
-        return total
-
-    def persist_budget_used_chars(self) -> int:
-        """Return live tool-result chars that still occupy the persist budget.
-
-        Excludes results whose originating tool is persist-exempt
-        (``result_storage.PERSIST_EXEMPT_TOOLS``) or that are error
-        results -- ``_should_persist`` skips both, so they should not
-        inflate the budget that forces persist of unrelated results.
+        Excludes error results -- ``_should_persist`` skips them, so they
+        should not inflate the budget that forces persist of unrelated
+        results.
 
         Cached against ``runtime.context().version`` (monotonic tape
         length); each new tape record invalidates the cache so the next
@@ -829,17 +848,10 @@ class Agent:
         cached = self._persist_budget_cache
         if cached is not None and cached[0] == resolved.version:
             return cached[1]
-        tool_names: dict[str, str] = {}
         total = 0
         for entry in resolved.messages:
-            if isinstance(entry, types.runtime.AssistantMessage):
-                for tc in entry.tool_calls:
-                    tool_names[tc.id] = tc.name
-            elif isinstance(entry, types.runtime.ToolResult):
-                tool_name = tool_names.get(entry.call_id, "")
-                if entry.is_error or tool_name in PERSIST_EXEMPT_TOOLS:
-                    continue
-                total += len(entry.content)
+            if isinstance(entry, types.runtime.ToolResult) and not entry.is_error:
+                total += self.model.approx_text_tokens(entry.content)
         self._persist_budget_cache = (resolved.version, total)
         return total
 
@@ -1019,7 +1031,7 @@ class Agent:
             estimated = self.model.approx_request_tokens(
                 materialize_request(
                     request,
-                    tool_result_budget_chars=self.budget.message_budget_chars,
+                    tool_result_budget_tokens=self.budget.message_budget_tokens,
                 ),
             )
         except Exception as exc:  # noqa: BLE001 -- token estimator may invoke provider classification
@@ -2206,7 +2218,7 @@ class Agent:
                         system=self.system_prompt() or None,
                         tools=self.live_tools() or None,
                     ),
-                    tool_result_budget_chars=self.budget.message_budget_chars,
+                    tool_result_budget_tokens=self.budget.message_budget_tokens,
                 )
             )
         else:
@@ -2282,7 +2294,7 @@ class Agent:
         return model.approx_request_tokens(
             materialize_request(
                 types.model.ModelRequest(messages=list(since)),
-                tool_result_budget_chars=self.budget.message_budget_chars,
+                tool_result_budget_tokens=self.budget.message_budget_tokens,
             )
         )
 
@@ -2313,7 +2325,7 @@ class Agent:
         prefix = history[: last_assistant + 1]
         materialized = materialize_request(
             types.model.ModelRequest(messages=list(prefix)),
-            tool_result_budget_chars=self.budget.message_budget_chars,
+            tool_result_budget_tokens=self.budget.message_budget_tokens,
         )
         return _wire_attachment_bytes(
             materialized.messages,
@@ -2819,9 +2831,9 @@ class _AgentModel:
         # the typed error so the user gets immediate, actionable feedback.
         #
         # Measure the MATERIALIZED request (same artifact ``send_with_retry``
-        # ships), so tool results elided by ``tool_result_budget_chars`` are
+        # ships), so tool results elided by ``tool_result_budget_tokens`` are
         # sized at their wire placeholder -- not their pre-elision length. This
-        # mirrors ``persist_budget_used_chars``, which already
+        # mirrors ``persist_budget_used_tokens``, which already
         # materializes-then-measures, and keeps a single rule: byte accounting
         # always runs over the materialized view. ``_wire_request_bytes`` counts
         # attachments and every text surface but omits tool-schema / JSON
@@ -2832,7 +2844,7 @@ class _AgentModel:
         if max_request_bytes > 0:
             guard_messages = materialize_request(
                 types.model.ModelRequest(messages=list(history)),
-                tool_result_budget_chars=self._agent.budget.message_budget_chars,
+                tool_result_budget_tokens=self._agent.budget.message_budget_tokens,
             ).messages
             wire_bytes = _wire_request_bytes(
                 guard_messages,
@@ -2899,7 +2911,7 @@ class _AgentModel:
                     service_tier=rich_service_tier,
                     latency=rich_latency,
                 ),
-                tool_result_budget_chars=self._agent.budget.message_budget_chars,
+                tool_result_budget_tokens=self._agent.budget.message_budget_tokens,
             )
             # Hand the one-shot resume wait to THIS attempt only, then clear it
             # unconditionally -- before the send can raise. ``send_with_retry``
@@ -3141,9 +3153,9 @@ class _AgentTool:
             result,
             self._inner.name,
             session_dir=self._agent.session_dir,
-            persist_threshold=self._agent.budget.persist_threshold,
-            message_budget_chars=self._agent.budget.message_budget_chars,
-            used_message_chars=self._agent.persist_budget_used_chars(),
+            persist_tokens=self._agent.budget.persist_tokens,
+            message_budget_tokens=self._agent.budget.message_budget_tokens,
+            used_message_tokens=self._agent.persist_budget_used_tokens(),
         )
 
     def _inject_conditional_rules(
@@ -3194,9 +3206,9 @@ class _AgentTool:
                 result,
                 self._inner.name,
                 session_dir=self._agent.session_dir,
-                persist_threshold=self._agent.budget.persist_threshold,
-                message_budget_chars=self._agent.budget.message_budget_chars,
-                used_message_chars=self._agent.persist_budget_used_chars(),
+                persist_tokens=self._agent.budget.persist_tokens,
+                message_budget_tokens=self._agent.budget.message_budget_tokens,
+                used_message_tokens=self._agent.persist_budget_used_tokens(),
             )
         except asyncio.CancelledError:
             # Two cancellation paths, distinguished by registry membership
@@ -3352,7 +3364,7 @@ class _AgentCompactor:
                         system=cached_system or None,
                         tools=cached_tools or None,
                     ),
-                    tool_result_budget_chars=self._agent.budget.message_budget_chars,
+                    tool_result_budget_tokens=self._agent.budget.message_budget_tokens,
                 ),
             )
         except Exception as exc:  # noqa: BLE001 -- token estimator may invoke provider classification; catch-all routes UserFacingError to warning, others to exception
@@ -3409,8 +3421,8 @@ class _AgentCompactor:
                             system=cached_system or None,
                             tools=cached_tools or None,
                         ),
-                        tool_result_budget_chars=(
-                            self._agent.budget.message_budget_chars
+                        tool_result_budget_tokens=(
+                            self._agent.budget.message_budget_tokens
                         ),
                     ),
                 )
@@ -3468,7 +3480,7 @@ class _AgentCompactor:
                         system=cached_system or None,
                         tools=cached_tools or None,
                     ),
-                    tool_result_budget_chars=self._agent.budget.message_budget_chars,
+                    tool_result_budget_tokens=self._agent.budget.message_budget_tokens,
                 ),
             )
             would_retrigger = self._inner.should_compact(

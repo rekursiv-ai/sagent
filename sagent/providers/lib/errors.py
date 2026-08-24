@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Final, cast
+
+import contextlib
+import json
 
 from sagent.types.exceptions import UserFacingError
 from sagent.types.model import RequestTooLargeError
@@ -35,18 +39,54 @@ _REQUEST_TOO_LARGE_PHRASES: Final = (
     "payload too large",
     "request entity too large",
 )
-# Token context-window overflow phrases. Real token overflow is a 400 with
-# code ``context_length_exceeded`` / "maximum context length is N tokens"
-# (Gemini and OpenAI-compatible servers also sometimes return these on 413).
-# Bare "context length" is deliberately excluded: it is subsumed by the
-# specific forms below and would mismatch a byte error's remediation prose.
+# Token context-window overflow phrases, pooled across every vendor: each
+# provider used to keep its own list, so a spelling only one of them knew
+# propagated raw from the other four (session ``190b6baec7ed``). Bare
+# "context length" is deliberately excluded: it is subsumed by the specific
+# forms below and would mismatch a byte error's remediation prose.
 _CONTEXT_OVERFLOW_PHRASES: Final = (
     "context_length_exceeded",
     "maximum context length",
-    "context window",
-    "model context",
     "input too large",
+    "input too long",
+    # A per-ITEM string cap, not the request-byte ceiling: shedding
+    # attachment bytes cannot clear it, but the compactor's tool-result
+    # shrink can, so it must classify as token overflow.
+    "string_above_max_length",
+    # Anthropic (API + CLI).
+    "prompt is too long",
+    "prompt too long",
+    "too_long",
 )
+"""Unambiguous token-overflow phrases: each names the PROMPT or the
+CONTEXT, never a request size. Safe for :func:`is_request_too_large` to
+read as a byte-classification veto."""
+
+_AMBIGUOUS_CONTEXT_OVERFLOW_PHRASES: Final = ("exceeds the maximum",)
+"""Phrases that name neither unit. ``exceeds the maximum`` prefixes both
+``...context length`` (token) and ``...request size`` (byte), so it is
+sound ONLY after the byte case is excluded -- which is why
+:func:`is_request_too_large` must not read it, or a 413 whose body says
+"exceeds the maximum size" would veto its own byte classification."""
+
+_GUARDED_CONTEXT_OVERFLOW_PHRASES: Final = (
+    ("context window", ("exceed", "overflow", "maximum")),
+    ("model context", ("exceed",)),
+)
+"""Phrases needing a co-occurring marker: each appears benignly in
+tool-schema validation errors, where a bare match is a false positive."""
+
+_CONTEXT_OVERFLOW_CODES: Final = frozenset({"context_length_exceeded"})
+"""Vendor ``error.code`` values that name the condition outright."""
+
+PER_ITEM_STRING_CAP_BODY: Final = (
+    "Error code: 400 - {'error': {'message': \"Invalid 'input[388].output': "
+    "string too long. Expected a string with maximum length 10485760, but got "
+    "a string with length 11143438 instead.\", 'type': 'invalid_request_error', "
+    "'param': 'input[388].output', 'code': 'string_above_max_length'}}"
+)
+"""Verbatim 400 from session ``190b6baec7ed``; shared by the tests that
+pin both halves of its classification."""
 
 
 def error_status_code(error: BaseException) -> int | None:
@@ -98,9 +138,70 @@ def is_request_too_large(status: int | None, body: str) -> bool:
     # 3. Else fall back to the 413 status as the byte signal.
     if any(phrase in lower for phrase in _REQUEST_TOO_LARGE_PHRASES):
         return True
-    if any(phrase in lower for phrase in _CONTEXT_OVERFLOW_PHRASES):
+    if _names_token_overflow(lower):
         return False
     return status == _REQUEST_TOO_LARGE_STATUS
+
+
+def is_context_overflow_text(body: str) -> bool:
+    """Whether ``body`` names a token-side overflow the compactor can shed.
+
+    Callers MUST exclude the byte wire-limit first (see
+    :func:`is_request_too_large`): several phrases here are byte-ambiguous
+    and only sound once that case is gone.
+
+    Shared so the phrase set lives in ONE place. Every provider used to
+    hardcode its own list, so a spelling only one of them knew propagated
+    raw from the other four -- the shape that wedged session
+    ``190b6baec7ed``. The union is deliberate: a missed overflow is fatal
+    (the raw error reaches the runtime and every retry repeats it) while a
+    false positive merely costs one wasted compaction.
+
+    ``model context`` / ``context window`` stay GUARDED rather than bare:
+    both appear benignly in tool-schema validation errors, and a bare match
+    classified "'model context' field missing in tools schema" as overflow.
+
+    Args:
+      body: Decoded response body (or stringified error).
+
+    Returns:
+      overflow: True when the text describes a token-side overflow.
+
+    """
+    # A structured ``error.code`` is authoritative when present: it is the
+    # vendor naming the condition, not prose that happens to contain a phrase.
+    with contextlib.suppress(json.JSONDecodeError):
+        parsed = json.loads(body)
+        if isinstance(parsed, Mapping):
+            error = cast(Mapping[str, object], parsed).get("error")
+            if isinstance(error, Mapping):
+                code = cast(Mapping[str, object], error).get("code")
+                # ``str`` before membership: ``code`` is whatever the
+                # vendor sent, and an unhashable value (``{}``, ``[]``)
+                # raises ``TypeError`` against a ``frozenset`` -- a crash
+                # inside the handler whose whole job is to classify the
+                # error it was handed.
+                if isinstance(code, str):
+                    return code in _CONTEXT_OVERFLOW_CODES
+    lower = body.lower()
+    if any(phrase in lower for phrase in _AMBIGUOUS_CONTEXT_OVERFLOW_PHRASES):
+        return True
+    return _names_token_overflow(lower)
+
+
+def _names_token_overflow(lower: str) -> bool:
+    """Unambiguous token-overflow signals in an already-lowercased body.
+
+    Excludes :data:`_AMBIGUOUS_CONTEXT_OVERFLOW_PHRASES`, so this is also
+    what :func:`is_request_too_large` reads to veto byte classification --
+    a phrase naming neither unit must not decide that question.
+    """
+    if any(phrase in lower for phrase in _CONTEXT_OVERFLOW_PHRASES):
+        return True
+    return any(
+        phrase in lower and any(marker in lower for marker in markers)
+        for phrase, markers in _GUARDED_CONTEXT_OVERFLOW_PHRASES
+    )
 
 
 def raise_if_request_too_large(
@@ -161,11 +262,22 @@ def find_response_not_read(exc: BaseException) -> httpx.ResponseNotRead | None:
       cause: The first ``ResponseNotRead`` found, or ``None``.
 
     """
-    current: BaseException | None = exc
+    # Both links are followed, not ``cause or context``: the two form a
+    # TREE, and an SDK that raises while formatting a hidden body puts the
+    # ``ResponseNotRead`` on the context of an exception that already has
+    # an unrelated cause. Taking one branch missed exactly that shape.
+    pending: list[BaseException] = [exc]
     seen: set[int] = set()
-    while current is not None and id(current) not in seen:
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
         if isinstance(current, httpx.ResponseNotRead):
             return current
         seen.add(id(current))
-        current = current.__cause__ or current.__context__
+        pending.extend(
+            link
+            for link in (current.__cause__, current.__context__)
+            if link is not None
+        )
     return None

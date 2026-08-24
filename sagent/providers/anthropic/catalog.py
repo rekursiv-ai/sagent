@@ -91,17 +91,21 @@ def _prices(
 # ``budget_tokens``. A model missing ``text`` reasons but returns a
 # signed-but-empty block -- the plaintext is never delivered.
 #
-# ``chars_per_token`` measured via ``messages.count_tokens`` on a 2.6M-char
-# mixed code+JSON+thinking session (de89f75430bf). Three tokenizer
-# generations cluster: 2.83, 3.66, 4.83. Pure-English content tokenizes
-# higher; these err toward overcount, the safe direction for compaction.
+# ``chars_per_token`` measured via ``messages.count_tokens`` against the
+# live API on 347k chars of real session text (2026-08-22). TWO tokenizer
+# generations, not three: the claude-5 / opus-4-8 / opus-4-7 family
+# returns 2.38, and everything 4-6 and older returns 3.12 -- sonnet-4-5
+# and haiku-4-5 report counts byte-identical to opus-4-6, so the 4.83
+# tier they used to carry did not exist and under-counted their tokens
+# by 55%. Independently corroborated by TextKit's 2026 tokenizer survey,
+# which finds the same two counting regimes.
 MODELS: Mapping[str, ModelCapability] = MappingProxyType(
     {
         "claude-fable-5": ModelCapability(
             model_id="claude-fable-5",
             context_limits=_windowed(edge=2576, default=1_000_000),
             prices=_prices(request=10.0, response=50.0),
-            chars_per_token=2.83,
+            chars_per_token=2.38,
             supported_thinking_efforts=MappingProxyType(
                 {
                     "low": "low",
@@ -119,7 +123,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="claude-opus-5",
             context_limits=_windowed(edge=2576, default=1_000_000),
             prices=_prices(request=5.0, response=25.0, fast_multiple=2.0),
-            chars_per_token=2.83,
+            chars_per_token=2.38,
             supported_thinking_efforts=MappingProxyType(
                 {
                     "low": "low",
@@ -136,7 +140,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="claude-opus-4-8",
             context_limits=_windowed(edge=2576),
             prices=_prices(request=5.0, response=25.0, fast_multiple=2.0),
-            chars_per_token=2.83,
+            chars_per_token=2.38,
             supported_thinking_efforts=MappingProxyType(
                 {
                     "low": "low",
@@ -155,7 +159,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             # Fast mode was removed from 4-7 on 2026-07-24; the API now
             # rejects ``speed="fast"`` rather than serving it.
             prices=_prices(request=5.0, response=25.0),
-            chars_per_token=2.83,
+            chars_per_token=2.38,
             supported_thinking_efforts=MappingProxyType(
                 {
                     "low": "low",
@@ -176,7 +180,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             # standard speed and bills standard, reporting usage.speed
             # "standard". A fast price row would overstate the cost.
             prices=_prices(request=5.0, response=25.0),
-            chars_per_token=3.66,
+            chars_per_token=3.12,
             supported_thinking_efforts=MappingProxyType(
                 {"low": "low", "medium": "medium", "high": "high", "max": "max"}
             ),
@@ -187,7 +191,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="claude-opus-4-5",
             context_limits=_windowed(edge=1568),
             prices=_prices(request=5.0, response=25.0),
-            chars_per_token=3.66,
+            chars_per_token=3.12,
             supported_thinking_efforts=MappingProxyType(
                 {"low": "low", "medium": "medium", "high": "high"}
             ),
@@ -199,7 +203,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="claude-sonnet-5",
             context_limits=_windowed(edge=2576, default=1_000_000),
             prices=_prices(request=3.0, response=15.0),
-            chars_per_token=2.83,
+            chars_per_token=2.38,
             supported_thinking_efforts=MappingProxyType(
                 {
                     "low": "low",
@@ -217,7 +221,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="claude-sonnet-4-6",
             context_limits=_windowed(edge=1568),
             prices=_prices(request=3.0, response=15.0),
-            chars_per_token=3.66,
+            chars_per_token=3.12,
             supported_thinking_efforts=MappingProxyType(
                 {"low": "low", "medium": "medium", "high": "high", "max": "max"}
             ),
@@ -229,7 +233,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="claude-sonnet-4-5",
             context_limits=_windowed(edge=1568),
             prices=_prices(request=3.0, response=15.0),
-            chars_per_token=4.83,
+            chars_per_token=3.12,
             supported_thinking_efforts=MappingProxyType({}),
             supported_thinking_budgets=frozenset({"fixed"}),
             supported_thinking_outputs=frozenset({"text", "redacted"}),
@@ -239,7 +243,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="claude-haiku-4-5",
             context_limits=_limits(request=200_000, response=64_000, edge=1568),
             prices=_prices(request=1.0, response=5.0),
-            chars_per_token=4.83,
+            chars_per_token=3.12,
             supported_thinking_efforts=MappingProxyType({}),
             supported_thinking_budgets=frozenset({"fixed"}),
             supported_thinking_outputs=frozenset({"text", "redacted"}),

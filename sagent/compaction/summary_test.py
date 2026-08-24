@@ -15,6 +15,7 @@ from sagent.agent import retry
 from sagent.agent.context import resolve_context
 from sagent.compaction.history import estimate_entry_tokens
 from sagent.compaction.summary import (
+    _COMPACTOR_TOOL_RESULT_NOTICE,
     SummaryCompactor,
     _attach_markers,
     _drop_orphan_tool_results,
@@ -1013,7 +1014,14 @@ async def test_compactor_summary_request_sees_canonical_tool_result() -> None:
         entry for entry in model.received[-1].messages if isinstance(entry, ToolResult)
     ]
     assert len(results) == 1
-    assert results[0].content == "x" * 1_000_000
+    # The result reaches the compactor CAPPED, not whole. Shipping it
+    # whole is what wedged session ``190b6baec7ed``: the compactor builds
+    # its request directly rather than through ``materialize_request``, so
+    # an 11.1M-character result crossed the wire intact and blew OpenAI's
+    # per-item cap -- on the very call that was supposed to shed it, and
+    # therefore on every retry and every later turn.
+    assert len(results[0].content) < 1_000_000
+    assert results[0].content.startswith(_COMPACTOR_TOOL_RESULT_NOTICE)
 
 
 @pytest.mark.asyncio
@@ -1067,6 +1075,32 @@ async def test_verify_summary_identical_keeps_first_pass() -> None:
     first = result[0]
     assert isinstance(first, UserMessage)
     assert body in first.text
+
+
+@pytest.mark.asyncio
+async def test_verify_summary_unparseable_keeps_first_pass() -> None:
+    """Verifier prose without ``<summary>`` must not destroy a valid summary.
+
+    ``_verify`` accepted any non-``IDENTICAL`` text, so a chatty reply
+    ("Looks complete.") replaced a summary that HAD the required block.
+    ``_format_summary`` then rejected it and the whole compaction fell
+    back -- an optional refinement turning a success into a failure and
+    discarding the first call's work.
+    """
+    body = "first pass with the required block"
+    model = _ScriptedModel(
+        stream_responses=[
+            _summary_resp(body),
+            ModelResponse(message=AssistantMessage(text="Looks complete.")),
+        ]
+    )
+    compactor = SummaryCompactor(verify_summary=True)
+    history: list[ModelContextEvent] = [UserMessage(text="x")]
+    result = await _apply_compact(compactor, history, model)
+    first = result[0]
+    assert isinstance(first, UserMessage)
+    assert body in first.text, "the valid first-pass summary was discarded"
+    assert "Compaction failed" not in first.text
 
 
 @pytest.mark.asyncio

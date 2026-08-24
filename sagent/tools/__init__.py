@@ -33,7 +33,7 @@ from sagent.tools.agent_spawn import AgentSpawn
 from sagent.tools.background_task import BackgroundTask
 from sagent.tools.bash import Bash
 from sagent.tools.core import (
-    TOOL_RESULT_MAX_CHARS,
+    bound_by_tokens,
     changed_files_context,
     has_been_read,
     mark_read,
@@ -61,7 +61,6 @@ from sagent.tools.write import Write
 
 
 __all__ = (
-    "TOOL_RESULT_MAX_CHARS",
     "AgentSelf",
     "AgentSend",
     "AgentSpawn",
@@ -85,6 +84,7 @@ __all__ = (
     "WebSearch",
     "Wiki",
     "Write",
+    "bound_by_tokens",
     "changed_files_context",
     "get_tool_state",
     "has_been_read",

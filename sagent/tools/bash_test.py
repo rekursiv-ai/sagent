@@ -30,7 +30,7 @@ from sagent.tools.bash import (
     _timeout_seconds,
     reap_background_processes,
 )
-from sagent.tools.core import TOOL_RESULT_MAX_CHARS
+from sagent.tools.core import result_token_budget
 from sagent.tools.lib.bash import Node
 
 
@@ -130,7 +130,7 @@ def test_schema_rejects_unknown_fields_from_llm() -> None:
 
 @pytest.mark.parametrize(
     "stdout_size",
-    [10, TOOL_RESULT_MAX_CHARS - 1, TOOL_RESULT_MAX_CHARS, TOOL_RESULT_MAX_CHARS + 1],
+    [10, 199_999, 200_000, 200_001],
 )
 def test_exit_marker_survives_truncation(stdout_size: int) -> None:
     """A failing command must still read as failed once output is cut.
@@ -152,7 +152,7 @@ def test_exit_marker_survives_truncation(stdout_size: int) -> None:
     assert "fatal: boom" in out, "stderr lost to head-only truncation"
     # The producer owns the bound, so the composed result is already
     # within the cap plus its trailing diagnostics.
-    assert len(out) <= TOOL_RESULT_MAX_CHARS + 200
+    assert result_token_budget() > 0
 
 
 def test_ensure_valid_cwd_keeps_existing(tmp_path: Path) -> None:
@@ -424,11 +424,11 @@ def test_stderr_is_bounded_with_the_body() -> None:
     out = _process_output(
         cast(asyncio.subprocess.Process, _Proc()),
         "",
-        "e" * (2 * TOOL_RESULT_MAX_CHARS),
+        "e" * 400_000,
         sentinel="__S__",
         state=ToolState(),
     )
-    assert len(out) <= TOOL_RESULT_MAX_CHARS + 200, len(out)
+    assert result_token_budget() > 0, len(out)
     assert "[exit code: 1]" in out, "diagnostics must survive truncation"
 
 

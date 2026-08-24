@@ -349,7 +349,7 @@ async def test_agent_model_stream_materializes_request() -> None:
     budget = types.model.ContextBudget(
         max_request_tokens=100_000,
         max_response_tokens=1_024,
-        message_budget_chars=10,
+        message_budget_tokens=10,
     )
     agent = Agent(model=model, budget=budget)
 
@@ -373,30 +373,6 @@ def test_agent_budget_override_respected() -> None:
     assert a.budget is b
 
 
-def test_live_tool_result_chars_counts_read_results() -> None:
-    """Read tool-result chars belong in the wire-budget tally.
-
-    ``live_tool_result_chars`` previously skipped Read results (likely
-    copy-pasted from ``PERSIST_EXEMPT_TOOLS``), but Read content still
-    crosses the wire and consumes the message budget. Skipping it lets
-    Read-heavy contexts evade message-budget compaction.
-    """
-    a = _build_agent()
-    read_call = types.runtime.ToolCall(id="read-1", name="Read", args={})
-    bash_call = types.runtime.ToolCall(id="bash-1", name="Bash", args={})
-    a.runtime.append_history(types.runtime.UserMessage(text="go"))
-    a.runtime.append_history(
-        types.runtime.AssistantMessage(tool_calls=(read_call, bash_call))
-    )
-    a.runtime.append_history(
-        types.runtime.ToolResult(call_id="read-1", content="r" * 200)
-    )
-    a.runtime.append_history(
-        types.runtime.ToolResult(call_id="bash-1", content="b" * 50)
-    )
-    assert a.live_tool_result_chars() == 250
-
-
 def test_agent_like_protocol_exposes_kill_all_tools() -> None:
     """Regression for H10: ``AgentLike`` advertises ``kill_all_tools``.
 
@@ -412,12 +388,13 @@ def test_agent_like_protocol_exposes_kill_all_tools() -> None:
     assert callable(via_protocol.kill_all_tools)
 
 
-def test_persist_budget_used_chars_excludes_persist_exempt_tools() -> None:
-    """Persist-exempt tool results don't inflate the persist budget.
+def test_persist_budget_used_tokens_excludes_error_results() -> None:
+    """Error results don't inflate the persist budget.
 
-    Regression for AGENT-REVIEW-005: feeding ``post_process_result``
-    with the live-wire tally inflated ``used_message_chars`` by Read's
-    bytes, prematurely forcing unrelated (Bash) results to disk.
+    ``_should_persist`` skips them, so counting them here would force
+    unrelated results to disk early. No tool is exempt any more -- Read's
+    exemption is what let an 11.1M-character result reach the wire in
+    session ``190b6baec7ed`` -- so every non-error result counts.
     """
     a = _build_agent()
     read_call = types.runtime.ToolCall(id="read-1", name="Read", args={})
@@ -438,8 +415,9 @@ def test_persist_budget_used_chars_excludes_persist_exempt_tools() -> None:
     a.runtime.append_history(
         types.runtime.ToolResult(call_id="bash-err", content="e" * 30, is_error=True)
     )
-    # Only the non-error Bash result occupies the persist budget.
-    assert a.persist_budget_used_chars() == 50
+    # Both non-error results count (200 + 50 chars at 4 chars/token);
+    # only the error result is excluded.
+    assert a.persist_budget_used_tokens() == (200 + 50) // 4
 
 
 def test_agent_register_and_cancel_background() -> None:
@@ -1272,7 +1250,7 @@ async def test_agent_tool_persists_with_runtime_call_id(tmp_path: Path) -> None:
     )
     budget = replace(
         types.model.ContextBudget.from_model(model),
-        persist_threshold=1_000,
+        persist_tokens=1_000,
     )
     tool = StubTool(response="X" * 5_000)
     a = _build_agent(model=model, tools=[tool], budget=budget, session_dir=tmp_path)
@@ -6120,7 +6098,7 @@ async def test_pre_send_guard_measures_materialized_not_raw_history() -> None:
     ``tool_result_budget_chars`` elision (-> ``<elided>``) before the request
     ships. Sizing raw history counts the un-elided bytes and false-rejects a
     request the provider would happily accept. The guard must measure the same
-    artifact that ``send_with_retry`` sends (mirrors ``persist_budget_used_chars``,
+    artifact that ``send_with_retry`` sends (mirrors ``persist_budget_used_tokens``,
     which already materializes-then-measures).
     """
 
@@ -6144,10 +6122,10 @@ async def test_pre_send_guard_measures_materialized_not_raw_history() -> None:
             )
 
     model = _CapturingModel()
-    # message_budget_chars=1000 -> the 5 MB historical tool result elides to the
+    # message_budget_tokens=1000 -> the 5 MB historical tool result elides to the
     # short placeholder; the materialized body is tiny and well under 1 MB.
     a = Agent(model=model, tools=[], compactor=None)
-    a._budget = replace(a._budget, message_budget_chars=1_000)
+    a._budget = replace(a._budget, message_budget_tokens=1_000)
     # A CLOSED tool pair in HISTORY (not this turn's input): user asks, model
     # calls a tool, a 5 MB tool result returns, then a fresh user turn.
     a.runtime.append_history(types.runtime.UserMessage(text="hi"))
@@ -7244,7 +7222,7 @@ async def test_agent_compactor_receives_canonical_context() -> None:
     budget = types.model.ContextBudget(
         max_request_tokens=100_000,
         max_response_tokens=1_024,
-        message_budget_chars=10,
+        message_budget_tokens=10,
     )
     a = Agent(model=StubModel(), compactor=_RecordingCompactor(), budget=budget)
     a.runtime.append_history(types.runtime.UserMessage(text="start"))

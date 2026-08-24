@@ -6,16 +6,69 @@ from io import BytesIO
 from types import SimpleNamespace
 from typing import cast
 
+import asyncio
+import os
+
 from PIL import Image
 
+import httpx
 import pytest
 import tiktoken
 
+from sagent.lib.custom_json import dict_val, str_val
+from sagent.providers.openai import catalog as openai_catalog
 from sagent.providers.openai.api import OpenAI
 from sagent.types.cost import PriceCatalogProduct
 from sagent.types.model import ModelRequest
 from sagent.types.runtime import UserMessage
 from sagent.types.tools import Tool
+
+
+@pytest.mark.network_openai
+@pytest.mark.asyncio
+async def test_every_catalog_row_is_a_model_the_vendor_serves() -> None:
+    """A catalog row must name a model the API will actually accept.
+
+    Retirement is only visible from a real call. ``GET /v1/models`` lists
+    what the KEY is entitled to see, which is a different set: ``gpt-5.6``
+    is absent from that listing yet serves ``POST /v1/responses``
+    normally, and trusting the listing removed a live model from this
+    catalog. Only ``model_not_found`` from a real request proves a row is
+    dead, so that is what this asserts.
+    """
+    key = os.environ.get("OPENAI_API_KEY")
+    if not key:
+        pytest.skip("OPENAI_API_KEY not set")
+
+    async def _is_dead(client: httpx.AsyncClient, model_id: str) -> bool:
+        response = await client.post(
+            "https://api.openai.com/v1/responses",
+            headers={"authorization": f"Bearer {key}"},
+            json={
+                "model": model_id,
+                "input": [{"role": "user", "content": "."}],
+                "max_output_tokens": 16,
+            },
+        )
+        if response.status_code == 200:
+            return False
+        error = dict_val(dict_val(response.json()).get("error"))
+        return str_val(error.get("code")) == "model_not_found"
+
+    # The rows are independent, so probing serially costs the sum of every
+    # round-trip rather than the slowest one.
+    model_ids = tuple(openai_catalog.MODELS)
+    limits = httpx.Limits(max_connections=len(model_ids))
+    async with httpx.AsyncClient(timeout=60.0, limits=limits) as client:
+        verdicts = await asyncio.gather(
+            *(_is_dead(client, model_id) for model_id in model_ids)
+        )
+    dead = [
+        model_id
+        for model_id, is_dead in zip(model_ids, verdicts, strict=True)
+        if is_dead
+    ]
+    assert not dead, f"catalog names models the API does not serve: {dead}"
 
 
 def test_openai_from_key_constructs() -> None:
@@ -59,8 +112,8 @@ def test_openai_unknown_model_raises() -> None:
 @pytest.mark.parametrize(
     ("base_id", "full_tokens"),
     [
-        ("gpt-5.6", 1_050_000),
         ("gpt-5.6-sol", 1_050_000),
+        ("gpt-5.6", 1_050_000),
         ("gpt-5.6-terra", 1_050_000),
         ("gpt-5.6-luna", 1_050_000),
         ("gpt-5.5", 1_000_000),
@@ -95,8 +148,8 @@ def test_openai_default_model_opts_into_full_window() -> None:
 @pytest.mark.parametrize(
     ("model_id", "request_price", "response_price", "cache_write_price"),
     [
-        ("gpt-5.6", 5.0, 30.0, 6.25),
         ("gpt-5.6-sol", 5.0, 30.0, 6.25),
+        ("gpt-5.6", 5.0, 30.0, 6.25),
         ("gpt-5.6-terra", 2.5, 15.0, 3.125),
         ("gpt-5.6-luna", 1.0, 6.0, 1.25),
     ],
@@ -186,7 +239,6 @@ def test_openai_utility_model_default() -> None:
 @pytest.mark.parametrize(
     ("model_id", "expected"),
     [
-        ("o1-mini", True),
         ("o3-mini", True),
         ("gpt-5.5", True),
         ("gpt-5.4-mini", True),
@@ -382,7 +434,7 @@ def test_catalog_efforts_are_all_buildable() -> None:
     off a different vocabulary made ``off``/``min`` pass the agent's
     validation and then raise at body-build time.
     """
-    m = OpenAI.from_key("k").model("gpt-5.6")
+    m = OpenAI.from_key("k").model("gpt-5.6-sol")
     for effort, wire in m.spec.supported_thinking_efforts.items():
         body = m._build_body(
             ModelRequest(messages=[UserMessage(text="x")], effort=effort),
@@ -393,5 +445,5 @@ def test_catalog_efforts_are_all_buildable() -> None:
 
 def test_valid_efforts_never_exceeds_the_catalog() -> None:
     """The UI must not offer an effort ``Agent.effort`` would reject."""
-    m = OpenAI.from_key("k").model("gpt-5.6")
+    m = OpenAI.from_key("k").model("gpt-5.6-sol")
     assert set(m.valid_efforts) <= set(m.spec.supported_thinking_efforts)

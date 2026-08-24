@@ -441,6 +441,28 @@ agent_label_var: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 
 
+def approx_tokens(text: str) -> int:
+    """Token count for ``text`` under the ACTIVE model.
+
+    The one primitive both the tool layer and the agent layer count with,
+    so a result's size means the same thing on both sides of the boundary.
+    Lives here rather than in ``tools.core`` because ``agent`` may not
+    import ``tools`` (that direction is a cycle).
+
+    Falls back to a flat ratio only when no agent is in context
+    (standalone tool use, tests) -- the one place a ratio survives.
+
+    Args:
+      text: Text to score.
+
+    Returns:
+      tokens: Approximate token count.
+
+    """
+    agent = current_agent_var.get(None)
+    return agent.approx_text_tokens(text) if agent is not None else len(text) // 4
+
+
 class AgentLike(Protocol):
     """Minimal agent surface for tools that route messages between agents."""
 
@@ -461,20 +483,43 @@ class AgentLike(Protocol):
         ...
 
     @property
-    def max_result_chars(self) -> int:
-        """Characters one tool result may occupy before it is off-loaded.
+    def max_result_tokens(self) -> int:
+        """Tokens one tool result may occupy before it is off-loaded.
 
         Text-producing tools consult this -- via ``current_agent_var`` --
-        to size their own default limits, the way PDF rasterization
-        consults :attr:`max_request_bytes`. A result at or under this
-        size is guaranteed to reach the model whole: it neither trips
-        disk persistence nor exceeds the per-request tool-result budget,
-        which would replace it with an elision placeholder.
+        to bound their own output, the way PDF rasterization consults
+        :attr:`max_request_bytes`. A result at or under this size is
+        guaranteed to reach the model whole: it neither trips disk
+        persistence nor exceeds the per-request tool-result budget, which
+        would replace it with an elision placeholder.
 
-        Derived from the active budget rather than a constant because
-        the safe size spans two orders of magnitude across the model
-        range. ``0`` means no agent-derived ceiling; callers fall back to
-        their own constant.
+        TOKENS, not characters: the budget the provider enforces is a
+        token count, and every conversion into another unit needs a
+        guessed ratio. Read bounded itself in LINES via an assumed
+        chars-per-line, which was 40x wrong on JSONL and returned 11.1M
+        characters in session ``190b6baec7ed``.
+
+        ``0`` means no agent-derived ceiling; callers fall back to their
+        own constant.
+        """
+        ...
+
+    def approx_text_tokens(self, text: str) -> int:
+        """Token count for ``text`` under the ACTIVE model's tokenizer.
+
+        The one primitive tools use to bound output. Synchronous and
+        local: providers with a real tokenizer (tiktoken, HuggingFace)
+        answer exactly, and the rest apply their own measured ratio.
+        Callers must never divide a character count by a ratio of their
+        own -- that mislabels chars as tokens and is the defect this
+        method exists to remove.
+
+        Args:
+          text: Text to score.
+
+        Returns:
+          tokens: Approximate token count.
+
         """
         ...
 

@@ -110,6 +110,7 @@ from sagent.providers.lib.errors import (
     StreamingResponseNotReadError,
     error_status_code,
     find_response_not_read,
+    is_context_overflow_text,
     is_request_too_large,
     raise_if_request_too_large,
 )
@@ -938,12 +939,7 @@ class _OpenAISubModel(_OpenAIModel):
         """
         if is_request_too_large(error_status_code(error), str(error)):
             return False
-        msg = str(error).lower()
-        return (
-            "context_length_exceeded" in msg
-            or "maximum context length" in msg
-            or "exceeds the context window" in msg
-        )
+        return is_context_overflow_text(str(error))
 
     @override
     def is_retryable_provider_error(self, error: Exception) -> bool:

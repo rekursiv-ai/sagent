@@ -17,9 +17,7 @@ from sagent.testing import FakeAgent, with_fake_agent
 from sagent.tools.lib.bash import parse_bash
 from sagent.tools.lib.pdf import MAX_PDF_BYTES, extract_pdf_pages
 from sagent.tools.read import (
-    _ASSUMED_CHARS_PER_LINE,
     Read,
-    _default_line_limit,
 )
 
 
@@ -30,6 +28,34 @@ def _png_bytes() -> bytes:
     buf = BytesIO()
     Image.new("RGB", (4, 4), (255, 0, 0)).save(buf, format="PNG")
     return buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("label", "payload"),
+    [
+        ("invalid json", b"not-json"),
+        ("non-utf8", b"\xff\xfe\x00bad"),
+        ("wrong top-level shape", b"[]"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_unreadable_notebook_is_an_error(
+    label: str, payload: bytes, tmp_path: Path
+) -> None:
+    """A notebook that cannot be parsed is a failure, and must say so.
+
+    Every other unreadable-file path sets ``is_error`` (missing file, a
+    directory, permission denied). These three returned a SUCCESS result
+    whose body happened to describe a failure, so a caller branching on
+    ``is_error`` -- which is what the flag is for -- treated a corrupt
+    notebook as a notebook with unusual contents.
+    """
+    del label
+    f = tmp_path / "bad.ipynb"
+    f.write_bytes(payload)
+    with with_fake_agent():
+        result = await read.run({"file_path": str(f)})
+    assert result.is_error, result.content
 
 
 @pytest.mark.asyncio
@@ -700,24 +726,6 @@ async def test_an_unreadable_file_returns_an_error_not_an_exception(
         locked.chmod(0o600)
     assert result.is_error, result.content
     assert "locked.txt" in result.content, result.content
-
-
-@pytest.mark.parametrize("ceiling", [20_000, 60_000, 150_000, 600_000])
-def test_the_default_line_cap_stays_under_the_result_ceiling(ceiling: int) -> None:
-    """The derived cap must fit ONE reply at every budget, not a floor.
-
-    ``ContextBudget.from_model`` bottoms out at ``persist_threshold=20_000``,
-    where a 2000-line floor is ~160_000 chars -- 8x the ceiling the cap
-    exists to respect, and Read is exempt from disk offload, so nothing
-    else bounds it.
-    """
-    with with_fake_agent() as agent:
-        agent.max_result_chars = ceiling
-        lines = _default_line_limit()
-    assert lines * _ASSUMED_CHARS_PER_LINE <= ceiling, (
-        f"{lines} lines x {_ASSUMED_CHARS_PER_LINE} chars exceeds {ceiling}"
-    )
-    assert lines >= 1, "a positive ceiling must still allow lines"
 
 
 if __name__ == "__main__":

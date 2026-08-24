@@ -138,6 +138,12 @@ _GPT56_REASONING = _efforts(
 # A row carries only what the MODEL can do; caching, retry, and auth mode are
 # transport facts declared on ``API`` / ``SUBSCRIPTION``, since ``&`` can only
 # remove. Every reasoning model takes an auto budget and returns readable text.
+# ``chars_per_token`` measured from SERVER-reported ``usage.input_tokens``
+# on 347k chars of real session text (2026-08-22), differencing out the
+# per-request envelope. 3.71 across the whole range -- the catalog's prior
+# flat 4.0 was the dataclass default, never measured, and over-credited
+# every budget by ~7%. tiktoken says 3.81 locally; the gap is request
+# framing the local tokenizer never sees.
 MODELS: Mapping[str, ModelCapability] = MappingProxyType(
     {
         "gpt-5.6-sol": ModelCapability(
@@ -152,10 +158,14 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
                 cache_read=0.5,
                 two_tier=True,
             ),
+            chars_per_token=3.71,
             supported_thinking_efforts=_GPT56_REASONING,
             supported_thinking_budgets=frozenset({"auto"}),
             supported_thinking_outputs=frozenset({"text"}),
         ),
+        # Absent from ``GET /v1/models`` yet serves ``POST /v1/responses``
+        # normally. Listing is an entitlement view, not the model set, so a
+        # row must be dropped only on ``model_not_found`` from a real call.
         "gpt-5.6": ModelCapability(
             model_id="gpt-5.6",
             context_limits=_windowed(
@@ -168,6 +178,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
                 cache_read=0.5,
                 two_tier=True,
             ),
+            chars_per_token=3.71,
             supported_thinking_efforts=_GPT56_REASONING,
             supported_thinking_budgets=frozenset({"auto"}),
             supported_thinking_outputs=frozenset({"text"}),
@@ -184,6 +195,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
                 cache_read=0.1,
                 two_tier=True,
             ),
+            chars_per_token=3.71,
             supported_thinking_efforts=_GPT56_REASONING,
             supported_thinking_budgets=frozenset({"auto"}),
             supported_thinking_outputs=frozenset({"text"}),
@@ -200,6 +212,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
                 cache_read=0.25,
                 two_tier=True,
             ),
+            chars_per_token=3.71,
             supported_thinking_efforts=_GPT56_REASONING,
             supported_thinking_budgets=frozenset({"auto"}),
             supported_thinking_outputs=frozenset({"text"}),
@@ -208,6 +221,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="gpt-5.5",
             context_limits=_windowed(request=272_000, response=128_000, long=1_000_000),
             prices=_prices(request=5.0, response=30.0, cache_read=0.5, two_tier=True),
+            chars_per_token=3.71,
             supported_thinking_efforts=_LEGACY_REASONING,
             supported_thinking_budgets=frozenset({"auto"}),
             supported_thinking_outputs=frozenset({"text"}),
@@ -216,6 +230,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="gpt-5.5-pro",
             context_limits=_windowed(request=272_000, response=128_000, long=1_050_000),
             prices=_prices(request=30.0, response=180.0, two_tier=True),
+            chars_per_token=3.71,
             supported_thinking_efforts=_LEGACY_REASONING,
             supported_thinking_budgets=frozenset({"auto"}),
             supported_thinking_outputs=frozenset({"text"}),
@@ -224,6 +239,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="gpt-5.4",
             context_limits=_windowed(request=272_000, response=128_000, long=1_050_000),
             prices=_prices(request=2.5, response=15.0, cache_read=0.25, two_tier=True),
+            chars_per_token=3.71,
             supported_thinking_efforts=_LEGACY_REASONING,
             supported_thinking_budgets=frozenset({"auto"}),
             supported_thinking_outputs=frozenset({"text"}),
@@ -232,6 +248,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="gpt-5.4-pro",
             context_limits=_windowed(request=272_000, response=128_000, long=1_050_000),
             prices=_prices(request=30.0, response=180.0, two_tier=True),
+            chars_per_token=3.71,
             supported_thinking_efforts=_LEGACY_REASONING,
             supported_thinking_budgets=frozenset({"auto"}),
             supported_thinking_outputs=frozenset({"text"}),
@@ -240,6 +257,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="gpt-5.4-mini",
             context_limits=_limits(request=400_000, response=128_000),
             prices=_prices(request=0.75, response=4.5, cache_read=0.075),
+            chars_per_token=3.71,
             supported_thinking_efforts=_LEGACY_REASONING,
             supported_thinking_budgets=frozenset({"auto"}),
             supported_thinking_outputs=frozenset({"text"}),
@@ -248,6 +266,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="gpt-5.4-nano",
             context_limits=_limits(request=400_000, response=128_000),
             prices=_prices(request=0.2, response=1.25, cache_read=0.02),
+            chars_per_token=3.71,
             supported_thinking_efforts=_LEGACY_REASONING,
             supported_thinking_budgets=frozenset({"auto"}),
             supported_thinking_outputs=frozenset({"text"}),
@@ -256,17 +275,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="gpt-5.3-codex",
             context_limits=_limits(request=400_000, response=128_000),
             prices=_prices(request=1.75, response=14.0, cache_read=0.175),
-            supported_thinking_efforts=_LEGACY_REASONING,
-            supported_thinking_budgets=frozenset({"auto"}),
-            supported_thinking_outputs=frozenset({"text"}),
-        ),
-        # Research preview: 128k context / 32k output, NOT the 400k/128k the
-        # sibling gpt-5.3-codex carries.
-        # https://openai.com/index/introducing-gpt-5-3-codex-spark/
-        "gpt-5.3-codex-spark": ModelCapability(
-            model_id="gpt-5.3-codex-spark",
-            context_limits=_limits(request=128_000, response=32_768),
-            prices=_prices(request=1.75, response=14.0, cache_read=0.175),
+            chars_per_token=3.71,
             supported_thinking_efforts=_LEGACY_REASONING,
             supported_thinking_budgets=frozenset({"auto"}),
             supported_thinking_outputs=frozenset({"text"}),
@@ -275,6 +284,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="gpt-5.3-chat-latest",
             context_limits=_limits(request=128_000, response=16_384),
             prices=_prices(request=1.75, response=14.0, cache_read=0.175),
+            chars_per_token=3.71,
             supported_thinking_efforts=_LEGACY_REASONING,
             supported_thinking_budgets=frozenset({"auto"}),
             supported_thinking_outputs=frozenset({"text"}),
@@ -283,6 +293,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="gpt-5.2",
             context_limits=_limits(request=400_000, response=128_000),
             prices=_prices(request=1.75, response=14.0, cache_read=0.175),
+            chars_per_token=3.71,
             supported_thinking_efforts=_LEGACY_REASONING,
             supported_thinking_budgets=frozenset({"auto"}),
             supported_thinking_outputs=frozenset({"text"}),
@@ -291,14 +302,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="o1",
             context_limits=_limits(request=200_000, response=100_000),
             prices=_prices(request=15.0, response=60.0, cache_read=7.5),
-            supported_thinking_efforts=_LEGACY_REASONING,
-            supported_thinking_budgets=frozenset({"auto"}),
-            supported_thinking_outputs=frozenset({"text"}),
-        ),
-        "o1-mini": ModelCapability(
-            model_id="o1-mini",
-            context_limits=_limits(request=128_000, response=65_536),
-            prices=_prices(request=3.0, response=12.0, cache_read=1.5),
+            chars_per_token=3.71,
             supported_thinking_efforts=_LEGACY_REASONING,
             supported_thinking_budgets=frozenset({"auto"}),
             supported_thinking_outputs=frozenset({"text"}),
@@ -307,6 +311,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="o3-mini",
             context_limits=_limits(request=200_000, response=100_000),
             prices=_prices(request=1.1, response=4.4, cache_read=0.55),
+            chars_per_token=3.71,
             supported_thinking_efforts=_LEGACY_REASONING,
             supported_thinking_budgets=frozenset({"auto"}),
             supported_thinking_outputs=frozenset({"text"}),
@@ -317,6 +322,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
                 request=1_047_576, response=32_768, long=1_047_576
             ),
             prices=_prices(request=2.0, response=8.0, cache_read=0.5),
+            chars_per_token=3.71,
             # No reasoning knob on this generation.
             supported_thinking_efforts=MappingProxyType({}),
             supported_thinking_budgets=frozenset(),
@@ -328,6 +334,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
                 request=1_047_576, response=32_768, long=1_047_576
             ),
             prices=_prices(request=0.4, response=1.6, cache_read=0.1),
+            chars_per_token=3.71,
             # No reasoning knob on this generation.
             supported_thinking_efforts=MappingProxyType({}),
             supported_thinking_budgets=frozenset(),
@@ -339,6 +346,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
                 request=1_047_576, response=32_768, long=1_047_576
             ),
             prices=_prices(request=0.1, response=0.4, cache_read=0.025),
+            chars_per_token=3.71,
             # No reasoning knob on this generation.
             supported_thinking_efforts=MappingProxyType({}),
             supported_thinking_budgets=frozenset(),
@@ -348,6 +356,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="gpt-4o",
             context_limits=_limits(request=128_000, response=16_384),
             prices=_prices(request=2.5, response=10.0, cache_read=1.25),
+            chars_per_token=3.71,
             # No reasoning knob on this generation.
             supported_thinking_efforts=MappingProxyType({}),
             supported_thinking_budgets=frozenset(),
@@ -357,6 +366,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="gpt-4o-mini",
             context_limits=_limits(request=128_000, response=16_384),
             prices=_prices(request=0.15, response=0.6, cache_read=0.075),
+            chars_per_token=3.71,
             # No reasoning knob on this generation.
             supported_thinking_efforts=MappingProxyType({}),
             supported_thinking_budgets=frozenset(),
@@ -366,6 +376,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="gpt-4-turbo",
             context_limits=_limits(request=128_000, response=4_096),
             prices=_prices(request=10.0, response=30.0),
+            chars_per_token=3.71,
             # No reasoning knob on this generation.
             supported_thinking_efforts=MappingProxyType({}),
             supported_thinking_budgets=frozenset(),
@@ -375,6 +386,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
             model_id="gpt-4",
             context_limits=_limits(request=8_192, response=8_192),
             prices=_prices(request=30.0, response=60.0),
+            chars_per_token=3.71,
             # No reasoning knob on this generation.
             supported_thinking_efforts=MappingProxyType({}),
             supported_thinking_budgets=frozenset(),

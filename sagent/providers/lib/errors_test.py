@@ -2,17 +2,54 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
 from sagent.providers.lib.errors import (
+    PER_ITEM_STRING_CAP_BODY,
     StreamingResponseNotReadError,
     error_status_code,
     find_response_not_read,
+    is_context_overflow_text,
     is_request_too_large,
     raise_if_request_too_large,
 )
 from sagent.types.model import RequestTooLargeError
+
+
+def test_context_overflow_survives_a_non_string_error_code() -> None:
+    """A malformed vendor body must classify, not crash.
+
+    ``error.code`` is whatever the vendor sent. Testing membership of an
+    unhashable value against a ``frozenset`` raises ``TypeError``, and
+    this runs at the provider's exception boundary -- so a single
+    malformed body would replace the real error with a crash inside the
+    handler meant to classify it.
+    """
+    for body in (
+        '{"error":{"code":{}}}',
+        '{"error":{"code":[]}}',
+        '{"error":{"code":1}}',
+    ):
+        assert is_context_overflow_text(body) is False, body
+
+
+def test_find_response_not_read_searches_both_chain_branches() -> None:
+    """``__cause__`` and ``__context__`` are a tree, not a list.
+
+    The docstring promises both are walked. Following ``cause or
+    context`` takes only one branch, so a ``ResponseNotRead`` reachable
+    through the context of an exception that also has a cause is missed
+    -- and the SDK produces exactly that shape when a handler raises
+    while formatting a hidden body.
+    """
+    root = RuntimeError("outer")
+    root.__cause__ = ValueError("decoy branch")
+    target = httpx.ResponseNotRead()
+    root.__context__ = target
+    assert find_response_not_read(root) is target
 
 
 def test_find_response_not_read_direct() -> None:
@@ -129,6 +166,78 @@ def test_unambiguous_byte_phrase_wins_over_co_occurring_context_phrase() -> None
         )
         is True
     )
+
+
+def test_context_overflow_text_false_positive_tools_schema_validation() -> None:
+    """Tool-schema validation errors mention 'model context' benignly."""
+    msg = "Provider rejected: 'model context' field missing in tools schema"
+    assert is_context_overflow_text(msg) is False
+
+
+def test_context_overflow_text_structured_body_canonical_code() -> None:
+    """``error.code == 'context_length_exceeded'`` is the canonical signal."""
+    body = json.dumps(
+        {
+            "error": {
+                "code": "context_length_exceeded",
+                "message": "This model's maximum context length is 128000 tokens.",
+            }
+        }
+    )
+    assert is_context_overflow_text(body) is True
+
+
+def test_context_overflow_text_structured_body_unrelated_code() -> None:
+    """Structured error with unrelated code must not classify as overflow."""
+    body = json.dumps(
+        {
+            "error": {
+                "code": "invalid_request_error",
+                "message": "tools[0].function: 'model context' field missing",
+            }
+        }
+    )
+    assert is_context_overflow_text(body) is False
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # OpenAI.
+        "context_length_exceeded",
+        "This model's maximum context length is 128000 tokens",
+        "input too large",
+        # Anthropic.
+        "prompt is too long: 250000 tokens > 200000 maximum",
+        '{"type":"error","error":{"type":"invalid_request_error","message":"too_long"}}',
+        # Google.
+        "The request exceeds the maximum number of tokens",
+        "Input too long for the model",
+    ],
+)
+def test_every_vendor_spelling_reaches_one_classifier(body: str) -> None:
+    """Each provider's overflow spelling must classify for ALL providers.
+
+    Five providers each kept a private phrase list, so a body naming an
+    overflow the way only one vendor spells it propagated raw from the
+    other four -- the shape that wedged session ``190b6baec7ed``. The
+    union is deliberate: a missed overflow is fatal, a false positive
+    costs one wasted compaction.
+    """
+    assert is_context_overflow_text(body) is True
+
+
+def test_per_item_string_cap_is_not_the_byte_limit() -> None:
+    """OpenAI's per-item string cap is token-side, not the wire ceiling.
+
+    Verbatim body from session ``190b6baec7ed``, which wedged. This half of
+    the classification is already correct -- the provider's
+    ``is_context_overflow`` is what must also recognise it, so the
+    compactor's shrink-and-retry path runs instead of the raw 400
+    propagating. See ``providers/openai/sub_test.py``.
+    """
+    assert is_request_too_large(400, PER_ITEM_STRING_CAP_BODY) is False
+    raise_if_request_too_large(400, PER_ITEM_STRING_CAP_BODY)  # must not raise
 
 
 def test_raise_if_request_too_large_raises_on_413() -> None:
