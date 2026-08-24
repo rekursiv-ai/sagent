@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import (
+    Callable,
     Mapping,
     MutableMapping,
     MutableSequence,
+    MutableSet,
     Sequence,
     Set as AbstractSet,
 )
@@ -245,7 +247,10 @@ def _validate_json_enum(enum: object, value: object, path: str) -> list[str]:
     if not isinstance(enum, (list, tuple)):
         return []
     enum_values = cast(Sequence[object], enum)
-    if value in enum_values:
+    # ``in`` compares by ``==``, and ``True == 1`` in Python -- so a boolean
+    # satisfied a numeric enum and vice versa. JSON Schema types them apart, as
+    # the type check in this module already does.
+    if any(_same_json_value(value, member) for member in enum_values):
         return []
     return [
         (
@@ -253,6 +258,13 @@ def _validate_json_enum(enum: object, value: object, path: str) -> list[str]:
             f"{_json_enum_values(enum_values)}."
         )
     ]
+
+
+def _same_json_value(value: object, member: object) -> bool:
+    """Whether two JSON values are equal AND of the same JSON type."""
+    if isinstance(value, bool) != isinstance(member, bool):
+        return False
+    return value == member
 
 
 def _validate_json_range(
@@ -406,14 +418,6 @@ def int_val(value: object, default: int) -> int:
     return default
 
 
-@overload
-def optional_val(target: type[bool], value: object) -> None: ...  # pragma: no cover
-
-
-@overload
-def optional_val[T](target: type[T], value: object) -> T | None: ...  # pragma: no cover
-
-
 def optional_val[T](target: type[T], value: object) -> T | None:
     """Read ``value`` as ``target``, or ``None`` when it is not one.
 
@@ -433,20 +437,24 @@ def optional_val[T](target: type[T], value: object) -> T | None:
     seeders, and dropping the fraction reports a number the source never sent.
 
     A numeric STRING is deliberately not parsed: these read machine JSON, where
-    a quoted number is a shape mismatch rather than a value to recover.
+    a quoted number is a shape mismatch rather than a value to recover. That
+    restriction is about NUMBERS, not about strings: every special scalar the
+    codec handles (``bytes``, ``Path``, ``UUID``, ``datetime``) IS encoded as a
+    string, so reading one back is the string case working as intended.
 
     Args:
-      target: The type to read, e.g. ``int``, ``float``, or ``str``.
+      target: The type to read -- any type :func:`decode` handles.
       value: Value to read.
 
     Returns:
       result: The value as ``target``, or ``None``.
 
     """
-    # A str is never coerced FROM another scalar and never parsed INTO one:
-    # ``decode`` does both for a schema it owns, but at this boundary a
-    # quoted number and a stringified int are both shape mismatches.
-    if isinstance(value, str) != (target is str):
+    # A number is never PARSED from a string and never stringified into one:
+    # ``decode`` does both for a schema it owns, but at this boundary a quoted
+    # number and a stringified int are both shape mismatches. Scoped to the
+    # numeric targets, because the special scalars arrive as strings by design.
+    if target in (int, float, str) and isinstance(value, str) != (target is str):
         return None
     try:
         return cast("T", decode(target, value))
@@ -604,6 +612,36 @@ _TYPE_TAG: Final = "__type__"
 _SCALAR_TAG: Final = "__scalar__"
 _VALUE_TAG: Final = "__value__"
 _FLOAT_TAG: Final = "__float__"
+
+# What each array-shaped annotation DECODES TO. A table rather than a
+# membership test plus a construction ladder, because those are two lists that
+# must agree and did not: ``AbstractSet`` and ``Sequence`` were each added to
+# the membership tuple one incident at a time, while the ``Mutable*`` abcs this
+# module's own ``MutableJSONValue`` is built from were in neither -- so a field
+# spelled with one encoded fine and refused to decode.
+#
+# An abc names no constructor, so it maps to the concrete type it materializes
+# as: a ``Mutable*`` abc promises mutation and takes the mutable type; the
+# read-only abcs take the immutable reading, which is the safe default on the
+# frozen dataclasses this codec exists for.
+#
+# Membership is by identity, not ``issubclass``: widening to every ``Mapping``
+# subclass admits ``defaultdict``, whose constructor takes a factory first and
+# raises on a decoded dict.
+_SEQUENCE_CONTAINERS: Final[Mapping[object, Callable[[list[object]], object]]] = {
+    # Each constructor is annotated at the declared element type: a bare
+    # ``list`` reads as ``list[Unknown]``, which leaks through the return of
+    # every decoded container.
+    list: lambda items: items,
+    tuple: tuple[object, ...],
+    set: set[object],
+    frozenset: frozenset[object],
+    Sequence: lambda items: items,
+    MutableSequence: lambda items: items,
+    AbstractSet: frozenset[object],
+    MutableSet: set[object],
+}
+_MAPPING_CONTAINERS: Final = (dict, Mapping, MutableMapping)
 
 
 class SchemaError(ValueError):
@@ -877,13 +915,16 @@ def decode(annotation: object, raw: object) -> object:
       value: ``raw`` coerced to ``annotation``.
 
     """
-    # JSON null decodes to ``None`` for EVERY annotation, so the check runs
-    # before any dispatch. Below the nested-dataclass branch it was
-    # unreachable for an ``Optional[dataclass]`` field: ``_strip_optional``
-    # had already reduced the annotation to the bare dataclass, which then
-    # rejected the ``None`` as a non-Mapping.
+    # JSON null is checked before any dispatch: below the nested-dataclass
+    # branch it was unreachable for an ``Optional[dataclass]`` field, because
+    # ``_strip_optional`` had already reduced the annotation to the bare
+    # dataclass, which then rejected the ``None`` as a non-Mapping. Only an
+    # annotation that ADMITS none accepts it -- returning ``None`` for every
+    # annotation let a non-nullable field hold a value its own hint forbids.
     if raw is None:
-        return None
+        if _admits_none(annotation):
+            return None
+        raise TypeError(f"cannot decode None as {annotation}")
     ann: object = _strip_optional(_resolve_alias(annotation))
     origin = get_origin(ann)
     # Nested dataclass.
@@ -907,32 +948,22 @@ def decode(annotation: object, raw: object) -> object:
     # ``frozenset`` field left an unhashable, mutable value on a frozen
     # dataclass that no downstream isinstance guard would catch.
     #
-    # ``AbstractSet`` is listed because a field may be annotated with the abc
-    # rather than the concrete type, and its origin is then
-    # ``collections.abc.Set`` -- not ``set``, so it fell through to the
-    # scalar passthrough and stayed a list. It materializes as ``frozenset``:
-    # the abc names no constructor, and an immutable value is the safe
-    # reading of an unqualified "set" on a frozen dataclass.
-    if origin in (
-        tuple,
-        list,
-        set,
-        frozenset,
-        AbstractSet,
-        Sequence,
-    ) and isinstance(raw, list):
-        items = cast("list[object]", raw)
+    # A field may be spelled with an abc rather than a concrete type, and an
+    # abc's origin is its own class (``collections.abc.Set``, never ``set``),
+    # so :data:`_SEQUENCE_CONTAINERS` maps each to what it materializes as.
+    materialize = _SEQUENCE_CONTAINERS.get(origin)
+    if materialize is not None and isinstance(raw, list):
+        items = cast(list[object], raw)
+        arity = _fixed_tuple_arity(cast(object, ann))
+        if arity is not None and arity != len(items):
+            # A fixed-length tuple annotation names one type per position, so a
+            # value of another length satisfies none of them. The mismatch used
+            # to drop every element annotation, and the raw list passed through.
+            raise TypeError(f"cannot decode {raw!r} as {ann}: expected {arity} items")
         elems = _element_annotations(cast(object, ann), count=len(items))
-        decoded = [decode(a, v) for v, a in zip(items, elems, strict=True)]
-        # ``Sequence`` names no constructor, and JSON arrays decode to lists;
-        # a list already satisfies the abc.
-        if origin in (list, Sequence):
-            return decoded
-        if origin is AbstractSet:
-            return frozenset(decoded)
-        return cast(type, origin)(decoded)
+        return materialize([decode(a, v) for v, a in zip(items, elems, strict=True)])
     # Mapping (dict[K, V]): decode each value against the value annotation.
-    if origin in (dict, Mapping) and isinstance(raw, Mapping):
+    if origin in _MAPPING_CONTAINERS and isinstance(raw, Mapping):
         args = get_args(ann)
         val_ann: object = args[1] if len(args) == 2 else object
         return {
@@ -963,8 +994,8 @@ def decode(annotation: object, raw: object) -> object:
     if ann is bool:
         # ``raw`` is the ``object``-typed decode input; pyright tracks it as
         # partially ``Unknown`` through the recursive cast sites above.
-        # ``bool_val`` accepts ``object``, so the value is correct.
-        return bool_val(raw)  # pyright: ignore[reportUnknownArgumentType]
+        # ``_decode_bool`` accepts ``object``, so the value is correct.
+        return _decode_bool(raw)  # pyright: ignore[reportUnknownArgumentType]
     if ann is int:
         return _decode_int(raw)  # pyright: ignore[reportUnknownArgumentType] -- see ``bool_val`` above
     if ann is float:
@@ -978,15 +1009,29 @@ def decode(annotation: object, raw: object) -> object:
         if isinstance(raw, (int, float)):
             return str(raw)
         raise TypeError(f"cannot coerce {raw!r} to str")
-    # Scalar special-cases.
-    if ann is bytes and isinstance(raw, str):
-        return base64.b64decode(raw)
-    if ann is Path and isinstance(raw, str):
-        return Path(raw)
-    if ann is UUID and isinstance(raw, str):
-        return UUID(raw)
-    if ann is datetime and isinstance(raw, str):
-        return datetime.fromisoformat(raw)
+    # Scalar special-cases. Each accepts the ENCODED string and the decoded
+    # value alike: a caller may hand back a value it already parsed, and
+    # refusing its own output made the identity case an error.
+    if ann is bytes:
+        if isinstance(raw, bytes):
+            return raw
+        if isinstance(raw, str):
+            return _decode_base64(raw)
+    if ann is Path:
+        if isinstance(raw, Path):
+            return raw
+        if isinstance(raw, str):
+            return Path(raw)
+    if ann is UUID:
+        if isinstance(raw, UUID):
+            return raw
+        if isinstance(raw, str):
+            return UUID(raw)
+    if ann is datetime:
+        if isinstance(raw, datetime):
+            return raw
+        if isinstance(raw, str):
+            return datetime.fromisoformat(raw)
     if isinstance(ann, type) and issubclass(ann, Enum):
         return ann(raw)
     # An unannotated field (``object`` / no hint) is the one shape with no
@@ -1025,6 +1070,63 @@ def _decode_untagged_union(annotation: object, raw: object) -> object:
         if isinstance(origin, type) and isinstance(raw, origin):
             return decode(member, raw)
     raise TypeError(f"cannot decode {raw!r} as {annotation}")
+
+
+def _admits_none(annotation: object) -> bool:
+    """Whether ``annotation`` permits ``None`` as a value.
+
+    An unannotated field (``object`` / no hint) makes no claim, so it does.
+    """
+    ann = _resolve_alias(annotation)
+    if ann is None or ann is object or ann is type(None) or isinstance(ann, TypeVar):
+        return True
+    if isinstance(ann, UnionType) or get_origin(ann) is UnionType:
+        return any(m is type(None) for m in get_args(ann)) or any(
+            _admits_none(m) for m in _union_args(ann)
+        )
+    return get_origin(ann) is Literal and None in get_args(ann)
+
+
+def _fixed_tuple_arity(annotation: object) -> int | None:
+    """The element count a fixed-length ``tuple[A, B]`` demands, else ``None``.
+
+    ``tuple[T, ...]`` is homogeneous and unbounded, so it has no arity.
+    """
+    ann = _strip_optional(_resolve_alias(annotation))
+    if get_origin(ann) is not tuple:
+        return None
+    args = get_args(ann)
+    if not args or (len(args) == 2 and args[1] is Ellipsis):
+        return None
+    return len(args)
+
+
+def _decode_bool(raw: object) -> bool:
+    """Decode a bool, refusing values ``bool_val`` would answer by default.
+
+    ``bool_val`` is the LENIENT reader: an unknown string or an arbitrary
+    object takes its default, which is the right contract at a network boundary
+    and the wrong one here -- ``decode(bool, {})`` answered ``False`` about a
+    shape it never understood, while every sibling scalar raises.
+    """
+    if isinstance(raw, (bool, int, float)):
+        return bool(raw)
+    if isinstance(raw, str) and bool_val(raw, default=True) == bool_val(raw):
+        return bool_val(raw)
+    raise TypeError(f"cannot decode {raw!r} as bool")
+
+
+def _decode_base64(raw: str) -> bytes:
+    """Decode base64 text, refusing input that is not base64.
+
+    ``b64decode`` DISCARDS every character outside the alphabet unless
+    ``validate=True``, so ``"!!!!"`` decoded to ``b""`` -- a value the source
+    never sent, indistinguishable from an empty field.
+    """
+    try:
+        return base64.b64decode(raw, validate=True)
+    except ValueError as exc:
+        raise TypeError(f"cannot decode {raw!r} as bytes") from exc
 
 
 def _decode_int(raw: object) -> int:
