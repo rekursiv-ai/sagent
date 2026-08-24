@@ -1,5 +1,6 @@
 from torch.utils import (
     backcompat as backcompat,
+    benchmark as benchmark,
     collect_env as collect_env,
     data as data,
     deterministic as deterministic,
