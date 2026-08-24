@@ -50,6 +50,7 @@ from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.lib.cli_respawn import respawn_for_cadence
 from sagent.providers.lib.errors import (
     error_status_code,
+    is_context_overflow_text,
     is_request_too_large,
 )
 from sagent.providers.lib.hotspare import HotSpare
@@ -898,10 +899,7 @@ class _AnthropicCLIModel(ModelDefaults):
         """
         if is_request_too_large(error_status_code(error), str(error)):
             return False
-        msg = str(error).lower()
-        return (
-            "prompt is too long" in msg or "context window" in msg or "too_long" in msg
-        )
+        return is_context_overflow_text(str(error))
 
     @override
     def is_retryable_provider_error(self, error: Exception) -> bool:

@@ -121,21 +121,21 @@ def test_context_budget_rejects_negative_reattach_budget() -> None:
         )
 
 
-def test_context_budget_rejects_negative_persist_threshold() -> None:
-    with pytest.raises(ValueError, match="persist_threshold"):
+def test_context_budget_rejects_negative_persist_tokens() -> None:
+    with pytest.raises(ValueError, match="persist_tokens"):
         _ = ContextBudget(
             max_request_tokens=1_000,
             max_response_tokens=100,
-            persist_threshold=-1,
+            persist_tokens=-1,
         )
 
 
-def test_context_budget_rejects_negative_message_budget_chars() -> None:
-    with pytest.raises(ValueError, match="message_budget_chars"):
+def test_context_budget_rejects_negative_message_budget_tokens() -> None:
+    with pytest.raises(ValueError, match="message_budget_tokens"):
         _ = ContextBudget(
             max_request_tokens=1_000,
             max_response_tokens=100,
-            message_budget_chars=-1,
+            message_budget_tokens=-1,
         )
 
 
@@ -650,11 +650,12 @@ def test_resolve_accepts_tags_in_any_order() -> None:
 def test_from_model_uses_the_measured_chars_per_token() -> None:
     """The budget must plan against the model's real tokenizer density.
 
-    Hardcoding 4 while the spec carries a measured 2.83 makes every
-    derived character budget ~41% too generous against the token window
-    it exists to protect.
+    The two re-attach caps are the only fields still denominated in
+    characters, so they must plan against the model's real tokenizer
+    density -- hardcoding 4 against a measured 2.38 makes them ~68% too
+    generous against the token window they exist to protect.
     """
     model = anthropic.Anthropic.from_key("k").model("claude-opus-5")
-    assert model.spec.chars_per_token == 2.83
+    assert model.spec.chars_per_token == 2.38
     budget = ContextBudget.from_model(model)
-    assert budget.chars_per_token == 3
+    assert budget.chars_per_token == 2

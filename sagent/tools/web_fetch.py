@@ -17,9 +17,8 @@ import cachetools
 
 from sagent.lib.custom_json import JSONValue, json_freeze, json_unfreeze
 from sagent.tools.core import (
-    TOOL_RESULT_MAX_CHARS,
     load_tool_description,
-    truncate,
+    truncate_to_budget,
 )
 from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import Node, walk_commands
@@ -205,7 +204,7 @@ class WebFetch:
         except (FetchError, ValueError, OSError) as e:
             return ToolResult(call_id="", content=f"Fetch failed: {e}", is_error=True)
 
-        content = truncate(result.text, TOOL_RESULT_MAX_CHARS)
+        content = truncate_to_budget(result.text)
         if cache_key is not None:
             self._cache[cache_key] = content
         return ToolResult(call_id="", content=content)

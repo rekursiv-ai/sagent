@@ -45,6 +45,7 @@ from sagent.lib.custom_json import (
 from sagent.providers.google import catalog as google_catalog
 from sagent.providers.lib.errors import (
     error_status_code,
+    is_context_overflow_text,
     is_request_too_large,
     raise_if_request_too_large,
 )
@@ -378,8 +379,7 @@ class _GeminiModel(ModelDefaults):
         """
         if is_request_too_large(error_status_code(error), str(error)):
             return False
-        msg = str(error).lower()
-        return "too large" in msg or "too long" in msg or "exceeds the maximum" in msg
+        return is_context_overflow_text(str(error))
 
     @override
     async def stream(

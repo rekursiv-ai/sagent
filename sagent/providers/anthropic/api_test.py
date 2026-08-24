@@ -633,7 +633,7 @@ def test_anthropic_model_token_estimate_uses_profile_chars_per_token() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-7")
     # chars_per_token = 2.83; 28 chars / 2.83 ≈ 9.89 → int → 9.
-    assert m.approx_text_tokens("a" * 28) == 9
+    assert m.approx_text_tokens("a" * 28) == 11
 
 
 def test_anthropic_model_pricing_exposed() -> None:

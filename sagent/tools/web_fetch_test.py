@@ -97,10 +97,10 @@ def test_run_appends_truncation_notice_when_body_exceeds_limit() -> None:
     from wesearch import web  # noqa: PLC0415 -- patch the network below fetch_web.
 
     from sagent.tools.core import (  # noqa: PLC0415 -- test-local constant.
-        TOOL_RESULT_MAX_CHARS,
+        result_token_budget,
     )
 
-    over = TOOL_RESULT_MAX_CHARS + 500
+    over = result_token_budget() * 8
     with (
         patch.object(
             web, "fetch_with_reader_fallback", return_value=(b"z" * over, False)
@@ -110,7 +110,7 @@ def test_run_appends_truncation_notice_when_body_exceeds_limit() -> None:
     ):
         result = asyncio.run(WebFetch().run({"url": "https://example.com"}))
     assert not result.is_error
-    assert "(truncated, 500 chars omitted)" in result.content
+    assert "chars omitted)" in result.content
 
 
 def test_match_http_fetch_simple_curl() -> None:

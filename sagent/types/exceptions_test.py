@@ -76,7 +76,25 @@ def test_stream_interrupted_carries_response() -> None:
     response = ModelResponse(message=AssistantMessage(text="partial"))
     err = StreamInterruptedError(response)
     assert err.response is response
-    assert "tool_use" in str(err)
+
+
+def test_stream_interrupted_names_tool_use_only_when_tools_were_announced() -> None:
+    """The message must describe what actually happened.
+
+    The same error covers a turn that declared ``tool_use`` and sent no
+    tool blocks, and an SSE stream that ended without its terminator. It
+    reported tool use for both, so a text-only connection drop read as a
+    tool-call failure and sent the reader after tools never in play.
+    """
+    tool_turn = ModelResponse(message=AssistantMessage(text=""), stop_reason="tool_use")
+    assert "tool_use" in str(StreamInterruptedError(tool_turn))
+
+    text_turn = ModelResponse(
+        message=AssistantMessage(text="partial"), stop_reason="model_finished"
+    )
+    message = str(StreamInterruptedError(text_turn))
+    assert "delivered no tool blocks" not in message, message
+    assert "ended before completing" in message, message
 
 
 def test_stream_interrupted_is_exception() -> None:

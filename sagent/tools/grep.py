@@ -13,9 +13,14 @@ import re
 import shutil
 import subprocess
 
-from sagent.agent.state import current_agent_var, get_tool_state
+from sagent.agent.state import approx_tokens, get_tool_state
 from sagent.lib.custom_json import bool_val, int_val, json_freeze
-from sagent.tools.core import load_tool_description, run_sync
+from sagent.tools.core import (
+    bound_by_tokens,
+    load_tool_description,
+    result_token_budget,
+    run_sync,
+)
 from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
     Invocation,
@@ -110,44 +115,6 @@ _NUDGE: Final = "grep/rg via Bash is a bad UX. Use the Grep tool."
 # point of ``grep -q x f && action``. A tool call returns matches, not a
 # status a later shell command can branch on, so Bash is necessary.
 _GREP_DENY: frozenset[str] = frozenset({"-v", "--invert-match", "-q", "--quiet"})
-
-# Prepended to the body when a knob was dropped. The model passed it and
-# must be told it did not apply; ``logger.warning`` goes nowhere it reads.
-_OFFSET_IGNORED: Final = "[offset ignored: context lines were requested]\n"
-
-# Entry cap when no agent is in context (standalone use, tests).
-_FALLBACK_KEEP_FIRST: Final = 1_000
-
-# Characters a rendered match line costs, used to turn the agent's
-# character budget into an entry count. Set above a typical
-# ``path:line:text`` row so the derived cap errs small.
-_ASSUMED_CHARS_PER_MATCH: Final = 150
-
-
-def _default_keep_first() -> int:
-    """Entry cap for an unpaginated Grep, derived from the active budget.
-
-    A result over ``max_result_chars`` is off-loaded to disk or elided,
-    and either outcome returns less than a bounded reply would -- so an
-    "unlimited" default silently lost matches on a wide pattern. The
-    derived cap keeps one reply whole; ``offset`` reaches the rest.
-
-    Returns:
-      limit: Maximum entries returned by default; the fallback constant
-          when no agent is in context.
-
-    """
-    agent = current_agent_var.get(None)
-    ceiling = agent.max_result_chars if agent is not None else 0
-    if ceiling <= 0:
-        return _FALLBACK_KEEP_FIRST
-    # A floor here defeats the derivation. The smallest budget
-    # ``ContextBudget.from_model`` produces is ``persist_threshold=20_000``,
-    # where 1000 entries is ~150_000 chars -- 7.5x the ceiling, so the
-    # result off-loads to disk and the caller sees a preview instead of
-    # matches. ``offset`` reaches whatever a smaller cap left behind.
-    return max(1, ceiling // _ASSUMED_CHARS_PER_MATCH)
-
 
 # Mirrors the ``output_mode`` enum advertised in ``directive_schema``.
 # Validated at runtime so an unknown value errors instead of silently
@@ -321,7 +288,7 @@ class Grep:
             "multiline",
         }
         kwargs: dict[str, object] = {k: v for k, v in args.items() if k not in known}
-        keep_first = int_val(args.get("keep_first"), _default_keep_first())
+        keep_first = int_val(args.get("keep_first"), 0)
         keep_last = int_val(args.get("keep_last"), 0)
         offset = int_val(args.get("offset"), 0)
         context_before = _kw_int(kwargs, "-B", "context_before")
@@ -812,6 +779,13 @@ def _paginate(text: str, *, keep_first: int, keep_last: int, offset: int) -> str
     Slicing inside the accumulator instead let the unit differ per mode
     (content lines vs. per-file counts vs. context separators).
 
+    ``offset`` applies with context lines too. Both backends used to zero
+    it and prepend an "offset ignored" notice, which left the reply both
+    ignoring the knob AND telling the reader to pass it -- a resume note
+    that cannot be followed. Slicing rendered lines is agnostic to how
+    they were produced, so context rows page like any others; a group
+    separator inside the window is simply one more entry.
+
     Args:
       text: Rendered output, one entry per line.
       keep_first: Keep only the leading N entries; ``0`` is unlimited.
@@ -825,14 +799,45 @@ def _paginate(text: str, *, keep_first: int, keep_last: int, offset: int) -> str
     if not text or text == "(no matches)":
         return text or "(no matches)"
     lines = text.split("\n")
+    # Where the shown window BEGINS in the full match set. Every resume
+    # note is phrased from this, never from the caller's ``offset``:
+    # ``keep_last`` slices a tail and leaves ``offset`` at 0, so a note
+    # built from ``offset`` named a position at the HEAD while the body
+    # showed the TAIL -- following it re-fetched rows already shown and
+    # never reached the omitted ones.
     if keep_last > 0:
-        lines = lines[-keep_last:]
+        start = max(0, len(lines) - keep_last)
+        lines = lines[start:]
     else:
+        start = offset
         if offset > 0:
             lines = lines[offset:]
         if keep_first > 0:
             lines = lines[:keep_first]
-    return "\n".join(lines) if lines and lines[0] else "(no matches)"
+    if not lines or not lines[0]:
+        return "(no matches)"
+    # The token bound is the backstop for an unpaginated search: the
+    # caller's knobs are a window, and neither says how wide a match is.
+    # The resume note is part of the result, so its own cost comes out of
+    # the budget -- appending it afterwards put the reply back over.
+    budget = result_token_budget()
+    # Reserve the note by rendering the REAL one for the worst case (all
+    # entries withheld), not a second hand-written copy: a stand-in with
+    # placeholder values drifts from what actually ships.
+    reserved = _resume_note(withheld=len(lines), resume=start + len(lines))
+    body, kept = bound_by_tokens(
+        (f"{line}\n" for line in lines),
+        budget=max(1, budget - approx_tokens(reserved)),
+    )
+    body = body.rstrip("\n")
+    if kept < len(lines):
+        body += _resume_note(withheld=len(lines) - kept, resume=start + kept)
+    return body
+
+
+def _resume_note(*, withheld: int, resume: int) -> str:
+    """Render the continuation note for entries this reply did not show."""
+    return f"\n... ({withheld} more entries; pass offset={resume} to continue)"
 
 
 def _grep_rg(
@@ -854,13 +859,6 @@ def _grep_rg(
     offset: int,
 ) -> str | ToolResult:
     """Grep using ripgrep."""
-    notice = ""
-    if offset > 0 and (context_before > 0 or context_after > 0):
-        # A log line is invisible to the model that passed the knob, so
-        # the dropped ``offset`` read as a search that simply started at
-        # the top. Say it in the body instead.
-        notice = _OFFSET_IGNORED
-        offset = 0
     cmd = _build_rg_cmd(
         pattern=pattern,
         path=path,
@@ -904,7 +902,7 @@ def _grep_rg(
             content=f"ripgrep error (exit {result.returncode}): {err}",
             is_error=True,
         )
-    return notice + _paginate(
+    return _paginate(
         result.stdout.strip(),
         keep_first=keep_first,
         keep_last=keep_last,
@@ -1133,10 +1131,6 @@ def _grep_python(
             ),
             is_error=True,
         )
-    notice = ""
-    if offset > 0 and (context_before > 0 or context_after > 0):
-        notice = _OFFSET_IGNORED
-        offset = 0
     if not multiline and r"\n" in pattern:
         return ToolResult(
             call_id="",
@@ -1178,8 +1172,11 @@ def _grep_python(
             state.process_multiline(pat, text, filepath)
         else:
             state.process_lines(pat, text.splitlines(), filepath)
-    return notice + _paginate(
-        state.format(), keep_first=keep_first, keep_last=keep_last, offset=offset
+    return _paginate(
+        state.format(),
+        keep_first=keep_first,
+        keep_last=keep_last,
+        offset=offset,
     )
 
 

@@ -10,7 +10,6 @@ import os
 import re
 
 from sagent.agent.result_storage import (
-    PERSIST_EXEMPT_TOOLS,
     PERSISTED_TAG,
     post_process_result,
 )
@@ -24,16 +23,14 @@ if TYPE_CHECKING:
 def test_empty_result_gets_completed_marker() -> None:
     """C9: empty content + no error gets a stop-sequence-safe marker."""
     result = ToolResult(call_id="c1", content="")
-    out = post_process_result(
-        result, "Bash", session_dir=None, persist_threshold=10_000
-    )
+    out = post_process_result(result, "Bash", session_dir=None, persist_tokens=10_000)
     assert out.content == "(Bash completed with no output)"
 
 
 def test_nonempty_error_result_skips_persist_and_marker() -> None:
     """C9: error results with content pass through untouched (no persist)."""
     result = ToolResult(call_id="c1", content="boom", is_error=True)
-    out = post_process_result(result, "Bash", session_dir=None, persist_threshold=10)
+    out = post_process_result(result, "Bash", session_dir=None, persist_tokens=10)
     assert out is result
 
 
@@ -46,9 +43,7 @@ def test_empty_error_result_gets_completed_marker() -> None:
     just successful ones.
     """
     result = ToolResult(call_id="c1", content="", is_error=True)
-    out = post_process_result(
-        result, "Bash", session_dir=None, persist_threshold=10_000
-    )
+    out = post_process_result(result, "Bash", session_dir=None, persist_tokens=10_000)
     assert out.content
     assert out.is_error, "the error flag is preserved"
 
@@ -65,7 +60,7 @@ def test_empty_error_result_with_attachment_passes_through() -> None:
         is_error=True,
         attachments=(BytesMessage(b"\xff\xd8\xff\xe0data", "image/jpeg"),),
     )
-    out = post_process_result(result, "Bash", session_dir=None, persist_threshold=10)
+    out = post_process_result(result, "Bash", session_dir=None, persist_tokens=10)
     assert out is result
 
 
@@ -74,7 +69,7 @@ def test_oversized_result_persists_to_disk(tmp_path: Path) -> None:
     big = "X" * 5_000
     result = ToolResult(call_id="call_abc", content=big)
     out = post_process_result(
-        result, "Bash", session_dir=tmp_path, persist_threshold=1_000
+        result, "Bash", session_dir=tmp_path, persist_tokens=1_000
     )
     assert PERSISTED_TAG in out.content
     on_disk = tmp_path / "tool-results" / "call_abc.txt"
@@ -85,37 +80,42 @@ def test_oversized_result_persists_to_disk(tmp_path: Path) -> None:
 def test_aggregate_budget_persists_before_per_result_threshold(
     tmp_path: Path,
 ) -> None:
-    body = "X" * 5_000
+    body = "X" * 5_000  # ~1_250 tokens at the no-agent fallback ratio.
     result = ToolResult(call_id="call_budget", content=body)
     out = post_process_result(
         result,
         "Bash",
         session_dir=tmp_path,
-        persist_threshold=10_000,
-        message_budget_chars=6_000,
-        used_message_chars=2_000,
+        persist_tokens=10_000,
+        message_budget_tokens=1_500,
+        used_message_tokens=1_000,
     )
     assert PERSISTED_TAG in out.content
     assert (tmp_path / "tool-results" / "call_budget.txt").read_text() == body
 
 
-def test_exempt_tool_skips_persist(tmp_path: Path) -> None:
-    """C9: Read (and other exempt tools) bypass disk offload."""
-    assert "Read" in PERSIST_EXEMPT_TOOLS
+def test_no_tool_is_exempt_from_persist(tmp_path: Path) -> None:
+    """Read offloads like every other tool.
+
+    ``Read`` was exempt on the stated grounds that its output was already
+    bounded by its own cap. That cap was later re-expressed in LINES via a
+    guessed chars-per-line, so it stopped bounding anything: session
+    ``190b6baec7ed`` produced an 11.1M-character Read result that no layer
+    caught. The exemption was the only thing standing between that result
+    and disk.
+    """
     body = "X" * 5_000
     result = ToolResult(call_id="r1", content=body)
-    out = post_process_result(
-        result, "Read", session_dir=tmp_path, persist_threshold=1_000
-    )
-    assert out.content == body
-    assert not (tmp_path / "tool-results").exists()
+    out = post_process_result(result, "Read", session_dir=tmp_path, persist_tokens=100)
+    assert PERSISTED_TAG in out.content
+    assert (tmp_path / "tool-results" / "r1.txt").read_text() == body
 
 
 def test_threshold_zero_disables_persist(tmp_path: Path) -> None:
-    """C9: ``persist_threshold=0`` keeps every byte in history (no disk)."""
+    """C9: ``persist_tokens=0`` keeps every byte in history (no disk)."""
     body = "X" * 1_000_000
     result = ToolResult(call_id="big", content=body)
-    out = post_process_result(result, "Bash", session_dir=tmp_path, persist_threshold=0)
+    out = post_process_result(result, "Bash", session_dir=tmp_path, persist_tokens=0)
     assert out.content == body
     assert not (tmp_path / "tool-results").exists()
 
@@ -126,7 +126,7 @@ def test_persist_dedup_on_existing_file(tmp_path: Path) -> None:
     target.mkdir()
     _ = (target / "call_abc.txt").write_text("PRIOR")
     result = ToolResult(call_id="call_abc", content="PRIOR")
-    _ = post_process_result(result, "Bash", session_dir=tmp_path, persist_threshold=1)
+    _ = post_process_result(result, "Bash", session_dir=tmp_path, persist_tokens=1)
     assert (target / "call_abc.txt").read_text() == "PRIOR"
 
 
@@ -136,7 +136,7 @@ def test_persist_collision_writes_distinct_file(tmp_path: Path) -> None:
     _ = (target / "call_abc.txt").write_text("PRIOR")
     result = ToolResult(call_id="call_abc", content="X" * 5_000)
     out = post_process_result(
-        result, "Bash", session_dir=tmp_path, persist_threshold=1_000
+        result, "Bash", session_dir=tmp_path, persist_tokens=1_000
     )
     match = re.search(r"Full output saved to: (.+)", out.content)
     assert match is not None
@@ -161,7 +161,7 @@ def test_post_process_does_not_touch_attachments() -> None:
         content="[PDF: big.pdf (10 page(s))]",
         attachments=(BytesMessage(big, "image/jpeg"),),
     )
-    out = post_process_result(result, "Read", session_dir=None, persist_threshold=0)
+    out = post_process_result(result, "Read", session_dir=None, persist_tokens=0)
     assert out is result
 
 
@@ -189,7 +189,7 @@ def test_persist_handles_posix_short_writes(
     body = "Y" * 5_000
     result = ToolResult(call_id="short_write", content=body)
     out = post_process_result(
-        result, "Bash", session_dir=tmp_path, persist_threshold=1_000
+        result, "Bash", session_dir=tmp_path, persist_tokens=1_000
     )
     assert PERSISTED_TAG in out.content
     on_disk = tmp_path / "tool-results" / "short_write.txt"

@@ -22,7 +22,6 @@ from sagent.agent.state import (
 from sagent.testing import with_fake_agent
 from sagent.tools.core import (
     _MISSING_TOOL_DESCRIPTION,
-    TOOL_RESULT_MAX_CHARS,
     _ToolImpl,
     changed_files_context,
     get_file_write_lock,
@@ -37,11 +36,12 @@ from sagent.tools.core import (
     recipe_list,
     resolve_recipe,
     resolve_tool_path,
+    result_token_budget,
     run_sync,
     set_recipe,
     to_result,
     tool,
-    truncate,
+    truncate_to_budget,
 )
 from sagent.types.runtime import ToolResult
 
@@ -65,14 +65,20 @@ def _as_mapping(value: object) -> Mapping[str, object]:
 
 
 def test_truncate_short_passthrough() -> None:
-    assert truncate("abc", 10) == "abc"
+    assert truncate_to_budget("abc") == "abc"
 
 
 def test_truncate_long_appends_notice() -> None:
-    out = truncate("x" * 50, 10)
+    """An over-budget body is cut AND says so.
+
+    A single unsplittable line is the case the unit-wise bound cannot
+    handle, so the backstop falls through to a character cut -- silence
+    there would be indistinguishable from a complete answer.
+    """
+    out = truncate_to_budget("x" * (result_token_budget() * 8))
     assert out.startswith("x" * 10)
     assert "truncated" in out
-    assert "40" in out
+    assert "omitted" in out
 
 
 def test_to_result_wraps_string() -> None:
@@ -525,12 +531,12 @@ async def test_tool_run_async_function_returns_result() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_run_truncates_at_the_shared_cap() -> None:
-    """The only result cap is ``TOOL_RESULT_MAX_CHARS``; no per-tool knob."""
+    """The only result cap is the model-derived token budget."""
 
     @tool
     def fn(x: str) -> str:
         del x
-        return "y" * (TOOL_RESULT_MAX_CHARS + 100)
+        return "y" * (result_token_budget() * 8)
 
     out = await fn.run({"x": ""})
     assert "truncated" in out.content
@@ -630,7 +636,7 @@ async def test_run_sync_passes_tool_result() -> None:
 @pytest.mark.asyncio
 async def test_run_sync_truncates_long() -> None:
     def fn() -> str:
-        return "x" * (TOOL_RESULT_MAX_CHARS + 100)
+        return "x" * (result_token_budget() * 8)
 
     out = await run_sync(fn)
     assert "truncated" in out.content

@@ -21,13 +21,17 @@ import signal
 import subprocess
 import time
 
-from sagent.agent.state import ToolState, get_tool_state
+from sagent.agent.state import (
+    ToolState,
+    approx_tokens,
+    get_tool_state,
+)
 from sagent.lib import debug_log
 from sagent.lib.custom_json import bool_val, int_val, json_freeze
 from sagent.tools.core import (
-    TOOL_RESULT_MAX_CHARS,
+    bound_by_tokens,
     load_tool_description,
-    truncate,
+    result_token_budget,
 )
 from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
@@ -501,9 +505,18 @@ def _process_output(
     # overflow, and a broken build then reads as a clean one. Each half
     # gets its own share of the cap, so neither can crowd out the other
     # and the total stays bounded however noisy one of them is.
-    diagnostics = truncate(stderr.strip(), TOOL_RESULT_MAX_CHARS // 4)
-    body_budget = TOOL_RESULT_MAX_CHARS - len(diagnostics)
-    out = truncate("\n".join(body_lines).strip(), body_budget)
+    budget = result_token_budget()
+    diagnostics, _ = bound_by_tokens(
+        (f"{line}\n" for line in stderr.strip().split("\n")), budget=budget // 4
+    )
+    diagnostics = diagnostics.strip()
+    body, kept = bound_by_tokens(
+        (f"{line}\n" for line in body_lines),
+        budget=max(1, budget - approx_tokens(diagnostics)),
+    )
+    out = body.strip()
+    if kept < len(body_lines):
+        out += f"\n... ({len(body_lines) - kept} more lines omitted; budget reached)"
     if diagnostics:
         out = f"{out}\n{diagnostics}" if out else diagnostics
     if reason:

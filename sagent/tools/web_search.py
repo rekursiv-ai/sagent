@@ -21,9 +21,8 @@ from wesearch.types.errors import BotDetectionError
 
 from sagent.lib.custom_json import json_freeze
 from sagent.tools.core import (
-    TOOL_RESULT_MAX_CHARS,
     load_tool_description,
-    truncate,
+    truncate_to_budget,
 )
 from sagent.tools.display import Toggle, Wrap
 from sagent.tools.tool_spec import CLI_SETTABLE
@@ -178,7 +177,7 @@ class WebSearch:
             text = "(no results)"
         else:
             text = "\n\n".join(format_result(r) for r in results)
-        return ToolResult(call_id="", content=truncate(text, TOOL_RESULT_MAX_CHARS))
+        return ToolResult(call_id="", content=truncate_to_budget(text))
 
 
 # A bare hostname: dot-separated labels of letters/digits/hyphens, optional

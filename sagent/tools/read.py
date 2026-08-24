@@ -11,7 +11,11 @@ import asyncio
 import json
 import re
 
-from sagent.agent.state import current_agent_var, get_tool_state
+from sagent.agent.state import (
+    approx_tokens,
+    current_agent_var,
+    get_tool_state,
+)
 from sagent.lib.custom_json import (
     dict_val,
     dicts_val,
@@ -21,10 +25,12 @@ from sagent.lib.custom_json import (
     str_val,
 )
 from sagent.tools.core import (
+    bound_by_tokens,
     file_lock_key,
     load_tool_description,
     mark_read,
     resolve_tool_path,
+    result_token_budget,
 )
 from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
@@ -168,7 +174,9 @@ class Read:
         """
         file_path = resolve_tool_path(str(args.get("file_path", "")))
         offset = int_val(args.get("offset"), 1)
-        limit = int_val(args.get("limit"), _default_line_limit())
+        # ``0`` means "to EOF"; the token bound in ``_window_text`` is what
+        # actually stops the read, so no line-count default is needed.
+        limit = int_val(args.get("limit"), 0)
         last_lines = int_val(args.get("last_lines"), 0)
         pages = str(args.get("pages", ""))
         # Schema declares ``offset``/``limit``/``last_lines`` as
@@ -375,21 +383,28 @@ def _read_notebook(p: Path, *, file_path: str) -> ToolResult:
     """Parse a Jupyter notebook and return cell contents as text."""
     try:
         nb = json.loads(p.read_text(encoding="utf-8"))
+    # ``is_error`` on every unreadable shape, matching the missing-file
+    # and not-a-file paths above: a caller branching on the flag -- which
+    # is what it exists for -- otherwise reads a corrupt notebook as a
+    # notebook with unusual contents.
     except json.JSONDecodeError as e:
         return ToolResult(
             call_id="",
             content=f"[Invalid notebook JSON: {file_path}: {e}]",
+            is_error=True,
         )
     except UnicodeDecodeError as e:
         return ToolResult(
             call_id="",
             content=f"[Non-UTF-8 notebook: {file_path}: {e}]",
+            is_error=True,
         )
     nb_d = dict_val(nb)
     if not nb_d:
         return ToolResult(
             call_id="",
             content=f"[Not a valid Jupyter notebook: {file_path}]",
+            is_error=True,
         )
     parts: list[str] = []
     for i, cell in enumerate(list_val(nb_d.get("cells"))):
@@ -400,10 +415,17 @@ def _read_notebook(p: Path, *, file_path: str) -> ToolResult:
         parts.append(f"--- Cell {i + 1} ({ctype}) ---")
         parts.append(_joined(cell_d.get("source")))
         _collect_cell_outputs(cell_d, parts)
-    return ToolResult(
-        call_id="",
-        content="\n".join(parts) or "(empty notebook)",
+    # Bounded like every other Read path. This one never reaches
+    # ``_window_text``, so before the token bound existed a large notebook
+    # -- cells plus every output plus tracebacks -- shipped whole.
+    note = f"\n... ({len(parts)} more notebook sections omitted.)"
+    body, kept = bound_by_tokens(
+        (f"{part}\n" for part in parts),
+        budget=max(1, result_token_budget() - approx_tokens(note)),
     )
+    if kept < len(parts):
+        body += f"\n... ({len(parts) - kept} more notebook sections omitted.)"
+    return ToolResult(call_id="", content=body or "(empty notebook)")
 
 
 def _collect_cell_outputs(cell: Mapping[str, object], parts: list[str]) -> None:
@@ -498,7 +520,7 @@ def _window_text(
     limit: int,
     last_lines: int,
 ) -> str:
-    """Apply offset/limit/last_lines windowing and add line numbers."""
+    """Apply offset/limit/last_lines windowing, add line numbers, bound tokens."""
     lines = text.splitlines(keepends=True)
     total = len(lines)
     if last_lines > 0:
@@ -509,14 +531,23 @@ def _window_text(
     if start >= total:
         return f"[offset {offset} beyond EOF: {file_path} has {total} lines]"
     end = total if limit <= 0 else min(start + limit, total)
-    selected = lines[start:end]
-    numbered = [f"{start + i + 1}\t{line}" for i, line in enumerate(selected)]
-    result_str = "".join(numbered)
-    if end < total:
-        result_str += (
-            f"\n... ({total - end} more lines. Use offset={end + 1} to continue.)"
+
+    # Bound by TOKENS, never by a line count: the caller's ``limit`` is a
+    # window, not a budget, and one line's width is unknown until read.
+    note = f"\n... ({total} more lines. Use offset={total + 1} to continue.)"
+    body, kept = bound_by_tokens(
+        (f"{start + i + 1}\t{line}" for i, line in enumerate(lines[start:end])),
+        budget=max(1, result_token_budget() - approx_tokens(note)),
+    )
+    # One note whether the budget or the window stopped us: ``start + kept``
+    # is where the reader resumes either way.
+    shown_through = start + kept
+    if shown_through < total:
+        body += (
+            f"\n... ({total - shown_through} more lines."
+            f" Use offset={shown_through + 1} to continue.)"
         )
-    return result_str
+    return body
 
 
 def _has_glob(arg: str) -> bool:
@@ -756,46 +787,6 @@ def _render_pdf_jpegs(
     return extract_pdf_pages(
         path, first=first, last=last, max_total_bytes=_rendered_byte_budget()
     )
-
-
-# Line cap used when no agent is in context (standalone tool use, tests).
-_FALLBACK_LINE_LIMIT: Final = 2_000
-
-# Characters per line assumed when turning a character budget into a line
-# count. Set above typical source-line width so the derived cap errs
-# small: over-estimating width under-counts lines, which is the safe
-# direction.
-_ASSUMED_CHARS_PER_LINE: Final = 80
-
-
-def _default_line_limit() -> int:
-    """Line cap for a windowless Read, derived from the active budget.
-
-    One result must stay under ``max_result_chars`` or it is off-loaded
-    to disk (replaced by a ~2 KB preview) or, past the per-request
-    budget, elided to a placeholder -- both of which hand back LESS of
-    the file than a plain windowed read. Read is additionally exempt
-    from disk offload, so without a cap here nothing bounds it at all.
-
-    Deriving the cap from the agent keeps one read whole across models
-    whose windows differ by two orders of magnitude, where any single
-    constant is wrong at one end. Mirrors :func:`_rendered_byte_budget`,
-    which sizes PDF rasterization from the same handle.
-
-    Returns:
-      limit: Maximum lines a default Read returns; the fallback constant
-          when no agent is in context.
-
-    """
-    agent = current_agent_var.get(None)
-    ceiling = agent.max_result_chars if agent is not None else 0
-    if ceiling <= 0:
-        return _FALLBACK_LINE_LIMIT
-    # A floor here defeats the derivation. The smallest budget
-    # ``ContextBudget.from_model`` produces is ``persist_threshold=20_000``,
-    # where 2000 lines is ~160_000 chars -- 8x the ceiling this cap exists
-    # to respect. ``offset`` reaches whatever a smaller cap left behind.
-    return max(1, ceiling // _ASSUMED_CHARS_PER_LINE)
 
 
 def _rendered_byte_budget() -> int:

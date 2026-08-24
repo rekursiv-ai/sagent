@@ -14,7 +14,7 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Final, cast, get_type_hints, overload
 
@@ -32,6 +32,8 @@ import typing
 import yaml
 
 from sagent.agent.state import (
+    approx_tokens,
+    current_agent_var,
     get_tool_state,
 )
 from sagent.lib.custom_json import JSON, int_val, json_freeze
@@ -261,8 +263,109 @@ def _ensure_locale_time() -> None:
         locale.setlocale(locale.LC_TIME, "C")
 
 
-# 100K tokens × ~4 chars/token.
-TOOL_RESULT_MAX_CHARS: Final = 400_000
+def result_token_budget(*, fallback: int = 50_000) -> int:
+    """Tokens one tool result may occupy, from the ACTIVE model.
+
+    Args:
+      fallback: Budget when no agent is in context (standalone tool use,
+          tests). Sized near the smallest window a real model declares.
+
+    Returns:
+      budget: Token ceiling for one result.
+
+    """
+    agent = current_agent_var.get(None)
+    ceiling = agent.max_result_tokens if agent is not None else 0
+    return ceiling if ceiling > 0 else fallback
+
+
+def bound_by_tokens(units: Iterable[str], *, budget: int) -> tuple[str, int]:
+    """Join ``units`` while they fit ``budget``; report how many were kept.
+
+    The single place every text tool stops. Tools pass their own rendered
+    units -- a numbered line, a match row, a path -- and this counts what
+    the provider will count, so no tool converts a budget into a unit of
+    its own. Read bounded itself in LINES via an assumed 80 chars/line,
+    which is 40x wrong on JSONL: session ``190b6baec7ed`` shipped an 11.1M
+    character result and could not recover.
+
+    Emitting at least one unit is deliberate: a result whose first unit
+    alone busts the budget is still more useful than an empty body, and
+    the caller's resume note names where to continue.
+
+    The count is RETURNED rather than folded into a note here: a caller
+    that windowed its input already withheld units this function never
+    saw, so only the caller can phrase the remainder correctly.
+
+    Args:
+      units: Rendered pieces, in output order. Each is emitted whole --
+          a sliced unit (half a line, a truncated path) reads as content
+          rather than as a boundary.
+      budget: Token ceiling from :func:`result_token_budget`.
+
+    Returns:
+      body: The kept units, joined.
+      kept: How many units ``body`` holds.
+
+    """
+    out: list[str] = []
+    used = 0
+    for unit in units:
+        cost = approx_tokens(unit)
+        if out and used + cost > budget:
+            break
+        if not out and cost > budget:
+            # The FIRST unit alone busts the budget, so dropping units
+            # cannot help -- a minified blob is ONE line. Emitting it
+            # whole is how an 11.1M-character result reached the wire in
+            # session ``190b6baec7ed``; cutting inside the unit is worse
+            # than a clean boundary and far better than a result the
+            # provider rejects outright.
+            return _slice_to_budget(unit, budget=budget), 1
+        used += cost
+        out.append(unit)
+    # Per-unit costs are a LOWER bound on the joined cost: tokenization
+    # does not distribute over concatenation (a subword can span a unit
+    # boundary), and the no-agent fallback ratio discards a fraction per
+    # unit to floor division -- measured 7% under on 5.5k grep rows. So
+    # re-count the REAL body and shrink from the tail until it fits: what
+    # is returned is what was measured, not a sum of parts.
+    body = "".join(out)
+    while len(out) > 1 and approx_tokens(body) > budget:
+        del out[-max(1, len(out) // 16) :]
+        body = "".join(out)
+    # One unit left and still over: same unsplittable case as above,
+    # reached when the joined re-count exceeds what the per-unit sum said.
+    if len(out) == 1 and approx_tokens(body) > budget:
+        return _slice_to_budget(body, budget=budget), 1
+    return body, len(out)
+
+
+def _slice_to_budget(unit: str, *, budget: int) -> str:
+    """Cut one unsplittable unit down to ``budget``, saying that it cut.
+
+    Characters are the only handle left once a unit cannot be split, so
+    the cut is made there and then VERIFIED in tokens: a chars-per-token
+    estimate is exactly the guess this module exists to remove, and a
+    minified line is far denser than any average.
+    """
+
+    def rendered(chars: int) -> str:
+        return (
+            f"{unit[:chars]}\n"
+            f"... (truncated mid-line, {len(unit) - chars:,} chars omitted)"
+        )
+
+    ratio = max(1, len(unit) // max(1, approx_tokens(unit)))
+    cut = max(1, budget * ratio)
+    # Measure the RENDERED result, notice included: the notice is part of
+    # what ships, so sizing only the prefix leaves the reply one notice
+    # over budget -- the same append-after-counting mistake this module
+    # exists to prevent.
+    while cut > 1 and approx_tokens(rendered(cut)) > budget:
+        cut //= 2
+    return rendered(cut)
+
 
 _TYPE_MAP: dict[type[object], str] = {
     str: "string",
@@ -325,22 +428,36 @@ def _build_schema(
     return schema
 
 
-def truncate(text: str, max_chars: int) -> str:
-    """Truncate text, appending a notice if truncated.
+def truncate_to_budget(text: str) -> str:
+    """Bound ``text`` to the active model's per-result token budget.
+
+    The framework's backstop for tools that do not bound themselves. A
+    tool that CAN paginate should call :func:`bound_by_tokens` instead and
+    offer an ``offset``: this cuts mid-line and the remainder is
+    unreachable, so it says so rather than trailing off silently.
 
     Args:
-      text: Input text.
-      max_chars: Maximum character count before truncation.
+      text: Rendered tool output.
 
     Returns:
-      result: Original text, or prefix with a truncation notice appended.
+      result: ``text``, or a prefix plus a truncation notice.
 
     """
-    if len(text) <= max_chars:
+    budget = result_token_budget()
+    if approx_tokens(text) <= budget:
         return text
-    return (
-        text[:max_chars] + f"\n... (truncated, {len(text) - max_chars} chars omitted)"
-    )
+    lines = text.splitlines(keepends=True)
+    body, kept = bound_by_tokens(lines, budget=budget)
+    if kept < len(lines):
+        return f"{body}\n... (truncated, {len(lines) - kept} lines omitted)"
+    # Every line was kept yet the whole still busts the budget: the body
+    # is one (or few) very long line, which ``bound_by_tokens`` cannot
+    # split without slicing a unit. Cut by characters here -- this is the
+    # backstop, and an over-budget result is worse than a mid-line cut
+    # that says so.
+    ratio = max(1, len(text) // max(1, approx_tokens(text)))
+    cut = max(1, budget * ratio)
+    return f"{text[:cut]}\n... (truncated, {len(text) - cut} chars omitted)"
 
 
 def to_result(result: str | ToolResult) -> ToolResult:
@@ -471,7 +588,7 @@ async def run_sync(
     ``fn`` may return a plain ``str`` (auto-wrapped into a
     ``ToolResult`` with empty ``call_id``) or a ``ToolResult``
     directly. Plain text content is truncated at
-    ``TOOL_RESULT_MAX_CHARS``. Exceptions propagate to the caller;
+    the active model's token budget. Exceptions propagate to the caller;
     the ``_AgentTool`` wrapper or the runtime converts them to
     ``ToolResult(is_error=True)`` at the dispatch boundary.
 
@@ -490,10 +607,9 @@ async def run_sync(
     """
     raw = await asyncio.to_thread(fn, **kwargs)
     result = to_result(raw)
-    if len(result.content) > TOOL_RESULT_MAX_CHARS:
-        return dataclasses.replace(
-            result, content=truncate(result.content, TOOL_RESULT_MAX_CHARS)
-        )
+    bounded = truncate_to_budget(result.content)
+    if bounded != result.content:
+        return dataclasses.replace(result, content=bounded)
     return result
 
 
@@ -552,7 +668,7 @@ class _ToolImpl:
 
         The wrapped function may return ``str`` (wrapped to
         ``ToolResult(content=...)``) or ``ToolResult`` directly. Text
-        content over ``TOOL_RESULT_MAX_CHARS`` is truncated. Exceptions
+        content over the model's token budget is truncated. Exceptions
         propagate; the ``_AgentTool`` wrapper at the dispatch boundary
         converts them to ``is_error=True``.
 
@@ -575,10 +691,9 @@ class _ToolImpl:
                 await asyncio.to_thread(self._fn, **kwargs),
             )
         result = to_result(raw)
-        if len(result.content) > TOOL_RESULT_MAX_CHARS:
-            return dataclasses.replace(
-                result, content=truncate(result.content, TOOL_RESULT_MAX_CHARS)
-            )
+        bounded = truncate_to_budget(result.content)
+        if bounded != result.content:
+            return dataclasses.replace(result, content=bounded)
         return result
 
 
@@ -819,7 +934,7 @@ def changed_files_context() -> str:
 # Only names this module DEFINES. Re-exporting what ``agent.state`` owns
 # gave every such symbol two import paths; reach into the owner instead.
 __all__ = (
-    "TOOL_RESULT_MAX_CHARS",
+    "bound_by_tokens",
     "changed_files_context",
     "file_lock_key",
     "get_file_write_lock",
@@ -835,9 +950,10 @@ __all__ = (
     "recipe_list",
     "resolve_recipe",
     "resolve_tool_path",
+    "result_token_budget",
     "run_sync",
     "set_recipe",
     "to_result",
     "tool",
-    "truncate",
+    "truncate_to_budget",
 )

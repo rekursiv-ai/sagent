@@ -22,6 +22,7 @@ from sagent.agent.retry import is_rate_limited, is_retryable
 from sagent.lib.custom_json import JSONValue
 from sagent.providers import OpenAI
 from sagent.providers.lib.errors import (
+    PER_ITEM_STRING_CAP_BODY,
     StreamingResponseNotReadError,
     find_response_not_read,
 )
@@ -873,6 +874,25 @@ def test_subscription_context_overflow_detection() -> None:
     assert m.is_context_overflow(RuntimeError("context_length_exceeded")) is True
     assert m.is_context_overflow(RuntimeError("exceeds the context window")) is True
     assert m.is_context_overflow(RuntimeError("other failure")) is False
+
+
+def test_subscription_per_item_string_cap_is_context_overflow() -> None:
+    """The per-item string cap must route to the compactor's shrink path.
+
+    Session ``190b6baec7ed`` wedged here: an 11 MB tool result tripped
+    OpenAI's 10 MiB per-ITEM cap, the phrase matched no classifier, and
+    ``stream`` re-raised the raw ``BadRequestError`` (``sub.py:1054``).
+    That is neither ``RequestTooLargeError`` nor ``PromptTooLongError``,
+    so ``_shrink_groups_for_compaction`` never ran -- and because the
+    compactor's own request carries the same item, every retry (and every
+    later turn, and ``/compact``) failed identically until the session died.
+
+    Classifying it as token overflow reaches the shrink-and-retry that
+    caps oversized tool results, which is what actually clears it.
+    """
+    m = _make_provider().model("gpt-5.5")
+    err = _StatusError(PER_ITEM_STRING_CAP_BODY, 400)
+    assert m.is_context_overflow(err) is True
 
 
 def test_subscription_byte_limit_not_context_overflow() -> None:

@@ -7,6 +7,7 @@ from typing import Final
 
 import dataclasses
 
+from sagent.agent.state import approx_tokens
 from sagent.types.model import ModelRequest
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -47,13 +48,13 @@ def elided_placeholder(original_chars: int) -> str:
 def materialize_request(
     request: ModelRequest,
     *,
-    tool_result_budget_chars: int = 0,
+    tool_result_budget_tokens: int = 0,
 ) -> ModelRequest:
     """Return ``request`` with provider-visible messages budgeted.
 
     Args:
       request: Fully-built provider request.
-      tool_result_budget_chars: Aggregate character budget for full
+      tool_result_budget_tokens: Aggregate TOKEN budget for full
           ``ToolResult.content`` values. ``0`` disables tool-result elision.
 
     Returns:
@@ -64,7 +65,7 @@ def materialize_request(
         request,
         messages=materialize_messages(
             request.messages,
-            tool_result_budget_chars=tool_result_budget_chars,
+            tool_result_budget_tokens=tool_result_budget_tokens,
         ),
     )
 
@@ -72,13 +73,13 @@ def materialize_request(
 def materialize_messages(
     messages: Sequence[ModelContextEvent],
     *,
-    tool_result_budget_chars: int = 0,
+    tool_result_budget_tokens: int = 0,
 ) -> list[ModelContextEvent]:
     """Return provider-visible messages with full results under budget.
 
     Args:
       messages: Resolved provider-facing history.
-      tool_result_budget_chars: Aggregate character budget for full
+      tool_result_budget_tokens: Aggregate TOKEN budget for full
           ``ToolResult.content`` values. ``0`` disables tool-result elision.
 
     Returns:
@@ -86,7 +87,7 @@ def materialize_messages(
           non-empty placeholders while preserving message ordering and ids.
 
     """
-    if tool_result_budget_chars <= 0:
+    if tool_result_budget_tokens <= 0:
         return _coalesce_adjacent_users(_label_agent_sends(messages))
     labelled = list(_label_agent_sends(messages))
     used = 0
@@ -96,18 +97,22 @@ def materialize_messages(
         entry = labelled[idx]
         if isinstance(entry, ToolResult):
             content = entry.content
-            if used + len(content) <= tool_result_budget_chars:
-                used += len(content)
+            cost = approx_tokens(content)
+            if used + cost <= tool_result_budget_tokens:
+                used += cost
                 keep_calls.add(entry.call_id)
                 out_reversed.append(entry)
-            elif used + len(ELIDED_TOOL_RESULT_TAG) <= tool_result_budget_chars:
+            elif (
+                used + approx_tokens(ELIDED_TOOL_RESULT_TAG)
+                <= tool_result_budget_tokens
+            ):
                 # The full notice when it fits, the bare tag when only it
                 # does. A placeholder must never be sliced: a partial
                 # ``<elided...`` reads as content rather than as a marker.
                 placeholder = elided_placeholder(len(content))
-                if used + len(placeholder) > tool_result_budget_chars:
+                if used + approx_tokens(placeholder) > tool_result_budget_tokens:
                     placeholder = ELIDED_TOOL_RESULT_TAG
-                used += len(placeholder)
+                used += approx_tokens(placeholder)
                 keep_calls.add(entry.call_id)
                 out_reversed.append(dataclasses.replace(entry, content=placeholder))
         elif isinstance(entry, AssistantMessage) and entry.tool_calls:

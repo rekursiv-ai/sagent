@@ -33,7 +33,7 @@ def test_materialize_messages_bounds_tool_results_and_preserves_pairs() -> None:
         ToolResult(call_id="call_2", content="ok"),
     ]
 
-    materialized = materialize_messages(messages, tool_result_budget_chars=20)
+    materialized = materialize_messages(messages, tool_result_budget_tokens=5)
 
     first_result = materialized[2]
     second_result = materialized[5]
@@ -52,7 +52,7 @@ def test_materialize_messages_elides_error_results() -> None:
         ToolResult(call_id="call_1", content="traceback" * 1_000, is_error=True),
     ]
 
-    materialized = materialize_messages(messages, tool_result_budget_chars=10)
+    materialized = materialize_messages(messages, tool_result_budget_tokens=2)
 
     result = materialized[1]
     assert isinstance(result, ToolResult)
@@ -73,9 +73,9 @@ def test_materialize_messages_drops_excess_turns_before_emptying_results() -> No
         )
     ]
 
-    materialized = materialize_messages(messages, tool_result_budget_chars=10)
+    materialized = materialize_messages(messages, tool_result_budget_tokens=2)
 
-    assert _visible_tool_result_chars(materialized) <= 10
+    assert _visible_tool_result_chars(materialized) <= 40
     for entry in materialized:
         if isinstance(entry, ToolResult):
             assert entry.content
@@ -93,7 +93,7 @@ def test_materialize_messages_keeps_head_assistant_text_when_result_drops() -> N
         ToolResult(call_id="call_1", content="x" * 1_000),
     ]
 
-    materialized = materialize_messages(messages, tool_result_budget_chars=1)
+    materialized = materialize_messages(messages, tool_result_budget_tokens=1)
 
     assert len(materialized) == 1
     only = materialized[0]
@@ -110,7 +110,7 @@ def test_materialize_messages_drops_empty_assistant_when_result_drops() -> None:
         ToolResult(call_id="call_1", content="x" * 1_000),
     ]
 
-    materialized = materialize_messages(messages, tool_result_budget_chars=1)
+    materialized = materialize_messages(messages, tool_result_budget_tokens=1)
 
     assert materialized == []
     validate_context(materialized)
@@ -124,7 +124,7 @@ def test_materialize_messages_preserves_assistant_text_when_result_drops() -> No
         ToolResult(call_id="call_1", content="x" * 1_000),
     ]
 
-    materialized = materialize_messages(messages, tool_result_budget_chars=1)
+    materialized = materialize_messages(messages, tool_result_budget_tokens=1)
 
     assert len(materialized) == 2
     assistant = materialized[1]
@@ -151,7 +151,7 @@ def test_materialize_messages_keeps_text_assistant_between_users_when_result_dro
         UserMessage(text="continue"),
     ]
 
-    materialized = materialize_messages(messages, tool_result_budget_chars=1)
+    materialized = materialize_messages(messages, tool_result_budget_tokens=1)
 
     assert len(materialized) == 3
     first, middle, last = materialized
@@ -174,7 +174,7 @@ def test_materialize_messages_preserves_thinking_when_result_drops() -> None:
         ToolResult(call_id="call_1", content="x" * 1_000),
     ]
 
-    materialized = materialize_messages(messages, tool_result_budget_chars=1)
+    materialized = materialize_messages(messages, tool_result_budget_tokens=1)
 
     assert len(materialized) == 2
     assistant = materialized[1]
@@ -200,7 +200,7 @@ def test_materialize_messages_drops_orphaned_tool_use_text_before_assistant() ->
         AssistantMessage(text="next answer"),
     ]
 
-    materialized = materialize_messages(messages, tool_result_budget_chars=1)
+    materialized = materialize_messages(messages, tool_result_budget_tokens=1)
 
     assert materialized == [messages[0], messages[3]]
     validate_context(materialized)
@@ -215,7 +215,7 @@ def test_materialize_messages_drops_multi_tool_turn_instead_of_shrinking() -> No
         ToolResult(call_id="call_2", content="ok"),
     ]
 
-    materialized = materialize_messages(messages, tool_result_budget_chars=5)
+    materialized = materialize_messages(messages, tool_result_budget_tokens=1)
 
     assert materialized == []
     validate_context(materialized)
@@ -231,14 +231,14 @@ def test_materialize_messages_counts_only_kept_results_against_budget() -> None:
         ToolResult(call_id="call_2", content="y" * 1_000),
     ]
 
-    materialized = materialize_messages(messages, tool_result_budget_chars=10)
+    materialized = materialize_messages(messages, tool_result_budget_tokens=2)
 
     assert len(materialized) == 2
     result = materialized[1]
     assert isinstance(result, ToolResult)
     assert result.call_id == "call_2"
     assert result.content == ELIDED_TOOL_RESULT_TAG
-    assert _visible_tool_result_chars(materialized) <= 10
+    assert _visible_tool_result_chars(materialized) <= 40
     validate_context(materialized)
 
 
@@ -253,7 +253,7 @@ def test_materialize_request_reuses_message_materialization() -> None:
         system="sys",
     )
 
-    materialized = materialize_request(request, tool_result_budget_chars=10)
+    materialized = materialize_request(request, tool_result_budget_tokens=2)
 
     result = materialized.messages[2]
     assert isinstance(result, ToolResult)
@@ -322,7 +322,7 @@ def test_agent_send_prefix_applied_under_budget_path() -> None:
         AssistantMessage(tool_calls=(call,)),
         ToolResult(call_id="c1", content="ok"),
     ]
-    materialized = materialize_messages(messages, tool_result_budget_chars=10)
+    materialized = materialize_messages(messages, tool_result_budget_tokens=2)
     first = materialized[0]
     assert isinstance(first, AgentSendMessage)
     assert first.text == "[from Bob]: go"
@@ -344,7 +344,7 @@ def test_materialize_messages_preserves_tool_pair_around_interleaved_agent_send(
         AgentSendMessage(source="peer", text="ping"),
         ToolResult(call_id="c1", content="ok"),
     ]
-    materialized = materialize_messages(messages, tool_result_budget_chars=1000)
+    materialized = materialize_messages(messages, tool_result_budget_tokens=250)
     validate_context(materialized)
     # The pair stays contiguous, with the AgentSend pushed past the TR.
     assert isinstance(materialized[0], AssistantMessage)
@@ -420,7 +420,7 @@ def test_materialize_messages_keeps_assistant_text_when_all_tool_results_elided(
         ToolResult(call_id="t1", content="x" * 100_000),
         UserMessage(text="ok"),
     ]
-    out = materialize_messages(messages, tool_result_budget_chars=1)
+    out = materialize_messages(messages, tool_result_budget_tokens=1)
     assistants = [e for e in out if isinstance(e, AssistantMessage)]
     assert any("hello" in a.text for a in assistants)
 

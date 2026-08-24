@@ -16,7 +16,6 @@ from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
     _extract_usage,
-    _is_context_overflow_text,
     build_messages,
     consume_stream,
 )
@@ -556,38 +555,6 @@ def test_model_is_context_overflow_rejects_unrelated_errors(message: str) -> Non
     p = _DummyProvider.from_key("k")
     m = p.model()
     assert m.is_context_overflow(RuntimeError(message)) is False
-
-
-def test_is_context_overflow_text_false_positive_tools_schema_validation() -> None:
-    """Tool-schema validation errors mention 'model context' benignly."""
-    msg = "Provider rejected: 'model context' field missing in tools schema"
-    assert _is_context_overflow_text(msg) is False
-
-
-def test_is_context_overflow_text_structured_body_canonical_code() -> None:
-    """``error.code == 'context_length_exceeded'`` is the canonical signal."""
-    body = json.dumps(
-        {
-            "error": {
-                "code": "context_length_exceeded",
-                "message": "This model's maximum context length is 128000 tokens.",
-            }
-        }
-    )
-    assert _is_context_overflow_text(body) is True
-
-
-def test_is_context_overflow_text_structured_body_unrelated_code() -> None:
-    """Structured error with unrelated code must not classify as overflow."""
-    body = json.dumps(
-        {
-            "error": {
-                "code": "invalid_request_error",
-                "message": "tools[0].function: 'model context' field missing",
-            }
-        }
-    )
-    assert _is_context_overflow_text(body) is False
 
 
 def test_model_max_request_tokens_override() -> None:

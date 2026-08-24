@@ -58,6 +58,7 @@ from sagent.providers.lib.errors import (
     StreamingResponseNotReadError,
     error_status_code,
     find_response_not_read,
+    is_context_overflow_text,
     is_request_too_large,
     raise_if_request_too_large,
 )
@@ -602,13 +603,8 @@ def _is_prompt_too_long_text(
 
 
 def _matches_overflow_phrase(msg: str) -> bool:
-    """Substring fallback for Anthropic overflow phrases."""
-    lower = msg.lower()
-    if "too long" in lower or "too_long" in lower:
-        return True
-    return "context window" in lower and (
-        "exceed" in lower or "overflow" in lower or "maximum" in lower
-    )
+    """Substring fallback for overflow phrases; the shared cross-vendor set."""
+    return is_context_overflow_text(msg)
 
 
 def _api_status_body(error: anthropic.APIStatusError) -> Mapping[str, object] | None:

@@ -10,9 +10,7 @@ import pytest
 from sagent.lib.tool_validation import validate_tool_input
 from sagent.testing import with_fake_agent
 from sagent.tools.glob_tool import (
-    _ASSUMED_CHARS_PER_MATCH,
     Glob,
-    _default_max_results,
     _long_line,
 )
 from sagent.tools.lib.bash import parse_bash
@@ -28,6 +26,26 @@ async def _run_glob(args: Mapping[str, object], cwd: Path) -> ToolResult:
     with with_fake_agent() as agent:
         agent.tool_state.bash_cwd = str(cwd)
         return await glob_tool.run(args)
+
+
+@pytest.mark.asyncio
+async def test_star_excludes_dotfiles_as_documented(tmp_path: Path) -> None:
+    """``*`` must exclude hidden entries, and ``.*`` must find them.
+
+    The class docstring makes this the stated difference from List --
+    "Glob's pattern controls dotfile inclusion (``*`` excludes, ``.*``
+    matches only)" -- and it is why List carries a ``show_hidden`` toggle
+    and Glob does not. ``Path.glob`` does not implement that rule, so an
+    unfiltered ``*`` returned ``.env`` and ``.git`` contents to a caller
+    who asked for visible files.
+    """
+    (tmp_path / "visible.py").write_text("", encoding="utf-8")
+    (tmp_path / ".secret").write_text("", encoding="utf-8")
+    shown = await _run_glob({"pattern": "*", "path": str(tmp_path)}, tmp_path)
+    assert "visible.py" in shown.content
+    assert ".secret" not in shown.content, "'*' returned a dotfile"
+    hidden = await _run_glob({"pattern": ".*", "path": str(tmp_path)}, tmp_path)
+    assert ".secret" in hidden.content, "'.*' did not return the dotfile"
 
 
 @pytest.mark.asyncio
@@ -282,23 +300,6 @@ def test_schema_admits_the_unlimited_default() -> None:
         "Glob", Glob.directive_schema, {"pattern": "*.py", "max_results": 0}
     )
     assert err is None, f"schema rejects the documented unlimited default: {err}"
-
-
-@pytest.mark.parametrize("ceiling", [20_000, 60_000, 150_000, 600_000])
-def test_the_default_match_cap_stays_under_the_result_ceiling(ceiling: int) -> None:
-    """The derived cap must fit ONE reply at every budget, not a floor.
-
-    ``ContextBudget.from_model`` bottoms out at ``persist_threshold=20_000``,
-    where a 1000-match floor is ~120_000 chars -- 6x over, so the result
-    off-loads to disk and the caller sees a preview instead of paths.
-    """
-    with with_fake_agent() as agent:
-        agent.max_result_chars = ceiling
-        matches = _default_max_results()
-    assert matches * _ASSUMED_CHARS_PER_MATCH <= ceiling, (
-        f"{matches} matches x {_ASSUMED_CHARS_PER_MATCH} chars exceeds {ceiling}"
-    )
-    assert matches >= 1, "a positive ceiling must still allow matches"
 
 
 if __name__ == "__main__":

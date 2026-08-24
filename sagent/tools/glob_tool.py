@@ -9,9 +9,14 @@ from typing import Annotated, Final
 
 import time
 
-from sagent.agent.state import current_agent_var, get_tool_state
+from sagent.agent.state import approx_tokens, get_tool_state
 from sagent.lib.custom_json import bool_val, int_val, json_freeze
-from sagent.tools.core import load_tool_description, run_sync
+from sagent.tools.core import (
+    bound_by_tokens,
+    load_tool_description,
+    result_token_budget,
+    run_sync,
+)
 from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
     FIND_DENY_FLAGS,
@@ -36,40 +41,6 @@ from sagent.types.runtime import ToolResult
 _NUDGE: Final = "find via Bash is a bad UX. Use the Glob tool."
 
 _FIND_EXES: frozenset[str] = frozenset({"find"})
-
-# Match cap when no agent is in context (standalone use, tests).
-_FALLBACK_MAX_RESULTS: Final = 1_000
-
-# Characters a rendered match line costs, used to turn the agent's
-# character budget into a match count. Set above a typical absolute path
-# so the derived cap errs small.
-_ASSUMED_CHARS_PER_MATCH: Final = 120
-
-
-def _default_max_results() -> int:
-    """Match cap for a windowless Glob, derived from the active budget.
-
-    A result over ``max_result_chars`` is off-loaded or elided, so an
-    "unlimited" default silently returned less than a bounded one on a
-    wide pattern. Deriving the bound keeps one reply whole and pairs it
-    with ``offset`` so the remainder stays reachable.
-
-    Returns:
-      limit: Maximum matches returned by default; the fallback constant
-          when no agent is in context.
-
-    """
-    agent = current_agent_var.get(None)
-    ceiling = agent.max_result_chars if agent is not None else 0
-    if ceiling <= 0:
-        return _FALLBACK_MAX_RESULTS
-    # A floor here defeats the derivation. The smallest budget
-    # ``ContextBudget.from_model`` produces is ``persist_threshold=20_000``,
-    # where 1000 matches is ~120_000 chars -- 6x the ceiling, so the
-    # result off-loads to disk and the caller sees a preview instead of
-    # paths. ``offset`` reaches whatever a smaller cap left behind.
-    return max(1, ceiling // _ASSUMED_CHARS_PER_MATCH)
-
 
 _DEFAULT_SORT: Final = "name"
 
@@ -212,7 +183,7 @@ class Glob:
             path=str(args.get("path", ".") or "."),
             sort=str(args.get("sort", _DEFAULT_SORT) or _DEFAULT_SORT),
             long=bool_val(args.get("long"), False),
-            max_results=int_val(args.get("max_results"), _default_max_results()),
+            max_results=int_val(args.get("max_results"), 0),
             offset=int_val(args.get("offset"), 0),
         )
 
@@ -266,23 +237,25 @@ class Glob:
             root = Path(path)
             matches = list(root.glob(pattern))
 
+        matches = _honor_dotfile_rule(matches, pattern=pattern, root=root)
         sort_paths(matches, sort)
         if not matches:
             return "(no matches)"
         total = len(matches)
         window = matches[offset:]
-        # ``max_results=0`` means unlimited; the default comes from the
-        # active budget so one reply stays under the size at which the
-        # result would be off-loaded or elided.
+        # ``max_results=0`` means "no caller-supplied window"; the token
+        # bound below is what actually stops the reply.
         shown = window[:max_results] if max_results > 0 else window
-        if long:
-            lines = [_long_line(m) for m in shown]
-        else:
-            lines = [str(m.resolve()) for m in shown]
-        result = "\n".join(lines) or "(no matches in this window)"
-        remaining = total - offset - len(shown)
+        render = _long_line if long else _plain_line
+        note = f"\n... ({total} more; pass offset={total} to continue)"
+        result, kept = bound_by_tokens(
+            (render(m) for m in shown),
+            budget=max(1, result_token_budget() - approx_tokens(note)),
+        )
+        result = result.rstrip("\n") or "(no matches in this window)"
+        remaining = total - offset - kept
         if remaining > 0:
-            resume = offset + len(shown)
+            resume = offset + kept
             result += f"\n... ({remaining} more; pass offset={resume} to continue)"
         return result
 
@@ -322,6 +295,62 @@ class Glob:
         return None
 
 
+def _honor_dotfile_rule(matches: list[Path], *, pattern: str, root: Path) -> list[Path]:
+    """Drop hidden matches unless the pattern's own segment asks for them.
+
+    The shell rule this tool advertises: ``*`` does not match a leading
+    dot, ``.*`` matches only those. ``Path.glob`` implements neither, so
+    an unfiltered ``*`` handed back ``.env`` and every ``.git`` entry to a
+    caller who asked for visible files -- and List's ``show_hidden``
+    toggle exists precisely because Glob was supposed to answer this
+    through the pattern instead.
+
+    Matched PER SEGMENT against the pattern's corresponding segment, since
+    ``.config/*.json`` names a hidden directory explicitly and its
+    contents are then not hidden by the caller's reckoning.
+
+    Args:
+      matches: Paths ``Path.glob`` returned.
+      pattern: The caller's glob pattern.
+      root: Directory the pattern was resolved against.
+
+    Returns:
+      kept: Matches whose hidden segments were each asked for.
+
+    """
+    segments = Path(pattern).parts
+    if not any(part.startswith(".") for part in segments):
+        wants_hidden = ()
+    else:
+        wants_hidden = tuple(part.startswith(".") for part in segments)
+    kept: list[Path] = []
+    for match in matches:
+        try:
+            relative = match.relative_to(root).parts
+        except ValueError:
+            kept.append(match)
+            continue
+        hidden = [i for i, part in enumerate(relative) if part.startswith(".")]
+        # ``**`` spans any depth, so a positional pattern segment does not
+        # line up; require the pattern to name a dot somewhere instead.
+        recursive = "**" in segments
+        if all(
+            (
+                wants_hidden[i]
+                if i < len(wants_hidden) and not recursive
+                else bool(wants_hidden)
+            )
+            for i in hidden
+        ):
+            kept.append(match)
+    return kept
+
+
+def _plain_line(p: Path) -> str:
+    """Render one resolved path, newline-terminated for the token bound."""
+    return f"{p.resolve()}\n"
+
+
 def _long_line(p: Path) -> str:
     """Render one ``ls -l``-style row: ``<size>  <mtime>  <path>``."""
     size = safe_size(p)
@@ -329,7 +358,7 @@ def _long_line(p: Path) -> str:
     mtime = (
         time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime_raw)) if mtime_raw else "?"
     )
-    return f"{size:>10}  {mtime}  {p.resolve()}"
+    return f"{size:>10}  {mtime}  {p.resolve()}\n"
 
 
 def _glob_call(
