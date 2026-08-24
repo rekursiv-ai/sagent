@@ -210,7 +210,6 @@ class PaperDetails:
             return id_list
 
         source = str(args.get("source", "s2") or "s2").strip().lower()
-
         if source not in ("", "s2", "openalex"):
             return ToolResult(
                 call_id="",

@@ -194,7 +194,6 @@ class PaperSearch:
                 year_to=year_to,
                 open_access_only=open_access_only,
             )
-
         except PaperError as e:
             return ToolResult(call_id="", content=str(e), is_error=True)
 
