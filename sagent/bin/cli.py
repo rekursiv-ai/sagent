@@ -885,7 +885,6 @@ def _credential_setup_commands(
         if account_args:
             return (login, run)
         return ("codex login", login, run)
-
     cls = getattr(providers, provider_name, None)
     env_var = {
         "Anthropic": "ANTHROPIC_API_KEY",

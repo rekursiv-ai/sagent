@@ -70,7 +70,6 @@ def infer_provider(
                 # override table, so it holds for variants that table does not
                 # enumerate (e.g. ``OpenAISubscription`` in the public build).
                 return None
-
             account_target = _ACCOUNT_OVERRIDES.get(base_prov)
             target = (
                 account_target

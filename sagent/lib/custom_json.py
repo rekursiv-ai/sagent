@@ -613,36 +613,6 @@ _SCALAR_TAG: Final = "__scalar__"
 _VALUE_TAG: Final = "__value__"
 _FLOAT_TAG: Final = "__float__"
 
-# What each array-shaped annotation DECODES TO. A table rather than a
-# membership test plus a construction ladder, because those are two lists that
-# must agree and did not: ``AbstractSet`` and ``Sequence`` were each added to
-# the membership tuple one incident at a time, while the ``Mutable*`` abcs this
-# module's own ``MutableJSONValue`` is built from were in neither -- so a field
-# spelled with one encoded fine and refused to decode.
-#
-# An abc names no constructor, so it maps to the concrete type it materializes
-# as: a ``Mutable*`` abc promises mutation and takes the mutable type; the
-# read-only abcs take the immutable reading, which is the safe default on the
-# frozen dataclasses this codec exists for.
-#
-# Membership is by identity, not ``issubclass``: widening to every ``Mapping``
-# subclass admits ``defaultdict``, whose constructor takes a factory first and
-# raises on a decoded dict.
-_SEQUENCE_CONTAINERS: Final[Mapping[object, Callable[[list[object]], object]]] = {
-    # Each constructor is annotated at the declared element type: a bare
-    # ``list`` reads as ``list[Unknown]``, which leaks through the return of
-    # every decoded container.
-    list: lambda items: items,
-    tuple: tuple[object, ...],
-    set: set[object],
-    frozenset: frozenset[object],
-    Sequence: lambda items: items,
-    MutableSequence: lambda items: items,
-    AbstractSet: frozenset[object],
-    MutableSet: set[object],
-}
-_MAPPING_CONTAINERS: Final = (dict, Mapping, MutableMapping)
-
 
 class SchemaError(ValueError):
     """Decoded JSON does not match the target dataclass's schema.
@@ -899,7 +869,29 @@ def _encode(value: object, annotation: object = None) -> JSONValue:
     raise TypeError(f"cannot encode {type(value).__name__} to JSON")
 
 
-def decode(annotation: object, raw: object) -> object:
+def decode(
+    annotation: object,
+    raw: object,
+    *,
+    sequence_containers: Mapping[object, Callable[[list[object]], object]] = (
+        MappingProxyType(
+            {
+                # Each constructor is annotated at the declared element type: a bare
+                # ``list`` reads as ``list[Unknown]``, which leaks through the
+                # return of every decoded container.
+                list: lambda items: items,
+                tuple: tuple[object, ...],
+                set: set[object],
+                frozenset: frozenset[object],
+                Sequence: lambda items: items,
+                MutableSequence: lambda items: items,
+                AbstractSet: frozenset[object],
+                MutableSet: set[object],
+            }
+        )
+    ),
+    mapping_containers: tuple[object, ...] = (dict, Mapping, MutableMapping),
+) -> object:
     """Coerce a JSON-decoded value to the type named by ``annotation``.
 
     Type-hint-driven: dispatches on the resolved annotation (scalar, union,
@@ -910,6 +902,20 @@ def decode(annotation: object, raw: object) -> object:
     Args:
       annotation: The target type annotation (a resolved type, not a string).
       raw: A JSON-decoded value (scalar, list, or mapping).
+      sequence_containers: What each array-shaped annotation DECODES TO. A table
+        rather than a membership test plus a construction ladder, because those
+        are two lists that must agree and did not: ``AbstractSet`` and
+        ``Sequence`` were each added to the membership tuple one incident at a
+        time, while the ``Mutable*`` abcs this module's own ``MutableJSONValue``
+        is built from were in neither -- so a field spelled with one encoded
+        fine and refused to decode. An abc names no constructor, so it maps to
+        the concrete type it materializes as: a ``Mutable*`` abc promises
+        mutation and takes the mutable type; the read-only abcs take the
+        immutable reading, the safe default on the frozen dataclasses this codec
+        exists for. Membership is by identity, not ``issubclass``: widening to
+        every ``Mapping`` subclass admits ``defaultdict``, whose constructor
+        takes a factory first and raises on a decoded dict.
+      mapping_containers: The object-shaped annotations decoded key-by-key.
 
     Returns:
       value: ``raw`` coerced to ``annotation``.
@@ -950,8 +956,8 @@ def decode(annotation: object, raw: object) -> object:
     #
     # A field may be spelled with an abc rather than a concrete type, and an
     # abc's origin is its own class (``collections.abc.Set``, never ``set``),
-    # so :data:`_SEQUENCE_CONTAINERS` maps each to what it materializes as.
-    materialize = _SEQUENCE_CONTAINERS.get(origin)
+    # so ``sequence_containers`` maps each to what it materializes as.
+    materialize = sequence_containers.get(origin)
     if materialize is not None and isinstance(raw, list):
         items = cast(list[object], raw)
         arity = _fixed_tuple_arity(cast(object, ann))
@@ -963,7 +969,7 @@ def decode(annotation: object, raw: object) -> object:
         elems = _element_annotations(cast(object, ann), count=len(items))
         return materialize([decode(a, v) for v, a in zip(items, elems, strict=True)])
     # Mapping (dict[K, V]): decode each value against the value annotation.
-    if origin in _MAPPING_CONTAINERS and isinstance(raw, Mapping):
+    if origin in mapping_containers and isinstance(raw, Mapping):
         args = get_args(ann)
         val_ann: object = args[1] if len(args) == 2 else object
         return {
