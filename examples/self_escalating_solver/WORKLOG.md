@@ -11,8 +11,8 @@
 > gate PASSED** (cheap fails 75%, strong 100%) — see § 0. Harness plumbing is
 > reusable; next is wiring code-execution + the full self-mutate loop.
 >
-> Repo: `/home/jp/rekursiv/sagent`, branch `feat/AnthropicCLI` (the demo dir is
-> currently **untracked** — see § Branch & commit). Demo dir:
+> Repo: a fork of `rekursiv-ai/sagent`, branch `feat/AnthropicCLI` (the demo dir
+> is currently **untracked** — see § Branch & commit). Demo dir:
 > `examples/self_escalating_solver/` (will likely be **renamed** to
 > `examples/bayesian_self_escalation/`).
 
@@ -325,19 +325,19 @@ goal's requirements *intrinsically*:
   re-derive the whole model; the self-mutator continues.
 - **Stochastic random failure raises difficulty further** — the user's point: an
   algorithm with random failure modes is much harder than a deterministic trace.
-- **The demo doubles as a prototype** for the user's real **Bayesian consultant**
-  product (same escalation trigger: sampler won't converge → escalate).
+- **The demo doubles as a prototype** for a real Bayesian-consultant use case
+  (same escalation trigger: sampler won't converge → escalate).
 
 ---
 
-## 3. Problem source — `rekursiv/bayesian-catelog`  ⭐
+## 3. Problem source — the curated Bayesian-failure corpus  ⭐
 
-**Do NOT invent problems.** Use the user's own curated corpus at
-`/home/jp/rekursiv/bayesian-catelog` (note the spelling: *catelog*). It is an
-expert-curated (Junpeng Lao) knowledge base distilled from PyMC/Stan/Pyro forums +
-Betancourt case studies + Dan Simpson's blog, **explicitly built around the
-failure path**: "broken code → diagnosis → wrong fix → iteration." That is exactly
-the cheap-fails-then-escalates structure this demo needs.
+**Do NOT invent problems.** Use the curated corpus (a local checkout; path
+varies per machine). It is an expert-curated knowledge base distilled from
+PyMC/Stan/Pyro forums + Betancourt case studies + Dan Simpson's blog,
+**explicitly built around the failure path**: "broken code → diagnosis →
+wrong fix → iteration." That is exactly the cheap-fails-then-escalates
+structure this demo needs.
 
 Concretely useful entry points (verified 2026-06-24):
 - **`eval_cases/*.json`** — 54 cases, each `{ "uid": "stan:11203", "gold": "<expert
@@ -462,7 +462,7 @@ answer.
    diverges and strong reliably fixes).
 4. **Code execution path + sandbox** — which tool, what safety, how the transcript
    serializes to one report per panel.
-5. **Problem selection + ground truth** — pick 3–6 from `bayesian-catelog`; define
+5. **Problem selection + ground truth** — pick 3–6 from the failure corpus; define
    grading (compare to `gold`; or an objective metric like "final R̂ < 1.01 & 0
    divergences").
 6. **Rename** the example dir `self_escalating_solver` → `bayesian_self_escalation`
@@ -480,8 +480,8 @@ Only build the 3-panel/timeline webpage once both hold.
 
 ## 7. Environment & how to run
 
-- **Repo:** `/home/jp/rekursiv/sagent` (fork; origin `junpenglao/sagent`, upstream
-  `rekursiv-ai/sagent`). Run everything via `uv run` inside this repo.
+- **Repo:** a fork of `rekursiv-ai/sagent`. Run everything via `uv run` inside
+  this repo.
 - **Branch:** **`demo/bayesian-self-escalation`**, branched from `upstream/main`
   (2026-06-24; the old `feat/AnthropicCLI` was stale — 235 files behind, lacked the
   thought-sig fix). Demo files are untracked here; **#211 thought-sig fix is native**
@@ -490,11 +490,10 @@ Only build the 3-panel/timeline webpage once both hold.
   the model stream API is now `stream(request, publish=...)` (the offline `_Offline`
   mock in `solver.py` still uses the old `on_text`/`on_thinking` signature → MUST update
   before any offline run).
-- **API key (Gemini):** `/home/jp/.config/sagent/google_api_key` (readable by user
-  `jp`). **Read it inline, NEVER print it:**
-  `GOOGLE_API_KEY="$(tr -d '[:space:]' < /home/jp/.config/sagent/google_api_key)" uv run …`
-  The key is **live** — remind the user to **rotate it** and there's no longer a
-  `/tmp/sagent_gkey` bridge. Do not echo keys anywhere.
+- **API key (Gemini):** store it in a file outside the repo. **Read it inline,
+  NEVER print it:**
+  `GOOGLE_API_KEY="$(tr -d '[:space:]' < /path/to/google_api_key)" uv run …`
+  Do not echo keys anywhere.
 - **Run a calibration:** `uv run python -m examples.self_escalating_solver.run
   --provider google --ids <ids> --conditions static-cheap,self-mutate`
 - **Lint (CI runs both over `examples/`):** `uv run ruff check --no-fix .` and

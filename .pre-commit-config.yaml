@@ -232,16 +232,6 @@ repos:
       # `phys` counts physical cores (SMT deduped), `perf` those at the top
       # clock. Both terms were FITTED to measured optima, not derived:
       #
-      #   host                     nproc  phys  perf  optimal  imputed
-      #   tron (Core Ultra 7 255H)    16    16     6        5        5
-      #   colossus (EPYC 9555)       128    64    64       24       24
-      #
-      # `optimal` is the measured best `pytest -n`. tron: 5 -> 216s vs 6 -> 256s
-      # (653 slow tests, idle box); its 16 cores span three clock domains
-      # (6x5.1GHz, 8x4.4GHz, 2x2.5GHz), only the first counting as perf.
-      # colossus: 24 -> 105s vs 20 -> 113s (651 slow tests); uniform 3.25GHz, so
-      # perf == phys and `perf - 1` never binds. The floor of 2 binds only on a
-      # 2-vCPU runner, where xdist still beats serial (5.4s vs 6.4s).
       #
       # Do NOT "simplify" this to a core count: physical cores, top frequency
       # domain, and nproc/2 each overshot a box. The EPYC curve is a sawtooth
