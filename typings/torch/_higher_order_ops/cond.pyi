@@ -20,12 +20,12 @@ class CondOp(HigherOrderOperator):
 cond_op = ...
 
 @exposed_in("torch")
-def cond(
+def cond[R](
     pred: bool | float | torch.Tensor,
-    true_fn: Callable,
-    false_fn: Callable,
-    operands: tuple | list = ...,
-) -> Any: ...
+    true_fn: Callable[..., R],
+    false_fn: Callable[..., R],
+    operands: tuple[Any, ...] | list[Any] = ...,
+) -> R: ...
 def trace_cond(proxy_mode, func_overload, pred, true_fn, false_fn, operands): ...
 @cond_op.py_impl(DispatchKey.CompositeExplicitAutograd)
 def cond_op_dense(pred, true_fn, false_fn, operands): ...
