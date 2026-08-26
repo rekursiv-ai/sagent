@@ -11,11 +11,15 @@ import json
 import logging
 import os
 import re
+import shutil
+import stat
 import time
+import uuid
 
 import pytest
 
 from sagent import sessions
+from sagent.agent.session_io import append_session
 from sagent.lib.userdirs import data_dir
 from sagent.sessions import (
     SessionInfo,
@@ -27,11 +31,13 @@ from sagent.sessions import (
     list_all_sessions,
     list_sessions,
     new_session_dir,
-    parse_jsonl,
     pick_session,
     project_dir,
+    restrict_path,
     session_dir_for_scope,
 )
+from sagent.types.runtime import UserMessage
+from sagent.types.tape import ReferrableTapeEvent, TapeRef
 
 
 def _write_session(
@@ -297,21 +303,18 @@ def test_existing_scope_dir_ranks_by_transcript_mtime(tmp_path: Path) -> None:
     assert existing_scope_dir(scope, base=tmp_path) == stale
 
 
-def test_parse_jsonl_skips_blank_and_malformed_lines() -> None:
-    text = '{"a": 1}\n\n{not json}\n{"b": 2}\n'
-    records = parse_jsonl(text)
-    assert records == [{"a": 1}, {"b": 2}]
+def test_iter_jsonl_skips_blank_and_malformed_lines() -> None:
+    lines = ['{"a": 1}', "", "{not json}", '{"b": 2}']
+    assert list(sessions._iter_jsonl(lines)) == [{"a": 1}, {"b": 2}]
 
 
-def test_parse_jsonl_skips_non_dict_values() -> None:
+def test_iter_jsonl_skips_non_dict_values() -> None:
     """Top-level JSON that isn't a dict is dropped."""
-    text = '[1, 2]\n42\n{"k": "v"}\n'
-    records = parse_jsonl(text)
-    assert records == [{"k": "v"}]
+    assert list(sessions._iter_jsonl(["[1, 2]", "42", '{"k": "v"}'])) == [{"k": "v"}]
 
 
-def test_parse_jsonl_empty_string() -> None:
-    assert parse_jsonl("") == []
+def test_iter_jsonl_no_lines() -> None:
+    assert list(sessions._iter_jsonl([])) == []
 
 
 def test_list_sessions_empty_when_project_dir_missing(tmp_path: Path) -> None:
@@ -372,6 +375,124 @@ def test_latest_session_returns_top(tmp_path: Path) -> None:
 
 def test_list_all_sessions_returns_empty_when_root_missing(tmp_path: Path) -> None:
     assert list_all_sessions(projects_dir=tmp_path / "missing") == []
+
+
+def test_find_session_dirs_by_prefix_reads_no_transcripts(tmp_path: Path) -> None:
+    """A prefix match compares directory NAMES; it must not parse any file.
+
+    ``--resume HASH`` fell through to an unbounded ``list_all_sessions`` when
+    the cwd had no match, and that peeks every transcript to build status /
+    message-count / model-id -- metadata a ``startswith`` never reads.
+    Measured from a cwd with no sessions: 51.39s across 5,652 transcripts,
+    every byte of it discarded.
+    """
+    projects = tmp_path / "projects"
+    for i in range(10):
+        _write_session(projects / f"p{i}" / f"deadbeef{i:04d}", session_id=f"S{i}")
+
+    with patch.object(
+        sessions, "_peek_session", side_effect=AssertionError("peeked a transcript")
+    ):
+        found = sessions.find_session_dirs_by_prefix(
+            "deadbeef0007", projects_dir=projects
+        )
+
+    assert [p.name for p in found] == ["deadbeef0007"]
+
+
+def test_find_session_dirs_by_prefix_reports_every_ambiguous_match(
+    tmp_path: Path,
+) -> None:
+    """Ambiguity must stay detectable: return all matches, not the first.
+
+    Taking the first of several would attach to a session the operator did not
+    name, with nothing in the output revealing it.
+    """
+    projects = tmp_path / "projects"
+    for suffix in ("aa", "ab", "zz"):
+        _write_session(projects / "p" / f"cafe{suffix}", session_id=suffix)
+
+    found = sessions.find_session_dirs_by_prefix("cafea", projects_dir=projects)
+
+    assert sorted(p.name for p in found) == ["cafeaa", "cafeab"]
+
+
+def test_find_session_dirs_by_prefix_spans_nested_scopes(tmp_path: Path) -> None:
+    """Nested scopes are permitted, so the prefix search must reach them."""
+    projects = tmp_path / "projects"
+    _write_session(projects / "slack" / "T123" / "beef0001", session_id="nested")
+
+    found = sessions.find_session_dirs_by_prefix("beef", projects_dir=projects)
+
+    assert [p.name for p in found] == ["beef0001"]
+
+
+def test_list_all_sessions_peeks_only_the_limit(tmp_path: Path) -> None:
+    """Ranking is mtime, and mtime is a ``stat`` -- not a parse of every file.
+
+    The scan parsed every line of every transcript to build metadata the picker
+    then threw away: it shows 20 rows. Measured across 5,647 real sessions
+    (19.5 MB for the largest) that was 51.88s, against 0.08s for glob+stat. The
+    peek is the whole cost, so peek only what is returned.
+    """
+    projects = tmp_path / "projects"
+    for i in range(10):
+        _write_session(projects / f"p{i}" / f"s{i}", session_id=f"S{i}")
+        os.utime(projects / f"p{i}" / f"s{i}" / "session.jsonl", (i, i))
+
+    real_peek = sessions._peek_session
+    peeked: list[str] = []
+
+    def counting_peek(d: Path) -> SessionInfo | None:
+        peeked.append(d.name)
+        return real_peek(d)
+
+    with patch.object(sessions, "_peek_session", side_effect=counting_peek):
+        found = list_all_sessions(projects_dir=projects, limit=3)
+
+    assert [s.session_id for s in found] == ["S9", "S8", "S7"]
+    assert len(peeked) == 3, f"peeked {len(peeked)} files for a 3-row result"
+
+
+def test_list_all_sessions_limit_none_returns_everything(tmp_path: Path) -> None:
+    """``--resume HASH`` searches by prefix, so it needs the whole corpus.
+
+    A limit applied unconditionally would make a hash prefix resolvable or not
+    depending on how recently its session happened to be touched.
+    """
+    projects = tmp_path / "projects"
+    for i in range(5):
+        _write_session(projects / f"p{i}" / f"s{i}", session_id=f"S{i}")
+
+    found = list_all_sessions(projects_dir=projects)
+
+    assert {s.session_id for s in found} == {f"S{i}" for i in range(5)}
+
+
+def test_list_all_sessions_limit_skips_an_unreadable_file(tmp_path: Path) -> None:
+    """A peek that fails must not shorten the result below the limit.
+
+    Truncating the mtime-sorted candidates to ``limit`` and peeking those
+    returns fewer rows than asked whenever one is unreadable -- the picker
+    silently loses a resumable session. Keep taking candidates until ``limit``
+    are actually built.
+    """
+    projects = tmp_path / "projects"
+    for i in range(4):
+        _write_session(projects / f"p{i}" / f"s{i}", session_id=f"S{i}")
+        os.utime(projects / f"p{i}" / f"s{i}" / "session.jsonl", (i, i))
+
+    real_peek = sessions._peek_session
+
+    def failing_peek(d: Path) -> SessionInfo | None:
+        return None if d.name == "s3" else real_peek(d)
+
+    with patch.object(sessions, "_peek_session", side_effect=failing_peek):
+        found = list_all_sessions(projects_dir=projects, limit=2)
+
+    assert [s.session_id for s in found] == ["S2", "S1"], (
+        f"an unreadable session shortened the result; got {found}"
+    )
 
 
 def test_list_all_sessions_aggregates_across_projects(tmp_path: Path) -> None:
@@ -527,7 +648,7 @@ def test_pick_session_invalid_input_reprompts() -> None:
 def test_iter_jsonl_warns_on_malformed(caplog: pytest.LogCaptureFixture) -> None:
     """Malformed non-blank lines log a warning rather than silently dropping."""
     with caplog.at_level(logging.WARNING, logger=sessions.__name__):
-        records = parse_jsonl('{"ok": 1}\n{not json}\n[1, 2]\n')
+        records = list(sessions._iter_jsonl(['{"ok": 1}', "{not json}", "[1, 2]"]))
     assert records == [{"ok": 1}]
     assert sum("malformed" in r.message.lower() for r in caplog.records) >= 1
     assert sum("non-dict" in r.message.lower() for r in caplog.records) >= 1
@@ -571,6 +692,286 @@ def test_peek_session_signals_corruption_on_mid_iteration_failure(
     )
     info = _peek_session(sdir)
     assert info is None or info.corrupt is True
+
+
+def test_peek_session_reads_each_record_once(tmp_path: Path) -> None:
+    """The scan is one streaming pass, not a re-read per reported field.
+
+    ``--resume`` falls through to ``list_all_sessions`` whenever the cwd scope
+    misses, and that scan is proportional to the whole corpus -- 6.13 GB on
+    one developer's machine. What must hold is linearity; an earlier version
+    bought speed by deciding a record's kind from its leading bytes, which
+    silently skipped valid JSONL written with different spacing.
+    """
+    sdir = tmp_path / "s"
+    sdir.mkdir()
+    records = [
+        {"kind": "meta", "session_id": "S", "model_id": "m"},
+        {"kind": "history", "type": "user", "text": "hi"},
+        *({"kind": "tool_state", "payload": "x" * 100} for _ in range(50)),
+    ]
+    (sdir / "session.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+    )
+
+    real_loads = json.loads
+    calls = {"n": 0}
+
+    def counting_loads(s: str | bytes, /) -> object:
+        calls["n"] += 1
+        return real_loads(s)
+
+    with patch.object(json, "loads", side_effect=counting_loads):
+        info = _peek_session(sdir)
+
+    assert info is not None
+    assert info.message_count == 1
+    assert calls["n"] == len(records), (
+        f"expected one decode per record; got {calls['n']} for {len(records)}"
+    )
+
+
+def test_peek_session_reads_what_the_writer_actually_writes(tmp_path: Path) -> None:
+    """The scan must agree with ``append_session``, not a hand-built file.
+
+    ``_peek_session`` decides a record's kind from the line's leading bytes
+    rather than by parsing it, which is sound only while the writer emits one
+    object per line with ``kind`` first and ``json.dumps``'s default ``", "``
+    separator. Nothing else pins that. Compact separators or a reordered dict
+    would make every session report zero history -- silently, with the picker
+    rendering the damage as a healthy empty conversation.
+    """
+    session_file = tmp_path / "session.jsonl"
+    append_session(
+        session_file,
+        meta={"session_id": "S", "model_id": "m"},
+        tape_delta=[
+            ReferrableTapeEvent(
+                ref=TapeRef(session_id="S", ordinal=i), event=UserMessage(text=text)
+            )
+            for i, text in enumerate(("first", "second"))
+        ],
+        tool_state_snapshot={"bash_cwd": "/x"},
+    )
+    info = _peek_session(tmp_path)
+    assert info is not None
+    assert info.session_id == "S"
+    assert info.model_id == "m"
+    assert info.message_count == 2
+    assert info.status == "first"
+
+
+def test_peek_session_flags_a_history_record_it_could_not_parse(
+    tmp_path: Path,
+) -> None:
+    """A torn history line makes the counts partial, so say so.
+
+    Counting by prefix means a record that fails to parse still increments
+    ``message_count``. Reporting that as exact would be a confidently wrong
+    number; ``corrupt`` is what the picker renders to mark it.
+    """
+    sdir = tmp_path / "s"
+    sdir.mkdir()
+    (sdir / "session.jsonl").write_text(
+        '{"kind": "meta", "session_id": "S", "model_id": "m"}\n'
+        '{"kind": "history", "type": "user", "text": "ok"}\n'
+        '{"kind": "history", "type": "user", "text": "tor\n',
+        encoding="utf-8",
+    )
+    info = _peek_session(sdir)
+    assert info is not None
+    assert info.corrupt is True
+
+
+def test_peek_session_flags_a_malformed_record_that_still_closes(
+    tmp_path: Path,
+) -> None:
+    """A closing brace is not a parse. Health must not be inferred from one.
+
+    Counting by prefix and judging corruption by the trailing ``}`` calls a
+    line healthy whenever the damage happens to land inside the braces. The
+    picker renders that count, so a partial session reads as a complete one.
+    """
+    sdir = tmp_path / "s"
+    sdir.mkdir()
+    (sdir / "session.jsonl").write_text(
+        '{"kind": "meta", "session_id": "S", "model_id": "m"}\n'
+        '{"kind": "history", "type": "user", "text": "ok"}\n'
+        '{"kind": "history", nope}\n',
+        encoding="utf-8",
+    )
+    info = _peek_session(sdir)
+    assert info is not None
+    assert info.corrupt is True
+    assert info.message_count == 1, (
+        f"an unparseable record is not a message; got {info.message_count}"
+    )
+
+
+def test_scope_rejects_a_windows_drive_qualified_path(tmp_path: Path) -> None:
+    """A drive letter is an absolute path, and scope keys come from callers.
+
+    ``_safe_scope`` rejects a leading ``/`` and backslashes but accepted
+    ``C:/escape`` -- absolute on Windows, where the project supports
+    platform-specific user directories. The check exists because Slack thread
+    ids and similar caller-supplied keys reach it unchanged.
+    """
+    with pytest.raises(ValueError, match="relative"):
+        _ = session_dir_for_scope("C:/escape", base=tmp_path)
+    assert not list(tmp_path.iterdir())
+
+
+def test_a_fresh_session_dir_is_never_an_existing_one(tmp_path: Path) -> None:
+    """A fresh session dir is empty, so a collision must not be handed back.
+
+    Both creation paths took 12 hex characters and called ``mkdir`` with
+    ``exist_ok=True``, so a collision silently handed back a live session and
+    two conversations appended to one transcript.
+    """
+    # The id is the FIRST 12 hex characters, so the distinguishing bits have
+    # to be high ones -- ``UUID(int=1)`` truncates to the same name as
+    # ``UUID(int=0)``.
+    collide = uuid.UUID(int=0)
+    distinct = uuid.UUID(int=1 << 100)
+    ids = iter((collide, collide, distinct))
+    with patch.object(uuid, "uuid4", lambda: next(ids)):
+        first = sessions._fresh_session_dir(tmp_path, attempts=3)
+        second = sessions._fresh_session_dir(tmp_path, attempts=3)
+
+    assert first.name == collide.hex[:12]
+    assert second.name == distinct.hex[:12], (
+        "the colliding id was reused instead of re-minted"
+    )
+
+
+def test_the_fresh_dir_fallback_never_returns_a_live_session(
+    tmp_path: Path,
+) -> None:
+    """The last-resort path must not do the thing the function exists to stop.
+
+    The bounded retry correctly uses a bare ``mkdir()``, but the full-uuid
+    fallback used ``exist_ok=True`` -- so exhausting the retries handed back
+    whatever directory was already there, which is the shared-session bug in
+    the one branch reached only when collisions are already happening.
+    """
+    collide = uuid.UUID(int=0)
+    (tmp_path / collide.hex[:12]).mkdir()
+    live = tmp_path / collide.hex
+    live.mkdir()
+    (live / "session.jsonl").write_text("someone else's conversation\n")
+
+    with (
+        patch.object(uuid, "uuid4", lambda: collide),
+        pytest.raises(FileExistsError),
+    ):
+        _ = sessions._fresh_session_dir(tmp_path, attempts=2)
+
+    assert (live / "session.jsonl").read_text() == "someone else's conversation\n"
+
+
+def test_migration_does_not_republish_private_data(tmp_path: Path) -> None:
+    """REV6 PS2-006: migration inherited legacy modes instead of re-restricting.
+
+    ``copy2`` carries the source mode across and ``mkdir`` takes the umask, so
+    a legacy tree written before the owner-only rule was copied out at
+    ``0644`` under ``0755`` directories -- migration undoing for every existing
+    session the confidentiality that new sessions are given.
+    """
+    original = os.umask(0o022)
+    try:
+        src = tmp_path / "legacy"
+        (src / "projects" / "p" / "abc").mkdir(parents=True)
+        transcript = src / "projects" / "p" / "abc" / "session.jsonl"
+        _ = transcript.write_text('{"kind": "meta"}\n', encoding="utf-8")
+        transcript.chmod(0o644)
+
+        sessions._copy_tree_merge(src, tmp_path / "dst")
+
+        migrated = tmp_path / "dst" / "projects" / "p" / "abc" / "session.jsonl"
+        file_mode = stat.S_IMODE(migrated.stat().st_mode)
+        dir_mode = stat.S_IMODE(migrated.parent.stat().st_mode)
+    finally:
+        _ = os.umask(original)
+
+    assert not file_mode & 0o077, f"migrated transcript is 0o{file_mode:o}"
+    assert not dir_mode & 0o077, f"migrated session dir is 0o{dir_mode:o}"
+
+
+def test_migration_survives_one_unreadable_file(tmp_path: Path) -> None:
+    """Per-item best-effort means one bad file, not one bad migration.
+
+    ``migrate_legacy_home`` documents that per-item failures are logged and
+    swallowed, but only the symlink branch was guarded -- a failing ``copy2``
+    propagated to the outer catch and stranded every session not yet copied.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "bad").write_text("x")
+    (src / "good").write_text("y")
+    real_copy = shutil.copy2
+
+    def failing_copy2(source: str, target: str) -> str:
+        if Path(source).name == "bad":
+            raise OSError("unreadable")
+        return str(real_copy(source, target))
+
+    with patch.object(shutil, "copy2", failing_copy2):
+        sessions._copy_tree_merge(src, tmp_path / "dst")
+
+    assert (tmp_path / "dst" / "good").exists(), "one bad file aborted the copy"
+
+
+def test_peek_session_reads_any_valid_json_encoding(tmp_path: Path) -> None:
+    """The record format is JSON, not a byte layout.
+
+    Deciding a line's kind from its leading bytes made the scan agree with one
+    writer's current spacing and key order. Compact separators or a reordered
+    dict -- both valid JSONL, both producible by any other writer -- were
+    skipped silently, and the picker showed a healthy zero-message session.
+    """
+    sdir = tmp_path / "s"
+    sdir.mkdir()
+    (sdir / "session.jsonl").write_text(
+        json.dumps({"kind": "meta", "session_id": "S", "model_id": "m"})
+        + "\n"
+        + json.dumps({"type": "user", "text": "hi", "kind": "history"})
+        + "\n"
+        + json.dumps(
+            {"kind": "history", "type": "user", "text": "compact"},
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    info = _peek_session(sdir)
+    assert info is not None
+    assert info.message_count == 2, f"valid records skipped; got {info.message_count}"
+    assert info.status == "hi"
+
+
+def test_peek_session_counts_history_after_the_first_user_message(
+    tmp_path: Path,
+) -> None:
+    """Every history record counts, not just those before the first prompt.
+
+    A scan that stops once it has a title would report ``message_count``
+    as 1 for a thousand-message session, and the picker shows that count.
+    """
+    sdir = tmp_path / "s"
+    sdir.mkdir()
+    records = [
+        {"kind": "meta", "session_id": "S", "model_id": "m"},
+        {"kind": "history", "type": "user", "text": "first"},
+        {"kind": "history", "type": "assistant", "text": "reply"},
+        {"kind": "history", "type": "user", "text": "second"},
+    ]
+    (sdir / "session.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+    )
+    info = _peek_session(sdir)
+    assert info is not None
+    assert info.message_count == 3
+    assert info.status == "first"
 
 
 def test_latest_session_avoids_full_peek_sort(tmp_path: Path) -> None:
@@ -927,6 +1328,79 @@ def test_project_dir_prefers_current_slug_when_present(
     current = projects / cwd_slug(cwd)
     current.mkdir(parents=True)
     assert project_dir(cwd, projects_dir=projects) == current
+
+
+@pytest.mark.parametrize("mode", [0o644, 0o640, 0o604, 0o777])
+def test_an_over_permissive_path_is_tightened(tmp_path: Path, mode: int) -> None:
+    """Any group or other bit is exposure, not just world-readable."""
+    target = tmp_path / "session.jsonl"
+    _ = target.write_text("x", encoding="utf-8")
+    target.chmod(mode)
+
+    restrict_path(target, 0o600)
+
+    assert not stat.S_IMODE(target.stat().st_mode) & 0o077
+
+
+def test_an_already_private_path_is_not_rewritten(tmp_path: Path) -> None:
+    """The common path costs one ``stat`` and no write.
+
+    ``append_session`` calls this on every save, so an unconditional ``chmod``
+    would be a syscall per append for a mode that is already correct.
+    """
+    target = tmp_path / "session.jsonl"
+    _ = target.write_text("x", encoding="utf-8")
+    target.chmod(0o600)
+
+    with patch.object(Path, "chmod", side_effect=AssertionError("chmod called")):
+        restrict_path(target, 0o600)
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+def test_a_directory_is_tightened_too(tmp_path: Path) -> None:
+    """``mkdir(mode=...)`` is ignored for an existing dir, so this is the repair."""
+    original = os.umask(0)
+    try:
+        target = tmp_path / "proj"
+        target.mkdir(mode=0o777)
+
+        restrict_path(target, 0o700)
+    finally:
+        _ = os.umask(original)
+
+    assert not stat.S_IMODE(target.stat().st_mode) & 0o077
+
+
+def test_an_unchmodable_path_warns_instead_of_raising(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Persistence matters more than the mode.
+
+    A transcript on a filesystem without POSIX modes, or one owned by another
+    user, must not take the session down mid-append.
+    """
+    target = tmp_path / "session.jsonl"
+    _ = target.write_text("x", encoding="utf-8")
+    target.chmod(0o644)
+
+    with (
+        patch.object(Path, "chmod", side_effect=OSError("read-only filesystem")),
+        caplog.at_level(logging.WARNING),
+    ):
+        restrict_path(target, 0o600)
+
+    assert any("could not restrict permissions" in r.message for r in caplog.records)
+
+
+def test_a_missing_path_warns_instead_of_raising(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The ``stat`` is inside the guard too; a vanished path is not a crash."""
+    with caplog.at_level(logging.WARNING):
+        restrict_path(tmp_path / "gone.jsonl", 0o600)
+
+    assert any("could not restrict permissions" in r.message for r in caplog.records)
 
 
 if __name__ == "__main__":

@@ -925,13 +925,14 @@ def test_append_splice_insert_after_check_is_session_scoped() -> None:
 
 
 def test_user_coalesce_absorbs_prior_mask_only_in_tail_session() -> None:
-    """Coalesce must not absorb a prior splice's cross-session mask ordinals.
+    """Coalesce must not let a foreign ordinal widen this session's deletion.
 
-    ``_append_or_coalesce_user`` builds the new coalesce mask in the tail's
-    session. If the prior coalesce splice's mask spans other sessions, taking
-    the minimum ordinal across all of them would mask unrelated current-session
-    records (overbroad deletion under undelete semantics). The absorbed low
-    ordinal must come only from same-session mask ranges.
+    Ordinals are per-session positions, so comparing them across sessions
+    compares numbers naming nothing in common. The prior splice's foreign
+    ranges ARE inherited -- dropping them resurrects the records they masked
+    (see the sibling test) -- but the absorbed LOW that decides how far back
+    this session's deletion and anchor reach must come from same-session
+    ranges alone.
     """
     agent, _ = make_agent([AssistantMessage(text="x")])
     sid = agent.session_id
@@ -963,19 +964,71 @@ def test_user_coalesce_absorbs_prior_mask_only_in_tail_session() -> None:
         and r.strategy == "user_coalesce"
         and r.ref != prior_ref
     )
-    # The new mask must live entirely in the tail session: a leaked ``legacy``
-    # range is the bug.
-    assert all(r.session_id == sid for r in new_splice.mask), (
-        "coalesce mask absorbed a cross-session range: "
+    # The foreign range is inherited, not dropped: killing the prior splice
+    # lapses its masking, so a range left behind resurrects its record.
+    assert any(r.session_id == "legacy" for r in new_splice.mask), (
+        "foreign range dropped; its record will resurface: "
         f"{[(r.session_id, r.lo) for r in new_splice.mask]}"
     )
-    # The absorbed low must come from the same-session range (5) or the prior
-    # splice's own ordinal -- never pulled down to the foreign low (1).
-    assert min(r.lo for r in new_splice.mask) >= 5
+    # But this session's deletion must not widen to the foreign low (1): the
+    # same-session low stays at 5, so u0..u4 keep rendering, in order.
+    assert min(r.lo for r in new_splice.mask if r.session_id == sid) >= 5
+    assert [getattr(m, "text", "") for m in agent.context().messages] == [
+        "u0",
+        "u1",
+        "u2",
+        "u3",
+        "u4",
+        "prior\n\nmore",
+    ]
     # The insertion anchor must be same-session too (F43-COALESCE-004): the
     # scan skips foreign-session records so a ``legacy`` ordinal cannot
     # mis-anchor the splice.
     assert new_splice.insert_after is None or new_splice.insert_after.session_id == sid
+
+
+def test_user_coalesce_does_not_resurrect_a_foreign_session_record() -> None:
+    """Absorbing a splice must carry EVERY range it masked, not just same-session.
+
+    Killing a splice lapses all of its masking under undelete semantics, so a
+    mask range the absorber declines to carry forward is a record that
+    resurfaces. The carry filtered on ``session_id == sid`` because the NEW
+    ranges are built in the tail's session -- but the ranges being inherited
+    are already single-session by construction and can be carried verbatim.
+
+    A resumed or forked tape is exactly where this bites: content the user
+    cleared reappears beside the message that replaced it.
+    """
+    agent, _ = make_agent([AssistantMessage(text="x")])
+    agent.replay_tape(
+        [
+            ReferrableTapeEvent(
+                ref=TapeRef(session_id="legacy", ordinal=0),
+                event=UserMessage(text="legacy"),
+            ),
+            ReferrableTapeEvent(
+                ref=TapeRef(session_id=agent.session_id, ordinal=0),
+                event=UserMessage(text="current"),
+            ),
+            ContextSplice.replay(
+                ref=TapeRef(session_id=agent.session_id, ordinal=1),
+                mask=(
+                    MaskRange(session_id="legacy", lo=0, hi=0),
+                    MaskRange(session_id=agent.session_id, lo=0, hi=0),
+                ),
+                insert_after=None,
+                payload=(UserMessage(text="summary"),),
+                strategy="user_coalesce",
+            ),
+        ]
+    )
+    assert [getattr(m, "text", "") for m in agent.context().messages] == ["summary"]
+
+    agent._append_or_coalesce_user(UserMessage(text="more"))
+
+    texts = [getattr(m, "text", "") for m in agent.context().messages]
+    assert "legacy" not in texts, f"a masked foreign-session record resurfaced: {texts}"
+    assert texts == ["summary\n\nmore"], texts
 
 
 def test_user_coalesce_preserves_sparse_prior_mask_gaps() -> None:
@@ -1164,6 +1217,127 @@ async def test_detach_and_result_arrives_later() -> None:
         isinstance(r, ContextSplice) and r.strategy == "detached_splice"
         for r in agent.tape
     )
+
+
+@pytest.mark.asyncio
+async def test_backgrounded_tool_calls_still_serialize_on_their_key() -> None:
+    """Backgrounding a cohort must not drop the serialization it was owed.
+
+    A mid-stream user turn redirects the model's tool calls into
+    ``self.detached``, and that path spawned one task per call -- bypassing
+    ``_partition_cohort``. Two Edits to one file then ran concurrently, which
+    is precisely what ``serialize_key`` exists to prevent; backgrounding is a
+    scheduling decision, not permission to race.
+    """
+    live: list[str] = []
+    overlapped = False
+
+    @dataclass(kw_only=True, slots=True)
+    class _SerialTool:
+        _name: str = "Edit"
+
+        @property
+        def name(self) -> str:
+            return self._name
+
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return "same-file"
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            nonlocal overlapped
+            tag = str(args.get("tag"))
+            overlapped = overlapped or bool(live)
+            live.append(tag)
+            await asyncio.sleep(0.05)
+            live.remove(tag)
+            return ToolResult(call_id="", content=tag)
+
+    agent, _ = make_agent(
+        [
+            AssistantMessage(
+                tool_calls=(
+                    ToolCall(id="e1", name="Edit", args={"tag": "one"}),
+                    ToolCall(id="e2", name="Edit", args={"tag": "two"}),
+                ),
+            ),
+            AssistantMessage(text="done"),
+        ],
+        tools=[_SerialTool()],
+    )
+    agent.before_tool_spawn = lambda message: (
+        UserMessage(text="redirect") if message.tool_calls else None
+    )
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    async def finish() -> None:
+        await wait_until(lambda: bool(live), timeout_sec=3.0)
+        await wait_until(lambda: not live, timeout_sec=3.0)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(
+        run_until_quit(agent, timeout_sec=5.0),
+        finish(),
+    )
+
+    assert not overlapped, "same-key tools ran concurrently once backgrounded"
+
+
+@pytest.mark.asyncio
+async def test_killing_a_serialized_call_stops_the_rest_of_its_group() -> None:
+    """Killing one call of a serialized group must not release the next.
+
+    A group exists because its calls contend for one resource -- same file,
+    same key. ``_run_tool_and_post`` swallows ``CancelledError`` to synthesize
+    a ``[cancelled]`` result, so the group loop read the cancel as an ordinary
+    completion and started the next call: the user asked to stop editing a
+    file and the next edit to that same file began anyway.
+    """
+    started: list[str] = []
+
+    @dataclass(kw_only=True, slots=True)
+    class _SerialTool:
+        _name: str = "Edit"
+
+        @property
+        def name(self) -> str:
+            return self._name
+
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return "same-file"
+
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            started.append(str(args.get("tag")))
+            await asyncio.sleep(5.0)
+            return ToolResult(call_id="", content="done")
+
+    agent, _ = make_agent(
+        [
+            AssistantMessage(
+                tool_calls=(
+                    ToolCall(id="e1", name="Edit", args={"tag": "one"}),
+                    ToolCall(id="e2", name="Edit", args={"tag": "two"}),
+                ),
+            ),
+            AssistantMessage(text="stopped"),
+        ],
+        tools=[_SerialTool()],
+    )
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    async def kill_the_first() -> None:
+        await wait_until(lambda: bool(started), timeout_sec=2.0)
+        agent.inbox.push_back(Kill(call_id="e1"))
+        await asyncio.sleep(0.2)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(
+        run_until_quit(agent, timeout_sec=5.0),
+        kill_the_first(),
+    )
+
+    assert started == ["one"], f"group continued past the kill; started={started}"
 
 
 @pytest.mark.asyncio
@@ -1678,6 +1852,35 @@ async def test_compact_rewrites_history() -> None:
     )
 
 
+def test_rescue_declares_that_it_replaces_what_it_sanitizes() -> None:
+    """Rescue drops what cannot be made wire-valid, so it must say so.
+
+    ``_sanitize_for_send`` exists to remove an orphan ``ToolResult`` or a
+    duplicated tool_call -- entries that cannot ship. That makes rescue a
+    REPLACEMENT, and an undeclared one is refused by the carry guard: the last
+    resort for a broken tape became unreachable exactly when it was needed.
+    """
+    agent, _ = make_agent([AssistantMessage(text="x")])
+    agent.adopt_record(
+        ContextSplice.replay(
+            ref=agent.mint_ref(),
+            mask=(),
+            insert_after=None,
+            payload=(
+                ToolResult(call_id="ghost", content="dangling"),
+                UserMessage(text="keep"),
+            ),
+            strategy="legacy",
+        )
+    )
+
+    agent._rescue_context()
+
+    texts = [getattr(m, "text", "") for m in agent.context().messages]
+    assert texts == ["keep"], texts
+    validate_context(agent.context().messages)
+
+
 def test_widen_barrier_mask_preserves_mask_gaps() -> None:
     """Disjoint barrier masks stay disjoint when widened."""
     refs = tuple(TapeRef(session_id="s", ordinal=idx) for idx in range(4))
@@ -2054,6 +2257,34 @@ async def test_run_model_error_returns_and_removes_observer() -> None:
     assert isinstance(user, UserMessage)
     assert user.text == "go"
     assert "[Error:" not in user.text
+
+
+@pytest.mark.asyncio
+async def test_run_raises_when_the_driver_crashes_before_signalling() -> None:
+    """A driver that dies without publishing must raise, not block forever.
+
+    ``run`` waits on an event only an observer sets, so a ``run_forever`` that
+    raises before publishing ``ModelIdle`` or ``ModelResponseError`` sets
+    nothing. The crash rethrow lives past that wait and is unreachable, and the
+    done-callback only logs -- so the caller hangs on a task that is already
+    dead. Sibling crash coverage misses this by publishing first.
+    """
+    agent, _ = make_agent([AssistantMessage(text="unused")])
+
+    async def _crash() -> None:
+        raise RuntimeError("driver boom")
+
+    agent.run_forever = _crash  # ty: ignore[invalid-assignment] -- monkeypatch run_forever on the instance so the engine task dies before publishing
+
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(RuntimeError, match="driver boom"):
+        _ = await asyncio.wait_for(agent.run(UserMessage(text="go")), timeout=5.0)
+    # Timing is the assertion, not decoration: under ``wait_for`` a hang also
+    # ends in this ``RuntimeError`` -- the cancellation unwinds into the
+    # ``finally`` that awaits the dead task -- so only the elapsed time
+    # distinguishes raising promptly from blocking until the deadline.
+    elapsed = asyncio.get_running_loop().time() - started
+    assert elapsed < 1.0, f"run() blocked {elapsed:.2f}s instead of raising"
 
 
 @pytest.mark.asyncio
@@ -3457,6 +3688,10 @@ async def test_append_splice_indexes_preserved_payload_anchors() -> None:
     )
     # Anchor must now point at the splice's payload AM.
     assert agent._parent_assistant_refs.get("c1") == splice_ref
+
+
+@pytest.mark.asyncio
+async def test_clear_drops_a_late_detached_result_instead_of_synthesizing() -> None:
     """``Clear`` wipes anchors; a late ``DetachedResult`` must not appear.
 
     The legacy fallback synthesizes a ``[Tool ... completed]``
@@ -3657,6 +3892,201 @@ async def test_undetach_all_re_gates_every_detached() -> None:
     # zzz was re-added to cohort; collect_detached prunes the completed
     # task so the next gate cycle proceeds.
     assert "zzz" not in agent.detached
+
+
+@pytest.mark.asyncio
+async def test_quit_cancels_detached_tasks() -> None:
+    """Quit must stop the tools it detached, not just the ones still running.
+
+    ``_stop_all_tools(mode="detach")`` moves a tool out of ``running_tools``
+    and into ``detached``, so a Quit that walks only ``running_tools`` returns
+    while the tool keeps doing external work -- writing files, spending money
+    -- against a runtime with nobody left to service its result. ``Clear``
+    already cancels the same registry.
+    """
+    started = asyncio.Event()
+
+    async def _blocked() -> None:
+        started.set()
+        await asyncio.sleep(10.0)
+
+    agent, _ = make_agent([AssistantMessage(text="done")])
+    task = asyncio.create_task(_blocked())
+    await started.wait()
+    agent.detached["d1"] = task
+    agent.inbox.push_back(Quit())
+
+    await run_until_quit(agent, timeout_sec=3.0)
+
+    # ``cancel()`` only requests; the task reaches CANCELLED at its next
+    # scheduling point, so awaiting it is what observes the outcome.
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert task.cancelled(), "detached task outlived Quit"
+    assert not agent.detached, f"detached registry not drained; got {agent.detached!r}"
+
+
+def test_a_non_decimal_digit_suffix_is_not_a_mimic_index() -> None:
+    """``isdigit`` admits characters ``int()`` refuses, so replay crashed.
+
+    ``"²".isdigit()`` is True but ``int("²")`` raises, and a persisted id
+    carrying one reached ``int()`` through ``replay_tape`` -- so one crafted
+    or corrupted call id made the whole session unloadable. ``isdecimal`` is
+    the predicate that matches what ``int`` accepts.
+    """
+    assert (
+        agent_runtime._mimic_index_of(f"{DETACHED_ARRIVED_MIMIC_PREFIX}\u00b2") is None
+    )
+    assert agent_runtime._mimic_index_of(f"{DETACHED_ARRIVED_MIMIC_PREFIX}7") == 7
+
+
+def test_widening_promotes_an_empty_compaction_mask_to_a_barrier() -> None:
+    """An empty mask from the compactor IS a barrier request, not a no-op.
+
+    A compactor summarizing a fresh tape has no prior mask to extend, and both
+    ``widen_barrier_mask`` call sites are compaction -- so widening an empty
+    mask to the whole tape is the contract, not an accident. Pinned because
+    the shape reads like an oversight: a payload-only splice would be badly
+    served by it, and nothing else here says why none reaches this function.
+    """
+    agent = _runtime_for_alternation_tests()
+    agent.append_history(UserMessage(text="u0"))
+    agent.append_history(AssistantMessage(text="a0"))
+    summary = ContextSplice(
+        ref=agent.mint_ref(),
+        mask=(),
+        insert_after=None,
+        payload=(UserMessage(text="[summary]"),),
+        strategy="summary",
+    )
+
+    widened = agent_runtime.widen_barrier_mask(summary, agent.tape)
+
+    assert widened.mask == (MaskRange(session_id=agent.session_id, lo=0, hi=1),)
+
+
+@pytest.mark.asyncio
+async def test_agent_idle_waits_for_a_waking_deferred_commit() -> None:
+    """A deferred result that will drive a round is work, not idleness.
+
+    A forward ``DetachedResult`` answers a ``tool_use`` already on the tape.
+    ``_fully_drained`` did not consult the deferred queue, so ``AgentIdle``
+    could fire between the deferral and its flush -- persisting a context the
+    provider rejects and letting a one-shot ``Agent.run`` reap mid-exchange.
+
+    Only WAKING commits gate idle. A non-waking one (mimic pairing,
+    ride-along) flushes only alongside a round that real content drives, so
+    gating on it would wedge the loop instead of protecting it.
+    """
+    agent, _ = make_agent([AssistantMessage(text="ok")])
+    agent.append_history(
+        AssistantMessage(tool_calls=(ToolCall(id="d1", name="echo", args={}),)),
+    )
+    agent.append_history(
+        ToolResult(
+            call_id="d1", content=DETACHED_PLACEHOLDER, kind=ToolResultKind.PENDING
+        ),
+    )
+    agent._defer_detached_forward(ToolResult(call_id="d1", content="late"))
+    assert agent._has_waking_commit()
+
+    assert not agent._fully_drained(), (
+        "AgentIdle would fire with a waking commit still deferred"
+    )
+
+
+@pytest.mark.asyncio
+async def test_compact_commits_staged_input_instead_of_dropping_it() -> None:
+    """Text the user staged is theirs; compaction must not silently eat it.
+
+    ``Compact`` cleared the ``queued`` lane outright while preserving the
+    mid-stream buffer beside it -- three staging lanes, three policies. The
+    typed text vanished with no event and no log, and ``Clear`` (which drops
+    both by design) is the only verb entitled to discard user input.
+    """
+    agent, _ = make_agent([AssistantMessage(text="ok")])
+    agent.inbox.push_back(UserQueuedMessage(text="staged text"))
+    agent.inbox.push_back(Compact())
+    agent.inbox.push_back(Quit())
+
+    await run_until_quit(agent, timeout_sec=3.0)
+
+    texts = [getattr(m, "text", "") for m in agent.context().messages]
+    assert any("staged text" in t for t in texts), f"staged input dropped; {texts}"
+
+
+@pytest.mark.asyncio
+async def test_kill_all_stops_detached_tools_too() -> None:
+    """Killing every tool means every tool, including the backgrounded ones.
+
+    ``Kill(call_id=...)`` cancels a detached task, and ``Clear`` and ``Quit``
+    both drain the registry -- but the all-branch walked ``running_tools``
+    alone, which ``_stop_all_tools`` has by then emptied into ``detached``. A
+    user who killed everything was left with tools still running.
+    """
+    started = asyncio.Event()
+
+    async def _blocked() -> None:
+        started.set()
+        await asyncio.sleep(10.0)
+
+    agent, _ = make_agent([AssistantMessage(text="done")])
+    task = asyncio.create_task(_blocked())
+    await started.wait()
+    agent.detached["d1"] = task
+
+    async def kill_then_quit() -> None:
+        agent.inbox.push_back(Kill())
+        # Observe the state Kill alone leaves. ``Quit`` also drains the
+        # registry, so pushing both together would grade the wrong verb.
+        await wait_until(lambda: not agent.detached, timeout_sec=2.0)
+        agent.inbox.push_back(Quit())
+
+    await asyncio.gather(
+        run_until_quit(agent, timeout_sec=3.0),
+        kill_then_quit(),
+    )
+
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert task.cancelled(), "Kill-all left a detached tool running"
+
+
+@pytest.mark.parametrize("verb", [Kill, Detach])
+@pytest.mark.asyncio
+async def test_dropping_an_undetached_tool_releases_the_gate(
+    verb: type[Kill | Detach],
+) -> None:
+    """Every verb that drops a tool must drop its cohort membership too.
+
+    ``Undetach`` re-gates a detached id, putting it in ``cohort`` while it is
+    absent from ``running_tools``. Each verb's running-tools branch discards
+    the cohort entry; neither miss branch does. Nothing else clears the id, so
+    ``_ready_to_advance`` stays false and the model gate never opens again.
+
+    Both items ride one drain batch: ``_collect_detached`` runs before every
+    drain, so a task that finishes between batches is pruned from ``detached``
+    and ``Undetach`` never re-gates it -- the wedge needs a live task.
+    """
+    started = asyncio.Event()
+
+    async def _blocked() -> None:
+        started.set()
+        await asyncio.sleep(10.0)
+
+    agent, _ = make_agent([AssistantMessage(text="done")])
+    task = asyncio.create_task(_blocked())
+    await started.wait()
+    agent.detached["t1"] = task
+    agent.inbox.push_back(Undetach(call_id="t1"))
+    agent.inbox.push_back(verb(call_id="t1"))
+    agent.inbox.push_back(Quit())
+
+    await run_until_quit(agent, timeout_sec=3.0)
+
+    assert agent.cohort == set(), (
+        f"cohort wedged after {verb.__name__}; got {agent.cohort!r}"
+    )
 
 
 @pytest.mark.asyncio
@@ -4334,6 +4764,308 @@ class TestUserMessageAlternation:
             f"coalesce must reuse tail id {tail_before.id}; got {tail_after.id}"
         )
 
+    def test_coalesce_onto_barrier_preserves_its_payload(self) -> None:
+        """Coalescing onto a barrier splice must not delete the conversation.
+
+        ``_append_or_coalesce_user`` absorbs the prior splice's mask, which
+        kills that splice and stops its payload rendering. For a
+        coalesce-on-coalesce the payload is one merged ``UserMessage`` and
+        nothing is lost. For a BARRIER splice -- the resume-time
+        ``orphan_tool_result_repair``, ``context_rescue``, ``summary`` -- the
+        payload is the whole conversation, so replacing it with the merged
+        message alone truncates the session to that one entry.
+        """
+        agent = _runtime_for_alternation_tests()
+        sid = agent.session_id
+        for i in range(3):
+            agent.append_history(UserMessage(text=f"u{i}"))
+        # The exact shape ``_repair_dangling_tape`` builds on resume.
+        conversation = (
+            UserMessage(text="first"),
+            AssistantMessage(text="reply"),
+            UserMessage(text="second"),
+        )
+        agent.append_splice(
+            mask=(MaskRange(session_id=sid, lo=0, hi=2),),
+            insert_after=None,
+            payload=conversation,
+            strategy="orphan_tool_result_repair",
+        )
+        assert len(agent.context().messages) == len(conversation)
+
+        agent._append_or_coalesce_user(UserMessage(text="next"))
+
+        messages = agent.context().messages
+        assert len(messages) == len(conversation), (
+            "barrier payload dropped: resolved view truncated to "
+            f"{[getattr(m, 'text', '') for m in messages]}"
+        )
+        assert [getattr(m, "text", "") for m in messages[:-1]] == ["first", "reply"]
+        tail = messages[-1]
+        assert isinstance(tail, UserMessage)
+        assert tail.text == "second\n\nnext"
+        validate_context(messages)
+
+    def test_coalesce_onto_summary_splice_preserves_summary(self) -> None:
+        """The same loss via compaction: a summary payload keeps a user tail.
+
+        ``SummaryCompactor.compact`` raises ``effective_keep`` to the trailing
+        user-message run, so its payload is ``(continuation, *to_keep)`` and
+        ends user-side with length > 1. The user's next message coalesces onto
+        that tail and must not take the summary with it.
+        """
+        agent = _runtime_for_alternation_tests()
+        sid = agent.session_id
+        agent.append_history(UserMessage(text="old"))
+        summary_payload = (
+            UserMessage(text="Summary:\nprior work"),
+            AssistantMessage(text="ack"),
+            UserMessage(text="kept tail"),
+        )
+        agent.append_splice(
+            mask=(MaskRange(session_id=sid, lo=0, hi=0),),
+            insert_after=None,
+            payload=summary_payload,
+            strategy="summary",
+        )
+
+        agent._append_or_coalesce_user(UserMessage(text="after compaction"))
+
+        texts = [getattr(m, "text", "") for m in agent.context().messages]
+        assert "Summary:\nprior work" in texts, f"summary deleted; got {texts}"
+        assert texts[-1] == "kept tail\n\nafter compaction"
+        validate_context(agent.context().messages)
+
+    def test_absorbing_a_splice_without_its_payload_is_rejected(self) -> None:
+        """``append_splice`` must reject a mask that silently drops a payload.
+
+        The class defect, not one call site: absorbing a splice's ref kills it,
+        so any content its payload contributed vanishes unless the absorber
+        re-injects it. ``_append_or_coalesce_user`` got this wrong for 90 days
+        and nothing caught it. The guard belongs where the damage is still
+        preventable -- at append, before the record is on the tape and on disk.
+        """
+        agent = _runtime_for_alternation_tests()
+        sid = agent.session_id
+        agent.append_history(UserMessage(text="u0"))
+        barrier = agent.append_splice(
+            mask=(MaskRange(session_id=sid, lo=0, hi=0),),
+            insert_after=None,
+            payload=(UserMessage(text="a"), AssistantMessage(text="b")),
+            strategy="summary",
+        )
+        with pytest.raises(InvalidSpliceError, match="payload"):
+            agent.append_splice(
+                mask=(MaskRange(session_id=sid, lo=0, hi=barrier.ordinal),),
+                insert_after=None,
+                payload=(UserMessage(text="replacement"),),
+                strategy="careless_absorber",
+            )
+
+    def test_absorbing_a_splice_must_carry_its_text_not_just_its_count(self) -> None:
+        """The guard measures length; the contract is about content.
+
+        ``len(payload) < absorbed`` passes any payload of equal-or-greater
+        entry count, so a preserving producer can absorb a barrier carrying the
+        conversation and inject something else entirely -- exactly the silent
+        replacement ``discards_content`` exists to make explicit. Counting is a
+        proxy for carrying, and a proxy the caller can satisfy without
+        carrying anything.
+        """
+        agent = _runtime_for_alternation_tests()
+        sid = agent.session_id
+        agent.append_history(UserMessage(text="u0"))
+        barrier = agent.append_splice(
+            mask=(MaskRange(session_id=sid, lo=0, hi=0),),
+            insert_after=None,
+            payload=(UserMessage(text="must survive"),),
+            strategy="summary",
+        )
+
+        with pytest.raises(InvalidSpliceError, match="payload"):
+            agent.append_splice(
+                mask=(MaskRange(session_id=sid, lo=0, hi=barrier.ordinal),),
+                insert_after=None,
+                payload=(UserMessage(text="unrelated"),),
+                strategy="careless_absorber",
+            )
+
+        assert any(
+            "must survive" in getattr(m, "text", "") for m in agent.context().messages
+        ), "the absorbed payload was replaced without a discard declaration"
+
+    def test_a_deliberate_discard_may_ship_a_shorter_payload(self) -> None:
+        """A producer that MEANS to replace content says so, and is allowed.
+
+        Compaction's whole job is to render many entries as few, so a length
+        comparison can never separate "summarized" from "deleted" -- the guard
+        rejected every summary taken over a coalesced tape. Intent is declared
+        by the caller instead: ``discards_content`` is the producer stating
+        that its payload replaces rather than carries.
+        """
+        agent = _runtime_for_alternation_tests()
+        sid = agent.session_id
+        agent.append_history(UserMessage(text="u0"))
+        barrier = agent.append_splice(
+            mask=(MaskRange(session_id=sid, lo=0, hi=0),),
+            insert_after=None,
+            payload=(UserMessage(text="a"), AssistantMessage(text="b")),
+            strategy="summary",
+        )
+        agent.append_splice(
+            mask=(MaskRange(session_id=sid, lo=0, hi=barrier.ordinal),),
+            insert_after=None,
+            payload=(UserMessage(text="[summary]"),),
+            strategy="summary",
+            discards_content=True,
+        )
+        assert [getattr(m, "text", "") for m in agent.context().messages] == [
+            "[summary]"
+        ]
+
+    def test_absorbing_a_splice_carrying_its_payload_is_allowed(self) -> None:
+        """The same absorb is legal once the payload is carried forward."""
+        agent = _runtime_for_alternation_tests()
+        sid = agent.session_id
+        agent.append_history(UserMessage(text="u0"))
+        carried = (UserMessage(text="a"), AssistantMessage(text="b"))
+        barrier = agent.append_splice(
+            mask=(MaskRange(session_id=sid, lo=0, hi=0),),
+            insert_after=None,
+            payload=carried,
+            strategy="summary",
+        )
+        agent.append_splice(
+            mask=(MaskRange(session_id=sid, lo=0, hi=barrier.ordinal),),
+            insert_after=None,
+            payload=(*carried, UserMessage(text="more")),
+            strategy="careful_absorber",
+        )
+        assert len(agent.context().messages) == 3
+
+    def test_parent_id_resolves_through_a_preserved_splice_payload(self) -> None:
+        """An anchor indexed from a splice payload must resolve to its id.
+
+        ``_index_record`` registers tool_call ids found inside a splice payload
+        precisely so a compactor that preserves the parent ``AssistantMessage``
+        keeps the grouping identity across the barrier. The lookup rejected
+        every non-``ReferrableTapeEvent`` record, so each id it had just
+        indexed resolved to ``-1`` and post-barrier stubs rendered as orphans.
+        """
+        agent = _runtime_for_alternation_tests()
+        sid = agent.session_id
+        agent.append_history(UserMessage(text="u0"))
+        preserved = AssistantMessage(
+            tool_calls=(ToolCall(id="c1", name="Bash", args={}),),
+        )
+        agent.append_splice(
+            mask=(MaskRange(session_id=sid, lo=0, hi=0),),
+            insert_after=None,
+            payload=(UserMessage(text="kept"), preserved),
+            strategy="compact_preserve",
+            paired_externally=frozenset({"c1"}),
+        )
+
+        assert agent._parent_id_for_call("c1") == preserved.id
+
+    def test_adopt_record_rejects_a_dropped_payload_like_append_splice(self) -> None:
+        """Both append doors enforce the payload-carry rule, not just one.
+
+        ``_compact_and_post`` reaches the tape through ``adopt_record``, so a
+        guard wired only into ``append_splice`` leaves compaction free to
+        absorb a barrier and drop its conversation -- the exact shape that
+        truncated a resumed 1642-message session to one message.
+        """
+        agent = _runtime_for_alternation_tests()
+        sid = agent.session_id
+        agent.append_history(UserMessage(text="u0"))
+        barrier = agent.append_splice(
+            mask=(MaskRange(session_id=sid, lo=0, hi=0),),
+            insert_after=None,
+            payload=(UserMessage(text="a"), AssistantMessage(text="b")),
+            strategy="summary",
+        )
+        with pytest.raises(InvalidSpliceError, match="payload"):
+            agent.adopt_record(
+                ContextSplice(
+                    ref=agent.mint_ref(),
+                    mask=(MaskRange(session_id=sid, lo=0, hi=barrier.ordinal),),
+                    insert_after=None,
+                    payload=(UserMessage(text="replacement"),),
+                    strategy="careless_absorber",
+                )
+            )
+
+    def test_coalescing_onto_a_legacy_unalternated_barrier_keeps_the_message(
+        self,
+    ) -> None:
+        """A payload that merges on carry must not be read as content loss.
+
+        ``ContextSplice.replay`` skips payload validation by design, so a
+        session persisted before role alternation was enforced can hold a
+        barrier whose payload ends in two user-side entries. Carrying that
+        forward runs them through ``coalesce_roles``, which merges the pair --
+        a payload one entry SHORTER than the one absorbed. Read as loss, the
+        splice is refused, the dispatch loop swallows the error, and the
+        user's message disappears with nothing said.
+        """
+        agent = _runtime_for_alternation_tests()
+        sid = agent.session_id
+        agent.append_history(UserMessage(text="u0"))
+        agent.adopt_record(
+            ContextSplice.replay(
+                ref=agent.mint_ref(),
+                mask=(MaskRange(session_id=sid, lo=0, hi=0),),
+                insert_after=None,
+                payload=(
+                    AssistantMessage(text="a"),
+                    UserMessage(text="u1"),
+                    UserMessage(text="u2"),
+                ),
+                strategy="summary",
+            )
+        )
+
+        agent._append_or_coalesce_user(UserMessage(text="next"))
+
+        texts = [getattr(m, "text", "") for m in agent.context().messages]
+        assert any("next" in t for t in texts), f"user message dropped; got {texts}"
+        assert any(t == "a" for t in texts), f"barrier content dropped; got {texts}"
+        validate_context(agent.context().messages)
+
+    def test_absorbing_a_barrier_that_re_injects_everything_is_allowed(self) -> None:
+        """A clear/rescue barrier deliberately drops content; it is not a loss.
+
+        ``append_clear`` masks the whole tape with an EMPTY payload on purpose.
+        The guard must key on losing another splice's payload, not on any wide
+        mask, or every barrier producer breaks.
+        """
+        agent = _runtime_for_alternation_tests()
+        agent.append_history(UserMessage(text="u0"))
+        agent.append_history(AssistantMessage(text="a0"))
+        agent.append_clear()
+        assert agent.context().messages == []
+
+    def test_coalesce_onto_coalesce_is_unchanged(self) -> None:
+        """The healthy path keeps one merged entry and the tail's id.
+
+        Guards the fix for the barrier case from changing coalesce-on-coalesce:
+        a prior ``user_coalesce`` payload is a single ``UserMessage``, so
+        carrying it forward must be a no-op.
+        """
+        agent = _runtime_for_alternation_tests()
+        first = UserMessage(text="one")
+        agent.append_history(first)
+        agent._append_or_coalesce_user(UserMessage(text="two"))
+        agent._append_or_coalesce_user(UserMessage(text="three"))
+
+        messages = agent.context().messages
+        assert len(messages) == 1, f"expected one merged entry; got {messages!r}"
+        tail = messages[-1]
+        assert isinstance(tail, UserMessage)
+        assert tail.text == "one\n\ntwo\n\nthree"
+        assert tail.id == first.id
+
     def test_after_user_concatenates_attachments(self) -> None:
         """Coalesce concatenates attachments in arrival order."""
         a1 = BytesMessage(data=b"a", descriptor="image/png")
@@ -4358,6 +5090,32 @@ class TestUserMessageAlternation:
         tail = agent.context().messages[-1]
         assert isinstance(tail, UserMessage)
         assert tail.text == "a\n\nb\n\nc"
+
+    def test_coalescing_two_peers_keeps_both_attributions(self) -> None:
+        """Merging peers must label each source, not adopt the first one.
+
+        ``_coalesce_user_side`` stamped the joined text with the first sender's
+        ``source``, so a message from B was recorded as sent by A -- the reader
+        cannot tell who said what, and the canonical tape coalescer
+        (``_merge_user``) already solved this by demoting a cross-source pair
+        to a labelled ``UserMessage``. Two coalescers, one input, two answers.
+        """
+        agent = _runtime_for_alternation_tests()
+        agent._commit_queued_user_side(
+            [
+                AgentSendQueuedMessage(source="A", text="from-a"),
+                AgentSendQueuedMessage(source="B", text="from-b"),
+            ]
+        )
+
+        tail = agent.context().messages[-1]
+        text = getattr(tail, "text", "")
+        assert "[from A]" in text, (
+            f"peer attribution lost when merging two sources; got {tail!r}"
+        )
+        assert "[from B]" in text, (
+            f"peer attribution lost when merging two sources; got {tail!r}"
+        )
 
     def test_append_or_coalesce_user_merges_cross_type(self) -> None:
         """UserMessage tail + AgentSend incoming merge into a single user turn."""
@@ -5036,8 +5794,9 @@ async def test_queued_message_drain_publishes_user_message() -> None:
 # (``AWAIT_USER`` after Halt / ModelResponseError counts as parked-on-
 # specific-event, not idle). Edge-triggered: at most one publish per
 # transition from working to idle; the ``_was_idle`` flag suppresses
-# republication until ``drain()`` returns work. Cold start does NOT
-# publish (``_was_idle`` initializes to ``True``).
+# republication until ``drain()`` returns work. Cold start DOES publish
+# (``_was_idle`` initializes to ``False``) so a REPL that pre-staged a
+# deferred block before any work ran gets an ``AgentIdle`` to flush on.
 #
 # Tests below cover each work source independently and confirm the
 # edge-triggering invariant under observer push-back.
@@ -5095,13 +5854,12 @@ async def test_agent_idle_after_text_response() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_idle_not_published_on_cold_start() -> None:
-    """Quit immediately without any work; no AgentIdle should fire.
+async def test_agent_idle_not_published_when_quit_is_already_queued() -> None:
+    """A pre-staged Quit means the inbox is not empty; no idle transition.
 
-    The ``_was_idle`` flag initializes to ``True`` so the first
-    iteration's predicate-check finds ``_was_idle == True`` and
-    suppresses publish. Cold start is not an idle transition -- there
-    was no prior work to be 'between.'
+    Named for what it pins: ``_fully_drained`` fails on ``inbox.empty()``
+    here, not on ``_was_idle``. The cold-start behaviour is the opposite and
+    is covered by its own test below.
     """
     agent, collector = make_agent([])
     agent.inbox.push_back(Quit())
@@ -5109,8 +5867,32 @@ async def test_agent_idle_not_published_on_cold_start() -> None:
     await run_until_quit(agent)
 
     assert not collector.has(AgentIdle), (
-        "AgentIdle fired on cold start; should be suppressed until at "
-        "least one drain() returns work"
+        "AgentIdle fired while Quit was already queued; the inbox was not empty"
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_idle_is_published_on_a_genuine_cold_start() -> None:
+    """An empty inbox at the first iteration IS an idle transition.
+
+    ``_was_idle`` starts ``False`` deliberately: a REPL where the user staged
+    a deferred block before any work ran needs an ``AgentIdle`` to flush the
+    queue on, and "agent is accepting input" is true at the very first
+    iteration. Nothing pinned that -- the sibling test pre-stages a ``Quit``,
+    so it exits on the empty-inbox leg and would pass either way.
+    """
+    agent, collector = make_agent([])
+
+    def _quit_on_idle(event: RuntimeEvent) -> None:
+        if isinstance(event, AgentIdle):
+            agent.inbox.push_back(Quit())
+
+    agent.observers.append(_quit_on_idle)
+    await run_until_quit(agent)
+
+    assert collector.has(AgentIdle), (
+        "cold start published no AgentIdle; a pre-staged deferred block would "
+        "never flush"
     )
 
 
@@ -5790,7 +6572,9 @@ class TestGateRepairsInvalidContext:
             tool_calls=(ToolCall(id="toolu_X", name="Bash", args={}),),
         )
         legacy_override = ContextSplice.replay(
-            ref=TapeRef(session_id="", ordinal=agent._next_ordinal),
+            # ``mint_ref`` advances the counter; reading ``_next_ordinal``
+            # without it hands the same position to the next append.
+            ref=agent.mint_ref(),
             mask=(),
             insert_after=None,
             payload=(
@@ -5835,9 +6619,10 @@ class TestGateRepairsInvalidContext:
 async def test_stop_tool_kill_carries_parent_id_to_synth_result() -> None:
     """`_stop_tool` must stamp the parent assistant ``id`` on its synth result.
 
-    Other ToolResult append sites carry ``parent_id`` (1666, 1698,
-    _run_tool_and_post). Without parent_id here, UI / consumer code
-    that keys on parent_id sees the killed-tool placeholder as orphan.
+    Other ToolResult append sites carry ``parent_id``
+    (``_relegate_tool_calls_to_background``, ``_run_tool_and_post``). Without
+    parent_id here, UI / consumer code that keys on parent_id sees the
+    killed-tool placeholder as orphan.
     """
     slow = StubTool(_name="slow", response="done", delay_sec=10.0)
     agent, _ = make_agent(
@@ -6837,7 +7622,7 @@ async def test_gate_recovery_admits_clear_control_event() -> None:
     def _raise() -> None:
         raise InvalidContextError("unrepairable context")
 
-    agent._assert_alternation_invariant = _raise  # ty: ignore[invalid-assignment]
+    agent._assert_alternation_invariant = _raise  # ty: ignore[invalid-assignment] -- monkeypatch the invariant check on the instance to force the unrepairable-context path
     collector = EventCollector()
     agent.observers.append(collector)
 
@@ -6873,7 +7658,7 @@ async def test_gate_recovery_arms_before_publish_so_observer_clear_releases() ->
     def _raise() -> None:
         raise InvalidContextError("unrepairable context")
 
-    agent._assert_alternation_invariant = _raise  # ty: ignore[invalid-assignment]
+    agent._assert_alternation_invariant = _raise  # ty: ignore[invalid-assignment] -- monkeypatch the invariant check on the instance to force the unrepairable-context path
     collector = EventCollector()
 
     pushed = False
@@ -7020,7 +7805,7 @@ async def test_gate_failure_surfaces_model_response_error() -> None:
 
     # Test mock: patch the bound method to simulate a future producer whose
     # context rescue cannot repair.
-    agent._assert_alternation_invariant = _raise  # ty: ignore[invalid-assignment]
+    agent._assert_alternation_invariant = _raise  # ty: ignore[invalid-assignment] -- monkeypatch the invariant check on the instance to force the unrepairable-context path
 
     collector = EventCollector()
     agent.observers.append(collector)

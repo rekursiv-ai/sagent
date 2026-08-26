@@ -9,9 +9,11 @@ the originally-masked content).
 from __future__ import annotations
 
 from collections.abc import Sequence
+from unittest.mock import patch
 
 import pytest
 
+from sagent.agent import context as context_module
 from sagent.agent.context import (
     InvalidContextError,
     ResolvedContext,
@@ -430,6 +432,64 @@ def test_resolved_context_returns_independent_message_list() -> None:
     first.messages.append(_user("BOGUS"))
     second = resolve_context(tape)
     assert len(second.messages) == 1
+
+
+def test_resolve_scales_linearly_in_tape_length() -> None:
+    """Anchor lookup must not rescan the emitted order for every splice.
+
+    Anchor lookup walked the emitted list per alive splice, and a coalesce splice per
+    user turn is the ordinary shape -- so the resolver grew quadratically in a
+    long session, on a path the runtime re-runs after every single append.
+    Counted rather than timed: a wall-clock bound would be flaky under load,
+    while the scan count is the property that actually decides the growth.
+    """
+    scans = 0
+    real_contains = context_module._OrderedRefs.contains
+
+    def counting_contains(order: context_module._OrderedRefs, ref: TapeRef) -> bool:
+        nonlocal scans
+        scans += 1
+        return real_contains(order, ref)
+
+    tape: list[TapeRecord] = []
+    ordinal = 0
+    for i in range(200):
+        tape.append(_hr(ordinal, _user(f"u{i}")))
+        ordinal += 1
+        tape.append(
+            _splice(
+                ordinal,
+                mask=(MaskRange(session_id="s", lo=ordinal - 1, hi=ordinal - 1),),
+                insert_after=_ref(ordinal - 2) if ordinal >= 2 else None,
+                payload=(_assistant(f"a{i}"),),
+            )
+        )
+        ordinal += 1
+
+    with patch.object(context_module._OrderedRefs, "contains", counting_contains):
+        _ = resolve_context(tape)
+
+    assert scans <= len(tape), (
+        f"anchor lookup cost {scans} probes over a {len(tape)}-record tape"
+    )
+
+
+def test_a_duplicate_ref_is_refused_rather_than_silently_doubled() -> None:
+    """One ref names one record; two claimants is corruption, not a choice.
+
+    ``segments`` is keyed by ref while ``order`` keeps every occurrence, so a
+    tape carrying a ref twice rendered the LAST record twice and dropped the
+    first -- no error, no log. That is how a concurrent writer colliding on an
+    ordinal turns into a conversation that reads back wrong, and three real
+    sessions on disk carry the shape.
+    """
+    ref = _ref(0)
+    tape = [
+        ReferrableTapeEvent(ref=ref, event=_user("a")),
+        ReferrableTapeEvent(ref=ref, event=_user("b")),
+    ]
+    with pytest.raises(InvalidContextError, match="duplicate"):
+        _ = resolve_context(tape)
 
 
 # --- validate_context: unchanged from prior model ----------------------

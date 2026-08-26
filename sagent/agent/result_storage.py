@@ -22,6 +22,7 @@ import dataclasses
 import hashlib
 import logging
 import os
+import re
 import tempfile
 import uuid
 
@@ -161,9 +162,10 @@ def stub_cost_tokens(content: str, *, preview_chars: int = 2_000) -> int:
 
     """
     return approx_tokens(
-        f"{PERSISTED_TAG}\nOutput too large ({_format_size(len(content))}). "
+        f"{PERSISTED_TAG}\nOutput too large "
+        f"({_format_size(len(content.encode('utf-8')))}). "
         f"Full output saved to: {_FALLBACK_STORAGE_DIR}/{'x' * 40}.txt\n\n"
-        f"Preview (first {_format_size(preview_chars)}):\n"
+        f"Preview (first {preview_chars:,} chars):\n"
         f"{content[:preview_chars]}\n...\n</persisted-output>"
     )
 
@@ -193,11 +195,8 @@ def _persist_oversized(
     except OSError:
         logger.exception("could not create tool-results dir at %s", base)
         return None
-    safe = "".join(c for c in call_id if c.isalnum() or c in "_-") or (
-        "id_" + hashlib.sha256(call_id.encode()).hexdigest()[:16]
-    )
-    filepath = base / f"{safe}.txt"
-    encoded = content.encode("utf-8")
+    filepath = base / f"{_safe_stem(call_id)}.txt"
+    encoded = _strip_line_numbers(content).encode("utf-8")
     try:
         filepath = _write_unique(filepath, encoded)
     except OSError:
@@ -212,11 +211,73 @@ def _persist_oversized(
     more = "\n...\n" if has_more else "\n"
     return (
         f"{PERSISTED_TAG}\n"
-        f"Output too large ({_format_size(len(content))}). "
+        f"Output too large ({_format_size(len(encoded))}). "
         f"Full output saved to: {filepath}\n\n"
-        f"Preview (first {_format_size(preview_chars)}):\n"
+        f"Preview (first {preview_chars:,} chars):\n"
         f"{preview}{more}"
         "</persisted-output>"
+    )
+
+
+_MAX_STEM: Final = 96  # config-globals: ignore -- filename component bound
+"""Longest call-id-derived filename stem kept verbatim.
+
+Filesystem name components cap near 255 bytes, so a long provider call id made
+``open`` raise ``ENAMETOOLONG``; ``_persist_oversized`` caught it and returned
+``None``, and the oversized body stayed inline -- the off-load silently
+disabled by the id's length. Well under the limit, leaving room for the
+``.txt`` suffix and a collision suffix.
+"""
+
+
+def _safe_stem(call_id: str) -> str:
+    """Return a filesystem-safe, length-bounded stem for ``call_id``.
+
+    Truncating alone would collide two ids sharing a long prefix, so an
+    over-long id keeps a readable head AND a hash of the whole value.
+    """
+    safe = "".join(c for c in call_id if c.isalnum() or c in "_-")
+    digest = hashlib.sha256(call_id.encode()).hexdigest()[:16]
+    if not safe:
+        return f"id_{digest}"
+    if len(safe) <= _MAX_STEM:
+        return safe
+    return f"{safe[: _MAX_STEM - len(digest) - 1]}-{digest}"
+
+
+_NUMBERED_LINE = re.compile(r"^ *(\d+)\t")
+
+
+def _strip_line_numbers(content: str) -> str:
+    r"""Return ``content`` without a ``Read``-style ``<n>\t`` line-number gutter.
+
+    The stub tells the model to re-read the persisted path, so that read must
+    be a fixed point. ``Read`` renders a gutter, so the content arriving here
+    is already numbered; writing it verbatim means the next read numbers the
+    numbers, growing the file ~2,555 chars per round on a 12,545-char source
+    and re-spilling forever. The promised recovery could never complete.
+
+    Applied only when EVERY non-empty line carries a gutter whose numbers run
+    consecutively. A Bash dump or TSV payload with a stray ``1\\t`` prefix
+    fails that test and is written byte-for-byte, since stripping it would
+    corrupt the data the file exists to preserve.
+    """
+    lines = content.splitlines(keepends=True)
+    prev: int | None = None
+    for line in lines:
+        if not line.strip():
+            continue
+        match = _NUMBERED_LINE.match(line)
+        if match is None:
+            return content
+        current = int(match.group(1))
+        if prev is not None and current != prev + 1:
+            return content
+        prev = current
+    if prev is None:
+        return content
+    return "".join(
+        _NUMBERED_LINE.sub("", line) if line.strip() else line for line in lines
     )
 
 

@@ -2,11 +2,12 @@ r"""AgentRuntime: inbox-driven event loop.
 
 One loop, one pipe, one match block. Everything is a ``RuntimeEvent``.
 
-This module is the canonical sagent runtime. It owns the history dataclasses
+This module is the canonical sagent runtime. It owns the dispatch loop, the
+gate logic, the detach machinery, the AWAIT mechanism, and the minimal
+``Tool`` / ``Model`` / ``Compactor`` protocols. The history dataclasses
 (``UserMessage``, ``AssistantMessage``, ``ToolResult``, ``ToolCall``,
- ``BytesMessage``, ``SessionMessage``), the ``RuntimeEvent`` union, the
-dispatch loop, the gate logic, the detach machinery, the AWAIT mechanism, and
-the minimal ``Tool`` / ``Model`` / ``Compactor`` protocols. Adapters and
+``BytesMessage``, ``SessionMessage``) and the ``RuntimeEvent`` union are
+defined in ``types/runtime.py`` and imported here. Adapters and
 wrappers in ``agent/agent.py`` present richer protocols inward; the runtime
 sees only its minimal protocols.
 
@@ -303,6 +304,7 @@ from sagent.types.tape import (
     TapeEvent,
     TapeRecord,
     TapeRef,
+    coalesce_roles,
     full_tape_mask,
     mask_contains_ref,
     mask_ranges_overlap,
@@ -417,6 +419,18 @@ def _preserved_mask_gaps_by_session(
     }
 
 
+def _entry_text(entry: ModelContextEvent) -> str:
+    """Return the provider-visible text of one context entry.
+
+    Containment is checked on text because a merge concatenates: a carried
+    entry survives inside a larger merged body, so equality would reject the
+    legitimate absorber while substring containment accepts it.
+    """
+    if isinstance(entry, ToolResult):
+        return entry.content
+    return entry.text
+
+
 def _sanitize_for_send(
     entries: Sequence[ModelContextEvent],
 ) -> tuple[ModelContextEvent, ...]:
@@ -435,11 +449,16 @@ def _sanitize_for_send(
 
 
 def _mimic_index_of(cid: str) -> int | None:
-    """Return the ``N`` of a ``DetachedArrived:mimic:N`` id, or ``None``."""
+    """Return the ``N`` of a ``DetachedArrived:mimic:N`` id, or ``None``.
+
+    ``isdecimal``, not ``isdigit``: the latter admits characters ``int()``
+    rejects (``"²".isdigit()`` is True), and this runs over persisted ids
+    during ``replay_tape`` -- so one such id made a whole session unloadable.
+    """
     if not cid.startswith(DETACHED_ARRIVED_MIMIC_PREFIX):
         return None
     suffix = cid.removeprefix(DETACHED_ARRIVED_MIMIC_PREFIX)
-    return int(suffix) if suffix.isdigit() else None
+    return int(suffix) if suffix.isdecimal() else None
 
 
 def _mimic_indices(entry: object) -> list[int]:
@@ -750,16 +769,18 @@ def _message_from_queued(
 def _coalesce_user_side(
     items: Sequence[UserMessage | AgentSendMessage],
 ) -> UserMessage | AgentSendMessage:
-    first = items[0]
-    text = "\n\n".join(item.text for item in items)
-    attachments = sum((item.attachments for item in items), ())
-    if isinstance(first, AgentSendMessage):
-        return AgentSendMessage(
-            source=first.source,
-            text=text,
-            attachments=attachments,
-        )
-    return UserMessage(text=text, attachments=attachments)
+    """Merge a user-side run into one entry via the canonical coalescer.
+
+    Delegates rather than re-joining text: stamping the run with the first
+    sender's ``source`` recorded every later peer's message as sent by the
+    first, and ``_merge_user`` already demotes a cross-source pair to a
+    ``UserMessage`` carrying each part's ``[from <source>]`` label.
+    """
+    merged = coalesce_roles(items)
+    assert len(merged) == 1
+    entry = merged[0]
+    assert isinstance(entry, (UserMessage, AgentSendMessage))
+    return entry
 
 
 class Tool(Protocol):
@@ -1209,6 +1230,13 @@ class AgentRuntime:
           reaps the live job before its forward result lands.
         * ``_mid_stream_queue`` non-empty -- buffered ``UserMessage``
           received while the model was streaming.
+        * ``_has_waking_commit()`` -- a deferred commit that will itself drive
+          a round (a forward ``DetachedResult``). Its ``tool_use`` is already
+          taped, so idling first persists a context the provider rejects and
+          lets a one-shot ``Agent.run`` reap mid-exchange. Only WAKING commits
+          count: a non-waking one (mimic pairing, ride-along) flushes solely
+          alongside a round real content drives, so gating idle on it would
+          wedge the loop -- nothing would ever fire the round that drains it.
         * ``inbox.gate_armed`` -- the inbox is waiting for a specific
           event type (e.g. ``AWAIT_USER`` after ``Halt`` /
           ``ModelResponseError``). Semantically "parked on a particular
@@ -1245,6 +1273,7 @@ class AgentRuntime:
             self.is_idle
             and self.inbox.empty()
             and not self.detached
+            and not self._has_waking_commit()
             and not (
                 self.has_pending_background is not None
                 and self.has_pending_background()
@@ -1330,12 +1359,13 @@ class AgentRuntime:
         fallback_reason: str = "",
         preserved_tail_count: int = 0,
         paired_externally: frozenset[str] = frozenset(),
+        discards_content: bool = False,
     ) -> TapeRef:
         """Append a ``ContextSplice`` to the tape.
 
-        Validates that ``mask`` does not overlap any existing splice's
-        mask (each tape ref has at most one editor for its lifetime).
-        To re-edit, mask the editing splice's own ref. Producers must
+        Validates that ``mask`` does not overlap an ALIVE splice's mask
+        (each tape ref has at most one editor at a time). To re-edit,
+        absorb the editing splice by masking its own ref. Producers must
         also avoid placing ``insert_after`` inside the splice's own
         ``mask`` (validated below).
 
@@ -1353,6 +1383,10 @@ class AgentRuntime:
               in fallback mode.
           paired_externally: Call ids whose pair lives outside this
               payload (typically a ``ReferrableTapeEvent``).
+          discards_content: Whether this splice REPLACES what it absorbs
+              rather than carrying it forward. Compaction and ``Clear``
+              set it; a merging producer leaves it False so the
+              payload-carry check still applies.
 
         Returns:
           ref: ``TapeRef`` minted for the new splice.
@@ -1363,6 +1397,8 @@ class AgentRuntime:
 
         """
         self._validate_no_alive_mask_overlap(mask)
+        if not discards_content:
+            self._validate_absorbed_payloads_carried(mask, payload)
         # ``mask_contains_ref`` compares ``session_id`` before ordinal: a raw
         # ordinal compare false-rejects an ``insert_after`` anchor from a
         # different session whose ordinal happens to fall in this mask's range
@@ -1421,6 +1457,71 @@ class AgentRuntime:
                     f"new splice mask overlaps alive splice {alive_ref};"
                     f" either don't claim already-claimed positions or extend"
                     f" the mask to include the splice's own ref to absorb it",
+                )
+
+    def _validate_absorbed_payloads_carried(
+        self,
+        new_mask: tuple[MaskRange, ...],
+        payload: tuple[ModelContextEvent, ...],
+    ) -> None:
+        """Reject a mask that absorbs a splice whose payload is not carried.
+
+        Absorbing an alive splice's ref kills it, so every entry its payload
+        contributed stops rendering. This runs only for a producer that did NOT
+        declare ``discards_content`` -- one that merges rather than replaces --
+        so losing entries here is content going missing, the shape that
+        truncated a resumed 1642-message session to one message. It is caught
+        at append, where the tape and the session file can still be saved.
+
+        Length is only a sound measure under that declaration. A compaction
+        summary is SUPPOSED to be shorter than what it replaces, so measuring
+        alone can never separate "summarized" from "deleted"; the caller states
+        which it means, and this check applies to the preserving half.
+
+        Both sides are counted after ``coalesce_roles`` so the comparison is
+        between equivalent renderings rather than raw entry counts. An absorber
+        carrying a payload forward runs it through that merge, and a payload
+        loaded via ``ContextSplice.replay`` -- which skips validation, so it may
+        end in two user-side entries -- collapses by one there. Counting raw
+        entries read that merge as a deleted message and refused the append,
+        which the dispatch loop swallows: the user's message vanished silently.
+
+        Args:
+          new_mask: Ranges the new splice claims.
+          payload: Entries the new splice injects.
+
+        Raises:
+          InvalidSpliceError: An absorbed splice's payload entries are
+              missing from ``payload`` while ``payload`` is non-empty.
+
+        """
+        if not payload:
+            return
+        for alive_ref in alive_splices(self.tape):
+            splice = self._tape_by_ref.get(alive_ref)
+            if not isinstance(splice, ContextSplice):
+                continue
+            if not mask_contains_ref(new_mask, alive_ref):
+                continue
+            # Text, not count. A legitimate absorber MERGES the absorbed tail
+            # into new objects (``coalesce_roles`` does), so identity cannot be
+            # required -- but counting entries is a proxy the caller satisfies
+            # without carrying anything, so an unrelated payload of equal
+            # length replaced the conversation silently. Every absorbed entry's
+            # text must still appear somewhere in the new payload; a merge
+            # concatenates, so containment survives it.
+            carried = "\n".join(_entry_text(e) for e in payload)
+            missing = [
+                text
+                for entry in coalesce_roles(splice.payload)
+                if (text := _entry_text(entry)) and text not in carried
+            ]
+            if missing:
+                raise InvalidSpliceError(
+                    f"new splice absorbs {alive_ref} but its payload drops"
+                    f" {len(missing)} entry(s) of the absorbed content"
+                    f" (first: {missing[0][:60]!r}); carry them forward, or"
+                    f" pass discards_content=True to replace deliberately",
                 )
 
     def append_clear(self) -> TapeRef:
@@ -1495,7 +1596,9 @@ class AgentRuntime:
         self._next_ordinal += 1
         return ref
 
-    def adopt_record(self, record: TapeRecord) -> None:
+    def adopt_record(
+        self, record: TapeRecord, *, discards_content: bool = False
+    ) -> None:
         """Append a pre-built tape record (with a runtime-minted ref).
 
         Used by compactors that build ``ContextSplice`` instances
@@ -1506,15 +1609,21 @@ class AgentRuntime:
         Args:
           record: Pre-built tape record whose ``ref`` was minted via
               :meth:`mint_ref` on this runtime.
+          discards_content: Whether ``record`` REPLACES what it absorbs
+              rather than carrying it forward, as :meth:`append_splice`
+              means it. Both append doors enforce the same contract; a
+              guard on one alone left compaction free to truncate.
 
         Raises:
           InvalidSpliceError: When ``record`` is a ``ContextSplice``
               whose mask overlaps another alive splice's mask without
-              absorbing it.
+              absorbing it, or absorbs one without carrying its payload.
 
         """
         if isinstance(record, ContextSplice):
             self._validate_no_alive_mask_overlap(record.mask)
+            if not discards_content:
+                self._validate_absorbed_payloads_carried(record.mask, record.payload)
         self.tape.append(record)
         self._cached_resolved = None
         self._index_record(record)
@@ -1798,6 +1907,14 @@ class AgentRuntime:
                                 self.compact_task.cancel()
                             for t in self.running_tools.values():
                                 t.cancel()
+                            # ``_stop_all_tools(mode="detach")`` moves a tool
+                            # out of ``running_tools`` into ``detached``, so
+                            # walking only the former leaves it running against
+                            # a runtime with nobody left to service its result
+                            # -- still writing files and spending money after
+                            # shutdown returned. ``Clear`` drains the same
+                            # registry for the same reason.
+                            self._cancel_detached()
                             return
 
                         case Halt():
@@ -1849,9 +1966,7 @@ class AgentRuntime:
                             # membership at ``_run_tool_and_post`` and
                             # are silently dropped at the default
                             # inbox case.
-                            for task in self.detached.values():
-                                task.cancel()
-                            self.detached.clear()
+                            self._cancel_detached()
                             self._pending_commits.clear()
                             self._forwarded_call_ids.clear()
                             queued.clear()
@@ -1918,6 +2033,13 @@ class AgentRuntime:
                                     len(self.detached),
                                 )
                                 self._stop_all_tools(mode="kill")
+                                # "Every tool" includes the backgrounded ones.
+                                # ``_stop_all_tools`` empties ``running_tools``
+                                # into ``detached``, so walking the former
+                                # alone left the user's kill-everything with
+                                # tools still running. The named-id branch
+                                # below already cancels a detached task.
+                                self._cancel_detached()
                             elif cid in self.running_tools:
                                 logger.debug("runtime kill tool: call_id=%s", cid)
                                 self._stop_tool(
@@ -1944,6 +2066,12 @@ class AgentRuntime:
                                         "runtime kill missed tool: call_id=%s",
                                         cid,
                                     )
+                                # ``Undetach`` re-gates a detached id, so the
+                                # cohort can hold an id that ``running_tools``
+                                # never had. Dropping the tool without dropping
+                                # its gate entry wedges ``_ready_to_advance``
+                                # for the rest of the session.
+                                self.cohort.discard(cid)
 
                         case Detach(call_id=cid):
                             if cid is None:
@@ -1967,6 +2095,7 @@ class AgentRuntime:
                                 logger.debug(
                                     "runtime detach missed tool: call_id=%s", cid
                                 )
+                                self.cohort.discard(cid)
 
                         case Undetach(call_id=cid):
                             if cid is None:
@@ -1996,6 +2125,14 @@ class AgentRuntime:
                                 self.model_call = None
                                 self._model_call_generation += 1
                             self._stop_all_tools(mode="detach")
+                            # Commit staged input rather than dropping it. The
+                            # user typed it; ``Clear`` is the only verb that
+                            # discards, and the mid-stream lane below was
+                            # already committed here -- clearing one lane and
+                            # committing the other lost the text with no event
+                            # and no log.
+                            for committed in self._commit_queued_user_side(queued):
+                                self.publish(committed)
                             queued.clear()
                             # Capture buffered mid-stream input into the snapshot
                             # the compactor will see; publish the coalesced
@@ -2427,7 +2564,18 @@ class AgentRuntime:
         )
 
         try:
-            await done.wait()
+            # Race the driver against the signal. ``done`` is set only by an
+            # observer, so a ``run_forever`` that dies before publishing sets
+            # nothing and a bare ``await done.wait()`` blocks on a task that is
+            # already dead -- the rethrow below never runs. Waiting on both
+            # makes the crash a wake-up; the ``finally`` then surfaces it.
+            waiter = asyncio.ensure_future(done.wait())
+            try:
+                _ = await asyncio.wait(
+                    (waiter, task), return_when=asyncio.FIRST_COMPLETED
+                )
+            finally:
+                waiter.cancel()
             return list(self.context().messages[context_cursor:])
         finally:
             if _watch in self.observers:
@@ -2535,6 +2683,12 @@ class AgentRuntime:
             payload=tuple(sanitized),
             strategy="context_rescue",
             paired_externally=unpaired_call_ids(sanitized),
+            # Rescue REPLACES: the sanitizer exists to drop what cannot be made
+            # wire-valid -- an orphan ``ToolResult``, a duplicated tool_call --
+            # so its payload is deliberately not everything it absorbs. Without
+            # the declaration the carry guard rejects the rescue, and the last
+            # resort for a broken tape becomes unreachable exactly when needed.
+            discards_content=True,
         )
 
     def _repair_history_record_orphans(self) -> None:
@@ -2558,12 +2712,14 @@ class AgentRuntime:
         messages = resolved.messages
         origins = resolved.origins
         unmatched_per_am: list[tuple[TapeRef | None, list[str]]] = []
-        pending: dict[str, int] = {}
+        # Insertion-ordered set: only membership and order are read, so a
+        # dict-with-index carried a value nothing consumed.
+        pending: dict[str, None] = {}
         am_repair_anchor: TapeRef | None = None
         seen_results: set[str] = set()
         hr_orphan_refs: list[TapeRef] = []
 
-        def _flush_pending() -> None:
+        def _flush_unmatched() -> None:
             if pending:
                 unmatched_per_am.append((am_repair_anchor, list(pending)))
             pending.clear()
@@ -2573,9 +2729,9 @@ class AgentRuntime:
             origin_record = self._tape_by_ref.get(origin)
             origin_is_hr = isinstance(origin_record, ReferrableTapeEvent)
             if isinstance(entry, AssistantMessage):
-                _flush_pending()
+                _flush_unmatched()
                 am_repair_anchor = origin if origin_is_hr else None
-                pending.update({tc.id: idx for tc in entry.tool_calls})
+                pending.update(dict.fromkeys(tc.id for tc in entry.tool_calls))
             elif isinstance(entry, ToolResult):
                 if entry.call_id in seen_results or entry.call_id not in pending:
                     if origin_is_hr:
@@ -2585,9 +2741,9 @@ class AgentRuntime:
                 del pending[entry.call_id]
                 seen_results.add(entry.call_id)
             else:
-                _flush_pending()
+                _flush_unmatched()
                 am_repair_anchor = None
-        _flush_pending()
+        _flush_unmatched()
 
         for anchor, missing_ids in unmatched_per_am:
             if anchor is None:
@@ -2667,8 +2823,6 @@ class AgentRuntime:
         - Idle/mid-cohort ``UserMessage`` branch (two rapid Enters land
           in one drain batch; the gate only sets ``model_call`` AFTER
           the per-item loop).
-        - ``ModelResponseError`` synthesizing ``[Error: ...]`` (model
-          never produced an assistant turn for the preceding user input).
         - Halt-then-fresh-user (cancellation drops any partial assistant
           content; only the user's prior message is in history).
         - ``_drain_mid_stream_queue`` when invoked from a halt/compact/
@@ -2733,11 +2887,24 @@ class AgentRuntime:
         # ``sid``. Each ``MaskRange`` is single-session by construction, so a
         # plain ``session_id`` match selects the right ones.
         prior_ranges: tuple[MaskRange, ...] = ()
+        prior_head: tuple[ModelContextEvent, ...] = ()
         if isinstance(prior_record, ContextSplice):
-            # Each range is single-session by construction, so a simple
-            # session match suffices (Issue#313 deleted the former
-            # both-endpoint cross-session filter).
-            prior_ranges = tuple(r for r in prior_record.mask if r.session_id == sid)
+            # EVERY range, not just this session's. Absorbing the prior
+            # splice's ref kills it, and under undelete semantics that lapses
+            # all of its masking -- so a range left behind here is a record
+            # that resurfaces. Filtering to ``sid`` dropped the foreign ones
+            # and resurrected content the user had already cleared, on exactly
+            # the resumed/forked tapes that carry two session ids. Each range
+            # is single-session by construction, so carrying them verbatim
+            # cannot produce a cross-session range.
+            prior_ranges = prior_record.mask
+            # Absorbing the mask kills the prior splice, so its payload stops
+            # rendering. A coalesce splice carries only the merged message and
+            # loses nothing, but a barrier -- resume's ``orphan_tool_result_
+            # repair``, ``context_rescue``, ``summary`` -- carries the WHOLE
+            # conversation, and dropping it truncated a resumed session to the
+            # one message that coalesced onto it.
+            prior_head = prior_record.payload[:-1]
         own_range = MaskRange(
             session_id=sid, lo=tail_origin.ordinal, hi=tail_origin.ordinal
         )
@@ -2747,7 +2914,15 @@ class AgentRuntime:
         # session-scoped because the mask is built in ``sid``: a foreign-session
         # record whose ordinal happens to exceed the low must not terminate the
         # scan early and mis-anchor the splice (multi-session tapes).
-        lo_ord = min(r.lo for r in mask)
+        # Same-session ranges only. Ordinals are per-session positions, so a
+        # ``min`` across sessions compares numbers that name nothing in common:
+        # a foreign range starting at 1 dragged the anchor to this session's
+        # position 1 and inserted the merged tail into the middle of the
+        # conversation. The mask may legitimately carry foreign ranges (they
+        # must be inherited or their records resurrect); the ANCHOR is what has
+        # to stay session-scoped.
+        same_session = [r.lo for r in mask if r.session_id == sid]
+        lo_ord = min(same_session) if same_session else tail_origin.ordinal
         anchor: TapeRef | None = None
         for record in self.tape:
             if record.ref.session_id != sid:
@@ -2755,11 +2930,16 @@ class AgentRuntime:
             if record.ref.ordinal >= lo_ord:
                 break
             anchor = record.ref
+        payload = coalesce_roles((*prior_head, combined))
         self.append_splice(
             mask=mask,
             insert_after=anchor,
-            payload=(combined,),
+            payload=payload,
             strategy="user_coalesce",
+            # Computed from the final payload, never inherited: a carried
+            # barrier payload can open a tool pair the validator then rejects
+            # as claimed both locally and externally.
+            paired_externally=unpaired_call_ids(payload),
         )
         return combined
 
@@ -2790,9 +2970,10 @@ class AgentRuntime:
             else (DETACHED_PLACEHOLDER, False, ToolResultKind.PENDING)
         )
         # Carry parent_id through; every other placeholder/result append site
-        # (1666, 1698, _run_tool_and_post) does so. Without it, downstream
-        # consumers that key on parent_id (UI grouping, splice routing) see
-        # the synth result as orphan even though the cohort gate matched.
+        # (``_relegate_tool_calls_to_background``, ``_run_tool_and_post``) does
+        # so. Without it, downstream consumers that key on parent_id (UI
+        # grouping, splice routing) see the synth result as orphan even though
+        # the cohort gate matched.
         self.append_history(
             ToolResult(
                 call_id=cid,
@@ -2807,11 +2988,25 @@ class AgentRuntime:
             task.cancel()
 
     def _parent_id_for_call(self, call_id: str) -> int:
-        """Return the originating ``AssistantMessage.id`` for ``call_id``, or -1."""
+        """Return the originating ``AssistantMessage.id`` for ``call_id``, or -1.
+
+        A splice ref is a valid anchor: ``_index_record`` registers the
+        tool_call ids inside a preserved payload against the splice's own ref
+        so grouping survives a compaction barrier. Reading only
+        ``ReferrableTapeEvent`` discarded exactly those, so every id the
+        compactor took care to preserve came back orphaned.
+        """
         parent_ref = self._parent_assistant_refs.get(call_id)
         if parent_ref is None:
             return -1
         record = self._tape_by_ref.get(parent_ref)
+        if isinstance(record, ContextSplice):
+            for entry in record.payload:
+                if isinstance(entry, AssistantMessage) and any(
+                    tc.id == call_id for tc in entry.tool_calls
+                ):
+                    return entry.id
+            return -1
         if not isinstance(record, ReferrableTapeEvent):
             return -1
         event = record.event
@@ -2915,6 +3110,12 @@ class AgentRuntime:
         ``before_tool_spawn`` ``UserMessage`` and a buffered mid-stream user
         turn -- which differ only in how they commit the user content, not in
         how they background the tools.
+
+        Grouping is the same ``_partition_cohort`` the foreground path uses:
+        ``serialize_key`` says two calls contend for one resource, and that is
+        a fact about the resource, not about which scheduler runs them. A task
+        per call let two Edits to one file run concurrently the moment a user
+        message cut in.
         """
         for tc in msg.tool_calls:
             self.append_history(
@@ -2925,16 +3126,21 @@ class AgentRuntime:
                     kind=ToolResultKind.PENDING,
                 ),
             )
+        for group in self._partition_cohort(msg.tool_calls):
             detached_task = asyncio.create_task(
-                self._run_tool_and_post(tc, parent_id=msg.id),
+                self._run_tool_group_and_post(group, parent_id=msg.id),
             )
             detached_task.add_done_callback(
                 log_task_exception(
                     logger,
-                    f"detached tool {tc.name!r} crashed",
+                    f"detached tool {group[0].name!r} crashed",
                 ),
             )
-            self.detached[tc.id] = detached_task
+            # Every member maps to the group's task: ``Kill``/``Detach`` name a
+            # call_id, and cancelling the task is what stops the work that
+            # call_id belongs to.
+            for tc in group:
+                self.detached[tc.id] = detached_task
 
     def _drain_mid_stream_queue(self) -> UserMessage | AgentSendMessage | None:
         r"""Append a coalesced ``UserMessage`` for any buffered mid-stream input.
@@ -2955,6 +3161,19 @@ class AgentRuntime:
         coalesced = _coalesce_user_side(self._mid_stream_queue)
         self._mid_stream_queue.clear()
         return self._append_or_coalesce_user(coalesced)
+
+    def _cancel_detached(self) -> None:
+        """Cancel and forget every detached task.
+
+        Shared by the three verbs that mean "stop the background work too"
+        (``Kill`` all, ``Clear``, ``Quit``). Once ``detached`` is empty, a
+        cancelled task's completion matches neither cohort nor detached
+        membership in ``_run_tool_and_post`` and is dropped at the inbox
+        default -- which is what keeps a late result out of a wiped session.
+        """
+        for task in self.detached.values():
+            _ = task.cancel()
+        self.detached.clear()
 
     def _collect_detached(self) -> None:
         """Clean up detached tasks that completed or were cancelled.
@@ -3052,15 +3271,38 @@ class AgentRuntime:
           parent_id: Originating assistant message id.
 
         """
-        for call in group:
-            await self._run_tool_and_post(call, parent_id=parent_id)
+        for index, call in enumerate(group):
+            if await self._run_tool_and_post(call, parent_id=parent_id):
+                continue
+            # A group exists because its calls contend for one resource, so
+            # cancelling one is a decision about the resource, not about that
+            # call alone. ``_run_tool_and_post`` absorbs the cancellation to
+            # synthesize a paired ``[cancelled]`` result, so without this the
+            # loop read the cancel as a completion and started the next edit
+            # to the same file the user had just stopped.
+            for skipped in group[index + 1 :]:
+                self._post_cancelled(skipped, parent_id=parent_id)
+            return
+
+    def _post_cancelled(self, call: ToolCall, *, parent_id: int) -> None:
+        """Post a ``[cancelled]`` result for a call that never ran."""
+        logger.debug("runtime group skipped after cancel: call_id=%s", call.id)
+        self.inbox.push_back(
+            ToolResult(
+                call_id=call.id,
+                parent_id=parent_id,
+                content=CANCELLED_PLACEHOLDER,
+                is_error=True,
+                kind=ToolResultKind.CANCELLED,
+            ),
+        )
 
     async def _run_tool_and_post(
         self,
         call: ToolCall,
         *,
         parent_id: int = -1,
-    ) -> None:
+    ) -> bool:
         """Run one tool invocation, post the ``ToolResult`` to the inbox.
 
         Tool authors return a fully-formed ``ToolResult``; the runtime
@@ -3070,6 +3312,16 @@ class AgentRuntime:
         runtime emits ``DetachedResult`` instead of ``ToolResult`` so
         the late completion arrives as context rather than being
         silently dropped by the cohort gate.
+
+        Args:
+          call: Tool invocation to run.
+          parent_id: Originating assistant message id.
+
+        Returns:
+          completed: False when the call was cancelled. The cancellation is
+              absorbed here to keep the tool_use paired, so a caller running a
+              serialized group has no other way to learn the group should stop.
+
         """
         if call.name == DETACHED_ARRIVED_TOOL:
             # ``DetachedArrived`` is not a real tool: the runtime synthesizes
@@ -3105,7 +3357,7 @@ class AgentRuntime:
                     ),
                 ),
             )
-            return
+            return True
         tool = self.tools_map.get(call.name)
         if tool is None:
             logger.debug(
@@ -3122,11 +3374,12 @@ class AgentRuntime:
                     is_error=True,
                 ),
             )
-            return
+            return True
         # Expose ``call.id`` via ContextVar so wrappers + streaming tools
         # can publish ``ToolLabel`` / ``ToolResultPartial`` correlated with
         # the originating call.
         call_token = current_call_id_var.set(call.id)
+        completed = True
         try:
             logger.debug(
                 "runtime tool start: call_id=%s tool=%s parent_id=%s",
@@ -3154,6 +3407,7 @@ class AgentRuntime:
             # tool_use with a tool_result. Without this, any asyncio
             # cancellation (Kill, future paths) orphans the tool_use and
             # the next provider call fails with HTTP 400.
+            completed = False
             result = ToolResult(
                 call_id=call.id,
                 parent_id=parent_id,
@@ -3196,6 +3450,7 @@ class AgentRuntime:
                 result.is_error,
             )
             self.inbox.push_back(result)
+        return completed
 
     async def _compact_and_post(self, args: str) -> None:
         """Run compaction; the compactor's overrides land in the tape.
@@ -3237,5 +3492,8 @@ class AgentRuntime:
         if generation != self._compact_generation:
             return
         override = widen_barrier_mask(override, self.tape)
-        self.adopt_record(override)
+        # Compaction replaces the region it masks with a summary; a summary is
+        # supposed to be shorter than what it summarizes, so the payload-carry
+        # check does not apply to it.
+        self.adopt_record(override, discards_content=True)
         self.inbox.push_back(CompactComplete.from_override(override))

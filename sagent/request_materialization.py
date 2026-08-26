@@ -27,6 +27,11 @@ _ELISION_NOTICE: Final = (
     " Re-run the tool with a narrower window to see this content.>"
 )
 
+_TRUNCATION_NOTICE: Final = (
+    "\n<truncated: kept the first {kept:,} of {total:,} chars to fit the"
+    " request budget. Re-run the tool from character {kept:,} for the rest.>"
+)
+
 
 def elided_placeholder(original_chars: int) -> str:
     """Render the wire placeholder for an over-budget tool result.
@@ -43,6 +48,45 @@ def elided_placeholder(original_chars: int) -> str:
 
     """
     return _ELISION_NOTICE.format(chars=original_chars)
+
+
+def truncated_result(content: str, budget_tokens: int) -> str:
+    """Return ``content``'s head plus a marker naming where to resume.
+
+    The read tool truncates and names an ``offset=``; the persist path writes
+    the whole text to disk and prints the path. This layer runs after both and
+    used to replace the result outright, discarding content they had already
+    bounded -- and its notice told the reader to retry with a smaller window,
+    which an agent obeyed by paging one file in 35-line reads.
+
+    Args:
+      content: Full result text.
+      budget_tokens: Tokens this result may occupy, marker included.
+
+    Returns:
+      truncated: Head of ``content`` plus a resume marker, or ``""`` when the
+          budget cannot even hold the marker.
+
+    """
+    if approx_tokens(_render_truncated(content, 0)) > budget_tokens:
+        return ""
+    # Bisect on the estimator rather than dividing by a chars-per-token ratio:
+    # ``approx_tokens`` is the ACTIVE model's tokenizer when one is in context,
+    # so no fixed ratio is correct, and the marker itself grows with the kept
+    # count. Monotone in ``kept``, so bisection lands on the largest fit.
+    low, high = 0, len(content)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if approx_tokens(_render_truncated(content, mid)) <= budget_tokens:
+            low = mid
+        else:
+            high = mid - 1
+    return _render_truncated(content, low) if low else ""
+
+
+def _render_truncated(content: str, kept: int) -> str:
+    """Return ``content``'s first ``kept`` chars plus the resume marker."""
+    return content[:kept] + _TRUNCATION_NOTICE.format(kept=kept, total=len(content))
 
 
 def materialize_request(
@@ -93,6 +137,8 @@ def materialize_messages(
     used = 0
     keep_calls: set[str] = set()
     out_reversed: list[ModelContextEvent] = []
+    older = _older_tool_result_counts(labelled)
+    tag_cost = approx_tokens(ELIDED_TOOL_RESULT_TAG)
     for idx in range(len(labelled) - 1, -1, -1):
         entry = labelled[idx]
         if isinstance(entry, ToolResult):
@@ -102,14 +148,43 @@ def materialize_messages(
                 used += cost
                 keep_calls.add(entry.call_id)
                 out_reversed.append(entry)
-            elif (
-                used + approx_tokens(ELIDED_TOOL_RESULT_TAG)
-                <= tool_result_budget_tokens
-            ):
-                # The full notice when it fits, the bare tag when only it
-                # does. A placeholder must never be sliced: a partial
-                # ``<elided...`` reads as content rather than as a marker.
-                placeholder = elided_placeholder(len(content))
+            elif used + tag_cost <= tool_result_budget_tokens:
+                # Prefer the HEAD of the content plus a resume marker; fall
+                # back to a placeholder only when the remaining budget cannot
+                # hold even that. Dropping outright discarded text the read
+                # tool had already truncated for exactly this budget, and the
+                # placeholder's "retry with a narrower window" then drove the
+                # reader into paging the same file dozens of times.
+                #
+                # Reserve one NOTICE per older result before truncating --
+                # never a bare tag. Elision cost ~20 tokens and was
+                # self-limiting, so every older turn survived as a placeholder;
+                # truncation is not, and giving the newest result the whole
+                # remaining budget starved the turns behind it (6 turns
+                # collapsed to 1). But reserving the 8-byte TAG while falling
+                # back to the longer NOTICE under-buys: the reservation cannot
+                # pay for what it promises, so at batch scale the oldest
+                # entries -- carrying the largest reservation -- collapsed to
+                # the tag anyway. On a real 21-file batch that was 11 results
+                # reaching the wire as 8 bytes, a 10,576-char file among them
+                # while a 49,565-char file passed whole.
+                #
+                # The floor is the self-describing notice: a bare tag names
+                # neither the size dropped nor a way back, and reads to the
+                # model like a tool that returned nothing. The tag survives
+                # only as a genuine last resort -- a budget too small to hold
+                # one notice, where the alternative is dropping the result and
+                # unpairing its ``tool_use``.
+                notice = elided_placeholder(len(content))
+                notice_cost = approx_tokens(notice)
+                reserved = min(
+                    older[idx] * notice_cost,
+                    max(tool_result_budget_tokens - used - notice_cost, 0),
+                )
+                share = tool_result_budget_tokens - used - reserved
+                placeholder = truncated_result(content, share) if share > 0 else ""
+                if not placeholder or approx_tokens(placeholder) > share:
+                    placeholder = notice
                 if used + approx_tokens(placeholder) > tool_result_budget_tokens:
                     placeholder = ELIDED_TOOL_RESULT_TAG
                 used += approx_tokens(placeholder)
@@ -145,6 +220,22 @@ def materialize_messages(
         else:
             out_reversed.append(entry)
     return _coalesce_adjacent_users(reversed(out_reversed))
+
+
+def _older_tool_result_counts(messages: Sequence[ModelContextEvent]) -> list[int]:
+    """Return, per index, how many ``ToolResult`` entries precede it.
+
+    The budget walk runs newest-first, so what a result may spend is bounded by
+    what the results BEHIND it still need. This is that count, precomputed once
+    rather than rescanned per entry (the walk is already O(n)).
+    """
+    counts = [0] * len(messages)
+    seen = 0
+    for idx, entry in enumerate(messages):
+        counts[idx] = seen
+        if isinstance(entry, ToolResult):
+            seen += 1
+    return counts
 
 
 def _label_agent_sends(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -12,6 +12,7 @@ import dataclasses
 import json
 import logging
 import os
+import stat
 import threading
 
 import pytest
@@ -26,11 +27,17 @@ from sagent.agent.session_io import (
     PersistentAgentRecord,
     SessionMeta,
     _apply_update_in_place,
+    _att_from_json,
     _entry_from_json,
     _is_barrier_splice,
+    _json_bool,
     _mask_from_json,
     _mask_runs,
+    _optional_float,
+    _optional_int,
     _persisted_refs,
+    _ref_from_json,
+    _tool_result_kind_from_json,
     append_context_repair,
     append_session,
     load_persistent_agents,
@@ -42,6 +49,7 @@ from sagent.agent.session_io import (
     unpersisted_session_error,
 )
 from sagent.agent.state import ReadCacheEntry, ToolState
+from sagent.sessions import new_session_dir
 from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
@@ -993,6 +1001,864 @@ def test_load_session_repairs_orphan_tool_result(tmp_path: Path) -> None:
     assert users[0].text == f"{user1.text}\n\n{user2.text}"
 
 
+def test_appending_after_a_torn_tail_does_not_destroy_the_next_record(
+    tmp_path: Path,
+) -> None:
+    """A crash truncates one record; it must not also eat the recovery.
+
+    ``_append_lines`` opens ``O_APPEND`` and writes, so a file whose last line
+    lost its newline gets the next record concatenated onto it. Both lines then
+    fail to parse and BOTH are skipped -- the crash costs the record it
+    interrupted plus the first one written after recovery, which is the one
+    saying what the user did next.
+    """
+    session_file = tmp_path / "session.jsonl"
+    append_session(
+        session_file,
+        meta=SessionMeta(session_id="torn", model_id="m").serialize(),
+    )
+    with session_file.open("a", encoding="utf-8") as handle:
+        _ = handle.write('{"kind": "history", "ref": {"session_id": "torn", "ord')
+
+    append_session(
+        session_file,
+        tape_delta=[
+            ReferrableTapeEvent(
+                ref=TapeRef(session_id="torn", ordinal=1),
+                event=UserMessage(text="survivor"),
+            ),
+        ],
+    )
+
+    loaded = load_session(tmp_path)
+    assert loaded is not None
+    texts = [getattr(m, "text", "") for m in resolve_context(loaded[1]).messages]
+    assert "survivor" in texts, f"record after a torn tail was lost; got {texts}"
+
+
+def test_load_preserves_append_order_across_sessions(tmp_path: Path) -> None:
+    """Tape order is append order; a session-id sort is not a tie-break.
+
+    The resolver anchors a splice against the records emitted BEFORE it, so
+    ordering by ``session_id`` first hoists one session's whole run ahead of
+    another's and an anchor that has not been emitted yet falls into HEAD --
+    silently reversing the conversation. Resumed and forked tapes carry two
+    session ids by design, and one real session on disk reorders this way.
+    """
+    session_file = tmp_path / "session.jsonl"
+    b0 = TapeRef(session_id="B", ordinal=0)
+    append_session(
+        session_file,
+        meta=SessionMeta(session_id="A", model_id="m").serialize(),
+        tape_delta=[
+            ReferrableTapeEvent(ref=b0, event=UserMessage(text="asked")),
+            ContextSplice(
+                ref=TapeRef(session_id="A", ordinal=1),
+                mask=(),
+                insert_after=b0,
+                payload=(AssistantMessage(text="answered"),),
+                strategy="probe",
+            ),
+        ],
+    )
+
+    loaded = load_session(tmp_path)
+    assert loaded is not None
+    texts = [getattr(m, "text", "") for m in resolve_context(loaded[1]).messages]
+    assert texts == ["asked", "answered"], f"load reordered the tape; got {texts}"
+
+
+def test_a_json_string_is_not_a_persisted_barrier_flag(tmp_path: Path) -> None:
+    """``bool("false")`` is True, so a typed-wrong record inverted its flag.
+
+    A legacy override carrying ``"barrier": "false"`` was read as a barrier
+    and masked every message ahead of it -- the conversation disappeared
+    because some writer stringified a boolean. Only a real JSON boolean sets a
+    persisted flag; anything else is malformed and takes the default.
+    """
+    session_file = tmp_path / "session.jsonl"
+    records: tuple[Mapping[str, object], ...] = (
+        {"kind": "meta", "session_id": "flag", "model_id": "m"},
+        {
+            "kind": "history",
+            "ref": {"session_id": "flag", "ordinal": 0},
+            "type": "user",
+            "text": "keep me",
+        },
+        {
+            "kind": "context_override",
+            "ref": {"session_id": "flag", "ordinal": 1},
+            "suppresses": [],
+            "inject_after": None,
+            "barrier": "false",
+            "payload": [],
+        },
+    )
+    session_file.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_session(tmp_path)
+    assert loaded is not None
+    texts = [getattr(m, "text", "") for m in resolve_context(loaded[1]).messages]
+    assert texts == ["keep me"], f"a stringified false masked history; got {texts}"
+
+
+def test_a_boolean_is_not_a_number_at_the_disk_boundary() -> None:
+    """``isinstance(True, int)`` holds, so a JSON ``true`` became a real cap.
+
+    A persisted ``max_tool_call_rounds: true`` decoded to ``True``, which is
+    ``1`` everywhere downstream -- a one-round budget the operator never set;
+    ``max_budget_usd: true`` became a $1 ceiling. ``_ref_from_json`` already
+    rejects this exact trap, so the sibling decoders disagreed about the same
+    wire value at the same boundary.
+    """
+    assert _optional_int(True) is None
+    assert _optional_float(True) is None
+    assert _optional_int(3) == 3
+    assert _optional_float(2.5) == 2.5
+
+
+def test_an_attachment_descriptor_is_matched_exactly_not_by_prefix() -> None:
+    """``application/pdf`` is a complete type, not the head of a family.
+
+    Prefix matching admitted ``application/pdf-malware`` and
+    ``application/jsonevil`` -- descriptors the allowlist exists to exclude --
+    while the genuine families (``image/``, ``text/``) do end in a separator
+    and remain prefixes.
+    """
+    assert _att_from_json({"mime": "application/pdf-malware", "data": "aA=="}) is None
+    assert _att_from_json({"mime": "application/jsonevil", "data": "aA=="}) is None
+    assert _att_from_json({"mime": "application/pdf", "data": "aA=="}) is not None
+    assert _att_from_json({"mime": "image/png", "data": "aA=="}) is not None
+
+
+def test_an_unknown_result_kind_infers_from_content_not_final() -> None:
+    """An unreadable lifecycle must not default to "this is the real answer".
+
+    ``FINAL`` is the forward-deliverable, terminal state, so a typo in the
+    persisted enum promoted a still-pending stub to a real result -- the
+    ``[detached]`` placeholder would be forwarded to the model as output. The
+    content-inference path that already exists for pre-discriminator records
+    is the safe reading; use it whenever the field cannot be honoured.
+    """
+    assert (
+        _tool_result_kind_from_json("typo", DETACHED_PLACEHOLDER)
+        is ToolResultKind.PENDING
+    )
+    assert (
+        _tool_result_kind_from_json("typo", CANCELLED_PLACEHOLDER)
+        is ToolResultKind.CANCELLED
+    )
+    assert _tool_result_kind_from_json("pending", "x") is ToolResultKind.PENDING
+
+
+def test_a_tool_call_without_an_id_or_name_is_dropped() -> None:
+    """A call the runtime cannot key or dispatch is not a call.
+
+    Missing fields decoded to ``""``, and the runtime keys ``running_tools``,
+    the cohort, and every pairing map by ``call_id`` -- so a single empty id
+    is dispatchable under ``""`` and collides with the next one. Drop the
+    malformed call at the boundary; the surrounding message still loads.
+    """
+    record: Mapping[str, object] = {
+        "type": "assistant",
+        "text": "hi",
+        "tool_calls": [
+            {"id": "", "name": "Bash", "args": cast("Mapping[str, object]", {})},
+            {"id": "t1", "name": "", "args": cast("Mapping[str, object]", {})},
+            {"id": "t2", "name": "Bash", "args": cast("Mapping[str, object]", {})},
+        ],
+    }
+    entry = _entry_from_json(record)
+    assert isinstance(entry, AssistantMessage)
+    assert [tc.id for tc in entry.tool_calls] == ["t2"]
+
+
+def test_a_malformed_base64_attachment_is_dropped() -> None:
+    """The drop path must actually fire for garbage, not silently empty it.
+
+    ``b64decode`` without ``validate=True`` discards non-alphabet bytes rather
+    than raising, so ``"!!!!"`` decodes to ``b""`` and the ``except`` below it
+    never runs. An attachment that survives as zero bytes is worse than one
+    that is dropped: it reaches the provider as a real, empty image.
+    """
+    assert _att_from_json({"mime": "image/png", "data": "!!!!"}) is None, (
+        "malformed base64 must be dropped, not decoded to empty bytes"
+    )
+
+
+def test_a_tape_ref_rejects_a_non_position_ordinal() -> None:
+    """``ordinal`` is a 0-based position, and the disk is a trust boundary.
+
+    ``isinstance(True, int)`` holds, so a JSON ``true`` became ordinal 1 and
+    collided with a real record; a negative ordinal is unmaskable, since
+    ``MaskRange`` rejects ``lo < 0``. The sibling types disagreed about the
+    same field at the same boundary.
+    """
+    assert _ref_from_json({"session_id": "s", "ordinal": True}) is None
+    assert _ref_from_json({"session_id": "s", "ordinal": -1}) is None
+    assert _ref_from_json({"session_id": "s", "ordinal": 3}) == TapeRef(
+        session_id="s", ordinal=3
+    )
+
+
+def test_a_relocated_record_is_not_written_back_to_disk(tmp_path: Path) -> None:
+    """Resume must not re-append records the load merely relocated.
+
+    The persistence observer decides what is new by comparing tape refs
+    against the refs it read off disk, and a record relocated by
+    ``_renumber_duplicate_refs`` carries a ref that appears in neither -- so
+    it would look new and be appended again, recreating on every save the
+    duplicate the load had just resolved. ``resume``'s rebaseline is what
+    prevents that, by seeding the cursor from the POST-load tape rather than
+    from the file. Pinned here because the relocation and the rebaseline are
+    in different modules and nothing else ties them together.
+    """
+    session_file = tmp_path / "session.jsonl"
+    collision = TapeRef(session_id="respawn", ordinal=0)
+    append_session(
+        session_file,
+        meta=SessionMeta(session_id="respawn", model_id="m").serialize(),
+        tape_delta=[
+            ReferrableTapeEvent(ref=collision, event=UserMessage(text="first")),
+            ReferrableTapeEvent(ref=collision, event=UserMessage(text="second")),
+        ],
+    )
+    loaded = load_session(tmp_path)
+    assert loaded is not None
+    meta, tape, _state = loaded
+
+    agent = Agent(model=_NoopModel(), tools=[], session_dir=tmp_path)
+    agent.resume(meta, tape, ToolState())
+    agent.runtime.publish(SaveSession())
+
+    reloaded = load_session(tmp_path)
+    assert reloaded is not None
+    assert len(reloaded[1]) == len(tape), (
+        f"resume re-appended {len(reloaded[1]) - len(tape)} record(s)"
+    )
+
+
+def test_one_malformed_record_does_not_abort_the_resume(tmp_path: Path) -> None:
+    """A single bad record costs that record, not the whole conversation.
+
+    ``_entry_from_json`` builds an ``AssistantMessage`` directly, and its
+    ``__post_init__`` raises on a duplicate ``tool_calls`` id. ``load_session``
+    catches only ``JSONDecodeError`` and ``OSError``, so a semantically
+    malformed line propagated out and the session became unresumable -- every
+    other record in the file lost with it. The loader's whole posture is
+    legacy repair; it must degrade per record.
+    """
+    session_file = tmp_path / "session.jsonl"
+    records: tuple[Mapping[str, object], ...] = (
+        {"kind": "meta", "session_id": "dup", "model_id": "m"},
+        {
+            "kind": "history",
+            "ref": {"session_id": "dup", "ordinal": 0},
+            "type": "user",
+            "text": "keep me",
+        },
+        {
+            "kind": "history",
+            "ref": {"session_id": "dup", "ordinal": 1},
+            "type": "assistant",
+            "text": "",
+            "tool_calls": [
+                {"id": "t1", "name": "Bash", "args": cast("Mapping[str, object]", {})},
+                {"id": "t1", "name": "Bash", "args": cast("Mapping[str, object]", {})},
+            ],
+        },
+        {
+            "kind": "history",
+            "ref": {"session_id": "dup", "ordinal": 2},
+            "type": "user",
+            "text": "and me",
+        },
+    )
+    session_file.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_session(tmp_path)
+    assert loaded is not None, "one malformed record made the session unloadable"
+    texts = [getattr(m, "text", "") for m in resolve_context(loaded[1]).messages]
+    assert "keep me" in " ".join(texts)
+    assert "and me" in " ".join(texts)
+
+
+def test_a_legacy_clear_masks_the_highest_ordinal_not_the_last_appended(
+    tmp_path: Path,
+) -> None:
+    """A clear wipes the whole prefix, so it must mask every earlier ordinal.
+
+    The mask ended at ``tape[-1].ref.ordinal`` -- the last record READ, taken
+    before the load sorts by ordinal. A file whose records are out of order
+    therefore left the highest-ordinal record visible past a clear.
+    """
+    session_file = tmp_path / "session.jsonl"
+    records: tuple[Mapping[str, object], ...] = (
+        {"kind": "meta", "session_id": "s", "model_id": "m"},
+        {
+            "kind": "history",
+            "ref": {"session_id": "s", "ordinal": 5},
+            "type": "user",
+            "text": "high-ordinal",
+        },
+        {
+            "kind": "history",
+            "ref": {"session_id": "s", "ordinal": 1},
+            "type": "user",
+            "text": "low-ordinal",
+        },
+        {"kind": "clear"},
+    )
+    session_file.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_session(tmp_path)
+    assert loaded is not None
+    texts = [getattr(m, "text", "") for m in resolve_context(loaded[1]).messages]
+    assert texts == [], f"records survived a legacy clear; got {texts}"
+
+
+def test_a_legacy_clear_masks_every_session_on_the_tape(tmp_path: Path) -> None:
+    """A clear wipes the view, and the view spans every session on the tape.
+
+    The mask was built in the clear's own ``session_id`` only, so on a resumed
+    or forked tape -- the shape ``_sort_tape_by_ordinal`` exists for -- records
+    from the other session stayed visible after the user asked for a wipe.
+    """
+    session_file = tmp_path / "session.jsonl"
+    records: tuple[Mapping[str, object], ...] = (
+        {"kind": "meta", "session_id": "B", "model_id": "m"},
+        {
+            "kind": "history",
+            "ref": {"session_id": "A", "ordinal": 0},
+            "type": "user",
+            "text": "from-session-A",
+        },
+        {
+            "kind": "history",
+            "ref": {"session_id": "B", "ordinal": 1},
+            "type": "user",
+            "text": "from-session-B",
+        },
+        {"kind": "context_clear", "ref": {"session_id": "B", "ordinal": 2}},
+    )
+    session_file.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_session(tmp_path)
+    assert loaded is not None
+    texts = [getattr(m, "text", "") for m in resolve_context(loaded[1]).messages]
+    assert texts == [], f"a foreign session survived a legacy clear; got {texts}"
+
+
+def test_a_relocated_record_does_not_land_inside_an_existing_mask(
+    tmp_path: Path,
+) -> None:
+    """Relocation must not move a record into a mask that never covered it.
+
+    A duplicate moves past the tape's high-water mark, but a mask can already
+    claim ordinals ABOVE every record -- a barrier written when the tape was
+    longer, or one whose range was widened. The relocated record lands inside
+    it and disappears, even though it was written AFTER that barrier and so
+    was never something that barrier meant to hide.
+    """
+    session_file = tmp_path / "session.jsonl"
+    sid = "wide"
+    records: tuple[Mapping[str, object], ...] = (
+        {"kind": "meta", "session_id": sid, "model_id": "m"},
+        {
+            "kind": "history",
+            "ref": {"session_id": sid, "ordinal": 0},
+            "type": "user",
+            "text": "a",
+        },
+        {
+            "kind": "context_splice",
+            "ref": {"session_id": sid, "ordinal": 1},
+            "mask": [
+                [
+                    {"session_id": sid, "ordinal": 0},
+                    {"session_id": sid, "ordinal": 99},
+                ]
+            ],
+            "insert_after": None,
+            "payload": [{"type": "user", "text": "barrier"}],
+            "strategy": "barrier",
+        },
+        {
+            "kind": "history",
+            "ref": {"session_id": sid, "ordinal": 0},
+            "type": "user",
+            "text": "later-real",
+        },
+    )
+    session_file.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_session(tmp_path)
+    assert loaded is not None
+    texts = [getattr(m, "text", "") for m in resolve_context(loaded[1]).messages]
+    assert "later-real" in texts, f"relocation hid a post-barrier record; {texts}"
+
+
+def test_a_carried_mask_does_not_overlap_the_range_it_extends(
+    tmp_path: Path,
+) -> None:
+    """Carrying a mask onto a moved record must not duplicate coverage.
+
+    The carried singleton is appended to the splice's existing ranges without
+    merging, and ``ContextSplice`` rejects overlapping ranges. The raise comes
+    out of ``dataclasses.replace`` AFTER the read loop, outside the per-record
+    catch -- so one duplicated ref made the whole session unloadable.
+    """
+    session_file = tmp_path / "session.jsonl"
+    sid = "overlap"
+    records: tuple[Mapping[str, object], ...] = (
+        {"kind": "meta", "session_id": sid, "model_id": "m"},
+        {
+            "kind": "history",
+            "ref": {"session_id": sid, "ordinal": 0},
+            "type": "user",
+            "text": "a",
+        },
+        {
+            "kind": "history",
+            "ref": {"session_id": sid, "ordinal": 0},
+            "type": "user",
+            "text": "a-dup",
+        },
+        {
+            "kind": "context_splice",
+            "ref": {"session_id": sid, "ordinal": 1},
+            "mask": [
+                [
+                    {"session_id": sid, "ordinal": 0},
+                    {"session_id": sid, "ordinal": 10},
+                ]
+            ],
+            "insert_after": None,
+            "payload": [],
+            "strategy": "wide",
+        },
+    )
+    session_file.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_session(tmp_path)
+    assert loaded is not None, "an overlapping carried mask made the session unloadable"
+
+
+def test_a_duplicated_dead_splice_is_not_resurrected(tmp_path: Path) -> None:
+    """Re-numbering must not move a splice out from under what killed it.
+
+    A splice is dead iff its ref falls inside an alive splice's mask, so
+    moving that ref past the high-water mark revives the edit and the content
+    it hid disappears again. A re-appended edit is not a second edit: drop it.
+    """
+    session_file = tmp_path / "session.jsonl"
+    sid = "resurrect"
+    poison = TapeRef(session_id=sid, ordinal=1)
+    append_session(
+        session_file,
+        meta=SessionMeta(session_id=sid, model_id="m").serialize(),
+        tape_delta=[
+            ReferrableTapeEvent(
+                ref=TapeRef(session_id=sid, ordinal=0), event=UserMessage(text="real")
+            ),
+            ContextSplice(
+                ref=poison,
+                mask=(MaskRange(session_id=sid, lo=0, hi=0),),
+                insert_after=None,
+                payload=(UserMessage(text="poison"),),
+                strategy="poison",
+            ),
+            ContextSplice(
+                ref=TapeRef(session_id=sid, ordinal=2),
+                mask=(MaskRange(session_id=sid, lo=1, hi=1),),
+                insert_after=None,
+                payload=(),
+                strategy="killer",
+            ),
+            ContextSplice.replay(
+                ref=poison,
+                mask=(MaskRange(session_id=sid, lo=0, hi=0),),
+                insert_after=None,
+                payload=(UserMessage(text="poison-dup"),),
+                strategy="poison",
+            ),
+        ],
+    )
+
+    loaded = load_session(tmp_path)
+    assert loaded is not None
+    texts = [getattr(m, "text", "") for m in resolve_context(loaded[1]).messages]
+    assert texts == ["real"], f"dead splice resurrected; got {texts}"
+
+
+def test_a_second_writers_splice_is_relocated_not_dropped(tmp_path: Path) -> None:
+    """A live duplicate splice is new content, not a re-appended edit.
+
+    Two agents resumed from one session directory both mint from an in-memory
+    ordinal cursor seeded at load, so each claims the same next position. When
+    the second one's record is a ``ContextSplice`` -- which it is for every
+    user-message coalesce -- dropping it as a re-append discards the payload
+    outright, and the user's message is gone with nothing on disk to recover
+    it.
+
+    The discriminator is the POSITION's fate, matching the rule this function
+    already applies to a plain record: a duplicate landing on a ref some alive
+    splice masks is dead, and relocating it would revive an edit (see
+    ``test_a_duplicated_dead_splice_is_not_resurrected``). A duplicate landing
+    on a live ref is a second writer's real work and must survive.
+    """
+    session_file = tmp_path / "session.jsonl"
+    sid = "concurrent"
+    collision = TapeRef(session_id=sid, ordinal=1)
+    append_session(
+        session_file,
+        meta=SessionMeta(session_id=sid, model_id="m").serialize(),
+        tape_delta=[
+            ReferrableTapeEvent(
+                ref=TapeRef(session_id=sid, ordinal=0),
+                event=UserMessage(text="shared-history"),
+            ),
+            ReferrableTapeEvent(ref=collision, event=UserMessage(text="said-to-A")),
+            ContextSplice.replay(
+                ref=collision,
+                mask=(),
+                insert_after=None,
+                payload=(UserMessage(text="said-to-B"),),
+                strategy="user_coalesce",
+            ),
+        ],
+    )
+
+    loaded = load_session(tmp_path)
+    assert loaded is not None
+    texts = [getattr(m, "text", "") for m in resolve_context(loaded[1]).messages]
+    assert "said-to-B" in texts, f"second writer's message was dropped; got {texts}"
+    assert "said-to-A" in texts, f"first writer's message was dropped; got {texts}"
+
+
+def test_a_duplicate_written_before_a_barrier_stays_masked(tmp_path: Path) -> None:
+    """A moved record keeps the fate of the position it was written at.
+
+    The barrier masked that ordinal, and this claimant already existed when
+    the barrier landed -- so the barrier meant to hide it. Re-numbering it to
+    the tail without carrying that mask makes it reappear alongside the
+    summary that replaced it.
+    """
+    session_file = tmp_path / "session.jsonl"
+    sid = "premask"
+    collision = TapeRef(session_id=sid, ordinal=0)
+    append_session(
+        session_file,
+        meta=SessionMeta(session_id=sid, model_id="m").serialize(),
+        tape_delta=[
+            ReferrableTapeEvent(ref=collision, event=UserMessage(text="a")),
+            ReferrableTapeEvent(ref=collision, event=UserMessage(text="a-dup")),
+            ContextSplice(
+                ref=TapeRef(session_id=sid, ordinal=2),
+                mask=(MaskRange(session_id=sid, lo=0, hi=1),),
+                insert_after=None,
+                payload=(UserMessage(text="barrier"),),
+                strategy="barrier",
+            ),
+        ],
+    )
+
+    loaded = load_session(tmp_path)
+    assert loaded is not None
+    texts = [getattr(m, "text", "") for m in resolve_context(loaded[1]).messages]
+    assert texts == ["barrier"], f"pre-barrier duplicate escaped its mask; {texts}"
+
+
+def test_a_duplicate_written_after_a_barrier_survives_it(tmp_path: Path) -> None:
+    """A barrier cannot mask a record that did not exist when it was written.
+
+    The mirror of the pre-barrier case, and why one policy cannot serve both:
+    this claimant was appended by a second writer AFTER the barrier, so
+    carrying the barrier's mask onto it would delete a message the user
+    actually received.
+    """
+    session_file = tmp_path / "session.jsonl"
+    sid = "postmask"
+    collision = TapeRef(session_id=sid, ordinal=0)
+    append_session(
+        session_file,
+        meta=SessionMeta(session_id=sid, model_id="m").serialize(),
+        tape_delta=[
+            ReferrableTapeEvent(ref=collision, event=UserMessage(text="a")),
+            ContextSplice(
+                ref=TapeRef(session_id=sid, ordinal=1),
+                mask=(MaskRange(session_id=sid, lo=0, hi=0),),
+                insert_after=None,
+                payload=(UserMessage(text="barrier"),),
+                strategy="barrier",
+            ),
+            ReferrableTapeEvent(ref=collision, event=UserMessage(text="later-real")),
+        ],
+    )
+
+    loaded = load_session(tmp_path)
+    assert loaded is not None
+    texts = [getattr(m, "text", "") for m in resolve_context(loaded[1]).messages]
+    assert texts == ["barrier", "later-real"], f"post-barrier record lost; {texts}"
+
+
+def test_a_corrupt_session_backup_is_not_world_readable(tmp_path: Path) -> None:
+    """REV6 PS2-005: the forensic copy holds everything the original does.
+
+    ``write_bytes`` creates under the umask, so on a default ``022`` host the
+    ``.corrupt-*`` sibling landed at ``0644`` -- the backup publishing the
+    prompts, tool output, and secrets that the live transcript protects.
+    """
+    original = os.umask(0o022)
+    try:
+        session_file = tmp_path / "session.jsonl"
+        _ = session_file.write_text("{not json\n", encoding="utf-8")
+        session_file.chmod(0o600)
+
+        session_io._preserve_corrupt_session(session_file)
+
+        backup = next(tmp_path.glob("session.jsonl.corrupt-*"))
+        mode = stat.S_IMODE(backup.stat().st_mode)
+    finally:
+        _ = os.umask(original)
+
+    assert not mode & 0o077, f"corrupt-session backup is 0o{mode:o}"
+
+
+def test_a_caller_cannot_retype_a_record_via_its_payload(tmp_path: Path) -> None:
+    """REV6 PS2-007: the ``kind`` discriminator belongs to the API, not the data.
+
+    ``{"kind": "meta", **meta}`` let a ``kind`` key inside ``meta`` win, so a
+    metadata blob could be written tagged ``history`` -- the loader would then
+    treat it as a message and the session's metadata would vanish silently.
+    """
+    session_file = tmp_path / "session.jsonl"
+
+    append_session(
+        session_file,
+        meta={"kind": "history", "session_id": "s", "type": "user", "text": "hijack"},
+        tool_state_snapshot={"kind": "meta", "bash_cwd": "/x"},
+    )
+
+    kinds = [
+        json.loads(line)["kind"]
+        for line in session_file.read_text(encoding="utf-8").splitlines()
+    ]
+    assert kinds == ["meta", "tool_state"], f"caller data retyped a record: {kinds}"
+
+
+def test_a_persisted_true_is_not_a_tool_depth(tmp_path: Path) -> None:
+    """REV6 PS2-009: ``isinstance(True, int)`` holds, so ``true`` became depth 1.
+
+    Depth caps ``AgentSpawn`` nesting, so a bool decoding to 1 is a spawn
+    budget the operator never set. The sibling decoders already reject this
+    exact trap at the same boundary.
+    """
+    del tmp_path
+    state = ToolState()
+    default = state.depth
+
+    restore_tool_state(state, {"depth": True})
+
+    assert state.depth == default, f"a JSON bool became depth {state.depth!r}"
+    restore_tool_state(state, {"depth": 3})
+    assert state.depth == 3, "a real integer depth must still restore"
+
+
+def test_a_transcript_is_not_readable_by_other_users(tmp_path: Path) -> None:
+    """A transcript is private: prompts, tool output, file contents, secrets.
+
+    ``_append_lines`` created it ``0o644`` and the parent directory took the
+    umask default, so on any shared or multi-account host every local user
+    could read whole conversations. Measured on one developer's machine: 400
+    of 400 sampled transcripts were group- and world-readable.
+    """
+    original = os.umask(0)
+    try:
+        session_dir = tmp_path / "s"
+        session_file = session_dir / "session.jsonl"
+        append_session(
+            session_file,
+            meta=SessionMeta(session_id="private", model_id="m").serialize(),
+        )
+        file_mode = stat.S_IMODE(session_file.stat().st_mode)
+        dir_mode = stat.S_IMODE(session_dir.stat().st_mode)
+    finally:
+        _ = os.umask(original)
+
+    assert not file_mode & 0o077, f"transcript is 0o{file_mode:o}"
+    assert not dir_mode & 0o077, f"session dir is 0o{dir_mode:o}"
+
+
+def test_an_already_permissive_transcript_is_tightened_on_append(
+    tmp_path: Path,
+) -> None:
+    """Every transcript on disk predates the mode arguments, so they miss it.
+
+    ``mkdir(mode=...)`` is ignored when the directory exists and
+    ``os.open(..., 0o600)`` applies only when the file is created, so the modes
+    added for new sessions never reach the sessions that already exist -- which
+    is all of them. Measured: 400 of 400 sampled transcripts are group- and
+    other-readable, under ``0o777`` directories.
+    """
+    original = os.umask(0)
+    try:
+        session_dir = tmp_path / "s"
+        session_dir.mkdir(mode=0o777)
+        session_file = session_dir / "session.jsonl"
+        _ = session_file.write_text("", encoding="utf-8")
+        session_file.chmod(0o644)
+
+        append_session(
+            session_file,
+            meta=SessionMeta(session_id="legacy", model_id="m").serialize(),
+        )
+
+        file_mode = stat.S_IMODE(session_file.stat().st_mode)
+        dir_mode = stat.S_IMODE(session_dir.stat().st_mode)
+    finally:
+        _ = os.umask(original)
+
+    assert not file_mode & 0o077, f"pre-existing transcript is 0o{file_mode:o}"
+    assert not dir_mode & 0o077, f"pre-existing session dir is 0o{dir_mode:o}"
+
+
+def test_a_short_write_cannot_interleave_another_append(tmp_path: Path) -> None:
+    """``O_APPEND`` makes one ``os.write`` atomic -- not a loop of them.
+
+    The batch is written by a retry loop, so a short write leaves half a JSON
+    line on disk with the file offset released; another writer appending in
+    that gap lands its records between the halves and the spliced line never
+    parses again. The tape is the only copy of the conversation, so an
+    unparseable record is lost history.
+    """
+    session_file = tmp_path / "session.jsonl"
+    real_write = os.write
+    halved: list[bool] = []
+    intruder_done = threading.Event()
+
+    def intruder() -> None:
+        with patch.object(os, "write", real_write):
+            append_session(
+                session_file,
+                tape_delta=[
+                    ReferrableTapeEvent(
+                        ref=TapeRef(session_id="other", ordinal=0),
+                        event=UserMessage(text="from the other writer"),
+                    ),
+                ],
+            )
+        intruder_done.set()
+
+    threads: list[threading.Thread] = []
+
+    def short_write(fd: int, data: object) -> int:
+        buffer = cast(memoryview, data)
+        if halved or len(buffer) < 2:
+            return real_write(fd, buffer)
+        halved.append(True)
+        written = real_write(fd, buffer[: len(buffer) // 2])
+        thread = threading.Thread(target=intruder)
+        thread.start()
+        threads.append(thread)
+        # Long enough for an unguarded intruder to land its records in the gap;
+        # a guarded one is still blocked when this returns.
+        _ = intruder_done.wait(0.05)
+        return written
+
+    with patch.object(os, "write", short_write):
+        append_session(
+            session_file,
+            tape_delta=[
+                ReferrableTapeEvent(
+                    ref=TapeRef(session_id="main", ordinal=0),
+                    event=UserMessage(text="y" * 4096),
+                ),
+            ],
+        )
+    for thread in threads:
+        thread.join(5.0)
+
+    assert halved, "the short write never fired; the test proves nothing"
+    for line in session_file.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        _ = json.loads(line)
+
+
+def test_new_session_dir_is_not_readable_by_other_users(tmp_path: Path) -> None:
+    """The directory is created before any append, so it needs its own mode.
+
+    ``new_session_dir`` is what mints a session directory; ``append_session``
+    only ever sees it as pre-existing. Under a default umask the listing --
+    which leaks nothing but the session ids -- was world-readable, and the
+    directory stayed ``0o777`` for every file written into it afterwards.
+    """
+    original = os.umask(0)
+    try:
+        created = new_session_dir(tmp_path / "proj", projects_dir=tmp_path / "root")
+        mode = stat.S_IMODE(created.stat().st_mode)
+        parent_mode = stat.S_IMODE(created.parent.stat().st_mode)
+    finally:
+        _ = os.umask(original)
+
+    assert not mode & 0o077, f"session dir is 0o{mode:o}"
+    assert not parent_mode & 0o077, f"project dir is 0o{parent_mode:o}"
+
+
+def test_load_session_keeps_both_records_when_a_ref_collides(
+    tmp_path: Path,
+) -> None:
+    """A duplicated ref must be re-numbered, not resolved as one record twice.
+
+    Two writers minting the same ordinal is a real shape -- three sessions on
+    disk carry it. The resolver now refuses a duplicate rather than silently
+    rendering the later record twice, so the loader has to reconcile it: the
+    file is the only copy of the conversation, and dropping either record (or
+    raising) loses history the user cannot get back.
+    """
+    session_file = tmp_path / "session.jsonl"
+    meta = SessionMeta(session_id="collide", model_id="m", provider="P", auth="env")
+    collision = TapeRef(session_id="collide", ordinal=0)
+    append_session(
+        session_file,
+        meta=meta.serialize(),
+        tape_delta=[
+            ReferrableTapeEvent(ref=collision, event=UserMessage(text="first")),
+            ReferrableTapeEvent(ref=collision, event=UserMessage(text="second")),
+        ],
+    )
+
+    loaded = load_session(tmp_path)
+    assert loaded is not None
+    _, tape, _ = loaded
+
+    assert len({record.ref for record in tape}) == len(tape), (
+        f"duplicate refs survived load; got {[r.ref for r in tape]}"
+    )
+    texts = [getattr(m, "text", "") for m in resolve_context(tape).messages]
+    assert "first" in " ".join(texts), f"earlier record dropped; got {texts}"
+    assert "second" in " ".join(texts), f"later record dropped; got {texts}"
+
+
 def test_load_session_repairs_orphan_tool_result_from_splice_payload(
     tmp_path: Path,
 ) -> None:
@@ -1052,7 +1918,64 @@ def test_load_session_repairs_orphan_tool_result_from_splice_payload(
         insert_after=None,
         payload=(UserMessage(text="[next summary]"),),
         strategy="summary",
+        # A summary replaces what it absorbs; the carry guard compares text,
+        # so the producer states the intent instead of it being inferred.
+        discards_content=True,
     )
+
+
+def test_resumed_dangling_session_survives_the_next_user_message(
+    tmp_path: Path,
+) -> None:
+    """A resumed mid-tool session must not lose its history to one message.
+
+    The incident: ``load_session`` repairs an interrupted tool turn by
+    appending a barrier splice that masks the whole tape and carries the
+    conversation as its payload. The user's next message coalesces onto that
+    payload's user-side tail, absorbing the barrier's mask -- which kills the
+    barrier and, unless its payload is carried forward, deletes every message
+    the session had. Presents as a resume that "worked" and then remembered
+    nothing on the first reply.
+    """
+    session_file = tmp_path / "session.jsonl"
+    meta = SessionMeta(session_id="resumed", model_id="m", provider="P", auth="env")
+    refs = [TapeRef(session_id="resumed", ordinal=i) for i in range(4)]
+    append_session(
+        session_file,
+        meta=meta.serialize(),
+        tape_delta=[
+            ReferrableTapeEvent(ref=refs[0], event=UserMessage(text="do the thing")),
+            ReferrableTapeEvent(ref=refs[1], event=AssistantMessage(text="working")),
+            # Interrupted mid-tool: the tool_use persisted, its result did not.
+            ReferrableTapeEvent(
+                ref=refs[2],
+                event=AssistantMessage(
+                    tool_calls=(ToolCall(id="call_1", name="Bash", args={}),)
+                ),
+            ),
+            ReferrableTapeEvent(ref=refs[3], event=UserMessage(text="still there?")),
+        ],
+    )
+
+    loaded = load_session(tmp_path)
+    assert loaded is not None
+    _, tape, _ = loaded
+    runtime = agent_runtime.AgentRuntime(model=_RuntimeModel(), session_id="resumed")
+    runtime.replay_tape(tape)
+    before = len(runtime.context().messages)
+    assert before > 1, "fixture did not resume a multi-message conversation"
+
+    runtime._append_or_coalesce_user(UserMessage(text="next"))
+
+    messages = runtime.context().messages
+    assert len(messages) == before, (
+        f"resume lost history: {before} messages before the reply, "
+        f"{len(messages)} after -- {[getattr(m, 'text', '') for m in messages]}"
+    )
+    assert any(
+        isinstance(m, UserMessage) and "do the thing" in m.text for m in messages
+    ), "the session's first user message is gone"
+    validate_context(messages)
 
 
 def test_append_session_writes_meta_then_tape_delta(tmp_path: Path) -> None:
@@ -1370,6 +2293,54 @@ def test_persistent_agent_legacy_notify_on_asleep_defaults_true(tmp_path: Path) 
     assert records[0].account is None
 
 
+def test_json_bool_default_is_reachable_from_every_caller() -> None:
+    """A decoder with a ``default=`` no caller passes has two shapes on disk.
+
+    ``notify_on_asleep`` hand-rolled the same isinstance-else-default decode
+    while ``_json_bool``'s own ``default=`` went unused across six call sites.
+    Two spellings of one decode is how they drift: the wire values must agree.
+    """
+    assert _json_bool("false", default=True) is True
+    assert _json_bool(False, default=True) is False
+    assert _json_bool(None, default=True) is True
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(True, True), (False, False), ("false", True), (1, True), (None, True)],
+)
+def test_persistent_agent_notify_on_asleep_decodes_through_json_bool(
+    tmp_path: Path, raw: object, expected: bool
+) -> None:
+    """Non-bool ``notify_on_asleep`` takes the default; a JSON ``false`` does not.
+
+    The field is the parent's idle-ping switch: a truthy-string decode would
+    turn a persisted ``"false"`` into notifications the operator disabled.
+    """
+    _write_jsonl(
+        tmp_path / "session.jsonl",
+        {
+            "kind": "persistent_agent",
+            "label": "fix-tools",
+            "run_id": "run-1",
+            "session_dir": str(tmp_path / "children" / "run-1"),
+            "state": "running",
+            "provider": "OpenAISubscription",
+            "auth": "credentials",
+            "account": None,
+            "model_id": "gpt-5.5",
+            "tools": ["Read"],
+            "system": "system text",
+            "notify_on_asleep": raw,
+        },
+    )
+
+    records = load_persistent_agents(tmp_path)
+
+    assert len(records) == 1
+    assert records[0].notify_on_asleep is expected
+
+
 def test_persistent_agent_legacy_provider_args_maps_known_keys(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -1559,7 +2530,13 @@ def test_repair_dangling_tape_handles_legacy_consecutive_assistants(
                 "ref": {"session_id": "abc", "ordinal": 2},
                 "type": "assistant",
                 "text": "second with orphan call",
-                "tool_calls": [{"id": "call_x", "name": "echo", "args": {}}],
+                "tool_calls": [
+                    {
+                        "id": "call_x",
+                        "name": "echo",
+                        "args": cast("Mapping[str, object]", {}),
+                    }
+                ],
             },
         ),
     )
@@ -1593,7 +2570,13 @@ def test_repair_dangling_tape_handles_legacy_duplicate_tool_call_id(
                 "kind": "history",
                 "ref": {"session_id": "abc", "ordinal": 0},
                 "type": "assistant",
-                "tool_calls": [{"id": "t1", "name": "echo", "args": {}}],
+                "tool_calls": [
+                    {
+                        "id": "t1",
+                        "name": "echo",
+                        "args": cast("Mapping[str, object]", {}),
+                    }
+                ],
             },
         ),
         cast(
@@ -1602,7 +2585,13 @@ def test_repair_dangling_tape_handles_legacy_duplicate_tool_call_id(
                 "kind": "history",
                 "ref": {"session_id": "abc", "ordinal": 1},
                 "type": "assistant",
-                "tool_calls": [{"id": "t1", "name": "echo", "args": {}}],
+                "tool_calls": [
+                    {
+                        "id": "t1",
+                        "name": "echo",
+                        "args": cast("Mapping[str, object]", {}),
+                    }
+                ],
             },
         ),
     )
@@ -1610,8 +2599,14 @@ def test_repair_dangling_tape_handles_legacy_duplicate_tool_call_id(
     assert loaded is not None
 
 
-def test_sort_tape_by_session_id_then_ordinal() -> None:
-    """Same-ordinal records from different sessions order by ``session_id``."""
+def test_sort_tape_by_ordinal_keeps_file_order_for_a_tie() -> None:
+    """Ordinal orders the tape; a same-ordinal tie keeps the recorded order.
+
+    Sorting by ``session_id`` first grouped each session's whole run together,
+    which is not what the tape means: the resolver reads it as append order and
+    anchors splices against what precedes them, so the regrouping reversed
+    conversations on resumed and forked tapes.
+    """
     rec_a = ReferrableTapeEvent(
         ref=TapeRef(session_id="b", ordinal=1), event=UserMessage(text="b-1")
     )
@@ -1624,8 +2619,8 @@ def test_sort_tape_by_session_id_then_ordinal() -> None:
     sorted_tape = session_io._sort_tape_by_ordinal([rec_a, rec_b, rec_c])
     assert [(r.ref.session_id, r.ref.ordinal) for r in sorted_tape] == [
         ("a", 0),
-        ("a", 1),
         ("b", 1),
+        ("a", 1),
     ]
 
 
@@ -1665,7 +2660,11 @@ def test_load_session_drops_non_dict_tool_calls(tmp_path: Path) -> None:
     """``tool_calls`` items that aren't dicts are skipped."""
     session_file = tmp_path / "session.jsonl"
     bad_tc: object = "not a dict"
-    good_tc: dict[str, object] = {"id": "c1", "name": "echo", "args": {}}
+    good_tc: dict[str, object] = {
+        "id": "c1",
+        "name": "echo",
+        "args": cast("Mapping[str, object]", {}),
+    }
     record: dict[str, object] = {
         "kind": "history",
         "type": "assistant",

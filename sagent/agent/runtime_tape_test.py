@@ -251,7 +251,13 @@ def test_append_splice_rejects_double_mask_of_same_position() -> None:
 
 
 def test_append_splice_allows_mask_after_absorbing_prior() -> None:
-    """A splice that masks both the prior splice's ref AND its target passes."""
+    """A splice that masks both the prior splice's ref AND its target passes.
+
+    Replacing the prior payload rather than carrying it is a discard, so the
+    producer declares it: the carry guard compares TEXT, and an undeclared
+    absorber that swaps content is the silent-replacement bug it exists to
+    catch.
+    """
     runtime = _runtime()
     hr = runtime.append_history(UserMessage(text="x"))
     prior = runtime.append_splice(
@@ -267,6 +273,7 @@ def test_append_splice_allows_mask_after_absorbing_prior() -> None:
         insert_after=None,
         payload=(UserMessage(text="second"),),
         strategy="test",
+        discards_content=True,
     )
     assert [
         m.text for m in runtime.context().messages if isinstance(m, UserMessage)
@@ -322,7 +329,9 @@ def test_adopt_record_rejects_mask_overlap_like_append_splice() -> None:
         payload=(UserMessage(text="summary"),),
         strategy="summary",
     )
-    runtime.adopt_record(absorbing_override)
+    # A summary REPLACES; the carry guard compares text, so the intent is
+    # declared rather than inferred from entry count.
+    runtime.adopt_record(absorbing_override, discards_content=True)
 
 
 # --- append_clear -----------------------------------------------------------
