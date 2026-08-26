@@ -54,6 +54,7 @@ from sagent.agent.state import (
     AgentLike,
     ToolState,
     agent_registry,
+    approx_tokens,
     tool_state_context,
 )
 from sagent.compaction.summary import SummaryCompactor
@@ -3219,6 +3220,77 @@ async def test_compact_now_replaces_history_in_place() -> None:
 
 
 @pytest.mark.asyncio
+async def test_compact_now_survives_a_tape_carrying_an_alive_coalesce() -> None:
+    """Compaction must not die on a tape that holds an alive coalesce splice.
+
+    ``widen_barrier_mask`` widens a compactor's mask to every tape ref, so it
+    newly absorbs any alive splice the compactor's summary never carried. The
+    append-time payload guard then rejects that -- and ``adopt_record`` sits
+    OUTSIDE ``compact_now``'s try, so the rejection escapes the method: no
+    ``CompactFailed``, no ``last_compact_error``, no ``False`` return. Every
+    caller, including overflow recovery, sees an unhandled exception instead
+    of a degraded compaction. A coalesce splice is the ordinary product of two
+    back-to-back user messages, so this is the common tape shape.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _SummaryCompactor:
+        def should_compact(
+            self,
+            current_tokens: int,
+            max_request_tokens: int,
+            system_tokens: int = 0,
+        ) -> bool:
+            del current_tokens, max_request_tokens, system_tokens
+            return False
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del tape, context, model, custom_instructions
+            return _summary_override(
+                [types.runtime.UserMessage(text="[summary]")], mint_ref
+            )
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[types.runtime.ModelContextEvent],
+            tools: object,
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextSplice, ...]:
+            del tape, context, tools, mint_ref
+            return ()
+
+    a = Agent(model=StubModel(), tools=[], compactor=_SummaryCompactor())
+    a.runtime.append_history(types.runtime.UserMessage(text="first"))
+    a.runtime.append_history(types.runtime.AssistantMessage(text="reply"))
+    # Resume's ``orphan_tool_result_repair`` barrier carries the whole
+    # conversation; the next user message coalesces onto it and inherits that
+    # payload. The resulting alive splice is therefore many entries wide, which
+    # is what the compactor's one-entry summary is measured against.
+    a.runtime.append_splice(
+        mask=types.tape.full_tape_mask(a.runtime.tape),
+        insert_after=None,
+        payload=(
+            types.runtime.UserMessage(text="first"),
+            types.runtime.AssistantMessage(text="reply"),
+        ),
+        strategy="orphan_tool_result_repair",
+    )
+    a.runtime._append_or_coalesce_user(types.runtime.UserMessage(text="second"))
+
+    assert await a.compact_now(), f"compaction failed: {a.last_compact_error!r}"
+    texts = [getattr(m, "text", "") for m in a.runtime.context().messages]
+    assert "[summary]" in texts, f"summary did not land; got {texts}"
+
+
+@pytest.mark.asyncio
 async def test_compact_recall_reset_waits_for_barrier_adoption(tmp_path: Path) -> None:
     @dataclass(slots=True, kw_only=True)
     class _NoopCompactor:
@@ -4151,18 +4223,15 @@ async def test_agent_compactor_recomputes_paired_externally_from_final_payload()
     None
 ):
     """``_AgentCompactor.compact`` derives ``paired_externally`` from the
-    post-rewrite payload, not the producer's declaration.
+    post-rewrite payload, and the repair honours what the producer declared.
 
-    The inner compactor returned a (validator-bypassed) override whose
-    payload has an externally paired AM tool_call followed by a UM.
-    The agent layer's repair pass (``_repair_compact_payload``) sees the
-    AM with unmatched tool_calls and synthesizes a local
-    ``[interrupted]`` ``ToolResult`` -- which means the call_id now has
-    a *local* pair and is no longer "external". Inheriting the
-    producer's ``paired_externally`` blindly would lie to the strict
-    validator. The bridge must recompute via :func:`unpaired_call_ids`
-    so the declaration stays honest. Here the synthetic TR pairs
-    locally, so ``external_c1`` is correctly dropped.
+    The inner compactor returns a (validator-bypassed) override whose payload
+    has an externally paired AM tool_call followed by a UM. That declaration
+    means the answering ``ToolResult`` lives on the TAPE -- the tool is still
+    detached and running -- so the repair must leave the call open rather than
+    synthesizing ``[interrupted]`` for a tool that has not failed. The
+    recomputation then confirms it is still external, which is the honest
+    declaration for the strict validator.
     """
 
     @dataclass(slots=True, kw_only=True)
@@ -4232,10 +4301,10 @@ async def test_agent_compactor_recomputes_paired_externally_from_final_payload()
         mint_ref=a.runtime.mint_ref,
         custom_instructions=None,
     )
-    # ``_repair_compact_payload`` synthesized a local TR for external_c1,
-    # so the call_id is no longer external and must be dropped from
-    # ``paired_externally``. The local pair is present and well-formed.
-    assert "external_c1" not in override.paired_externally
+    # The producer declared the pair external, so the repair leaves the call
+    # open and the recomputation agrees: still external, no synthetic
+    # ``[interrupted]`` claiming a running tool died.
+    assert "external_c1" in override.paired_externally
     am_call_ids: set[str] = set()
     tr_call_ids: set[str] = set()
     for entry in override.payload:
@@ -4244,7 +4313,7 @@ async def test_agent_compactor_recomputes_paired_externally_from_final_payload()
         elif isinstance(entry, types.runtime.ToolResult):
             tr_call_ids.add(entry.call_id)
     assert "external_c1" in am_call_ids
-    assert "external_c1" in tr_call_ids
+    assert "external_c1" not in tr_call_ids
 
 
 @pytest.mark.asyncio
@@ -6094,12 +6163,13 @@ async def test_fresh_text_heavy_request_rejected_before_send() -> None:
 async def test_pre_send_guard_measures_materialized_not_raw_history() -> None:
     """The guard must size the MATERIALIZED request, not raw history.
 
-    A large HISTORICAL tool result is shed by ``materialize_request``'s
-    ``tool_result_budget_chars`` elision (-> ``<elided>``) before the request
-    ships. Sizing raw history counts the un-elided bytes and false-rejects a
-    request the provider would happily accept. The guard must measure the same
-    artifact that ``send_with_retry`` sends (mirrors ``persist_budget_used_tokens``,
-    which already materializes-then-measures).
+    A large HISTORICAL tool result is cut down by ``materialize_request``'s
+    tool-result budget (truncated to a resumable head, or elided outright when
+    even that will not fit) before the request ships. Sizing raw history counts
+    the un-shed bytes and false-rejects a request the provider would happily
+    accept. The guard must measure the same artifact that ``send_with_retry``
+    sends (mirrors ``persist_budget_used_tokens``, which already
+    materializes-then-measures).
     """
 
     @dataclass(slots=True, kw_only=True)
@@ -6143,9 +6213,12 @@ async def test_pre_send_guard_measures_materialized_not_raw_history() -> None:
     await a._agent_model.stream(history=history, publish=lambda _ev: None)
     assert model.call_index == 1, "guard false-rejected an elidable historical result"
     sent = model.received[0]
-    elided = next(m for m in sent.messages if isinstance(m, types.runtime.ToolResult))
-    assert len(elided.content) < 1_000, (
-        "tool result should have been elided on the wire"
+    shed = next(m for m in sent.messages if isinstance(m, types.runtime.ToolResult))
+    assert len(shed.content) < len("x" * (5 * 1024 * 1024)), (
+        "oversized tool result reached the wire intact"
+    )
+    assert approx_tokens(shed.content) <= 1_000, (
+        f"materialized result exceeds the budget; {len(shed.content)} chars"
     )
 
 
@@ -7293,7 +7366,13 @@ async def test_post_compact_estimates_use_live_background_aware_tools() -> None:
 
 @pytest.mark.asyncio
 async def test_compact_payload_ending_with_tool_calls_gets_synthetic_results() -> None:
-    """Post-compact tail repair must preserve tool-call pairing."""
+    """Post-compact tail repair must preserve tool-call pairing.
+
+    The producer declares nothing external, so an unanswered call in its
+    payload is a genuine orphan and the repair pairs it. (A producer that DOES
+    declare an id external is answered on the tape instead -- see
+    ``test_agent_compactor_recomputes_paired_externally_from_final_payload``.)
+    """
 
     class _ToolCallCompactor:
         def should_compact(
@@ -7322,7 +7401,6 @@ async def test_compact_payload_ending_with_tool_calls_gets_synthetic_results() -
                 insert_after=None,
                 payload=(types.runtime.AssistantMessage(tool_calls=(call,)),),
                 strategy="legacy",
-                paired_externally=frozenset({"call-1"}),
             )
 
     a = Agent(model=StubModel(), compactor=_ToolCallCompactor())
@@ -8325,6 +8403,47 @@ def test_tool_registry_keeps_detached_calls_however_old(
             ),
         )
     assert a._tool_registry["old"] == ("Bash", 0.0)
+
+
+@pytest.mark.asyncio
+async def test_a_live_drive_loop_still_blocks_a_second_driver() -> None:
+    """REV6 AG-001: the single-driver claim outlived only the method, not the loop.
+
+    ``drive_until_first_idle`` returns while its ``serve_forever`` keeps
+    running by design, but its ``finally`` cleared ``_run_active``
+    unconditionally -- so a second ``run`` / ``drive_until_first_idle`` walked
+    past the guard onto the same inbox. Two drivers then consume each other's
+    events, and whichever exits first pushes ``Quit`` into the other's loop.
+    """
+    a = _build_agent(
+        model=StubModel(responses=[types.runtime.AssistantMessage(text="hi")])
+    )
+    _ = await a.drive_until_first_idle(types.runtime.UserMessage(text="go"))
+    # The loop must still be live, or the guard has nothing to protect.
+    assert a._drive_task is not None
+    assert not a._drive_task.done()
+
+    with pytest.raises(RuntimeError, match="not reentrant"):
+        _ = await a.drive_until_first_idle(types.runtime.UserMessage(text="again"))
+
+    a.shutdown(force=True)
+    with contextlib.suppress(asyncio.CancelledError):
+        await a._drive_task
+
+
+@pytest.mark.asyncio
+async def test_the_driver_claim_clears_once_the_loop_exits() -> None:
+    """The guard must not latch: after shutdown a fresh driver is allowed."""
+    a = _build_agent(
+        model=StubModel(responses=[types.runtime.AssistantMessage(text="hi")])
+    )
+    _ = await a.drive_until_first_idle(types.runtime.UserMessage(text="go"))
+    a.shutdown(force=True)
+    assert a._drive_task is not None
+    with contextlib.suppress(asyncio.CancelledError):
+        await a._drive_task
+
+    assert not a._run_active, "the claim latched after its loop exited"
 
 
 if __name__ == "__main__":

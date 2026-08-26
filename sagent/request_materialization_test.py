@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from sagent.agent.context import validate_context
+from sagent.agent.state import approx_tokens
 from sagent.request_materialization import (
     ELIDED_TOOL_RESULT_TAG,
     _defer_user_between_tool_pair,
@@ -43,6 +44,158 @@ def test_materialize_messages_bounds_tool_results_and_preserves_pairs() -> None:
     assert second_result.content == "ok"
     assert _visible_tool_result_chars(materialized) <= 20
     validate_context(materialized)
+
+
+def test_materialize_messages_keeps_the_head_of_an_over_budget_result() -> None:
+    """An over-budget result is truncated, not deleted.
+
+    Three layers bound tool output and two of them leave a way back: the read
+    tool truncates and names an ``offset=`` to resume from, and the persist
+    path writes the full text to disk and prints the path. This layer runs
+    LAST and replaced the whole result with a notice, so it threw away content
+    the other two had already truncated and preserved. The notice then told
+    the reader to "re-run with a narrower window", which is an instruction --
+    an agent obeyed it by binary-searching down to 35-line reads and spending
+    hundreds of calls to page through one file.
+    """
+    call = ToolCall(id="call_1", name="Read", args={})
+    body = "".join(f"line {i}\n" for i in range(2_000))
+    messages = [
+        AssistantMessage(tool_calls=(call,)),
+        ToolResult(call_id="call_1", content=body),
+    ]
+
+    materialized = materialize_messages(messages, tool_result_budget_tokens=200)
+
+    result = materialized[1]
+    assert isinstance(result, ToolResult)
+    assert result.content.startswith("line 0\n"), (
+        f"head was discarded rather than truncated; got {result.content[:80]!r}"
+    )
+    assert "line 1999" not in result.content, "budget was not enforced"
+    assert approx_tokens(result.content) <= 200, "budget was not enforced"
+    assert "Re-run the tool from character" in result.content
+
+
+def test_truncating_the_newest_result_does_not_evict_older_turns() -> None:
+    """One over-budget result must not consume the budget the others need.
+
+    Elision cost ~20 tokens per shed result, so a long session kept its shape:
+    every older turn survived as a placeholder. Truncation is not
+    self-limiting -- handing the FIRST over-budget result the entire remaining
+    budget leaves nothing for the turns behind it, and each one then fails the
+    admit gate and takes its assistant turn with it. Measured at 6 turns x
+    200 KB: 6 results and 12 messages became 1 result and 3 messages.
+    """
+    messages: list[ToolResult | AssistantMessage | UserMessage] = [
+        UserMessage(text="the original task")
+    ]
+    for i in range(6):
+        messages.append(
+            AssistantMessage(
+                text=f"reasoning-{i}",
+                tool_calls=(ToolCall(id=f"c{i}", name="Read", args={}),),
+            )
+        )
+        messages.append(ToolResult(call_id=f"c{i}", content="x" * 200_000))
+
+    materialized = materialize_messages(messages, tool_result_budget_tokens=30_000)
+
+    kept = [m.call_id for m in materialized if isinstance(m, ToolResult)]
+    assert kept == [f"c{i}" for i in range(6)], (
+        f"older turns evicted by the newest result's truncation; kept {kept}"
+    )
+    assert (
+        sum(approx_tokens(m.content) for m in materialized if isinstance(m, ToolResult))
+        <= 30_000
+    )
+    validate_context(materialized)
+
+
+def test_no_over_budget_result_degrades_to_the_bare_tag() -> None:
+    """Every shed result must say what it was and how to get it back.
+
+    ``<elided>`` is 8 characters carrying no size and no path -- the model
+    cannot tell it from a tool that returned nothing. The self-describing
+    notice exists precisely so it can. Reserving only a BARE TAG per older
+    result while falling back to the longer NOTICE means the reservation
+    cannot pay for what it buys: walking newest-first, the oldest entries have
+    the largest reservation subtracted, ``share`` goes negative, and they
+    collapse to the tag.
+
+    Measured on a real 21-file batch at a 100k budget: 11 results reached the
+    wire as 8 bytes, including a 10,576-char file, while a 49,565-char file
+    passed whole. Size did not decide it; position did.
+    """
+    messages: list[ToolResult | AssistantMessage | UserMessage] = [
+        UserMessage(text="read the tree")
+    ]
+    for i in range(21):
+        messages.append(
+            AssistantMessage(tool_calls=(ToolCall(id=f"c{i}", name="Read", args={}),))
+        )
+        messages.append(
+            ToolResult(call_id=f"c{i}", content=f"FILE{i}\n" + "x" * 60_000)
+        )
+
+    materialized = materialize_messages(messages, tool_result_budget_tokens=25_000)
+
+    bare = [
+        m.call_id
+        for m in materialized
+        if isinstance(m, ToolResult) and m.content == ELIDED_TOOL_RESULT_TAG
+    ]
+    assert not bare, f"{len(bare)} results degraded to the bare tag: {bare}"
+    for entry in materialized:
+        if isinstance(entry, ToolResult):
+            assert (
+                entry.content.startswith("FILE")
+                or "chars dropped" in entry.content
+                or "Re-run the tool from character" in entry.content
+            ), f"unrecoverable placeholder for {entry.call_id}: {entry.content[:80]!r}"
+    validate_context(materialized)
+
+
+def test_shedding_stays_within_budget_at_batch_scale() -> None:
+    """The floor must not be bought by blowing the budget it defends."""
+    messages: list[ToolResult | AssistantMessage | UserMessage] = [
+        UserMessage(text="read the tree")
+    ]
+    for i in range(21):
+        messages.append(
+            AssistantMessage(tool_calls=(ToolCall(id=f"c{i}", name="Read", args={}),))
+        )
+        messages.append(ToolResult(call_id=f"c{i}", content="x" * 60_000))
+
+    materialized = materialize_messages(messages, tool_result_budget_tokens=25_000)
+
+    # Per result, matching how the budget is spent. Tokenizing the
+    # concatenation instead charges for boundaries the wire never carries --
+    # 21 separate blocks cost 25,000 while their joined text scores 25,005.
+    spent = sum(
+        approx_tokens(m.content) for m in materialized if isinstance(m, ToolResult)
+    )
+    assert spent <= 25_000, f"shedding overspent: {spent} > 25,000"
+
+
+def test_the_newest_result_still_gets_a_resumable_head() -> None:
+    """Sharing the budget must not undo the truncation itself.
+
+    The point of truncating rather than eliding is that the reader keeps real
+    content plus an offset to resume from. A per-result share that collapsed to
+    the bare placeholder would restore the paging behaviour this replaced.
+    """
+    messages = [
+        AssistantMessage(tool_calls=(ToolCall(id="c1", name="Read", args={}),)),
+        ToolResult(call_id="c1", content="".join(f"line {i}\n" for i in range(5_000))),
+    ]
+
+    materialized = materialize_messages(messages, tool_result_budget_tokens=2_000)
+
+    result = materialized[1]
+    assert isinstance(result, ToolResult)
+    assert result.content.startswith("line 0\n")
+    assert "Re-run the tool from character" in result.content
 
 
 def test_materialize_messages_elides_error_results() -> None:

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from unittest.mock import patch
+
+import itertools
 import threading
 import time
 
@@ -86,6 +90,48 @@ def test_reset_id_counter_concurrent_threads_stay_monotonic() -> None:
 
     post = UserMessage(text="post").id
     assert post > pre, f"reset_id_counter raced; pre={pre} post={post}"
+
+
+def test_a_mint_during_a_reset_does_not_reuse_an_id() -> None:
+    """The lock must cover minting too, or it protects nothing that matters.
+
+    ``reset_id_counter`` locks its peek-and-replace, but ``SessionMessage.id``
+    minted outside that lock. A mint landing between the peek and the
+    replacement takes the value the reset is about to re-issue, so two
+    messages carry one id -- the collision the lock's own docstring says it
+    prevents. The sibling test only races resetters against each other, which
+    the lock already serialises.
+    """
+    reset_id_counter(50)
+    peeked = threading.Event()
+    minted_mid_reset: list[int] = []
+    source = itertools.count(60)
+
+    def pausing_counter() -> Iterator[int]:
+        """Hold the reset's peek open long enough for a mint to land in it."""
+        first = True
+        while True:
+            value = next(source)
+            if first:
+                first = False
+                peeked.set()
+                time.sleep(0.05)
+            yield value
+
+    def do_mint() -> None:
+        _ = peeked.wait(2.0)
+        minted_mid_reset.append(UserMessage(text="concurrent").id)
+
+    with patch.object(types_runtime, "_id_counter", pausing_counter()):
+        minter = threading.Thread(target=do_mint)
+        minter.start()
+        reset_id_counter(61)
+        minter.join()
+
+    after = [UserMessage(text=f"post{i}").id for i in range(3)]
+    assert not set(minted_mid_reset) & set(after), (
+        f"id reused across a reset: minted {minted_mid_reset}, then {after}"
+    )
 
 
 def test_id_counter_lock_module_attribute_exists() -> None:

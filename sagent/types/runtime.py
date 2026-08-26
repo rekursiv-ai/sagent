@@ -35,14 +35,25 @@ sentinel ``reset_id_counter`` uses to re-emit a peeked value.
 """
 
 _id_counter_lock: threading.Lock = threading.Lock()
-"""Guards the peek-and-replace inside ``reset_id_counter``.
+"""Guards every read of ``_id_counter`` -- minting as well as resetting.
 
 Two threads calling ``reset_id_counter`` concurrently can otherwise
 interleave the ``next(_id_counter)`` peek with the ``_id_counter =``
 replacement and produce non-monotonic ids -- tape persistence then
 collides on duplicate ``SessionMessage.id`` values. Resumes from
 distinct tapes are the realistic source of concurrency.
+
+Minting holds the same lock. Guarding only the reset left the window
+that matters open: a mint between the peek and the replacement takes the
+value the reset is about to re-issue, so two messages carry one id --
+exactly the collision this lock exists to prevent.
 """
+
+
+def _next_message_id() -> int:
+    """Mint the next ``SessionMessage.id`` under the counter lock."""
+    with _id_counter_lock:
+        return next(_id_counter)
 
 
 def _empty_headers() -> dict[str, str]:
@@ -130,6 +141,10 @@ def reset_id_counter(start: int) -> None:
     discarding it (was below ``start``, replace with ``count(start)``).
     """
     global _id_counter  # noqa: PLW0603 -- module-level counter requires global statement
+    # Peek AND replace under one acquisition. Releasing between them lets a
+    # mint take the value this reset is about to re-issue, which is the
+    # duplicate id the lock exists to prevent -- and minting now contends for
+    # the same lock, so the window is closed on both sides.
     with _id_counter_lock:
         peek = next(_id_counter)
         if peek >= start:
@@ -153,7 +168,7 @@ class BytesMessage:
 class SessionMessage:
     """Common fields for provider-visible session messages."""
 
-    id: int = dataclasses.field(default_factory=lambda: next(_id_counter))
+    id: int = dataclasses.field(default_factory=_next_message_id)
     """Monotonically increasing per-session message id."""
 
     parent_id: int = -1

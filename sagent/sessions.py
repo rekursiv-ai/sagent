@@ -45,6 +45,38 @@ from sagent.lib.userdirs import data_dir
 
 logger = logging.getLogger(__name__)
 
+_GROUP_AND_OTHER = 0o077
+"""Permission bits that expose a path beyond its owner."""
+
+
+def restrict_path(path: Path, mode: int) -> None:
+    """Clear group/other bits from ``path`` when it already carries them.
+
+    A transcript carries prompts, tool output, file contents, and whatever
+    secrets passed through them, so its file and its directory are owner-only.
+    Both the mode passed to ``mkdir`` and the one passed to ``os.open`` apply
+    ONLY at creation, so neither reaches a path that already exists -- which is
+    every session written before those arguments were added. This is the
+    after-the-fact repair, and it lives beside the session-directory factory so
+    the two cannot drift on what a session path may expose.
+
+    Gated on the bits actually being set, so the common path costs one ``stat``
+    and no write.
+
+    Args:
+      path: File or directory to restrict.
+      mode: Permission bits to apply when ``path`` is over-permissive.
+
+    """
+    try:
+        if path.stat().st_mode & _GROUP_AND_OTHER:
+            path.chmod(mode)
+    except OSError as exc:
+        # A transcript on a filesystem without POSIX modes (or owned by another
+        # user) must not take the session down; persistence matters more.
+        logger.warning("could not restrict permissions on %s: %s", path, exc)
+
+
 # Pre-convention, sagent's home was the hardcoded ``~/.sagent`` (before it
 # followed OS data-dir conventions). For most users that was a real directory.
 # However, some users may have instead symlinked ``~/.sagent -> ~/.claude`` so
@@ -72,8 +104,15 @@ def _copy_tree_merge(src: Path, dst: Path) -> None:
     duplicate copy and -- worse -- a cycle (``a/loop -> a``) would recurse until
     ``RecursionError``. The walk uses ``is_symlink()`` before ``is_dir()`` so the
     link itself, not its (possibly self-referential) target, is what's copied.
+
+    Migrated content is re-restricted, never inherited. ``copy2`` carries the
+    source mode across and ``mkdir`` takes the umask, so a legacy tree written
+    before the owner-only rule republished whole transcripts at ``0644`` under
+    ``0755`` directories -- migration silently undoing the confidentiality that
+    new sessions are given.
     """
     dst.mkdir(parents=True, exist_ok=True)
+    restrict_path(dst, 0o700)
     for child in src.iterdir():
         target = dst / child.name
         if child.is_symlink():
@@ -85,7 +124,15 @@ def _copy_tree_merge(src: Path, dst: Path) -> None:
             # Merge into an existing dir rather than skipping it wholesale.
             _copy_tree_merge(child, target)
         elif not target.exists():
-            shutil.copy2(child, target)
+            # Per item, not per migration: one unreadable file must not strand
+            # every session that has not been copied yet. The caller's single
+            # catch is a backstop for the walk itself, not a per-file policy.
+            try:
+                _ = shutil.copy2(child, target)
+            except OSError as exc:
+                logger.warning("skipping unreadable %s: %s", child, exc)
+            else:
+                restrict_path(target, 0o600)
 
 
 def migrate_legacy_home() -> None:
@@ -396,10 +443,51 @@ def new_session_dir(cwd: str | Path, *, projects_dir: Path | None = None) -> Pat
     # writing through it would keep new sessions in the legacy dir and never
     # create the current slug. So derive the write path directly here.
     root = projects_dir or (data_dir() / "rekursiv-ai" / "sagent" / "projects")
-    sid = uuid.uuid4().hex[:12]
-    d = root / cwd_slug(cwd) / sid
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    return _fresh_session_dir(root / cwd_slug(cwd))
+
+
+def _fresh_session_dir(parent: Path, *, attempts: int = 8) -> Path:
+    """Create and return a session directory that did not already exist.
+
+    The id is a truncated uuid, so a collision is possible -- and
+    ``exist_ok=True`` turned one into a silently SHARED session, two
+    conversations appending to one transcript. ``exist_ok=False`` makes the
+    collision visible so a fresh id can be minted.
+
+    Args:
+      parent: Directory the session dir is created under.
+      attempts: Re-mints before falling back to a full uuid. Bounded rather
+          than unbounded: at 12 hex characters a real collision is
+          vanishingly rare, so repeated failure means the id is not random
+          (a seeded or patched source) and looping would hang.
+
+    Returns:
+      path: The newly created, previously nonexistent session directory.
+
+    Raises:
+      FileExistsError: Every candidate, including the full-uuid fallback,
+          was already taken.
+
+    """
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    restrict_path(parent, 0o700)
+    for _ in range(attempts):
+        candidate = parent / uuid.uuid4().hex[:12]
+        try:
+            candidate.mkdir(mode=0o700)
+        except FileExistsError:
+            logger.warning("session id %s already exists; re-minting.", candidate.name)
+            continue
+        return candidate
+    # A bare ``mkdir`` here too. ``exist_ok=True`` made the last-resort branch
+    # hand back whatever was already there -- the shared-session bug this
+    # function exists to prevent, in the one path reached only when collisions
+    # are already happening. Raising is right: a full uuid colliding means the
+    # id source is not random, and returning a live session is worse than
+    # failing.
+    full = parent / uuid.uuid4().hex
+    full.mkdir(mode=0o700)
+    return full
 
 
 def _safe_scope(scope: str) -> str:
@@ -427,7 +515,10 @@ def _safe_scope(scope: str) -> str:
         raise ValueError("scope cannot be empty.")
     if "\x00" in scope:
         raise ValueError("scope cannot contain NUL bytes.")
-    if scope.startswith("/") or "\\" in scope:
+    # ``C:/x`` is drive-qualified and therefore absolute on Windows, where the
+    # project supports platform-specific user directories -- so a leading-``/``
+    # test alone let a caller-supplied key escape the projects root there.
+    if scope.startswith("/") or "\\" in scope or ":" in scope.split("/", 1)[0]:
         raise ValueError(
             f"scope must be a relative path without backslashes: {scope!r}"
         )
@@ -454,9 +545,7 @@ def session_dir_for_scope(scope: str, base: Path | None = None) -> Path:
         if base is not None
         else (data_dir() / "rekursiv-ai" / "sagent" / "projects")
     )
-    d = root / _safe_scope(scope) / uuid.uuid4().hex[:12]
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    return _fresh_session_dir(root / _safe_scope(scope))
 
 
 def existing_scope_dir(scope: str, base: Path | None = None) -> Path | None:
@@ -520,19 +609,6 @@ class SessionInfo:
     """True when the head scan aborted mid-file; counts above are partial."""
 
 
-def parse_jsonl(text: str) -> list[MutableJSON]:
-    """Parse JSONL text, skipping blank lines and malformed records.
-
-    Args:
-      text: Raw JSONL string.
-
-    Returns:
-      records: Parsed dict records in file order.
-
-    """
-    return list(_iter_jsonl(text.splitlines()))
-
-
 def _iter_jsonl(lines: Iterable[str]) -> Iterator[MutableJSON]:
     """Yield one JSON dict per line, logging malformed and non-dict entries."""
     for raw in lines:
@@ -588,16 +664,31 @@ def _peek_session(session_dir: Path) -> SessionInfo | None:
     # memory just to pull the title + count.
     try:
         with session_file.open(encoding="utf-8") as f:
-            for rec in _iter_jsonl(f):
+            for line in f:
+                # Parse every record. A cheaper gate on the line's leading
+                # bytes made this agree with one writer's current spacing and
+                # key order, so valid JSONL from any other writer was skipped
+                # and reported as a healthy empty session. Parsing costs ~17s
+                # across a 6.13 GB corpus, against ~54s for the whole-corpus
+                # scan this replaced.
+                rec = next(_iter_jsonl((line,)), None)
+                if rec is None:
+                    if not line.strip():
+                        continue
+                    # A record did not parse, so the counts below are partial.
+                    # Say so: the picker renders this count, and a damaged
+                    # session that reads as healthy is a confidently wrong one.
+                    corrupt = True
+                    continue
                 kind = rec.get("kind")
-                if kind == "meta":
-                    model_id = str(rec.get("model_id", ""))
-                    session_id = str(rec.get("session_id", session_id))
-                    status = str(rec.get("status") or rec.get("title") or "")
-                elif kind == "history":
+                if kind == "history":
                     message_count += 1
                     if not first_user_msg and _is_user_text_message(rec):
                         first_user_msg = str(rec["text"])
+                elif kind == "meta":
+                    model_id = str(rec.get("model_id", ""))
+                    session_id = str(rec.get("session_id", session_id))
+                    status = str(rec.get("status") or rec.get("title") or "")
     except (OSError, UnicodeDecodeError):
         # Surface corruption on whatever we managed to read rather than
         # silently dropping or returning partial counts as if complete.
@@ -641,11 +732,62 @@ def list_sessions(
     return out
 
 
-def list_all_sessions(*, projects_dir: Path | None = None) -> list[SessionInfo]:
+def find_session_dirs_by_prefix(
+    prefix: str, *, projects_dir: Path | None = None
+) -> list[Path]:
+    """Return every session directory whose NAME starts with ``prefix``.
+
+    A hash-prefix search reads the directory name and nothing else, so it must
+    not build :class:`SessionInfo`: status, message count, and model id each
+    require parsing a whole transcript, and ``startswith`` reads none of them.
+    Routing this through ``list_all_sessions`` cost 51.39s across 5,652
+    transcripts, every byte of it discarded.
+
+    Returns ALL matches rather than the first: the caller reports ambiguity,
+    and silently taking one would attach to a session the operator did not
+    name.
+
+    Args:
+      prefix: Session-directory name prefix. Never empty -- the caller
+          rejects that, since ``"".startswith`` matches every session.
+      projects_dir: Override for the projects root directory.
+
+    Returns:
+      paths: Matching session directories, unordered.
+
+    """
+    root = projects_dir or (data_dir() / "rekursiv-ai" / "sagent" / "projects")
+    if not root.exists():
+        return []
+    # Glob the transcripts, not the directories: a session IS a dir holding
+    # ``session.jsonl``, so matching the file keeps stray dirs (and the
+    # sibling ``memory/``) out without a second stat. ``**`` reaches nested
+    # scopes, which ``session_dir_for_scope`` permits.
+    return [
+        session_file.parent
+        for session_file in root.glob("**/session.jsonl")
+        if session_file.parent.name.startswith(prefix)
+    ]
+
+
+def list_all_sessions(
+    *, projects_dir: Path | None = None, limit: int | None = None
+) -> list[SessionInfo]:
     """List sessions across all projects, newest first.
+
+    Ranking is by the transcript's mtime, which is a ``stat`` -- so the sort
+    does not need the peek. Peeking is what costs: it parses every line of
+    every transcript, and across 5,647 real sessions that was 51.88s against
+    0.08s for the glob and stats. Callers that render a bounded list (the
+    picker shows 20) pass ``limit`` and pay for those rows only.
+
+    ``limit=None`` peeks everything, which is what a prefix search over
+    ``path.name`` needs: bounding it would make a hash resolvable or not
+    depending on how recently its session was touched.
 
     Args:
       projects_dir: Override for the projects root directory.
+      limit: Most recent sessions to build, or ``None`` for all of them.
 
     Returns:
       sessions: Session metadata across all projects, sorted by mtime descending.
@@ -658,12 +800,24 @@ def list_all_sessions(*, projects_dir: Path | None = None) -> list[SessionInfo]:
     # ``session_dir_for_scope`` accepts nested scopes (``slack/T123``), so
     # a fixed two-level scan silently omits every scoped session from
     # ``--resume-all`` / ``--continue-all``.
-    out = [
-        info
-        for session_file in root.glob("**/session.jsonl")
-        if (info := _peek_session(session_file.parent)) is not None
-    ]
-    out.sort(key=lambda s: s.mtime, reverse=True)
+    candidates: list[tuple[float, Path]] = []
+    for session_file in root.glob("**/session.jsonl"):
+        try:
+            candidates.append((session_file.stat().st_mtime, session_file.parent))
+        except OSError:
+            continue
+    candidates.sort(key=lambda pair: pair[0], reverse=True)
+    out: list[SessionInfo] = []
+    for _mtime, session_dir in candidates:
+        # Take until ``limit`` are BUILT, not until ``limit`` are tried: a peek
+        # returns ``None`` for an unreadable transcript, and truncating the
+        # candidate list first would hand back fewer rows than asked and drop a
+        # resumable session out of the picker.
+        if limit is not None and len(out) >= limit:
+            break
+        info = _peek_session(session_dir)
+        if info is not None:
+            out.append(info)
     return out
 
 
@@ -723,12 +877,21 @@ def _truncate(text: str, n: int) -> str:
     return t if len(t) <= n else t[: n - 1] + "…"
 
 
+DEFAULT_PICK_CAP: Final = 20
+"""Rows the interactive picker shows, and the default listing bound.
+
+One number, because two would disagree: a listing bounded below the picker's
+cap renders blank rows, and a listing above it pays for sessions nobody sees.
+``--resume-limit`` moves both.
+"""
+
+
 def pick_session(
     sessions: list[SessionInfo],
     stream_in: IO[str] | None = None,
     stream_out: IO[str] | None = None,
     *,
-    pick_cap: int = 20,
+    pick_cap: int = DEFAULT_PICK_CAP,
 ) -> SessionInfo | None:
     """Interactive picker over ``sessions`` (stdin/stdout).
 

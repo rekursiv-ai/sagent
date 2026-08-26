@@ -32,13 +32,14 @@ head of the visible view.
 
 The runtime enforces a single rule at append time:
 
-> No two splices may mask the same tape ref.
+> No two ALIVE splices may mask the same tape ref.
 
-This prevents ambiguity: each tape ref has at most one editor for its
-lifetime. To re-edit a region whose splice you no longer want, mask
-the splice's own ``ref`` (not the original target). Earlier edits are
-chained through; the resolved view always reflects the latest decision
-for each slot.
+This prevents ambiguity: each tape ref has at most one editor at a
+time, not for its lifetime. To re-edit a region whose splice you no
+longer want, mask the splice's own ``ref`` (not the original target) --
+that kills it, and a new splice may then claim the positions it held.
+Earlier edits are chained through; the resolved view always reflects
+the latest decision for each slot.
 
 Payload pairing invariant
 -------------------------
@@ -127,6 +128,18 @@ class TapeRef:
 
     ordinal: int
     """Position of the record in its session's tape (0-based)."""
+
+    def __post_init__(self) -> None:
+        # A bool is an int in Python, and a JSON ``true`` decoded to ordinal 1,
+        # colliding with the record actually at position 1. A negative ordinal
+        # is unreachable by every mask range (they start at ``lo >= 0``), so
+        # such a record can never be masked, undeleted, or repaired. Both are
+        # already rejected at the wire boundary; rejecting here closes the
+        # in-process producer path too.
+        if isinstance(self.ordinal, bool) or self.ordinal < 0:
+            raise InvalidPayloadError(
+                f"TapeRef ordinal must be a non-negative int, got {self.ordinal!r}",
+            )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -224,11 +237,11 @@ class ContextSplice:
     """Inclusive single-session :class:`MaskRange`s whose view contribution
     this splice removes.
 
-    The runtime rejects appends whose mask overlaps any existing
-    splice's mask: each tape ref has at most one editor for its
-    lifetime. To re-edit, mask the editing splice's own ref. Within a
-    single splice, the ranges must be disjoint (the validator rejects
-    within-mask overlap)."""
+    The runtime rejects appends whose mask overlaps an ALIVE splice's
+    mask: each tape ref has at most one editor at a time. Absorbing that
+    splice -- masking its own ref -- kills it and frees the positions it
+    claimed. Within a single splice, the ranges must be disjoint (the
+    validator rejects within-mask overlap)."""
 
     insert_after: TapeRef | None
     """Tape ref after which ``payload`` renders in the resolved view.
@@ -422,6 +435,8 @@ def mask_ranges_overlap(
 
 def pair_and_dedup_tool_calls(
     payload: Sequence[ModelContextEvent],
+    *,
+    paired_externally: frozenset[str] = frozenset(),
 ) -> list[ModelContextEvent]:
     """Return a splice-valid repair of ``payload``: paired, deduped, coalesced.
 
@@ -457,6 +472,12 @@ def pair_and_dedup_tool_calls(
 
     Args:
       payload: Flat provider-facing entries to repair.
+      paired_externally: Call ids whose ``ToolResult`` lives OUTSIDE this
+          payload, so an unanswered call here is correct rather than orphaned.
+          A compactor preserving the parent of a still-detached tool declares
+          these; synthesizing ``[interrupted]`` for one tells the model a
+          running tool failed and strands its real result against a call the
+          model was already told was dead.
 
     Returns:
       repaired: Entries with tool calls paired/deduped and orphans removed.
@@ -468,10 +489,14 @@ def pair_and_dedup_tool_calls(
     deferred: list[ModelContextEvent] = []
 
     def _flush_interrupted() -> None:
-        for cid in sorted(pending):
+        for cid in sorted(pending - paired_externally):
             seen.add(cid)
             out.append(ToolResult(call_id=cid, content="[interrupted]", is_error=True))
         pending.clear()
+        _flush_deferred()
+
+    def _flush_deferred() -> None:
+        """Emit peers held past an open pair, in arrival order."""
         out.extend(deferred)
         deferred.clear()
 
@@ -490,6 +515,12 @@ def pair_and_dedup_tool_calls(
             if entry.call_id in pending:
                 out.append(entry)
                 pending.discard(entry.call_id)
+                if not pending:
+                    # The pair the peers were held for has closed normally.
+                    # Draining only on the INTERRUPT path left them queued, so
+                    # every later peer overtook them and the conversation read
+                    # back with its replies inverted.
+                    _flush_deferred()
         elif isinstance(entry, UserMessage):
             _flush_interrupted()
             out.append(entry)
@@ -505,6 +536,8 @@ def pair_and_dedup_tool_calls(
 
 def splice_safe_repair(
     payload: Sequence[ModelContextEvent],
+    *,
+    paired_externally: frozenset[str] = frozenset(),
 ) -> tuple[ModelContextEvent, ...]:
     """Repair ``payload`` and coalesce it into a splice-valid shape.
 
@@ -514,8 +547,22 @@ def splice_safe_repair(
     same-role turns). One name so no caller forgets the second half (F2);
     load-time orphan-only repair that must not rewrite valid histories calls
     :func:`pair_and_dedup_tool_calls` directly instead.
+
+    Args:
+      payload: Flat provider-facing entries to repair.
+      paired_externally: Call ids whose ``ToolResult`` lives OUTSIDE this
+          payload -- a compactor preserving the parent of a still-detached
+          tool declares these. Without them the repair read the open call as
+          an orphan and answered it ``[interrupted]``, telling the model a
+          running tool had failed.
+
+    Returns:
+      repaired: Splice-valid entries.
+
     """
-    return coalesce_roles(pair_and_dedup_tool_calls(payload))
+    return coalesce_roles(
+        pair_and_dedup_tool_calls(payload, paired_externally=paired_externally)
+    )
 
 
 def coalesce_roles(
@@ -638,6 +685,15 @@ def _merge_assistant(
     the same, and the reasoning trace is unrecoverable across a merge either
     way. Unsigned / ``redacted_thinking`` blocks carry no per-turn signature
     and survive (H14, R2O-5).
+
+    ``thought_signature`` goes for the same reason one step out: it signs the
+    TEXT of the turn that produced it, and the merged text is two turns' worth,
+    so keeping ``prior``'s asserts a provenance that no longer holds.
+
+    ``hidden`` follows the user-side rule (see :func:`_merge_user`): the AND of
+    both parts, so any visible part keeps the merged turn visible. Inheriting
+    ``prior``'s bit meant a hidden system turn ahead of a real answer
+    suppressed the answer from the REPL.
     """
     seen = {tc.id for tc in prior.tool_calls}
     tool_calls = prior.tool_calls + tuple(
@@ -653,7 +709,9 @@ def _merge_assistant(
         id=max(prior.id, entry.id),
         text="\n\n".join(t for t in (prior.text, entry.text) if t),
         thinking_blocks=thinking_blocks,
+        thought_signature="",
         tool_calls=tool_calls,
+        hidden=prior.hidden and entry.hidden,
     )
 
 

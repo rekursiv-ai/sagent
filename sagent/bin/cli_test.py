@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, cast
 import argparse
 import asyncio
 import dataclasses
+import inspect
 import io
 import json
 import logging
@@ -22,8 +23,10 @@ from sagent.agent.session_io import (
     PersistentAgentRecord,
     SessionMeta,
     append_session,
+    unpersisted_session_error,
 )
 from sagent.agent.state import agent_registry
+from sagent.bin import cli as cli_module
 from sagent.bin.cli import (
     _DEFAULT_PROVIDER,
     DEFAULT_TOOLS,
@@ -61,7 +64,7 @@ from sagent.types.cost import (
     PriceCatalogProduct,
     TokenPrice,
 )
-from sagent.types.model import Limits, ModelSpec
+from sagent.types.model import Limits, Model, ModelSpec
 from sagent.types.providers import ProviderOptions
 from sagent.types.runtime import (
     AssistantMessage,
@@ -70,6 +73,7 @@ from sagent.types.runtime import (
     ModelResponsePartial,
     ModelResponseThinking,
     ModelServiceSuspended,
+    SaveSession,
     ServiceErrorSnapshot,
     ToolLabel,
     ToolResult,
@@ -626,7 +630,8 @@ def test_resolve_resume_hash_rejects_empty_prefix(tmp_path: Path) -> None:
 
 
 def test_resolve_resume_hash_refuses_ambiguous_prefix(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """An ambiguous prefix must not silently pick one session.
 
@@ -1214,6 +1219,61 @@ def test_resolve_provider_and_allow_resumed_primary_outside_allow_is_rejected() 
     with pytest.raises(SystemExit) as exc:
         _resolve_provider_and_allow("OpenAI", primary="Anthropic", from_resume=True)
     assert exc.value.code == 1
+
+
+@pytest.mark.parametrize("bad", ["0", "-1"])
+def test_resume_limit_rejects_a_non_positive_count(bad: str) -> None:
+    """REV6 PS2-004: a cap below one is silently wrong, not merely useless.
+
+    ``pick_cap=0`` renders an empty list whose blank-input default then indexes
+    row 0 and raises ``IndexError``; a negative cap slices from the end and
+    offers the OLDEST sessions under a header promising the newest. Refuse it
+    at the parser, where argparse turns it into a usage error.
+    """
+    parser = argparse.ArgumentParser()
+    with pytest.raises(SystemExit):
+        _ = cli_module._parse_cli_args(parser, ["--resume", "--resume-limit", bad])
+
+
+def test_resume_limit_accepts_a_positive_count() -> None:
+    """Sanity: the validator must not reject the values operators use."""
+    parser = argparse.ArgumentParser()
+    args, _ = cli_module._parse_cli_args(parser, ["--resume", "--resume-limit", "50"])
+    assert args.resume_limit == 50
+
+
+@pytest.mark.asyncio
+async def test_headless_reports_total_persistence_failure(tmp_path: Path) -> None:
+    """REV6 PS2-008: headless printed the answer and exited 0 having saved nothing.
+
+    ``publish`` isolates observer exceptions, so a persistence observer that
+    raises on every save loses the conversation silently.
+    ``unpersisted_session_error`` exists for exactly this and was wired only
+    into the REPL -- leaving the unattended mode, where nobody is watching, as
+    the one that fails quietly.
+    """
+    agent = Agent(model=cast(Model, _ChildStubModel()), tools=[], session_dir=tmp_path)
+    # Every save raises, exactly as a full disk or a permissions fault would;
+    # ``publish`` swallows it, so nothing reaches the transcript.
+    agent.runtime.observers.clear()
+    agent.runtime.append_history(UserMessage(text="work"))
+    agent.runtime.publish(SaveSession())
+    assert not (tmp_path / "session.jsonl").exists(), "fixture must not persist"
+
+    # The message the check produces, and that headless must now surface.
+    error = unpersisted_session_error(agent)
+    assert error is not None
+    assert "cannot be resumed" in error
+
+    # And headless raises rather than printing a result and exiting 0.
+    source = inspect.getsource(cli_module._run_headless)
+    assert "unpersisted_session_error" in source, (
+        "headless does not consult the persistence check; a total write"
+        " failure exits 0 with the answer printed and nothing saved"
+    )
+    assert source.index("unpersisted_session_error") < source.index(
+        "result_text = _last_assistant_text"
+    ), "the check must run BEFORE the result is emitted"
 
 
 if __name__ == "__main__":

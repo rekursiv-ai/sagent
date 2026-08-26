@@ -75,6 +75,7 @@ from sagent.agent.session_io import (
     SessionMeta,
     load_persistent_agents,
     load_session,
+    unpersisted_session_error,
 )
 from sagent.agent.state import agent_registry, unique_registry_label
 from sagent.compaction.summary import SummaryCompactor
@@ -237,6 +238,32 @@ def _parse_tool_flag(specs: list[str]) -> dict[str, dict[str, str]]:
         raise SystemExit(str(exc)) from exc
 
 
+def _positive_int(raw: str) -> int:
+    """Parse a count that must be at least one.
+
+    A cap of zero renders an empty picker whose blank-input default then
+    indexes row 0, and a negative one slices from the end -- both silently
+    wrong rather than refused. ``argparse`` turns the raise into a usage error.
+
+    Args:
+      raw: The raw command-line token.
+
+    Returns:
+      value: The parsed count.
+
+    Raises:
+      argparse.ArgumentTypeError: When ``raw`` is not an integer >= 1.
+
+    """
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected an integer, got {raw!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {value}")
+    return value
+
+
 def _resolve_session_dir(args: argparse.Namespace) -> str | None:
     """Pick the session directory per --session / --resume / --continue."""
     if args.session is not None:
@@ -248,10 +275,10 @@ def _resolve_session_dir(args: argparse.Namespace) -> str | None:
         return _resolve_continue_all()
     if args.resume is not None:
         if args.resume is True:
-            return _resolve_resume(cwd)
+            return _resolve_resume(cwd, args.resume_limit)
         return _resolve_resume_hash(str(args.resume), cwd)
     if args.resume_all:
-        return _resolve_resume_all()
+        return _resolve_resume_all(args.resume_limit)
     return str(sessions.new_session_dir(cwd))
 
 
@@ -282,17 +309,26 @@ def _resolve_resume_hash(session_hash: str, cwd: Path) -> str:
         # report "ambiguous". Neither is what the operator asked for.
         sys.stderr.write("[resume] HASH cannot be empty.\n")
         raise SystemExit(1)
-    # Lazily: the global scan head-reads every session file under the
-    # root, so evaluating it eagerly costs a full walk even when the cwd
-    # scope already matched.
-    scopes: tuple[tuple[str, Callable[[], list[sessions.SessionInfo]]], ...] = (
-        ("this directory", lambda: sessions.list_sessions(cwd)),
-        ("all projects", sessions.list_all_sessions),
+    # Both scopes match on the directory NAME, so neither reads a transcript.
+    # The cwd scope still resolves first, and is still evaluated lazily: the
+    # global glob is skipped entirely when this directory already matched.
+    scopes: tuple[tuple[str, Callable[[], list[Path]]], ...] = (
+        (
+            "this directory",
+            lambda: [
+                session_dir
+                for project in sessions.project_dirs(cwd)
+                for session_dir in sessions.find_session_dirs_by_prefix(
+                    session_hash, projects_dir=project
+                )
+            ],
+        ),
+        ("all projects", lambda: sessions.find_session_dirs_by_prefix(session_hash)),
     )
     for label, load in scopes:
-        matches = [s for s in load() if s.path.name.startswith(session_hash)]
+        matches = load()
         if len(matches) > 1:
-            names = ", ".join(sorted(s.path.name for s in matches))
+            names = ", ".join(sorted(path.name for path in matches))
             sys.stderr.write(
                 f"[resume] {session_hash!r} is ambiguous in {label}; "
                 f"matches: {names}.\n"
@@ -300,21 +336,21 @@ def _resolve_resume_hash(session_hash: str, cwd: Path) -> str:
             )
             raise SystemExit(1)
         if matches:
-            sys.stderr.write(f"[resume] {matches[0].path} (matched in {label})\n")
-            return str(matches[0].path)
+            sys.stderr.write(f"[resume] {matches[0]} (matched in {label})\n")
+            return str(matches[0])
     sys.stderr.write(
         f"[resume] no session matching {session_hash!r}; starting fresh.\n"
     )
     return str(sessions.new_session_dir(cwd))
 
 
-def _resolve_resume(cwd: Path) -> str:
+def _resolve_resume(cwd: Path, pick_cap: int) -> str:
     """Show interactive session picker, or start fresh on no selection."""
     avail = sessions.list_sessions(cwd)
     if not avail:
         sys.stderr.write("[resume] no prior sessions; starting fresh.\n")
         return str(sessions.new_session_dir(cwd))
-    choice = sessions.pick_session(avail)
+    choice = sessions.pick_session(avail, pick_cap=pick_cap)
     if choice is not None:
         sys.stderr.write(f"[resume] {choice.path}\n")
         return str(choice.path)
@@ -324,7 +360,8 @@ def _resolve_resume(cwd: Path) -> str:
 
 def _resolve_continue_all() -> str:
     """Resume the most recent session across all projects, or start fresh."""
-    all_sessions = sessions.list_all_sessions()
+    # One row is all this path uses: it takes ``[0]`` and discards the rest.
+    all_sessions = sessions.list_all_sessions(limit=1)
     if all_sessions:
         sys.stderr.write(f"[resume] {all_sessions[0].path}\n")
         return str(all_sessions[0].path)
@@ -332,13 +369,14 @@ def _resolve_continue_all() -> str:
     return str(sessions.new_session_dir(Path.cwd()))
 
 
-def _resolve_resume_all() -> str:
+def _resolve_resume_all(pick_cap: int) -> str:
     """Show interactive picker across all projects, or start fresh on no selection."""
-    avail = sessions.list_all_sessions()
+    # Bounded to what the picker renders: every extra row is a transcript read.
+    avail = sessions.list_all_sessions(limit=pick_cap)
     if not avail:
         sys.stderr.write("[resume] no prior sessions; starting fresh.\n")
         return str(sessions.new_session_dir(Path.cwd()))
-    choice = sessions.pick_session(avail)
+    choice = sessions.pick_session(avail, pick_cap=pick_cap)
     if choice is not None:
         sys.stderr.write(f"[resume] {choice.path}\n")
         return str(choice.path)
@@ -609,6 +647,18 @@ def _parse_cli_args(
         dest="continue_all",
         action="store_true",
         help="Resume the most recent session across all projects.",
+    )
+    parser.add_argument(
+        "--resume-limit",
+        dest="resume_limit",
+        type=_positive_int,
+        default=sessions.DEFAULT_PICK_CAP,
+        metavar="N",
+        help=(
+            "Sessions the picker lists (default:"
+            f" {sessions.DEFAULT_PICK_CAP}). Each row costs a transcript"
+            " read, so raising this slows --resume-all."
+        ),
     )
     parser.add_argument(
         "--resume-persistent",
@@ -1436,6 +1486,19 @@ async def _run_headless(
             sys.stdout.write("\n")
         elif output_format == "text":
             sys.stderr.write(f"Error: {message}\n")
+        raise SystemExit(1)
+    # The persistence observer's exceptions are isolated by ``publish``, so a
+    # total write failure is silent: headless would print the answer and exit
+    # 0 having saved nothing, and the conversation is unrecoverable. The REPL
+    # checks this on exit; headless is the mode that runs unattended, where a
+    # silent success is worse.
+    persistence_error = unpersisted_session_error(agent)
+    if persistence_error is not None:
+        if output_format == "json":
+            json.dump({"error": persistence_error}, sys.stdout)
+            sys.stdout.write("\n")
+        else:
+            sys.stderr.write(f"Error: {persistence_error}\n")
         raise SystemExit(1)
     result_text = _last_assistant_text(agent.history)
     if output_format == "stream-json":

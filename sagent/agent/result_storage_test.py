@@ -111,6 +111,124 @@ def test_no_tool_is_exempt_from_persist(tmp_path: Path) -> None:
     assert (tmp_path / "tool-results" / "r1.txt").read_text() == body
 
 
+def test_rereading_a_persisted_result_does_not_grow_it(tmp_path: Path) -> None:
+    """The stub names a path; reading that path must terminate.
+
+    ``Read`` renders line numbers, so what reaches this seam is ALREADY
+    numbered -- and persisting it writes the numbered view. Reading the file
+    back numbers it again, so every recovery attempt grows the content and
+    re-spills: +2,555 chars per round on a 12,545-char source, without bound.
+    The stub therefore names a file that can never be recovered whole, which
+    is the one thing the stub exists to promise.
+
+    Persisting the RAW content makes the round trip a fixed point.
+    """
+    source = "".join(f"def f{i}(): return {i}\n" for i in range(400))
+    rendered = "".join(
+        f"{i:6d}\t{line}\n" for i, line in enumerate(source.splitlines(), 1)
+    )
+
+    out = post_process_result(
+        ToolResult(call_id="c1", content=rendered),
+        "Read",
+        session_dir=tmp_path,
+        persist_tokens=100,
+    )
+
+    assert PERSISTED_TAG in out.content, "fixture did not spill"
+    saved = (tmp_path / "tool-results" / "c1.txt").read_text()
+    assert saved == source, (
+        "persisted the line-numbered view; re-reading it renumbers on top and"
+        " the content grows without bound"
+    )
+
+
+def test_persisted_content_without_line_numbers_is_untouched(tmp_path: Path) -> None:
+    """Only a numbered render is stripped; ordinary output is written verbatim.
+
+    Bash dumps, tracebacks, and JSON payloads must survive byte-for-byte --
+    stripping a digits-and-tab pattern out of those would corrupt them.
+    """
+    body = "1\tnot a line number, just tab-separated data\n" * 200
+
+    out = post_process_result(
+        ToolResult(call_id="c2", content=body),
+        "Bash",
+        session_dir=tmp_path,
+        persist_tokens=100,
+    )
+
+    assert PERSISTED_TAG in out.content
+    assert (tmp_path / "tool-results" / "c2.txt").read_text() == body
+
+
+def test_a_long_call_id_still_persists(tmp_path: Path) -> None:
+    """REV6 RS-002: an id longer than a filename component disabled off-load.
+
+    The stem was the sanitized call id verbatim, so a long provider id made
+    ``open`` raise ``ENAMETOOLONG``; ``_persist_oversized`` caught it, returned
+    ``None``, and the oversized body stayed inline -- persistence silently
+    switched off by the id's length rather than the content's size.
+    """
+    body = "X" * 5_000
+
+    out = post_process_result(
+        ToolResult(call_id="a" * 300, content=body),
+        "Bash",
+        session_dir=tmp_path,
+        persist_tokens=100,
+    )
+
+    assert PERSISTED_TAG in out.content
+    written = list((tmp_path / "tool-results").glob("*.txt"))
+    assert len(written) == 1
+    assert written[0].read_text() == body
+
+
+def test_long_call_ids_sharing_a_prefix_do_not_collide(tmp_path: Path) -> None:
+    """Truncating alone would map two distinct ids onto one file."""
+    first = post_process_result(
+        ToolResult(call_id="a" * 300, content="FIRST" * 1_000),
+        "Bash",
+        session_dir=tmp_path,
+        persist_tokens=100,
+    )
+    second = post_process_result(
+        ToolResult(call_id="a" * 299 + "b", content="SECOND" * 1_000),
+        "Bash",
+        session_dir=tmp_path,
+        persist_tokens=100,
+    )
+
+    assert PERSISTED_TAG in first.content
+    assert PERSISTED_TAG in second.content
+    written = sorted((tmp_path / "tool-results").glob("*.txt"))
+    assert len(written) == 2, f"ids collided onto one file: {written}"
+
+
+def test_persisted_size_label_reports_bytes_not_characters(tmp_path: Path) -> None:
+    """REV6 RS-003: ``_format_size`` promises bytes; callers passed characters.
+
+    Non-ASCII output was under-reported 4x -- a 12,000-byte result labelled
+    "2.9 KB" -- and the preview counted characters while saying KB.
+    """
+    body = "\U0001f600" * 3_000
+
+    out = post_process_result(
+        ToolResult(call_id="emoji", content=body),
+        "Bash",
+        session_dir=tmp_path,
+        persist_tokens=100,
+    )
+
+    assert PERSISTED_TAG in out.content
+    on_disk = (tmp_path / "tool-results" / "emoji.txt").read_bytes()
+    assert len(on_disk) == len(body.encode("utf-8"))
+    # 12,000 bytes renders as 11.7 KB; the character count would say 2.9 KB.
+    assert "11.7 KB" in out.content, out.content.splitlines()[1]
+    assert "chars):" in out.content, "preview must count characters, not bytes"
+
+
 def test_threshold_zero_disables_persist(tmp_path: Path) -> None:
     """C9: ``persist_tokens=0`` keeps every byte in history (no disk)."""
     body = "X" * 1_000_000

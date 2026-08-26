@@ -742,14 +742,14 @@ class Agent:
         """Resolved provider-facing context (read-only snapshot).
 
         Returns a fresh list each call. Mutations are silently lost --
-        use ``runtime.append_history`` / ``append_override`` /
+        use ``runtime.append_history`` / ``append_splice`` /
         ``append_clear`` to evolve state.
         """
         return self.runtime.context().messages
 
     @property
-    def inbox(self):
-        """The runtime's inbox (``GatedDeque[types.runtime.RuntimeEvent]``)."""
+    def inbox(self) -> agent_runtime.GatedDeque[types.runtime.RuntimeEvent]:
+        """The runtime's inbox."""
         return self.runtime.inbox
 
     @property
@@ -1430,9 +1430,12 @@ class Agent:
         # closes that hole -- unless the caller already claimed it to
         # launch this very loop (``drive_until_first_idle``), which owns
         # the flag for the whole span and clears it itself.
-        owns_run_flag = not self._run_active
-        if owns_run_flag:
-            self._run_active = True
+        # The flag is released by whoever's LOOP this is, which is this method
+        # either way. ``drive_until_first_idle`` claims it before spawning us
+        # and then returns while we keep running, so if it also released it the
+        # guard would lapse while the loop it protects is still draining the
+        # inbox -- letting a second driver in. It leaves the release to us.
+        self._run_active = True
         preexisting = self._registered_label()
         owns_registry = preexisting is None
         label = preexisting or self._dedup_label()
@@ -1442,8 +1445,7 @@ class Agent:
             with self._install_contextvars(label=label):
                 await self.runtime.run_forever()
         finally:
-            if owns_run_flag:
-                self._run_active = False
+            self._run_active = False
             if owns_registry:
                 self.deregister(label)
 
@@ -1674,7 +1676,15 @@ class Agent:
         finally:
             if _watch in self.runtime.observers:
                 self.runtime.observers.remove(_watch)
-            self._run_active = False
+            # Do NOT clear ``_run_active`` here. Unlike ``run``, this method
+            # returns while its ``serve_forever`` keeps running by design, so
+            # releasing the claim on return let a second ``run`` /
+            # ``drive_until_first_idle`` past the guard and put two drivers on
+            # one inbox -- each consuming events the other needed, and the
+            # first to exit pushing ``Quit`` into the other's loop. The loop
+            # releases the flag itself when it finally exits.
+            if self._drive_task is None or self._drive_task.done():
+                self._run_active = False
 
     # -- Internal helpers ---------------------------------------------
 
@@ -2380,6 +2390,17 @@ class Agent:
                 self.runtime.mint_ref,
                 custom_instructions=None,
             )
+            # Adoption is inside the guarded region because it VALIDATES.
+            # ``widen_barrier_mask`` grows the producer's mask to every tape
+            # ref, so it can newly absorb an alive splice the summary never
+            # carried, and ``adopt_record`` rejects that. Outside the try, the
+            # rejection escaped the method entirely: no ``CompactFailed``, no
+            # ``last_compact_error``, and overflow recovery's ``assert`` on
+            # that field fired instead of the real error.
+            override = agent_runtime.widen_barrier_mask(override, self.runtime.tape)
+            # A summary replaces the region it masks, so it is expected to be
+            # shorter; the payload-carry check governs merging producers.
+            self.runtime.adopt_record(override, discards_content=True)
         except Exception as exc:  # noqa: BLE001 -- compaction calls the model; catch-all routes UserFacingError to warning, others to exception
             types.exceptions.log_exception_or_warning(
                 logger,
@@ -2396,8 +2417,6 @@ class Agent:
             self.publish(failed)
             self.last_compact_error = exc
             return False
-        override = agent_runtime.widen_barrier_mask(override, self.runtime.tape)
-        self.runtime.adopt_record(override)
         complete = types.runtime.CompactComplete.from_override(override)
         self.runtime.append_history(complete)
         self.publish(complete)
@@ -3018,8 +3037,10 @@ class _AgentTool:
     - When ``background`` / ``delay`` is set: spawn a detached task that
       will eventually post ``types.runtime.DetachedResult`` to the runtime inbox; the
       synchronous return is a ``[Running in background: <name>]``
-      placeholder. The runtime splices the real result into that
-      placeholder slot once the bg task completes.
+      placeholder. That placeholder stays the answer to this call; the real
+      result arrives later as NEW forward context (a synthetic
+      ``DetachedArrived`` pair), so nothing the model already read is
+      rewritten underneath it.
     - Otherwise: await the raw tool's ``run``, then post-process
       (empty-result marker, oversized-content disk offload).
 
@@ -3389,7 +3410,10 @@ class _AgentCompactor:
                 types.exceptions.log_exception_or_warning(
                     logger, "post_compact_enrich failed; continuing", exc
                 )
-        payload = _repair_compact_payload(payload)
+        # Carry the producer's external-pair declaration into the repair: a
+        # preserved parent whose tool is still detached is answered by the
+        # ``[detached]`` stub on the tape, not by a synthetic interrupt.
+        payload = _repair_compact_payload(payload, override.paired_externally)
         if not payload or isinstance(payload[-1], types.runtime.AssistantMessage):
             payload.append(types.runtime.UserMessage(text="[continuation]"))
 
@@ -3455,7 +3479,9 @@ class _AgentCompactor:
                     # below would declare those ids ``paired_externally``
                     # with no real external partner and the next provider
                     # call would 400.
-                    payload = _repair_compact_payload(payload)
+                    payload = _repair_compact_payload(
+                        payload, override.paired_externally
+                    )
                     if not payload or isinstance(
                         payload[-1], types.runtime.AssistantMessage
                     ):
@@ -3595,9 +3621,19 @@ class _AgentCompactor:
 
 def _repair_compact_payload(
     payload: Sequence[types.runtime.ModelContextEvent],
+    paired_externally: frozenset[str] = frozenset(),
 ) -> list[types.runtime.ModelContextEvent]:
-    """List-wrap :func:`tape.splice_safe_repair` so the caller can append."""
-    return list(splice_safe_repair(payload))
+    """List-wrap :func:`tape.splice_safe_repair` so the caller can append.
+
+    Args:
+      payload: Compactor output to repair.
+      paired_externally: Ids the producer declared as answered outside the
+          payload -- a preserved parent whose tool is still detached. Passing
+          them through is what stops the repair reporting a running tool as
+          ``[interrupted]``.
+
+    """
+    return list(splice_safe_repair(payload, paired_externally=paired_externally))
 
 
 def _should_cancel_background(

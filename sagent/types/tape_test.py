@@ -28,6 +28,7 @@ from sagent.types.tape import (
     merge_mask_ranges,
     pair_and_dedup_tool_calls,
     splice_safe_repair,
+    unpaired_call_ids,
 )
 
 
@@ -134,6 +135,106 @@ def test_coalesce_roles_merges_across_hidden_boundary_visible_wins() -> None:
     assert len(both) == 1
     assert isinstance(both[0], UserMessage)
     assert both[0].hidden is True
+
+
+def test_repair_leaves_an_externally_paired_call_open() -> None:
+    """A call whose partner lives outside the payload is paired, not orphaned.
+
+    A compactor preserving the parent of a STILL-RUNNING detached tool
+    declares that id ``paired_externally`` -- its ``[detached]`` stub is on
+    the tape, outside this payload. The repair pass saw an unanswered call and
+    synthesized ``[interrupted]``, so the model was told a tool that is still
+    working had failed, and the real result arrived later against a call it
+    had already been told was dead.
+    """
+    call = ToolCall(id="live-1", name="Bash", args={})
+    payload = (
+        UserMessage(text="[summary]"),
+        AssistantMessage(tool_calls=(call,)),
+    )
+
+    repaired = splice_safe_repair(payload, paired_externally=frozenset({"live-1"}))
+
+    assert not any(isinstance(entry, ToolResult) for entry in repaired), (
+        f"synthesized a result for an external pair; got {repaired}"
+    )
+    assert unpaired_call_ids(repaired) == frozenset({"live-1"})
+
+
+def test_pair_and_dedup_keeps_peer_messages_in_arrival_order() -> None:
+    """Deferring a peer past an open pair must not reorder it against a later one.
+
+    A peer send interleaving an in-flight tool turn is held so a real result
+    still lands, but the buffer drained only when a turn CLOSED by interrupt
+    -- never when a genuine ``ToolResult`` closed it. The held message then sat
+    behind every peer that arrived afterwards and the conversation read back
+    with the replies inverted.
+    """
+    out = pair_and_dedup_tool_calls(
+        [
+            AssistantMessage(tool_calls=(ToolCall(id="c1", name="B", args={}),)),
+            AgentSendMessage(source="A", text="first"),
+            ToolResult(call_id="c1", content="done"),
+            AgentSendMessage(source="A", text="second"),
+        ],
+    )
+    texts = [getattr(entry, "text", "") for entry in out if getattr(entry, "text", "")]
+    assert texts == ["first", "second"], f"peer messages reordered; got {texts}"
+
+
+def test_coalesce_roles_assistant_merge_keeps_a_visible_part_visible() -> None:
+    """Assistant merges follow the same visible-wins rule as user merges.
+
+    ``_merge_assistant`` built from ``prior`` without touching ``hidden``, so
+    a hidden turn followed by a visible one produced a hidden block: the
+    model's actual answer stopped rendering in the REPL because a
+    system-injected turn happened to precede it.
+    """
+    out = coalesce_roles(
+        (
+            AssistantMessage(text="internal", hidden=True),
+            AssistantMessage(text="answer"),
+        ),
+    )
+    assert len(out) == 1
+    merged = out[0]
+    assert isinstance(merged, AssistantMessage)
+    assert merged.hidden is False, "a visible assistant part was suppressed"
+    assert merged.text == "internal\n\nanswer"
+
+    both = coalesce_roles(
+        (
+            AssistantMessage(text="a", hidden=True),
+            AssistantMessage(text="b", hidden=True),
+        ),
+    )
+    assert len(both) == 1
+    assert isinstance(both[0], AssistantMessage)
+    assert both[0].hidden is True
+
+
+def test_coalesce_roles_drops_a_stale_thought_signature() -> None:
+    """A signature binds to the turn that produced it, not to merged text.
+
+    ``_merge_assistant`` already drops signed thinking blocks for exactly this
+    reason -- a merged turn cannot re-sign them -- but kept ``prior``'s
+    ``thought_signature`` and attached it to text that is now two turns'
+    output. Gemini requires that signature echoed verbatim for the text it
+    signed; carrying it across a merge asserts provenance that no longer
+    holds.
+    """
+    out = coalesce_roles(
+        (
+            AssistantMessage(text="first", thought_signature="sig-a"),
+            AssistantMessage(text="second", thought_signature="sig-b"),
+        ),
+    )
+    assert len(out) == 1
+    merged = out[0]
+    assert isinstance(merged, AssistantMessage)
+    assert merged.thought_signature == "", (
+        f"merged turn kept a stale signature: {merged.thought_signature!r}"
+    )
 
 
 def test_payload_rejects_adjacent_agent_sends() -> None:
@@ -652,6 +753,29 @@ def test_paired_externally_does_not_hide_local_invalid_pair_order() -> None:
             ),
             paired_externally=frozenset({"c1"}),
         )
+
+
+def test_tape_ref_rejects_a_negative_ordinal() -> None:
+    """An ordinal is a 0-based tape position; below zero is malformed.
+
+    ``_ref_from_json`` already rejects it and sibling ``MaskRange`` validates
+    its own endpoints, so the only way a negative ordinal enters the tape is
+    in-process construction -- and such a record can never be masked,
+    undeleted, or repaired, because every mask range starts at ``lo >= 0``.
+    """
+    with pytest.raises(InvalidPayloadError, match="ordinal"):
+        _ = TapeRef(session_id="s", ordinal=-1)
+
+
+def test_tape_ref_rejects_a_bool_ordinal() -> None:
+    """``isinstance(True, int)`` holds, so a bool slips through unguarded.
+
+    JSON ``true`` decoded to ordinal 1 and collided with the real record at
+    position 1. ``_ref_from_json`` rejects it at the wire boundary; the type
+    itself must too, or an in-process producer reintroduces the collision.
+    """
+    with pytest.raises(InvalidPayloadError, match="ordinal"):
+        _ = TapeRef(session_id="s", ordinal=True)
 
 
 if __name__ == "__main__":

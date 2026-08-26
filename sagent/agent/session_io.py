@@ -25,22 +25,30 @@ Legacy formats (read-only; converter promotes them to ``ContextSplice``):
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast, get_args
 
 import base64
+import contextlib
 import dataclasses
+import fcntl
 import json
 import logging
 import os
+import threading
 import time
 
 from wrapt import lazy_import
 
-from sagent.agent.context import resolve_context
+from sagent.agent.context import (
+    alive_splices,
+    masked_refs_by_alive,
+    resolve_context,
+)
 from sagent.agent.state import ReadCacheEntry, ToolState
 from sagent.lib.custom_json import float_val, int_val
+from sagent.sessions import restrict_path
 from sagent.types.cost import TokenCost
 from sagent.types.model import Model, ModelRecipe, TokenCount
 from sagent.types.providers import ProviderOptions
@@ -79,6 +87,7 @@ from sagent.types.tape import (
     coalesce_roles,
     full_tape_mask,
     mask_contains_ref,
+    merge_mask_ranges,
     pair_and_dedup_tool_calls,
 )
 
@@ -148,24 +157,27 @@ def _att_from_json(raw: object) -> BytesMessage | None:
     if not _is_known_attachment_descriptor(mime):
         return None
     try:
-        return BytesMessage(data=base64.b64decode(data), descriptor=mime)
+        # ``validate=True`` or the drop path below is unreachable: the default
+        # discards non-alphabet bytes instead of raising, so garbage decodes to
+        # ``b""`` and reaches the provider as a real, empty attachment.
+        return BytesMessage(data=base64.b64decode(data, validate=True), descriptor=mime)
     except (ValueError, TypeError):
         return None
 
 
 def _is_known_attachment_descriptor(mime: str) -> bool:
-    """Return True when ``mime`` matches a wire-allowed attachment prefix."""
-    return mime.startswith(
-        (
-            "image/",
-            "audio/",
-            "video/",
-            "application/pdf",
-            "application/json",
-            "application/octet-stream",
-            "text/",
-        )
-    )
+    """Return True when ``mime`` is a wire-allowed attachment descriptor.
+
+    The media families end in ``/`` and stay prefixes; the ``application/*``
+    entries are complete types and are matched exactly, optionally followed by
+    a MIME parameter. Prefix-matching them admitted ``application/pdf-malware``
+    and ``application/jsonevil`` -- precisely the descriptors an allowlist is
+    for excluding.
+    """
+    if mime.startswith(("image/", "audio/", "video/", "text/")):
+        return True
+    base = mime.split(";", 1)[0].strip()
+    return base in ("application/pdf", "application/json", "application/octet-stream")
 
 
 def _atts_to_json(atts: tuple[BytesMessage, ...]) -> list[dict[str, str]]:
@@ -291,13 +303,22 @@ def _ref_to_json(ref: TapeRef) -> dict[str, object]:
 
 
 def _ref_from_json(raw: object) -> TapeRef | None:
-    """Decode a ``{session_id, ordinal}`` dict; ``None`` on malformed input."""
+    """Decode a ``{session_id, ordinal}`` dict; ``None`` on malformed input.
+
+    An ordinal is a 0-based tape position, so a bool (``isinstance(True, int)``
+    holds, and JSON ``true`` became position 1, colliding with a real record)
+    and a negative are both malformed. ``MaskRange`` already rejects a negative
+    endpoint; without the same check here a negative-ordinal record loads but
+    can never be masked, undeleted, or repaired.
+    """
     if not isinstance(raw, dict):
         return None
     d = cast(Mapping[str, object], raw)
     session_id = d.get("session_id")
     ordinal = d.get("ordinal")
     if not isinstance(session_id, str) or not isinstance(ordinal, int):
+        return None
+    if isinstance(ordinal, bool) or ordinal < 0:
         return None
     return TapeRef(session_id=session_id, ordinal=ordinal)
 
@@ -320,6 +341,9 @@ def _mask_from_json(raw_mask: object) -> tuple[MaskRange, ...]:
         r_from = _ref_from_json(pair[0])
         r_to = _ref_from_json(pair[1])
         if r_from is None or r_to is None:
+            logger.warning(
+                "dropping malformed legacy mask range %s -> %s", pair[0], pair[1]
+            )
             continue
         try:
             ranges.append(MaskRange.between(r_from, r_to))
@@ -448,7 +472,7 @@ def _legacy_override_to_splice(
                 suppresses.append(decoded)
     raw_inject = rec.get("inject_after")
     inject_after = _ref_from_json(raw_inject) if raw_inject is not None else None
-    barrier = bool(rec.get("barrier", False))
+    barrier = _json_bool(rec.get("barrier"))
     mask: tuple[MaskRange, ...]
     if suppresses:
         mask = _mask_runs(suppresses)
@@ -517,29 +541,31 @@ def _mask_runs(refs: Sequence[TapeRef]) -> tuple[MaskRange, ...]:
     return tuple(runs)
 
 
-def _legacy_clear_to_splice(ref: TapeRef, last_visible_ord: int) -> ContextSplice:
+def _legacy_clear_to_splice(ref: TapeRef, tape: Sequence[TapeRecord]) -> ContextSplice:
     """Convert a legacy ``kind=context_clear`` / ``kind=clear`` to splice.
 
-    A clear was a full-prefix barrier with no payload. The equivalent
-    splice masks every record on the tape so far and inserts nothing.
+    A clear was a full-prefix barrier with no payload, so the equivalent
+    splice masks every record read so far -- which is what
+    :func:`full_tape_mask` computes.
+
+    Deriving the mask from the tape rather than from one ordinal closes two
+    ways the old form under-masked. It ranged to ``tape[-1].ref.ordinal``, the
+    last record READ and not the highest (the load sorts afterwards), so an
+    out-of-order file left its highest-ordinal record visible; and it built the
+    range in the clear's own ``session_id``, so a resumed or forked tape kept
+    the other session's records after the user asked for a wipe.
 
     Args:
       ref: Synthetic or persisted ref for the new splice.
-      last_visible_ord: Ordinal of the most recent record on the tape
-          before the clear; ``-1`` when the tape was empty.
+      tape: Records read before this clear; empty yields an empty mask.
 
     Returns:
       splice: Equivalent ``ContextSplice``.
 
     """
-    mask: tuple[MaskRange, ...]
-    if last_visible_ord < 0:
-        mask = ()
-    else:
-        mask = (MaskRange(session_id=ref.session_id, lo=0, hi=last_visible_ord),)
     return ContextSplice.replay(
         ref=ref,
-        mask=mask,
+        mask=full_tape_mask(tape),
         insert_after=None,
         payload=(),
         strategy="clear",
@@ -567,7 +593,7 @@ def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
     entry_id = int_val(d.get("id"), 0)
     parent_id = int_val(d.get("parent_id"), -1)
     timestamp = float_val(d.get("timestamp"), 0.0)
-    hidden = bool(d.get("hidden"))
+    hidden = _json_bool(d.get("hidden"))
     if t == "user":
         return UserMessage(
             text=str(d.get("text") or ""),
@@ -601,10 +627,24 @@ def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
                     if isinstance(raw_args, dict)
                     else {}
                 )
+                call_id = str(tcd.get("id") or "")
+                call_name = str(tcd.get("name") or "")
+                if not call_id or not call_name:
+                    # The runtime keys ``running_tools``, the cohort, and every
+                    # pairing map by ``call_id``, and dispatches by name -- so
+                    # a blank id is dispatchable under ``""`` and collides with
+                    # the next blank one. Drop the call; the message still
+                    # loads without it.
+                    logger.warning(
+                        "Dropping tool_call with empty id/name: id=%r name=%r",
+                        call_id,
+                        call_name,
+                    )
+                    continue
                 tcs.append(
                     ToolCall(
-                        id=str(tcd.get("id") or ""),
-                        name=str(tcd.get("name") or ""),
+                        id=call_id,
+                        name=call_name,
                         args=args,
                         thought_signature=str(tcd.get("thought_signature") or ""),
                     ),
@@ -625,7 +665,7 @@ def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
             call_id=str(d.get("call_id") or ""),
             content=content,
             kind=_tool_result_kind_from_json(d.get("result_kind"), content),
-            is_error=bool(d.get("is_error")),
+            is_error=_json_bool(d.get("is_error")),
             attachments=_atts_from_json(d.get("attachments")),
             diff=str(d.get("diff") or ""),
             diff_file_path=str(d.get("diff_file_path") or ""),
@@ -646,12 +686,17 @@ def _tool_result_kind_from_json(raw: object, content: str) -> ToolResultKind:
     ``result_kind``. For those, recover the lifecycle from the placeholder
     content one last time so a resumed old session does not mis-forward a stub.
     New records always carry the explicit field.
+
+    An unreadable value falls through to that same inference rather than to
+    ``FINAL``: ``FINAL`` means "the real, forward-deliverable answer", so
+    defaulting there promoted a still-pending ``[detached]`` stub to output
+    whenever the persisted enum was misspelled.
     """
     if isinstance(raw, str):
         try:
             return ToolResultKind(raw)
         except ValueError:
-            return ToolResultKind.FINAL
+            logger.warning("Unknown tool result_kind %r; inferring from content.", raw)
     if content == DETACHED_PLACEHOLDER or content.startswith(RUNNING_PREFIX):
         return ToolResultKind.PENDING
     if content == CANCELLED_PLACEHOLDER:
@@ -717,8 +762,11 @@ def restore_tool_state(state: ToolState, snapshot: Mapping[str, object]) -> None
     bash_cwd = snapshot.get("bash_cwd")
     if isinstance(bash_cwd, str) and bash_cwd:
         state.bash_cwd = bash_cwd
-    depth = snapshot.get("depth")
-    if isinstance(depth, int):
+    # ``isinstance(True, int)`` holds, so a persisted ``true`` became depth 1 --
+    # a spawn-depth the operator never set. ``_optional_int`` rejects the same
+    # trap at the sibling decoders; this is the one that read the bool.
+    depth = _optional_int(snapshot.get("depth"))
+    if depth is not None:
         state.depth = depth
     raw_dirs = snapshot.get("additional_dirs")
     if isinstance(raw_dirs, list):
@@ -983,7 +1031,7 @@ def _runtime_event_from_json(record: Mapping[str, object]) -> RuntimeEvent | Non
             model_id=str(record.get("model_id") or ""),
             retry_at=float_val(record.get("retry_at"), 0.0),
             delay_sec=float_val(record.get("delay_sec"), 0.0),
-            server_supplied=bool(record.get("server_supplied")),
+            server_supplied=_json_bool(record.get("server_supplied")),
             error=error,
         )
     if record.get("type") == "notice_message":
@@ -1062,7 +1110,6 @@ def _persistent_agent_from_json(
     provider_options = _provider_options_from_json(
         record.get("provider_options", record.get("provider_args")),
     )
-    notify_raw = record.get("notify_on_asleep")
     return PersistentAgentRecord(
         label=str(record.get("label") or ""),
         run_id=str(record.get("run_id") or ""),
@@ -1074,7 +1121,7 @@ def _persistent_agent_from_json(
         model_id=str(record.get("model_id") or ""),
         tools=tools,
         system=str(record.get("system") or ""),
-        notify_on_asleep=notify_raw if isinstance(notify_raw, bool) else True,
+        notify_on_asleep=_json_bool(record.get("notify_on_asleep"), default=True),
         max_tool_call_rounds=_optional_int(record.get("max_tool_call_rounds")),
         max_request_tokens=_optional_int(record.get("max_request_tokens")),
         max_response_tokens=_optional_int(record.get("max_response_tokens")),
@@ -1084,7 +1131,7 @@ def _persistent_agent_from_json(
         cache_ttl=str(record.get("cache_ttl") or "5m"),
         service_tier=_optional_str(record.get("service_tier")),
         max_budget_usd=_optional_float(record.get("max_budget_usd")),
-        persistent_retry=bool(record.get("persistent_retry")),
+        persistent_retry=_json_bool(record.get("persistent_retry")),
         provider_options=provider_options,
     )
 
@@ -1123,18 +1170,36 @@ def _persistent_state(raw: object) -> PersistentAgentState | None:
     return None
 
 
+def _json_bool(raw: object, *, default: bool = False) -> bool:
+    """Decode a persisted boolean; anything non-boolean takes ``default``.
+
+    ``bool()`` on a wire value is not a decode, it is a truthiness test: any
+    non-empty string is True, so a writer that stringified a flag turned
+    ``"false"`` into True. On the legacy ``barrier`` field that read a
+    non-barrier as a barrier and masked the conversation ahead of it.
+    """
+    return raw if isinstance(raw, bool) else default
+
+
 def _optional_str(raw: object) -> str | None:
     """Decode an optional string field."""
     return raw if isinstance(raw, str) else None
 
 
 def _optional_int(raw: object) -> int | None:
-    """Decode an optional integer field."""
-    return raw if isinstance(raw, int) else None
+    """Decode an optional integer field; a bool is not a number.
+
+    ``isinstance(True, int)`` holds, so a persisted ``true`` decoded to
+    ``True`` and behaved as ``1`` downstream -- a one-round tool budget the
+    operator never set. ``_ref_from_json`` rejects the same trap.
+    """
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) else None
 
 
 def _optional_float(raw: object) -> float | None:
-    """Decode an optional float field."""
+    """Decode an optional float field; a bool is not a number."""
+    if isinstance(raw, bool):
+        return None
     return raw if isinstance(raw, (float, int)) else None
 
 
@@ -1248,18 +1313,27 @@ def append_session(
     """
     parts: list[str] = []
     if meta is not None:
-        parts.append(json.dumps({"kind": "meta", **meta}))
+        # ``kind`` last, not first: spreading the caller's mapping over the tag
+        # let a ``kind`` key in ``meta`` retype the record, so a meta blob could
+        # be written as history and the session's metadata silently vanish. The
+        # discriminator is chosen by the method that was called, never by data.
+        parts.append(json.dumps({**meta, "kind": "meta"}))
     parts.extend(json.dumps(_tape_record_to_json(r)) for r in tape_delta or ())
     parts.extend(json.dumps(_runtime_event_to_json(e)) for e in runtime_events or ())
     parts.extend(
         json.dumps(_persistent_agent_to_json(r)) for r in persistent_agents or ()
     )
     if tool_state_snapshot is not None:
-        parts.append(json.dumps({"kind": "tool_state", **tool_state_snapshot}))
+        parts.append(json.dumps({**tool_state_snapshot, "kind": "tool_state"}))
     if not parts:
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # Owner-only: a transcript holds prompts, tool output, file contents, and
+    # whatever secrets passed through them. The umask default made every one
+    # world-readable on shared and multi-account hosts.
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    restrict_path(path.parent, 0o700)
     _append_lines(path, parts)
+    restrict_path(path, 0o600)
 
 
 def _append_lines(path: Path, lines: Sequence[str]) -> None:
@@ -1274,20 +1348,101 @@ def _append_lines(path: Path, lines: Sequence[str]) -> None:
     inotify watchers keep following it rather than being orphaned on the
     renamed-away inode.
 
+    Atomicity: ``O_APPEND`` makes one ``os.write`` atomic against other
+    appenders -- but not a LOOP of them. A short write leaves half a JSON line
+    on disk and releases the file offset, so a second appender lands its
+    records between the halves and the spliced line never parses again. The
+    whole batch therefore writes under :func:`session_file_lock`, and the
+    trailing-newline probe reads inside it too (its answer is only valid while
+    no one else can append).
+
     Args:
       path: Destination file (created if missing).
       lines: Each becomes one JSONL record (newline appended here).
 
     """
-    payload = "".join(line + "\n" for line in lines).encode("utf-8")
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    with session_file_lock(path):
+        # Close a torn tail before writing. A crash mid-append leaves a line
+        # with no newline, and appending straight after it concatenates the two
+        # into one unparseable record -- so the crash costs the record it
+        # interrupted AND the first one written afterwards.
+        prefix = b"\n" if _lacks_trailing_newline(path) else b""
+        payload = prefix + "".join(line + "\n" for line in lines).encode("utf-8")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            view = memoryview(payload)
+            while view:
+                view = view[os.write(fd, view) :]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+_append_locks: dict[str, tuple[threading.RLock, list[int]]] = {}
+"""Per-file reentrancy bookkeeping for :func:`session_file_lock`.
+
+Keyed by ``realpath`` so two spellings of one transcript share an entry. The
+``RLock`` serialises threads within the process and permits re-entry from the
+thread that already holds it; the one-element list is that thread's nesting
+depth, read and written only while the ``RLock`` is held.
+"""
+
+_append_locks_guard: threading.Lock = threading.Lock()
+"""Guards insertion into ``_append_locks`` (dict mutation is not atomic here)."""
+
+
+@contextlib.contextmanager
+def session_file_lock(path: Path) -> Generator[None]:
+    """Hold an exclusive lock on the session file for the body's duration.
+
+    Two layers, because two different races exist:
+
+    - ``flock`` excludes other PROCESSES -- the repair tool against a live
+      agent, or two agents resumed from one directory.
+    - a per-path ``RLock`` excludes other THREADS, which ``flock`` does not:
+      a second ``flock`` from the same process on a different descriptor
+      would block forever against the first.
+
+    Reentrant for the calling thread, so a caller that needs read-then-append
+    atomic (choosing an ordinal from the tape it just read) can wrap the pair
+    and let the inner ``_append_lines`` take the same lock without deadlocking.
+
+    Args:
+      path: Session file to lock; created if missing.
+
+    """
+    key = os.path.realpath(path)
+    with _append_locks_guard:
+        lock, depth = _append_locks.setdefault(key, (threading.RLock(), [0]))
+    with lock:
+        if depth[0]:
+            depth[0] += 1
+            try:
+                yield
+            finally:
+                depth[0] -= 1
+            return
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            depth[0] = 1
+            yield
+        finally:
+            depth[0] = 0
+            # Closing the descriptor releases the flock; no separate unlock.
+            os.close(fd)
+
+
+def _lacks_trailing_newline(path: Path) -> bool:
+    """Whether ``path`` ends mid-line."""
     try:
-        view = memoryview(payload)
-        while view:
-            view = view[os.write(fd, view) :]
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+        with path.open("rb") as handle:
+            if handle.seek(0, os.SEEK_END) == 0:
+                return False
+            _ = handle.seek(-1, os.SEEK_END)
+            return handle.read(1) != b"\n"
+    except OSError:
+        return False
 
 
 def install_session_persistence(agent: Agent, session_dir: Path) -> Callable[[], None]:
@@ -1467,6 +1622,8 @@ def load_persistent_agents(session_dir: Path) -> list[PersistentAgentRecord]:
 
 def load_session(
     session_dir: Path,
+    *,
+    preserve_corrupt: bool = True,
 ) -> tuple[SessionMeta, list[TapeRecord], ToolState] | None:
     """Load the most recent state from ``session.jsonl``.
 
@@ -1486,6 +1643,9 @@ def load_session(
 
     Args:
       session_dir: Directory containing ``session.jsonl``.
+      preserve_corrupt: Whether to copy the file aside on the first
+          unparseable line. Off for a read-only inspection: a caller that
+          promises not to modify the session cannot leave a backup behind.
 
     Returns:
       loaded: ``(meta, tape, tool_state)`` on success, or ``None`` if
@@ -1521,7 +1681,7 @@ def load_session(
                 try:
                     record = json.loads(line)
                 except json.JSONDecodeError:
-                    if not corrupt_preserved:
+                    if preserve_corrupt and not corrupt_preserved:
                         _preserve_corrupt_session(session_file)
                         corrupt_preserved = True
                     logger.warning(
@@ -1534,48 +1694,40 @@ def load_session(
                     continue
                 rec = cast(Mapping[str, object], record)
                 kind = rec.get("kind")
+                # ``meta`` and ``tool_state`` bind loop-scoped state rather
+                # than appending to the tape, so they stay here.
                 if kind == "meta":
                     meta_raw = dict(rec)
-                elif kind == "tool_state":
+                    continue
+                if kind == "tool_state":
                     snapshot = dict(rec)
                     snapshot_line = line_num
-                elif kind == "clear":
-                    ref = _next_synthetic_ref()
-                    last_ord = tape[-1].ref.ordinal if tape else -1
-                    tape.append(_legacy_clear_to_splice(ref, last_ord))
+                    continue
+                try:
+                    _absorb_record(
+                        rec,
+                        tape=tape,
+                        barrier_candidates=barrier_candidates,
+                        runtime_events=runtime_events,
+                        next_synthetic_ref=_next_synthetic_ref,
+                        line_num=line_num,
+                    )
+                except (ValueError, TypeError, KeyError):
+                    # One record's shape must not cost the conversation. The
+                    # dataclasses validate at construction (duplicate tool_call
+                    # ids, inverted mask ranges), and the whole point of this
+                    # loader is repairing what legacy writers left behind -- so
+                    # a record that cannot be built is skipped, like an
+                    # unparseable line, rather than aborting the resume.
+                    logger.warning(
+                        "Skipping malformed session record on line %s in %s.",
+                        line_num,
+                        session_file,
+                        exc_info=True,
+                    )
+                    continue
+                if kind in ("clear", "context_clear"):
                     snapshot = None
-                elif kind == "context_clear":
-                    ref = _ref_from_json(rec.get("ref")) or _next_synthetic_ref()
-                    last_ord = tape[-1].ref.ordinal if tape else -1
-                    tape.append(_legacy_clear_to_splice(ref, last_ord))
-                    snapshot = None
-                elif kind == "history":
-                    entry = _entry_from_json(rec)
-                    if entry is not None:
-                        ref = _ref_from_json(rec.get("ref")) or _next_synthetic_ref()
-                        tape.append(ReferrableTapeEvent(ref=ref, event=entry))
-                elif kind == "context_splice":
-                    ref = _ref_from_json(rec.get("ref")) or _next_synthetic_ref()
-                    splice = _splice_from_json(rec, ref)
-                    if splice is not None:
-                        tape.append(splice)
-                        barrier_candidates.append((splice, line_num))
-                elif kind == "runtime_event":
-                    event = _runtime_event_from_json(rec)
-                    if event is not None:
-                        runtime_events.append(event)
-                elif kind == "context_override":
-                    # Legacy: convert to ContextSplice on read.
-                    ref = _ref_from_json(rec.get("ref")) or _next_synthetic_ref()
-                    splice = _legacy_override_to_splice(rec, ref)
-                    if splice is not None:
-                        tape.append(splice)
-                        barrier_candidates.append((splice, line_num))
-                elif kind == "update":
-                    # Legacy splice patch: apply to the latest matching
-                    # ``ReferrableTapeEvent.event`` in place; dropped silently
-                    # if no match (stale patch from a corrupted file).
-                    _apply_update_in_place(tape, rec)
                 # Keep the synthetic-ref cursor monotonic against legacy
                 # records that supplied their own ref.
                 ordinal_cursor = max(
@@ -1586,6 +1738,7 @@ def load_session(
         logger.warning("Could not read session file, starting fresh.")
         return None
 
+    tape = _renumber_duplicate_refs(tape)
     tape = _sort_tape_by_ordinal(tape)
     if snapshot is not None and _has_later_barrier(
         barrier_candidates,
@@ -1607,15 +1760,181 @@ def load_session(
     return meta, tape, state
 
 
-def _sort_tape_by_ordinal(tape: list[TapeRecord]) -> list[TapeRecord]:
-    """Return loaded tape records in canonical ``(session_id, ordinal)`` order.
+def _absorb_record(
+    rec: Mapping[str, object],
+    *,
+    tape: list[TapeRecord],
+    barrier_candidates: list[tuple[ContextSplice, int]],
+    runtime_events: list[RuntimeEvent],
+    next_synthetic_ref: Callable[[], TapeRef],
+    line_num: int,
+) -> None:
+    """Fold one decoded session record into the loading tape.
 
-    Cross-session loads (forks, merged session_dirs) can collide on the
-    same ordinal; sort by ``session_id`` first so same-ordinal records
-    from different sessions tie deterministically and stay grouped by
-    session.
+    Split out of ``load_session`` so a record that fails to construct can be
+    skipped by its caller without a ``try`` around the whole read loop.
+
+    Args:
+      rec: One decoded JSONL record.
+      tape: Tape being built; appended in place.
+      barrier_candidates: Splices paired with their line, for snapshot
+          invalidation; appended in place.
+      runtime_events: Durable runtime events; appended in place.
+      next_synthetic_ref: Mints a ref for a legacy record carrying none.
+      line_num: Line this record came from, recorded with barriers.
+
     """
-    return sorted(tape, key=lambda record: (record.ref.session_id, record.ref.ordinal))
+    kind = rec.get("kind")
+    if kind == "clear":
+        tape.append(_legacy_clear_to_splice(next_synthetic_ref(), tape))
+    elif kind == "context_clear":
+        ref = _ref_from_json(rec.get("ref")) or next_synthetic_ref()
+        tape.append(_legacy_clear_to_splice(ref, tape))
+    elif kind == "history":
+        entry = _entry_from_json(rec)
+        if entry is not None:
+            ref = _ref_from_json(rec.get("ref")) or next_synthetic_ref()
+            tape.append(ReferrableTapeEvent(ref=ref, event=entry))
+    elif kind == "context_splice":
+        ref = _ref_from_json(rec.get("ref")) or next_synthetic_ref()
+        splice = _splice_from_json(rec, ref)
+        if splice is not None:
+            tape.append(splice)
+            barrier_candidates.append((splice, line_num))
+    elif kind == "runtime_event":
+        event = _runtime_event_from_json(rec)
+        if event is not None:
+            runtime_events.append(event)
+    elif kind == "context_override":
+        # Legacy: convert to ContextSplice on read.
+        ref = _ref_from_json(rec.get("ref")) or next_synthetic_ref()
+        splice = _legacy_override_to_splice(rec, ref)
+        if splice is not None:
+            tape.append(splice)
+            barrier_candidates.append((splice, line_num))
+    elif kind == "update":
+        # Legacy splice patch: apply to the latest matching
+        # ``ReferrableTapeEvent.event`` in place; dropped silently
+        # if no match (stale patch from a corrupted file).
+        _apply_update_in_place(tape, rec)
+
+
+def _renumber_duplicate_refs(tape: list[TapeRecord]) -> list[TapeRecord]:
+    """Give every record its own ref, relocating later claimants of one.
+
+    Two writers can mint the same ordinal against one session file -- an
+    external tool computing ``max + 1`` from a snapshot while the agent is
+    live, for instance. The resolver refuses a duplicate, and it must: keyed by
+    ref, it would otherwise render the later record twice and drop the earlier.
+    Refusing at LOAD would strand a conversation whose only copy is this file,
+    so the duplicate is relocated instead -- but a ref names a POSITION, and a
+    position carries a masking fate, so relocation has to preserve it.
+
+    Two claimant kinds, handled oppositely because their causes are opposite:
+
+    - A duplicate ``ContextSplice`` on a MASKED position is a re-appended EDIT.
+      Applying it twice is meaningless, and moving it would lift its ref out of
+      the mask that killed it -- reviving a deletion and re-hiding real
+      messages. Drop it.
+    - Every other duplicate is real work by a second writer and must survive:
+      a plain record is conversation, and a splice on a live position is a
+      second agent's coalesce, whose payload is the user's message and exists
+      nowhere else. Both move past the high-water mark, and every splice
+      appended AFTER them carries its mask onto the new ordinal. Splices
+      appended BEFORE do not: a barrier cannot have meant to mask a record that
+      did not exist yet, and applying it retroactively deletes a delivered
+      message.
+
+    Two live agents resumed from one directory are the source of the second
+    case. Each seeds an in-memory ordinal cursor at load and mints from it
+    without consulting the file, so both claim the same next position -- and
+    since every user message coalesces through a splice, the blanket
+    drop discarded whichever agent lost the race.
+
+    Tape order is file order (records are appended as the loop reads), so the
+    index comparison below IS "written before / written after".
+    """
+    seen: set[TapeRef] = set()
+    kept: list[TapeRecord] = []
+    moved: list[tuple[TapeRef, TapeRef, int]] = []
+    # Above every mask, not just every record: a splice can claim ordinals
+    # past the tape's end (a barrier from when the tape was longer, or a
+    # widened range), and a record relocated into one silently disappears --
+    # though it was written after that splice and was never its target.
+    next_ordinal = (
+        max(
+            (
+                *(record.ref.ordinal for record in tape),
+                *(
+                    r.hi
+                    for record in tape
+                    if isinstance(record, ContextSplice)
+                    for r in record.mask
+                ),
+            ),
+            default=-1,
+        )
+        + 1
+    )
+    # Aliveness is read once, from the tape as loaded. Recomputing it per
+    # relocation would let a decision depend on relocations already made.
+    masked_positions = masked_refs_by_alive(tape, alive_splices(tape))
+    for index, record in enumerate(tape):
+        if record.ref not in seen:
+            seen.add(record.ref)
+            kept.append(record)
+            continue
+        if isinstance(record, ContextSplice) and record.ref in masked_positions:
+            logger.warning("Dropping re-appended splice at %s.", record.ref)
+            continue
+        fresh = TapeRef(session_id=record.ref.session_id, ordinal=next_ordinal)
+        next_ordinal += 1
+        logger.warning("Duplicate tape ref %s relocated to %s.", record.ref, fresh)
+        seen.add(fresh)
+        moved.append((record.ref, fresh, index))
+        kept.append(dataclasses.replace(record, ref=fresh))
+    if not moved:
+        return kept
+    index_of = {id(record): index for index, record in enumerate(tape)}
+    return [
+        # ``merge_mask_ranges``, not concatenation: the carried singleton can
+        # fall inside a range the splice already holds, and ``ContextSplice``
+        # rejects overlap. That raise came out of ``dataclasses.replace``
+        # below, past the read loop's per-record catch, so one duplicated ref
+        # made the whole session unloadable.
+        dataclasses.replace(record, mask=merge_mask_ranges(record.mask + extra))
+        if isinstance(record, ContextSplice)
+        and (extra := _mask_for_moved(record, moved, index_of))
+        else record
+        for record in kept
+    ]
+
+
+def _mask_for_moved(
+    splice: ContextSplice,
+    moved: Sequence[tuple[TapeRef, TapeRef, int]],
+    index_of: Mapping[int, int],
+) -> tuple[MaskRange, ...]:
+    """Ranges extending ``splice``'s mask onto records it predates."""
+    splice_index = index_of.get(id(splice), -1)
+    return tuple(
+        MaskRange(session_id=fresh.session_id, lo=fresh.ordinal, hi=fresh.ordinal)
+        for original, fresh, record_index in moved
+        if record_index < splice_index and mask_contains_ref(splice.mask, original)
+    )
+
+
+def _sort_tape_by_ordinal(tape: list[TapeRecord]) -> list[TapeRecord]:
+    """Return loaded tape records in ordinal order, append order breaking ties.
+
+    Ordinal first, NEVER ``session_id`` first: the resolver anchors each splice
+    against the records emitted before it, so grouping by session hoists one
+    session's whole run ahead of another's and an anchor not yet emitted falls
+    into HEAD -- reversing the conversation on a resumed or forked tape. A
+    same-ordinal tie across sessions keeps the order the file recorded, which
+    is the order the events actually happened in.
+    """
+    return sorted(tape, key=lambda record: record.ref.ordinal)
 
 
 def _has_later_barrier(
@@ -1701,7 +2020,7 @@ def _apply_update_in_place(
             patched = dataclasses.replace(
                 event,
                 content=new_content,
-                is_error=bool(rec.get("is_error", False)),
+                is_error=_json_bool(rec.get("is_error")),
                 kind=_tool_result_kind_from_json(rec.get("result_kind"), new_content),
             )
             tape[i] = dataclasses.replace(record, event=patched)
@@ -1796,12 +2115,20 @@ def repair_dangling_tool_calls(
 
 
 def _preserve_corrupt_session(session_file: Path) -> None:
-    """Copy corrupt session bytes to a timestamped sibling for forensics."""
+    """Copy corrupt session bytes to a timestamped sibling for forensics.
+
+    The copy holds the same prompts, tool output, and secrets as the original,
+    so it takes the same owner-only mode. ``write_bytes`` creates under the
+    umask, which on a default ``022`` host published a full transcript at
+    ``0644`` -- the forensic artifact leaking what the live file protects.
+    """
     backup = session_file.with_name(f"{session_file.name}.corrupt-{time.time_ns()}")
     try:
         backup.write_bytes(session_file.read_bytes())
     except OSError:
         logger.exception("Could not preserve corrupt session file %s.", session_file)
+        return
+    restrict_path(backup, 0o600)
 
 
 def restore_model(

@@ -150,12 +150,28 @@ def resolve_context(tape: Sequence[TapeRecord]) -> ResolvedContext:
     Returns:
       resolved: Provider-facing messages and version key.
 
+    Raises:
+      InvalidContextError: Two records claim the same ``TapeRef``.
+
     """
     alive = alive_splices(tape)
     masked = masked_refs_by_alive(tape, alive)
 
     segments: dict[TapeRef, list[ModelContextEvent]] = {}
-    order: list[TapeRef] = []
+    order: _OrderedRefs = _OrderedRefs()
+
+    # A ref names exactly one record. ``segments`` is keyed by ref while
+    # ``order`` keeps every occurrence, so a duplicate silently rendered the
+    # later record in both slots and dropped the earlier one -- the failure
+    # mode when two writers mint the same ordinal. Refuse instead: a caller
+    # cannot repair damage it is never told about.
+    seen: set[TapeRef] = set()
+    for record in tape:
+        if record.ref in seen:
+            raise InvalidContextError(
+                f"duplicate tape ref {record.ref}: two records claim one position",
+            )
+        seen.add(record.ref)
 
     for record in tape:
         if isinstance(record, ReferrableTapeEvent):
@@ -177,24 +193,19 @@ def resolve_context(tape: Sequence[TapeRecord]) -> ResolvedContext:
             order.append(record.ref)
             continue
         segments[record.ref] = list(record.payload)
-        anchor_idx = (
-            _index_of(order, record.insert_after)
-            if record.insert_after is not None
-            else -1
-        )
-        if anchor_idx is None:
+        anchor = record.insert_after
+        if anchor is not None and not order.contains(anchor):
             logger.warning(
                 "resolver: splice %s insert_after=%s not on tape; falling into HEAD",
                 record.ref,
-                record.insert_after,
+                anchor,
             )
-            order.insert(0, record.ref)
-        else:
-            order.insert(anchor_idx + 1, record.ref)
+            anchor = None
+        order.insert_after(anchor, record.ref)
 
     messages: list[ModelContextEvent] = []
     origins: list[TapeRef] = []
-    for ref in order:
+    for ref in order.refs:
         segment = segments[ref]
         messages.extend(segment)
         origins.extend(ref for _ in segment)
@@ -297,9 +308,58 @@ class _MaskIndex:
         intervals.insert(idx, (start, stop))
 
 
-def _index_of(order: list[TapeRef], ref: TapeRef) -> int | None:
-    """Linear search for ``ref`` in ``order``. ``None`` when absent."""
-    for i, r in enumerate(order):
-        if r == ref:
-            return i
-    return None
+@dataclass(slots=True, kw_only=True)
+class _OrderedRefs:
+    """Emission order with O(1) lookup of a ref's position.
+
+    ``resolve_context`` anchors each alive splice against the refs emitted so
+    far, and the runtime re-resolves after every append. Scanning the list per
+    splice made that quadratic in tape length on the ordinary shape -- one
+    coalesce splice per user turn.
+
+    Order is kept as a linked list rather than a Python list because a splice
+    inserts in the MIDDLE: renumbering the tail per insert, or rebuilding an
+    index because the tail moved, is the same quadratic in different clothing.
+    Links make both the insert and the lookup O(1), and ``refs`` walks them
+    once at the end.
+    """
+
+    _next: dict[TapeRef | None, TapeRef | None] = field(default_factory=dict)
+    _prev: dict[TapeRef | None, TapeRef | None] = field(default_factory=dict)
+    _present: set[TapeRef] = field(default_factory=set)
+
+    def __post_init__(self) -> None:
+        # ``None`` is the head/tail sentinel, so an empty list is one link.
+        self._next[None] = None
+        self._prev[None] = None
+
+    def append(self, ref: TapeRef) -> None:
+        """Emit ``ref`` at the end."""
+        self._link(self._prev[None], ref)
+
+    def insert_after(self, anchor: TapeRef | None, ref: TapeRef) -> None:
+        """Emit ``ref`` directly after ``anchor``; ``None`` means at the head."""
+        self._link(anchor, ref)
+
+    def contains(self, ref: TapeRef) -> bool:
+        """Whether ``ref`` has been emitted."""
+        return ref in self._present
+
+    @property
+    def refs(self) -> list[TapeRef]:
+        """Emitted refs in order."""
+        out: list[TapeRef] = []
+        cursor = self._next[None]
+        while cursor is not None:
+            out.append(cursor)
+            cursor = self._next[cursor]
+        return out
+
+    def _link(self, after: TapeRef | None, ref: TapeRef) -> None:
+        """Splice ``ref`` into the chain immediately after ``after``."""
+        following = self._next[after]
+        self._next[after] = ref
+        self._next[ref] = following
+        self._prev[ref] = after
+        self._prev[following] = ref
+        self._present.add(ref)
