@@ -107,7 +107,9 @@ class OpenAICompat:
     ENV_VAR: ClassVar[str] = ""
     BASE_URL: ClassVar[str] = ""
 
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = MappingProxyType({})
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = MappingProxyType[
+        str, ModelCapability
+    ]({})
     """Per-model capability; empty on the plain compat base."""
 
     TRANSPORT: ClassVar[ModelCapability] = ModelCapability(
