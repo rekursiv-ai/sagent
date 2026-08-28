@@ -12,12 +12,13 @@ from collections.abc import (
     Sequence,
     Set as AbstractSet,
 )
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from types import GenericAlias, UnionType
 from typing import ClassVar, Protocol, cast
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import dataclasses
 import json
@@ -907,6 +908,47 @@ class TestNonFiniteEncoding:
             assert math.isnan(back.ratio)
         else:
             assert back.ratio == value
+
+
+class TestZonedDatetimeEncoding:
+    """ISO 8601 spells an OFFSET, so a zone name has nowhere to ride.
+
+    Encoding ``America/Los_Angeles`` as ``-07:00`` loses both the name and
+    the DST rules that make the offset right on any other date, so a summer
+    timestamp decoded in winter is wrong by an hour.
+    """
+
+    def test_a_named_zone_survives_the_round_trip(self) -> None:
+        zone = ZoneInfo("America/Los_Angeles")
+        doc = _Doc(when=datetime(2026, 8, 24, 12, tzinfo=zone))
+
+        back = _Doc.from_json(json.loads(json.dumps(doc.to_json())))
+
+        assert back.when == doc.when
+        assert back.when is not None
+        assert back.when.tzinfo == zone
+
+    def test_the_decoded_zone_still_knows_its_dst_rule(self) -> None:
+        # What the NAME buys over the offset: the encoded instant is correct
+        # either way, but only a named zone shifts to -08:00 when arithmetic
+        # carries it across the DST boundary. A fixed -07:00 stays -07:00.
+        doc = _Doc(
+            when=datetime(2026, 8, 24, 12, tzinfo=ZoneInfo("America/Los_Angeles"))
+        )
+
+        back = _Doc.from_json(json.loads(json.dumps(doc.to_json()))).when
+        assert back is not None
+        winter = back.astimezone(back.tzinfo) + timedelta(days=150)
+
+        assert back.utcoffset() == timedelta(hours=-7)
+        assert winter.astimezone(back.tzinfo).utcoffset() == timedelta(hours=-8)
+
+    def test_a_fixed_offset_stays_a_bare_string(self) -> None:
+        # No name to preserve, so the tag would be noise on every timestamp
+        # the codec writes.
+        doc = _Doc(when=datetime(2026, 8, 24, tzinfo=UTC))
+
+        assert dict_val(doc.to_json())["when"] == "2026-08-24T00:00:00+00:00"
 
 
 class TestNonStrMappingKeys:

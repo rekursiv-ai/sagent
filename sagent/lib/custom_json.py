@@ -29,6 +29,7 @@ from typing import (
     overload,
 )
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import base64
 import math
@@ -612,6 +613,7 @@ _TYPE_TAG: Final = "__type__"
 _SCALAR_TAG: Final = "__scalar__"
 _VALUE_TAG: Final = "__value__"
 _FLOAT_TAG: Final = "__float__"
+_ZONE_TAG: Final = "__zone__"
 
 
 class SchemaError(ValueError):
@@ -814,6 +816,19 @@ def _encode_float(value: float) -> JSONValue:
     return {_FLOAT_TAG: repr(value)}
 
 
+def _encode_datetime(value: datetime) -> JSONValue:
+    """Encode a datetime, tagging the zone NAME ISO 8601 cannot express.
+
+    ``isoformat`` writes an offset (``-07:00``), so a named zone decodes as a
+    fixed ``UTC-07:00`` and the name is gone -- along with the DST rules that
+    make the offset correct on any other date. A zone that HAS a name becomes
+    a tagged token, mirroring ``_encode_float``.
+    """
+    if isinstance(value.tzinfo, ZoneInfo):
+        return {_ZONE_TAG: value.tzinfo.key, _VALUE_TAG: value.isoformat()}
+    return value.isoformat()
+
+
 def _encode(value: object, annotation: object = None) -> JSONValue:
     if is_dataclass(value) and not isinstance(value, type):
         return dataclass_to_json(value)
@@ -836,7 +851,7 @@ def _encode(value: object, annotation: object = None) -> JSONValue:
     if isinstance(value, UUID):
         return str(value)
     if isinstance(value, datetime):
-        return value.isoformat()
+        return _encode_datetime(value)
     if isinstance(value, Enum):
         return cast(JSONValue, value.value)
     if isinstance(value, Mapping):
@@ -1038,6 +1053,8 @@ def decode(
             return raw
         if isinstance(raw, str):
             return datetime.fromisoformat(raw)
+        if isinstance(raw, Mapping):
+            return _decode_datetime(cast(Mapping[str, object], raw))
     if isinstance(ann, type) and issubclass(ann, Enum):
         return ann(raw)
     # An unannotated field (``object`` / no hint) is the one shape with no
@@ -1155,6 +1172,22 @@ def _decode_int(raw: object) -> int:
         except ValueError as exc:
             raise TypeError(f"cannot decode {raw!r} as int") from exc
     raise TypeError(f"cannot decode {raw!r} as int")
+
+
+def _decode_datetime(raw: Mapping[str, object]) -> datetime:
+    """Decode a datetime whose zone name travelled beside its offset."""
+    key = raw.get(_ZONE_TAG)
+    stamp = raw.get(_VALUE_TAG)
+    if not isinstance(key, str) or not isinstance(stamp, str):
+        raise TypeError(f"cannot decode {raw!r} as datetime")
+    try:
+        zone = ZoneInfo(key)
+    except (ValueError, ZoneInfoNotFoundError):
+        # The name is valid where it was written but absent here (a trimmed
+        # tzdata, a renamed zone). The instant is still exact, so keep it
+        # rather than failing the whole document.
+        return datetime.fromisoformat(stamp)
+    return datetime.fromisoformat(stamp).astimezone(zone)
 
 
 def _decode_float(raw: object) -> float:
