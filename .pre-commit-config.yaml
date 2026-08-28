@@ -28,11 +28,17 @@
 #   fires on a dirty tree) STASHES your changes -- a git mutation, and this
 #   worktree is shared.
 #
+#   NUL-delimited, per AGENTS.md: a path containing a space becomes two
+#   arguments under `$(...)` or a bare `xargs`, and a rename record yields the
+#   name that no longer exists.
+#
 #   # Harvest all changed files from the perspective of CWD.
-#     uv --quiet run --frozen --group pre-commit pre-commit run --files $(git --no-pager diff --name-only --diff-filter=d HEAD | sed "s|^|$(git rev-parse --show-cdup)|")
+#     git -C "$(git rev-parse --show-toplevel)" diff -z --name-only --diff-filter=d HEAD \
+#       | xargs -0 --no-run-if-empty uv --quiet run --frozen --group pre-commit pre-commit run --files
 #
 #   # Run only the files from the CWD.
-#     uv --quiet run --frozen --group pre-commit pre-commit run --files $(git --no-pager diff --name-only --cached --relative | xargs)
+#     git --no-pager diff -z --name-only --cached --relative \
+#       | xargs -0 --no-run-if-empty uv --quiet run --frozen --group pre-commit pre-commit run --files
 #
 #   One hook at a time, by id (`ruff-check`, `ty-check`, `pytest-global`, ...):
 #     uv --quiet run --frozen --group pre-commit pre-commit run ruff-check --all-files
@@ -230,7 +236,10 @@ repos:
       #   WORKERS = max(2, min(perf - 1, round(phys * 3/8)))
       #
       # `phys` counts physical cores (SMT deduped), `perf` those at the top
-      # clock. Both terms were FITTED to measured optima, not derived:
+      # clock. Deduped on `(physical_package_id, core_id)`, not `core_id`
+      # alone: core ids restart at 0 per socket, so a dual-socket host collapsed
+      # to one socket's worth of cores and ran half the workers it should.
+      # Both terms were FITTED to measured optima, not derived:
       #
       #
       # Do NOT "simplify" this to a core count: physical cores, top frequency
@@ -262,9 +271,10 @@ repos:
             if [ -z "$WORKERS" ]; then
               cpu=/sys/devices/system/cpu;
               if [ -d "$cpu/cpu0/topology" ]; then
-                phys=$(cat $cpu/cpu*/topology/core_id 2>/dev/null | sort -u | wc -l);
+                key() { for d in "$@"; do printf "%s,%s\n" "$(cat $d/topology/physical_package_id 2>/dev/null)" "$(cat $d/topology/core_id 2>/dev/null)"; done | sort -u | wc -l; };
+                phys=$(key $cpu/cpu[0-9]*);
                 top=$(sort -rn $cpu/cpu*/cpufreq/cpuinfo_max_freq 2>/dev/null | head -1);
-                perf=$([ -n "$top" ] && grep -lx "$top" $cpu/cpu*/cpufreq/cpuinfo_max_freq | xargs -n1 dirname | xargs -n1 dirname | xargs -I@ cat @/topology/core_id | sort -u | wc -l || echo "$phys");
+                perf=$([ -n "$top" ] && key $(grep -lx "$top" $cpu/cpu*/cpufreq/cpuinfo_max_freq | xargs -n1 dirname | xargs -n1 dirname) || echo "$phys");
               else
                 phys=$(sysctl -n hw.physicalcpu 2>/dev/null || getconf _NPROCESSORS_ONLN);
                 perf=0;
@@ -326,6 +336,11 @@ repos:
         name: basedpyright
         language: system
         stages: [pre-commit]
+        # `--explain` writes the selected scope, and pre-commit discards a
+        # PASSING hook's output (see the Pre-Push Gates note on `verbose`), so
+        # without this the scope is visible only on failure -- exactly when it
+        # is least useful for confirming the hook looked at the right files.
+        verbose: true
         require_serial: true
         # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
         alias: superseded-at-pre-push
@@ -334,15 +349,24 @@ repos:
         # `files` stays `"$@"` unless BOTH the opt-in is set and the harvester
         # exists -- the latter never does in an exported package, which ships no
         # `ops/` tree.
+        #
+        # An ARRAY throughout, never a scalar. Flattening argv into a string and
+        # re-splitting on IFS turns `dir with space/mod.py` into three arguments
+        # and lets a `*` in a filename glob against the worktree. The harvester
+        # emits one path per line for the same reason, and `--` keeps a
+        # leading-dash filename from parsing as an option.
         args:
           - WORKERS_BASEDPYRIGHT
           - >-
-            files="$@";
-            [ -n "${PRECOMMIT_CODEGRAPH:-}" ] && [ -x ops/git/precommit/affected.py ] &&
-              files=$(ops/git/precommit/affected.py --emit files --depth 3 --explain "$@");
+            files=("$@");
+            if [ -n "${PRECOMMIT_CODEGRAPH:-}" ] && [ -x ops/git/precommit/affected.py ]; then
+              harvested=$(ops/git/precommit/affected.py --emit files --depth 3 --explain -- "$@") &&
+                [ -n "$harvested" ] &&
+                IFS=$'\n' read -r -d '' -a files < <(printf "%s" "$harvested" && printf '\0');
+            fi;
             exec env NODE_OPTIONS=--max-old-space-size=2048
             uv --quiet run --frozen --group pre-commit
-            basedpyright --threads="$WORKERS" $files
+            basedpyright --threads="$WORKERS" "${files[@]}"
         exclude: |
           (?x)^(
             typings/
@@ -386,6 +410,9 @@ repos:
         language: system
         stages: [pre-commit]
         require_serial: true
+        # See `basedpyright` above: a passing hook's output is discarded, which
+        # made "did any test run at all?" unanswerable from a green line.
+        verbose: true
         # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
         alias: superseded-at-pre-push
         types: [python]
@@ -393,15 +420,21 @@ repos:
         # The inline loop is the SIDECAR PROBE and it is the DEFAULT. The
         # harvester supersedes it only under `PRECOMMIT_CODEGRAPH=1`, and never
         # in an exported package, which ships no `ops/` tree.
+        #
+        # The probe also runs whenever the harvester yields NOTHING -- a nonzero
+        # exit or an empty selection. Without that, a corrupt or stale index
+        # made this hook run zero tests and exit green, which is worse than not
+        # having the index at all.
         args:
           - WORKERS_PYTEST
           - >-
             tests=();
             if [ -n "${PRECOMMIT_CODEGRAPH:-}" ] && [ -x ops/git/precommit/affected.py ]; then
-              ids=$(ops/git/precommit/affected.py --emit nodeids --explain "$@");
-              [ -n "$ids" ] &&
+              ids=$(ops/git/precommit/affected.py --emit nodeids --explain -- "$@") &&
+                [ -n "$ids" ] &&
                 IFS=$'\n' read -r -d '' -a tests < <(printf "%s" "$ids" && printf '\0');
-            else
+            fi;
+            if [ ${#tests[@]} -eq 0 ]; then
               for f in "$@"; do
                 dir=$(dirname "$f");
                 stem=$(basename "$f" .py); stem=${stem%_test}; stem=${stem#test_};
@@ -410,12 +443,13 @@ repos:
                   [ -f "$cand" ] && tests+=("$cand");
                 done;
               done;
-              IFS=$'\n' read -r -d '' -a tests < <(printf "%s\n" "${tests[@]}" | sort -u && printf '\0');
+              ((${#tests[@]})) &&
+                IFS=$'\n' read -r -d '' -a tests < <(printf "%s\n" "${tests[@]}" | sort -u && printf '\0');
             fi;
             [ ${#tests[@]} -eq 0 ] && exit 0;
             dist=();
             ((${#tests[@]} >= ${SIDECAR_XDIST_MIN:-16})) && dist=(-n "$WORKERS");
-            uv --quiet run --frozen --group pre-commit pytest "${dist[@]}" -q --tb=short "${tests[@]}"
+            uv --quiet run --frozen --group pre-commit pytest "${dist[@]}" -q --tb=short -- "${tests[@]}"
             || test "$?" = 5
 
   # === Pre-Push Gates =========================================================
