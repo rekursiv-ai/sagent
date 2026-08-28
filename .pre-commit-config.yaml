@@ -321,6 +321,7 @@ repos:
       # basedpyright at `--threads=$WORKERS` -- a 500-file changeset launched 18
       # processes and ~96 Node workers on a 16-core box. Serial partitioning is
       # what makes $WORKERS a cap.
+      #
       - id: basedpyright
         name: basedpyright
         language: system
@@ -330,12 +331,18 @@ repos:
         alias: superseded-at-pre-push
         types_or: [python, pyi]
         entry: *worker-entry
+        # `files` stays `"$@"` unless BOTH the opt-in is set and the harvester
+        # exists -- the latter never does in an exported package, which ships no
+        # `ops/` tree.
         args:
           - WORKERS_BASEDPYRIGHT
           - >-
+            files="$@";
+            [ -n "${PRECOMMIT_CODEGRAPH:-}" ] && [ -x ops/git/precommit/affected.py ] &&
+              files=$(ops/git/precommit/affected.py --emit files --depth 3 --explain "$@");
             exec env NODE_OPTIONS=--max-old-space-size=2048
             uv --quiet run --frozen --group pre-commit
-            basedpyright --threads="$WORKERS" "$@"
+            basedpyright --threads="$WORKERS" $files
         exclude: |
           (?x)^(
             typings/
@@ -345,22 +352,17 @@ repos:
       # Runs the test file PAIRED with each changed source file, nothing
       # transitive: ~1s, versus the whole suite at pre-push.
       #
-      # Deliberately not an affected-set analysis. The reverse-import closure of
-      # a 42-file changeset here is 2482 files / 1124 test files (39% of the
-      # tree) because one touched module has 212 importers -- import
-      # reachability is not behavioral dependence, so the cheap pairing buys
-      # nearly as much and pre-push runs everything regardless.
-      #
-      # Probes both sidecar spellings and a mirrored tests/ tree; a layout
+      # Probes both sidecar spellings and a sibling tests/ directory; a layout
       # matching none runs nothing and exits 0. Green here means "no paired test
       # found", not "tested" -- acceptable only because pre-push is the gate.
       #
-      # Tolerate exit 5 (nothing collected): a sidecar whose every test carries
-      # a deselected marker collects zero, which is not a failure -- editing
-      # `chrome/echo.py` reported RED on seven passing integration tests. A real
-      # failure is exit 1 and still fails.
       #
-      # `-n` is chosen from changeset size because neither setting wins
+      # Tolerate exit 5 (nothing collected): a selection whose every test
+      # carries a deselected marker collects zero, which is not a failure --
+      # editing `chrome/echo.py` reported RED on seven passing integration
+      # tests. A real failure is exit 1 and still fails.
+      #
+      # `-n` is chosen from selection size because neither setting wins
       # everywhere: xdist costs a fixed ~5s startup, a sidecar is ~0.23s serial
       # vs ~0.10s spread, so the curves cross. Measured on tron (WORKERS=5),
       # files -> wall:
@@ -373,9 +375,6 @@ repos:
       # won, so a few-file commit -- what this tier exists for -- never pays
       # startup and a sweeping refactor still gets workers. SIDECAR_XDIST_MIN
       # overrides.
-      #
-      # `read -d ''`, not `mapfile`: mapfile is bash 4.0 and macOS ships 3.2.
-      # `printf '\0'` supplies the NUL, so read exits 0 instead of on EOF.
       #
       # `require_serial: true` is a separate axis, governing pre-commit's OWN
       # argv partitioning: it forks cpu_count copies of this whole hook, which
@@ -391,21 +390,29 @@ repos:
         alias: superseded-at-pre-push
         types: [python]
         entry: *worker-entry
+        # The inline loop is the SIDECAR PROBE and it is the DEFAULT. The
+        # harvester supersedes it only under `PRECOMMIT_CODEGRAPH=1`, and never
+        # in an exported package, which ships no `ops/` tree.
         args:
           - WORKERS_PYTEST
           - >-
             tests=();
-            for f in "$@"; do
-              dir=$(dirname "$f");
-              stem=$(basename "$f" .py); stem=${stem%_test}; stem=${stem#test_};
-              for cand in "$dir/${stem}_test.py" "$dir/test_${stem}.py" \
-                          "tests/${dir#src/}/${stem}_test.py" \
-                          "tests/${dir#src/}/test_${stem}.py"; do
-                [ -f "$cand" ] && tests+=("$cand");
+            if [ -n "${PRECOMMIT_CODEGRAPH:-}" ] && [ -x ops/git/precommit/affected.py ]; then
+              ids=$(ops/git/precommit/affected.py --emit nodeids --explain "$@");
+              [ -n "$ids" ] &&
+                IFS=$'\n' read -r -d '' -a tests < <(printf "%s" "$ids" && printf '\0');
+            else
+              for f in "$@"; do
+                dir=$(dirname "$f");
+                stem=$(basename "$f" .py); stem=${stem%_test}; stem=${stem#test_};
+                for cand in "$dir/${stem}_test.py" "$dir/test_${stem}.py" \
+                            "$dir/tests/${stem}_test.py" "$dir/tests/test_${stem}.py"; do
+                  [ -f "$cand" ] && tests+=("$cand");
+                done;
               done;
-            done;
+              IFS=$'\n' read -r -d '' -a tests < <(printf "%s\n" "${tests[@]}" | sort -u && printf '\0');
+            fi;
             [ ${#tests[@]} -eq 0 ] && exit 0;
-            IFS=$'\n' read -r -d '' -a tests < <(printf "%s\n" "${tests[@]}" | sort -u && printf '\0');
             dist=();
             ((${#tests[@]} >= ${SIDECAR_XDIST_MIN:-16})) && dist=(-n "$WORKERS");
             uv --quiet run --frozen --group pre-commit pytest "${dist[@]}" -q --tb=short "${tests[@]}"
