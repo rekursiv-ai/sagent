@@ -28,13 +28,18 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import dataclasses
+import gc
+import inspect
 import json
 import math
+import weakref
 
 import pytest
 
+from sagent.lib.absent import ABSENT
 from sagent.lib.custom_json import (
     JSON,
+    Invalid,
     JsonCodec,
     JSONValue,
     SchemaError,
@@ -51,7 +56,10 @@ from sagent.lib.custom_json import (
     json_unfreeze,
     list_val,
     optional_val,
+    replay,
+    residual,
     str_val,
+    take,
     validate_json_schema,
 )
 
@@ -65,6 +73,47 @@ class TestJsonFreeze:
         assert isinstance(frozen, Mapping)
         assert frozen == {"a": (1, {"b": True})}
 
+    def test_sequence_abc(self) -> None:
+        assert json_freeze(range(3)) == (0, 1, 2)
+
+    @pytest.mark.parametrize("value", [object(), b"x", bytearray(b"x"), {1}])
+    def test_rejects_non_json_values(self, value: object) -> None:
+        with pytest.raises(TypeError):
+            json_freeze(value)
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_preserves_non_finite_float_extensions(self, value: float) -> None:
+        frozen = json_freeze({"value": value})
+        assert isinstance(frozen, Mapping)
+        result = frozen["value"]
+        assert isinstance(result, float)
+        assert math.isnan(result) if math.isnan(value) else result == value
+
+    @pytest.mark.parametrize(
+        ("value", "literal"),
+        [
+            (float("nan"), "NaN"),
+            (float("inf"), "Infinity"),
+            (float("-inf"), "-Infinity"),
+        ],
+    )
+    def test_non_finite_extensions_round_trip_through_json_text(
+        self, value: float, literal: str
+    ) -> None:
+        text = json.dumps(json_unfreeze(json_freeze({"value": value})))
+        assert literal in text
+        result = json.loads(text)["value"]
+        assert math.isnan(result) if math.isnan(value) else result == value
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_allow_nan_false_requires_finite_values(self, value: float) -> None:
+        with pytest.raises(TypeError, match="non-finite"):
+            json_freeze({"value": value}, allow_nan=False)
+
+    def test_rejects_non_string_mapping_keys(self) -> None:
+        with pytest.raises(TypeError):
+            json_freeze({1: "integer", "1": "string"})
+
 
 class TestJsonUnfreeze:
     def test_scalar(self) -> None:
@@ -76,6 +125,29 @@ class TestJsonUnfreeze:
 
     def test_list(self) -> None:
         assert json_unfreeze([("x",)]) == [["x"]]
+
+    def test_sequence_abc(self) -> None:
+        assert json_unfreeze(range(3)) == [0, 1, 2]
+
+    @pytest.mark.parametrize("value", [object(), b"x", bytearray(b"x"), {1}])
+    def test_rejects_non_json_values(self, value: object) -> None:
+        with pytest.raises(TypeError):
+            json_unfreeze(value)
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_preserves_non_finite_float_extensions(self, value: float) -> None:
+        result = json_unfreeze({"value": value})["value"]
+        assert isinstance(result, float)
+        assert math.isnan(result) if math.isnan(value) else result == value
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_allow_nan_false_requires_finite_values(self, value: float) -> None:
+        with pytest.raises(TypeError, match="non-finite"):
+            json_unfreeze({"value": value}, allow_nan=False)
+
+    def test_rejects_non_string_keys_before_they_collide(self) -> None:
+        with pytest.raises(TypeError):
+            json_unfreeze({1: "integer", "1": "string"})
 
 
 class TestBoolVal:
@@ -93,6 +165,15 @@ class TestBoolVal:
 
     def test_unknown_uses_default(self) -> None:
         assert bool_val("maybe", True) is True
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_numbers_are_truthy(self, value: float) -> None:
+        assert bool_val(value) is True
+
+    @pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity"])
+    def test_non_finite_strings_use_default(self, value: str) -> None:
+        assert bool_val(value, True) is True
+        assert bool_val(value, False) is False
 
     def test_object_uses_default(self) -> None:
         assert bool_val(object(), True) is True
@@ -150,13 +231,34 @@ class TestFloatVal:
     def test_bad_string_uses_default(self) -> None:
         assert float_val("nope", 3.5) == 3.5
 
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (float("nan"), float("nan")),
+            (float("inf"), float("inf")),
+            (float("-inf"), float("-inf")),
+            ("NaN", float("nan")),
+            ("Infinity", float("inf")),
+            ("-Infinity", float("-inf")),
+        ],
+    )
+    def test_non_finite_extension_is_preserved(
+        self, value: object, expected: float
+    ) -> None:
+        result = float_val(value, 3.5)
+        assert math.isnan(result) if math.isnan(expected) else result == expected
+
     def test_object_uses_default(self) -> None:
         assert float_val(object(), 3.5) == 3.5
 
 
 class TestIntVal:
     def test_number(self) -> None:
-        assert int_val(2.5, 0) == 2
+        assert int_val(2.0, 0) == 2
+        assert int_val(2.5, 7) == 7
+
+    def test_invalid_value_defaults_to_zero(self) -> None:
+        assert int_val("nope") == 0
 
     def test_string(self) -> None:
         assert int_val("3", 0) == 3
@@ -196,9 +298,11 @@ class TestOptionalVal:
         assert optional_val(target, False) is None
 
     @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
-    def test_non_finite_json_literals_are_none(self, literal: str) -> None:
+    def test_non_finite_float_extensions_are_values(self, literal: str) -> None:
         value = json.loads(literal)
-        assert optional_val(float, value) is None
+        result = optional_val(float, value)
+        assert isinstance(result, float)
+        assert math.isnan(result) if math.isnan(value) else result == value
         assert optional_val(int, value) is None
 
     def test_fractional_float_is_refused_for_int(self) -> None:
@@ -279,6 +383,130 @@ class TestOptionalVal:
         assert optional_val(bool, value) is bool_val(value)
 
 
+class TestLosslessFields:
+    def test_take_distinguishes_every_field_state(self) -> None:
+        source = {"null": None, "value": "", "invalid": 7}
+
+        missing = take(source, "missing", str)
+        null = take(source, "null", str)
+        value = take(source, "value", str)
+        invalid = take(source, "invalid", str)
+
+        assert missing is ABSENT
+        assert null is None
+        assert value == ""
+        assert invalid == Invalid(raw=7)
+        assert isinstance(invalid, Invalid)
+
+    def test_replay_retains_the_original_equivalent_json_number(self) -> None:
+        source = {"value": 1}
+        state = take(source, "value", float)
+        stored = residual(source, fields={"value": state})
+        assert isinstance(state, float)
+
+        restored = replay(stored, {"value": state})
+        assert restored == source
+        assert type(restored["value"]) is int
+        assert replay(stored, {"value": 2.0}) == {"value": 2.0}
+
+    def test_residual_and_replay_preserve_presence_order_and_invalid_values(
+        self,
+    ) -> None:
+        source = {
+            "before": 1,
+            "null": None,
+            "value": "old",
+            "invalid": True,
+            "after": 2,
+        }
+        fields = {
+            key: take(source, key, target)
+            for key, target in {
+                "missing": str,
+                "null": str,
+                "value": str,
+                "invalid": int,
+            }.items()
+        }
+
+        stored = residual(source, fields=fields)
+        encoded = json.loads(json.dumps(stored))
+        restored = replay(
+            cast(Mapping[str, object], encoded),
+            {"missing": "default", "null": "now set", "value": "new", "invalid": 9},
+        )
+
+        assert restored == {
+            "before": 1,
+            "null": "now set",
+            "value": "new",
+            "invalid": True,
+            "after": 2,
+        }
+        assert list(restored) == list(source)
+
+    def test_stateful_residual_also_drops_consumed_non_field_keys(self) -> None:
+        source = {"value": 1, "derived": 2, "other": 3}
+        stored = residual(
+            source,
+            {"derived"},
+            fields={"value": take(source, "value", int)},
+        )
+
+        assert replay(stored, {"value": 4}) == {"value": 4, "other": 3}
+
+    def test_provider_key_matching_the_metadata_tag_survives(self) -> None:
+        source = {"$__custom_json_fields__": "provider", "value": 1}
+        stored = residual(source, fields={"value": take(source, "value", int)})
+
+        assert replay(stored, {"value": 2}) == {
+            "$__custom_json_fields__": "provider",
+            "value": 2,
+        }
+
+    def test_plain_residual_drops_consumed_keys_without_metadata(self) -> None:
+        assert residual({"a": 1, "b": 2}, {"a"}) == {"b": 2}
+
+    def test_plain_residual_escapes_a_provider_replay_marker(self) -> None:
+        source = {
+            "$__custom_json_fields__": {
+                "version": 1,
+                "order": ["x"],
+                "states": {"x": "value"},
+                "residual": {},
+            },
+            "x": "provider",
+        }
+
+        assert replay(residual(source), {}) == source
+
+    def test_replay_requires_every_present_semantic_value(self) -> None:
+        source = {"value": 1}
+        stored = residual(source, fields={"value": take(source, "value", int)})
+
+        with pytest.raises(KeyError, match="value"):
+            replay(stored, {})
+
+    def test_provider_values_must_be_json_safe(self) -> None:
+        source = {"x": object()}
+        with pytest.raises(TypeError, match="x"):
+            residual(source)
+        with pytest.raises(TypeError, match="x"):
+            take(source, "x", int)
+
+    def test_replay_rejects_unknown_field_state_labels(self) -> None:
+        stored = {
+            "$__custom_json_fields__": {
+                "version": 1,
+                "order": ["value"],
+                "states": {"value": "garbage"},
+                "raw": {"value": 1},
+                "residual": {},
+            }
+        }
+        assert replay(stored, {"value": 2}) == stored
+
+
 class TestStrVal:
     def test_string_passes_through(self) -> None:
         assert str_val("hi") == "hi"
@@ -297,11 +525,15 @@ class TestDictVal:
     def test_keeps_all_values(self) -> None:
         assert dict_val({"a": 1, "b": "x", "c": None}) == {"a": 1, "b": "x", "c": None}
 
-    def test_coerces_keys_to_str(self) -> None:
-        assert dict_val({3: "c"}) == {"3": "c"}
+    def test_coerces_a_noncolliding_key_to_string(self) -> None:
+        assert dict_val({True: "enabled"}) == {"True": "enabled"}
+
+    def test_rejects_non_string_keys_before_they_collide(self) -> None:
+        with pytest.raises(TypeError):
+            dict_val({1: "integer", "1": "string"})
 
     def test_filters_by_item_type(self) -> None:
-        typed: dict[str, int] = dict_val({"a": 1, "b": "x", "c": 2}, int)
+        typed: dict[str, int] = dict_val({"a": 1, "b": "x", "c": 2, "truth": True}, int)
         assert typed == {"a": 1, "c": 2}
 
     def test_non_dict_is_empty(self) -> None:
@@ -316,6 +548,7 @@ class TestListVal:
     def test_filters_by_item_type(self) -> None:
         typed: list[str] = list_val(["a", 1, None, "b"], str)
         assert typed == ["a", "b"]
+        assert list_val([1, True, 2], int) == [1, 2]
 
     def test_non_list_is_empty(self) -> None:
         assert list_val({"a": 1}) == []
@@ -475,13 +708,18 @@ class TestValidateJsonSchema:
     def test_integral_float_is_an_integer(self) -> None:
         assert validate_json_schema({"type": "integer"}, 1.0) == []
 
+    def test_frozen_array_is_an_array(self) -> None:
+        value = json_freeze([1])
+        assert (
+            validate_json_schema({"type": "array", "items": {"type": "integer"}}, value)
+            == []
+        )
+
     @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
-    @pytest.mark.parametrize("schema_type", ["integer", "number"])
-    def test_non_finite_is_not_a_json_number(
-        self, value: float, schema_type: str
-    ) -> None:
-        assert validate_json_schema({"type": schema_type}, value) == [
-            f"Parameter `<root>` must be {schema_type}."
+    def test_non_finite_extension_is_a_number(self, value: float) -> None:
+        assert validate_json_schema({"type": "number"}, value) == []
+        assert validate_json_schema({"type": "integer"}, value) == [
+            "Parameter `<root>` must be integer."
         ]
 
     def test_bool_is_not_integer_or_number(self) -> None:
@@ -501,6 +739,7 @@ class TestValidateJsonSchema:
 
     def test_valid_enum_passes(self) -> None:
         assert validate_json_schema({"enum": ["read", "write"]}, "read") == []
+        assert validate_json_schema({"enum": [float("nan")]}, float("nan")) == []
 
     def test_non_sequence_enum_is_ignored(self) -> None:
         assert validate_json_schema({"enum": "x"}, "y") == []
@@ -526,6 +765,18 @@ class TestValidateJsonSchema:
             "Parameter `<root>` must be <= 3."
         ]
 
+    @pytest.mark.parametrize(
+        ("schema", "issue"),
+        [
+            ({"minimum": 1}, "Parameter `<root>` must be >= 1."),
+            ({"maximum": 1}, "Parameter `<root>` must be <= 1."),
+        ],
+    )
+    def test_nan_does_not_satisfy_ranges(
+        self, schema: dict[str, int], issue: str
+    ) -> None:
+        assert validate_json_schema(schema, float("nan")) == [issue]
+
     def test_range_ignores_bool(self) -> None:
         assert validate_json_schema({"minimum": 1}, True) == []
 
@@ -546,6 +797,22 @@ class TestValidateJsonSchema:
 class _Color(Enum):
     RED = "red"
     BLUE = "blue"
+
+
+class _PathEnum(Enum):
+    ROOT = Path("/root")
+
+
+class _TupleEnum(Enum):
+    NESTED = (Path("/nested"),)
+
+
+class _NumericEnum(Enum):
+    ONE = 1
+
+
+class _BooleanEnum(Enum):
+    TRUE = True
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
@@ -680,6 +947,32 @@ class _ListUnion(JsonCodec):
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _MappingElementUnion(JsonCodec):
+    value: dict[str, int] | dict[str, str] = dataclasses.field(
+        default_factory=dict[str, int]
+    )
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _TupleElementUnion(JsonCodec):
+    value: tuple[int, ...] | tuple[str, ...] = ()
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _RecursiveEnums(JsonCodec):
+    path: _PathEnum = _PathEnum.ROOT
+    nested: _TupleEnum = _TupleEnum.NESTED
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _StrictAnnotations(JsonCodec):
+    count: int = 0
+    pair: tuple[int, str] = (0, "")
+    numbers: list[int] = dataclasses.field(default_factory=list[int])
+    table: dict[str, int] = dataclasses.field(default_factory=dict[str, int])
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class _LiteralUnion(JsonCodec):
     value: Literal["x"] | int = "x"
 
@@ -687,6 +980,31 @@ class _LiteralUnion(JsonCodec):
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class _JsonHolder(JsonCodec):
     value: JSONValue = None
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _ObjectHolder(JsonCodec):
+    value: dict[str, object] = dataclasses.field(default_factory=dict[str, object])
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _ChildWithExtra(_Child):
+    extra: int = 0
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _BaseHolder(JsonCodec):
+    value: _Child = dataclasses.field(default_factory=_Child)
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _ReservedTypeField(JsonCodec):
+    __type__: str = "default"
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _FrozenSetHolder(JsonCodec):
+    value: frozenset[int] = frozenset()
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
@@ -722,6 +1040,24 @@ class _SpecialUnions(JsonCodec):
 
 
 class TestDataclassCodec:
+    def test_generated_classes_are_collectible(self) -> None:
+        cls = dataclasses.make_dataclass(
+            "Ephemeral",
+            [("value", int)],
+            bases=(JsonCodec,),
+            frozen=True,
+            slots=True,
+            kw_only=True,
+        )
+        instance = cls(value=1)
+        assert dataclass_from_json(cls, dataclass_to_json(instance)) == instance
+        class_ref = weakref.ref(cls)
+
+        del instance, cls
+        gc.collect()
+
+        assert class_ref() is None
+
     def test_scalars_and_specials_round_trip(self) -> None:
         doc = _Doc(
             name="d",
@@ -731,6 +1067,22 @@ class TestDataclassCodec:
             color=_Color.BLUE,
         )
         assert _Doc.from_json(doc.to_json()) == doc
+
+    def test_enum_values_encode_recursively_and_round_trip(self) -> None:
+        doc = _RecursiveEnums()
+        encoded = doc.to_json()
+        json.dumps(encoded, allow_nan=False)
+        assert encoded["path"] == "/root"
+        assert encoded["nested"] == ["/nested"]
+        assert _RecursiveEnums.from_json(encoded) == doc
+
+    def test_enum_decode_separates_bool_from_numbers(self) -> None:
+        with pytest.raises(TypeError):
+            decode(_NumericEnum, True)
+        with pytest.raises(TypeError):
+            decode(_BooleanEnum, 1)
+        assert decode(_NumericEnum, 1) is _NumericEnum.ONE
+        assert decode(_BooleanEnum, True) is _BooleanEnum.TRUE
 
     def test_nested_and_tuples_round_trip(self) -> None:
         doc = _Doc(child=_Child(n=9), items=(_Child(n=1), _Child(n=2)))
@@ -800,6 +1152,23 @@ class TestDataclassCodec:
         back = _SpecialUnions.from_json(doc.to_json())
         assert back == doc
         assert isinstance(back.scalar, bytes)
+
+    def test_integer_value_round_trips_through_float_field(self) -> None:
+        encoded = _Floats(ratio=cast(float, 1)).to_json()
+        back = _Floats.from_json(encoded)
+        assert back.ratio == 1.0
+        assert isinstance(back.ratio, float)
+
+    def test_declared_dataclass_type_rejects_subclass_values(self) -> None:
+        doc = _BaseHolder(value=_ChildWithExtra(n=1, extra=2))
+        with pytest.raises(TypeError, match="_ChildWithExtra"):
+            doc.to_json()
+
+    def test_reserved_type_field_is_rejected(self) -> None:
+        with pytest.raises(TypeError, match="__type__"):
+            _ReservedTypeField().to_json()
+        with pytest.raises(TypeError, match="__type__"):
+            _ReservedTypeField.from_json({"__type__": "user"})
 
     def test_mapping_field_values_decoded(self) -> None:
         doc = _SpecialUnions(mapping={"a": Path("/x"), "b": Path("/y")})
@@ -897,6 +1266,9 @@ class TestStrictDecode:
     as itself. That fallthrough is what made each union defect silent.
     """
 
+    def test_public_signature_has_only_inputs(self) -> None:
+        assert tuple(inspect.signature(decode).parameters) == ("annotation", "raw")
+
     @pytest.mark.parametrize("annotation", [float | None, int | None])
     def test_bool_is_not_a_number(self, annotation: UnionType) -> None:
         for value in (True, False):
@@ -904,9 +1276,11 @@ class TestStrictDecode:
                 decode(annotation, value)
 
     @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
-    def test_non_finite_floats_are_refused(self, literal: str) -> None:
-        with pytest.raises(TypeError):
-            decode(float | None, json.loads(literal))
+    def test_non_finite_float_extensions_are_decoded(self, literal: str) -> None:
+        value = json.loads(literal)
+        result = decode(float | None, value)
+        assert isinstance(result, float)
+        assert math.isnan(result) if math.isnan(value) else result == value
 
     def test_fractional_float_is_refused_for_int(self) -> None:
         # Truncating reports a number the source never sent.
@@ -919,6 +1293,15 @@ class TestStrictDecode:
             decode(float | None, {})
         with pytest.raises(TypeError):
             decode(int, object())
+
+    def test_malformed_float_tag_raises_type_error(self) -> None:
+        with pytest.raises(TypeError, match="float"):
+            decode(float, {"__float__": "not-a-float"})
+
+    def test_naive_zoned_datetime_tag_is_rejected(self) -> None:
+        raw = {"__zone__": "UTC", "__value__": "2026-01-01T00:00:00"}
+        with pytest.raises(TypeError, match="datetime"):
+            decode(datetime, raw)
 
     def test_null_for_a_non_nullable_target_raises(self) -> None:
         # ``None`` was returned for EVERY annotation, before any dispatch, so a
@@ -943,9 +1326,8 @@ class TestStrictDecode:
             decode(bool, value)
 
     @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
-    def test_bool_rejects_non_finite_numbers(self, value: float) -> None:
-        with pytest.raises(TypeError):
-            decode(bool, value)
+    def test_bool_accepts_non_finite_number_extensions(self, value: float) -> None:
+        assert decode(bool, value) is True
 
     @pytest.mark.parametrize("value", [[1], [1, "a", 2]])
     def test_fixed_tuple_arity_must_match(self, value: list[object]) -> None:
@@ -1024,6 +1406,49 @@ class TestStrictDecode:
     ) -> None:
         assert decode(list[int] | list[str], raw) == expected
 
+    @pytest.mark.parametrize(
+        ("annotation", "raw", "expected"),
+        [
+            (dict[str, int] | dict[str, str], {"x": 1}, {"x": 1}),
+            (dict[str, int] | dict[str, str], {"x": "one"}, {"x": "one"}),
+            (tuple[int, ...] | tuple[str, ...], [1, 2], (1, 2)),
+            (tuple[int, ...] | tuple[str, ...], ["one", "two"], ("one", "two")),
+        ],
+    )
+    def test_generic_union_selects_by_nested_elements(
+        self, annotation: object, raw: object, expected: object
+    ) -> None:
+        assert decode(annotation, raw) == expected
+
+
+class TestStrictEncode:
+    @pytest.mark.parametrize(
+        "doc",
+        [
+            _StrictAnnotations(count=cast(int, "one")),
+            _StrictAnnotations(pair=cast(tuple[int, str], (1,))),
+            _StrictAnnotations(numbers=cast(list[int], ["one"])),
+            _StrictAnnotations(table=cast(dict[str, int], {"x": "one"})),
+        ],
+    )
+    def test_rejects_values_that_do_not_match_annotations(
+        self, doc: _StrictAnnotations
+    ) -> None:
+        with pytest.raises(TypeError):
+            doc.to_json()
+
+    def test_concrete_frozenset_rejects_set_value(self) -> None:
+        doc = _FrozenSetHolder(value=cast(frozenset[int], {1}))
+        with pytest.raises(TypeError):
+            doc.to_json()
+
+    def test_object_field_rejects_special_scalars_without_type_information(
+        self,
+    ) -> None:
+        doc = _ObjectHolder(value={"path": Path("/x")})
+        with pytest.raises(TypeError, match="Path"):
+            doc.to_json()
+
 
 class TestMixedScalarUnion:
     """Union members must retain their concrete type across the wire."""
@@ -1059,9 +1484,42 @@ class TestMixedScalarUnion:
         doc = _ListUnion(value=value)
         assert _ListUnion.from_json(doc.to_json()) == doc
 
+    @pytest.mark.parametrize("value", [{"x": 1}, {"x": "one"}])
+    def test_mapping_union_round_trips_by_value_type(
+        self, value: dict[str, int] | dict[str, str]
+    ) -> None:
+        doc = _MappingElementUnion(value=value)
+        assert _MappingElementUnion.from_json(doc.to_json()) == doc
+
+    @pytest.mark.parametrize("value", [(1, 2), ("one", "two")])
+    def test_tuple_union_round_trips_by_element_type(
+        self, value: tuple[int, ...] | tuple[str, ...]
+    ) -> None:
+        doc = _TupleElementUnion(value=value)
+        assert _TupleElementUnion.from_json(doc.to_json()) == doc
+
     def test_recursive_annotation_has_a_finite_union_tag(self) -> None:
         doc = _RecursiveAnnotationUnion(value=_JsonHolder(value={"x": [1]}))
         assert _RecursiveAnnotationUnion.from_json(doc.to_json()) == doc
+
+    def test_json_value_data_does_not_gain_recursive_union_envelopes(self) -> None:
+        doc = _JsonHolder(value={"x": [1, {"y": True}]})
+        assert doc.to_json() == {
+            "__type__": "_JsonHolder",
+            "value": {"x": [1, {"y": True}]},
+        }
+        assert _JsonHolder.from_json(doc.to_json()) == doc
+
+    @pytest.mark.parametrize(
+        "doc",
+        [
+            _ListUnion(value=[]),
+            _MappingElementUnion(value={}),
+            _TupleElementUnion(value=()),
+        ],
+    )
+    def test_empty_generic_container_union_round_trips(self, doc: JsonCodec) -> None:
+        assert type(doc).from_json(doc.to_json()) == doc
 
     def test_reserved_scalar_keys_survive_in_a_mapping_member(self) -> None:
         value = {"__scalar__": "Path", "__value__": "/x"}
@@ -1117,6 +1575,29 @@ class TestMixedScalarUnion:
 
 class TestNonFiniteEncoding:
     """``json.dumps`` writes bare ``NaN``; strict readers reject it."""
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_float_under_object_round_trips(self, value: float) -> None:
+        doc = _ObjectHolder(value={"number": value})
+        text = json.dumps(doc.to_json(), allow_nan=False)
+        back = _ObjectHolder.from_json(json.loads(text))
+        result = back.value["number"]
+        assert isinstance(result, float)
+        assert math.isnan(result) if math.isnan(value) else result == value
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            {"__float__": "nan"},
+            {"__raw_object__": [["x", 1]]},
+        ],
+    )
+    def test_reserved_untyped_mappings_round_trip_as_data(
+        self, value: dict[str, object]
+    ) -> None:
+        doc = _ObjectHolder(value={"mapping": value})
+        back = _ObjectHolder.from_json(json.loads(json.dumps(doc.to_json())))
+        assert back == doc
 
     @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
     def test_non_finite_floats_round_trip(self, value: float) -> None:

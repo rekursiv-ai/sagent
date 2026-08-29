@@ -1,9 +1,16 @@
-"""JSON utilities."""
+"""Typed, lossless JSON handling beyond syntax conversion.
+
+Provides dataclass codecs, safe coercion, immutable values, schema checks, and
+exact provider-payload replay. Numbers intentionally extend RFC 8259 and
+ECMA-404 with IEEE-754 NaN and signed infinities. ``allow_nan=False`` enforces
+finite numbers; the dataclass codec tags non-finite floats for strict JSON.
+"""
 
 from __future__ import annotations
 
 from collections.abc import (
     Callable,
+    Iterable,
     Mapping,
     MutableMapping,
     MutableSequence,
@@ -11,16 +18,16 @@ from collections.abc import (
     Sequence,
     Set as AbstractSet,
 )
-from dataclasses import fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
 from enum import Enum
-from functools import cache
 from pathlib import Path
 from types import MappingProxyType, UnionType
 from typing import (
     Final,
     Literal,
     Self,
+    TypeGuard,
     TypeVar,
     Union,  # pyright: ignore[reportDeprecated] -- runtime marker for typing.Union
     cast,
@@ -35,7 +42,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import base64
 import math
 
+from sagent.lib.absent import ABSENT, Absent
 
+
+# ``float`` intentionally includes IEEE-754 NaN and signed infinities; see the
+# module contract above.
 type JSONScalar = str | int | float | bool | None
 # The scalar union is inlined here rather than referencing ``JSONScalar`` by
 # name. ty 0.0.52 panics ("too many cycle iterations" in
@@ -43,8 +54,6 @@ type JSONScalar = str | int | float | bool | None
 # references a *named* union alias alongside a covariant-abc (Sequence) and
 # invariant-abc (Mapping) member. Inlining the scalar union sidesteps it.
 # https://github.com/astral-sh/ty/issues/3835
-# Was:
-#   type JSONValue = JSONScalar | Sequence[JSONValue] | Mapping[str, JSONValue]
 type JSONValue = (
     str | int | float | bool | Sequence[JSONValue] | Mapping[str, JSONValue] | None
 )
@@ -52,12 +61,6 @@ type JSON = Mapping[str, JSONValue]
 
 # Scalar union inlined (not ``JSONScalar``) for the same ty 0.0.52 panic; see
 # the JSONValue note above.
-# Was:
-#   type MutableJSONValue = (
-#       JSONScalar
-#       | MutableSequence[MutableJSONValue]
-#       | MutableMapping[str, MutableJSONValue]
-# )
 type MutableJSONValue = (
     str
     | int
@@ -70,79 +73,140 @@ type MutableJSONValue = (
 type MutableJSON = MutableMapping[str, MutableJSONValue]
 
 
-@overload
-def json_freeze(obj: JSONScalar) -> JSONScalar: ...  # pragma: no cover
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Invalid:
+    """A JSON object stated a field that did not match its target type."""
+
+    raw: JSONValue
+
+
+type FieldState[T] = Absent | T | Invalid | None
+
+_FIELD_STATE_TAG: Final = "$__custom_json_fields__"
 
 
 @overload
-def json_freeze(obj: Mapping[str, object]) -> JSON: ...  # pragma: no cover
+def json_freeze(
+    obj: JSONScalar, *, allow_nan: bool = True
+) -> JSONScalar: ...  # pragma: no cover
 
 
 @overload
-def json_freeze(obj: Sequence[object]) -> Sequence[JSONValue]: ...  # pragma: no cover
+def json_freeze(
+    obj: Mapping[str, object], *, allow_nan: bool = True
+) -> JSON: ...  # pragma: no cover
 
 
 @overload
-def json_freeze(obj: object) -> JSONValue: ...  # pragma: no cover
+def json_freeze(
+    obj: Sequence[object], *, allow_nan: bool = True
+) -> Sequence[JSONValue]: ...  # pragma: no cover
 
 
-def json_freeze(obj: object) -> JSONValue:
+@overload
+def json_freeze(
+    obj: object, *, allow_nan: bool = True
+) -> JSONValue: ...  # pragma: no cover
+
+
+def json_freeze(obj: object, *, allow_nan: bool = True) -> JSONValue:
     """Recursively freeze a JSON-like object: dict→MappingProxyType, list→tuple.
 
     Args:
       obj: Mutable JSON-like structure.
+      allow_nan: Whether to preserve IEEE-754 NaN and signed infinities. This
+        follows Python's ``json`` spelling even though ``require_finite`` would
+        more precisely describe the policy's full scope.
 
     Returns:
       frozen: Immutable equivalent.
 
+    Raises:
+      TypeError: ``obj`` contains an unsupported value, or a non-finite float
+        when ``allow_nan`` is false.
+
     """
     if isinstance(obj, Mapping):
-        d = cast(Mapping[str, object], obj)
-        return MappingProxyType({k: json_freeze(v) for k, v in d.items()})
-    if isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray)):
-        items = cast(Sequence[object], obj)  # pyright: ignore[reportUnnecessaryCast] -- ty needs the cast; pyright resolves the type
-        return tuple(json_freeze(v) for v in items)
-    return cast(JSONValue, obj)
-
-
-@overload
-def json_unfreeze(obj: Mapping[str, object]) -> MutableJSON: ...  # pragma: no cover
-
-
-@overload
-def json_unfreeze(obj: JSONScalar) -> JSONScalar: ...  # pragma: no cover
+        result: dict[str, JSONValue] = {}
+        for key, value in cast(Mapping[object, object], obj).items():
+            if not isinstance(key, str):
+                raise TypeError(f"JSON object key must be str, got {key!r}")
+            result[key] = json_freeze(value, allow_nan=allow_nan)
+        return MappingProxyType(result)
+    if _is_json_sequence(obj):
+        return tuple(json_freeze(value, allow_nan=allow_nan) for value in obj)
+    return _checked_json_scalar(obj, allow_nan=allow_nan)
 
 
 @overload
 def json_unfreeze(
-    obj: Sequence[object],
+    obj: Mapping[str, object], *, allow_nan: bool = True
+) -> MutableJSON: ...  # pragma: no cover
+
+
+@overload
+def json_unfreeze(
+    obj: JSONScalar, *, allow_nan: bool = True
+) -> JSONScalar: ...  # pragma: no cover
+
+
+@overload
+def json_unfreeze(
+    obj: Sequence[object], *, allow_nan: bool = True
 ) -> list[MutableJSONValue]: ...  # pragma: no cover
 
 
 @overload
-def json_unfreeze(obj: object) -> MutableJSONValue: ...  # pragma: no cover
+def json_unfreeze(
+    obj: object, *, allow_nan: bool = True
+) -> MutableJSONValue: ...  # pragma: no cover
 
 
-def json_unfreeze(obj: object) -> MutableJSONValue:
+def json_unfreeze(obj: object, *, allow_nan: bool = True) -> MutableJSONValue:
     """Recursively normalize JSON-like data to plain dicts/lists.
 
     Args:
       obj: Frozen or mutable JSON-like value.
+      allow_nan: Whether to preserve IEEE-754 NaN and signed infinities. This
+        follows Python's ``json`` spelling even though ``require_finite`` would
+        more precisely describe the policy's full scope.
 
     Returns:
       thawed: Mutable JSON equivalent.
 
+    Raises:
+      TypeError: ``obj`` contains an unsupported value, or a non-finite float
+        when ``allow_nan`` is false.
+
     """
     if isinstance(obj, Mapping):
-        return {
-            str(k): json_unfreeze(v)
-            for k, v in cast(Mapping[object, object], obj).items()
-        }
-    if isinstance(obj, tuple):
-        return [json_unfreeze(v) for v in cast(tuple[object, ...], obj)]
-    if isinstance(obj, list):
-        return [json_unfreeze(v) for v in cast(list[object], obj)]
-    return cast(MutableJSONValue, obj)
+        result: dict[str, MutableJSONValue] = {}
+        for key, value in cast(Mapping[object, object], obj).items():
+            if not isinstance(key, str):
+                raise TypeError(f"JSON object key must be str, got {key!r}")
+            result[key] = json_unfreeze(value, allow_nan=allow_nan)
+        return result
+    if _is_json_sequence(obj):
+        return [json_unfreeze(value, allow_nan=allow_nan) for value in obj]
+    return _checked_json_scalar(obj, allow_nan=allow_nan)
+
+
+def _is_json_sequence(value: object) -> TypeGuard[Sequence[object]]:
+    """Return whether ``value`` is a non-string JSON array shape."""
+    return isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    )
+
+
+def _checked_json_scalar(obj: object, *, allow_nan: bool) -> JSONScalar:
+    """Return a JSON scalar under the selected non-finite policy."""
+    if obj is None or isinstance(obj, (str, bool, int)):
+        return obj
+    if isinstance(obj, float):
+        if allow_nan or math.isfinite(obj):
+            return obj
+        raise TypeError("non-finite float requires allow_nan=True")
+    raise TypeError(f"cannot represent {type(obj).__name__} as JSON")
 
 
 def validate_json_schema(schema: object, value: object) -> list[str]:
@@ -152,7 +216,9 @@ def validate_json_schema(schema: object, value: object) -> list[str]:
     single name or a list of names, e.g. ``["array", "string"]``),
     ``required``, ``properties``, ``items``, ``additionalProperties``,
     ``enum``, ``minimum``, and ``maximum``. Unknown schema shapes and
-    unsupported keywords are ignored.
+    unsupported keywords are ignored. The ``number`` type includes this
+    module's IEEE-754 NaN and signed-infinity extensions. NaN does not satisfy
+    ``minimum`` or ``maximum`` because it is unordered.
 
     This is not a general JSON Schema implementation. ``jsonschema`` is
     the standards-compliant library, but costs roughly 440ms of cold
@@ -191,9 +257,9 @@ def _validate_json_schema(schema: object, value: object, path: str) -> list[str]
         issues.extend(
             _validate_json_object(schema_map, cast(Mapping[str, object], value), path)
         )
-    if isinstance(value, list):
+    if _is_json_sequence(value_obj):
         items = schema_map.get("items")
-        value_items = cast(list[object], value)
+        value_items = value_obj
         issues.extend(
             issue
             for idx, item in enumerate(value_items)
@@ -222,7 +288,7 @@ def _validate_json_schema_type(
     if not names or any(_matches_json_schema_type(t, value) for t in names):
         return []
     expected = names[0] if len(names) == 1 else " or ".join(names)
-    return [f"Parameter `{_json_schema_path_display(path)}` must be {expected}."]
+    return [f"Parameter `{path or '<root>'}` must be {expected}."]
 
 
 def _matches_json_schema_type(schema_type: str, value: object) -> bool:
@@ -230,19 +296,15 @@ def _matches_json_schema_type(schema_type: str, value: object) -> bool:
     if schema_type == "object":
         return isinstance(value, Mapping)
     if schema_type == "array":
-        return isinstance(value, list)
+        return _is_json_sequence(value)
     if schema_type == "string":
         return isinstance(value, str)
     if schema_type == "integer":
         return (isinstance(value, int) and not isinstance(value, bool)) or (
-            isinstance(value, float) and math.isfinite(value) and value.is_integer()
+            isinstance(value, float) and value.is_integer()
         )
     if schema_type == "number":
-        return (
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and (not isinstance(value, float) or math.isfinite(value))
-        )
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
     if schema_type == "boolean":
         return isinstance(value, bool)
     if schema_type == "null":
@@ -262,7 +324,7 @@ def _validate_json_enum(enum: object, value: object, path: str) -> list[str]:
         return []
     return [
         (
-            f"Parameter `{_json_schema_path_display(path)}` must be one of "
+            f"Parameter `{path or '<root>'}` must be one of "
             f"{_json_enum_values(enum_values)}."
         )
     ]
@@ -272,6 +334,13 @@ def _same_json_value(value: object, member: object) -> bool:
     """Whether two JSON values are recursively equal by JSON type."""
     if isinstance(value, bool) != isinstance(member, bool):
         return False
+    if (
+        isinstance(value, float)
+        and isinstance(member, float)
+        and math.isnan(value)
+        and math.isnan(member)
+    ):
+        return True
     if isinstance(value, Mapping) and isinstance(member, Mapping):
         left = cast(Mapping[object, object], value)
         right = cast(Mapping[object, object], member)
@@ -301,15 +370,15 @@ def _validate_json_range(
         return []
     issues: list[str] = []
     minimum = schema.get("minimum")
-    if isinstance(minimum, (int, float)) and value < minimum:
-        issues.append(
-            f"Parameter `{_json_schema_path_display(path)}` must be >= {minimum}."
-        )
+    if isinstance(minimum, (int, float)) and (
+        (isinstance(value, float) and math.isnan(value)) or value < minimum
+    ):
+        issues.append(f"Parameter `{path or '<root>'}` must be >= {minimum}.")
     maximum = schema.get("maximum")
-    if isinstance(maximum, (int, float)) and value > maximum:
-        issues.append(
-            f"Parameter `{_json_schema_path_display(path)}` must be <= {maximum}."
-        )
+    if isinstance(maximum, (int, float)) and (
+        (isinstance(value, float) and math.isnan(value)) or value > maximum
+    ):
+        issues.append(f"Parameter `{path or '<root>'}` must be <= {maximum}.")
     return issues
 
 
@@ -325,7 +394,7 @@ def _validate_json_object(
         cast(Mapping[str, object], props_raw) if isinstance(props_raw, Mapping) else {}
     )
     issues = [
-        f"The required parameter `{_json_schema_path_join(path, key)}` is missing."
+        f"The required parameter `{f'{path}.{key}' if path else key}` is missing."
         for key in required
         if key not in args
     ]
@@ -335,7 +404,7 @@ def _validate_json_object(
         additional_properties = cast(Mapping[str, object], additional_properties_raw)
     if additional_properties_raw is False:
         issues.extend(
-            f"Unexpected parameter `{_json_schema_path_join(path, key)}`."
+            f"Unexpected parameter `{f'{path}.{key}' if path else key}`."
             for key in args
             if key not in props
         )
@@ -346,7 +415,7 @@ def _validate_json_object(
                 _validate_json_schema(
                     child_schema,
                     item,
-                    _json_schema_path_join(path, key),
+                    f"{path}.{key}" if path else key,
                 )
             )
         elif additional_properties is not None:
@@ -354,7 +423,7 @@ def _validate_json_object(
                 _validate_json_schema(
                     additional_properties,
                     item,
-                    _json_schema_path_join(path, key),
+                    f"{path}.{key}" if path else key,
                 )
             )
     return issues
@@ -373,28 +442,25 @@ def _json_enum_values(enum: Sequence[object]) -> str:
     return ", ".join(repr(item) for item in enum)
 
 
-def _json_schema_path_display(path: str) -> str:
-    """Return a user-facing validation path."""
-    return path or "<root>"
-
-
-def _json_schema_path_join(prefix: str, key: str) -> str:
-    """Append ``key`` to a dotted validation path."""
-    if prefix:
-        return f"{prefix}.{key}"
-    return key
-
-
 def bool_val(value: object, default: bool = False) -> bool:
     """Coerce common JSON-ish boolean values safely.
 
     Plain ``bool(value)`` treats any non-empty string as true, so model outputs
     like ``"false"`` can accidentally enable destructive options. Unknown
-    strings fall back to ``default`` instead.
+    strings fall back to ``default`` instead. Numeric NaN and signed infinities
+    follow Python and IEEE-754 numeric truthiness.
+
+    Args:
+      value: Value to coerce.
+      default: Fallback if coercion fails.
+
+    Returns:
+      result: Boolean value or ``default``.
+
     """
     if isinstance(value, bool):
         return value
-    if isinstance(value, int | float):
+    if isinstance(value, (int, float)):
         return bool(value)
     if isinstance(value, str):
         normalized = value.strip().lower()
@@ -406,11 +472,22 @@ def bool_val(value: object, default: bool = False) -> bool:
 
 
 def float_val(value: object, default: float = 0.0) -> float:
-    """Coerce common JSON numeric values to float, or return ``default``."""
+    """Coerce JSON numeric values, including NaN and infinities, to float.
+
+    Args:
+      value: Value to coerce.
+      default: Fallback if coercion fails.
+
+    Returns:
+      result: Float value or ``default``.
+
+    """
     if isinstance(value, bool):
         return default
-    if isinstance(value, int | float):
+    if isinstance(value, int):
         return float(value)
+    if isinstance(value, float):
+        return value
     if isinstance(value, str):
         try:
             return float(value.strip())
@@ -419,7 +496,7 @@ def float_val(value: object, default: float = 0.0) -> float:
     return default
 
 
-def int_val(value: object, default: int) -> int:
+def int_val(value: object, default: int = 0) -> int:
     """Coerce a JSON value to int, falling back to ``default``.
 
     Args:
@@ -437,7 +514,7 @@ def int_val(value: object, default: int) -> int:
     if isinstance(value, int):
         return value
     if isinstance(value, float):
-        return int(value) if math.isfinite(value) else default
+        return int(value) if math.isfinite(value) and value.is_integer() else default
     if isinstance(value, str):
         try:
             return int(value.strip())
@@ -456,16 +533,16 @@ def optional_val[T](target: type[T], value: object) -> T | None:
     "abort the response".
 
     Callers reached for ``float_val(v) if isinstance(v, (int, float)) else
-    None`` and that guard is wrong three ways, each of which shipped: ``bool``
+    None`` and that guard is wrong two ways, each of which shipped: ``bool``
     passes ``isinstance`` (``bool`` subclasses ``int``) and then takes
     ``float_val``'s ``0.0`` default, so a JSON ``true`` latitude became a real
-    coordinate; and ``NaN`` / ``Infinity``, which :func:`json.loads` accepts by
-    default, pass through as themselves. A fractional float is likewise refused
-    for an ``int`` rather than truncated -- ``1.9`` seeders is not ``1``
-    seeders, and dropping the fraction reports a number the source never sent.
+    coordinate. A fractional float is likewise refused for an ``int`` rather
+    than truncated -- ``1.9`` seeders is not ``1`` seeders, and dropping the
+    fraction reports a number the source never sent.
 
     A numeric STRING is deliberately not parsed: these read machine JSON, where
-    a quoted number is a shape mismatch rather than a value to recover. That
+    a quoted number is a shape mismatch rather than a value to recover. Native
+    float values include the module's NaN and signed-infinity extensions. That
     restriction is about NUMBERS, not about strings: every special scalar the
     codec handles (``bytes``, ``Path``, ``UUID``, ``datetime``) IS encoded as a
     string, so reading one back is the string case working as intended.
@@ -488,6 +565,166 @@ def optional_val[T](target: type[T], value: object) -> T | None:
         return cast(T, decode(target, value))
     except (TypeError, ValueError):
         return None
+
+
+def take[T](source: Mapping[str, object], key: str, target: type[T]) -> FieldState[T]:
+    """Read one field without collapsing absence, null, or malformed data.
+
+    Args:
+      source: Provider JSON object.
+      key: Field to read.
+      target: Expected runtime type.
+
+    Returns:
+      state: Absent, decoded (including null), or invalid field state.
+
+    """
+    if key not in source:
+        return ABSENT
+    raw = source[key]
+    if raw is None:
+        return None
+    checked = _provider_json_value(key, raw)
+    value = optional_val(target, raw)
+    if value is None:
+        return Invalid(raw=checked)
+    return value
+
+
+def _provider_json_value(key: str, value: object) -> JSONValue:
+    """Validate one provider field and name it in failures."""
+    try:
+        json_freeze(value)
+    except TypeError as exc:
+        raise TypeError(f"field {key!r}: {exc}") from exc
+    return cast(JSONValue, value)
+
+
+def _replay_envelope(stored: Mapping[str, object]) -> dict[str, object] | None:
+    """Return a valid internal replay envelope, if present."""
+    raw = stored.get(_FIELD_STATE_TAG)
+    if not isinstance(raw, Mapping):
+        return None
+    envelope = {
+        key: value
+        for key, value in cast(Mapping[object, object], raw).items()
+        if isinstance(key, str)
+    }
+    if int_val(envelope.get("version"), 0) != 1:
+        return None
+    if not isinstance(envelope.get("order"), list):
+        return None
+    states = envelope.get("states")
+    if not isinstance(states, Mapping):
+        return None
+    if any(
+        not isinstance(key, str) or label not in ("null", "value")
+        for key, label in cast(Mapping[object, object], states).items()
+    ):
+        return None
+    if not isinstance(envelope.get("residual"), Mapping):
+        return None
+    return envelope
+
+
+def residual(
+    source: Mapping[str, object],
+    consumed: Iterable[str] = (),
+    *,
+    fields: Mapping[str, FieldState[object]] | None = None,
+) -> dict[str, JSONValue]:
+    """Preserve fields not represented semantically, including field states.
+
+    A ``fields`` mapping produces an opaque, JSON-safe replay envelope. Valid
+    and null fields are represented by their semantic values; malformed fields
+    remain verbatim in the residual. ``consumed`` performs the simpler operation
+    of removing keys without replay metadata.
+
+    Args:
+      source: Provider JSON object.
+      consumed: Field names represented elsewhere without replay state.
+      fields: States returned by :func:`take`.
+
+    Returns:
+      extra: JSON-safe residual data.
+
+    """
+    checked = {key: _provider_json_value(key, value) for key, value in source.items()}
+    if fields is None:
+        dropped = set(consumed)
+        kept = {key: value for key, value in checked.items() if key not in dropped}
+        if _replay_envelope(kept) is None:
+            return kept
+        return {
+            _FIELD_STATE_TAG: {
+                "version": 1,
+                "order": list(kept),
+                "states": {},
+                "residual": kept,
+            }
+        }
+    represented = {
+        key: "null" if state is None else "value"
+        for key, state in fields.items()
+        if state is not ABSENT and not isinstance(state, Invalid)
+    }
+    dropped = set(consumed)
+    spare = {
+        key: value
+        for key, value in checked.items()
+        if key not in represented and key not in dropped
+    }
+    return {
+        _FIELD_STATE_TAG: {
+            "version": 1,
+            "order": list(source),
+            "states": represented,
+            "raw": {key: checked[key] for key in represented if key in checked},
+            "residual": spare,
+        }
+    }
+
+
+def replay(
+    stored: Mapping[str, object], values: Mapping[str, object]
+) -> dict[str, object]:
+    """Rebuild a provider object from a residual and current semantic values.
+
+    Args:
+      stored: Replay envelope returned by :func:`residual`. A plain mapping is
+        returned unchanged because it carries no represented-field metadata.
+      values: Current semantic value for every represented field. Ignored when
+        ``stored`` is not a recognized replay envelope.
+
+    Returns:
+      object_: Provider object in its original key order.
+
+    Raises:
+      KeyError: A represented field has no current semantic value.
+
+    """
+    envelope = _replay_envelope(stored)
+    if envelope is None:
+        return dict(stored)
+    order = list_val(envelope.get("order"), str)
+    states = dict_val(envelope.get("states"), str)
+    original = dict_val(envelope.get("raw"))
+    spare = dict_val(envelope.get("residual"))
+    result: dict[str, object] = {}
+    for key in order:
+        if key in states:
+            if key not in values:
+                raise KeyError(f"missing semantic value for replay field {key!r}")
+            current = values[key]
+            result[key] = (
+                original[key]
+                if key in original and _same_json_value(current, original[key])
+                else current
+            )
+        elif key in spare:
+            result[key] = spare[key]
+    result.update({key: value for key, value in spare.items() if key not in result})
+    return result
 
 
 @overload
@@ -518,12 +755,32 @@ def dict_val[T](value: object, item: type[T | object] = object) -> dict[str, T]:
     """
     if not isinstance(value, Mapping):
         return {}
-    src = cast(Mapping[object, object], value)
     # ``isinstance(v, item)`` proves each kept value is ``T`` at runtime, but the
     # ``type[T | object]`` default (needed to accept the no-arg overload) widens
     # the static narrowing to ``object``; the overloads carry the exact type.
-    kept = {str(k): v for k, v in src.items() if isinstance(v, item)}
+    kept = {
+        key: member
+        for key, member in _normalized_mapping_items(
+            cast(Mapping[object, object], value)
+        )
+        if isinstance(member, item) and not (item is int and isinstance(member, bool))
+    }
     return cast(dict[str, T], kept)
+
+
+def _normalized_mapping_items(
+    value: Mapping[object, object],
+) -> list[tuple[str, object]]:
+    """Normalize mapping keys to distinct strings or reject a collision."""
+    result: list[tuple[str, object]] = []
+    seen: set[str] = set()
+    for key, member in value.items():
+        normalized = str(key)
+        if normalized in seen:
+            raise TypeError(f"mapping keys collide as {normalized!r}")
+        seen.add(normalized)
+        result.append((normalized, member))
+    return result
 
 
 @overload
@@ -557,18 +814,20 @@ def list_val[T](value: object, item: type[T | object] = object) -> list[T]:
     src = cast(list[object], value)
     # See ``dict_val``: the runtime ``isinstance`` proves ``T``; the defaulted
     # ``type[T | object]`` widens the static narrowing, so cast to the contract.
-    kept = [x for x in src if isinstance(x, item)]
+    kept = [
+        value
+        for value in src
+        if isinstance(value, item) and not (item is int and isinstance(value, bool))
+    ]
     return cast(list[T], kept)
 
 
 def dicts_val(value: object) -> list[dict[str, object]]:
     """Narrow a JSON-decoded value to a list of str-keyed dicts, else empty.
 
-    Composes :func:`list_val` and :func:`dict_val` for the common shape of a
-    JSON array of objects (message parts, tool calls, records): non-list values,
-    non-object elements, and empty objects are dropped, and each kept element is
-    normalized to ``dict[str, object]`` so the caller can read its fields without
-    an isinstance guard.
+    JSON object keys are normally strings, but provider-boundary callers may
+    supply decoded mapping-like objects with scalar keys. Those keys are
+    normalized only when doing so is lossless; colliding spellings raise.
 
     Args:
       value: Value to read, expected to be a JSON array of objects.
@@ -576,8 +835,20 @@ def dicts_val(value: object) -> list[dict[str, object]]:
     Returns:
       result: The object elements as ``dict[str, object]``, possibly empty.
 
+    Raises:
+      TypeError: Two input keys normalize to the same string.
+
     """
-    return [d for x in list_val(value) if (d := dict_val(x))]
+    result: list[dict[str, object]] = []
+    for item in list_val(value):
+        if not isinstance(item, Mapping):
+            continue
+        normalized = dict(
+            _normalized_mapping_items(cast(Mapping[object, object], item))
+        )
+        if normalized:
+            result.append(normalized)
+    return result
 
 
 def str_val(value: object, default: str = "") -> str:
@@ -640,7 +911,44 @@ _TYPE_TAG: Final = "__type__"
 _UNION_TAG: Final = "__union__"
 _VALUE_TAG: Final = "__value__"
 _FLOAT_TAG: Final = "__float__"
+_RAW_OBJECT_TAG: Final = "__raw_object__"
 _ZONE_TAG: Final = "__zone__"
+_SEQUENCE_CONTAINERS: Final[Mapping[object, Callable[[list[object]], object]]] = (
+    MappingProxyType(
+        {
+            list: lambda items: items,
+            tuple: tuple[object, ...],
+            set: set[object],
+            frozenset: frozenset[object],
+            Sequence: lambda items: items,
+            MutableSequence: lambda items: items,
+            AbstractSet: frozenset[object],
+            MutableSet: set[object],
+        }
+    )
+)
+_MAPPING_CONTAINERS: Final[tuple[object, ...]] = (dict, Mapping, MutableMapping)
+
+
+def _matches_container_value(container: object, value: object) -> bool:
+    """Return whether ``value`` has the container shape ``container`` promises."""
+    if container is list:
+        return isinstance(value, list)
+    if container is tuple:
+        return isinstance(value, tuple)
+    if container is set:
+        return isinstance(value, set)
+    if container is frozenset:
+        return isinstance(value, frozenset)
+    if container is MutableSequence:
+        return isinstance(value, MutableSequence)
+    if container is Sequence:
+        return _is_json_sequence(value)
+    if container is MutableSet:
+        return isinstance(value, MutableSet)
+    if container is AbstractSet:
+        return isinstance(value, AbstractSet)
+    return False
 
 
 class SchemaError(ValueError):
@@ -667,7 +975,10 @@ def dataclass_to_json(obj: object) -> JSON:
     """
     if not is_dataclass(obj) or isinstance(obj, type):
         raise TypeError(f"dataclass_to_json expects a dataclass instance, got {obj!r}")
-    hints = _hints(type(obj))
+    hints = get_type_hints(type(obj))
+    settable = [field for field in fields(obj) if field.init]
+    if any(field.name == _TYPE_TAG for field in settable):
+        raise TypeError(f"dataclass field {_TYPE_TAG!r} is reserved by the JSON codec")
     out: dict[str, JSONValue] = {_TYPE_TAG: type(obj).__name__}
     # ``init=False`` fields are skipped, not written: the generated
     # ``__init__`` rejects them by name, so emitting one produced a payload
@@ -706,8 +1017,10 @@ def dataclass_from_json[T](cls: type[T], data: Mapping[str, object]) -> T:
       ValueError: An encoded scalar value is malformed.
 
     """
-    hints = _hints(cls)
+    hints = get_type_hints(cls)
     settable = _settable_fields(cls)
+    if _TYPE_TAG in settable:
+        raise TypeError(f"dataclass field {_TYPE_TAG!r} is reserved by the JSON codec")
     unknown = sorted(k for k in data if k != _TYPE_TAG and k not in settable)
     if unknown:
         raise SchemaError(
@@ -722,9 +1035,8 @@ def dataclass_from_json[T](cls: type[T], data: Mapping[str, object]) -> T:
     )
 
 
-@cache
 def _settable_fields(cls: type) -> frozenset[str]:
-    """Names ``cls``'s generated ``__init__`` accepts, cached.
+    """Return names accepted by ``cls``'s generated ``__init__``.
 
     ``init=False`` fields are omitted from both the wire form and constructor,
     so accepting one would produce a ``TypeError`` instead of the schema error
@@ -732,12 +1044,6 @@ def _settable_fields(cls: type) -> frozenset[str]:
     """
     assert is_dataclass(cls)
     return frozenset(f.name for f in fields(cls) if f.init)
-
-
-@cache
-def _hints(cls: type) -> Mapping[str, object]:
-    """Resolved type hints for ``cls`` (forward refs included), cached."""
-    return get_type_hints(cls)
 
 
 def _is_union(annotation: object) -> bool:
@@ -788,41 +1094,89 @@ def _matching_union_member(
         raise TypeError(f"cannot encode {value!r} as {annotation}")
     best = min(rank for rank, _ in ranked)
     matches = [member for rank, member in ranked if rank == best]
-    if len(matches) != 1:
+    if len(matches) != 1 and not _is_empty_container(value):
         raise TypeError(f"ambiguous union member for {value!r} as {annotation}")
     member = matches[0]
     return _annotation_id(member), member
 
 
-def _annotation_match_rank(annotation: object, value: object) -> int | None:
+def _is_empty_container(value: object) -> bool:
+    """Return whether ``value`` is an empty JSON-like container."""
+    if _is_json_sequence(value):
+        return len(value) == 0
+    if isinstance(value, Mapping):
+        return not value
+    if isinstance(value, AbstractSet):
+        return len(value) == 0
+    return False
+
+
+def _annotation_match_rank(
+    annotation: object, value: object, *, wire: bool = False
+) -> int | None:
     """Return how specifically ``value`` matches ``annotation``."""
     resolved = _resolve_alias(annotation)
     origin = get_origin(resolved)
+    if _is_union(resolved):
+        ranks = [
+            rank
+            for member in _union_args(resolved)
+            if (rank := _annotation_match_rank(member, value, wire=wire)) is not None
+        ]
+        return min(ranks) if ranks else None
     if origin is Literal:
         return (
             0
             if any(_same_json_value(value, choice) for choice in get_args(resolved))
             else None
         )
+    if resolved is object or isinstance(resolved, TypeVar):
+        return 100
     if isinstance(resolved, type):
+        if resolved in (int, float) and isinstance(value, bool):
+            return None
         if type(value) is resolved:
             return 1
+        if resolved is float and isinstance(value, int):
+            return 2
+        if is_dataclass(resolved):
+            return None
         return 2 if isinstance(value, resolved) else None
-    if origin is list and isinstance(value, list):
-        items = cast(list[object], value)
-        element_ranks = [
-            _annotation_match_rank(element, item)
+    if origin in _MAPPING_CONTAINERS and isinstance(value, Mapping):
+        args = get_args(resolved)
+        key_annotation: object = args[0] if len(args) == 2 else object
+        value_annotation: object = args[1] if len(args) == 2 else object
+        ranks = [
+            rank
+            for key, item in cast(Mapping[object, object], value).items()
+            for rank in (
+                _annotation_match_rank(key_annotation, key, wire=wire),
+                _annotation_match_rank(value_annotation, item, wire=wire),
+            )
+        ]
+        if any(rank is None for rank in ranks):
+            return None
+        return 3 + max((cast(int, rank) for rank in ranks), default=0)
+    if origin in _SEQUENCE_CONTAINERS:
+        if not (wire and isinstance(value, list)) and not _matches_container_value(
+            origin, value
+        ):
+            return None
+        items = list(cast(Iterable[object], value))
+        arity = _fixed_tuple_arity(resolved)
+        if arity is not None and arity != len(items):
+            return None
+        ranks = [
+            _annotation_match_rank(element, item, wire=wire)
             for item, element in zip(
                 items,
                 _element_annotations(resolved, count=len(items)),
                 strict=True,
             )
         ]
-        if any(rank is None for rank in element_ranks):
+        if any(rank is None for rank in ranks):
             return None
-        return 3 + max((cast(int, rank) for rank in element_ranks), default=0)
-    if isinstance(origin, type) and isinstance(value, origin):
-        return 3
+        return 3 + max((cast(int, rank) for rank in ranks), default=0)
     return None
 
 
@@ -848,7 +1202,7 @@ def _annotation_id(annotation: object, seen: frozenset[int] = frozenset()) -> st
     if isinstance(resolved, type):
         name = f"{resolved.__module__}.{resolved.__qualname__}"
         if is_dataclass(resolved):
-            hints = _hints(resolved)
+            hints = get_type_hints(resolved)
             schema = ",".join(
                 f"{field.name}:{_annotation_id(hints.get(field.name), seen)}"
                 for field in fields(resolved)
@@ -892,13 +1246,59 @@ def _encode_datetime(value: datetime) -> JSONValue:
     return value.isoformat()
 
 
+def _validate_encode_value(value: object, annotation: object) -> None:
+    """Reject a value that cannot decode under its declared annotation."""
+    if annotation is None or annotation is object or isinstance(annotation, TypeVar):
+        return
+    if value is None:
+        if _admits_none(annotation):
+            return
+        raise TypeError(f"cannot encode None as {annotation}")
+    resolved = _strip_optional(_resolve_alias(annotation))
+    if _annotation_match_rank(resolved, value) is None:
+        raise TypeError(f"cannot encode {value!r} as {annotation}")
+    origin = get_origin(resolved)
+    if origin in _SEQUENCE_CONTAINERS and not _matches_container_value(origin, value):
+        raise TypeError(f"cannot encode {value!r} as {annotation}")
+    if origin in _MAPPING_CONTAINERS and not isinstance(value, Mapping):
+        raise TypeError(f"cannot encode {value!r} as {annotation}")
+
+
+def _encode_untyped(value: object) -> JSONValue:
+    """Encode JSON-native data without inventing type information."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return _encode_float(value)
+    if isinstance(value, Mapping):
+        encoded = {
+            _mapping_key(key): _encode_untyped(item)
+            for key, item in cast(Mapping[object, object], value).items()
+        }
+        if len(encoded) == 1 and next(iter(encoded)) in (_FLOAT_TAG, _RAW_OBJECT_TAG):
+            return {_RAW_OBJECT_TAG: [[key, item] for key, item in encoded.items()]}
+        return encoded
+    if _is_json_sequence(value):
+        return [_encode_untyped(item) for item in value]
+    raise TypeError(f"cannot encode {type(value).__name__} without an annotation")
+
+
 def _encode(value: object, annotation: object = None) -> JSONValue:
+    if (
+        annotation is JSONValue
+        or annotation is object
+        or isinstance(annotation, TypeVar)
+    ):
+        return _encode_untyped(value)
     selected = _matching_union_member(annotation, value)
     if selected is not None:
         tag, member = selected
         return {_UNION_TAG: tag, _VALUE_TAG: _encode(value, member)}
+    _validate_encode_value(value, annotation)
     if is_dataclass(value) and not isinstance(value, type):
         return dataclass_to_json(value)
+    if isinstance(value, Enum):
+        return _encode(value.value)
     if isinstance(value, bool | int | str) or value is None:
         return value
     # After the bool/int branch, only a true float reaches here, so the
@@ -913,8 +1313,6 @@ def _encode(value: object, annotation: object = None) -> JSONValue:
         return str(value)
     if isinstance(value, datetime):
         return _encode_datetime(value)
-    if isinstance(value, Enum):
-        return cast(JSONValue, value.value)
     if isinstance(value, Mapping):
         val_ann = _value_annotation(annotation)
         # A non-str key was coerced with ``str(k)`` and never restored, so the
@@ -945,53 +1343,48 @@ def _encode(value: object, annotation: object = None) -> JSONValue:
     raise TypeError(f"cannot encode {type(value).__name__} to JSON")
 
 
-def decode(
-    annotation: object,
-    raw: object,
-    *,
-    sequence_containers: Mapping[object, Callable[[list[object]], object]] = (
-        MappingProxyType(
-            {
-                # Each constructor is annotated at the declared element type: a bare
-                # ``list`` reads as ``list[Unknown]``, which leaks through the
-                # return of every decoded container.
-                list: lambda items: items,
-                tuple: tuple[object, ...],
-                set: set[object],
-                frozenset: frozenset[object],
-                Sequence: lambda items: items,
-                MutableSequence: lambda items: items,
-                AbstractSet: frozenset[object],
-                MutableSet: set[object],
-            }
-        )
-    ),
-    mapping_containers: tuple[object, ...] = (dict, Mapping, MutableMapping),
-) -> object:
+def _decode_untyped(raw: object) -> object:
+    """Decode JSON-native data and this codec's non-finite float tags."""
+    if isinstance(raw, Mapping):
+        source = cast(Mapping[object, object], raw)
+        if len(source) == 1 and _FLOAT_TAG in source:
+            return _decode_float(cast(Mapping[str, object], raw))
+        if len(source) == 1 and _RAW_OBJECT_TAG in source:
+            entries = source[_RAW_OBJECT_TAG]
+            if not _is_json_sequence(entries):
+                raise TypeError(f"cannot decode {raw!r} as an untyped JSON object")
+            result: dict[str, object] = {}
+            for entry in entries:
+                if not _is_json_sequence(entry) or len(entry) != 2:
+                    raise TypeError(f"cannot decode {raw!r} as an untyped JSON object")
+                key, value = entry
+                if not isinstance(key, str):
+                    raise TypeError(f"cannot decode {raw!r} as an untyped JSON object")
+                result[key] = _decode_untyped(value)
+            return result
+        result = {}
+        for key, value in source.items():
+            if not isinstance(key, str):
+                raise TypeError(f"cannot decode mapping key {key!r} as str")
+            result[key] = _decode_untyped(value)
+        return result
+    if _is_json_sequence(raw):
+        return [_decode_untyped(value) for value in raw]
+    return _checked_json_scalar(raw, allow_nan=True)
+
+
+def decode(annotation: object, raw: object) -> object:
     """Coerce a JSON-decoded value to the type named by ``annotation``.
 
     Type-hint-driven: dispatches on the resolved annotation (scalar, union,
     ``Path`` / ``UUID`` / ``datetime`` / ``bytes`` / ``Enum``, nested
     dataclass, ``list`` / ``tuple`` / ``dict``), mirroring how
-    :func:`dataclass_from_json` decodes a field.
+    :func:`dataclass_from_json` decodes a field. Float annotations accept the
+    module's NaN and signed-infinity extensions.
 
     Args:
       annotation: The target type annotation (a resolved type, not a string).
       raw: A JSON-decoded value (scalar, list, or mapping).
-      sequence_containers: What each array-shaped annotation DECODES TO. A table
-        rather than a membership test plus a construction ladder, because those
-        are two lists that must agree and did not: ``AbstractSet`` and
-        ``Sequence`` were each added to the membership tuple one incident at a
-        time, while the ``Mutable*`` abcs this module's own ``MutableJSONValue``
-        is built from were in neither -- so a field spelled with one encoded
-        fine and refused to decode. An abc names no constructor, so it maps to
-        the concrete type it materializes as: a ``Mutable*`` abc promises
-        mutation and takes the mutable type; read-only set ABCs take an immutable
-        set, while sequence ABCs materialize as JSON-like lists. Membership is by
-        identity, not ``issubclass``: widening to
-        every ``Mapping`` subclass admits ``defaultdict``, whose constructor
-        takes a factory first and raises on a decoded dict.
-      mapping_containers: The object-shaped annotations decoded key-by-key.
 
     Returns:
       value: ``raw`` coerced to ``annotation``.
@@ -1011,6 +1404,12 @@ def decode(
         if _admits_none(annotation):
             return None
         raise TypeError(f"cannot decode None as {annotation}")
+    if (
+        annotation is JSONValue
+        or annotation is object
+        or isinstance(annotation, TypeVar)
+    ):
+        return _decode_untyped(raw)
     ann: object = _strip_optional(_resolve_alias(annotation))
     origin = get_origin(ann)
     if _is_union(ann):
@@ -1037,10 +1436,9 @@ def decode(
     # dataclass that no downstream isinstance guard would catch.
     #
     # A field may be spelled with an abc rather than a concrete type, and an
-    # abc's origin is its own class (``collections.abc.Set``, never ``set``),
-    # so ``sequence_containers`` maps each to what it materializes as.
+    # abc's origin is its own class (``collections.abc.Set``, never ``set``).
     container: object = origin if origin is not None else cast(object, ann)
-    materialize = sequence_containers.get(container)
+    materialize = _SEQUENCE_CONTAINERS.get(container)
     if materialize is not None and isinstance(raw, list):
         items = cast(list[object], raw)
         arity = _fixed_tuple_arity(cast(object, ann))
@@ -1052,7 +1450,9 @@ def decode(
         elems = _element_annotations(cast(object, ann), count=len(items))
         return materialize([decode(a, v) for v, a in zip(items, elems, strict=True)])
     # Mapping (dict[K, V]): decode each key and value against its annotation.
-    if container in mapping_containers and isinstance(raw, Mapping):
+    if any(container is candidate for candidate in _MAPPING_CONTAINERS) and isinstance(
+        raw, Mapping
+    ):
         args = get_args(ann)
         key_ann: object = args[0] if len(args) == 2 else object
         val_ann: object = args[1] if len(args) == 2 else object
@@ -1112,7 +1512,7 @@ def decode(
         if isinstance(raw, Mapping):
             return _decode_datetime(cast(Mapping[str, object], raw))
     if isinstance(ann, type) and issubclass(ann, Enum):
-        return ann(raw)
+        return _decode_enum(ann, raw)
     # An unannotated field (``object`` / no hint) is the one shape with no
     # claim to check, so its value passes through. Everything else reaching
     # here is a shape the annotation does not describe: returning it unchanged
@@ -1135,7 +1535,7 @@ def _decode_untagged_union(annotation: object, raw: object) -> object:
         (rank, member)
         for member in _union_args(annotation)
         if member is not type(None)
-        and (rank := _annotation_match_rank(member, raw)) is not None
+        and (rank := _annotation_match_rank(member, raw, wire=True)) is not None
     ]
     if not ranked:
         raise TypeError(f"cannot decode {raw!r} as {annotation}")
@@ -1155,9 +1555,7 @@ def _admits_none(annotation: object) -> bool:
     if ann is None or ann is object or ann is type(None) or isinstance(ann, TypeVar):
         return True
     if _is_union(ann):
-        return any(m is type(None) for m in get_args(ann)) or any(
-            _admits_none(m) for m in _union_args(ann)
-        )
+        return any(_admits_none(member) for member in _union_args(ann))
     return get_origin(ann) is Literal and None in get_args(ann)
 
 
@@ -1183,9 +1581,7 @@ def _decode_bool(raw: object) -> bool:
     and the wrong one here -- ``decode(bool, {})`` answered ``False`` about a
     shape it never understood, while every sibling scalar raises.
     """
-    if isinstance(raw, bool | int):
-        return bool(raw)
-    if isinstance(raw, float) and math.isfinite(raw):
+    if isinstance(raw, bool | int | float):
         return bool(raw)
     if isinstance(raw, str) and bool_val(raw, default=True) == bool_val(raw):
         return bool_val(raw)
@@ -1203,6 +1599,18 @@ def _decode_base64(raw: str) -> bytes:
         return base64.b64decode(raw, validate=True)
     except ValueError as exc:
         raise TypeError(f"cannot decode {raw!r} as bytes") from exc
+
+
+def _decode_enum(enum_type: type[Enum], raw: object) -> Enum:
+    """Decode an enum by its recursively encoded, JSON-typed value."""
+    if isinstance(raw, enum_type):
+        return raw
+    matches = [
+        member for member in enum_type if _same_json_value(raw, _encode(member.value))
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    raise TypeError(f"cannot decode {raw!r} as {enum_type.__name__}")
 
 
 def _decode_int(raw: object) -> int:
@@ -1234,36 +1642,40 @@ def _decode_datetime(raw: Mapping[str, object]) -> datetime:
     if not isinstance(key, str) or not isinstance(stamp, str):
         raise TypeError(f"cannot decode {raw!r} as datetime")
     try:
+        moment = datetime.fromisoformat(stamp)
+    except ValueError as exc:
+        raise TypeError(f"cannot decode {raw!r} as datetime") from exc
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        raise TypeError(f"cannot decode {raw!r} as datetime: timestamp is naive")
+    try:
         zone = ZoneInfo(key)
     except (ValueError, ZoneInfoNotFoundError):
         # The name is valid where it was written but absent here (a trimmed
         # tzdata, a renamed zone). The instant is still exact, so keep it
         # rather than failing the whole document.
-        return datetime.fromisoformat(stamp)
-    return datetime.fromisoformat(stamp).astimezone(zone)
+        return moment
+    return moment.astimezone(zone)
 
 
 def _decode_float(raw: object) -> float:
-    """Decode a float, refusing bool and restoring tagged non-finite values."""
+    """Decode a float, including direct or tagged non-finite values."""
     if isinstance(raw, bool):
         raise TypeError(f"cannot decode {raw!r} as float: bool is not a number")
     if isinstance(raw, Mapping):
         token = cast(Mapping[str, object], raw).get(_FLOAT_TAG)
         if isinstance(token, str):
-            return float(token)
+            try:
+                return float(token)
+            except ValueError as exc:
+                raise TypeError(f"cannot decode {raw!r} as float") from exc
         raise TypeError(f"cannot decode {raw!r} as float")
     if isinstance(raw, (int, float)):
-        if not math.isfinite(raw):
-            raise TypeError(f"cannot decode {raw!r} as float: not finite")
         return float(raw)
     if isinstance(raw, str):
         try:
-            parsed = float(raw.strip())
+            return float(raw.strip())
         except ValueError as exc:
             raise TypeError(f"cannot decode {raw!r} as float") from exc
-        if not math.isfinite(parsed):
-            raise TypeError(f"cannot decode {raw!r} as float: not finite")
-        return parsed
     raise TypeError(f"cannot decode {raw!r} as float")
 
 
