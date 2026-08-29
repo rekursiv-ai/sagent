@@ -32,7 +32,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, Literal
+from typing import Final, Literal, cast
 
 import asyncio
 import contextlib
@@ -1752,7 +1752,7 @@ class Agent:
         | tuple[type[types.runtime.RuntimeEvent], ...],
     ) -> None:
         """Push ``push`` and resolve when an event of ``complete`` type arrives."""
-        fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        fut = cast(asyncio.Future[None], asyncio.get_running_loop().create_future())
 
         def resolver(ev: types.runtime.RuntimeEvent) -> None:
             if isinstance(ev, complete) and not fut.done():

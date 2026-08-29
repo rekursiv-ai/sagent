@@ -331,7 +331,7 @@ async def _await_detached(
     job: BackgroundTaskEntry,
 ) -> ToolResult:
     """Wait for a ``DetachedResult`` matching ``call_id`` and return it."""
-    fut: asyncio.Future[ToolResult] = asyncio.get_running_loop().create_future()
+    fut = cast(asyncio.Future[ToolResult], asyncio.get_running_loop().create_future())
 
     def on_event(event: RuntimeEvent) -> None:
         if fut.done():

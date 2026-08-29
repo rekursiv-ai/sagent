@@ -108,9 +108,7 @@ test = [
 ]
 typecheck = [
     "basedpyright>=1.10",
-    # 0.0.72 and basedpyright 1.39.10 work correctly.
-    # https://github.com/astral-sh/ty/issues/4352
-    "ty>=0.0.60,!=0.0.73",
+    "ty>=0.0.75",
 ]
 "pre-commit" = [
     "pre-commit>=4.6",
