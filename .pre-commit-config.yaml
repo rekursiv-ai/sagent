@@ -360,7 +360,7 @@ repos:
           - >-
             files=("$@");
             if [ -n "${PRECOMMIT_CODEGRAPH:-}" ] && [ -x ops/git/precommit/affected.py ]; then
-              harvested=$(ops/git/precommit/affected.py --emit files --depth 3 --explain -- "$@") &&
+              harvested=$(ops/git/precommit/affected.py --emit files --depth 3 --workers "$WORKERS" --explain -- "$@") &&
                 [ -n "$harvested" ] &&
                 IFS=$'\n' read -r -d '' -a files < <(printf "%s" "$harvested" && printf '\0');
             fi;
@@ -430,7 +430,7 @@ repos:
           - >-
             tests=();
             if [ -n "${PRECOMMIT_CODEGRAPH:-}" ] && [ -x ops/git/precommit/affected.py ]; then
-              ids=$(ops/git/precommit/affected.py --emit nodeids --explain -- "$@") &&
+              ids=$(ops/git/precommit/affected.py --emit nodeids --workers "$WORKERS" --explain -- "$@") &&
                 [ -n "$ids" ] &&
                 IFS=$'\n' read -r -d '' -a tests < <(printf "%s" "$ids" && printf '\0');
             fi;
