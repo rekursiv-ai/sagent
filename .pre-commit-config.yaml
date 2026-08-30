@@ -359,7 +359,7 @@ repos:
           - WORKERS_BASEDPYRIGHT
           - >-
             files=("$@");
-            if [ -n "${PRECOMMIT_CODEGRAPH:-}" ] && [ -x ops/git/precommit/affected.py ]; then
+            if [ "${PRECOMMIT_CODEGRAPH:-}" = 1 ] && [ -x ops/git/precommit/affected.py ]; then
               harvested=$(ops/git/precommit/affected.py --emit files --depth 3 --workers "$WORKERS" --explain -- "$@") &&
                 [ -n "$harvested" ] &&
                 IFS=$'\n' read -r -d '' -a files < <(printf "%s" "$harvested" && printf '\0');
@@ -429,7 +429,7 @@ repos:
           - WORKERS_PYTEST
           - >-
             tests=();
-            if [ -n "${PRECOMMIT_CODEGRAPH:-}" ] && [ -x ops/git/precommit/affected.py ]; then
+            if [ "${PRECOMMIT_CODEGRAPH:-}" = 1 ] && [ -x ops/git/precommit/affected.py ]; then
               ids=$(ops/git/precommit/affected.py --emit nodeids --workers "$WORKERS" --explain -- "$@") &&
                 [ -n "$ids" ] &&
                 IFS=$'\n' read -r -d '' -a tests < <(printf "%s" "$ids" && printf '\0');
