@@ -454,6 +454,28 @@ def test_list_all_sessions_peeks_only_the_limit(tmp_path: Path) -> None:
     assert len(peeked) == 3, f"peeked {len(peeked)} files for a 3-row result"
 
 
+def test_list_sessions_peeks_only_the_limit(tmp_path: Path) -> None:
+    """The cwd picker must not parse sessions beyond its visible rows."""
+    projects = tmp_path / "projects"
+    pdir = project_dir(tmp_path, projects_dir=projects)
+    for i in range(10):
+        _write_session(pdir / f"s{i}", session_id=f"S{i}")
+        os.utime(pdir / f"s{i}" / "session.jsonl", (i, i))
+
+    real_peek = sessions._peek_session
+    peeked: list[str] = []
+
+    def counting_peek(d: Path) -> SessionInfo | None:
+        peeked.append(d.name)
+        return real_peek(d)
+
+    with patch.object(sessions, "_peek_session", side_effect=counting_peek):
+        found = list_sessions(tmp_path, projects_dir=projects, limit=3)
+
+    assert [s.session_id for s in found] == ["S9", "S8", "S7"]
+    assert len(peeked) == 3, f"peeked {len(peeked)} files for a 3-row result"
+
+
 def test_list_all_sessions_limit_none_returns_everything(tmp_path: Path) -> None:
     """``--resume HASH`` searches by prefix, so it needs the whole corpus.
 
@@ -631,7 +653,7 @@ def test_pick_session_truncation_header_when_over_cap() -> None:
     sout = StringIO()
     _ = pick_session(sessions, stream_in=StringIO("\n"), stream_out=sout)
     out = sout.getvalue()
-    assert "20 of 25" in out
+    assert "showing 20 sessions; older ones hidden" in out
 
 
 def test_pick_session_invalid_input_reprompts() -> None:

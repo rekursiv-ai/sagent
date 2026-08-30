@@ -346,7 +346,7 @@ def _resolve_resume_hash(session_hash: str, cwd: Path) -> str:
 
 def _resolve_resume(cwd: Path, pick_cap: int) -> str:
     """Show interactive session picker, or start fresh on no selection."""
-    avail = sessions.list_sessions(cwd)
+    avail = sessions.list_sessions(cwd, limit=pick_cap + 1)
     if not avail:
         sys.stderr.write("[resume] no prior sessions; starting fresh.\n")
         return str(sessions.new_session_dir(cwd))
@@ -371,8 +371,8 @@ def _resolve_continue_all() -> str:
 
 def _resolve_resume_all(pick_cap: int) -> str:
     """Show interactive picker across all projects, or start fresh on no selection."""
-    # Bounded to what the picker renders: every extra row is a transcript read.
-    avail = sessions.list_all_sessions(limit=pick_cap)
+    # One extra row lets the bounded picker disclose that older sessions exist.
+    avail = sessions.list_all_sessions(limit=pick_cap + 1)
     if not avail:
         sys.stderr.write("[resume] no prior sessions; starting fresh.\n")
         return str(sessions.new_session_dir(Path.cwd()))
@@ -656,8 +656,8 @@ def _parse_cli_args(
         metavar="N",
         help=(
             "Sessions the picker lists (default:"
-            f" {sessions.DEFAULT_PICK_CAP}). Each row costs a transcript"
-            " read, so raising this slows --resume-all."
+            f" {sessions.DEFAULT_PICK_CAP}). Showing N rows reads at most"
+            " N+1 transcripts, so raising this slows the picker."
         ),
     )
     parser.add_argument(
