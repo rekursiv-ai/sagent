@@ -706,29 +706,51 @@ def _peek_session(session_dir: Path) -> SessionInfo | None:
 
 
 def list_sessions(
-    cwd: str | Path, *, projects_dir: Path | None = None
+    cwd: str | Path,
+    *,
+    projects_dir: Path | None = None,
+    limit: int | None = None,
 ) -> list[SessionInfo]:
     """List sessions under ``cwd``'s project dir, newest first.
 
     Args:
       cwd: Current working directory.
       projects_dir: Override for the projects root directory.
+      limit: Most recent sessions to build, or ``None`` for all of them.
 
     Returns:
       sessions: Session metadata sorted by mtime descending.
 
     """
-    out: list[SessionInfo] = []
+    candidates: list[tuple[float, Path]] = []
     for pdir in project_dirs(cwd, projects_dir=projects_dir):
         if not pdir.exists():
             continue
         for child in pdir.iterdir():
             if not child.is_dir():
                 continue
-            info = _peek_session(child)
-            if info is not None:
-                out.append(info)
-    out.sort(key=lambda s: s.mtime, reverse=True)
+            session_file = child / "session.jsonl"
+            if not session_file.exists():
+                continue
+            try:
+                candidates.append((session_file.stat().st_mtime, child))
+            except OSError:
+                continue
+    return _peek_session_candidates(candidates, limit=limit)
+
+
+def _peek_session_candidates(
+    candidates: list[tuple[float, Path]], *, limit: int | None
+) -> list[SessionInfo]:
+    """Build newest-first metadata until ``limit`` sessions succeed."""
+    candidates.sort(key=lambda pair: pair[0], reverse=True)
+    out: list[SessionInfo] = []
+    for _mtime, session_dir in candidates:
+        if limit is not None and len(out) >= limit:
+            break
+        info = _peek_session(session_dir)
+        if info is not None:
+            out.append(info)
     return out
 
 
@@ -778,8 +800,8 @@ def list_all_sessions(
     Ranking is by the transcript's mtime, which is a ``stat`` -- so the sort
     does not need the peek. Peeking is what costs: it parses every line of
     every transcript, and across 5,647 real sessions that was 51.88s against
-    0.08s for the glob and stats. Callers that render a bounded list (the
-    picker shows 20) pass ``limit`` and pay for those rows only.
+    0.08s for the glob and stats. Picker callers pass one extra sentinel row
+    beyond their visible cap and pay for only those rows.
 
     ``limit=None`` peeks everything, which is what a prefix search over
     ``path.name`` needs: bounding it would make a hash resolvable or not
@@ -806,19 +828,11 @@ def list_all_sessions(
             candidates.append((session_file.stat().st_mtime, session_file.parent))
         except OSError:
             continue
-    candidates.sort(key=lambda pair: pair[0], reverse=True)
-    out: list[SessionInfo] = []
-    for _mtime, session_dir in candidates:
-        # Take until ``limit`` are BUILT, not until ``limit`` are tried: a peek
-        # returns ``None`` for an unreadable transcript, and truncating the
-        # candidate list first would hand back fewer rows than asked and drop a
-        # resumable session out of the picker.
-        if limit is not None and len(out) >= limit:
-            break
-        info = _peek_session(session_dir)
-        if info is not None:
-            out.append(info)
-    return out
+    # Take until ``limit`` are BUILT, not until ``limit`` are tried: a peek
+    # returns ``None`` for an unreadable transcript, and truncating the
+    # candidate list first would hand back fewer rows than asked and drop a
+    # resumable session out of the picker.
+    return _peek_session_candidates(candidates, limit=limit)
 
 
 def latest_session(
@@ -878,11 +892,10 @@ def _truncate(text: str, n: int) -> str:
 
 
 DEFAULT_PICK_CAP: Final = 20
-"""Rows the interactive picker shows, and the default listing bound.
+"""Rows the interactive picker shows.
 
-One number, because two would disagree: a listing bounded below the picker's
-cap renders blank rows, and a listing above it pays for sessions nobody sees.
-``--resume-limit`` moves both.
+Production listings load one additional sentinel row so the picker can disclose
+that older sessions exist. ``--resume-limit`` moves the visible-row cap.
 """
 
 
@@ -911,9 +924,7 @@ def pick_session(
     sout = stream_out if stream_out is not None else sys.stdout
     visible = sessions[:pick_cap]
     if len(sessions) > pick_cap:
-        sout.write(
-            f"  (showing {pick_cap} of {len(sessions)} sessions; older ones hidden)\n"
-        )
+        sout.write(f"  (showing {pick_cap} sessions; older ones hidden)\n")
     for i, s in enumerate(visible, start=1):
         rel = _format_relative_time(s.mtime)
         label = _truncate(s.status, 60) or "(no user messages)"

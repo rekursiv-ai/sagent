@@ -18,6 +18,7 @@ import sys
 
 import pytest
 
+from sagent import sessions
 from sagent.agent import Agent
 from sagent.agent.session_io import (
     PersistentAgentRecord,
@@ -48,6 +49,7 @@ from sagent.bin.cli import (
     _parse_stream_json,
     _resolve_cli_thinking_state,
     _resolve_provider_and_allow,
+    _resolve_resume,
     _resolve_resume_hash,
     _resolve_session_dir,
     _resume_label,
@@ -57,7 +59,7 @@ from sagent.bin.cli import (
     resolve_tools,
 )
 from sagent.providers import PROVIDER_NAMES
-from sagent.sessions import project_dir
+from sagent.sessions import SessionInfo, project_dir
 from sagent.testing import FakeAgent
 from sagent.types.cost import (
     PriceCatalog,
@@ -652,6 +654,55 @@ def test_resolve_resume_hash_refuses_ambiguous_prefix(
     assert "ambiguous" in err.lower(), f"ambiguity must be surfaced; got {err!r}"
     assert "ab1111111111" in err
     assert "ab2222222222" in err
+
+
+def test_resolve_resume_bounds_listing_to_limit_plus_sentinel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cwd picker reads visible rows plus one hidden-session sentinel."""
+    captured_limit: list[int | None] = []
+
+    def fake_list_sessions(
+        cwd: str | Path, *, limit: int | None = None
+    ) -> list[SessionInfo]:
+        assert cwd == tmp_path
+        captured_limit.append(limit)
+        return []
+
+    def fake_new_session_dir(cwd: str | Path) -> Path:
+        assert cwd == tmp_path
+        return tmp_path / "new-session"
+
+    monkeypatch.setattr(sessions, "list_sessions", fake_list_sessions)
+    monkeypatch.setattr(sessions, "new_session_dir", fake_new_session_dir)
+
+    _ = _resolve_resume(tmp_path, 3)
+
+    assert captured_limit == [4]
+
+
+def test_resolve_resume_discloses_hidden_sessions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The bounded cwd picker must disclose that older sessions exist."""
+    project = project_dir(tmp_path)
+    for i in range(4):
+        session_dir = project / f"s{i}"
+        session_dir.mkdir(parents=True)
+        (session_dir / "session.jsonl").write_text(
+            json.dumps({"kind": "meta", "session_id": f"S{i}"}) + "\n",
+            encoding="utf-8",
+        )
+        os.utime(session_dir / "session.jsonl", (i, i))
+    monkeypatch.setattr(sys, "stdin", io.StringIO("\n"))
+
+    selected = _resolve_resume(tmp_path, 3)
+
+    assert selected == str(project / "s3")
+    assert "showing 3 sessions; older ones hidden" in capsys.readouterr().out
 
 
 def test_parse_cli_args_resume_persistent_defaults_enabled() -> None:
