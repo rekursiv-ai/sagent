@@ -23,7 +23,7 @@ from collections.abc import (
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePath
 from types import MappingProxyType, ModuleType, UnionType
 from typing import (
     ClassVar,
@@ -360,7 +360,14 @@ class _GraphEncoder:
         return inline
 
     def reduce_for(self, value: object) -> object:
-        """Return one memoized pickle reduction result for ``value``."""
+        """Return one memoized pickle reduction result for ``value``.
+
+        A path's arguments are restated as one joined string. CPython 3.12
+        reduces ``PurePath`` to one argument per segment and 3.14 to a single
+        string, so the raw recipe would write a different wire per interpreter
+        -- and this format is durable across both. Every version reconstructs
+        from the joined form, so decode needs no matching special case.
+        """
         identity = id(value)
         cached = self._reduce_cache.get(identity)
         if cached is not None and cached[0] is value:
@@ -375,6 +382,8 @@ class _GraphEncoder:
                 reduced = _GRAPH_DECLINED
         if isinstance(reduced, tuple):
             parts = list(cast(tuple[object, ...], reduced))
+            if isinstance(value, PurePath) and len(parts) >= 2:
+                parts[1] = (str(value),)
             if len(parts) >= 4 and parts[3] is not None:
                 parts[3] = list(cast(Iterable[object], parts[3]))
             if len(parts) >= 5 and parts[4] is not None:
