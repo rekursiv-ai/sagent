@@ -2697,12 +2697,15 @@ wheels = [
 
 [[package]]
 name = "pyturbojpeg"
-version = "1.8.3"
+version = "2.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f2/2b/5fc7a7f51af947708a5d75d7637e923d2d4e60f43f6a4cfe55ae1ea241a2/pyturbojpeg-1.8.3.tar.gz", hash = "sha256:c131591a3990cc57f45a8b2705d6261c25df913a19b1fe88de5e911dbe04a1d4", size = 12757, upload-time = "2026-02-17T02:32:53.192Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/55/fe/b525bca5e85688a283839126095d3e7e6d9bb5e7f23c68e57ad30f43af14/pyturbojpeg-2.5.0.tar.gz", hash = "sha256:572e74886110e0bd85f8a95a188f1cda94c4a5f0222ff38a22d7e12faeb9844b", size = 49265, upload-time = "2026-07-14T16:00:50.511Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6c/e4/b19be937c95df9a02d6337178088b56fe77c2656eab46489344c7ac510e9/pyturbojpeg-2.5.0-py3-none-any.whl", hash = "sha256:2c10c2de86aa0e4fd9d08de187e46e975d108db35c25842d342393913cf54c36", size = 27455, upload-time = "2026-07-14T16:00:49.05Z" },
+]
 
 [[package]]
 name = "pytz"
@@ -3137,7 +3140,7 @@ requires-dist = [
     { name = "protobuf", marker = "extra == 'selfhosted'" },
     { name = "pygments" },
     { name = "pypdfium2" },
-    { name = "pyturbojpeg", specifier = ">=1.8.2,<2" },
+    { name = "pyturbojpeg", specifier = ">=1.8.2" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rich" },
     { name = "safetensors", marker = "extra == 'selfhosted'" },
@@ -3860,7 +3863,7 @@ wheels = [
 [[package]]
 name = "wesearch"
 version = "0.1.11"
-source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#d745a6653a118b6e023fb1abbe0005341f49419e" }
+source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#32d50676e86cb73b09a7670f4e1d71ff43adb09b" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "brotli" },

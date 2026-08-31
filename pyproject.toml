@@ -22,7 +22,14 @@ dependencies = [
     # media
     "imagesize>=1.4",
     "pillow",
-    "pyturbojpeg>=1.8.2,<2",
+    # On 24.04 LTS, package libturbojpeg is too old.
+    # V=$(curl -fsSL https://api.github.com/repos/libjpeg-turbo/libjpeg-turbo/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
+    # cd "$(mktemp -d)"
+    # curl -fsSL https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/$V/libjpeg-turbo-official_${V}_amd64.deb
+    # sudo dpkg -i libjpeg-turbo-official_${V}_amd64.deb
+    # sudo ln -sf /opt/libjpeg-turbo/lib64/libturbojpeg.so.0 /usr/local/lib/libturbojpeg.so.0
+    # sudo ldconfig
+    "pyturbojpeg>=1.8.2",
     "webp>=0.4.0",
     # data
     "numpy>=2.1",
