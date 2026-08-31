@@ -11,7 +11,7 @@ import asyncio
 import time
 
 from sagent.agent.state import get_tool_state
-from sagent.lib.custom_json import bool_val, int_val, json_freeze
+from sagent.lib.custom_json import BoolCodec, IntCodec, json_freeze
 from sagent.tools.core import load_tool_description
 from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
@@ -151,13 +151,13 @@ class List:
 
         """
         path = str(args.get("path", ".") or ".")
-        show_hidden = bool_val(args.get("show_hidden"), False)
-        long = bool_val(args.get("long"), False)
+        show_hidden = BoolCodec.coerce(args.get("show_hidden"), False)
+        long = BoolCodec.coerce(args.get("long"), False)
         sort = str(args.get("sort", _DEFAULT_SORT) or _DEFAULT_SORT)
-        max_results = int_val(args.get("max_results"), 500)
+        max_results = IntCodec.coerce(args.get("max_results"), 500)
         # ``0`` is not "disabled": the schema floor is 1, so a supplied
         # zero is a malformed directive. Distinguish absent from zero.
-        keep_last = int_val(args.get("keep_last"), 0)
+        keep_last = IntCodec.coerce(args.get("keep_last"), 0)
         if args.get("keep_last") is not None and keep_last < 1:
             return ToolResult(
                 call_id="",

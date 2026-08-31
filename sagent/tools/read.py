@@ -16,14 +16,7 @@ from sagent.agent.state import (
     current_agent_var,
     get_tool_state,
 )
-from sagent.lib.custom_json import (
-    dict_val,
-    dicts_val,
-    int_val,
-    json_freeze,
-    list_val,
-    str_val,
-)
+from sagent.lib.custom_json import DictCodec, IntCodec, ListCodec, StrCodec, json_freeze
 from sagent.tools.core import (
     bound_by_tokens,
     file_lock_key,
@@ -173,14 +166,14 @@ class Read:
 
         """
         file_path = resolve_tool_path(str(args.get("file_path", "")))
-        offset = int_val(args.get("offset"), 1)
+        offset = IntCodec.coerce(args.get("offset"), 1)
         # ``0`` means "to EOF"; the token bound in ``_window_text`` is what
         # actually stops the read, so no line-count default is needed.
-        limit = int_val(args.get("limit"), 0)
-        last_lines = int_val(args.get("last_lines"), 0)
+        limit = IntCodec.coerce(args.get("limit"), 0)
+        last_lines = IntCodec.coerce(args.get("last_lines"), 0)
         pages = str(args.get("pages", ""))
         # Schema declares ``offset``/``limit``/``last_lines`` as
-        # ``minimum: 1`` integers but ``int_val`` accepts any int
+        # ``minimum: 1`` integers but ``IntCodec.coerce`` accepts any int
         # (including 0 and negatives). Reject schema violations at the
         # entrypoint -- ``offset=0`` previously fell through to the
         # ``max(1, offset)`` clamp in ``_window_text`` which masked the
@@ -253,9 +246,9 @@ class Read:
         """
         file_path = str(args.get("file_path", ""))
         fname = Path(file_path).name if file_path else "?"
-        offset = int_val(args.get("offset"), 0)
-        limit = int_val(args.get("limit"), 0)
-        last_lines = int_val(args.get("last_lines"), 0)
+        offset = IntCodec.coerce(args.get("offset"), 0)
+        limit = IntCodec.coerce(args.get("limit"), 0)
+        last_lines = IntCodec.coerce(args.get("last_lines"), 0)
         if last_lines > 0:
             suffix = f":last-{last_lines}"
         elif offset > 0 and limit > 0:
@@ -399,7 +392,7 @@ def _read_notebook(p: Path, *, file_path: str) -> ToolResult:
             content=f"[Non-UTF-8 notebook: {file_path}: {e}]",
             is_error=True,
         )
-    nb_d = dict_val(nb)
+    nb_d = DictCodec.coerce(nb)
     if not nb_d:
         return ToolResult(
             call_id="",
@@ -407,11 +400,11 @@ def _read_notebook(p: Path, *, file_path: str) -> ToolResult:
             is_error=True,
         )
     parts: list[str] = []
-    for i, cell in enumerate(list_val(nb_d.get("cells"))):
-        cell_d = dict_val(cell)
+    for i, cell in enumerate(ListCodec.coerce(nb_d.get("cells"))):
+        cell_d = DictCodec.coerce(cell)
         if not cell_d:
             continue
-        ctype = str_val(cell_d.get("cell_type")) or "code"
+        ctype = StrCodec.coerce(cell_d.get("cell_type")) or "code"
         parts.append(f"--- Cell {i + 1} ({ctype}) ---")
         parts.append(_joined(cell_d.get("source")))
         _collect_cell_outputs(cell_d, parts)
@@ -438,10 +431,10 @@ def _collect_cell_outputs(cell: Mapping[str, object], parts: list[str]) -> None:
     cell returned nor how it failed -- the two things a reader opens a
     notebook for.
     """
-    for out_d in dicts_val(cell.get("outputs")):
+    for out_d in ListCodec.mappings(cell.get("outputs")):
         text = _joined(out_d.get("text"))
         if not text:
-            text = _joined(dict_val(out_d.get("data")).get("text/plain"))
+            text = _joined(DictCodec.coerce(out_d.get("data")).get("text/plain"))
         if not text:
             text = _joined(out_d.get("traceback"))
         if text:
@@ -452,8 +445,8 @@ def _joined(raw: object) -> str:
     """Render a notebook text field, which is a string OR a line list."""
     if raw is None:
         return ""
-    lines = list_val(raw)
-    return "".join(str(x) for x in lines) if lines else str_val(raw)
+    lines = ListCodec.coerce(raw)
+    return "".join(str(x) for x in lines) if lines else StrCodec.coerce(raw)
 
 
 def _read_text(
@@ -846,7 +839,7 @@ def _check_minimum(
     """Reject schema-violating windowing args at the tool entrypoint.
 
     Each tuple is ``(name, coerced, raw)``: ``coerced`` is the
-    ``int_val`` result we'd otherwise pass downstream; ``raw`` is the
+    ``IntCodec.coerce`` result we'd otherwise pass downstream; ``raw`` is the
     untouched directive value used to detect "the caller supplied it"
     (an absent key has ``raw is None`` and is allowed to fall through
     to the default).

@@ -28,10 +28,10 @@ import dataclasses
 
 from sagent.lib.custom_json import (
     JSON,
+    BoolCodec,
+    IntCodec,
     MutableJSON,
     MutableJSONValue,
-    bool_val,
-    int_val,
     json_freeze,
 )
 from sagent.types.runtime import ToolResult
@@ -295,6 +295,8 @@ def split_bg_args(
     clean = {k: v for k, v in args.items() if k not in ("background", "delay")}
     # Negative ``delay`` is meaningless; coerce to zero rather than
     # waiting an unbounded duration backwards or raising mid-dispatch.
-    delay_sec = max(0.0, float(int_val(args.get("delay"), 0)))
-    background = bool_val(args.get("background"), default=False) or delay_sec > 0
+    delay_sec = max(0.0, float(IntCodec.coerce(args.get("delay"), 0)))
+    background = (
+        BoolCodec.coerce(args.get("background"), default=False) or delay_sec > 0
+    )
     return background, delay_sec, clean

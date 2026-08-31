@@ -10,7 +10,7 @@ from typing import Annotated, Final
 import time
 
 from sagent.agent.state import approx_tokens, get_tool_state
-from sagent.lib.custom_json import bool_val, int_val, json_freeze
+from sagent.lib.custom_json import BoolCodec, IntCodec, json_freeze
 from sagent.tools.core import (
     bound_by_tokens,
     load_tool_description,
@@ -182,9 +182,9 @@ class Glob:
             pattern=str(args.get("pattern", "")),
             path=str(args.get("path", ".") or "."),
             sort=str(args.get("sort", _DEFAULT_SORT) or _DEFAULT_SORT),
-            long=bool_val(args.get("long"), False),
-            max_results=int_val(args.get("max_results"), 0),
-            offset=int_val(args.get("offset"), 0),
+            long=BoolCodec.coerce(args.get("long"), False),
+            max_results=IntCodec.coerce(args.get("max_results"), 0),
+            offset=IntCodec.coerce(args.get("offset"), 0),
         )
 
     def _run(

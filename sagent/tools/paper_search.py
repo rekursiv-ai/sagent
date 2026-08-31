@@ -22,7 +22,7 @@ from wesearch.paper.search import Source, search
 
 import cachetools
 
-from sagent.lib.custom_json import JSON, bool_val, json_freeze
+from sagent.lib.custom_json import JSON, BoolCodec, json_freeze
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
     validate_abstract_chars,
@@ -153,7 +153,7 @@ class PaperSearch:
         year_error = validate_year_range(year_from, year_to)
         if year_error is not None:
             return year_error
-        open_access_only = bool_val(args.get("open_access_only"), False)
+        open_access_only = BoolCodec.coerce(args.get("open_access_only"), False)
         cap = validate_abstract_chars(opt_int(args, "abstract_chars"))
         if isinstance(cap, ToolResult):
             return cap

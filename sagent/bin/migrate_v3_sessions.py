@@ -37,7 +37,7 @@ import json
 import logging
 import sys
 
-from sagent.lib.custom_json import int_val
+from sagent.lib.custom_json import IntCodec
 
 
 logger = logging.getLogger(__name__)
@@ -45,12 +45,12 @@ logger = logging.getLogger(__name__)
 
 def _id(rec: Mapping[str, object]) -> int:
     """Return the v3 record ``_id`` as an int, defaulting to ``0``."""
-    return int_val(rec.get("_id"), 0)
+    return IntCodec.coerce(rec.get("_id"), 0)
 
 
 def _parent_id(rec: Mapping[str, object]) -> int:
     """Return the v3 record ``_parent_id`` as an int, defaulting to ``-1``."""
-    return int_val(rec.get("_parent_id"), -1)
+    return IntCodec.coerce(rec.get("_parent_id"), -1)
 
 
 def _decode_bytes_content(content: object) -> bytes | None:

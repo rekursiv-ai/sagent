@@ -47,7 +47,7 @@ from sagent.agent.context import (
     resolve_context,
 )
 from sagent.agent.state import ReadCacheEntry, ToolState
-from sagent.lib.custom_json import float_val, int_val
+from sagent.lib.custom_json import FloatCodec, IntCodec
 from sagent.sessions import restrict_path
 from sagent.types.cost import TokenCost
 from sagent.types.model import Model, ModelRecipe, TokenCount
@@ -433,10 +433,10 @@ def _splice_from_json(
         insert_after=insert_after,
         payload=tuple(payload),
         strategy=str(rec.get("strategy") or ""),
-        token_before=int_val(rec.get("token_before"), 0),
-        token_after=int_val(rec.get("token_after"), 0),
+        token_before=IntCodec.coerce(rec.get("token_before"), 0),
+        token_after=IntCodec.coerce(rec.get("token_after"), 0),
         fallback_reason=str(rec.get("fallback_reason") or ""),
-        preserved_tail_count=int_val(rec.get("preserved_tail_count"), 0),
+        preserved_tail_count=IntCodec.coerce(rec.get("preserved_tail_count"), 0),
         paired_externally=paired,
     )
 
@@ -511,10 +511,10 @@ def _legacy_override_to_splice(
         insert_after=inject_after,
         payload=tuple(payload),
         strategy=str(rec.get("strategy") or ""),
-        token_before=int_val(rec.get("token_before"), 0),
-        token_after=int_val(rec.get("token_after"), 0),
+        token_before=IntCodec.coerce(rec.get("token_before"), 0),
+        token_after=IntCodec.coerce(rec.get("token_after"), 0),
         fallback_reason=str(rec.get("fallback_reason") or ""),
-        preserved_tail_count=int_val(rec.get("preserved_tail_count"), 0),
+        preserved_tail_count=IntCodec.coerce(rec.get("preserved_tail_count"), 0),
         paired_externally=paired,
     )
 
@@ -579,20 +579,20 @@ def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
         return CompactStarted()
     if t == "compact_complete":
         return CompactComplete(
-            token_before=int_val(d.get("token_before"), 0),
-            token_after=int_val(d.get("token_after"), 0),
-            payload_entries=int_val(d.get("payload_entries"), 0),
+            token_before=IntCodec.coerce(d.get("token_before"), 0),
+            token_after=IntCodec.coerce(d.get("token_after"), 0),
+            payload_entries=IntCodec.coerce(d.get("payload_entries"), 0),
             fallback_reason=str(d.get("fallback_reason") or ""),
-            preserved_tail_count=int_val(d.get("preserved_tail_count"), 0),
+            preserved_tail_count=IntCodec.coerce(d.get("preserved_tail_count"), 0),
         )
     if t == "compact_failed":
         return CompactFailed(
             exception=RuntimeError(str(d.get("message") or "")),
-            tape_len=int_val(d.get("tape_len"), 0),
+            tape_len=IntCodec.coerce(d.get("tape_len"), 0),
         )
-    entry_id = int_val(d.get("id"), 0)
-    parent_id = int_val(d.get("parent_id"), -1)
-    timestamp = float_val(d.get("timestamp"), 0.0)
+    entry_id = IntCodec.coerce(d.get("id"), 0)
+    parent_id = IntCodec.coerce(d.get("parent_id"), -1)
+    timestamp = FloatCodec.coerce(d.get("timestamp"), 0.0)
     hidden = _json_bool(d.get("hidden"))
     if t == "user":
         return UserMessage(
@@ -786,10 +786,10 @@ def restore_tool_state(state: ToolState, snapshot: Mapping[str, object]) -> None
             if not isinstance(path, str) or not path:
                 continue
             state.read_cache[path] = ReadCacheEntry(
-                offset=int_val(e.get("offset"), 0),
-                limit=int_val(e.get("limit"), 0),
-                last_lines=int_val(e.get("last_lines"), 0),
-                mtime=float_val(e.get("mtime"), 0.0),
+                offset=IntCodec.coerce(e.get("offset"), 0),
+                limit=IntCodec.coerce(e.get("limit"), 0),
+                last_lines=IntCodec.coerce(e.get("last_lines"), 0),
+                mtime=FloatCodec.coerce(e.get("mtime"), 0.0),
             )
     raw_recent = snapshot.get("recent_files")
     if isinstance(raw_recent, list):
@@ -822,10 +822,10 @@ def _spend_from_json(raw: object) -> TokenCost:
         return TokenCost()
     buckets = cast(Mapping[str, object], raw)
     return TokenCost(
-        request=float_val(buckets.get("request"), 0.0),
-        response=float_val(buckets.get("response"), 0.0),
-        cache_write=float_val(buckets.get("cache_write"), 0.0),
-        cache_read=float_val(buckets.get("cache_read"), 0.0),
+        request=FloatCodec.coerce(buckets.get("request"), 0.0),
+        response=FloatCodec.coerce(buckets.get("response"), 0.0),
+        cache_write=FloatCodec.coerce(buckets.get("cache_write"), 0.0),
+        cache_read=FloatCodec.coerce(buckets.get("cache_read"), 0.0),
     )
 
 
@@ -934,16 +934,16 @@ class SessionMeta:
             name=str(d.get("name") or ""),
             status=str(d.get("status") or ""),
             tokens=TokenCount(
-                request=int_val(tokens_d.get("input_tokens"), 0),
-                response=int_val(tokens_d.get("output_tokens"), 0),
-                cache_write=int_val(tokens_d.get("cache_creation_tokens"), 0),
-                cache_read=int_val(tokens_d.get("cache_read_tokens"), 0),
+                request=IntCodec.coerce(tokens_d.get("input_tokens"), 0),
+                response=IntCodec.coerce(tokens_d.get("output_tokens"), 0),
+                cache_write=IntCodec.coerce(tokens_d.get("cache_creation_tokens"), 0),
+                cache_read=IntCodec.coerce(tokens_d.get("cache_read_tokens"), 0),
             ),
             spend=_spend_from_json(d.get("spend")),
-            num_tool_call_rounds=int_val(d.get("num_tool_call_rounds"), 0),
-            compact_count=int_val(d.get("compact_count"), 0),
+            num_tool_call_rounds=IntCodec.coerce(d.get("num_tool_call_rounds"), 0),
+            compact_count=IntCodec.coerce(d.get("compact_count"), 0),
             bash_cwd=str(d.get("bash_cwd") or ""),
-            total_active_elapsed_seconds=float_val(
+            total_active_elapsed_seconds=FloatCodec.coerce(
                 d.get("total_active_elapsed_seconds"), 0.0
             ),
         )
@@ -1029,8 +1029,8 @@ def _runtime_event_from_json(record: Mapping[str, object]) -> RuntimeEvent | Non
             auth=str(record.get("auth") or ""),
             account=_optional_str(record.get("account")),
             model_id=str(record.get("model_id") or ""),
-            retry_at=float_val(record.get("retry_at"), 0.0),
-            delay_sec=float_val(record.get("delay_sec"), 0.0),
+            retry_at=FloatCodec.coerce(record.get("retry_at"), 0.0),
+            delay_sec=FloatCodec.coerce(record.get("delay_sec"), 0.0),
             server_supplied=_json_bool(record.get("server_supplied")),
             error=error,
         )
@@ -2003,7 +2003,7 @@ def _apply_update_in_place(
     (``content`` / ``is_error``). Only ``ToolResult`` splices are
     accepted; silently dropped if no match exists.
     """
-    target_id = int_val(rec.get("id"), -1)
+    target_id = IntCodec.coerce(rec.get("id"), -1)
     if target_id < 0:
         return
     for i, record in enumerate(tape):
