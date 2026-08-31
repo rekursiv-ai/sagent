@@ -16,7 +16,7 @@ from collections.abc import (
 )
 from datetime import UTC, datetime, timedelta
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import GenericAlias, ModuleType, UnionType
 from typing import (
     ClassVar,
@@ -2371,6 +2371,14 @@ class _SharedChildTuple(NamedTuple):
     child: list[object]
 
 
+class _SegmentedPath(PurePosixPath):
+    """A path reducing the way CPython 3.12 does: one argument per segment."""
+
+    @override
+    def __reduce__(self) -> tuple[object, ...]:
+        return type(self), tuple(self.parts)
+
+
 class _OwnInline:
     """Non-configgle value that owns its inline recipe."""
 
@@ -2423,6 +2431,37 @@ class _FreshArgsBag:
 
 
 class TestGraphEncoding:
+    def test_path_reduce_wire_is_interpreter_independent(self) -> None:
+        """A path writes one joined argument whatever its reduce returns.
+
+        CPython 3.12 reduces ``PurePath`` to one argument per segment and 3.14
+        to a single joined string. The wire is durable and shared across both,
+        so the encoder restates the joined form rather than copying whichever
+        shape the host happens to produce. ``_SegmentedPath`` pins the 3.12
+        shape here, so this bites on 3.14 too.
+        """
+        encoded = cast(dict[str, object], encode_graph(_SegmentedPath("/opt/x")))
+        recipe = cast(list[object], encoded["py/reduce"])
+        arguments = cast(dict[str, object], recipe[1])
+
+        assert arguments["py/tuple"] == ["/opt/x"]
+
+    def test_path_reduce_decodes_the_segmented_legacy_wire(self) -> None:
+        """A golden written by Python 3.12 still decodes here."""
+        legacy = {
+            "py/reduce": [
+                {"py/type": "pathlib.PurePosixPath"},
+                {"py/tuple": ["/", "opt", "scratch", "x"]},
+            ]
+        }
+
+        decoded = decode_graph(
+            legacy,
+            capabilities=DecodeCapabilities(resolve=resolve_import, apply_reduce=True),
+        )
+
+        assert decoded == PurePosixPath("/opt/scratch/x")
+
     def test_inline_recipe_is_evaluated_once_per_value(self) -> None:
         value = _InlineCounter()
 
