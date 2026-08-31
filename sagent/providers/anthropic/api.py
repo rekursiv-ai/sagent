@@ -36,14 +36,18 @@ if TYPE_CHECKING:
     from anthropic.lib.streaming import AsyncMessageStream
 
     import anthropic
-    import httpx
+
+    # The SDK's own transport types, not ours: anthropic 1.2 moved off httpx to
+    # httpx2, and these Protocols model its internals (`_build_request`,
+    # `_make_status_error`), so they must name the same package it does.
+    import httpx2
 
     import sagent.lib.image as image_lib
 else:
     from wrapt import lazy_import
 
     anthropic = lazy_import("anthropic")  # 569ms cold
-    httpx = lazy_import("httpx")  # 168ms cold
+    httpx2 = lazy_import("httpx2")  # 168ms cold
     AsyncMessageStream = lazy_import("anthropic.lib.streaming", "AsyncMessageStream")
     AsyncStream = lazy_import("anthropic._streaming", "AsyncStream")
     image_lib = lazy_import("sagent.lib.image")
@@ -107,20 +111,25 @@ _STREAM_IDLE_TIMEOUT = 600.0  # config-globals: ignore -- stream idle timeout di
 
 
 class _AnthropicTransportClient(Protocol):
-    async def send(self, request: httpx.Request, *, stream: bool) -> httpx.Response: ...
+    async def send(
+        self,
+        request: httpx2.Request,
+        *,
+        stream: bool,
+    ) -> httpx2.Response: ...
 
 
 class _AnthropicRawStreamSDK(Protocol):
     _client: _AnthropicTransportClient
 
-    def _build_request(self, options: FinalRequestOptions) -> httpx.Request: ...
+    def _build_request(self, options: FinalRequestOptions) -> httpx2.Request: ...
 
     def _make_status_error(
         self,
         err_msg: str,
         *,
         body: object,
-        response: httpx.Response,
+        response: httpx2.Response,
     ) -> anthropic.APIStatusError: ...
 
 
@@ -1176,20 +1185,20 @@ def _final_request_options(
 def _build_raw_anthropic_request(
     sdk: _AnthropicRawStreamSDK,
     options: FinalRequestOptions,
-) -> httpx.Request:
+) -> httpx2.Request:
     return sdk._build_request(options)  # noqa: SLF001 -- only the SDK request builder preserves auth/default headers for raw stream error handling.
 
 
 async def _send_raw_anthropic_request(
     sdk: _AnthropicRawStreamSDK,
-    request: httpx.Request,
-) -> httpx.Response:
+    request: httpx2.Request,
+) -> httpx2.Response:
     return await sdk._client.send(request, stream=True)  # noqa: SLF001 -- raw stream status handling must use the SDK-owned authenticated client.
 
 
 async def _raise_anthropic_status_error(
     sdk: _AnthropicRawStreamSDK,
-    response: httpx.Response,
+    response: httpx2.Response,
 ) -> None:
     body_text = (await response.aread()).decode(errors="replace")
     body: object = body_text
