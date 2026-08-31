@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from sagent.agent.retry import error_status, is_retryable
-from sagent.lib.custom_json import MutableJSON, int_val
+from sagent.lib.custom_json import IntCodec, MutableJSON
 from sagent.providers.anthropic.api import (
     Anthropic,
     _AnthropicModel,
@@ -753,9 +753,9 @@ def test_anthropic_build_kwargs_enabled_thinking_respects_max_tokens_cap() -> No
     m = p.model("claude-opus-4-8")
     req = ModelRequest(messages=[UserMessage(text="x")], thinking="enabled")
     kwargs = m._build_kwargs(req, [])
-    max_tokens = int_val(kwargs["max_tokens"], 0)
+    max_tokens = IntCodec.coerce(kwargs["max_tokens"], 0)
     thinking = cast(dict[str, object], kwargs["thinking"])
-    budget = int_val(thinking["budget_tokens"], 0)
+    budget = IntCodec.coerce(thinking["budget_tokens"], 0)
     assert max_tokens <= m.max_response_tokens
     assert budget < max_tokens
 

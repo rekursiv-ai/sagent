@@ -79,7 +79,7 @@ from sagent.agent.session_io import (
 )
 from sagent.agent.state import agent_registry, unique_registry_label
 from sagent.compaction.summary import SummaryCompactor
-from sagent.lib.custom_json import MutableJSON, dict_val, str_val
+from sagent.lib.custom_json import DictCodec, MutableJSON, StrCodec
 from sagent.lib.userdirs import data_dir
 from sagent.prompt import build_system
 from sagent.providers import (
@@ -1358,15 +1358,15 @@ def _parse_stream_json(raw: str) -> str:
             obj: object = json.loads(line)
         except json.JSONDecodeError as e:
             raise ValueError(f"invalid JSON line in stream-json input: {e}") from e
-        # ``dict_val`` maps any non-object to ``{}``, which is also what a
+        # ``DictCodec.coerce`` maps any non-object to ``{}``, which is also what a
         # legitimate empty object yields -- so compare against the parsed
         # value rather than testing emptiness. A bare ``{}`` is a valid
         # prompt-less line and must be skipped, exactly like the
         # prompt-less ``{"other": "data"}``; only a non-object is fatal.
-        record = dict_val(obj)
+        record = DictCodec.coerce(obj)
         if not record and obj != {}:
             raise TypeError("stream-json input requires JSON objects per line.")
-        p = str_val(record.get("prompt"))
+        p = StrCodec.coerce(record.get("prompt"))
         if p:
             prompts.append(p)
     return "\n\n".join(prompts)

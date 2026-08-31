@@ -51,10 +51,10 @@ else:
 from sagent import types
 from sagent.lib import debug_log, token_count
 from sagent.lib.custom_json import (
+    DictCodec,
+    IntCodec,
     MutableJSON,
     MutableJSONValue,
-    dict_val,
-    int_val,
     json_unfreeze,
 )
 from sagent.providers.lib.errors import (
@@ -831,14 +831,14 @@ def _is_image_mime(descriptor: str) -> bool:
 
 def _extract_usage(usage: MutableJSON) -> tuple[int, int, int, int]:
     """Return total input, output, cache-read, and cache-write token counts."""
-    input_tokens = int_val(usage.get("prompt_tokens"), 0)
-    output_tokens = int_val(usage.get("completion_tokens"), 0)
+    input_tokens = IntCodec.coerce(usage.get("prompt_tokens"), 0)
+    output_tokens = IntCodec.coerce(usage.get("completion_tokens"), 0)
     raw_details = usage.get("prompt_tokens_details")
     details: MutableJSON = (
         cast(MutableJSON, raw_details) if isinstance(raw_details, dict) else {}
     )
-    cache_read = int_val(details.get("cached_tokens"), 0)
-    cache_write = int_val(details.get("cache_write_tokens"), 0)
+    cache_read = IntCodec.coerce(details.get("cached_tokens"), 0)
+    cache_write = IntCodec.coerce(details.get("cache_write_tokens"), 0)
     return input_tokens, output_tokens, cache_read, cache_write
 
 
@@ -891,7 +891,7 @@ async def consume_stream(
                 saw_done = True
                 break
             try:
-                event = dict_val(json.loads(data_str))
+                event = DictCodec.coerce(json.loads(data_str))
             except json.JSONDecodeError:
                 continue
             if not message_id:

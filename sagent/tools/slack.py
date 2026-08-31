@@ -28,7 +28,7 @@ import logging
 from wesearch.fetch import ContentParams, RequestParams, RetryParams, fetch
 from wesearch.types.errors import FetchError
 
-from sagent.lib.custom_json import JSON, dict_val, dicts_val, int_val, json_freeze
+from sagent.lib.custom_json import JSON, DictCodec, IntCodec, ListCodec, json_freeze
 from sagent.tools.core import load_tool_description
 from sagent.types.runtime import ToolResult
 
@@ -101,7 +101,7 @@ async def _slack_call(
             content=(f"Slack HTTP {e.status}: {e.body.decode(errors='replace')}"),
             is_error=True,
         )
-    body = dict_val(json.loads(raw[0]))
+    body = DictCodec.coerce(json.loads(raw[0]))
     if not body.get("ok"):
         return ToolResult(
             call_id="",
@@ -198,7 +198,7 @@ class Slack:
             channel_name=str(args.get("channel_name", "")),
             text=str(args.get("text", "")),
             thread_ts=str(args.get("thread_ts", "")),
-            limit=int_val(args.get("limit"), 25),
+            limit=IntCodec.coerce(args.get("limit"), 25),
         )
         if isinstance(result, ToolResult):
             return result
@@ -274,7 +274,7 @@ class Slack:
         body = await _slack_call("conversations.list", params=params, token=self._token)
         if isinstance(body, ToolResult):
             return body
-        channels = dicts_val(body.get("channels"))
+        channels = ListCodec.mappings(body.get("channels"))
         if not channels:
             return "(no channels)"
         return "\n".join(
@@ -300,7 +300,7 @@ class Slack:
         )
         if isinstance(body, ToolResult):
             return body
-        messages = dicts_val(body.get("messages"))
+        messages = ListCodec.mappings(body.get("messages"))
         logger.info("[list_messages] channel=%s count=%d", channel, len(messages))
         return _render_messages(messages)
 
@@ -327,7 +327,7 @@ class Slack:
         )
         if isinstance(body, ToolResult):
             return body
-        messages = dicts_val(body.get("messages"))
+        messages = ListCodec.mappings(body.get("messages"))
         logger.info(
             "[read_thread] channel=%s thread=%s count=%d",
             channel,
@@ -342,7 +342,7 @@ class Slack:
         body = await _slack_call("users.list", params=params, token=self._token)
         if isinstance(body, ToolResult):
             return body
-        members = dicts_val(body.get("members"))
+        members = ListCodec.mappings(body.get("members"))
         if not members:
             return "(no users)"
         return "\n".join(
@@ -375,7 +375,7 @@ class Slack:
         )
         if isinstance(body, ToolResult):
             return body
-        ch = dict_val(body.get("channel"))
+        ch = DictCodec.coerce(body.get("channel"))
         return f"id={ch.get('id')}"
 
     async def send(
@@ -408,7 +408,7 @@ def _render_messages(messages: list[dict[str, object]]) -> str:
         ts = m.get("ts", "?")
         text = m.get("text", "")
         lines.append(f"[{ts}] <{user}> {text}")
-        reactions = dicts_val(m.get("reactions"))
+        reactions = ListCodec.mappings(m.get("reactions"))
         if reactions:
             parts = [f":{r.get('name', '?')}:x{r.get('count', 0)}" for r in reactions]
             lines.append(f"  reactions: {' '.join(parts)}")

@@ -29,7 +29,7 @@ from wesearch.paper.render import (
 
 import cachetools
 
-from sagent.lib.custom_json import JSON, bool_val, json_freeze
+from sagent.lib.custom_json import JSON, BoolCodec, json_freeze
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
     normalize_id_arg,
@@ -196,7 +196,7 @@ class PaperDetails:
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Look up paper metadata, references, or citations."""
         operation = str(args.get("operation", ""))
-        influential_only = bool_val(args.get("influential_only"), False)
+        influential_only = BoolCodec.coerce(args.get("influential_only"), False)
         year_from = opt_int(args, "year_from")
         limit = validate_limit(opt_int(args, "limit"))
         if isinstance(limit, ToolResult):

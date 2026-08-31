@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import (
     Callable,
     Hashable,
+    Iterable,
+    Iterator,
     Mapping,
     MutableMapping,
     MutableSequence,
@@ -15,50 +17,57 @@ from collections.abc import (
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from types import GenericAlias, UnionType
+from types import GenericAlias, ModuleType, UnionType
 from typing import (
     ClassVar,
     Literal,
+    NamedTuple,
     Optional,  # pyright: ignore[reportDeprecated] -- exercises legacy spelling
     Protocol,
+    SupportsIndex,
     Union,  # pyright: ignore[reportDeprecated] -- exercises legacy spelling
     cast,
+    override,
 )
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
+import ast
 import dataclasses
 import gc
 import inspect
 import json
 import math
+import sys
 import weakref
 
 import pytest
 
 from sagent.lib.absent import ABSENT
 from sagent.lib.custom_json import (
-    JSON,
+    BoolCodec,
+    DataclassCodec,
+    DatetimeCodec,
+    DecodeCapabilities,
+    DictCodec,
+    FloatCodec,
+    GraphHooks,
+    IntCodec,
     Invalid,
-    JsonCodec,
     JSONValue,
+    ListCodec,
     SchemaError,
-    bool_val,
-    dataclass_from_json,
-    dataclass_to_json,
-    datetime_val,
+    StrCodec,
     decode,
-    dict_val,
-    dicts_val,
-    float_val,
-    int_val,
+    decode_graph,
+    decode_or_none,
+    encode_graph,
+    encode_value,
     json_freeze,
     json_unfreeze,
-    list_val,
-    optional_val,
     replay,
     residual,
-    str_val,
+    resolve_import,
     take,
     validate_json_schema,
 )
@@ -152,31 +161,31 @@ class TestJsonUnfreeze:
 
 class TestBoolVal:
     def test_bool(self) -> None:
-        assert bool_val(True) is True
+        assert BoolCodec.coerce(True) is True
 
     def test_number(self) -> None:
-        assert bool_val(1) is True
+        assert BoolCodec.coerce(1) is True
 
     def test_string_true(self) -> None:
-        assert bool_val("yes") is True
+        assert BoolCodec.coerce("yes") is True
 
     def test_string_false(self) -> None:
-        assert bool_val("false", True) is False
+        assert BoolCodec.coerce("false", True) is False
 
     def test_unknown_uses_default(self) -> None:
-        assert bool_val("maybe", True) is True
+        assert BoolCodec.coerce("maybe", True) is True
 
     @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
     def test_non_finite_numbers_are_truthy(self, value: float) -> None:
-        assert bool_val(value) is True
+        assert BoolCodec.coerce(value) is True
 
     @pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity"])
     def test_non_finite_strings_use_default(self, value: str) -> None:
-        assert bool_val(value, True) is True
-        assert bool_val(value, False) is False
+        assert BoolCodec.coerce(value, True) is True
+        assert BoolCodec.coerce(value, False) is False
 
     def test_object_uses_default(self) -> None:
-        assert bool_val(object(), True) is True
+        assert BoolCodec.coerce(object(), True) is True
 
 
 class TestDecodeScalar:
@@ -220,16 +229,16 @@ class TestDecodeScalar:
 
 class TestFloatVal:
     def test_number(self) -> None:
-        assert float_val(2) == 2.0
+        assert FloatCodec.coerce(2) == 2.0
 
     def test_string(self) -> None:
-        assert float_val("1.25") == 1.25
+        assert FloatCodec.coerce("1.25") == 1.25
 
     def test_rejects_bool(self) -> None:
-        assert float_val(True, 3.5) == 3.5
+        assert FloatCodec.coerce(True, 3.5) == 3.5
 
     def test_bad_string_uses_default(self) -> None:
-        assert float_val("nope", 3.5) == 3.5
+        assert FloatCodec.coerce("nope", 3.5) == 3.5
 
     @pytest.mark.parametrize(
         ("value", "expected"),
@@ -245,43 +254,43 @@ class TestFloatVal:
     def test_non_finite_extension_is_preserved(
         self, value: object, expected: float
     ) -> None:
-        result = float_val(value, 3.5)
+        result = FloatCodec.coerce(value, 3.5)
         assert math.isnan(result) if math.isnan(expected) else result == expected
 
     def test_object_uses_default(self) -> None:
-        assert float_val(object(), 3.5) == 3.5
+        assert FloatCodec.coerce(object(), 3.5) == 3.5
 
 
 class TestIntVal:
     def test_number(self) -> None:
-        assert int_val(2.0, 0) == 2
-        assert int_val(2.5, 7) == 7
+        assert IntCodec.coerce(2.0, 0) == 2
+        assert IntCodec.coerce(2.5, 7) == 7
 
     def test_invalid_value_defaults_to_zero(self) -> None:
-        assert int_val("nope") == 0
+        assert IntCodec.coerce("nope") == 0
 
     def test_string(self) -> None:
-        assert int_val("3", 0) == 3
+        assert IntCodec.coerce("3", 0) == 3
 
     def test_string_strips_whitespace(self) -> None:
-        # Uniform with float_val, which strips before parsing.
-        assert int_val("  4 ", 0) == 4
+        # Uniform with FloatCodec.coerce, which strips before parsing.
+        assert IntCodec.coerce("  4 ", 0) == 4
 
     def test_bad_string_uses_default(self) -> None:
-        assert int_val("nope", 7) == 7
+        assert IntCodec.coerce("nope", 7) == 7
 
     def test_object_uses_default(self) -> None:
-        assert int_val(object(), 7) == 7
+        assert IntCodec.coerce(object(), 7) == 7
 
     def test_bool_uses_default(self) -> None:
-        # Uniform with bool_val/float_val: a JSON bool where an int was
+        # Uniform with BoolCodec.coerce/FloatCodec.coerce: a JSON bool where an int was
         # expected is a shape mismatch, not the value 1/0.
-        assert int_val(True, 7) == 7
-        assert int_val(False, 7) == 7
+        assert IntCodec.coerce(True, 7) == 7
+        assert IntCodec.coerce(False, 7) == 7
 
     @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
     def test_non_finite_float_uses_default(self, value: float) -> None:
-        assert int_val(value, 7) == 7
+        assert IntCodec.coerce(value, 7) == 7
 
 
 class TestOptionalVal:
@@ -294,35 +303,35 @@ class TestOptionalVal:
 
     @pytest.mark.parametrize("target", [int, float])
     def test_bool_is_not_a_number(self, target: type) -> None:
-        assert optional_val(target, True) is None
-        assert optional_val(target, False) is None
+        assert decode_or_none(target, True) is None
+        assert decode_or_none(target, False) is None
 
     @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
     def test_non_finite_float_extensions_are_values(self, literal: str) -> None:
         value = json.loads(literal)
-        result = optional_val(float, value)
+        result = decode_or_none(float, value)
         assert isinstance(result, float)
         assert math.isnan(result) if math.isnan(value) else result == value
-        assert optional_val(int, value) is None
+        assert decode_or_none(int, value) is None
 
     def test_fractional_float_is_refused_for_int(self) -> None:
-        assert optional_val(int, 1.9) is None
-        assert optional_val(float, 1.9) == 1.9
-        assert optional_val(int, 3.0) == 3
+        assert decode_or_none(int, 1.9) is None
+        assert decode_or_none(float, 1.9) == 1.9
+        assert decode_or_none(int, 3.0) == 3
 
     def test_numbers_pass_through(self) -> None:
-        assert optional_val(float, 1.5) == 1.5
-        assert optional_val(int, 42) == 42
+        assert decode_or_none(float, 1.5) == 1.5
+        assert decode_or_none(int, 42) == 42
 
     def test_str_target_reads_strings_only(self) -> None:
-        assert optional_val(str, "hi") == "hi"
-        assert optional_val(str, 42) is None
+        assert decode_or_none(str, "hi") == "hi"
+        assert decode_or_none(str, 42) is None
 
     @pytest.mark.parametrize("value", ["12", None, object()])
     def test_non_numeric_is_none(self, value: object) -> None:
         # A quoted number is a shape mismatch in machine JSON, not a value.
-        assert optional_val(float, value) is None
-        assert optional_val(int, value) is None
+        assert decode_or_none(float, value) is None
+        assert decode_or_none(int, value) is None
 
     @pytest.mark.parametrize(
         ("target", "wire", "expected"),
@@ -348,31 +357,31 @@ class TestOptionalVal:
         string value with a non-``str`` target failed the check before
         :func:`decode` ever saw it.
         """
-        assert optional_val(target, wire) == expected
+        assert decode_or_none(target, wire) == expected
 
     def test_an_already_typed_value_reads_as_itself(self) -> None:
         # The value may arrive decoded rather than on the wire (a caller that
         # parsed it, a re-read of an in-memory record). ``decode`` accepted
         # only the encoded form, so the identity case returned None.
         moment = datetime(2026, 1, 1, tzinfo=UTC)
-        assert optional_val(datetime, moment) == moment
-        assert optional_val(Path, Path("/x")) == Path("/x")
-        assert optional_val(UUID, UUID(int=7)) == UUID(int=7)
-        assert optional_val(bytes, b"x") == b"x"
+        assert decode_or_none(datetime, moment) == moment
+        assert decode_or_none(Path, Path("/x")) == Path("/x")
+        assert decode_or_none(UUID, UUID(int=7)) == UUID(int=7)
+        assert decode_or_none(bytes, b"x") == b"x"
 
     def test_a_malformed_special_scalar_is_none(self) -> None:
         # Lenient, not credulous: an unparseable value is still "absent".
-        assert optional_val(UUID, "not-a-uuid") is None
-        assert optional_val(datetime, "not-a-date") is None
+        assert decode_or_none(UUID, "not-a-uuid") is None
+        assert decode_or_none(datetime, "not-a-date") is None
         # Non-base64 text decoded to ``b""`` -- a value the source never sent,
         # which is exactly what "malformed means absent" exists to prevent.
-        assert optional_val(bytes, "!!!!") is None
+        assert decode_or_none(bytes, "!!!!") is None
 
     def test_an_unreadable_bool_is_absent_not_false(self) -> None:
         # ``False`` is a real answer; it must come from the payload, not from a
         # reader that failed to understand one.
-        assert optional_val(bool, "maybe") is None
-        assert optional_val(bool, {}) is None
+        assert decode_or_none(bool, "maybe") is None
+        assert decode_or_none(bool, {}) is None
 
     @pytest.mark.parametrize("value", [True, False, 1, 0, "true"])
     def test_bool_target_reads_a_bool(self, value: object) -> None:
@@ -380,7 +389,7 @@ class TestOptionalVal:
         # implementation returned real bools. bool-is-an-int is a rule about
         # what an ``int``/``float`` target must REJECT, not about asking for a
         # bool, which is an ordinary read.
-        assert optional_val(bool, value) is bool_val(value)
+        assert decode_or_none(bool, value) is BoolCodec.coerce(value)
 
 
 class TestLosslessFields:
@@ -509,76 +518,82 @@ class TestLosslessFields:
 
 class TestStrVal:
     def test_string_passes_through(self) -> None:
-        assert str_val("hi") == "hi"
+        assert StrCodec.coerce("hi") == "hi"
 
     def test_number_uses_default(self) -> None:
         # Deliberately does not stringify -- a number where a string was
         # expected is a shape mismatch.
-        assert str_val(42) == ""
-        assert str_val(42, "x") == "x"
+        assert StrCodec.coerce(42) == ""
+        assert StrCodec.coerce(42, "x") == "x"
 
     def test_none_uses_default(self) -> None:
-        assert str_val(None, "fallback") == "fallback"
+        assert StrCodec.coerce(None, "fallback") == "fallback"
 
 
 class TestDictVal:
     def test_keeps_all_values(self) -> None:
-        assert dict_val({"a": 1, "b": "x", "c": None}) == {"a": 1, "b": "x", "c": None}
+        assert DictCodec.coerce({"a": 1, "b": "x", "c": None}) == {
+            "a": 1,
+            "b": "x",
+            "c": None,
+        }
 
     def test_coerces_a_noncolliding_key_to_string(self) -> None:
-        assert dict_val({True: "enabled"}) == {"True": "enabled"}
+        assert DictCodec.coerce({True: "enabled"}) == {"True": "enabled"}
 
     def test_rejects_non_string_keys_before_they_collide(self) -> None:
         with pytest.raises(TypeError):
-            dict_val({1: "integer", "1": "string"})
+            DictCodec.coerce({1: "integer", "1": "string"})
 
     def test_filters_by_item_type(self) -> None:
-        typed: dict[str, int] = dict_val({"a": 1, "b": "x", "c": 2, "truth": True}, int)
+        typed: dict[str, int] = DictCodec.coerce(
+            {"a": 1, "b": "x", "c": 2, "truth": True}, int
+        )
         assert typed == {"a": 1, "c": 2}
 
     def test_non_dict_is_empty(self) -> None:
-        assert dict_val(["a", "b"]) == {}
-        assert dict_val(None) == {}
+        assert DictCodec.coerce(["a", "b"]) == {}
+        assert DictCodec.coerce(None) == {}
 
 
 class TestListVal:
     def test_keeps_all_elements(self) -> None:
-        assert list_val(["a", 1, None]) == ["a", 1, None]
+        assert ListCodec.coerce(["a", 1, None]) == ["a", 1, None]
 
     def test_filters_by_item_type(self) -> None:
-        typed: list[str] = list_val(["a", 1, None, "b"], str)
+        typed: list[str] = ListCodec.coerce(["a", 1, None, "b"], str)
         assert typed == ["a", "b"]
-        assert list_val([1, True, 2], int) == [1, 2]
+        assert ListCodec.coerce([1, True, 2], int) == [1, 2]
 
     def test_non_list_is_empty(self) -> None:
-        assert list_val({"a": 1}) == []
-        assert list_val(None) == []
+        assert ListCodec.coerce({"a": 1}) == []
+        assert ListCodec.coerce(None) == []
 
 
 class TestDictsVal:
     def test_keeps_and_normalizes_objects(self) -> None:
-        assert dicts_val([{"a": 1}, {3: "x"}]) == [{"a": 1}, {"3": "x"}]
+        assert ListCodec.mappings([{"a": 1}, {3: "x"}]) == [{"a": 1}, {"3": "x"}]
 
     def test_drops_non_objects(self) -> None:
-        assert dicts_val([{"a": 1}, "skip", None, 5]) == [{"a": 1}]
+        assert ListCodec.mappings([{"a": 1}, "skip", None, 5]) == [{"a": 1}]
 
     def test_non_list_is_empty(self) -> None:
-        assert dicts_val({"a": 1}) == []
-        assert dicts_val(None) == []
+        assert ListCodec.mappings({"a": 1}) == []
+        assert ListCodec.mappings(None) == []
 
 
 class TestDatetimeVal:
     def test_parses_iso(self) -> None:
         expected = datetime(2017, 6, 12)  # noqa: DTZ001 -- naive ISO parses naive
-        assert datetime_val("2017-06-12T00:00:00") == expected
+        assert DatetimeCodec.coerce("2017-06-12T00:00:00") == expected
 
     def test_malformed_uses_default(self) -> None:
-        assert datetime_val("not-a-date") is None
+        assert DatetimeCodec.coerce("not-a-date") is None
 
     def test_empty_and_non_string_use_default(self) -> None:
         sentinel = datetime(2000, 1, 1, tzinfo=UTC)
-        assert datetime_val("", sentinel) is sentinel
-        assert datetime_val(42, sentinel) is sentinel
+        assert DatetimeCodec.coerce("", sentinel) is sentinel
+        assert DatetimeCodec.coerce(42, sentinel) is sentinel
 
 
 class TestValidateJsonSchema:
@@ -816,12 +831,12 @@ class _BooleanEnum(Enum):
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _Bytes(JsonCodec):
+class _Bytes:
     data: bytes = b""
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _Link(JsonCodec):
+class _Link:
     url: str = ""
 
 
@@ -829,12 +844,12 @@ type _Att = _Bytes | _Link
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _Child(JsonCodec):
+class _Child:
     n: int = 0
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _Doc(JsonCodec):
+class _Doc:
     name: str = ""
     when: datetime | None = None
     who: UUID | None = None
@@ -846,7 +861,7 @@ class _Doc(JsonCodec):
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _Sets(JsonCodec):
+class _Sets:
     tags: frozenset[str] = frozenset()
     seen: set[int] = dataclasses.field(default_factory=set[int])
     # ``AbstractSet`` is the declared-container case the origin check missed:
@@ -855,33 +870,33 @@ class _Sets(JsonCodec):
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _ClassVarred(JsonCodec):
+class _ClassVarred:
     tag: ClassVar[str] = "c"
     n: int = 0
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _Derived(JsonCodec):
+class _Derived:
     x: int = 1
     doubled: int = dataclasses.field(init=False, default=2)
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _Pair(JsonCodec):
+class _Pair:
     # A FIXED-length tuple: each position has its own annotation, unlike the
     # homogeneous ``tuple[T, ...]`` the decoder assumed everywhere.
     value: tuple[int, str] = (0, "")
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _AmbiguousElements(JsonCodec):
+class _AmbiguousElements:
     # The element annotation is what makes ``Path | bytes`` decodable; a
     # container that drops it encodes both members to bare strings.
     values: tuple[Path | bytes, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _OptionalChild(JsonCodec):
+class _OptionalChild:
     # An absent nested dataclass. ``_strip_optional`` reduces the annotation
     # to ``_Child`` before dispatch, so the None has to survive a branch that
     # only accepts a Mapping.
@@ -889,7 +904,7 @@ class _OptionalChild(JsonCodec):
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _OptionalSpecialUnion(JsonCodec):
+class _OptionalSpecialUnion:
     # An ambiguous special-scalar union that is ALSO optional. ``None`` is not
     # ambiguous with the others (it encodes as JSON null), so the wrapper must
     # still be emitted for the two members that are.
@@ -900,7 +915,7 @@ type _NestedAtt = _Att | _Child
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _NestedUnion(JsonCodec):
+class _NestedUnion:
     # A union whose FIRST member is itself a PEP-695 alias. ``get_args``
     # returns the alias object, not its members, so a single-level walk drops
     # every class inside it.
@@ -908,64 +923,64 @@ class _NestedUnion(JsonCodec):
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _MixedScalarUnion(JsonCodec):
+class _MixedScalarUnion:
     # One special scalar and one plain ``str``: both encode to a bare string,
     # so without a tag the decoder cannot tell base64 from text.
     blob: bytes | str = b""
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _SpecialNativeUnion(JsonCodec):
+class _SpecialNativeUnion:
     value: Path | int = 0
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _MappingSpecialUnion(JsonCodec):
+class _MappingSpecialUnion:
     value: dict[str, str] | Path = dataclasses.field(default_factory=dict[str, str])
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _MappingDataclassUnion(JsonCodec):
+class _MappingDataclassUnion:
     value: dict[str, object] | _Child = dataclasses.field(
         default_factory=dict[str, object]
     )
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _UnionContainer(JsonCodec):
+class _UnionContainer:
     value: dict[str, Path | bytes] | int = 0
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _FloatUnion(JsonCodec):
+class _FloatUnion:
     value: float | int = 0
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _ListUnion(JsonCodec):
+class _ListUnion:
     value: list[int] | list[str] = dataclasses.field(default_factory=list[int])
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _MappingElementUnion(JsonCodec):
+class _MappingElementUnion:
     value: dict[str, int] | dict[str, str] = dataclasses.field(
         default_factory=dict[str, int]
     )
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _TupleElementUnion(JsonCodec):
+class _TupleElementUnion:
     value: tuple[int, ...] | tuple[str, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _RecursiveEnums(JsonCodec):
+class _RecursiveEnums:
     path: _PathEnum = _PathEnum.ROOT
     nested: _TupleEnum = _TupleEnum.NESTED
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _StrictAnnotations(JsonCodec):
+class _StrictAnnotations:
     count: int = 0
     pair: tuple[int, str] = (0, "")
     numbers: list[int] = dataclasses.field(default_factory=list[int])
@@ -973,17 +988,17 @@ class _StrictAnnotations(JsonCodec):
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _LiteralUnion(JsonCodec):
+class _LiteralUnion:
     value: Literal["x"] | int = "x"
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _JsonHolder(JsonCodec):
+class _JsonHolder:
     value: JSONValue = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _ObjectHolder(JsonCodec):
+class _ObjectHolder:
     value: dict[str, object] = dataclasses.field(default_factory=dict[str, object])
 
 
@@ -993,27 +1008,27 @@ class _ChildWithExtra(_Child):
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _BaseHolder(JsonCodec):
+class _BaseHolder:
     value: _Child = dataclasses.field(default_factory=_Child)
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _ReservedTypeField(JsonCodec):
+class _ReservedTypeField:
     __type__: str = "default"
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _FrozenSetHolder(JsonCodec):
+class _FrozenSetHolder:
     value: frozenset[int] = frozenset()
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _RecursiveAnnotationUnion(JsonCodec):
+class _RecursiveAnnotationUnion:
     value: _JsonHolder | int = 0
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _ReorderedSpecialUnion(JsonCodec):
+class _ReorderedSpecialUnion:
     value: bytes | Path = b""
 
 
@@ -1022,17 +1037,17 @@ type _AliasOuter = _AliasInner
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _Floats(JsonCodec):
+class _Floats:
     ratio: float = 0.0
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _Keyed(JsonCodec):
+class _Keyed:
     table: Mapping[str, str] = dataclasses.field(default_factory=dict[str, str])
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _SpecialUnions(JsonCodec):
+class _SpecialUnions:
     # Non-Optional unions of special scalars: neither member is None, so
     # ``_strip_optional`` must not collapse them; each must decode by value.
     scalar: Path | bytes = Path()
@@ -1044,13 +1059,14 @@ class TestDataclassCodec:
         cls = dataclasses.make_dataclass(
             "Ephemeral",
             [("value", int)],
-            bases=(JsonCodec,),
             frozen=True,
             slots=True,
             kw_only=True,
         )
         instance = cls(value=1)
-        assert dataclass_from_json(cls, dataclass_to_json(instance)) == instance
+        assert (
+            DataclassCodec.from_json(cls, DataclassCodec.to_json(instance)) == instance
+        )
         class_ref = weakref.ref(cls)
 
         del instance, cls
@@ -1066,15 +1082,15 @@ class TestDataclassCodec:
             where=Path("/x/y"),
             color=_Color.BLUE,
         )
-        assert _Doc.from_json(doc.to_json()) == doc
+        assert DataclassCodec.from_json(_Doc, DataclassCodec.to_json(doc)) == doc
 
     def test_enum_values_encode_recursively_and_round_trip(self) -> None:
         doc = _RecursiveEnums()
-        encoded = doc.to_json()
+        encoded = DataclassCodec.to_json(doc)
         json.dumps(encoded, allow_nan=False)
-        assert encoded["path"] == "/root"
-        assert encoded["nested"] == ["/nested"]
-        assert _RecursiveEnums.from_json(encoded) == doc
+        assert encoded["path"] == {"py/path": "/root"}
+        assert encoded["nested"] == {"py/tuple": [{"py/path": "/nested"}]}
+        assert DataclassCodec.from_json(_RecursiveEnums, encoded) == doc
 
     def test_enum_decode_separates_bool_from_numbers(self) -> None:
         with pytest.raises(TypeError):
@@ -1086,93 +1102,97 @@ class TestDataclassCodec:
 
     def test_nested_and_tuples_round_trip(self) -> None:
         doc = _Doc(child=_Child(n=9), items=(_Child(n=1), _Child(n=2)))
-        assert _Doc.from_json(doc.to_json()) == doc
+        assert DataclassCodec.from_json(_Doc, DataclassCodec.to_json(doc)) == doc
 
     def test_tagged_union_round_trips_each_member(self) -> None:
         doc = _Doc(atts=(_Bytes(data=b"\x00\x01"), _Link(url="u")))
-        back = _Doc.from_json(doc.to_json())
+        back = DataclassCodec.from_json(_Doc, DataclassCodec.to_json(doc))
         assert back == doc
         assert isinstance(back.atts[0], _Bytes)
         assert isinstance(back.atts[1], _Link)
 
     def test_encoded_form_is_json_serializable(self) -> None:
         doc = _Doc(when=datetime(2026, 1, 1, tzinfo=UTC), atts=(_Bytes(data=b"z"),))
-        json.dumps(doc.to_json())  # must not raise
+        json.dumps(DataclassCodec.to_json(doc))  # must not raise
 
     def test_type_tag_present_and_ignored_on_decode(self) -> None:
-        encoded = _Child(n=3).to_json()
-        assert encoded["__type__"] == "_Child"
+        encoded = DataclassCodec.to_json(_Child(n=3))
+        assert encoded["py/object"] == f"{_Child.__module__}._Child"
         # The tag is the codec's own; it decodes without being a field.
-        assert dataclass_from_json(_Child, encoded) == _Child(n=3)
+        assert DataclassCodec.from_json(_Child, encoded) == _Child(n=3)
 
     def test_unknown_key_is_rejected(self) -> None:
         # A key naming no field is a schema violation, not a value to drop:
         # silently ignoring it turned a misspelling into a silent default.
         with pytest.raises(ValueError, match="bogus"):
-            dataclass_from_json(_Child, {"n": 3, "bogus": 1})
+            DataclassCodec.from_json(_Child, {"n": 3, "bogus": 1})
 
     def test_unknown_key_raises_schema_error(self) -> None:
         # The rejection reaches HTTP callers: a bare ValueError matches no
         # registered handler, so a client's stray key became a 500 rather
         # than a 422. A named subclass gives the API something to catch.
         with pytest.raises(SchemaError):
-            dataclass_from_json(_Child, {"n": 3, "bogus": 1})
+            DataclassCodec.from_json(_Child, {"n": 3, "bogus": 1})
 
     def test_a_classvar_key_is_unknown(self) -> None:
         # ``get_type_hints`` includes ClassVars, which the constructor does
         # not accept, so gating on hints let the key through to a TypeError
         # -- losing the message this check exists to produce.
         with pytest.raises(SchemaError, match="tag"):
-            dataclass_from_json(_ClassVarred, {"n": 1, "tag": "other"})
+            DataclassCodec.from_json(_ClassVarred, {"n": 1, "tag": "other"})
 
     def test_a_non_init_field_round_trips(self) -> None:
         # Derived fields reconstruct from their settable inputs, so neither the
         # wire form nor the generated constructor needs to accept them.
         doc = _Derived(x=3)
-        assert "doubled" not in doc.to_json()
-        assert _Derived.from_json(doc.to_json()) == doc
+        assert "doubled" not in DataclassCodec.to_json(doc)
+        assert DataclassCodec.from_json(_Derived, DataclassCodec.to_json(doc)) == doc
 
     def test_unknown_key_names_the_class_and_valid_fields(self) -> None:
         with pytest.raises(ValueError, match="_Child") as excinfo:
-            dataclass_from_json(_Child, {"nn": 3})
+            DataclassCodec.from_json(_Child, {"nn": 3})
         assert "n" in str(excinfo.value)
 
     def test_to_json_rejects_non_dataclass(self) -> None:
         with pytest.raises(TypeError):
-            dataclass_to_json(42)
+            DataclassCodec.to_json(42)
 
     def test_non_optional_special_scalar_union_round_trips(self) -> None:
         doc = _SpecialUnions(scalar=Path("/a/b"))
-        back = _SpecialUnions.from_json(doc.to_json())
+        back = DataclassCodec.from_json(_SpecialUnions, DataclassCodec.to_json(doc))
         assert back == doc
         assert isinstance(back.scalar, Path)
 
     def test_non_optional_special_scalar_union_bytes_member(self) -> None:
         doc = _SpecialUnions(scalar=b"\x00\x01")
-        back = _SpecialUnions.from_json(doc.to_json())
+        back = DataclassCodec.from_json(_SpecialUnions, DataclassCodec.to_json(doc))
         assert back == doc
         assert isinstance(back.scalar, bytes)
 
     def test_integer_value_round_trips_through_float_field(self) -> None:
-        encoded = _Floats(ratio=cast(float, 1)).to_json()
-        back = _Floats.from_json(encoded)
+        encoded = DataclassCodec.to_json(_Floats(ratio=cast(float, 1)))
+        back = DataclassCodec.from_json(_Floats, encoded)
         assert back.ratio == 1.0
         assert isinstance(back.ratio, float)
 
     def test_declared_dataclass_type_rejects_subclass_values(self) -> None:
         doc = _BaseHolder(value=_ChildWithExtra(n=1, extra=2))
         with pytest.raises(TypeError, match="_ChildWithExtra"):
-            doc.to_json()
+            DataclassCodec.to_json(doc)
 
-    def test_reserved_type_field_is_rejected(self) -> None:
-        with pytest.raises(TypeError, match="__type__"):
-            _ReservedTypeField().to_json()
-        with pytest.raises(TypeError, match="__type__"):
-            _ReservedTypeField.from_json({"__type__": "user"})
+    def test_a_dunder_named_field_is_no_longer_reserved(self) -> None:
+        # Every tag holds a ``/``, which no Python identifier may, so the
+        # codec's names can no longer collide with a field's.
+        doc = _ReservedTypeField(__type__="user")
+
+        assert (
+            DataclassCodec.from_json(_ReservedTypeField, DataclassCodec.to_json(doc))
+            == doc
+        )
 
     def test_mapping_field_values_decoded(self) -> None:
         doc = _SpecialUnions(mapping={"a": Path("/x"), "b": Path("/y")})
-        back = _SpecialUnions.from_json(doc.to_json())
+        back = DataclassCodec.from_json(_SpecialUnions, DataclassCodec.to_json(doc))
         assert back == doc
         assert all(isinstance(v, Path) for v in back.mapping.values())
 
@@ -1181,7 +1201,7 @@ class TestDataclassCodec:
         # a ``frozenset`` field left an unhashable, mutable value on a frozen
         # dataclass, which no isinstance guard downstream would catch.
         doc = _Sets(tags=frozenset({"a", "b"}), seen={1, 2}, named=frozenset({"c"}))
-        back = _Sets.from_json(doc.to_json())
+        back = DataclassCodec.from_json(_Sets, DataclassCodec.to_json(doc))
         assert back == doc
         assert isinstance(back.tags, frozenset)
         assert isinstance(back.seen, set)
@@ -1191,14 +1211,14 @@ class TestDataclassCodec:
     def test_a_fixed_length_tuple_decodes_each_position(self) -> None:
         # Using ``args[0]`` for every position coerced "2" to the int 2.
         doc = _Pair(value=(1, "2"))
-        assert _Pair.from_json(doc.to_json()) == doc
+        assert DataclassCodec.from_json(_Pair, DataclassCodec.to_json(doc)) == doc
 
     def test_an_ambiguous_union_inside_a_container_round_trips(self) -> None:
         # The union wrapper disambiguates ``Path | bytes``; a container that
         # recursed without the element annotation never
         # emitted it, so both members came back as bare strings.
         doc = _AmbiguousElements(values=(Path("/x"), b"y"))
-        back = _AmbiguousElements.from_json(doc.to_json())
+        back = DataclassCodec.from_json(_AmbiguousElements, DataclassCodec.to_json(doc))
         assert back == doc
         assert isinstance(back.values[0], Path)
         assert isinstance(back.values[1], bytes)
@@ -1207,10 +1227,10 @@ class TestDataclassCodec:
         # Regression: only ambiguous unions get the wrapper. Plain and
         # Optional special scalars must still encode to a bare string so the
         # stored JSONB wire format is unchanged.
-        encoded = _Doc(where=Path("/x/y")).to_json()
-        assert encoded["where"] == "/x/y"
-        with_when = _Doc(when=datetime(2026, 1, 1, tzinfo=UTC)).to_json()
-        assert with_when["when"] == "2026-01-01T00:00:00+00:00"
+        encoded = DataclassCodec.to_json(_Doc(where=Path("/x/y")))
+        assert encoded["where"] == {"py/path": "/x/y"}
+        with_when = DataclassCodec.to_json(_Doc(when=datetime(2026, 1, 1, tzinfo=UTC)))
+        assert with_when["when"] == {"py/datetime": "2026-01-01T00:00:00+00:00"}
 
     def test_an_absent_nested_dataclass_round_trips(self) -> None:
         # ``None`` for an ``Optional[dataclass]`` field. ``_strip_optional``
@@ -1218,11 +1238,13 @@ class TestDataclassCodec:
         # the nested-dataclass branch saw a None it refused to accept -- the
         # ``raw is None`` guard sat below it and never ran.
         doc = _OptionalChild()
-        assert _OptionalChild.from_json(doc.to_json()) == doc
+        assert (
+            DataclassCodec.from_json(_OptionalChild, DataclassCodec.to_json(doc)) == doc
+        )
 
     def test_a_present_optional_nested_dataclass_still_decodes(self) -> None:
         doc = _OptionalChild(child=_Child(n=4))
-        back = _OptionalChild.from_json(doc.to_json())
+        back = DataclassCodec.from_json(_OptionalChild, DataclassCodec.to_json(doc))
         assert back == doc
         assert isinstance(back.child, _Child)
 
@@ -1233,13 +1255,18 @@ class TestDataclassCodec:
         # is not -- so both members encoded to indistinguishable bare strings.
         for value in (Path("/a"), b"b"):
             doc = _OptionalSpecialUnion(scalar=value)
-            back = _OptionalSpecialUnion.from_json(doc.to_json())
+            back = DataclassCodec.from_json(
+                _OptionalSpecialUnion, DataclassCodec.to_json(doc)
+            )
             assert back == doc
             assert isinstance(back.scalar, type(value))
 
     def test_an_optional_ambiguous_scalar_union_keeps_none(self) -> None:
         doc = _OptionalSpecialUnion()
-        assert _OptionalSpecialUnion.from_json(doc.to_json()) == doc
+        assert (
+            DataclassCodec.from_json(_OptionalSpecialUnion, DataclassCodec.to_json(doc))
+            == doc
+        )
 
 
 class TestUnionFlattening:
@@ -1253,7 +1280,7 @@ class TestUnionFlattening:
     def test_a_union_nested_in_an_alias_decodes_to_its_member(self) -> None:
         for value in (_Bytes(data=b"z"), _Link(url="u"), _Child(n=3)):
             doc = _NestedUnion(att=value)
-            back = _NestedUnion.from_json(doc.to_json())
+            back = DataclassCodec.from_json(_NestedUnion, DataclassCodec.to_json(doc))
             assert back == doc
             assert isinstance(back.att, type(value))
 
@@ -1296,10 +1323,10 @@ class TestStrictDecode:
 
     def test_malformed_float_tag_raises_type_error(self) -> None:
         with pytest.raises(TypeError, match="float"):
-            decode(float, {"__float__": "not-a-float"})
+            decode(float, {"py/float": "not-a-float"})
 
     def test_naive_zoned_datetime_tag_is_rejected(self) -> None:
-        raw = {"__zone__": "UTC", "__value__": "2026-01-01T00:00:00"}
+        raw = {"py/datetime": "2026-01-01T00:00:00[UTC]"}
         with pytest.raises(TypeError, match="datetime"):
             decode(datetime, raw)
 
@@ -1315,11 +1342,11 @@ class TestStrictDecode:
 
     def test_a_non_nullable_dataclass_field_rejects_null(self) -> None:
         with pytest.raises(TypeError):
-            _Child.from_json({"n": None})
+            DataclassCodec.from_json(_Child, {"n": None})
 
     @pytest.mark.parametrize("value", [{}, [], object(), "maybe"])
     def test_bool_rejects_what_it_cannot_read(self, value: object) -> None:
-        # ``bool_val`` returns its DEFAULT for an unreadable value, which is a
+        # ``BoolCodec.coerce`` returns its DEFAULT for an unreadable value, which is a
         # lenient reader's contract, not the codec's: ``decode(bool, {})``
         # answered ``False`` about a shape it never understood.
         with pytest.raises(TypeError):
@@ -1343,13 +1370,13 @@ class TestStrictDecode:
             decode(bytes, "!!!!")
 
     def test_an_untagged_union_member_raises(self) -> None:
-        encoded = _Doc(atts=(_Bytes(data=b"z"),)).to_json()
-        atts = cast(Sequence[Mapping[str, object]], encoded["atts"])
-        nested = cast(Mapping[str, object], atts[0]["__value__"])
-        untagged = {k: v for k, v in nested.items() if k != "__type__"}
+        encoded = DataclassCodec.to_json(_Doc(atts=(_Bytes(data=b"z"),)))
+        atts = ListCodec.coerce(DictCodec.coerce(encoded["atts"])["py/tuple"])
+        nested = DictCodec.coerce(atts[0])
+        untagged = {k: v for k, v in nested.items() if k != "py/object"}
         payload: dict[str, object] = {**encoded, "atts": [untagged]}
         with pytest.raises(TypeError):
-            _Doc.from_json(payload)
+            DataclassCodec.from_json(_Doc, payload)
 
     @pytest.mark.parametrize(
         ("annotation", "value"),
@@ -1435,19 +1462,25 @@ class TestStrictEncode:
         self, doc: _StrictAnnotations
     ) -> None:
         with pytest.raises(TypeError):
-            doc.to_json()
+            DataclassCodec.to_json(doc)
 
     def test_concrete_frozenset_rejects_set_value(self) -> None:
         doc = _FrozenSetHolder(value=cast(frozenset[int], {1}))
         with pytest.raises(TypeError):
-            doc.to_json()
+            DataclassCodec.to_json(doc)
 
-    def test_object_field_rejects_special_scalars_without_type_information(
-        self,
-    ) -> None:
+    def test_an_object_field_carries_a_special_scalar_by_its_tag(self) -> None:
+        # It used to raise: an untyped ``Path`` had no wire form a hintless
+        # decoder could read back. The tag is that form, so an untyped field
+        # now holds one.
         doc = _ObjectHolder(value={"path": Path("/x")})
-        with pytest.raises(TypeError, match="Path"):
-            doc.to_json()
+
+        assert (
+            DataclassCodec.from_json(
+                _ObjectHolder, json.loads(json.dumps(DataclassCodec.to_json(doc)))
+            )
+            == doc
+        )
 
 
 class TestMixedScalarUnion:
@@ -1456,59 +1489,84 @@ class TestMixedScalarUnion:
     def test_bytes_and_str_stay_distinct(self) -> None:
         for value in (b"raw", "raw"):
             doc = _MixedScalarUnion(blob=value)
-            back = _MixedScalarUnion.from_json(doc.to_json())
+            back = DataclassCodec.from_json(
+                _MixedScalarUnion, DataclassCodec.to_json(doc)
+            )
             assert back == doc
             assert isinstance(back.blob, type(value))
 
     def test_special_and_native_scalar_stay_distinct(self) -> None:
         for value in (Path("/x"), 3):
             doc = _SpecialNativeUnion(value=value)
-            back = _SpecialNativeUnion.from_json(doc.to_json())
+            back = DataclassCodec.from_json(
+                _SpecialNativeUnion, DataclassCodec.to_json(doc)
+            )
             assert back == doc
             assert isinstance(back.value, type(value))
 
     def test_union_tags_survive_member_reordering(self) -> None:
-        encoded = _AmbiguousElements(values=(b"x",)).to_json()
-        reordered = _ReorderedSpecialUnion.from_json(
-            {"value": cast(Sequence[object], encoded["values"])[0]}
+        encoded = DataclassCodec.to_json(_AmbiguousElements(values=(b"x",)))
+        reordered = DataclassCodec.from_json(
+            _ReorderedSpecialUnion,
+            {
+                "value": ListCodec.coerce(
+                    DictCodec.coerce(encoded["values"])["py/tuple"]
+                )[0]
+            },
         )
         assert reordered.value == b"x"
 
     def test_literal_union_round_trips(self) -> None:
-        assert _LiteralUnion.from_json(_LiteralUnion().to_json()) == _LiteralUnion()
+        assert (
+            DataclassCodec.from_json(
+                _LiteralUnion, DataclassCodec.to_json(_LiteralUnion())
+            )
+            == _LiteralUnion()
+        )
 
     @pytest.mark.parametrize("value", [[1, 2], ["a", "b"]])
     def test_container_union_round_trips_by_element_type(
         self, value: list[int] | list[str]
     ) -> None:
         doc = _ListUnion(value=value)
-        assert _ListUnion.from_json(doc.to_json()) == doc
+        assert DataclassCodec.from_json(_ListUnion, DataclassCodec.to_json(doc)) == doc
 
     @pytest.mark.parametrize("value", [{"x": 1}, {"x": "one"}])
     def test_mapping_union_round_trips_by_value_type(
         self, value: dict[str, int] | dict[str, str]
     ) -> None:
         doc = _MappingElementUnion(value=value)
-        assert _MappingElementUnion.from_json(doc.to_json()) == doc
+        assert (
+            DataclassCodec.from_json(_MappingElementUnion, DataclassCodec.to_json(doc))
+            == doc
+        )
 
     @pytest.mark.parametrize("value", [(1, 2), ("one", "two")])
     def test_tuple_union_round_trips_by_element_type(
         self, value: tuple[int, ...] | tuple[str, ...]
     ) -> None:
         doc = _TupleElementUnion(value=value)
-        assert _TupleElementUnion.from_json(doc.to_json()) == doc
+        assert (
+            DataclassCodec.from_json(_TupleElementUnion, DataclassCodec.to_json(doc))
+            == doc
+        )
 
     def test_recursive_annotation_has_a_finite_union_tag(self) -> None:
         doc = _RecursiveAnnotationUnion(value=_JsonHolder(value={"x": [1]}))
-        assert _RecursiveAnnotationUnion.from_json(doc.to_json()) == doc
+        assert (
+            DataclassCodec.from_json(
+                _RecursiveAnnotationUnion, DataclassCodec.to_json(doc)
+            )
+            == doc
+        )
 
     def test_json_value_data_does_not_gain_recursive_union_envelopes(self) -> None:
         doc = _JsonHolder(value={"x": [1, {"y": True}]})
-        assert doc.to_json() == {
-            "__type__": "_JsonHolder",
+        assert DataclassCodec.to_json(doc) == {
+            "py/object": f"{_JsonHolder.__module__}._JsonHolder",
             "value": {"x": [1, {"y": True}]},
         }
-        assert _JsonHolder.from_json(doc.to_json()) == doc
+        assert DataclassCodec.from_json(_JsonHolder, DataclassCodec.to_json(doc)) == doc
 
     @pytest.mark.parametrize(
         "doc",
@@ -1518,20 +1576,24 @@ class TestMixedScalarUnion:
             _TupleElementUnion(value=()),
         ],
     )
-    def test_empty_generic_container_union_round_trips(self, doc: JsonCodec) -> None:
-        assert type(doc).from_json(doc.to_json()) == doc
+    def test_empty_generic_container_union_round_trips(self, doc: object) -> None:
+        assert DataclassCodec.from_json(type(doc), DataclassCodec.to_json(doc)) == doc
 
     def test_reserved_scalar_keys_survive_in_a_mapping_member(self) -> None:
         value = {"__scalar__": "Path", "__value__": "/x"}
         doc = _MappingSpecialUnion(value=value)
-        back = _MappingSpecialUnion.from_json(doc.to_json())
+        back = DataclassCodec.from_json(
+            _MappingSpecialUnion, DataclassCodec.to_json(doc)
+        )
         assert back == doc
         assert isinstance(back.value, dict)
 
     def test_reserved_dataclass_keys_survive_in_a_mapping_member(self) -> None:
         value: dict[str, object] = {"__type__": "_Child", "n": 3}
         doc = _MappingDataclassUnion(value=value)
-        back = _MappingDataclassUnion.from_json(doc.to_json())
+        back = DataclassCodec.from_json(
+            _MappingDataclassUnion, DataclassCodec.to_json(doc)
+        )
         assert back == doc
         assert isinstance(back.value, dict)
 
@@ -1542,7 +1604,9 @@ class TestMixedScalarUnion:
         )
         for value in values:
             doc = _UnionContainer(value=value)
-            back = _UnionContainer.from_json(doc.to_json())
+            back = DataclassCodec.from_json(
+                _UnionContainer, DataclassCodec.to_json(doc)
+            )
             assert back == doc
             assert isinstance(back.value, dict)
             assert isinstance(back.value["x"], type(value["x"]))
@@ -1551,7 +1615,6 @@ class TestMixedScalarUnion:
         first = dataclasses.make_dataclass(
             "Same",
             [("number", int)],
-            bases=(JsonCodec,),
             frozen=True,
             slots=True,
             kw_only=True,
@@ -1559,7 +1622,6 @@ class TestMixedScalarUnion:
         second = dataclasses.make_dataclass(
             "Same",
             [("text", str)],
-            bases=(JsonCodec,),
             frozen=True,
             slots=True,
             kw_only=True,
@@ -1579,8 +1641,8 @@ class TestNonFiniteEncoding:
     @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
     def test_non_finite_float_under_object_round_trips(self, value: float) -> None:
         doc = _ObjectHolder(value={"number": value})
-        text = json.dumps(doc.to_json(), allow_nan=False)
-        back = _ObjectHolder.from_json(json.loads(text))
+        text = json.dumps(DataclassCodec.to_json(doc), allow_nan=False)
+        back = DataclassCodec.from_json(_ObjectHolder, json.loads(text))
         result = back.value["number"]
         assert isinstance(result, float)
         assert math.isnan(result) if math.isnan(value) else result == value
@@ -1588,15 +1650,18 @@ class TestNonFiniteEncoding:
     @pytest.mark.parametrize(
         "value",
         [
-            {"__float__": "nan"},
-            {"__raw_object__": [["x", 1]]},
+            {"py/float": "nan"},
+            {"py/path": "/x"},
+            {"py/raw": [["x", 1]]},
         ],
     )
     def test_reserved_untyped_mappings_round_trip_as_data(
         self, value: dict[str, object]
     ) -> None:
-        doc = _ObjectHolder(value={"mapping": value})
-        back = _ObjectHolder.from_json(json.loads(json.dumps(doc.to_json())))
+        doc = _ObjectHolder(value=value)
+        back = DataclassCodec.from_json(
+            _ObjectHolder, json.loads(json.dumps(DataclassCodec.to_json(doc)))
+        )
         assert back == doc
 
     @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
@@ -1604,8 +1669,8 @@ class TestNonFiniteEncoding:
         doc = _Floats(ratio=value)
         # ``allow_nan=False`` is what a strict reader enforces: an untagged
         # non-finite raises here rather than emitting invalid JSON.
-        text = json.dumps(doc.to_json(), allow_nan=False)
-        back = _Floats.from_json(json.loads(text))
+        text = json.dumps(DataclassCodec.to_json(doc), allow_nan=False)
+        back = DataclassCodec.from_json(_Floats, json.loads(text))
         if math.isnan(value):
             assert math.isnan(back.ratio)
         else:
@@ -1614,7 +1679,9 @@ class TestNonFiniteEncoding:
     @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
     def test_non_finite_float_in_a_union_round_trips(self, value: float) -> None:
         doc = _FloatUnion(value=value)
-        back = _FloatUnion.from_json(json.loads(json.dumps(doc.to_json())))
+        back = DataclassCodec.from_json(
+            _FloatUnion, json.loads(json.dumps(DataclassCodec.to_json(doc)))
+        )
         if math.isnan(value):
             assert math.isnan(back.value)
         else:
@@ -1633,7 +1700,9 @@ class TestZonedDatetimeEncoding:
         zone = ZoneInfo("America/Los_Angeles")
         doc = _Doc(when=datetime(2026, 8, 24, 12, tzinfo=zone))
 
-        back = _Doc.from_json(json.loads(json.dumps(doc.to_json())))
+        back = DataclassCodec.from_json(
+            _Doc, json.loads(json.dumps(DataclassCodec.to_json(doc)))
+        )
 
         assert back.when == doc.when
         assert back.when is not None
@@ -1647,7 +1716,9 @@ class TestZonedDatetimeEncoding:
             when=datetime(2026, 8, 24, 12, tzinfo=ZoneInfo("America/Los_Angeles"))
         )
 
-        back = _Doc.from_json(json.loads(json.dumps(doc.to_json()))).when
+        back = DataclassCodec.from_json(
+            _Doc, json.loads(json.dumps(DataclassCodec.to_json(doc)))
+        ).when
         assert back is not None
         winter = back.astimezone(back.tzinfo) + timedelta(days=150)
 
@@ -1659,7 +1730,9 @@ class TestZonedDatetimeEncoding:
         # the codec writes.
         doc = _Doc(when=datetime(2026, 8, 24, tzinfo=UTC))
 
-        assert dict_val(doc.to_json())["when"] == "2026-08-24T00:00:00+00:00"
+        assert DictCodec.coerce(DataclassCodec.to_json(doc))["when"] == {
+            "py/datetime": "2026-08-24T00:00:00+00:00"
+        }
 
 
 class TestNonStrMappingKeys:
@@ -1672,11 +1745,11 @@ class TestNonStrMappingKeys:
     def test_a_non_str_key_is_refused(self) -> None:
         table = cast(Mapping[str, str], {1: "a"})
         with pytest.raises(TypeError):
-            dataclass_to_json(_Keyed(table=table))
+            DataclassCodec.to_json(_Keyed(table=table))
 
     def test_str_keys_still_round_trip(self) -> None:
         doc = _Keyed(table={"k": "v"})
-        assert _Keyed.from_json(doc.to_json()) == doc
+        assert DataclassCodec.from_json(_Keyed, DataclassCodec.to_json(doc)) == doc
 
     def test_decode_rejects_a_non_str_key_annotation(self) -> None:
         with pytest.raises(TypeError):
@@ -1723,21 +1796,13 @@ encoder that collapses positions or drops an element."""
 
 
 class _Carrier(Protocol):
-    """The generated one-field carrier: a ``JsonCodec`` whose field is ``value``.
-
-    ``make_dataclass`` is typed as returning a bare ``type``, so nothing about
-    the generated class is statically known. Naming the shape the assertions
-    actually use restores ``value`` and the two codec methods, so the dynamism
-    stays in the *annotation* under test rather than leaking into the checker.
-    """
+    """The generated one-field dataclass shape used by round-trip assertions."""
 
     value: object
 
-    def to_json(self) -> JSON: ...
-
 
 def _assert_round_trips(annotation: object, value: object) -> None:
-    """Assert a one-field ``JsonCodec`` dataclass survives encode then decode.
+    """Assert a one-field dataclass survives encode then decode.
 
     Generating the carrier rather than declaring it is the point: the field's
     annotation is the codec's entire schema, so a generated annotation tests a
@@ -1756,7 +1821,6 @@ def _assert_round_trips(annotation: object, value: object) -> None:
     cls = dataclasses.make_dataclass(
         "_Generated",
         [("value", annotation)],
-        bases=(JsonCodec,),
         frozen=True,
         slots=True,
         kw_only=True,
@@ -1765,8 +1829,8 @@ def _assert_round_trips(annotation: object, value: object) -> None:
     # Through real JSON text, not just the dict: a value that survives the
     # in-memory round trip but is not serializable (a raw Path, bytes) would
     # otherwise pass while the JSONB write it stands in for fails.
-    wire = dict_val(json.loads(json.dumps(original.to_json())))
-    back = cast(_Carrier, cast(type[JsonCodec], cls).from_json(wire))
+    wire = DictCodec.coerce(json.loads(json.dumps(DataclassCodec.to_json(original))))
+    back = DataclassCodec.from_json(cast(type[_Carrier], cls), wire)
     assert back == original
     # The container type is half the contract: a ``frozenset`` field decoding
     # to a list is what this catches, and ``==`` alone would not.
@@ -1893,6 +1957,904 @@ class TestGeneratedRoundTrip:
             GenericAlias(MutableMapping, (str, annotation)),
             {"a": first, "b": second},
         )
+
+
+class TestJsonpickleVocabulary:
+    """One tag vocabulary across the repo: configgle's ``py/*``.
+
+    Two encoders wrote the same document space in two spellings, so neither
+    could read the other's output. ``py/*`` wins because it is documented,
+    jsonpickle-legible, and already shipped -- and because a dataclass tag of
+    ``module.QualName`` costs ~20 bytes where the structural one cost 846.
+    """
+
+    def test_a_dataclass_carries_a_py_object_tag(self) -> None:
+        encoded = DataclassCodec.to_json(_Child(n=3))
+
+        assert encoded["py/object"] == f"{_Child.__module__}._Child"
+        assert DataclassCodec.from_json(_Child, encoded) == _Child(n=3)
+
+    def test_a_union_member_is_tagged_by_its_dotted_path(self) -> None:
+        # The discriminator picks one of a CLOSED set the annotation names, so
+        # the class path suffices; the field schema it used to carry was
+        # 26.4% of a session document.
+        doc = _Doc(atts=(_Bytes(data=b"z"),))
+
+        container = DictCodec.coerce(
+            cast(JSONValue, DictCodec.coerce(DataclassCodec.to_json(doc))["atts"])
+        )
+        tagged = DictCodec.coerce(ListCodec.coerce(container["py/tuple"])[0])
+        assert tagged["py/object"] == f"{_Bytes.__module__}._Bytes"
+        assert (
+            DataclassCodec.from_json(
+                _Doc, json.loads(json.dumps(DataclassCodec.to_json(doc)))
+            )
+            == doc
+        )
+
+    def test_a_non_finite_float_uses_the_py_float_tag(self) -> None:
+        doc = _Floats(ratio=float("inf"))
+
+        assert DictCodec.coerce(DataclassCodec.to_json(doc))["ratio"] == {
+            "py/float": "inf"
+        }
+        assert (
+            DataclassCodec.from_json(
+                _Floats, json.loads(json.dumps(DataclassCodec.to_json(doc)))
+            )
+            == doc
+        )
+
+    def test_bytes_use_the_py_b64_tag(self) -> None:
+        doc = _Bytes(data=b"hi")
+
+        assert DictCodec.coerce(DataclassCodec.to_json(doc))["data"] == {
+            "py/b64": "aGk="
+        }
+        assert (
+            DataclassCodec.from_json(
+                _Bytes, json.loads(json.dumps(DataclassCodec.to_json(doc)))
+            )
+            == doc
+        )
+
+    def test_no_dunder_tag_survives_anywhere_in_a_document(self) -> None:
+        # The old vocabulary in full: a document carrying any of these is one
+        # the other encoder cannot read.
+        doc = _Doc(
+            when=datetime(2026, 8, 24, 12, tzinfo=ZoneInfo("America/Los_Angeles")),
+            atts=(_Bytes(data=b"z"),),
+        )
+
+        text = json.dumps(DataclassCodec.to_json(doc))
+
+        for tag in ("__type__", "__union__", "__float__", "__raw_object__"):
+            assert tag not in text, f"{tag} still emitted"
+
+
+class TestNamedZonePreservation:
+    """A named zone must survive, whatever the tag vocabulary is.
+
+    Measured before the format change: configgle's ``py/reduce`` DOES preserve
+    ``ZoneInfo`` through pickle's own reduce, but it renders the datetime as
+    opaque base64. This codec's documents are read in a database column, so
+    the readable ISO form with a zone tag beside it is kept.
+    """
+
+    def test_a_named_zone_survives_the_new_vocabulary(self) -> None:
+        zone = ZoneInfo("America/Los_Angeles")
+        doc = _Doc(when=datetime(2026, 8, 24, 12, tzinfo=zone))
+
+        back = DataclassCodec.from_json(
+            _Doc, json.loads(json.dumps(DataclassCodec.to_json(doc)))
+        )
+
+        assert back.when == doc.when
+        assert back.when is not None
+        assert back.when.tzinfo == zone
+
+    def test_the_timestamp_stays_readable_rather_than_pickled(self) -> None:
+        # What ``py/reduce`` would cost: the instant becomes base64 and a
+        # human reading the column sees nothing. The zone rides beside the
+        # ISO string instead.
+        doc = _Doc(when=datetime(2026, 8, 24, 12, tzinfo=ZoneInfo("UTC")))
+
+        assert "2026-08-24T12:00:00" in json.dumps(DataclassCodec.to_json(doc))
+
+
+class TestSelfDescribingValues:
+    """A tag says WHAT a value is, so decoding needs no annotation.
+
+    This is what lets one codec serve both callers. ``decode(Cls, tree)``
+    consults the hint to narrow and check; ``decode(None, tree)`` reads the
+    tag alone -- and configgle's ``deserialize`` is the second spelling, not
+    a second implementation. Before this, ``Path`` encoded to a bare ``"/x"``
+    that only a hint could interpret, so the two needed separate decoders.
+    """
+
+    @pytest.mark.parametrize(
+        ("value", "tag"),
+        [
+            (Path("/x"), "py/path"),
+            (UUID(int=1), "py/uuid"),
+            (b"hi", "py/b64"),
+            ((1, 2), "py/tuple"),
+            (frozenset({3}), "py/set"),
+            (float("inf"), "py/float"),
+            (datetime(2026, 1, 1, tzinfo=ZoneInfo("America/New_York")), "py/datetime"),
+        ],
+    )
+    def test_a_tagged_value_decodes_without_an_annotation(
+        self, value: object, tag: str
+    ) -> None:
+        encoded = encode_value(value)
+
+        assert isinstance(encoded, Mapping)
+        assert tag in encoded
+        assert decode(None, json.loads(json.dumps(encoded))) == value
+
+    def test_a_timestamp_stays_readable_rather_than_pickled(self) -> None:
+        # What configgle's ``py/reduce`` costs today: the instant becomes
+        # base64 and the database column is unreadable.
+        encoded = encode_value(datetime(2026, 1, 1, tzinfo=ZoneInfo("UTC")))
+
+        assert "2026-01-01T00:00:00" in json.dumps(encoded)
+
+    def test_json_native_data_stays_untagged(self) -> None:
+        # A tag on every value would make the common document unreadable; only
+        # what JSON cannot express natively earns one.
+        assert encode_value({"a": [1, "x", True, None]}) == {"a": [1, "x", True, None]}
+
+
+class TestSelfDiscriminatingUnionMembers:
+    """A dataclass member needs no union envelope: it tags itself.
+
+    ``DataclassCodec.to_json`` already writes ``py/object`` with the member's
+    dotted path, so wrapping it in ``{"py/union": <same path>, "py/value":
+    ...}`` states the discriminator twice. Measured on a session corpus: the
+    envelope was 15% of the document's excess over its source, and every one
+    of 747 records paid it.
+    """
+
+    def test_a_dataclass_member_carries_no_union_envelope(self) -> None:
+        doc = _Doc(atts=(_Bytes(data=b"z"),))
+
+        member = DictCodec.coerce(
+            ListCodec.coerce(
+                DictCodec.coerce(DataclassCodec.to_json(doc)["atts"])["py/tuple"]
+            )[0]
+        )
+
+        assert "py/union" not in member
+        assert StrCodec.coerce(member["py/object"]).endswith("._Bytes")
+        assert (
+            DataclassCodec.from_json(
+                _Doc, json.loads(json.dumps(DataclassCodec.to_json(doc)))
+            )
+            == doc
+        )
+
+    def test_a_scalar_member_still_needs_the_envelope(self) -> None:
+        # Nothing tags a bare scalar, so the discriminator has nowhere else
+        # to ride and the envelope is what makes the member recoverable.
+        doc = _MixedScalarUnion(blob=b"raw")
+
+        assert "py/union" in DictCodec.coerce(DataclassCodec.to_json(doc)["blob"])
+        assert (
+            DataclassCodec.from_json(_MixedScalarUnion, DataclassCodec.to_json(doc))
+            == doc
+        )
+
+    def test_same_named_members_keep_their_envelope(self) -> None:
+        # Two classes sharing one dotted path: ``py/object`` cannot tell them
+        # apart, so the positional union tag has to stay.
+        first = dataclasses.make_dataclass(
+            "Same",
+            [("number", int)],
+            frozen=True,
+            slots=True,
+            kw_only=True,
+        )
+        second = dataclasses.make_dataclass(
+            "Same",
+            [("text", str)],
+            frozen=True,
+            slots=True,
+            kw_only=True,
+        )
+        annotation = first | second
+
+        for cls, values in ((first, {"number": 1}), (second, {"text": "x"})):
+            original = cls(**values)
+            encoded = encode_value(original, annotation)
+
+            assert "py/union" in DictCodec.coerce(encoded)
+            assert decode(annotation, json.loads(json.dumps(encoded))) == original
+
+
+class TestDecodeCapabilities:
+    @pytest.mark.parametrize(
+        "tree",
+        [
+            {"py/type": "builtins.str"},
+            {"py/function": "operator.add"},
+            {"py/object": "builtins.object"},
+            {"py/reduce": []},
+        ],
+    )
+    def test_import_and_execution_tags_are_safe_by_default(
+        self, tree: dict[str, object]
+    ) -> None:
+        with pytest.raises(TypeError):
+            decode_graph(tree)
+
+    def test_import_resolution_does_not_imply_reduce_execution(self) -> None:
+        capabilities = DecodeCapabilities(resolve=resolve_import)
+        assert (
+            decode_graph({"py/type": "builtins.str"}, capabilities=capabilities) is str
+        )
+        with pytest.raises(TypeError, match="apply_reduce"):
+            decode_graph({"py/reduce": []}, capabilities=capabilities)
+
+    def test_explicit_reduce_capability_reconstructs_a_value(self) -> None:
+        capabilities = DecodeCapabilities(resolve=resolve_import, apply_reduce=True)
+        tree = {
+            "py/reduce": [
+                {"py/type": "builtins.list"},
+                {"py/tuple": [[1, 2]]},
+            ]
+        }
+        assert decode_graph(tree, capabilities=capabilities) == [1, 2]
+
+    def test_references_preserve_identity_without_execution_capabilities(self) -> None:
+        decoded = decode_graph([{"value": 1}, {"py/id": 1}])
+        assert isinstance(decoded, list)
+        assert decoded[0] is decoded[1]
+
+
+class _InlineCounter:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __custom_json_inline__(self) -> tuple[object, tuple[()], dict[str, object]]:
+        self.calls += 1
+        return list, (), {}
+
+    def __custom_json_inline_init__(
+        self,
+        func: object,
+        args: Sequence[object],
+        kwargs: Mapping[str, object],
+    ) -> None:
+        del func, args, kwargs
+        self.calls = 0
+
+
+class _EncounterSet(AbstractSet[object]):
+    def __init__(self, values: Sequence[object]) -> None:
+        self._values = tuple(values)
+
+    @override
+    def __contains__(self, value: object) -> bool:
+        return value in self._values
+
+    @override
+    def __iter__(self) -> Iterator[object]:
+        return iter(self._values)
+
+    @override
+    def __len__(self) -> int:
+        return len(self._values)
+
+    @override
+    def __reduce_ex__(self, protocol: SupportsIndex, /) -> str | tuple[object, ...]:
+        del protocol
+        raise TypeError
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _ReprCollisionToken:
+    n: int
+
+    @override
+    def __repr__(self) -> str:
+        return "token"
+
+
+class _TrackingSeen(set[int]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.added: list[int] = []
+
+    @override
+    def add(self, element: int) -> None:
+        self.added.append(element)
+        super().add(element)
+
+
+class _HookCounterMember:
+    def __init__(self, n: int) -> None:
+        self.n = n
+
+
+class _HookCounter:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def encode(self, value: object) -> object:
+        self.calls += 1
+        return cast(_HookCounterMember, value).n
+
+    def decode(self, value: object) -> object:
+        return value
+
+
+class _NonFiniteHookMember:
+    """Leaf whose hook payload holds values JSON cannot express natively."""
+
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    @override
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _NonFiniteHookMember) and (
+            other.value == self.value
+            or (math.isnan(other.value) and math.isnan(self.value))
+        )
+
+    @override
+    def __hash__(self) -> int:
+        return hash(self.value)
+
+
+def _encode_non_finite_hook(value: object) -> object:
+    return [cast(_NonFiniteHookMember, value).value]
+
+
+def _decode_non_finite_hook(payload: object) -> object:
+    items = cast(list[object], payload)
+    return _NonFiniteHookMember(FloatCodec.coerce(items[0]))
+
+
+class _ReservedKeyHookMember:
+    """Leaf whose hook payload holds a key that looks like a wire tag."""
+
+    def __init__(self, tag: str) -> None:
+        self.tag = tag
+
+    @override
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _ReservedKeyHookMember) and other.tag == self.tag
+
+    @override
+    def __hash__(self) -> int:
+        return hash(self.tag)
+
+
+def _encode_reserved_key_hook(value: object) -> object:
+    return {"py/id": cast(_ReservedKeyHookMember, value).tag}
+
+
+def _decode_reserved_key_hook(payload: object) -> object:
+    source = cast(Mapping[str, object], payload)
+    return _ReservedKeyHookMember(StrCodec.coerce(source["py/id"]))
+
+
+class _ReduceCounterMember:
+    def __init__(self, n: int) -> None:
+        self.n = n
+        self.calls = 0
+
+    @override
+    def __reduce_ex__(self, protocol: SupportsIndex, /) -> tuple[object, ...]:
+        del protocol
+        self.calls += 1
+        return type(self), (self.n,)
+
+
+class _ReduceIteratorMember:
+    def __init__(self) -> None:
+        self.items: list[object] = []
+        self.calls = 0
+
+    def extend(self, values: Iterable[object]) -> None:
+        self.items.extend(values)
+
+    @override
+    def __reduce_ex__(self, protocol: SupportsIndex, /) -> tuple[object, ...]:
+        del protocol
+        self.calls += 1
+        return type(self), (), None, iter((1, 2))
+
+
+class _SharedChildTuple(NamedTuple):
+    child: list[object]
+
+
+class _OwnInline:
+    """Non-configgle value that owns its inline recipe."""
+
+    def __init__(self, n: int) -> None:
+        self.n = n
+
+    @override
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _OwnInline) and other.n == self.n
+
+    @override
+    def __hash__(self) -> int:
+        return hash(self.n)
+
+    def __custom_json_inline__(
+        self,
+    ) -> tuple[object, list[object], dict[str, object]]:
+        return _OwnInline, [self.n], {}
+
+    def __custom_json_inline_init__(
+        self,
+        func: object,
+        args: Sequence[object],
+        kwargs: Mapping[str, object],
+    ) -> None:
+        del func, kwargs
+        self.n = IntCodec.coerce(args[0], 0)
+
+
+class _CycleNode:
+    __slots__ = ("peer", "tag")
+
+    def __init__(self, tag: int) -> None:
+        self.tag = tag
+        self.peer: object = None
+
+
+class _FreshArgsBag:
+    """Atomic reduce whose args hold a container the reducer just built."""
+
+    __slots__ = ("items",)
+
+    def __init__(self, items: Iterable[object]) -> None:
+        self.items = list(items)
+
+    @override
+    def __reduce_ex__(self, protocol: SupportsIndex, /) -> tuple[object, ...]:
+        del protocol
+        return _FreshArgsBag, ([*self.items],)
+
+
+class TestGraphEncoding:
+    def test_inline_recipe_is_evaluated_once_per_value(self) -> None:
+        value = _InlineCounter()
+
+        encode_graph(_EncounterSet((value,)))
+
+        assert value.calls == 1
+
+    def test_hook_encoder_is_evaluated_once_per_set_member(self) -> None:
+        member = _HookCounterMember(1)
+        counter = _HookCounter()
+
+        encode_graph(
+            _EncounterSet((member,)),
+            hooks={_HookCounterMember: (counter.encode, counter.decode)},
+        )
+
+        assert counter.calls == 1
+
+    def test_reduce_is_evaluated_once_per_set_member(self) -> None:
+        member = _ReduceCounterMember(1)
+
+        encode_graph(_EncounterSet((member,)))
+
+        assert member.calls == 1
+
+    def test_cached_reduce_preserves_iterator_items(self) -> None:
+        member = _ReduceIteratorMember()
+
+        decoded = decode_graph(
+            encode_graph(_EncounterSet((member,))),
+            capabilities=DecodeCapabilities(resolve=resolve_import, apply_reduce=True),
+        )
+
+        assert isinstance(decoded, set)
+        decoded_set = cast(set[object], decoded)
+        restored = next(iter(decoded_set))
+        assert isinstance(restored, _ReduceIteratorMember)
+        assert restored.items == [1, 2]
+        assert member.calls == 1
+
+    def test_hook_payload_is_encoded_as_strict_json(self) -> None:
+        hooks: GraphHooks = {
+            _NonFiniteHookMember: (_encode_non_finite_hook, _decode_non_finite_hook)
+        }
+        member = _NonFiniteHookMember(math.inf)
+
+        encoded = encode_graph(member, hooks=hooks)
+
+        assert json.dumps(encoded, allow_nan=False)
+        assert (
+            decode_graph(
+                encoded,
+                hooks=hooks,
+                capabilities=DecodeCapabilities(resolve=resolve_import),
+            )
+            == member
+        )
+
+    def test_hook_payload_reserved_key_survives_round_trip(self) -> None:
+        hooks: GraphHooks = {
+            _ReservedKeyHookMember: (
+                _encode_reserved_key_hook,
+                _decode_reserved_key_hook,
+            )
+        }
+        member = _ReservedKeyHookMember("data")
+
+        decoded = decode_graph(
+            encode_graph(member, hooks=hooks),
+            hooks=hooks,
+            capabilities=DecodeCapabilities(resolve=resolve_import),
+        )
+
+        assert decoded == member
+
+    def test_value_owned_inline_recipe_round_trips_outside_configgle(self) -> None:
+        decoded = decode_graph(
+            encode_graph(_OwnInline(3)),
+            capabilities=DecodeCapabilities(resolve=resolve_import, apply_reduce=True),
+        )
+
+        assert decoded == _OwnInline(3)
+
+    def test_reducer_built_args_container_is_not_graph_identity(self) -> None:
+        node = _CycleNode(1)
+        bag = _FreshArgsBag([node])
+        node.peer = bag
+
+        decoded = decode_graph(
+            encode_graph(bag),
+            capabilities=DecodeCapabilities(resolve=resolve_import, apply_reduce=True),
+        )
+
+        assert isinstance(decoded, _FreshArgsBag)
+        inner = cast(_CycleNode, decoded.items[0])
+        peer = cast(_FreshArgsBag, inner.peer)
+        assert [cast(_CycleNode, item).tag for item in peer.items] == [1]
+
+    def test_reduce_arguments_preserve_shared_child_identity(self) -> None:
+        child: list[object] = []
+
+        decoded = decode_graph(
+            encode_graph([_SharedChildTuple(child), child]),
+            capabilities=DecodeCapabilities(resolve=resolve_import, apply_reduce=True),
+        )
+
+        assert isinstance(decoded, list)
+        restored = cast(_SharedChildTuple, decoded[0])
+        assert restored.child is decoded[1]
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            Path("/x"),
+            UUID(int=7),
+            datetime(2026, 1, 1, tzinfo=UTC),
+        ],
+    )
+    def test_graph_decoder_reads_safe_value_codec_tags(self, value: object) -> None:
+        assert decode_graph(encode_value(value)) == value
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            Path("/x"),
+            UUID(int=7),
+            datetime(2026, 1, 1, tzinfo=UTC),
+        ],
+    )
+    def test_graph_encoder_writes_safe_value_codec_tags(self, value: object) -> None:
+        assert decode_graph(encode_graph(value)) == value
+
+    def test_finite_float_round_trips_as_a_literal(self) -> None:
+        assert decode_graph(encode_graph(1.0)) == 1.0
+
+    def test_nested_finite_floats_round_trip_as_literals(self) -> None:
+        value = {"items": [1.0], "mapping": {"value": 2.5}}
+
+        encoded = encode_graph(value)
+        decoded = decode_graph(encoded)
+
+        assert encoded == value
+        assert decoded == value
+        assert isinstance(cast(dict[str, object], decoded)["items"], list)
+        items = cast(list[object], cast(dict[str, object], decoded)["items"])
+        mapping = cast(dict[str, object], cast(dict[str, object], decoded)["mapping"])
+        assert type(items[0]) is float
+        assert type(mapping["value"]) is float
+
+    def test_graph_round_trip_preserves_repeated_identity(self) -> None:
+        member: dict[str, object] = {"value": 1}
+
+        decoded = decode_graph(encode_graph([member, member]))
+
+        assert isinstance(decoded, list)
+        assert decoded[0] is decoded[1]
+
+    def test_graph_round_trip_preserves_self_cycle(self) -> None:
+        value: list[object] = []
+        value.append(value)
+
+        decoded = decode_graph(encode_graph(value))
+
+        assert isinstance(decoded, list)
+        assert decoded[0] is decoded
+
+
+class TestStrictGraphTags:
+    @pytest.mark.parametrize(
+        ("tag", "payload"),
+        [
+            ("py/path", 42),
+            ("py/b64", 42),
+            ("py/uuid", 42),
+            ("py/datetime", 42),
+            ("py/float", []),
+        ],
+    )
+    def test_scalar_tags_reject_wrong_payload_shapes(
+        self, tag: str, payload: object
+    ) -> None:
+        with pytest.raises(TypeError) as excinfo:
+            decode_graph({tag: payload})
+
+        assert repr(payload) in str(excinfo.value)
+
+    @pytest.mark.parametrize("tag", ["py/hook", "py/inline"])
+    @pytest.mark.parametrize("payload", [[], ["only-one"], ["a", "b", "c"]])
+    def test_two_element_tags_reject_wrong_envelope_arity(
+        self, tag: str, payload: list[object]
+    ) -> None:
+        """A malformed envelope is rejected as malformed, not as an unpack error.
+
+        ``py/reduce`` states its arity before destructuring; these two unpack
+        first, so corrupt input surfaces as ``ValueError: not enough values to
+        unpack`` -- an internal detail that names neither the tag nor the fault.
+        """
+        with pytest.raises(TypeError) as excinfo:
+            decode_graph(
+                {tag: payload},
+                capabilities=DecodeCapabilities(resolve=resolve_import),
+            )
+
+        assert tag in str(excinfo.value)
+
+    def test_unregistered_hook_error_names_the_hook(self) -> None:
+        capabilities = DecodeCapabilities(resolve=resolve_import)
+
+        with pytest.raises(TypeError, match=r"hook.*builtins\.str"):
+            decode_graph(
+                {"py/hook": ["builtins.str", "payload"]},
+                capabilities=capabilities,
+            )
+
+    def test_invalid_named_datetime_zone_is_rejected_with_raw_payload(self) -> None:
+        payload = "2026-01-01T00:00:00+00:00[Not/AZone]"
+
+        with pytest.raises(TypeError) as excinfo:
+            decode_graph({"py/datetime": payload})
+
+        assert repr(payload) in str(excinfo.value)
+
+    def test_set_graph_encoding_is_deterministic(self) -> None:
+        assert encode_graph({"z", "a"}) == {"py/set": ["a", "z"]}
+
+    def test_abstract_set_graph_encoding_is_deterministic(self) -> None:
+        forward = _EncounterSet(("z", "a"))
+        reverse = _EncounterSet(("a", "z"))
+
+        assert encode_graph(forward) == encode_graph(reverse) == {"py/set": ["a", "z"]}
+
+    def test_equal_repr_members_sort_by_encoded_structure(self) -> None:
+        first = _ReprCollisionToken(n=1)
+        second = _ReprCollisionToken(n=2)
+        forward = _EncounterSet((first, second))
+        reverse = _EncounterSet((second, first))
+
+        assert encode_graph(forward) == encode_graph(reverse)
+
+
+class TestIssue19672Contracts:
+    @pytest.mark.parametrize("target", [bytes, Path])
+    @pytest.mark.parametrize("value", [42, ["x"], {"x": 1}])
+    def test_special_scalars_reject_wrong_wire_shapes(
+        self, target: type, value: object
+    ) -> None:
+        with pytest.raises(TypeError):
+            decode(target, value)
+        assert decode_or_none(target, value) is None
+
+    @pytest.mark.parametrize(("target", "value"), [(bytes, b"x"), (Path, Path("/x"))])
+    def test_special_scalars_accept_already_typed_values(
+        self, target: type, value: object
+    ) -> None:
+        assert decode(target, value) == value
+        assert decode_or_none(target, value) == value
+
+    @pytest.mark.parametrize(
+        ("tag", "payload"),
+        [
+            ("py/b64", "eA=="),
+            ("py/float", "1.5"),
+            ("py/path", "/x"),
+            ("py/uuid", "00000000-0000-0000-0000-000000000007"),
+            ("py/datetime", "2026-01-01T00:00:00+00:00"),
+        ],
+    )
+    def test_every_scalar_tag_envelope_rejects_extra_keys(
+        self, tag: str, payload: str
+    ) -> None:
+        with pytest.raises(TypeError, match="envelope"):
+            decode_graph({tag: payload, "extra": True})
+
+    def test_reference_envelope_rejects_extra_keys(self) -> None:
+        with pytest.raises(TypeError, match="envelope"):
+            decode_graph([{"value": 1}, {"py/id": 0, "extra": True}])
+
+    def test_ordinary_and_reserved_key_mappings_remain_data(self) -> None:
+        ordinary = {"provider": "/x", "extra": True}
+        reserved = {"py/path": "/provider", "extra": True}
+
+        assert decode_graph(ordinary) == ordinary
+        assert decode_graph(encode_graph(reserved)) == reserved
+
+    def test_plain_residual_rejects_runtime_non_string_keys(self) -> None:
+        source = cast(Mapping[str, object], {1: "value"})
+
+        with pytest.raises(TypeError, match="key"):
+            residual(source)
+
+    def test_stateful_residual_rejects_runtime_non_string_keys(self) -> None:
+        source = cast(Mapping[str, object], {1: "value"})
+
+        with pytest.raises(TypeError, match="key"):
+            residual(source, fields={})
+
+    def test_plain_residual_escape_preserves_numeric_spelling(self) -> None:
+        source = {
+            "$__custom_json_fields__": {
+                "version": 1,
+                "order": ["x"],
+                "states": {"x": "value"},
+                "residual": {},
+            },
+            "x": 1.0,
+        }
+
+        restored = replay(json.loads(json.dumps(residual(source))), {})
+
+        assert restored == source
+        assert type(restored["x"]) is float
+
+    def test_malformed_replay_raw_is_not_treated_as_an_envelope(self) -> None:
+        stored = {
+            "$__custom_json_fields__": {
+                "version": 1,
+                "order": ["x"],
+                "states": {"x": "value"},
+                "raw": "garbage",
+                "residual": {},
+            }
+        }
+
+        assert replay(stored, {"x": 2}) == stored
+
+    def test_classmethod_graph_round_trip_uses_reduce_fallback(self) -> None:
+        capabilities = DecodeCapabilities(resolve=resolve_import, apply_reduce=True)
+        encoded = encode_graph(DatetimeCodec.coerce)
+        wire = DictCodec.coerce(encoded, default=None)
+
+        assert "py/reduce" in wire
+        decoded = decode_graph(encoded, capabilities=capabilities)
+        assert callable(decoded)
+        assert decoded == DatetimeCodec.coerce
+
+    def test_untyped_abstract_set_uses_the_py_set_tag(self) -> None:
+        assert encode_value(_EncounterSet(("z", "a"))) == {"py/set": ["a", "z"]}
+
+    def test_encode_value_documents_hintless_dataclass_limit(self) -> None:
+        doc = inspect.getdoc(encode_value)
+
+        assert doc is not None
+        assert "dataclass" in doc.lower()
+        assert "import" in doc.lower()
+        assert "annotation" in doc.lower()
+
+    @pytest.mark.parametrize(
+        ("function", "parameters", "exceptions"),
+        [
+            (encode_graph, ("obj", "hooks"), ("TypeError",)),
+            (
+                decode_graph,
+                ("tree", "hooks", "capabilities"),
+                ("TypeError", "ValueError"),
+            ),
+            (resolve_import, ("path",), ("ImportError", "AttributeError")),
+        ],
+    )
+    def test_public_graph_api_has_full_google_docstring(
+        self,
+        function: Callable[..., object],
+        parameters: tuple[str, ...],
+        exceptions: tuple[str, ...],
+    ) -> None:
+        doc = inspect.getdoc(function)
+
+        assert doc is not None
+        assert "\n\nArgs:\n" in doc
+        assert all(f"{parameter}:" in doc for parameter in parameters)
+        assert "\n\nReturns:\n" in doc
+        assert "\n\nRaises:\n" in doc
+        assert all(f"{exception}:" in doc for exception in exceptions)
+
+
+class TestIssue19670Structure:
+    def test_annotation_recursion_reuses_one_seen_set(self) -> None:
+        annotation_id = cast(
+            Callable[[object, set[int]], str],
+            vars(sys.modules[decode.__module__])["_annotation_id"],
+        )
+        seen = _TrackingSeen()
+
+        annotation_id(tuple[list[int], dict[str, int]], seen)
+
+        assert len(seen.added) > 1
+        assert not seen
+
+    def test_public_type_tag_has_no_private_alias(self) -> None:
+        assert "_TYPE_TAG" not in vars(sys.modules[decode.__module__])
+
+    def test_coercion_failure_is_owned_by_the_codec_class(self) -> None:
+        codec = cast(type, vars(sys.modules[decode.__module__])["Codec"])
+        assert isinstance(codec.__dict__["coercion_failure"], classmethod)
+
+    def test_bool_numeric_coercion_is_documented(self) -> None:
+        doc = inspect.getdoc(BoolCodec.decode)
+        assert doc is not None
+        assert "truthiness" in doc
+
+    def test_unknown_replay_label_fallback_is_documented(self) -> None:
+        doc = inspect.getdoc(replay)
+        assert doc is not None
+        assert "unknown field-state labels" in doc
+
+    @pytest.mark.parametrize(
+        "module", [sys.modules[decode.__module__], sys.modules[__name__]]
+    )
+    def test_no_nested_helper_exceeds_three_lines(self, module: ModuleType) -> None:
+        assert not _long_nested_helpers(inspect.getsource(module))
+
+
+def _long_nested_helpers(source: str) -> list[str]:
+    tree = ast.parse(source)
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    nested: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        parent = parents.get(node)
+        while parent is not None and not isinstance(
+            parent, (ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            parent = parents.get(parent)
+        if parent is None or not node.body or node.end_lineno is None:
+            continue
+        if node.end_lineno - node.body[0].lineno + 1 > 3:
+            nested.append(node.name)
+    return nested
 
 
 if __name__ == "__main__":

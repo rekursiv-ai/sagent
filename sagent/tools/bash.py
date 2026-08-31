@@ -27,7 +27,7 @@ from sagent.agent.state import (
     get_tool_state,
 )
 from sagent.lib import debug_log
-from sagent.lib.custom_json import bool_val, int_val, json_freeze
+from sagent.lib.custom_json import BoolCodec, IntCodec, json_freeze
 from sagent.tools.core import (
     bound_by_tokens,
     load_tool_description,
@@ -294,8 +294,8 @@ class Bash:
 
         """
         command = str(args.get("command", ""))
-        timeout = int_val(args.get("timeout"), BASH_DEFAULT_TIMEOUT_MS)
-        run_as_fully_detached = bool_val(
+        timeout = IntCodec.coerce(args.get("timeout"), BASH_DEFAULT_TIMEOUT_MS)
+        run_as_fully_detached = BoolCodec.coerce(
             args.get("run_as_fully_detached"),
             False,
         )

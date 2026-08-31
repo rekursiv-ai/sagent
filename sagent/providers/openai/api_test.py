@@ -15,7 +15,7 @@ import httpx
 import pytest
 import tiktoken
 
-from sagent.lib.custom_json import dict_val, str_val
+from sagent.lib.custom_json import DictCodec, StrCodec
 from sagent.providers.openai import catalog as openai_catalog
 from sagent.providers.openai.api import OpenAI
 from sagent.types.cost import PriceCatalogProduct
@@ -52,8 +52,8 @@ async def test_every_catalog_row_is_a_model_the_vendor_serves() -> None:
         )
         if response.status_code == 200:
             return False
-        error = dict_val(dict_val(response.json()).get("error"))
-        return str_val(error.get("code")) == "model_not_found"
+        error = DictCodec.coerce(DictCodec.coerce(response.json()).get("error"))
+        return StrCodec.coerce(error.get("code")) == "model_not_found"
 
     # The rows are independent, so probing serially costs the sum of every
     # round-trip rather than the slowest one.

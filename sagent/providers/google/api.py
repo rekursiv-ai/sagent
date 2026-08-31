@@ -37,9 +37,9 @@ else:
 
 from sagent import types
 from sagent.lib.custom_json import (
+    IntCodec,
     MutableJSON,
     MutableJSONValue,
-    int_val,
     json_unfreeze,
 )
 from sagent.providers.google import catalog as google_catalog
@@ -346,7 +346,7 @@ class _GeminiModel(ModelDefaults):
             if "too large" in msg or "too long" in msg or "exceeds the maximum" in msg:
                 raise PromptTooLongError(r.text)
         r.raise_for_status()
-        return int_val(cast(MutableJSON, r.json()).get("totalTokens"), 0)
+        return IntCodec.coerce(cast(MutableJSON, r.json()).get("totalTokens"), 0)
 
     @property
     def max_image_dim(self) -> int:
@@ -767,11 +767,13 @@ def _build_response(
     spec: ModelSpec,
 ) -> ModelResponse:
     """Build a ``ModelResponse`` from Gemini's parsed stream fields."""
-    output_tokens = int_val(usage.get("candidatesTokenCount"), 0)
-    cache_read = int_val(usage.get("cachedContentTokenCount"), 0)
+    output_tokens = IntCodec.coerce(usage.get("candidatesTokenCount"), 0)
+    cache_read = IntCodec.coerce(usage.get("cachedContentTokenCount"), 0)
     # ``promptTokenCount`` is cache-inclusive; store the non-cached remainder so
     # ``TokenCount.input_tokens`` is disjoint from ``cache_read_tokens``.
-    input_tokens = max(0, int_val(usage.get("promptTokenCount"), 0) - cache_read)
+    input_tokens = max(
+        0, IntCodec.coerce(usage.get("promptTokenCount"), 0) - cache_read
+    )
     tokens = TokenCount(
         request=input_tokens,
         response=output_tokens,

@@ -40,9 +40,9 @@ import tempfile
 from sagent import types
 from sagent.lib.custom_json import (
     JSON,
+    FloatCodec,
+    IntCodec,
     MutableJSON,
-    float_val,
-    int_val,
     validate_json_schema,
 )
 from sagent.providers.anthropic import catalog as anthropic_catalog
@@ -1684,7 +1684,7 @@ def _parse_cli_credentials(raw: MutableJSON) -> AnthropicCLICredentials:
     creds = AnthropicCLICredentials(
         access_token=str(oauth["accessToken"]),
         refresh_token=str(oauth["refreshToken"]),
-        expires_at=float_val(oauth["expiresAt"]) / 1000.0,
+        expires_at=FloatCodec.coerce(oauth["expiresAt"]) / 1000.0,
     )
     if "scopes" in oauth:
         creds["scopes"] = cast(list[str], oauth["scopes"])
@@ -2140,9 +2140,9 @@ def _round_context_tokens(round_usage: MutableJSON | None) -> int:
     if round_usage is None:
         return 0
     return (
-        int_val(round_usage.get("input_tokens"), 0)
-        + int_val(round_usage.get("cache_creation_input_tokens"), 0)
-        + int_val(round_usage.get("cache_read_input_tokens"), 0)
+        IntCodec.coerce(round_usage.get("input_tokens"), 0)
+        + IntCodec.coerce(round_usage.get("cache_creation_input_tokens"), 0)
+        + IntCodec.coerce(round_usage.get("cache_read_input_tokens"), 0)
     )
 
 
@@ -2186,7 +2186,7 @@ def _build_model_response(
         if not isinstance(row, dict):
             continue
         row_map = cast(MutableJSON, row)
-        output_tokens += int_val(row_map.get("outputTokens"), 0)
+        output_tokens += IntCodec.coerce(row_map.get("outputTokens"), 0)
         cost = row_map.get("costUSD")
         if isinstance(cost, (int, float)):
             total_cost += float(cost)
@@ -2207,9 +2207,11 @@ def _build_model_response(
     cache_creation = 0
     cache_read = 0
     if last_round_usage is not None:
-        input_tokens = int_val(last_round_usage.get("input_tokens"), 0)
-        cache_creation = int_val(last_round_usage.get("cache_creation_input_tokens"), 0)
-        cache_read = int_val(last_round_usage.get("cache_read_input_tokens"), 0)
+        input_tokens = IntCodec.coerce(last_round_usage.get("input_tokens"), 0)
+        cache_creation = IntCodec.coerce(
+            last_round_usage.get("cache_creation_input_tokens"), 0
+        )
+        cache_read = IntCodec.coerce(last_round_usage.get("cache_read_input_tokens"), 0)
     # Build the single thinking block from the accumulated body + signature.
     # The signature MUST be present whenever the body is -- otherwise a
     # subsequent wire send rejects with ``thinking.signature: Field required``.

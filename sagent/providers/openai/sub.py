@@ -100,10 +100,10 @@ from sagent import types
 from sagent.lib import debug_log
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import (
+    DictCodec,
+    FloatCodec,
+    IntCodec,
     MutableJSON,
-    dict_val,
-    float_val,
-    int_val,
     json_unfreeze,
 )
 from sagent.providers.lib.errors import (
@@ -1233,8 +1233,8 @@ def _terminal_metadata(response: object) -> tuple[str, str, int, int, int, int]:
     usage = getattr(response, "usage", None)
     if usage is None:
         return message_id, status, 0, 0, 0, 0
-    input_tokens = int_val(getattr(usage, "input_tokens", None), 0)
-    output_tokens = int_val(getattr(usage, "output_tokens", None), 0)
+    input_tokens = IntCodec.coerce(getattr(usage, "input_tokens", None), 0)
+    output_tokens = IntCodec.coerce(getattr(usage, "output_tokens", None), 0)
     cache_read = 0
     cache_write = 0
     details = getattr(usage, "input_tokens_details", None)
@@ -1244,8 +1244,8 @@ def _terminal_metadata(response: object) -> tuple[str, str, int, int, int, int]:
         # through ``to_dict``. Reading the mapping keeps new usage data without
         # an Any cast or waiting for an SDK schema release.
         raw_details = cast(_UsageDetails, details).to_dict()
-        cache_read = int_val(raw_details.get("cached_tokens"), 0)
-        cache_write = int_val(raw_details.get("cache_write_tokens"), 0)
+        cache_read = IntCodec.coerce(raw_details.get("cached_tokens"), 0)
+        cache_write = IntCodec.coerce(raw_details.get("cache_write_tokens"), 0)
     return (
         message_id,
         status,
@@ -1663,16 +1663,16 @@ def _jwt_payload(token: str) -> dict[str, object]:
     raw = parts[1]
     raw += "=" * (4 - len(raw) % 4)
     try:
-        return dict_val(json.loads(base64.urlsafe_b64decode(raw)))
+        return DictCodec.coerce(json.loads(base64.urlsafe_b64decode(raw)))
     except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
         return {}
 
 
 def _jwt_exp(token: str) -> float:
     """Extract ``exp`` claim from a JWT without verification."""
-    return float_val(_jwt_payload(token).get("exp"))
+    return FloatCodec.coerce(_jwt_payload(token).get("exp"))
 
 
 def _jwt_claim(token: str, namespace: str, key: str) -> str:
     """Extract a nested claim from a JWT namespace object."""
-    return str(dict_val(_jwt_payload(token).get(namespace)).get(key, ""))
+    return str(DictCodec.coerce(_jwt_payload(token).get(namespace)).get(key, ""))

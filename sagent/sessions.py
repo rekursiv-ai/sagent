@@ -39,7 +39,7 @@ import sys
 import time
 import uuid
 
-from sagent.lib.custom_json import MutableJSON, dict_val, json_unfreeze
+from sagent.lib.custom_json import DictCodec, MutableJSON, json_unfreeze
 from sagent.lib.userdirs import data_dir
 
 
@@ -620,10 +620,10 @@ def _iter_jsonl(lines: Iterable[str]) -> Iterator[MutableJSON]:
         except json.JSONDecodeError:
             logger.warning("Skipping malformed JSONL line: %r", line[:120])
             continue
-        # ``dict_val`` narrows without a cast, but maps a non-object to an
+        # ``DictCodec.coerce`` narrows without a cast, but maps a non-object to an
         # empty dict -- indistinguishable from ``{}`` on the wire. Compare
         # against the parsed value to keep the non-dict warning honest.
-        record = dict_val(parsed)
+        record = DictCodec.coerce(parsed)
         if record or parsed == {}:
             yield json_unfreeze(record)
         else:

@@ -14,7 +14,7 @@ import shutil
 import subprocess
 
 from sagent.agent.state import approx_tokens, get_tool_state
-from sagent.lib.custom_json import bool_val, int_val, json_freeze
+from sagent.lib.custom_json import BoolCodec, IntCodec, json_freeze
 from sagent.tools.core import (
     bound_by_tokens,
     load_tool_description,
@@ -288,14 +288,14 @@ class Grep:
             "multiline",
         }
         kwargs: dict[str, object] = {k: v for k, v in args.items() if k not in known}
-        keep_first = int_val(args.get("keep_first"), 0)
-        keep_last = int_val(args.get("keep_last"), 0)
-        offset = int_val(args.get("offset"), 0)
+        keep_first = IntCodec.coerce(args.get("keep_first"), 0)
+        keep_last = IntCodec.coerce(args.get("keep_last"), 0)
+        offset = IntCodec.coerce(args.get("offset"), 0)
         context_before = _kw_int(kwargs, "-B", "context_before")
         context_after = _kw_int(kwargs, "-A", "context_after")
         context_symmetric = _kw_int(kwargs, "-C", "context")
         # Schema declares all pagination/context knobs as ``minimum: 0``
-        # integers but ``int_val`` accepts negatives, which then index
+        # integers but ``IntCodec.coerce`` accepts negatives, which then index
         # from the end of the result list (``lines[-N:]`` returns the
         # tail instead of failing). Enforce the schema floor here so a
         # malformed directive surfaces as a tool error rather than
@@ -318,7 +318,7 @@ class Grep:
             keep_first=keep_first,
             keep_last=keep_last,
             offset=offset,
-            multiline=bool_val(args.get("multiline"), False),
+            multiline=BoolCodec.coerce(args.get("multiline"), False),
             **kwargs,
         )
 
@@ -489,7 +489,7 @@ def _kw_bool(
     for k in (key, *fallbacks):
         v = kwargs.get(k)
         if v is not None:
-            return bool_val(v, default)
+            return BoolCodec.coerce(v, default)
     return default
 
 

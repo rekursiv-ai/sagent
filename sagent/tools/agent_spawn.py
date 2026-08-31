@@ -47,7 +47,7 @@ from sagent.agent.state import (
     get_tool_state,
     max_depth_var,
 )
-from sagent.lib.custom_json import JSON, bool_val, json_freeze
+from sagent.lib.custom_json import JSON, BoolCodec, json_freeze
 from sagent.providers import (
     PROVIDER_NAMES,
     build_provider,
@@ -458,8 +458,8 @@ class AgentSpawn:
                 content=f"'max_depth' must be ≥ 0, got {max_depth}.",
                 is_error=True,
             )
-        persistent = bool_val(args.get("persistent"), False)
-        notify_on_asleep = bool_val(args.get("notify_on_asleep"), True)
+        persistent = BoolCodec.coerce(args.get("persistent"), False)
+        notify_on_asleep = BoolCodec.coerce(args.get("notify_on_asleep"), True)
         custom_label = opt_str(args, "label")
         parent_agent = _current_agent()
         if parent_agent is None:
