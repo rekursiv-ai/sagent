@@ -1,7 +1,7 @@
 """Resources that cannot be shared across event loops.
 
 An ``asyncio.Lock`` binds to the loop that first *contends* on it, and an
-``httpx.AsyncClient`` holds a connection pool belonging to the loop that
+``httpx2.AsyncClient`` holds a connection pool belonging to the loop that
 opened it. A provider built once and used from two loops therefore fails:
 a second waiter raises ``RuntimeError: ... is bound to a different event
 loop``, and a third blocks forever on a future that will never resolve on

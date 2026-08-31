@@ -26,13 +26,13 @@ import uuid
 
 
 if TYPE_CHECKING:
-    import httpx
+    import httpx2
 
     import sagent.lib.image as image_lib
 else:
     from wrapt import lazy_import
 
-    httpx = lazy_import("httpx")  # 100ms cold
+    httpx2 = lazy_import("httpx2")  # 100ms cold
     image_lib = lazy_import("sagent.lib.image")
 
 from sagent import types
@@ -208,24 +208,24 @@ class _GeminiModel(ModelDefaults):
         self._model_id = model_id
         self._max_request_tokens = max_request_tokens
         self.spec = spec or ModelSpec()
-        # Per loop: an httpx.AsyncClient holds a connection pool owned by
+        # Per loop: an httpx2.AsyncClient holds a connection pool owned by
         # the loop that opened it, and the guarding lock binds to the loop
         # that first contends on it. Sharing either across loops raises
         # "bound to a different event loop" or hangs a waiter.
-        self._clients: PerLoop[httpx.AsyncClient | None] = PerLoop(lambda: None)
+        self._clients: PerLoop[httpx2.AsyncClient | None] = PerLoop(lambda: None)
         self._client_lock: PerLoop[asyncio.Lock] = PerLoop(asyncio.Lock)
 
     @property
-    def _client(self) -> httpx.AsyncClient | None:
+    def _client(self) -> httpx2.AsyncClient | None:
         """The running loop's HTTP client, if one has been opened."""
         return self._clients.peek()
 
     @_client.setter
-    def _client(self, value: httpx.AsyncClient) -> None:
+    def _client(self, value: httpx2.AsyncClient) -> None:
         """Install a client for this loop, replacing any existing one."""
         self._clients.set(value)
 
-    async def _get_client(self) -> httpx.AsyncClient:
+    async def _get_client(self) -> httpx2.AsyncClient:
         """Return a reused ``AsyncClient``. Lazy-created."""
         client = self._clients.get()
         if client is not None:
@@ -233,7 +233,7 @@ class _GeminiModel(ModelDefaults):
         async with self._client_lock.get():
             client = self._clients.get()
             if client is None:
-                client = httpx.AsyncClient()
+                client = httpx2.AsyncClient()
                 self._clients.set(client)
             return client
 
@@ -414,7 +414,7 @@ class _GeminiModel(ModelDefaults):
                 "Content-Type": "application/json",
                 "x-goog-api-key": self._provider.api_key,
             },
-            timeout=httpx.Timeout(_STREAM_IDLE_TIMEOUT, connect=30.0),
+            timeout=httpx2.Timeout(_STREAM_IDLE_TIMEOUT, connect=30.0),
         ) as r:
             if 400 <= r.status_code < 500:
                 err_body = (await r.aread()).decode(errors="replace")
@@ -653,7 +653,7 @@ def _flush_tool_parts(contents: list[MutableJSON], pending: list[MutableJSON]) -
 
 
 async def _consume_gemini_stream(
-    r: httpx.Response,
+    r: httpx2.Response,
     *,
     publish: Callable[[RuntimeEvent], None] | None = None,
     spec: ModelSpec,

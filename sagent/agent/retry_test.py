@@ -9,7 +9,7 @@ from typing import ClassVar, cast, override
 import asyncio
 import time
 
-import httpx
+import httpx2
 import pytest
 
 from sagent.agent import retry
@@ -147,7 +147,7 @@ def _collect_text(chunks: list[str]) -> Callable[[RuntimeEvent], None]:
 
 
 class _FakeResponse:
-    """Minimal stand-in for ``httpx.Response`` carrying status + headers + body."""
+    """Minimal stand-in for ``httpx2.Response`` carrying status + headers + body."""
 
     def __init__(
         self,
@@ -213,7 +213,7 @@ def test_is_retryable_timeout_error() -> None:
 
 
 def test_is_retryable_httpx_transport_error() -> None:
-    err = httpx.ConnectError("conn refused")
+    err = httpx2.ConnectError("conn refused")
     assert is_retryable(err, _ScriptedModel()) is True
 
 
@@ -1145,7 +1145,7 @@ async def test_send_with_retry_persistent_sleeps_through_long_server_delay(
 async def test_send_with_retry_persistent_loops_through_remote_protocol_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Persistent mode treats ``httpx.RemoteProtocolError`` as long-backoff.
+    """Persistent mode treats ``httpx2.RemoteProtocolError`` as long-backoff.
 
     Bug repro: large compaction payloads cause OpenAI to close the
     streamed request body mid-flight. The error has no HTTP status, so
@@ -1159,7 +1159,7 @@ async def test_send_with_retry_persistent_loops_through_remote_protocol_error(
         sleeps.append(delay_sec)
 
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-    err = httpx.RemoteProtocolError("peer closed connection")
+    err = httpx2.RemoteProtocolError("peer closed connection")
     model = _PersistentModel(
         stream_responses=[err, err, err, _resp("ok")],
     )
@@ -1422,7 +1422,7 @@ def test_service_error_snapshot_allowlists_forensic_fields() -> None:
 
 
 class _UnreadStreamingResponse:
-    """Mimics an httpx streaming response whose body was never read.
+    """Mimics an httpx2 streaming response whose body was never read.
 
     ``.text`` / ``.content`` raise ``ResponseNotRead``, reproducing the
     transcript failure where Anthropic reported a ``rate_limit_error`` via
@@ -1435,11 +1435,11 @@ class _UnreadStreamingResponse:
 
     @property
     def text(self) -> str:
-        raise httpx.ResponseNotRead
+        raise httpx2.ResponseNotRead
 
     @property
     def content(self) -> bytes:
-        raise httpx.ResponseNotRead
+        raise httpx2.ResponseNotRead
 
 
 def test_service_error_snapshot_survives_unread_streaming_body() -> None:
@@ -1651,14 +1651,14 @@ async def test_send_with_retry_silent_on_short_transient_retry(
 ) -> None:
     """A sub-second transport blip retries WITHOUT a suspension banner.
 
-    Regression: every recovered httpx ``ReadError`` was publishing a
+    Regression: every recovered httpx2 ``ReadError`` was publishing a
     ``ModelServiceSuspended`` event that rendered "[model service suspended:
     temporarily blocked; resumes in 1s]" -- alarming the user over a wait
     they never perceive. Local backoffs under ``SUSPENSION_NOTICE_SEC`` with
     no server-advertised delay must stay silent (still logged via
     ``publish_recoverable``).
     """
-    err = httpx.ReadError("")
+    err = httpx2.ReadError("")
     model = _ScriptedModel(stream_responses=[err, _resp("ok")])
     suspensions: list[float] = []
     notes: list[str] = []

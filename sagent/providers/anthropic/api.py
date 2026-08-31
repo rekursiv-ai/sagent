@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
     import anthropic
 
-    # The SDK's own transport types, not ours: anthropic 1.2 moved off httpx to
+    # The SDK's own transport types, not ours: anthropic 1.2 moved off httpx2 to
     # httpx2, and these Protocols model its internals (`_build_request`,
     # `_make_status_error`), so they must name the same package it does.
     import httpx2

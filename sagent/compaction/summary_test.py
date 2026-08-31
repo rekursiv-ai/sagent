@@ -8,7 +8,7 @@ from typing import Literal, cast, override
 
 import logging
 
-import httpx
+import httpx2
 import pytest
 
 from sagent.agent import retry
@@ -882,10 +882,10 @@ async def test_custom_instructions_are_fenced_in_compactor_prompt() -> None:
 async def test_compact_retries_on_transient_transport_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A transient ``httpx.TransportError`` mid-stream is retried, not fatal.
+    """A transient ``httpx2.TransportError`` mid-stream is retried, not fatal.
 
     The production failure (session ``bc528d70``) ended with
-    ``httpx.RemoteProtocolError: peer closed connection without sending
+    ``httpx2.RemoteProtocolError: peer closed connection without sending
     complete message body`` raised mid-stream from the compactor's
     summary call. ``RemoteProtocolError`` is a ``TransportError``
     already classified retryable in :mod:`agent.retry`, but the
@@ -895,7 +895,7 @@ async def test_compact_retries_on_transient_transport_error(
     ``send_with_retry`` makes one transient drop recoverable.
     """
     monkeypatch.setattr(retry, "RETRY_BASE_SEC", 0.0)
-    err = httpx.RemoteProtocolError("peer closed connection")
+    err = httpx2.RemoteProtocolError("peer closed connection")
     model = _ScriptedModel(
         stream_responses=[err, _summary_resp("recovered after retry")]
     )

@@ -13,9 +13,9 @@ from sagent.types.model import RequestTooLargeError
 
 
 if TYPE_CHECKING:
-    # httpx2, not httpx: the exception walked here is raised by the provider
+    # httpx2, not httpx2: the exception walked here is raised by the provider
     # SDKs, and both anthropic 1.2 and openai depend on httpx2. Checking the
-    # httpx class instead silently never matches -- the classes are unrelated.
+    # httpx2 class instead silently never matches -- the classes are unrelated.
     import httpx2
 else:
     from wrapt import lazy_import

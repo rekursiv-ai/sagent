@@ -73,7 +73,7 @@ from slack_sdk.socket_mode.aiohttp import SocketModeClient
 from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web.async_client import AsyncWebClient
 
-import httpx
+import httpx2
 
 from sagent.agent import Agent
 from sagent.agent.state import agent_registry
@@ -764,7 +764,7 @@ class SlackAdapter:
         url = "https://slack.com/api/conversations.members"
         headers = {"Authorization": f"Bearer {self._bot_token}"}
         params = {"channel": channel, "limit": 1000}
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx2.AsyncClient(timeout=30.0) as client:
             r = await client.get(url, headers=headers, params=params)
             if not r.is_success:
                 return []
@@ -781,7 +781,7 @@ class SlackAdapter:
             "Authorization": f"Bearer {self._bot_token}",
             "Content-Type": "application/json; charset=utf-8",
         }
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx2.AsyncClient(timeout=30.0) as client:
             _ = await client.post(
                 url,
                 headers=headers,

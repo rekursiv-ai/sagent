@@ -3040,7 +3040,7 @@ dependencies = [
     { name = "anthropic" },
     { name = "bashlex" },
     { name = "cachetools" },
-    { name = "httpx" },
+    { name = "httpx2" },
     { name = "imagesize" },
     { name = "markdown-it-py" },
     { name = "mcp" },
@@ -3138,7 +3138,7 @@ requires-dist = [
     { name = "bashlex", specifier = ">=0.18" },
     { name = "cachetools" },
     { name = "compressed-tensors", marker = "extra == 'selfhosted'" },
-    { name = "httpx", specifier = ">=0.27" },
+    { name = "httpx2", specifier = ">=2.12" },
     { name = "imagesize", specifier = ">=1.4" },
     { name = "kernels", marker = "extra == 'selfhosted'", specifier = ">=0.13.0" },
     { name = "markdown-it-py", specifier = ">=4.2" },
@@ -3916,7 +3916,7 @@ wheels = [
 [[package]]
 name = "wesearch"
 version = "0.1.11"
-source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#32d50676e86cb73b09a7670f4e1d71ff43adb09b" }
+source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#3222399eea973c04087819723b9771c59bde8efc" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "brotli" },

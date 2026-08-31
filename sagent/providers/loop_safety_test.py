@@ -87,7 +87,7 @@ def test_anthropic_sdk_is_not_shared_across_loops() -> None:
 def test_openai_subscription_sdk_is_not_shared_across_loops() -> None:
     """The transport this suite never covered, which is why it stayed broken.
 
-    ``AsyncOpenAI`` wraps an ``httpx`` pool with the same loop affinity
+    ``AsyncOpenAI`` wraps an ``httpx2`` pool with the same loop affinity
     as its Anthropic and Google peers.
     """
     provider = OpenAISubscription(
@@ -106,7 +106,7 @@ def test_openai_subscription_sdk_is_not_shared_across_loops() -> None:
 
 
 def test_google_client_survives_a_second_loop() -> None:
-    """Google's per-model httpx client has the same binding."""
+    """Google's per-model httpx2 client has the same binding."""
     provider = Google(api_key="test-key")
     model = provider.model("gemini-2.0-flash")
 

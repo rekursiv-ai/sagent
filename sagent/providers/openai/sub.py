@@ -81,7 +81,7 @@ import time
 if TYPE_CHECKING:
     from openai.types.responses.response_input_param import FunctionCallOutput
 
-    import httpx
+    import httpx2
     import openai
     import openai.types.responses as oai_responses
 
@@ -89,7 +89,7 @@ if TYPE_CHECKING:
 else:
     from wrapt import lazy_import
 
-    httpx = lazy_import("httpx")  # 100ms cold
+    httpx2 = lazy_import("httpx2")  # 100ms cold
     openai = lazy_import("openai")  # 493ms cold
     oai_responses = lazy_import("openai.types.responses")
     image_lib = lazy_import("sagent.lib.image")
@@ -473,7 +473,7 @@ class OpenAISubscription(OpenAI):
             finally:
                 listener.stop()
 
-        with httpx.Client() as http:
+        with httpx2.Client() as http:
             r = http.post(
                 _TOKEN_URL,
                 data={
@@ -723,7 +723,7 @@ class OpenAISubscription(OpenAI):
     async def _refresh(self) -> None:
         """Exchange the refresh token for a new access token."""
         logger.debug("Refreshing OpenAI OAuth token.")
-        async with httpx.AsyncClient() as http:
+        async with httpx2.AsyncClient() as http:
             r = await http.post(
                 _TOKEN_URL,
                 json={
@@ -738,7 +738,7 @@ class OpenAISubscription(OpenAI):
                 # Refresh token was rotated by another process, revoked
                 # server-side, or aged out. Retrying is pointless --
                 # surface a clean user-facing error so the renderer
-                # shows actionable text instead of an httpx traceback.
+                # shows actionable text instead of an httpx2 traceback.
                 raise AuthRefreshError(
                     "OpenAI Codex subscription session expired or revoked. "
                     "Run /login to re-authenticate, or /model to switch "
@@ -911,7 +911,7 @@ class _OpenAISubModel(_OpenAIModel):
         """Release the provider's Responses-API SDK and the HTTP client.
 
         The base ``OpenAICompatModel.close`` tears down the shared
-        ``httpx.AsyncClient``; the subscription path additionally has an
+        ``httpx2.AsyncClient``; the subscription path additionally has an
         ``AsyncOpenAI`` SDK owned by the *provider* (not the model), so
         delegate to ``provider.close_sdk()`` for that.
         """

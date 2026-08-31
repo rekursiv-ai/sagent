@@ -1,8 +1,8 @@
 from typing import Any, Self
 
-import httpx
+import httpx2
 
-class TestClient(httpx.Client):
+class TestClient(httpx2.Client):
     app: Any
     def __init__(
         self,

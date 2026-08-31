@@ -37,14 +37,14 @@ import os
 
 
 if TYPE_CHECKING:
-    import httpx
+    import httpx2
     import tiktoken
 
     import sagent.lib.image as image_lib
 else:
     from wrapt import lazy_import
 
-    httpx = lazy_import("httpx")  # 100ms cold
+    httpx2 = lazy_import("httpx2")  # 100ms cold
     image_lib = lazy_import("sagent.lib.image")
     tiktoken = lazy_import("tiktoken")  # 30ms cold
 
@@ -281,25 +281,25 @@ class OpenAICompatModel(ModelDefaults):
         self._model_id = model_id
         self._max_request_tokens = max_request_tokens
         self.spec = spec or ModelSpec()
-        # Per loop: an httpx.AsyncClient holds a connection pool owned by
+        # Per loop: an httpx2.AsyncClient holds a connection pool owned by
         # the loop that opened it, and the guarding lock binds to the loop
         # that first contends on it. Sharing either across loops raises
         # "bound to a different event loop" or hangs a waiter.
-        self._clients: PerLoop[httpx.AsyncClient | None] = PerLoop(lambda: None)
+        self._clients: PerLoop[httpx2.AsyncClient | None] = PerLoop(lambda: None)
         self._client_lock: PerLoop[asyncio.Lock] = PerLoop(asyncio.Lock)
         self._last_usage: UsageSnapshot | None = None
 
     @property
-    def _client(self) -> httpx.AsyncClient | None:
+    def _client(self) -> httpx2.AsyncClient | None:
         """The running loop's HTTP client, if one has been opened."""
         return self._clients.peek()
 
     @_client.setter
-    def _client(self, value: httpx.AsyncClient) -> None:
+    def _client(self, value: httpx2.AsyncClient) -> None:
         """Install a client for this loop, replacing any existing one."""
         self._clients.set(value)
 
-    async def _get_client(self) -> httpx.AsyncClient:
+    async def _get_client(self) -> httpx2.AsyncClient:
         """Return a reused ``AsyncClient`` (per-model). Lazy-created."""
         client = self._clients.get()
         if client is not None:
@@ -307,7 +307,7 @@ class OpenAICompatModel(ModelDefaults):
         async with self._client_lock.get():
             client = self._clients.get()
             if client is None:
-                client = httpx.AsyncClient()
+                client = httpx2.AsyncClient()
                 self._clients.set(client)
             return client
 
@@ -654,7 +654,7 @@ class OpenAICompatModel(ModelDefaults):
             self._endpoint,
             json=body,
             headers={**self._headers, "Accept": "text/event-stream"},
-            timeout=httpx.Timeout(_STREAM_IDLE_TIMEOUT, connect=30.0),
+            timeout=httpx2.Timeout(_STREAM_IDLE_TIMEOUT, connect=30.0),
         ) as r:
             if 400 <= r.status_code < 500:
                 err_body = (await r.aread()).decode(errors="replace")
@@ -843,7 +843,7 @@ def _extract_usage(usage: MutableJSON) -> tuple[int, int, int, int]:
 
 
 async def consume_stream(
-    r: httpx.Response,
+    r: httpx2.Response,
     *,
     publish: Callable[[RuntimeEvent], None] | None,
     spec: ModelSpec,

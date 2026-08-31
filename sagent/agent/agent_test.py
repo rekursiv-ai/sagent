@@ -18,7 +18,7 @@ import re
 import threading
 import time
 
-import httpx
+import httpx2
 import pytest
 
 from sagent import (
@@ -716,7 +716,7 @@ async def test_agent_run_does_not_silently_drop_failed_detached_redrive() -> Non
             # Yield once so a cancellation can preempt, mimicking a
             # transient transport failure mid-stream on the re-drive.
             await asyncio.sleep(0)
-            raise httpx.ReadError("transient transport failure")
+            raise httpx2.ReadError("transient transport failure")
 
     model = FailOnRedriveModel()
     a = _build_agent(model=model)
@@ -5531,7 +5531,7 @@ async def test_agent_model_proactive_compaction_failure_short_circuits() -> None
     (transport drop, auth blip, generic ``RuntimeError``), the agent
     surfaces that error verbatim instead of the polished
     ``ContextOverflowError`` -- the original session ``bc528d70`` lost
-    the real ``httpx.RemoteProtocolError`` behind a misleading
+    the real ``httpx2.RemoteProtocolError`` behind a misleading
     "context window exhausted" message because the proactive path
     raised the polished error unconditionally.
     """
