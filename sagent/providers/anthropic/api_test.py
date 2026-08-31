@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from anthropic.types import MessageParam
 
 import anthropic as anthropic_sdk
-import httpx
+import httpx2
 import pytest
 
 from sagent.agent.retry import error_status, is_retryable
@@ -933,8 +933,8 @@ def test_anthropic_byte_413_without_structured_body_stays_byte() -> None:
     guard keys on the 413 STATUS, closing that hole and matching every other
     provider's classifier.
     """
-    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-    response = httpx.Response(413, request=request)
+    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx2.Response(413, request=request)
     err = anthropic_sdk.APIStatusError(
         "request entity too large: maximum exceeded by context window",
         response=response,
@@ -974,8 +974,8 @@ async def test_anthropic_stream_request_too_large_raises_typed_error() -> None:
 
 def _api_status_error(status_code: int, message: str) -> anthropic_sdk.APIStatusError:
     """Construct an APIStatusError as the SDK would, with an arbitrary status."""
-    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-    response = httpx.Response(status_code, request=request)
+    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx2.Response(status_code, request=request)
     body = {
         "type": "error",
         "error": {"type": "invalid_request_error", "message": message},
@@ -985,8 +985,8 @@ def _api_status_error(status_code: int, message: str) -> anthropic_sdk.APIStatus
 
 def _request_too_large_error(message: str) -> anthropic_sdk.APIStatusError:
     """Construct the 413 ``request_too_large`` APIStatusError the SDK yields."""
-    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-    response = httpx.Response(413, request=request)
+    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx2.Response(413, request=request)
     body = {
         "type": "error",
         "error": {"type": "request_too_large", "message": message},
@@ -1008,7 +1008,7 @@ class _ResponseNotReadStatusError(Exception):
     def __init__(self, status_code: int) -> None:
         self.status_code = status_code
         super().__init__("Anthropic streaming request failed")
-        self.__cause__ = httpx.ResponseNotRead()
+        self.__cause__ = httpx2.ResponseNotRead()
 
 
 def test_anthropic_model_is_context_overflow_unusual_status_with_overflow_text() -> (
@@ -1059,8 +1059,8 @@ async def test_anthropic_stream_uses_structured_overflow_body() -> None:
 async def test_anthropic_raw_stream_reads_status_error_body() -> None:
     p = Anthropic.from_key("k")
     sdk = await p.get_sdk()
-    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-    response = httpx.Response(
+    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx2.Response(
         400,
         request=request,
         json={
@@ -1098,8 +1098,8 @@ async def test_anthropic_raw_stream_reads_status_error_body() -> None:
 async def test_anthropic_stream_status_body_overflow_triggers_prompt_too_long() -> None:
     p = Anthropic.from_key("k")
     sdk = await p.get_sdk()
-    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-    response = httpx.Response(
+    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx2.Response(
         400,
         request=request,
         json={
@@ -1130,7 +1130,7 @@ def test_response_not_read_provider_error_preserves_retry_status() -> None:
 
 @pytest.mark.asyncio
 async def test_anthropic_stream_wraps_bare_response_not_read() -> None:
-    # A raw ``httpx.ResponseNotRead`` escaping mid-stream is neither an
+    # A raw ``httpx2.ResponseNotRead`` escaping mid-stream is neither an
     # APIStatusError (so it dodges the overflow branch) nor a transport
     # error (so the retry classifier deems it fatal). It must be wrapped
     # in a user-facing error rather than surface as a bare exception.
@@ -1140,7 +1140,7 @@ async def test_anthropic_stream_wraps_bare_response_not_read() -> None:
         patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
         patch(
             "sagent.providers.anthropic.api._stream_impl",
-            AsyncMock(side_effect=httpx.ResponseNotRead()),
+            AsyncMock(side_effect=httpx2.ResponseNotRead()),
         ),
         pytest.raises(StreamingResponseNotReadError),
     ):
@@ -1154,7 +1154,7 @@ async def test_anthropic_stream_wraps_chained_response_not_read() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-8")
     wrapped = RuntimeError("stream formatting failed")
-    wrapped.__cause__ = httpx.ResponseNotRead()
+    wrapped.__cause__ = httpx2.ResponseNotRead()
     with (
         patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
         patch(
@@ -1178,7 +1178,7 @@ async def test_anthropic_stream_preserves_retryable_status_over_response_not_rea
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-8")
     err = _api_status_error(429, "Rate limited")
-    err.__cause__ = httpx.ResponseNotRead()
+    err.__cause__ = httpx2.ResponseNotRead()
     with (
         patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
         patch(

@@ -334,7 +334,16 @@ class OpenAISubscription(OpenAI):
 
     @classmethod
     @override
-    def from_key(cls, api_key: str, *, base_url: str | None = None) -> OpenAI:
+    # The base returns `Self`; this deliberately returns a SIBLING (`OpenAI`),
+    # because subscription billing cannot use an API key. `Anthropic` avoids the
+    # warning only by redeclaring `from_key` with a concrete return, while
+    # `OpenAI` inherits `OpenAICompat`'s `Self` unchanged.
+    def from_key(  # ty: ignore[invalid-method-override] -- intentional sibling return; see above
+        cls,
+        api_key: str,
+        *,
+        base_url: str | None = None,
+    ) -> OpenAI:
         """Create an API-key provider (delegates to ``OpenAI``).
 
         Subscription billing is incompatible with API keys, so this

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-import httpx
+import httpx2
 import pytest
 
 from sagent.providers.lib.errors import (
@@ -47,25 +47,25 @@ def test_find_response_not_read_searches_both_chain_branches() -> None:
     """
     root = RuntimeError("outer")
     root.__cause__ = ValueError("decoy branch")
-    target = httpx.ResponseNotRead()
+    target = httpx2.ResponseNotRead()
     root.__context__ = target
     assert find_response_not_read(root) is target
 
 
 def test_find_response_not_read_direct() -> None:
-    err = httpx.ResponseNotRead()
+    err = httpx2.ResponseNotRead()
     assert find_response_not_read(err) is err
 
 
 def test_find_response_not_read_via_cause() -> None:
-    inner = httpx.ResponseNotRead()
+    inner = httpx2.ResponseNotRead()
     outer = RuntimeError("formatting failed")
     outer.__cause__ = inner
     assert find_response_not_read(outer) is inner
 
 
 def test_find_response_not_read_via_context() -> None:
-    inner = httpx.ResponseNotRead()
+    inner = httpx2.ResponseNotRead()
     outer = RuntimeError("formatting failed")
     outer.__context__ = inner
     assert find_response_not_read(outer) is inner
@@ -89,7 +89,7 @@ def test_streaming_response_not_read_error_chains_its_raise_cause() -> None:
     A constructor that also assigned ``__cause__`` always lost to the
     ``from`` clause every call site uses, so the kwarg was dead weight.
     """
-    original = httpx.ResponseNotRead()
+    original = httpx2.ResponseNotRead()
 
     def _raise() -> None:
         raise StreamingResponseNotReadError(provider_name="Anthropic") from original
@@ -262,9 +262,9 @@ def test_error_status_code_from_status_attr() -> None:
 
 
 def test_error_status_code_from_response_attr() -> None:
-    request = httpx.Request("POST", "https://example.test")
-    err = httpx.HTTPStatusError(
-        "x", request=request, response=httpx.Response(413, request=request)
+    request = httpx2.Request("POST", "https://example.test")
+    err = httpx2.HTTPStatusError(
+        "x", request=request, response=httpx2.Response(413, request=request)
     )
     assert error_status_code(err) == 413
 

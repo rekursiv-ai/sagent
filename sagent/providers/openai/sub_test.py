@@ -15,6 +15,7 @@ import json
 import time
 
 import httpx
+import httpx2
 import openai
 import pytest
 
@@ -1481,14 +1482,14 @@ class TestStreamResponseNotRead:
         provider = _make_provider(expires_at=time.time() + 3600)
         sdk = MagicMock()
         sdk.responses = MagicMock()
-        sdk.responses.create = AsyncMock(side_effect=httpx.ResponseNotRead())
+        sdk.responses.create = AsyncMock(side_effect=httpx2.ResponseNotRead())
 
         with patch.object(provider, "get_sdk", AsyncMock(return_value=sdk)):
             model = provider.model("gpt-5.5")
             with pytest.raises(StreamingResponseNotReadError) as raised:
                 await model.stream(ModelRequest(messages=[UserMessage(text="hi")]))
 
-        assert not isinstance(raised.value, httpx.ResponseNotRead)
+        assert not isinstance(raised.value, httpx2.ResponseNotRead)
         assert "OpenAI subscription streaming request failed" in str(raised.value)
 
     @pytest.mark.anyio
@@ -1497,7 +1498,7 @@ class TestStreamResponseNotRead:
         sdk = MagicMock()
         sdk.responses = MagicMock()
         err = RuntimeError("SDK failed")
-        err.__cause__ = httpx.ResponseNotRead()
+        err.__cause__ = httpx2.ResponseNotRead()
         sdk.responses.create = AsyncMock(side_effect=err)
 
         with patch.object(provider, "get_sdk", AsyncMock(return_value=sdk)):
@@ -1509,7 +1510,7 @@ class TestStreamResponseNotRead:
 
     def test_response_not_read_context_is_detected(self) -> None:
         err = RuntimeError("SDK failed")
-        err.__context__ = httpx.ResponseNotRead()
+        err.__context__ = httpx2.ResponseNotRead()
 
         assert find_response_not_read(err) is not None
 

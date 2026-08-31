@@ -13,11 +13,14 @@ from sagent.types.model import RequestTooLargeError
 
 
 if TYPE_CHECKING:
-    import httpx
+    # httpx2, not httpx: the exception walked here is raised by the provider
+    # SDKs, and both anthropic 1.2 and openai depend on httpx2. Checking the
+    # httpx class instead silently never matches -- the classes are unrelated.
+    import httpx2
 else:
     from wrapt import lazy_import
 
-    httpx = lazy_import("httpx")
+    httpx2 = lazy_import("httpx2")
 
 
 # HTTP 413 ("Payload Too Large") is the cross-provider signal for the
@@ -246,10 +249,10 @@ class StreamingResponseNotReadError(UserFacingError):
         )
 
 
-def find_response_not_read(exc: BaseException) -> httpx.ResponseNotRead | None:
+def find_response_not_read(exc: BaseException) -> httpx2.ResponseNotRead | None:
     """Walk the ``__cause__``/``__context__`` chain for a ``ResponseNotRead``.
 
-    A streaming provider SDK can raise ``httpx.ResponseNotRead`` (directly
+    A streaming provider SDK can raise ``httpx2.ResponseNotRead`` (directly
     or chained) when it formats an error message by touching a response
     body that was never read. ``ResponseNotRead`` is a usage error, not a
     transport error, so the retry classifier treats it as fatal; callers
@@ -272,7 +275,7 @@ def find_response_not_read(exc: BaseException) -> httpx.ResponseNotRead | None:
         current = pending.pop()
         if id(current) in seen:
             continue
-        if isinstance(current, httpx.ResponseNotRead):
+        if isinstance(current, httpx2.ResponseNotRead):
             return current
         seen.add(id(current))
         pending.extend(
