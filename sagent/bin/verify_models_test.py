@@ -6,7 +6,7 @@ from typing import Self
 
 import sys
 
-import httpx
+import httpx2
 import pytest
 
 from sagent.bin import verify_models
@@ -30,7 +30,7 @@ class _Response:
         self._json_body = json_body or {}
         self.text = text
         self.status_code = status_code
-        self.request = httpx.Request("GET", "https://example.test")
+        self.request = httpx2.Request("GET", "https://example.test")
 
     @property
     def is_success(self) -> bool:
@@ -41,11 +41,13 @@ class _Response:
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
-            response = httpx.Response(
+            response = httpx2.Response(
                 self.status_code,
                 request=self.request,
             )
-            raise httpx.HTTPStatusError("boom", request=self.request, response=response)
+            raise httpx2.HTTPStatusError(
+                "boom", request=self.request, response=response
+            )
 
 
 class _Client:
@@ -102,7 +104,7 @@ class TestFetchGoogle:
                 ],
             }
         )
-        monkeypatch.setattr(httpx, "AsyncClient", _make_client([response]))
+        monkeypatch.setattr(httpx2, "AsyncClient", _make_client([response]))
         assert await verify_models.fetch_google("key") == {
             "gemini-test": verify_models.ModelLimits(
                 max_request_tokens=10,
@@ -123,7 +125,7 @@ class TestFetchOpenai:
             _Response(text="not parseable"),
             _Response(status_code=404),
         ]
-        monkeypatch.setattr(httpx, "AsyncClient", _make_client(responses))
+        monkeypatch.setattr(httpx2, "AsyncClient", _make_client(responses))
         limits = await verify_models.fetch_openai(["ok", "bad", "missing"])
         assert limits == {
             "ok": verify_models.ModelLimits(
@@ -148,7 +150,7 @@ class TestFetchAnthropic:
             _Response({"max_input_tokens": 0, "max_tokens": 10}),
             _Response(status_code=500),
         ]
-        monkeypatch.setattr(httpx, "AsyncClient", _make_client(responses))
+        monkeypatch.setattr(httpx2, "AsyncClient", _make_client(responses))
         limits = await verify_models.fetch_anthropic("key", ["ok", "bad", "err"])
         assert limits == {
             "ok": verify_models.ModelLimits(
@@ -167,7 +169,7 @@ class TestFetchAnthropic:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         monkeypatch.setattr(
-            httpx, "AsyncClient", _make_client([_Response(status_code=404)])
+            httpx2, "AsyncClient", _make_client([_Response(status_code=404)])
         )
         limits = await verify_models.fetch_anthropic("key", ["missing"])
         assert limits == {}

@@ -14,7 +14,6 @@ import io
 import json
 import time
 
-import httpx
 import httpx2
 import openai
 import pytest
@@ -562,7 +561,7 @@ def test_login_manual_advertises_localhost_redirect_uri(
     out = io.StringIO()
     with (
         patch(
-            "sagent.providers.openai.sub.httpx.Client",
+            "sagent.providers.openai.sub.httpx2.Client",
             return_value=http_client,
         ),
         patch.object(
@@ -1274,7 +1273,7 @@ class TestHandleAuthError:
         mock_http.__aexit__ = AsyncMock(return_value=False)
         with (
             patch(
-                "sagent.providers.openai.sub.httpx.AsyncClient",
+                "sagent.providers.openai.sub.httpx2.AsyncClient",
                 return_value=mock_http,
             ),
             patch(
@@ -1311,7 +1310,7 @@ class TestHandleAuthError:
         mock_http.__aexit__ = AsyncMock(return_value=False)
         with (
             patch(
-                "sagent.providers.openai.sub.httpx.AsyncClient",
+                "sagent.providers.openai.sub.httpx2.AsyncClient",
                 return_value=mock_http,
             ),
             patch(
@@ -1372,7 +1371,7 @@ class TestEnsureValidRace:
 
         with (
             patch(
-                "sagent.providers.openai.sub.httpx.AsyncClient",
+                "sagent.providers.openai.sub.httpx2.AsyncClient",
                 return_value=mock_http,
             ),
             patch(
@@ -1475,7 +1474,7 @@ class TestEnsureValidRace:
 
 
 class TestStreamResponseNotRead:
-    """Unread SDK streaming errors must not leak raw httpx exceptions."""
+    """Unread SDK streaming errors must not leak raw httpx2 exceptions."""
 
     @pytest.mark.anyio
     async def test_create_response_not_read_is_user_facing(self) -> None:
@@ -1529,8 +1528,8 @@ class TestStreamAuthRetry:
     @pytest.mark.anyio
     async def test_auth_error_triggers_reload_and_retries_once(self) -> None:
         provider = _make_provider(expires_at=time.time() + 3600)
-        request = httpx.Request("POST", "https://chatgpt.com/backend-api/codex")
-        response = httpx.Response(401, request=request)
+        request = httpx2.Request("POST", "https://chatgpt.com/backend-api/codex")
+        response = httpx2.Response(401, request=request)
         auth_err = openai.AuthenticationError(
             "Unauthorized",
             # openai vendors httpx2; the two Response classes are structurally
@@ -1947,7 +1946,7 @@ class TestRefreshErrors:
 
     Codex's ``auth.openai.com/oauth/token`` endpoint returns 400/401 when
     the refresh token has been rotated, revoked, or expired. The raw
-    ``httpx.HTTPStatusError`` is useless to the user -- it leaks the
+    ``httpx2.HTTPStatusError`` is useless to the user -- it leaks the
     OAuth URL into the terminal. Convert it into a typed, user-facing
     error with actionable text so the renderer can present "Run /login"
     without dumping a traceback.
@@ -1958,15 +1957,15 @@ class TestRefreshErrors:
     async def test_refresh_4xx_raises_auth_refresh_error(self, status: int) -> None:
         """400/401 on the token endpoint -> :class:`AuthRefreshError`."""
         provider = _make_provider(expires_at=0.0)
-        request = httpx.Request("POST", "https://auth.openai.com/oauth/token")
-        response = httpx.Response(status, request=request, text="invalid_grant")
+        request = httpx2.Request("POST", "https://auth.openai.com/oauth/token")
+        response = httpx2.Response(status, request=request, text="invalid_grant")
         mock_http = AsyncMock()
         mock_http.post = AsyncMock(return_value=response)
         mock_http.__aenter__ = AsyncMock(return_value=mock_http)
         mock_http.__aexit__ = AsyncMock(return_value=False)
         with (
             patch(
-                "sagent.providers.openai.sub.httpx.AsyncClient",
+                "sagent.providers.openai.sub.httpx2.AsyncClient",
                 return_value=mock_http,
             ),
             pytest.raises(AuthRefreshError) as excinfo,
@@ -2010,7 +2009,7 @@ class TestRefreshErrors:
         mock_http.__aexit__ = AsyncMock(return_value=False)
         with (
             patch(
-                "sagent.providers.openai.sub.httpx.AsyncClient",
+                "sagent.providers.openai.sub.httpx2.AsyncClient",
                 return_value=mock_http,
             ),
             patch(
@@ -2029,20 +2028,20 @@ class TestRefreshErrors:
     async def test_refresh_5xx_does_not_raise_auth_refresh_error(
         self, status: int
     ) -> None:
-        """Server-side failures bubble as plain ``httpx.HTTPStatusError``."""
+        """Server-side failures bubble as plain ``httpx2.HTTPStatusError``."""
         provider = _make_provider(expires_at=0.0)
-        request = httpx.Request("POST", "https://auth.openai.com/oauth/token")
-        response = httpx.Response(status, request=request, text="upstream down")
+        request = httpx2.Request("POST", "https://auth.openai.com/oauth/token")
+        response = httpx2.Response(status, request=request, text="upstream down")
         mock_http = AsyncMock()
         mock_http.post = AsyncMock(return_value=response)
         mock_http.__aenter__ = AsyncMock(return_value=mock_http)
         mock_http.__aexit__ = AsyncMock(return_value=False)
         with (
             patch(
-                "sagent.providers.openai.sub.httpx.AsyncClient",
+                "sagent.providers.openai.sub.httpx2.AsyncClient",
                 return_value=mock_http,
             ),
-            pytest.raises(httpx.HTTPStatusError),
+            pytest.raises(httpx2.HTTPStatusError),
         ):
             await provider._refresh()
 

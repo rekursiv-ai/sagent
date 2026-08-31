@@ -1168,7 +1168,7 @@ class TestListMembers:
         client.__aenter__ = AsyncMock(return_value=client)
         client.__aexit__ = AsyncMock(return_value=None)
         client.get = AsyncMock(return_value=response)
-        with patch("httpx.AsyncClient", return_value=client):
+        with patch("httpx2.AsyncClient", return_value=client):
             members = await adapter._list_members("C_SRC")
         assert members == ["U1", "U2"]
 
@@ -1181,7 +1181,7 @@ class TestListMembers:
         client.__aenter__ = AsyncMock(return_value=client)
         client.__aexit__ = AsyncMock(return_value=None)
         client.get = AsyncMock(return_value=response)
-        with patch("httpx.AsyncClient", return_value=client):
+        with patch("httpx2.AsyncClient", return_value=client):
             members = await adapter._list_members("C_SRC")
         assert members == []
 
@@ -1195,7 +1195,7 @@ class TestListMembers:
         client.__aenter__ = AsyncMock(return_value=client)
         client.__aexit__ = AsyncMock(return_value=None)
         client.get = AsyncMock(return_value=response)
-        with patch("httpx.AsyncClient", return_value=client):
+        with patch("httpx2.AsyncClient", return_value=client):
             members = await adapter._list_members("C_SRC")
         assert members == []
 
@@ -1209,7 +1209,7 @@ class TestInvite:
         client.__aenter__ = AsyncMock(return_value=client)
         client.__aexit__ = AsyncMock(return_value=None)
         client.post = post
-        with patch("httpx.AsyncClient", return_value=client):
+        with patch("httpx2.AsyncClient", return_value=client):
             await adapter._invite("C_DST", "U1")
         post.assert_awaited_once()
 

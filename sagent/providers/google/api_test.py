@@ -6,7 +6,7 @@ from typing import cast
 
 import logging
 
-import httpx
+import httpx2
 import pytest
 
 from sagent.lib.custom_json import MutableJSON, MutableJSONValue
@@ -189,17 +189,17 @@ async def test_google_stream_parses_text_tool_call_and_finish_reason() -> None:
         b'"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}\n\n'
     )
 
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handle(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             content=sse_body,
             headers={"Content-Type": "text/event-stream"},
         )
 
-    transport = httpx.MockTransport(handle)
+    transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
     m = p.model("gemini-2.5-flash")
-    m._client = httpx.AsyncClient(transport=transport)
+    m._client = httpx2.AsyncClient(transport=transport)
     resp = await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
     assert resp.message.text == "calling"
     assert len(resp.message.tool_calls) == 1
@@ -227,17 +227,17 @@ async def test_google_stream_routes_thought_parts_to_thinking() -> None:
         if isinstance(ev, ModelResponseThinking):
             thinking_chunks.append(ev.text)
 
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handle(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             content=sse_body,
             headers={"Content-Type": "text/event-stream"},
         )
 
-    transport = httpx.MockTransport(handle)
+    transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
     m = p.model("gemini-2.5-flash")
-    m._client = httpx.AsyncClient(transport=transport)
+    m._client = httpx2.AsyncClient(transport=transport)
     resp = await m.stream(
         ModelRequest(messages=[UserMessage(text="x")]),
         publish=_sink,
@@ -258,17 +258,17 @@ async def test_google_stream_logs_and_skips_malformed_json_chunk(
         b'data: {"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}\n\n'
     )
 
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handle(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             content=sse_body,
             headers={"Content-Type": "text/event-stream"},
         )
 
-    transport = httpx.MockTransport(handle)
+    transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
     m = p.model("gemini-2.5-flash")
-    m._client = httpx.AsyncClient(transport=transport)
+    m._client = httpx2.AsyncClient(transport=transport)
     with (
         caplog.at_level(logging.WARNING, logger="sagent.providers.google.api"),
         pytest.raises(StreamInterruptedError) as raised,
@@ -282,17 +282,17 @@ async def test_google_stream_logs_and_skips_malformed_json_chunk(
 async def test_google_stream_eof_without_finish_reason_raises_interrupted() -> None:
     sse_body = b'data: {"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}\n\n'
 
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handle(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             content=sse_body,
             headers={"Content-Type": "text/event-stream"},
         )
 
-    transport = httpx.MockTransport(handle)
+    transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
     m = p.model("gemini-2.5-flash")
-    m._client = httpx.AsyncClient(transport=transport)
+    m._client = httpx2.AsyncClient(transport=transport)
     with pytest.raises(StreamInterruptedError) as raised:
         await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
     assert raised.value.response.message.text == "partial"
@@ -302,17 +302,17 @@ async def test_google_stream_eof_without_finish_reason_raises_interrupted() -> N
 async def test_google_stream_raises_when_all_json_chunks_are_malformed() -> None:
     sse_body = b"data: {not-json}\n\ndata: also-not-json\n\n"
 
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handle(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             content=sse_body,
             headers={"Content-Type": "text/event-stream"},
         )
 
-    transport = httpx.MockTransport(handle)
+    transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
     m = p.model("gemini-2.5-flash")
-    m._client = httpx.AsyncClient(transport=transport)
+    m._client = httpx2.AsyncClient(transport=transport)
     with pytest.raises(ValueError, match="only malformed JSON chunks"):
         await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
 
@@ -325,17 +325,17 @@ async def test_google_stream_max_tokens_finish_reason() -> None:
         b'"finishReason":"MAX_TOKENS"}]}\n\n'
     )
 
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handle(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             content=sse_body,
             headers={"Content-Type": "text/event-stream"},
         )
 
-    transport = httpx.MockTransport(handle)
+    transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
     m = p.model("gemini-2.5-flash")
-    m._client = httpx.AsyncClient(transport=transport)
+    m._client = httpx2.AsyncClient(transport=transport)
     resp = await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
     assert resp.stop_reason == "max_tokens"
 
@@ -503,7 +503,7 @@ def test_build_request_without_thinking_keeps_temperature() -> None:
 async def test_google_model_close_closes_reusable_http_client() -> None:
     p = Google.from_key("k")
     m = p.model("gemini-2.5-flash")
-    client = httpx.AsyncClient()
+    client = httpx2.AsyncClient()
     m._client = client
     await m.close()
     assert client.is_closed
@@ -539,13 +539,13 @@ async def test_google_stream_413_token_body_raises_prompt_too_long() -> None:
     window helps) rather than routing to byte-overflow recovery.
     """
 
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(413, text="Input too large for model context.")
+    def handle(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(413, text="Input too large for model context.")
 
-    transport = httpx.MockTransport(handle)
+    transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
     m = p.model("gemini-2.5-flash")
-    m._client = httpx.AsyncClient(transport=transport)
+    m._client = httpx2.AsyncClient(transport=transport)
     with pytest.raises(PromptTooLongError):
         await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
 
@@ -558,13 +558,13 @@ async def test_google_stream_413_byte_body_raises_request_too_large() -> None:
     byte-overflow recovery (shed attachment bytes), not token-overflow.
     """
 
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(413, text="Request entity too large.")
+    def handle(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(413, text="Request entity too large.")
 
-    transport = httpx.MockTransport(handle)
+    transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
     m = p.model("gemini-2.5-flash")
-    m._client = httpx.AsyncClient(transport=transport)
+    m._client = httpx2.AsyncClient(transport=transport)
     with pytest.raises(RequestTooLargeError):
         await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
 
@@ -573,15 +573,15 @@ async def test_google_stream_413_byte_body_raises_request_too_large() -> None:
 async def test_google_stream_400_exceeds_maximum_normalizes() -> None:
     """The ``exceeds the maximum`` substring is the canonical Gemini overflow phrase."""
 
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handle(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             400, text="The input token count exceeds the maximum allowed."
         )
 
-    transport = httpx.MockTransport(handle)
+    transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
     m = p.model("gemini-2.5-flash")
-    m._client = httpx.AsyncClient(transport=transport)
+    m._client = httpx2.AsyncClient(transport=transport)
     with pytest.raises(PromptTooLongError):
         await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
 
@@ -591,14 +591,14 @@ async def test_google_stream_400_too_long_raises_prompt_too_long() -> None:
     """Stream path normalizes 4xx with overflow body to ``PromptTooLongError``."""
     sse_body = b'data: {"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}\n\n'
 
-    def handle(request: httpx.Request) -> httpx.Response:
+    def handle(request: httpx2.Request) -> httpx2.Response:
         del request
-        return httpx.Response(400, text="Input too long for model context.")
+        return httpx2.Response(400, text="Input too long for model context.")
 
-    transport = httpx.MockTransport(handle)
+    transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
     m = p.model("gemini-2.5-flash")
-    m._client = httpx.AsyncClient(transport=transport)
+    m._client = httpx2.AsyncClient(transport=transport)
     del sse_body  # only error path exercised
     with pytest.raises(PromptTooLongError):
         await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
@@ -610,14 +610,14 @@ async def test_google_stream_500_with_overflow_keyword_is_http_error_not_overflo
 ):
     """Stream 5xx with overflow keywords propagates as HTTPStatusError."""
 
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(500, text="internal error: too long traceback")
+    def handle(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(500, text="internal error: too long traceback")
 
-    transport = httpx.MockTransport(handle)
+    transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
     m = p.model("gemini-2.5-flash")
-    m._client = httpx.AsyncClient(transport=transport)
-    with pytest.raises(httpx.HTTPStatusError):
+    m._client = httpx2.AsyncClient(transport=transport)
+    with pytest.raises(httpx2.HTTPStatusError):
         await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
 
 
@@ -626,14 +626,14 @@ async def test_google_actual_request_tokens_hits_count_tokens_endpoint() -> None
     """``actual_request_tokens`` POSTs to ``:countTokens`` and reads ``totalTokens``."""
     seen_paths: list[str] = []
 
-    def handle(request: httpx.Request) -> httpx.Response:
+    def handle(request: httpx2.Request) -> httpx2.Response:
         seen_paths.append(request.url.path)
-        return httpx.Response(200, json={"totalTokens": 314})
+        return httpx2.Response(200, json={"totalTokens": 314})
 
-    transport = httpx.MockTransport(handle)
+    transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
     m = p.model("gemini-2.5-flash")
-    m._client = httpx.AsyncClient(transport=transport)
+    m._client = httpx2.AsyncClient(transport=transport)
     n = await m.actual_request_tokens(
         ModelRequest(messages=[UserMessage(text="ping")]),
     )
@@ -643,13 +643,13 @@ async def test_google_actual_request_tokens_hits_count_tokens_endpoint() -> None
 
 @pytest.mark.asyncio
 async def test_google_stream_400_other_raises_value_error() -> None:
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(400, text="malformed request body")
+    def handle(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(400, text="malformed request body")
 
-    transport = httpx.MockTransport(handle)
+    transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
     m = p.model("gemini-2.5-flash")
-    m._client = httpx.AsyncClient(transport=transport)
+    m._client = httpx2.AsyncClient(transport=transport)
     with pytest.raises(ValueError, match="Google API 400"):
         await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
 

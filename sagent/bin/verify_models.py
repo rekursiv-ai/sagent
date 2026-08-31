@@ -36,7 +36,7 @@ import os
 import re
 import sys
 
-import httpx
+import httpx2
 
 from sagent import providers
 from sagent.providers.anthropic.api import Anthropic
@@ -72,7 +72,7 @@ async def fetch_google(api_key: str) -> dict[str, ModelLimits]:
 
     """
     api = "https://generativelanguage.googleapis.com/v1beta/models"
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx2.AsyncClient(timeout=30) as client:
         r = await client.get(f"{api}?key={api_key}")
         r.raise_for_status()
         out: dict[str, ModelLimits] = {}
@@ -104,7 +104,7 @@ async def fetch_openai(model_ids: list[str]) -> dict[str, ModelLimits]:
     """
     out: dict[str, ModelLimits] = {}
     doc = "https://developers.openai.com/api/docs/models"
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+    async with httpx2.AsyncClient(timeout=30, follow_redirects=True) as client:
         for mid in model_ids:
             url = f"{doc}/{mid}"
             try:
@@ -115,7 +115,7 @@ async def fetch_openai(model_ids: list[str]) -> dict[str, ModelLimits]:
                     out[mid] = limits
                 else:
                     _out(f"  [warn] {mid}: could not parse limits from {url}")
-            except httpx.HTTPStatusError as e:
+            except httpx2.HTTPStatusError as e:
                 _out(f"  [warn] {mid}: HTTP {e.response.status_code}")
     return out
 
@@ -158,7 +158,7 @@ async def fetch_anthropic(
         "x-api-key": api_key,
         "anthropic-version": "2023-06-01",
     }
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx2.AsyncClient(timeout=30) as client:
         for mid in model_ids:
             try:
                 r = await client.get(f"{api}/{mid}", headers=headers)
@@ -173,7 +173,7 @@ async def fetch_anthropic(
                     )
                 else:
                     _out(f"  [warn] {mid}: missing limits in API response")
-            except httpx.HTTPStatusError as e:
+            except httpx2.HTTPStatusError as e:
                 if e.response.status_code == 404:
                     _out(f"  [warn] {mid}: not found in API")
                 else:

@@ -31,11 +31,11 @@ import time
 
 
 if TYPE_CHECKING:
-    import httpx
+    import httpx2
 else:
     from wrapt import lazy_import
 
-    httpx = lazy_import("httpx")  # 168ms
+    httpx2 = lazy_import("httpx2")  # 168ms
 
 from sagent.lib.durations import humanize_duration
 from sagent.types import runtime as runtime_types
@@ -382,7 +382,7 @@ def _response_body_text(response: object) -> str:
         if isinstance(text, str):
             return text
         raw = getattr(response, "content", None)
-    except httpx.ResponseNotRead:
+    except httpx2.ResponseNotRead:
         return ""
     if isinstance(raw, (bytes, bytearray)):
         try:
@@ -602,7 +602,7 @@ async def send_with_retry(
             if live:
                 prior_emitted = "".join(chunks)
             status = error_status(e)
-            # ``httpx.RemoteProtocolError`` ("peer closed connection without
+            # ``httpx2.RemoteProtocolError`` ("peer closed connection without
             # sending complete message body") shows up when an upstream edge
             # cuts a streamed request body mid-flight -- typical on very
             # large compaction payloads. These carry no HTTP status, so the
@@ -610,7 +610,7 @@ async def send_with_retry(
             # the caller opted into ``persistent_retry`` (compactor, batch
             # jobs), promote protocol errors into the long-backoff branch
             # so transient connection cuts don't fail the operation.
-            is_protocol_flake = isinstance(e, httpx.RemoteProtocolError)
+            is_protocol_flake = isinstance(e, httpx2.RemoteProtocolError)
             rate_limited = is_rate_limited(e)
             # A 529's body type is ``overloaded_error``; in-band it arrives
             # on a 200 stream, so the status check alone misses it -- the
@@ -703,7 +703,7 @@ async def send_with_retry(
             # Only surface the user-facing "model service suspended" banner
             # for waits that are actually worth interrupting the user over:
             # a server-advertised backoff, or a local backoff past a short
-            # threshold. Sub-second transport blips (e.g. an httpx ReadError
+            # threshold. Sub-second transport blips (e.g. an httpx2 ReadError
             # that recovers on the next attempt) retry silently -- otherwise
             # every transient network hiccup paints a scary suspension banner
             # for a wait the user never even perceives. The retry is still
@@ -744,7 +744,7 @@ def _backoff_delay(attempt: int, *, cap: float) -> float:
 
 def _is_retryable(error: Exception, depth: int) -> bool:
     """Walk transport/status/cause chain (depth-capped) for retryability."""
-    if isinstance(error, (httpx.TransportError, ConnectionError, TimeoutError)):
+    if isinstance(error, (httpx2.TransportError, ConnectionError, TimeoutError)):
         return True
     status = _error_status(error, 0)
     if status is not None and (status in RETRYABLE_STATUS_CODES or status >= 500):

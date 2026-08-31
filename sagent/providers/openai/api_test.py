@@ -11,7 +11,7 @@ import os
 
 from PIL import Image
 
-import httpx
+import httpx2
 import pytest
 import tiktoken
 
@@ -40,35 +40,59 @@ async def test_every_catalog_row_is_a_model_the_vendor_serves() -> None:
     if not key:
         pytest.skip("OPENAI_API_KEY not set")
 
-    async def _is_dead(client: httpx.AsyncClient, model_id: str) -> bool:
-        response = await client.post(
-            "https://api.openai.com/v1/responses",
-            headers={"authorization": f"Bearer {key}"},
-            json={
-                "model": model_id,
-                "input": [{"role": "user", "content": "."}],
-                "max_output_tokens": 16,
-            },
-        )
-        if response.status_code == 200:
-            return False
-        error = DictCodec.coerce(DictCodec.coerce(response.json()).get("error"))
-        return StrCodec.coerce(error.get("code")) == "model_not_found"
+    # Only `model_not_found` is evidence. A timeout or 5xx says the vendor was
+    # slow, which is not a claim about the catalog -- returning `True` there
+    # reported a live model as retired, and returning `False` would hide a real
+    # one. Unresolved is its own verdict, counted but never failing.
+    async def _is_dead(client: httpx2.AsyncClient, model_id: str) -> bool | None:
+        for attempt in range(3):
+            try:
+                response = await client.post(
+                    "https://api.openai.com/v1/responses",
+                    headers={"authorization": f"Bearer {key}"},
+                    json={
+                        "model": model_id,
+                        "input": [{"role": "user", "content": "."}],
+                        "max_output_tokens": 16,
+                    },
+                )
+            except httpx2.TransportError:
+                await asyncio.sleep(2**attempt)
+                continue
+            if response.status_code == 200:
+                return False
+            if response.status_code >= 500 or response.status_code == 429:
+                await asyncio.sleep(2**attempt)
+                continue
+            error = DictCodec.coerce(DictCodec.coerce(response.json()).get("error"))
+            return StrCodec.coerce(error.get("code")) == "model_not_found"
+        return None
 
-    # The rows are independent, so probing serially costs the sum of every
-    # round-trip rather than the slowest one.
+    # Bounded concurrency: firing one connection per row made the slowest
+    # response the whole test's fate, and `ReadTimeout` under that fan-out was
+    # the observed failure rather than any catalog defect.
     model_ids = tuple(openai_catalog.MODELS)
-    limits = httpx.Limits(max_connections=len(model_ids))
-    async with httpx.AsyncClient(timeout=60.0, limits=limits) as client:
+    gate = asyncio.Semaphore(8)
+
+    async def _probe(client: httpx2.AsyncClient, model_id: str) -> bool | None:
+        async with gate:
+            return await _is_dead(client, model_id)
+
+    async with httpx2.AsyncClient(timeout=60.0) as client:
         verdicts = await asyncio.gather(
-            *(_is_dead(client, model_id) for model_id in model_ids)
+            *(_probe(client, model_id) for model_id in model_ids)
         )
     dead = [
         model_id
         for model_id, is_dead in zip(model_ids, verdicts, strict=True)
-        if is_dead
+        if is_dead is True
     ]
     assert not dead, f"catalog names models the API does not serve: {dead}"
+    # Positive control: every row unresolved means the probe measured nothing,
+    # which must not read as a pass.
+    assert any(verdict is not None for verdict in verdicts), (
+        "every catalog probe failed to reach the API; nothing was verified"
+    )
 
 
 def test_openai_from_key_constructs() -> None:

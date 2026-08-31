@@ -8,7 +8,7 @@ from typing import ClassVar, cast
 
 import json
 
-import httpx
+import httpx2
 import pytest
 
 from sagent.lib.custom_json import MutableJSON
@@ -225,16 +225,16 @@ async def test_consume_stream_tracks_and_bills_cache_write_tokens() -> None:
     ) == pytest.approx((3 + 1306 * 1.25) / 1_000_000)
 
 
-def _sse_response(events: list[MutableJSON]) -> httpx.Response:
-    """Build an in-memory httpx Response carrying SSE lines."""
+def _sse_response(events: list[MutableJSON]) -> httpx2.Response:
+    """Build an in-memory httpx2 Response carrying SSE lines."""
     lines = [f"data: {json.dumps(e)}\n\n" for e in events]
     lines.append("data: [DONE]\n\n")
     return _sse_response_body("".join(lines).encode())
 
 
-def _sse_response_body(body: bytes) -> httpx.Response:
-    """Build an in-memory httpx Response carrying raw SSE bytes."""
-    return httpx.Response(
+def _sse_response_body(body: bytes) -> httpx2.Response:
+    """Build an in-memory httpx2 Response carrying raw SSE bytes."""
+    return httpx2.Response(
         200,
         content=body,
         headers={"Content-Type": "text/event-stream"},
@@ -584,7 +584,7 @@ async def test_actual_request_tokens_falls_back_to_approx_for_unknown_model() ->
 async def test_model_close_closes_reusable_http_client() -> None:
     p = _DummyProvider.from_key("k")
     m = p.model("stub-1")
-    client = httpx.AsyncClient()
+    client = httpx2.AsyncClient()
     m._client = client
     await m.close()
     assert client.is_closed
@@ -592,24 +592,24 @@ async def test_model_close_closes_reusable_http_client() -> None:
 
 
 def _make_provider_with_mock(
-    handler: httpx.MockTransport,
+    handler: httpx2.MockTransport,
 ) -> tuple[_DummyProvider, OpenAICompatModel]:
     p = _DummyProvider.from_key("test-key")
     m = p.model()
     # Inject a pre-built client so ``_get_client`` returns it.
-    m._client = httpx.AsyncClient(transport=handler)
+    m._client = httpx2.AsyncClient(transport=handler)
     return p, m
 
 
 @pytest.mark.asyncio
 async def test_stream_unrelated_400_propagates_as_http_error() -> None:
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(400, text="malformed body")
+    def handle(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(400, text="malformed body")
 
-    transport = httpx.MockTransport(handle)
+    transport = httpx2.MockTransport(handle)
     _, model = _make_provider_with_mock(transport)
     req = ModelRequest(messages=[UserMessage(text="x")])
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(httpx2.HTTPStatusError):
         await model.stream(req)
 
 
@@ -621,14 +621,14 @@ async def test_stream_parses_sse_via_mock_transport() -> None:
         b"data: [DONE]\n\n"
     )
 
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handle(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             content=sse_body,
             headers={"Content-Type": "text/event-stream"},
         )
 
-    transport = httpx.MockTransport(handle)
+    transport = httpx2.MockTransport(handle)
     _, model = _make_provider_with_mock(transport)
     chunks: list[str] = []
 
@@ -665,10 +665,10 @@ async def test_stream_4xx_context_overflow_raises_prompt_too_long(
     window helps) rather than routing to byte-overflow recovery.
     """
 
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(status_code, text=message)
+    def handle(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(status_code, text=message)
 
-    transport = httpx.MockTransport(handle)
+    transport = httpx2.MockTransport(handle)
     _, model = _make_provider_with_mock(transport)
     with pytest.raises(PromptTooLongError):
         await model.stream(ModelRequest(messages=[UserMessage(text="x")]))
@@ -682,10 +682,10 @@ async def test_stream_413_byte_body_raises_request_too_large() -> None:
     recovery (shed attachment bytes), not token-overflow recovery.
     """
 
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(413, text="Request entity too large")
+    def handle(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(413, text="Request entity too large")
 
-    transport = httpx.MockTransport(handle)
+    transport = httpx2.MockTransport(handle)
     _, model = _make_provider_with_mock(transport)
     with pytest.raises(RequestTooLargeError):
         await model.stream(ModelRequest(messages=[UserMessage(text="x")]))
@@ -695,12 +695,12 @@ async def test_stream_413_byte_body_raises_request_too_large() -> None:
 async def test_stream_500_with_overflow_keyword_is_http_error_not_overflow() -> None:
     """5xx server errors are infrastructure, never overflow (stream path)."""
 
-    def handle(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(500, text="internal error: too long traceback")
+    def handle(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(500, text="internal error: too long traceback")
 
-    transport = httpx.MockTransport(handle)
+    transport = httpx2.MockTransport(handle)
     _, model = _make_provider_with_mock(transport)
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(httpx2.HTTPStatusError):
         await model.stream(ModelRequest(messages=[UserMessage(text="x")]))
 
 
