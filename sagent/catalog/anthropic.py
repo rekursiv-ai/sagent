@@ -101,6 +101,24 @@ def _prices(
 # which finds the same two counting regimes.
 MODELS: Mapping[str, ModelCapability] = MappingProxyType(
     {
+        "claude-fable-5-1": ModelCapability(
+            model_id="claude-fable-5-1",
+            context_limits=_windowed(edge=2576, default=1_000_000),
+            prices=_prices(request=10.0, response=50.0),
+            chars_per_token=2.38,
+            supported_thinking_efforts=MappingProxyType(
+                {
+                    "low": "low",
+                    "medium": "medium",
+                    "high": "high",
+                    "xhigh": "xhigh",
+                    "max": "max",
+                }
+            ),
+            supported_thinking_budgets=frozenset({"auto"}),
+            supported_thinking_outputs=frozenset({"redacted"}),
+            fast=False,
+        ),
         "claude-fable-5": ModelCapability(
             model_id="claude-fable-5",
             context_limits=_windowed(edge=2576, default=1_000_000),

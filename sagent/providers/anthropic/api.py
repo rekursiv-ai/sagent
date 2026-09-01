@@ -139,7 +139,9 @@ _DEFAULT_API_TARGET_INPUT_TOKENS = (
     40_000  # config-globals: ignore -- target input-token dial
 )
 
-_DEFAULT_1M_MODELS = frozenset({"claude-fable-5", "claude-sonnet-5", "claude-opus-5"})
+_DEFAULT_1M_MODELS = frozenset(
+    {"claude-fable-5-1", "claude-fable-5", "claude-sonnet-5", "claude-opus-5"}
+)
 
 
 def supports_fast_mode(model_id: str) -> bool:
@@ -174,6 +176,7 @@ def supports_fast_mode(model_id: str) -> bool:
 # the +1m variants identically (same base model).
 _CONTEXT_MANAGEMENT_MODELS = frozenset(
     {
+        "claude-fable-5-1",
         "claude-fable-5",
         "claude-opus-5",
         "claude-opus-4-8",

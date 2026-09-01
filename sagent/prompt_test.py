@@ -157,6 +157,12 @@ def test_environment_section_fable_has_marketing_name() -> None:
     assert "Claude Fable 5" in out
 
 
+def test_environment_section_fable_5_1_has_marketing_name() -> None:
+    out = environment("claude-fable-5-1+1m")
+    assert "Claude Fable 5.1" in out
+    assert "June 2026" in out
+
+
 def test_environment_section_sonnet_5_has_marketing_name() -> None:
     out = environment("claude-sonnet-5+1m")
     assert "Claude Sonnet 5" in out
