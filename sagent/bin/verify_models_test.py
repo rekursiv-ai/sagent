@@ -10,13 +10,15 @@ import httpx2
 import pytest
 
 from sagent.bin import verify_models
-from sagent.types.model import Limits, ModelCapability
+from sagent.types.model import ModelCapability, ModelLimits
 
 
 def _cap(request: int, response: int) -> ModelCapability:
     """A capability carrying only the two limits ``compare`` reads."""
     return ModelCapability(
-        context_limits=Limits(max_request_tokens=request, max_response_tokens=response)
+        context_limits=ModelLimits(
+            max_request_tokens=request, max_response_tokens=response
+        )
     )
 
 
@@ -80,7 +82,7 @@ class TestParseOpenaiPage:
         <span>16,384 max output tokens</span>
         """
         limits = verify_models._parse_openai_page(html)
-        assert limits == verify_models.ModelLimits(
+        assert limits == verify_models.LiveLimits(
             max_request_tokens=128_000,
             max_response_tokens=16_384,
         )
@@ -106,7 +108,7 @@ class TestFetchGoogle:
         )
         monkeypatch.setattr(httpx2, "AsyncClient", _make_client([response]))
         assert await verify_models.fetch_google("key") == {
-            "gemini-test": verify_models.ModelLimits(
+            "gemini-test": verify_models.LiveLimits(
                 max_request_tokens=10,
                 max_response_tokens=20,
             )
@@ -128,7 +130,7 @@ class TestFetchOpenai:
         monkeypatch.setattr(httpx2, "AsyncClient", _make_client(responses))
         limits = await verify_models.fetch_openai(["ok", "bad", "missing"])
         assert limits == {
-            "ok": verify_models.ModelLimits(
+            "ok": verify_models.LiveLimits(
                 max_request_tokens=1000,
                 max_response_tokens=200,
             )
@@ -153,7 +155,7 @@ class TestFetchAnthropic:
         monkeypatch.setattr(httpx2, "AsyncClient", _make_client(responses))
         limits = await verify_models.fetch_anthropic("key", ["ok", "bad", "err"])
         assert limits == {
-            "ok": verify_models.ModelLimits(
+            "ok": verify_models.LiveLimits(
                 max_request_tokens=100,
                 max_response_tokens=10,
             )
@@ -187,15 +189,15 @@ class TestCompare:
             "dead": _cap(1, 2),
         }
         live = {
-            "same": verify_models.ModelLimits(
+            "same": verify_models.LiveLimits(
                 max_request_tokens=10,
                 max_response_tokens=20,
             ),
-            "diff": verify_models.ModelLimits(
+            "diff": verify_models.LiveLimits(
                 max_request_tokens=3,
                 max_response_tokens=4,
             ),
-            "new": verify_models.ModelLimits(
+            "new": verify_models.LiveLimits(
                 max_request_tokens=5,
                 max_response_tokens=6,
             ),
@@ -209,7 +211,7 @@ class TestCompare:
     def test_reports_all_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
         known = {"m": _cap(1, 2)}
         live = {
-            "m": verify_models.ModelLimits(max_request_tokens=1, max_response_tokens=2)
+            "m": verify_models.LiveLimits(max_request_tokens=1, max_response_tokens=2)
         }
         assert verify_models.compare("Provider", known, live) == 0
         assert "all 1 models OK" in capsys.readouterr().out
@@ -236,9 +238,9 @@ class TestMain:
 
         async def fake_fetch_openai(
             _: list[str],
-        ) -> dict[str, verify_models.ModelLimits]:
+        ) -> dict[str, verify_models.LiveLimits]:
             return {
-                "extra": verify_models.ModelLimits(
+                "extra": verify_models.LiveLimits(
                     max_request_tokens=1,
                     max_response_tokens=1,
                 )
@@ -258,7 +260,7 @@ class TestMain:
 
         async def fake_fetch_google(
             _: str,
-        ) -> dict[str, verify_models.ModelLimits]:
+        ) -> dict[str, verify_models.LiveLimits]:
             return {}
 
         monkeypatch.setattr(verify_models, "fetch_google", fake_fetch_google)
@@ -288,7 +290,7 @@ class TestMain:
         async def fake_fetch_anthropic(
             _key: str,
             _ids: list[str],
-        ) -> dict[str, verify_models.ModelLimits]:
+        ) -> dict[str, verify_models.LiveLimits]:
             return {}
 
         monkeypatch.setattr(verify_models, "fetch_anthropic", fake_fetch_anthropic)

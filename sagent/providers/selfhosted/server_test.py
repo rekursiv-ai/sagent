@@ -11,6 +11,7 @@ from typing import cast
 
 import json
 
+from sagent.catalog.cost import PriceCatalogProduct
 from sagent.lib.custom_json import MutableJSON
 from sagent.providers.selfhosted.server import (
     SelfHostedModel,
@@ -27,7 +28,6 @@ from sagent.providers.selfhosted.server import (
     _tool_preamble,
     _tool_schema,
 )
-from sagent.types.cost import PriceCatalogProduct
 from sagent.types.model import ModelRequest
 from sagent.types.runtime import (
     AssistantMessage,

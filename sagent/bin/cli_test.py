@@ -58,15 +58,15 @@ from sagent.bin.cli import (
     parse_agent_args,
     resolve_tools,
 )
-from sagent.providers import PROVIDER_NAMES
-from sagent.sessions import SessionInfo, project_dir
-from sagent.testing import FakeAgent
-from sagent.types.cost import (
+from sagent.catalog.cost import (
     PriceCatalog,
     PriceCatalogProduct,
     TokenPrice,
 )
-from sagent.types.model import Limits, Model, ModelSpec
+from sagent.providers import PROVIDER_NAMES
+from sagent.sessions import SessionInfo, project_dir
+from sagent.testing import FakeAgent
+from sagent.types.model import Model, ModelLimits, ModelSpec
 from sagent.types.providers import ProviderOptions
 from sagent.types.runtime import (
     AssistantMessage,
@@ -174,7 +174,7 @@ class _ChildStubModel:
     def spec(self) -> ModelSpec:
         return ModelSpec(
             model_id=self.model_id,
-            context_limits=Limits(
+            context_limits=ModelLimits(
                 max_request_tokens=self.max_request_tokens,
                 max_response_tokens=self.max_response_tokens,
             ),

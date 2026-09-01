@@ -55,9 +55,9 @@ else:
 from anthropic.types.raw_message_stream_event import RawMessageStreamEvent
 
 from sagent import types
+from sagent.catalog import anthropic as anthropic_catalog
 from sagent.lib import debug_log
 from sagent.lib.custom_json import MutableJSON, MutableJSONValue, json_unfreeze
-from sagent.providers.anthropic import catalog as anthropic_catalog
 from sagent.providers.lib.errors import (
     StreamingResponseNotReadError,
     error_status_code,

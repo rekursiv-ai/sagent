@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from sagent.types.cost import (
+from sagent.catalog.cost import (
     PriceCatalog,
     PriceCatalogProduct,
     TokenCost,

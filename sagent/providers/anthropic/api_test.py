@@ -13,6 +13,11 @@ import httpx2
 import pytest
 
 from sagent.agent.retry import error_status, is_retryable
+from sagent.catalog.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenPrice,
+)
 from sagent.lib.custom_json import IntCodec, MutableJSON
 from sagent.providers.anthropic.api import (
     Anthropic,
@@ -31,13 +36,8 @@ from sagent.providers.anthropic.api import (
 )
 from sagent.providers.lib.errors import StreamingResponseNotReadError
 from sagent.providers.lib.id_remap import IdRemapper
-from sagent.types.cost import (
-    PriceCatalog,
-    PriceCatalogProduct,
-    TokenPrice,
-)
 from sagent.types.model import (
-    Limits,
+    ModelLimits,
     ModelRequest,
     ModelResponse,
     ModelSpec,
@@ -891,7 +891,7 @@ def test_anthropic_image_byte_limits_read_from_spec_not_constant() -> None:
         provider=Anthropic.from_key("k"),
         model_id="claude-opus-4-7",
         spec=ModelSpec(
-            context_limits=Limits(
+            context_limits=ModelLimits(
                 max_image_edge_px=4096,
                 max_image_bytes=7 * 1024 * 1024,
                 max_request_bytes=15 * 1024 * 1024,

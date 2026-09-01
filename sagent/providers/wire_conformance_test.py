@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, ClassVar, Protocol
 
 import pytest
 
+from sagent.catalog.thinking import ALL_THINKING_EFFORTS
 from sagent.providers import PROVIDER_NAMES
 from sagent.providers.anthropic.api import Anthropic, _AnthropicModel
 from sagent.providers.dashscope.api import DashScope
@@ -33,11 +34,7 @@ from sagent.providers.minimax.api import MiniMax
 from sagent.providers.moonshot.api import Moonshot
 from sagent.providers.openai.api import OpenAI
 from sagent.providers.openai.compat import OpenAICompatModel
-from sagent.types.model import (
-    ALL_THINKING_EFFORTS,
-    Limits,
-    ModelRequest,
-)
+from sagent.types.model import ModelLimits, ModelRequest
 from sagent.types.providers import (
     UnsupportedTagError,
     resolve,
@@ -208,7 +205,7 @@ def test_every_advertised_context_and_tier_resolves(
     roles = provider.ROLES
     transport = provider.TRANSPORT
     limits = caps[model_id].context_limits
-    contexts = [""] if isinstance(limits, Limits) else list(limits)
+    contexts = [""] if isinstance(limits, ModelLimits) else list(limits)
     for context in contexts:
         spec = resolve(
             model_id + context, models=caps, roles=roles, transport=transport

@@ -18,9 +18,9 @@ import dataclasses
 from sagent.types.model import (
     CONTEXT_TAGS,
     LATENCY_TAGS,
-    Limits,
     Model,
     ModelCapability,
+    ModelLimits,
     ModelSpec,
     split_model_id,
 )
@@ -93,8 +93,8 @@ def resolve(
         raise UnknownModelError(f"Unknown model {model_id!r}. Known models: {known}")
     limits = cap.context_limits
     offered_contexts = cast(
-        Mapping[str, Limits],
-        ({} if isinstance(limits, Limits) else limits),
+        Mapping[str, ModelLimits],
+        ({} if isinstance(limits, ModelLimits) else limits),
     )
     if context and context not in offered_contexts:
         offered = ", ".join(sorted(t for t in offered_contexts if t)) or "(none)"

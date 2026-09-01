@@ -21,7 +21,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import ClassVar
 
-from sagent.providers.minimax import catalog as minimax_catalog
+from sagent.catalog import minimax as minimax_catalog
 from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,

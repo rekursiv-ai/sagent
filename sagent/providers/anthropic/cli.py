@@ -38,6 +38,8 @@ import subprocess
 import tempfile
 
 from sagent import types
+from sagent.catalog import anthropic as anthropic_catalog
+from sagent.catalog.cost import TokenCost
 from sagent.lib.custom_json import (
     JSON,
     FloatCodec,
@@ -45,7 +47,6 @@ from sagent.lib.custom_json import (
     MutableJSON,
     validate_json_schema,
 )
-from sagent.providers.anthropic import catalog as anthropic_catalog
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.lib.cli_respawn import respawn_for_cadence
 from sagent.providers.lib.errors import (
@@ -66,7 +67,6 @@ from sagent.providers.lib.subproc import (
     Subproc,
     SubprocessTransportError,
 )
-from sagent.types.cost import TokenCost
 from sagent.types.model import (
     ModelCapability,
     ModelRequest,

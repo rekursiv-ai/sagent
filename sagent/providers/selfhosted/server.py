@@ -53,18 +53,18 @@ import re
 import time
 import uuid
 
+from sagent.catalog.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenPrice,
+)
 from sagent.lib import token_count
 from sagent.lib.custom_json import MutableJSON, MutableJSONValue, json_unfreeze
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.lib.stop_reason import normalize_stop_reason
-from sagent.types.cost import (
-    PriceCatalog,
-    PriceCatalogProduct,
-    TokenPrice,
-)
 from sagent.types.model import (
-    Limits,
+    ModelLimits,
     ModelRequest,
     ModelResponse,
     ModelSpec,
@@ -505,7 +505,7 @@ class SelfHostedModel(ModelDefaults):
         # comes from the loaded model, not a published catalog.
         self.spec = ModelSpec(
             model_id=provider.hosted_model_id,
-            context_limits=Limits(
+            context_limits=ModelLimits(
                 max_request_tokens=provider.hosted_max_request_tokens,
                 max_response_tokens=provider.hosted_max_response_tokens,
             ),

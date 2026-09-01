@@ -15,10 +15,10 @@ import httpx2
 import pytest
 import tiktoken
 
+from sagent.catalog import openai as openai_catalog
+from sagent.catalog.cost import PriceCatalogProduct
 from sagent.lib.custom_json import DictCodec, StrCodec
-from sagent.providers.openai import catalog as openai_catalog
 from sagent.providers.openai.api import OpenAI
-from sagent.types.cost import PriceCatalogProduct
 from sagent.types.model import ModelRequest
 from sagent.types.runtime import UserMessage
 from sagent.types.tools import Tool

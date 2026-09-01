@@ -36,8 +36,8 @@ from sagent.tools.core import (
 )
 from sagent.types.model import (
     CONTEXT_TAGS,
-    Limits,
     ModelCapability,
+    ModelLimits,
     base_model_id,
 )
 
@@ -778,7 +778,7 @@ def _window_variant_hint(agent: Agent, model: types.model.Model, requested: int)
     for tag in CONTEXT_TAGS:
         candidate = base + tag
         limits = cap.context_limits
-        if isinstance(limits, Limits):
+        if isinstance(limits, ModelLimits):
             continue
         window = getattr(limits.get(tag), "max_request_tokens", 0)
         if candidate != model.spec.tagged_model_id and window >= requested:

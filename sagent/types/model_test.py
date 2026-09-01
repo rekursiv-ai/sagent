@@ -7,20 +7,18 @@ from typing import cast
 
 import pytest
 
-from sagent.providers.anthropic import (
-    api as anthropic,
-    catalog as anthropic_catalog,
-)
-from sagent.types.cost import (
+from sagent.catalog import anthropic as anthropic_catalog
+from sagent.catalog.cost import (
     PriceCatalog,
     PriceCatalogProduct,
     TokenPrice,
 )
+from sagent.providers.anthropic import api as anthropic
 from sagent.types.model import (
     ContextBudget,
-    Limits,
     Model,
     ModelCapability,
+    ModelLimits,
     ModelRecipe,
     ModelResponse,
     ModelSpec,
@@ -51,7 +49,7 @@ class _TinyModel:
         self, *, max_request_tokens: int = 4_096, max_response_tokens: int = 1_024
     ) -> None:
         self.spec = ModelSpec(
-            context_limits=Limits(
+            context_limits=ModelLimits(
                 max_request_tokens=max_request_tokens,
                 max_response_tokens=max_response_tokens,
             )
@@ -320,8 +318,10 @@ def _opus() -> ModelCapability:
         model_id="claude-opus-4-8",
         context_limits=MappingProxyType(
             {
-                "": Limits(max_request_tokens=200_000, max_image_bytes=5_000_000),
-                "+1m": Limits(max_request_tokens=1_000_000, max_image_bytes=5_000_000),
+                "": ModelLimits(max_request_tokens=200_000, max_image_bytes=5_000_000),
+                "+1m": ModelLimits(
+                    max_request_tokens=1_000_000, max_image_bytes=5_000_000
+                ),
             }
         ),
         prices=PriceCatalog(
@@ -346,7 +346,7 @@ def _cli() -> ModelCapability:
 
 def test_every_field_is_default_constructible() -> None:
     assert ModelCapability().model_id == ""
-    assert ModelSpec().context_limits == Limits()
+    assert ModelSpec().context_limits == ModelLimits()
 
 
 def test_bare_capability_restricts_nothing() -> None:
@@ -374,14 +374,16 @@ def test_meet_drops_fast_price_rows() -> None:
 
 def test_narrow_selects_one_context() -> None:
     spec = ModelSpec.narrow(_opus(), context="+1m", fast=True)
-    assert spec.context_limits == Limits(
+    assert spec.context_limits == ModelLimits(
         max_request_tokens=1_000_000,
         max_image_bytes=5_000_000,
     )
 
 
 def test_narrow_of_single_context_capability() -> None:
-    cap = ModelCapability(model_id="haiku", context_limits=Limits(max_request_tokens=7))
+    cap = ModelCapability(
+        model_id="haiku", context_limits=ModelLimits(max_request_tokens=7)
+    )
     assert ModelSpec.narrow(cap).context_limits.max_request_tokens == 7
 
 
@@ -569,8 +571,8 @@ def test_narrow_is_idempotent_on_an_already_narrowed_spec() -> None:
         model_id="m",
         context_limits=MappingProxyType(
             {
-                "": Limits(max_request_tokens=1),
-                "+1m": Limits(max_request_tokens=2),
+                "": ModelLimits(max_request_tokens=1),
+                "+1m": ModelLimits(max_request_tokens=2),
             }
         ),
     )
@@ -589,7 +591,7 @@ def test_meet_preserves_the_narrowed_type() -> None:
     """
     cap = ModelCapability(
         model_id="m",
-        context_limits=MappingProxyType({"": Limits(), "+1m": Limits()}),
+        context_limits=MappingProxyType({"": ModelLimits(), "+1m": ModelLimits()}),
     )
     spec = ModelSpec.narrow(cap, context="+1m", fast=True)
     met = spec & ModelCapability()
@@ -630,7 +632,10 @@ def test_resolve_accepts_tags_in_any_order() -> None:
         "m": ModelCapability(
             model_id="m",
             context_limits=MappingProxyType(
-                {"": Limits(max_request_tokens=1), "+1m": Limits(max_request_tokens=2)}
+                {
+                    "": ModelLimits(max_request_tokens=1),
+                    "+1m": ModelLimits(max_request_tokens=2),
+                }
             ),
             prices=PriceCatalog(
                 {
