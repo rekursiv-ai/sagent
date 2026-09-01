@@ -11,6 +11,11 @@ import json
 import httpx2
 import pytest
 
+from sagent.catalog.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenPrice,
+)
 from sagent.lib.custom_json import MutableJSON
 from sagent.providers.openai.compat import (
     OpenAICompat,
@@ -19,14 +24,9 @@ from sagent.providers.openai.compat import (
     build_messages,
     consume_stream,
 )
-from sagent.types.cost import (
-    PriceCatalog,
-    PriceCatalogProduct,
-    TokenPrice,
-)
 from sagent.types.model import (
-    Limits,
     ModelCapability,
+    ModelLimits,
     ModelRequest,
     ModelSpec,
     PromptTooLongError,
@@ -433,8 +433,8 @@ async def test_consume_stream_eof_without_done_raises_interrupted() -> None:
     assert response.total_cost == pytest.approx(0.000008)
 
 
-def _stub_limits(request: int) -> Limits:
-    return Limits(
+def _stub_limits(request: int) -> ModelLimits:
+    return ModelLimits(
         max_request_tokens=request,
         max_response_tokens=200,
         max_request_bytes=20 * 1024 * 1024,

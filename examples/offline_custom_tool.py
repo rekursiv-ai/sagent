@@ -9,15 +9,15 @@ import asyncio
 import sys
 
 from sagent.agent import Agent
-from sagent.lib import token_count
-from sagent.tools import tool
-from sagent.types.cost import (
+from sagent.catalog.cost import (
     PriceCatalog,
     PriceCatalogProduct,
     TokenPrice,
 )
+from sagent.lib import token_count
+from sagent.tools import tool
 from sagent.types.model import (
-    Limits,
+    ModelLimits,
     ModelRequest,
     ModelResponse,
     ModelSpec,
@@ -57,7 +57,9 @@ class ScriptedModel:
 
     spec = ModelSpec(
         model_id="scripted-offline",
-        context_limits=Limits(max_request_tokens=16_384, max_response_tokens=1_024),
+        context_limits=ModelLimits(
+            max_request_tokens=16_384, max_response_tokens=1_024
+        ),
         # An offline model bills nothing, but an empty catalog would raise.
         prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
         supported_thinking_efforts=MappingProxyType({}),

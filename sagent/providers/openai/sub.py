@@ -97,6 +97,7 @@ else:
 from openai.lib.streaming.responses import AsyncResponseStream
 
 from sagent import types
+from sagent.catalog import openai as openai_catalog
 from sagent.lib import debug_log
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import (
@@ -124,15 +125,14 @@ from sagent.providers.lib.oauth import (
 )
 from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.lib.stop_reason import normalize_stop_reason
-from sagent.providers.openai import catalog as openai_catalog
 from sagent.providers.openai.api import OpenAI, _OpenAIModel
 from sagent.types.exceptions import (
     AuthRefreshError,
     UserFacingError,
 )
 from sagent.types.model import (
-    Limits,
     ModelCapability,
+    ModelLimits,
     ModelRequest,
     ModelResponse,
     ModelSpec,
@@ -214,15 +214,15 @@ class _CredentialFileError(ValueError):
     """Stored credentials do not match the subscription OAuth schema."""
 
 
-def _subscription_limits(cap: ModelCapability) -> Limits:
+def _subscription_limits(cap: ModelCapability) -> ModelLimits:
     """Clamp a capability's windows to the subscription wire contract.
 
     Only the token windows differ between the API and the Codex backend,
     and the ``+1m`` context is unreachable once clamped -- so the result
-    is a single ``Limits``, not a context map.
+    is a single ``ModelLimits``, not a context map.
     """
     limits = cap.context_limits
-    base = limits if isinstance(limits, Limits) else limits[""]
+    base = limits if isinstance(limits, ModelLimits) else limits[""]
     return replace(
         base,
         max_request_tokens=min(

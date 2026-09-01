@@ -36,13 +36,13 @@ else:
     image_lib = lazy_import("sagent.lib.image")
 
 from sagent import types
+from sagent.catalog import google as google_catalog
 from sagent.lib.custom_json import (
     IntCodec,
     MutableJSON,
     MutableJSONValue,
     json_unfreeze,
 )
-from sagent.providers.google import catalog as google_catalog
 from sagent.providers.lib.errors import (
     error_status_code,
     is_context_overflow_text,
@@ -97,7 +97,7 @@ class Google:
     DEFAULT_UTILITY_MODEL = "gemini-2.5-flash-lite"
 
     # Model limits and pricing.
-    # Limits: https://ai.google.dev/gemini-api/docs/models
+    # ModelLimits: https://ai.google.dev/gemini-api/docs/models
     # Pricing: https://ai.google.dev/gemini-api/docs/pricing
     CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = google_catalog.MODELS
     """Per-model capability, shared by every Gemini transport."""

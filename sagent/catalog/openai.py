@@ -1,7 +1,7 @@
 """OpenAI model catalog, expressed as ``ModelCapability`` rows.
 
 Sources:
-  - Limits: https://developers.openai.com/api/docs/models/<model>
+  - ModelLimits: https://developers.openai.com/api/docs/models/<model>
   - Pricing: https://developers.openai.com/api/docs/pricing
   - Images: https://developers.openai.com/api/docs/guides/images-vision
 
@@ -16,16 +16,16 @@ from dataclasses import replace
 from types import MappingProxyType
 from typing import Final
 
-from sagent.types.cost import (
+from sagent.catalog.capability import (
+    ModelCapability,
+    ModelLimits,
+)
+from sagent.catalog.cost import (
     PriceCatalog,
     PriceCatalogProduct,
     TokenPrice,
 )
-from sagent.types.model import (
-    Limits,
-    ModelCapability,
-    ThinkingEffort,
-)
+from sagent.catalog.thinking import ThinkingEffort
 
 
 __all__ = ["API", "CHAT_MODELS", "MODELS", "SUBSCRIPTION"]
@@ -37,7 +37,7 @@ __all__ = ["API", "CHAT_MODELS", "MODELS", "SUBSCRIPTION"]
 _TWO_TIER: Final = 272_000
 
 
-def _limits(*, request: int, response: int, gpt56_images: bool = False) -> Limits:
+def _limits(*, request: int, response: int, gpt56_images: bool = False) -> ModelLimits:
     """Conservative pre-GPT-5.6 compatibility caps.
 
     ``detail:high`` images are first scaled to fit a 2048x2048 square
@@ -46,12 +46,12 @@ def _limits(*, request: int, response: int, gpt56_images: bool = False) -> Limit
     total request cap with no per-image cap.
     """
     if gpt56_images:
-        return Limits(
+        return ModelLimits(
             max_request_tokens=request,
             max_response_tokens=response,
             max_request_bytes=512 * 1024 * 1024,
         )
-    return Limits(
+    return ModelLimits(
         max_request_tokens=request,
         max_response_tokens=response,
         max_request_bytes=20 * 1024 * 1024,
@@ -62,7 +62,7 @@ def _limits(*, request: int, response: int, gpt56_images: bool = False) -> Limit
 
 def _windowed(
     *, request: int, response: int, long: int, gpt56_images: bool = False
-) -> Mapping[str, Limits]:
+) -> Mapping[str, ModelLimits]:
     """Both context tags; ``+1m`` opts into the full window and its surcharge."""
     return MappingProxyType(
         {

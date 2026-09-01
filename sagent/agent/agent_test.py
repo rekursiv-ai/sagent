@@ -57,20 +57,20 @@ from sagent.agent.state import (
     approx_tokens,
     tool_state_context,
 )
+from sagent.catalog.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenCost,
+    TokenPrice,
+)
 from sagent.compaction.summary import SummaryCompactor
 from sagent.lib import last_models, token_count
 from sagent.lib.custom_json import JSON, json_freeze
 from sagent.providers import Google
 from sagent.tools.read import Read
 from sagent.types.compactor import CompactRestorable
-from sagent.types.cost import (
-    PriceCatalog,
-    PriceCatalogProduct,
-    TokenCost,
-    TokenPrice,
-)
 from sagent.types.model import (
-    Limits,
+    ModelLimits,
     ModelSpec,
     ThinkingEffort,
 )
@@ -156,7 +156,7 @@ class StubModel:
         """Derive the spec from this stub's configured flags."""
         return ModelSpec(
             model_id=self.model_id,
-            context_limits=Limits(
+            context_limits=ModelLimits(
                 max_request_tokens=self.max_request_tokens,
                 max_response_tokens=self.max_response_tokens,
                 max_request_bytes=self.max_request_bytes,
@@ -4922,7 +4922,7 @@ class _OverflowModel:
     def spec(self) -> ModelSpec:
         return ModelSpec(
             model_id=self.model_id,
-            context_limits=Limits(
+            context_limits=ModelLimits(
                 max_request_tokens=self.max_request_tokens,
                 max_response_tokens=self.max_response_tokens,
             ),
@@ -5015,7 +5015,7 @@ class _RawOverflowModel:
     def spec(self) -> ModelSpec:
         return ModelSpec(
             model_id=self.model_id,
-            context_limits=Limits(
+            context_limits=ModelLimits(
                 max_request_tokens=self.max_request_tokens,
                 max_response_tokens=self.max_response_tokens,
             ),
@@ -5211,7 +5211,7 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
         def spec(self) -> ModelSpec:
             return ModelSpec(
                 model_id=self.model_id,
-                context_limits=Limits(
+                context_limits=ModelLimits(
                     max_request_tokens=self.max_request_tokens,
                     max_response_tokens=self.max_response_tokens,
                 ),

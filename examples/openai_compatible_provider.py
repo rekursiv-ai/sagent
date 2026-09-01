@@ -11,13 +11,13 @@ import os
 import sys
 
 from sagent.agent import Agent
-from sagent.providers.openai.compat import OpenAICompat
-from sagent.types.cost import (
+from sagent.catalog.cost import (
     PriceCatalog,
     PriceCatalogProduct,
     TokenPrice,
 )
-from sagent.types.model import Limits, ModelCapability
+from sagent.providers.openai.compat import OpenAICompat
+from sagent.types.model import ModelCapability, ModelLimits
 from sagent.types.runtime import AssistantMessage, UserMessage
 
 
@@ -32,7 +32,7 @@ class LocalOpenAI(OpenAICompat):
         {
             DEFAULT_MODEL: ModelCapability(
                 model_id=DEFAULT_MODEL,
-                context_limits=Limits(
+                context_limits=ModelLimits(
                     max_request_tokens=128_000, max_response_tokens=8_192
                 ),
                 # A local server bills nothing, but a missing row would raise.

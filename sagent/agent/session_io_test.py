@@ -49,14 +49,14 @@ from sagent.agent.session_io import (
     unpersisted_session_error,
 )
 from sagent.agent.state import ReadCacheEntry, ToolState
-from sagent.sessions import new_session_dir
-from sagent.types.cost import (
+from sagent.catalog.cost import (
     PriceCatalog,
     PriceCatalogProduct,
     TokenPrice,
 )
+from sagent.sessions import new_session_dir
 from sagent.types.model import (
-    Limits,
+    ModelLimits,
     ModelRequest,
     ModelResponse,
     ModelSpec,
@@ -123,7 +123,7 @@ class _NoopModel:
     def spec(self) -> ModelSpec:
         return ModelSpec(
             model_id=self.model_id,
-            context_limits=Limits(
+            context_limits=ModelLimits(
                 max_request_tokens=self.max_request_tokens,
                 max_response_tokens=self.max_response_tokens,
             ),

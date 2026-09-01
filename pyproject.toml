@@ -492,6 +492,11 @@ section-order = [
 typeCheckingMode = "recommended"
 failOnWarnings = true  # Warnings fail the check (basedpyright default; pinned explicitly).
 useLibraryCodeForTypes = false
+# The export SHIPS ``typings/`` but is checked from its own root, so without
+# this the stubs are present and unread: bashlex resolves to no ``Node`` and
+# webp to no ``ffi``, in files neither the monorepo nor the public build has
+# any other complaint about.
+extraPaths = ["typings"]
 exclude = [
     "**/.venv/",
     "**/.venv-ci312/",

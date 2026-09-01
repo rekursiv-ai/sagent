@@ -41,9 +41,9 @@ import shutil
 import tempfile
 
 from sagent import types
+from sagent.catalog import google as google_catalog
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import JSON, FloatCodec, MutableJSON, validate_json_schema
-from sagent.providers.google import catalog as google_catalog
 from sagent.providers.google.api import Google
 from sagent.providers.lib.cli_respawn import respawn_for_cadence
 from sagent.providers.lib.errors import (

@@ -13,12 +13,12 @@ import pytest
 from sagent import providers as providers_module
 from sagent.agent.agent import Agent
 from sagent.agent.state import current_agent_var, tool_state_var
+from sagent.catalog.cost import TokenCost
 from sagent.testing import MockModelCaps
 from sagent.tools.agent_self import AgentSelf
-from sagent.types.cost import TokenCost
 from sagent.types.model import (
-    Limits,
     ModelCapability,
+    ModelLimits,
     ModelRecipe,
     ModelRequest,
     ModelResponse,
@@ -283,10 +283,10 @@ async def test_exceeds_cap_suggests_window_variant_when_one_exists() -> None:
                 model_id="big-base",
                 context_limits=MappingProxyType(
                     {
-                        "": Limits(
+                        "": ModelLimits(
                             max_request_tokens=200_000, max_response_tokens=8_000
                         ),
-                        "+1m": Limits(
+                        "+1m": ModelLimits(
                             max_request_tokens=1_000_000, max_response_tokens=8_000
                         ),
                     }

@@ -1,7 +1,7 @@
 """Anthropic model catalog, expressed as ``ModelCapability`` rows.
 
 Sources:
-  - Limits & pricing: https://docs.anthropic.com/en/docs/about-claude/models
+  - ModelLimits & pricing: https://docs.anthropic.com/en/docs/about-claude/models
   - Fast mode: https://docs.anthropic.com/en/docs/build-with-claude/fast-mode
   - Vision: https://platform.claude.com/docs/en/build-with-claude/vision
   - Request size: https://platform.claude.com/docs/en/api/overview
@@ -16,28 +16,28 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Final
 
-from sagent.types.cost import (
+from sagent.catalog.capability import (
+    ModelCapability,
+    ModelLimits,
+)
+from sagent.catalog.cost import (
     PriceCatalog,
     PriceCatalogProduct,
     TokenPrice,
-)
-from sagent.types.model import (
-    Limits,
-    ModelCapability,
 )
 
 
 __all__ = ["API", "CLI", "MODELS", "SUBSCRIPTION"]
 
 
-def _limits(*, request: int, response: int = 128_000, edge: int) -> Limits:
+def _limits(*, request: int, response: int = 128_000, edge: int) -> ModelLimits:
     """Per-image hard limit 5 MB; per-request hard limit 32 MB.
 
     ``edge`` is the model's NATIVE resolution -- the long edge above
     which the server downscales for free, so pre-resizing there caps
     wire bytes and token cost without losing fidelity the model kept.
     """
-    return Limits(
+    return ModelLimits(
         max_request_tokens=request,
         max_response_tokens=response,
         max_request_bytes=32 * 1024 * 1024,
@@ -46,7 +46,7 @@ def _limits(*, request: int, response: int = 128_000, edge: int) -> Limits:
     )
 
 
-def _windowed(*, edge: int, default: int = 200_000) -> Mapping[str, Limits]:
+def _windowed(*, edge: int, default: int = 200_000) -> Mapping[str, ModelLimits]:
     """Both context tags, keyed by the id suffix that selects them.
 
     The 5 generation is 1M-native, so ``+1m`` is accepted but needs no

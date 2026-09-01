@@ -5,7 +5,7 @@ Source: https://platform.moonshot.cn/docs/api/chat
 A row carries only what the MODEL can do; caching, retry, and auth mode
 are transport facts declared on ``OpenAICompat.TRANSPORT``. These vendors
 publish no image pixel or byte ceiling and preprocess images server-side,
-so ``Limits`` carries only the two token windows.
+so ``ModelLimits`` carries only the two token windows.
 """
 
 from __future__ import annotations
@@ -13,12 +13,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from types import MappingProxyType
 
-from sagent.types.cost import (
+from sagent.catalog.capability import ModelCapability, ModelLimits
+from sagent.catalog.cost import (
     PriceCatalog,
     PriceCatalogProduct,
     TokenPrice,
 )
-from sagent.types.model import Limits, ModelCapability
 
 
 __all__ = ["MODELS"]
@@ -41,7 +41,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
     {
         "kimi-k2.6": ModelCapability(
             model_id="kimi-k2.6",
-            context_limits=Limits(
+            context_limits=ModelLimits(
                 max_request_tokens=256_000,
                 max_response_tokens=96_000,
             ),
@@ -49,7 +49,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
         ),
         "kimi-k2.5": ModelCapability(
             model_id="kimi-k2.5",
-            context_limits=Limits(
+            context_limits=ModelLimits(
                 max_request_tokens=256_000,
                 max_response_tokens=96_000,
             ),
@@ -57,7 +57,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
         ),
         "kimi-k2-0905-preview": ModelCapability(
             model_id="kimi-k2-0905-preview",
-            context_limits=Limits(
+            context_limits=ModelLimits(
                 max_request_tokens=256_000,
                 max_response_tokens=32_768,
             ),
@@ -65,7 +65,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
         ),
         "kimi-k2-0711-preview": ModelCapability(
             model_id="kimi-k2-0711-preview",
-            context_limits=Limits(
+            context_limits=ModelLimits(
                 max_request_tokens=131_072,
                 max_response_tokens=32_768,
             ),
@@ -73,7 +73,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
         ),
         "kimi-k2-turbo-preview": ModelCapability(
             model_id="kimi-k2-turbo-preview",
-            context_limits=Limits(
+            context_limits=ModelLimits(
                 max_request_tokens=256_000,
                 max_response_tokens=32_768,
             ),
@@ -81,7 +81,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
         ),
         "moonshot-v1-8k": ModelCapability(
             model_id="moonshot-v1-8k",
-            context_limits=Limits(
+            context_limits=ModelLimits(
                 max_request_tokens=8_000,
                 max_response_tokens=16_384,
             ),
@@ -89,7 +89,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
         ),
         "moonshot-v1-32k": ModelCapability(
             model_id="moonshot-v1-32k",
-            context_limits=Limits(
+            context_limits=ModelLimits(
                 max_request_tokens=32_000,
                 max_response_tokens=16_384,
             ),
@@ -97,7 +97,7 @@ MODELS: Mapping[str, ModelCapability] = MappingProxyType(
         ),
         "moonshot-v1-128k": ModelCapability(
             model_id="moonshot-v1-128k",
-            context_limits=Limits(
+            context_limits=ModelLimits(
                 max_request_tokens=128_000,
                 max_response_tokens=16_384,
             ),

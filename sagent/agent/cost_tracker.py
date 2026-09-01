@@ -29,7 +29,7 @@ from __future__ import annotations
 import dataclasses
 import time
 
-from sagent.types.cost import TokenCost, TokenCount
+from sagent.catalog.cost import TokenCost, TokenCount
 from sagent.types.model import ModelResponse
 
 

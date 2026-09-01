@@ -74,6 +74,7 @@ from sagent.agent.state import (
     tool_state_var,
     unique_registry_label,
 )
+from sagent.catalog.cost import TokenCost
 from sagent.compaction.history import (
     MAX_CONSECUTIVE_COMPACT_FAILURES,
     estimate_entry_tokens,
@@ -334,7 +335,7 @@ class Agent:
         # rolls up to the root ``cost_root_var`` tracker for the tree total;
         # this plain float tracks only THIS agent's own spend so a subagent's
         # budget cap is checked against its own calls, not the tree.
-        self._own_spend = types.cost.TokenCost()
+        self._own_spend = TokenCost()
         # True for agents spawned by ``AgentSpawn`` (both lifecycles). The root
         # REPL/CLI agent leaves it False so ``/send`` / ``/halt all`` can
         # target every subagent while never routing to the root or to self.

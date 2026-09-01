@@ -35,14 +35,14 @@ from sagent.agent.state import (
     current_agent_var,
     tool_state_var,
 )
-from sagent.lib import token_count
-from sagent.types.cost import (
+from sagent.catalog.cost import (
     PriceCatalog,
     PriceCatalogProduct,
     TokenPrice,
 )
+from sagent.lib import token_count
 from sagent.types.model import (
-    Limits,
+    ModelLimits,
     ModelRequest,
     ModelSpec,
     ThinkingEffort,
@@ -93,7 +93,7 @@ class MockModelCaps:
         """Derive the spec from this mock's configured limits."""
         return ModelSpec(
             model_id=self.model_id,
-            context_limits=Limits(
+            context_limits=ModelLimits(
                 max_request_tokens=self.max_request_tokens,
                 max_response_tokens=self.max_response_tokens,
                 max_request_bytes=32 * 1024 * 1024,

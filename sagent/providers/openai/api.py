@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import ClassVar, Final
 
-from sagent.providers.openai import catalog as openai_catalog
+from sagent.catalog import openai as openai_catalog
 from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
@@ -68,7 +68,7 @@ class OpenAI(OpenAICompat):
     BASE_URL: ClassVar[str] = "https://api.openai.com/v1"
 
     # Model limits and pricing.
-    # Limits: https://developers.openai.com/api/docs/models/<model>
+    # ModelLimits: https://developers.openai.com/api/docs/models/<model>
     # Pricing: https://developers.openai.com/api/docs/pricing
     # Cross-ref: https://github.com/taylorwilsdon/llm-context-limits
     #

@@ -23,8 +23,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import ClassVar, cast, override
 
+from sagent.catalog import dashscope as dashscope_catalog
 from sagent.lib.custom_json import MutableJSON
-from sagent.providers.dashscope import catalog as dashscope_catalog
 from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,

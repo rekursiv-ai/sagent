@@ -1,7 +1,7 @@
 """Google (Gemini) model catalog, expressed as ``ModelCapability`` rows.
 
 Sources:
-  - Limits: https://ai.google.dev/gemini-api/docs/models
+  - ModelLimits: https://ai.google.dev/gemini-api/docs/models
   - Pricing: https://ai.google.dev/gemini-api/docs/pricing
 
 ``MODELS`` is the API-key view. Other transports narrow it with ``&``
@@ -14,29 +14,29 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Final
 
-from sagent.types.cost import (
+from sagent.catalog.capability import (
+    ModelCapability,
+    ModelLimits,
+)
+from sagent.catalog.cost import (
     PriceCatalog,
     PriceCatalogProduct,
     TokenPrice,
 )
-from sagent.types.model import (
-    Limits,
-    ModelCapability,
-    ThinkingEffort,
-)
+from sagent.catalog.thinking import ThinkingEffort
 
 
 __all__ = ["API", "CLI", "MODELS", "SUBSCRIPTION"]
 
 
-def _limits(*, request: int) -> Limits:
+def _limits(*, request: int) -> ModelLimits:
     """Gemini's byte and pixel ceilings are uniform across the range.
 
     No per-image pixel or byte cap: larger images are tiled into 768x768
     tiles server-side, so both stay 0 (no client resize). The only
     documented ceiling is the 20 MB TOTAL inline request size.
     """
-    return Limits(
+    return ModelLimits(
         max_request_tokens=request,
         max_response_tokens=65_536,
         max_request_bytes=20 * 1024 * 1024,

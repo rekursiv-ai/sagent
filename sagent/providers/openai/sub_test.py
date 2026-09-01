@@ -19,6 +19,11 @@ import openai
 import pytest
 
 from sagent.agent.retry import is_rate_limited, is_retryable
+from sagent.catalog.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenPrice,
+)
 from sagent.lib.custom_json import JSONValue
 from sagent.providers import OpenAI
 from sagent.providers.lib.errors import (
@@ -42,15 +47,10 @@ from sagent.providers.openai.sub import (
     _parse_tool_arguments,
     _subscription_limits,
 )
-from sagent.types.cost import (
-    PriceCatalog,
-    PriceCatalogProduct,
-    TokenPrice,
-)
 from sagent.types.exceptions import AuthRefreshError, UserFacingError
 from sagent.types.model import (
-    Limits,
     ModelCapability,
+    ModelLimits,
     ModelRequest,
     ModelSpec,
     StreamInterruptedError,
@@ -290,7 +290,7 @@ def _stub_request_messages(
 
 def test_subscription_limits_clamp_request_tokens() -> None:
     cap = ModelCapability(
-        context_limits=Limits(
+        context_limits=ModelLimits(
             max_request_tokens=1_000_000, max_response_tokens=1_000_000
         )
     )
@@ -302,7 +302,9 @@ def test_subscription_limits_clamp_request_tokens() -> None:
 
 def test_subscription_limits_keep_small_windows() -> None:
     cap = ModelCapability(
-        context_limits=Limits(max_request_tokens=100_000, max_response_tokens=10_000)
+        context_limits=ModelLimits(
+            max_request_tokens=100_000, max_response_tokens=10_000
+        )
     )
     clamped = _subscription_limits(cap)
     assert clamped.max_request_tokens == 100_000
@@ -315,7 +317,7 @@ def test_subscription_limits_inherit_size_caps_from_parent() -> None:
     # unchanged, not be overwritten by a stale local constant. A divergent
     # parent capability proves inheritance rather than a hardcoded match.
     cap = ModelCapability(
-        context_limits=Limits(
+        context_limits=ModelLimits(
             max_request_tokens=1_000_000,
             max_response_tokens=1_000_000,
             max_image_edge_px=4096,
