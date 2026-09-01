@@ -9,13 +9,13 @@ import asyncio
 import sys
 
 from sagent.agent import Agent
-from sagent.catalog.cost import (
+from sagent.lib import token_count
+from sagent.tools import tool
+from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
     TokenPrice,
 )
-from sagent.lib import token_count
-from sagent.tools import tool
 from sagent.types.model import (
     ModelLimits,
     ModelRequest,

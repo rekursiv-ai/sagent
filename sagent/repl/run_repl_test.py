@@ -23,11 +23,6 @@ from sagent.agent import runtime as agent_runtime
 from sagent.agent.agent import Agent, _resolve_target_spec
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.state import AgentLike
-from sagent.catalog.cost import (
-    PriceCatalog,
-    PriceCatalogProduct,
-    TokenPrice,
-)
 from sagent.lib import last_models
 from sagent.providers import Google
 from sagent.repl.input_queues import InputQueues, QueuedInputBlock
@@ -53,6 +48,11 @@ from sagent.repl.run_repl import (
     format_tasks,
     install_input_queue_committer,
     run_repl,
+)
+from sagent.types.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenPrice,
 )
 from sagent.types.model import (
     ModelLimits,

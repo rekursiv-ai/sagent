@@ -8,12 +8,12 @@ from typing import cast
 import pytest
 
 from sagent.catalog import anthropic as anthropic_catalog
-from sagent.catalog.cost import (
+from sagent.providers.anthropic import api as anthropic
+from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
     TokenPrice,
 )
-from sagent.providers.anthropic import api as anthropic
 from sagent.types.model import (
     ContextBudget,
     Model,

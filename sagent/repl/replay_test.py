@@ -9,10 +9,10 @@ from typing import cast
 import time
 
 from sagent.agent.agent import Agent
-from sagent.catalog.cost import TokenCost
 from sagent.compaction.files import MICROCOMPACTED_ARGS_KEY
 from sagent.repl.render import RecordingPrinter
 from sagent.repl.replay import replay_messages
+from sagent.types.cost import TokenCost
 from sagent.types.runtime import (
     AssistantMessage,
     CompactComplete,

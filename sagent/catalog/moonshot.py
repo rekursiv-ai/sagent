@@ -13,8 +13,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from types import MappingProxyType
 
-from sagent.catalog.capability import ModelCapability, ModelLimits
-from sagent.catalog.cost import (
+from sagent.types.capability import ModelCapability, ModelLimits
+from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
     TokenPrice,

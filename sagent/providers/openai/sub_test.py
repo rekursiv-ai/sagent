@@ -19,11 +19,6 @@ import openai
 import pytest
 
 from sagent.agent.retry import is_rate_limited, is_retryable
-from sagent.catalog.cost import (
-    PriceCatalog,
-    PriceCatalogProduct,
-    TokenPrice,
-)
 from sagent.lib.custom_json import JSONValue
 from sagent.providers import OpenAI
 from sagent.providers.lib.errors import (
@@ -46,6 +41,11 @@ from sagent.providers.openai.sub import (
     _jwt_payload,
     _parse_tool_arguments,
     _subscription_limits,
+)
+from sagent.types.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenPrice,
 )
 from sagent.types.exceptions import AuthRefreshError, UserFacingError
 from sagent.types.model import (

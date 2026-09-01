@@ -35,12 +35,12 @@ from sagent.agent.state import (
     current_agent_var,
     tool_state_var,
 )
-from sagent.catalog.cost import (
+from sagent.lib import token_count
+from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
     TokenPrice,
 )
-from sagent.lib import token_count
 from sagent.types.model import (
     ModelLimits,
     ModelRequest,

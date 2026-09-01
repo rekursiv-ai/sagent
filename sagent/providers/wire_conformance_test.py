@@ -25,7 +25,6 @@ from typing import TYPE_CHECKING, ClassVar, Protocol
 
 import pytest
 
-from sagent.catalog.thinking import ALL_THINKING_EFFORTS
 from sagent.providers import PROVIDER_NAMES
 from sagent.providers.anthropic.api import Anthropic, _AnthropicModel
 from sagent.providers.dashscope.api import DashScope
@@ -40,6 +39,7 @@ from sagent.types.providers import (
     resolve,
 )
 from sagent.types.runtime import UserMessage
+from sagent.types.thinking import ALL_THINKING_EFFORTS
 
 
 if TYPE_CHECKING:

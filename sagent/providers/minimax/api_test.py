@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from sagent.catalog.cost import PriceCatalogProduct
 from sagent.providers.minimax.api import MiniMax
+from sagent.types.cost import PriceCatalogProduct
 
 
 def test_minimax_from_key() -> None:
