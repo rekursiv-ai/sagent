@@ -86,6 +86,7 @@ def test_context_betas_one_million_emits_beta() -> None:
 
 
 def test_context_betas_skip_one_million_beta_for_default_1m_model() -> None:
+    assert "context-1m-2025-08-07" not in context_betas("claude-fable-5-1+1m")
     assert "context-1m-2025-08-07" not in context_betas("claude-fable-5+1m")
     assert "context-1m-2025-08-07" not in context_betas("claude-sonnet-5+1m")
 
@@ -93,6 +94,7 @@ def test_context_betas_skip_one_million_beta_for_default_1m_model() -> None:
 def test_context_betas_native_context_management_for_supported_models() -> None:
     assert "context-management-2025-06-27" in context_betas("claude-haiku-4-5")
     assert "context-management-2025-06-27" in context_betas("claude-opus-4-7+1m")
+    assert "context-management-2025-06-27" in context_betas("claude-fable-5-1+1m")
     assert "context-management-2025-06-27" in context_betas("claude-fable-5+1m")
     assert "context-management-2025-06-27" in context_betas("claude-sonnet-5+1m")
 
@@ -642,6 +644,28 @@ def test_anthropic_model_pricing_exposed() -> None:
     assert m.spec.prices[PriceCatalogProduct()].request > 0
 
 
+def test_anthropic_fable_5_1_model_profile() -> None:
+    # Measured against the live API 2026-08-30: ``GET /v1/models/claude-fable-5-1``
+    # reports max_input_tokens 1000000, max_tokens 128000, efforts low..max,
+    # thinking.adaptive only (``enabled`` 400s), and no ``speed`` parameter.
+    p = Anthropic.from_key("k")
+    m = p.model("claude-fable-5-1")
+    assert m.max_request_tokens == 1_000_000
+    assert m.max_response_tokens == 128_000
+    assert m.spec.prices[PriceCatalogProduct()].request == 10.0
+    assert m.spec.prices[PriceCatalogProduct()].response == 50.0
+    assert m.valid_efforts == ("low", "medium", "high", "xhigh", "max")
+    assert m.spec.valid_latency_modes == ()
+    assert m.spec.valid_thinking_states == ("adaptive-hide", "off-hide", "redact-hide")
+
+
+def test_anthropic_fable_5_1_one_million_alias() -> None:
+    p = Anthropic.from_key("k")
+    m = p.model("claude-fable-5-1+1m")
+    assert m.model_id == "claude-fable-5-1+1m"
+    assert m.max_request_tokens == 1_000_000
+
+
 def test_anthropic_fable_model_profile() -> None:
     p = Anthropic.from_key("k")
     assert Anthropic.DEFAULT_MODEL == "claude-opus-5"
@@ -813,6 +837,7 @@ def test_anthropic_valid_latency_modes_fast_on_opus() -> None:
     p = Anthropic.from_key("k")
     assert p.model("claude-opus-4-8").spec.valid_latency_modes == ("fast",)
     assert p.model("claude-opus-4-8+1m").spec.valid_latency_modes == ("fast",)
+    assert p.model("claude-fable-5-1").spec.valid_latency_modes == ()
     assert p.model("claude-fable-5").spec.valid_latency_modes == ()
     assert p.model("claude-sonnet-5").spec.valid_latency_modes == ()
     assert p.model("claude-haiku-4-5").spec.valid_latency_modes == ()

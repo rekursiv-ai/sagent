@@ -119,19 +119,29 @@ def environment(model_id: str) -> str:
     """
     cwd = get_tool_state().bash_cwd
     is_git = _is_git_repo(cwd)
-    # Per-model marketing name + knowledge cutoff. Opus 4.8 and 4.7 cutoffs
-    # verified against Anthropic's docs (January 2026).
     model_info: dict[str, tuple[str, str]] = {
-        "claude-fable-5": ("Claude Fable 5", "unknown"),
+        # 2026-08-28
+        "claude-fable-5-1": ("Claude Fable 5.1", "June 2026"),
+        # 2026-07-24
         "claude-opus-5": ("Claude Opus 5", "May 2026"),
+        # 2026-06-29
+        "claude-sonnet-5": ("Claude Sonnet 5", "January 2026"),
+        # 2026-06-07
+        "claude-fable-5": ("Claude Fable 5", "January 2026"),
+        # 2026-05-28
         "claude-opus-4-8": ("Claude Opus 4.8", "January 2026"),
+        # 2026-04-14
         "claude-opus-4-7": ("Claude Opus 4.7", "January 2026"),
-        "claude-opus-4-6": ("Claude Opus 4.6", "May 2025"),
-        "claude-opus-4-5": ("Claude Opus 4.5", "May 2025"),
-        "claude-sonnet-5": ("Claude Sonnet 5", "unknown"),
+        # 2026-02-17
         "claude-sonnet-4-6": ("Claude Sonnet 4.6", "August 2025"),
-        "claude-sonnet-4-5": ("Claude Sonnet 4.5", "January 2025"),
+        # 2026-02-04
+        "claude-opus-4-6": ("Claude Opus 4.6", "May 2025"),
+        # 2025-11-24
+        "claude-opus-4-5": ("Claude Opus 4.5", "May 2025"),
+        # 2025-10-15
         "claude-haiku-4-5": ("Claude Haiku 4.5", "February 2025"),
+        # 2025-09-29
+        "claude-sonnet-4-5": ("Claude Sonnet 4.5", "January 2025"),
     }
     # Context-window variants share their base model's metadata; key the
     # lookup on the canonical base id so ``claude-opus-4-8+1m`` resolves to
