@@ -11,12 +11,12 @@ import os
 import sys
 
 from sagent.agent import Agent
-from sagent.catalog.cost import (
+from sagent.providers.openai.compat import OpenAICompat
+from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
     TokenPrice,
 )
-from sagent.providers.openai.compat import OpenAICompat
 from sagent.types.model import ModelCapability, ModelLimits
 from sagent.types.runtime import AssistantMessage, UserMessage
 

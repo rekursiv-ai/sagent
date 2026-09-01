@@ -12,8 +12,8 @@ from sagent.agent.state import (
     current_agent_var,
     tool_state_var,
 )
-from sagent.catalog.cost import PriceCatalogProduct, TokenPrice
 from sagent.testing import FakeAgent, MockModelCaps, with_fake_agent
+from sagent.types.cost import PriceCatalogProduct, TokenPrice
 from sagent.types.runtime import (
     AssistantMessage,
     Halt,

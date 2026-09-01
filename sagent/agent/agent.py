@@ -74,7 +74,6 @@ from sagent.agent.state import (
     tool_state_var,
     unique_registry_label,
 )
-from sagent.catalog.cost import TokenCost
 from sagent.compaction.history import (
     MAX_CONSECUTIVE_COMPACT_FAILURES,
     estimate_entry_tokens,
@@ -93,6 +92,7 @@ from sagent.thinking import (
     should_show_thinking,
     thinking_mode_supported,
 )
+from sagent.types.cost import TokenCost
 from sagent.types.tape import (
     ContextSplice,
     ReferrableTapeEvent,

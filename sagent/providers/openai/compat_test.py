@@ -11,11 +11,6 @@ import json
 import httpx2
 import pytest
 
-from sagent.catalog.cost import (
-    PriceCatalog,
-    PriceCatalogProduct,
-    TokenPrice,
-)
 from sagent.lib.custom_json import MutableJSON
 from sagent.providers.openai.compat import (
     OpenAICompat,
@@ -23,6 +18,11 @@ from sagent.providers.openai.compat import (
     _extract_usage,
     build_messages,
     consume_stream,
+)
+from sagent.types.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenPrice,
 )
 from sagent.types.model import (
     ModelCapability,

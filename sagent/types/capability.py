@@ -13,8 +13,8 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Final, Self
 
-from sagent.catalog.cost import PriceCatalog
-from sagent.catalog.thinking import (
+from sagent.types.cost import PriceCatalog
+from sagent.types.thinking import (
     ALL_THINKING_EFFORTS,
     ThinkingBudget,
     ThinkingEffort,

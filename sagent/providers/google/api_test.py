@@ -9,17 +9,17 @@ import logging
 import httpx2
 import pytest
 
-from sagent.catalog.cost import (
-    PriceCatalog,
-    PriceCatalogProduct,
-    TokenPrice,
-)
 from sagent.lib.custom_json import MutableJSON, MutableJSONValue
 from sagent.providers.google.api import (
     Google,
     _build_request,
     _build_response,
     _strip_additional_properties,
+)
+from sagent.types.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenPrice,
 )
 from sagent.types.model import (
     ModelRequest,

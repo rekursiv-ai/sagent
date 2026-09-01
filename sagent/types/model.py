@@ -18,23 +18,23 @@ from typing import (
     runtime_checkable,
 )
 
-from sagent.catalog.capability import ModelCapability, ModelLimits
-from sagent.catalog.cost import (
+from sagent.types.capability import ModelCapability, ModelLimits
+from sagent.types.cost import (
     PriceCatalogProduct,
     TokenCost,
     TokenCount,
-)
-from sagent.catalog.thinking import (
-    ALL_THINKING_EFFORTS,
-    ThinkingBudget,
-    ThinkingEffort,
-    ThinkingOutput,
 )
 from sagent.types.exceptions import UserFacingError
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
     RuntimeEvent,
+)
+from sagent.types.thinking import (
+    ALL_THINKING_EFFORTS,
+    ThinkingBudget,
+    ThinkingEffort,
+    ThinkingOutput,
 )
 
 

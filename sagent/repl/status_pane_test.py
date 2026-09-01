@@ -13,9 +13,9 @@ import pytest
 
 from sagent.agent.agent import ActivityTracker, Agent
 from sagent.agent.cost_tracker import CostTracker
-from sagent.catalog.cost import TokenCost
 from sagent.lib.custom_json import FloatCodec
 from sagent.repl.status_pane import render_status_pane
+from sagent.types.cost import TokenCost
 from sagent.types.model import ContextBudget, TokenCount
 
 

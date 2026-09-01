@@ -58,14 +58,14 @@ from sagent.bin.cli import (
     parse_agent_args,
     resolve_tools,
 )
-from sagent.catalog.cost import (
+from sagent.providers import PROVIDER_NAMES
+from sagent.sessions import SessionInfo, project_dir
+from sagent.testing import FakeAgent
+from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
     TokenPrice,
 )
-from sagent.providers import PROVIDER_NAMES
-from sagent.sessions import SessionInfo, project_dir
-from sagent.testing import FakeAgent
 from sagent.types.model import Model, ModelLimits, ModelSpec
 from sagent.types.providers import ProviderOptions
 from sagent.types.runtime import (

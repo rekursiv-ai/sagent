@@ -12,9 +12,9 @@ Callers must reach into a specific submodule:
   vocabulary, including provider-visible messages and tape events.
 - ``sagent.types.tape`` -- tape mechanics:
   refs, referrable events, context splices, and splice validators.
-- ``sagent.catalog.cost`` -- token count / price / cost
+- ``sagent.types.cost`` -- token count / price / cost
   calculus and the price catalog.
-- ``sagent.catalog.capability`` -- ``ModelLimits``, ``ModelCapability``,
+- ``sagent.types.capability`` -- ``ModelLimits``, ``ModelCapability``,
   and the thinking vocabulary a catalog row declares.
 - ``sagent.types.model`` -- the narrowed ``ModelSpec``,
   the ``Model`` Protocol, and request/response types.

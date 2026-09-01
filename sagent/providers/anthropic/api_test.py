@@ -13,11 +13,6 @@ import httpx2
 import pytest
 
 from sagent.agent.retry import error_status, is_retryable
-from sagent.catalog.cost import (
-    PriceCatalog,
-    PriceCatalogProduct,
-    TokenPrice,
-)
 from sagent.lib.custom_json import IntCodec, MutableJSON
 from sagent.providers.anthropic.api import (
     Anthropic,
@@ -36,6 +31,11 @@ from sagent.providers.anthropic.api import (
 )
 from sagent.providers.lib.errors import StreamingResponseNotReadError
 from sagent.providers.lib.id_remap import IdRemapper
+from sagent.types.cost import (
+    PriceCatalog,
+    PriceCatalogProduct,
+    TokenPrice,
+)
 from sagent.types.model import (
     ModelLimits,
     ModelRequest,
