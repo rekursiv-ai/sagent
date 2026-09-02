@@ -405,7 +405,7 @@ def test_should_respawn_triggers() -> None:
     assert model._should_respawn(request) is True
 
     model._turn_count = 0
-    model._last_input_tokens = model._max_request_tokens
+    model._last_input_tokens = model.limits.max_request_tokens
     assert model._should_respawn(request) is True
 
     model._last_input_tokens = 0
@@ -747,7 +747,7 @@ async def test_respawn_resets_active_counters(monkeypatch: pytest.MonkeyPatch) -
     model = provider.model("gemini-2.5-flash")
     assert isinstance(model, _GoogleCLIModel)
     model._turn_count = 100
-    model._last_input_tokens = model._max_request_tokens
+    model._last_input_tokens = model.limits.max_request_tokens
 
     class _Proc:
         pass

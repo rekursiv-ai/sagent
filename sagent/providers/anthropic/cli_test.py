@@ -483,7 +483,7 @@ def test_model_resolves_context_tag_to_profile() -> None:
     provider = AnthropicCLI()
     model = provider.model("claude-sonnet-4-5+1m")
     assert model.tagged_model_id == "claude-sonnet-4-5+1m"
-    assert model.max_request_tokens == 1_000_000
+    assert model.limits.max_request_tokens == 1_000_000
 
 
 def test_model_rejects_an_unknown_tag() -> None:
@@ -2085,7 +2085,7 @@ def test_should_respawn_triggers() -> None:
 
     # Sync turn-count; input-token safety valve -> respawn.
     model._turn_count = 0
-    model._last_input_tokens = model._max_request_tokens
+    model._last_input_tokens = model.limits.max_request_tokens
     assert model._should_respawn(request) is True
 
     # All clear -> no respawn.
@@ -2448,7 +2448,7 @@ async def test_respawn_resets_active_counters(monkeypatch: pytest.MonkeyPatch) -
     provider = AnthropicCLI()
     model = provider.model("claude-haiku-4-5")
     model._turn_count = 100
-    model._last_input_tokens = model._max_request_tokens
+    model._last_input_tokens = model.limits.max_request_tokens
     response = ModelResponse(message=AssistantMessage(text="ok"))
 
     class _Proc:
@@ -2612,7 +2612,7 @@ async def test_exchange_turn_replay_drain_does_not_update_input_tokens() -> None
                     MutableJSON,
                     {
                         "type": "result",
-                        "usage": {"input_tokens": model._max_request_tokens},
+                        "usage": {"input_tokens": model.limits.max_request_tokens},
                     },
                 )
             return None

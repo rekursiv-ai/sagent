@@ -155,13 +155,11 @@ class Google:
     def model(
         self,
         model_id: str | None = None,
-        max_request_tokens: int | None = None,
     ) -> _GeminiModel:
         """Create a model backend.
 
         Args:
           model_id: Model ID; ``None`` uses ``DEFAULT_MODEL``.
-          max_request_tokens: Override max input tokens.
 
         Returns:
           model: Gemini model backend.
@@ -174,16 +172,10 @@ class Google:
         capability, settings = resolve(
             mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT
         )
-        limits = settings.limits
         return _GeminiModel(
             provider=self,
             capability=capability,
             settings=settings,
-            max_request_tokens=(
-                max_request_tokens
-                if max_request_tokens is not None
-                else limits.max_request_tokens
-            ),
         )
 
     def utility_model(self) -> _GeminiModel:
@@ -204,12 +196,10 @@ class _GeminiModel(ModelDefaults):
         provider: Google,
         capability: ModelCapability,
         settings: ModelSettings,
-        max_request_tokens: int,
     ) -> None:
         self._provider = provider
         self._capability = capability
         self._settings = settings
-        self._max_request_tokens = max_request_tokens
         # Per loop: an httpx2.AsyncClient holds a connection pool owned by
         # the loop that opened it, and the guarding lock binds to the loop
         # that first contends on it. Sharing either across loops raises
@@ -263,11 +253,6 @@ class _GeminiModel(ModelDefaults):
     def settings(self) -> ModelSettings:
         """What this instance chose."""
         return self._settings
-
-    @property
-    def max_request_tokens(self) -> int:
-        """Maximum input tokens the model accepts."""
-        return self._max_request_tokens
 
     @override
     def approx_text_tokens(self, text: str) -> int:

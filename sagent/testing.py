@@ -81,9 +81,8 @@ class MockModelCaps:
     Distinct from ``_NullModel`` in this module, which satisfies the
     leaner **runtime** ``agent.runtime.Model`` Protocol that
     ``AgentRuntime(model=...)`` consumes. The agent layer's
-    ``_AgentModel`` (``agent/agent.py:1645``) bridges the rich provider
-    surface to the lean runtime surface; tests pick whichever side they
-    actually exercise.
+    ``_AgentModel`` bridges the rich provider surface to the lean runtime
+    surface; tests pick whichever side they actually exercise.
     """
 
     model_id: str = "mock-model"
@@ -291,7 +290,7 @@ class FakeAgent:
     def background(self) -> Mapping[str, BackgroundTaskEntry]:
         """Read view of explicit and detached background entries.
 
-        Mirrors ``Agent.background`` (``agent/agent.py:570-586``) -- the
+        Mirrors ``Agent.background`` -- the
         merged view is rebuilt per access; the returned
         ``BackgroundTaskEntry`` for a detached call is a fresh value
         each call and is **not** identity-stable across reads. Tests
@@ -348,7 +347,7 @@ class FakeAgent:
         form via its ``_bg`` / ``background`` lookups, while the queued
         ``Kill`` carries the resolved provider ``call_id`` so the
         runtime's tool dispatch handler matches its registry key.
-        Mirrors ``Agent.kill_tool`` (``agent/agent.py:887-896``).
+        Mirrors ``Agent.kill_tool``.
         """
         call_id = self._call_id_for_job(qid)
         self.cancel_background(qid)
@@ -358,8 +357,7 @@ class FakeAgent:
         """Cancel every visible explicit background tool job.
 
         Filter (``kind == "tool" and not job.hidden``) matches the real
-        Agent's ``_cancel_all_background`` (``agent/agent.py:1329-1333``),
-        which ``Agent.kill_all_tools`` (``agent/agent.py:898-901``)
+        Agent's ``_cancel_all_background``, which ``Agent.kill_all_tools``
         delegates to. Detached and persistent-subagent jobs survive --
         ``shutdown(force=True)`` is the broader sweep.
         """

@@ -67,7 +67,7 @@ class ScriptedModel:
         # An offline model bills nothing, but an empty catalog would raise.
         prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
     )
-    settings = ModelSettings(capability=capability)
+    settings = ModelSettings.narrowest(capability)
 
     @property
     def limits(self) -> ModelLimits:

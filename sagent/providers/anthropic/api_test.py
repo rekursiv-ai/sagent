@@ -590,7 +590,7 @@ def test_anthropic_model_known_id_returns_backend() -> None:
     # haiku supports thinking via ``enabled`` only (measured: 249 readable
     # thinking chars; ``adaptive`` 400s 'not supported on this model').
     assert m.capability.thinking_budget != frozenset({"none"})
-    assert m.max_request_tokens == 200_000
+    assert m.limits.max_request_tokens == 200_000
 
 
 def test_anthropic_model_unknown_id_raises() -> None:
@@ -603,7 +603,7 @@ def test_anthropic_model_strips_context_tag_for_profile_lookup() -> None:
     """``claude-sonnet-4-5+1m`` should resolve to the +1m profile entry."""
     p = Anthropic.from_key("k")
     m = p.model("claude-sonnet-4-5+1m")
-    assert m.max_request_tokens == 1_000_000
+    assert m.limits.max_request_tokens == 1_000_000
 
 
 def test_anthropic_default_model_resolves() -> None:
@@ -647,7 +647,7 @@ def test_anthropic_fable_5_1_model_profile() -> None:
     # thinking.adaptive only (``enabled`` 400s), and no ``speed`` parameter.
     p = Anthropic.from_key("k")
     m = p.model("claude-fable-5-1")
-    assert m.max_request_tokens == 1_000_000
+    assert m.limits.max_request_tokens == 1_000_000
     assert m.limits.max_response_tokens == 128_000
     assert m.capability.prices[PriceCatalogProduct()].request == 10.0
     assert m.capability.prices[PriceCatalogProduct()].response == 50.0
@@ -663,14 +663,14 @@ def test_anthropic_fable_5_1_one_million_alias() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-fable-5-1+1m")
     assert m.tagged_model_id == "claude-fable-5-1+1m"
-    assert m.max_request_tokens == 1_000_000
+    assert m.limits.max_request_tokens == 1_000_000
 
 
 def test_anthropic_fable_model_profile() -> None:
     p = Anthropic.from_key("k")
     assert Anthropic.DEFAULT_MODEL == "claude-opus-5"
     m = p.model("claude-fable-5")
-    assert m.max_request_tokens == 1_000_000
+    assert m.limits.max_request_tokens == 1_000_000
     assert m.limits.max_response_tokens == 128_000
     assert m.capability.prices[PriceCatalogProduct()].request == 10.0
     assert m.capability.prices[PriceCatalogProduct()].response == 50.0
@@ -682,13 +682,13 @@ def test_anthropic_fable_one_million_alias() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-fable-5+1m")
     assert m.tagged_model_id == "claude-fable-5+1m"
-    assert m.max_request_tokens == 1_000_000
+    assert m.limits.max_request_tokens == 1_000_000
 
 
 def test_anthropic_sonnet_5_model_profile() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-sonnet-5")
-    assert m.max_request_tokens == 1_000_000
+    assert m.limits.max_request_tokens == 1_000_000
     assert m.limits.max_response_tokens == 128_000
     assert m.capability.prices[PriceCatalogProduct()].request == 3.0
     assert m.capability.prices[PriceCatalogProduct()].response == 15.0
@@ -701,7 +701,7 @@ def test_anthropic_sonnet_5_one_million_alias() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-sonnet-5+1m")
     assert m.tagged_model_id == "claude-sonnet-5+1m"
-    assert m.max_request_tokens == 1_000_000
+    assert m.limits.max_request_tokens == 1_000_000
 
 
 @pytest.mark.asyncio
@@ -1484,12 +1484,6 @@ def test_anthropic_provider_build_system_none_returns_not_given() -> None:
     out = p.build_system(None)
     # ``anthropic.NOT_GIVEN`` is a sentinel; type is anthropic.NotGiven.
     assert out is anthropic_sdk.NOT_GIVEN
-
-
-def test_anthropic_model_max_request_tokens_override() -> None:
-    p = Anthropic.from_key("k")
-    m = p.model("claude-opus-4-7", max_request_tokens=10_000)
-    assert m.max_request_tokens == 10_000
 
 
 def test_anthropic_model_max_response_tokens_from_profile() -> None:

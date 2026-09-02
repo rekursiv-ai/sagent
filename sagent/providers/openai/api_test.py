@@ -129,7 +129,7 @@ def test_openai_known_model_returns_backend() -> None:
     p = OpenAI.from_key("k")
     m = p.model("gpt-4o")
     assert m.capability.model_id == "gpt-4o"
-    assert m.max_request_tokens == 128_000
+    assert m.limits.max_request_tokens == 128_000
 
 
 def test_openai_unknown_model_raises() -> None:
@@ -155,8 +155,8 @@ def test_openai_two_tier_default_caps_at_272k(base_id: str, full_tokens: int) ->
     p = OpenAI.from_key("k")
     base = p.model(base_id)
     full = p.model(f"{base_id}+1m")
-    assert base.max_request_tokens == 272_000
-    assert full.max_request_tokens == full_tokens
+    assert base.limits.max_request_tokens == 272_000
+    assert full.limits.max_request_tokens == full_tokens
     assert full.tagged_model_id == f"{base_id}+1m"
     # ``+1m`` only widens the window; pricing and other limits track the base.
     assert (
@@ -171,7 +171,7 @@ def test_openai_default_model_opts_into_full_window() -> None:
     p = OpenAI.from_key("k")
     m = p.model()
     assert m.tagged_model_id == "gpt-5.6-sol+1m"
-    assert m.max_request_tokens == 1_050_000
+    assert m.limits.max_request_tokens == 1_050_000
 
 
 @pytest.mark.parametrize(
@@ -190,7 +190,7 @@ def test_openai_gpt_56_profiles(
     cache_write_price: float,
 ) -> None:
     m = OpenAI.from_key("k").model(model_id)
-    assert m.max_request_tokens == 272_000
+    assert m.limits.max_request_tokens == 272_000
     assert m.limits.max_response_tokens == 128_000
     assert m.capability.prices[PriceCatalogProduct()].request == request_price
     assert m.capability.prices[PriceCatalogProduct()].response == response_price
@@ -242,8 +242,8 @@ def test_openai_no_cliff_model_plus1m_is_alias(base_id: str) -> None:
     # both ids resolve to the same full window.
     p = OpenAI.from_key("k")
     assert (
-        p.model(f"{base_id}+1m").max_request_tokens
-        == p.model(base_id).max_request_tokens
+        p.model(f"{base_id}+1m").limits.max_request_tokens
+        == p.model(base_id).limits.max_request_tokens
         == 1_047_576
     )
 

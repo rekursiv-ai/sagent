@@ -6,6 +6,7 @@ import sys
 
 import pytest
 
+from sagent import providers as providers_module
 from sagent.providers import (
     PROVIDER_NAMES,
     Anthropic,
@@ -19,6 +20,8 @@ from sagent.providers import (
     build_provider,
     infer_provider,
 )
+from sagent.types.cost import PriceCatalogProduct, TokenCount
+from sagent.types.model import base_model_id
 
 
 def test_provider_names_contains_core_providers() -> None:
@@ -230,6 +233,39 @@ def test_build_provider_forwards_account_only_where_declared(
     """A factory without an ``account`` parameter must not receive one."""
     monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
     assert isinstance(build_provider("Google", "env", account="ignored"), Google)
+
+
+@pytest.mark.parametrize(
+    "provider_name",
+    sorted(
+        name
+        for name in PROVIDER_NAMES
+        if getattr(getattr(providers_module, name, None), "CAPABILITIES", {})
+    ),
+)
+def test_a_catalog_backed_provider_names_a_cheaper_utility_model(
+    provider_name: str,
+) -> None:
+    """``utility`` must name a row, and a cheaper one than ``default``.
+
+    ``ROLES`` resolves ``utility`` to ``DEFAULT_UTILITY_MODEL or
+    DEFAULT_MODEL``, so a provider that declares none still answers -- with
+    the expensive default. DashScope, MiniMax, and Moonshot all did, which is
+    invisible from the role lookup alone: every summarizer call silently
+    billed the top rate.
+    """
+    cls = getattr(providers_module, provider_name)
+    utility = getattr(cls, "DEFAULT_UTILITY_MODEL", "")
+    assert utility, f"{provider_name} declares no DEFAULT_UTILITY_MODEL"
+    caps = cls.CAPABILITIES
+    default_row = caps[base_model_id(cls.DEFAULT_MODEL)]
+    utility_row = caps[base_model_id(utility)]
+    if utility_row is default_row:
+        pytest.skip("single-model catalog: utility and default coincide")
+    tokens = TokenCount(request=1_000_000, response=100_000)
+    assert (utility_row.prices[PriceCatalogProduct()] * tokens).total < (
+        default_row.prices[PriceCatalogProduct()] * tokens
+    ).total, f"{provider_name} utility {utility!r} is not cheaper than its default"
 
 
 if __name__ == "__main__":

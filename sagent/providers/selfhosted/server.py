@@ -521,7 +521,7 @@ class SelfHostedModel(ModelDefaults):
             # In-process weights: there is no server to roll history.
             manage_context_server_side={False},
         )
-        self._settings = ModelSettings(capability=self.capability)
+        self._settings = ModelSettings.narrowest(self.capability)
 
     @property
     @override

@@ -158,7 +158,7 @@ def test_every_advertised_effort_reaches_the_wire(
 ) -> None:
     """Each effort the row advertises builds a body carrying it.
 
-    ``capability.thinking_effort`` is what ``ModelSettings.validate``
+    ``capability.thinking_effort`` is what ``ModelSettings.__setattr__``
     accepts. An effort that passes that gate and then finds no wire
     mapping is a crash at send time.
     """
@@ -292,8 +292,11 @@ def test_every_catalog_backed_provider_has_a_wire_builder() -> None:
         # Subscription transports share the parent's catalog and body
         # builder; only auth and service tier differ.
         "OpenAISubscription",
-        # No catalog of its own (empty base) or requires a live server.
+        # No catalog of its own (the compat base ships an empty one).
         "OpenAICompat",
+        # Catalog-backed, but ``model()`` boots a local server / loads
+        # weights before it returns one, so there is nothing to drive
+        # offline.
         "LlamaCpp",
         "SelfHosted",
     }

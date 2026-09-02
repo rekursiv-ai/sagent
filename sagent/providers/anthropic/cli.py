@@ -511,7 +511,6 @@ class AnthropicCLI(Anthropic):
     def model(  # ty: ignore[invalid-method-override]  -- subclasses Anthropic for the shared model catalog + auth, but the CLI transport returns a different Model and accepts provider-specific options; both still satisfy the Provider protocol's ``model(..., **provider_options)`` shape
         self,
         model_id: str | None = None,
-        max_request_tokens: int | None = None,
         *,
         extra_mcp_servers: dict[str, dict[str, object]] | None = None,
         session_id: str | None = None,
@@ -522,7 +521,6 @@ class AnthropicCLI(Anthropic):
 
         Args:
           model_id: Claude model id; ``None`` uses ``DEFAULT_MODEL``.
-          max_request_tokens: Override the profile's input cap.
           extra_mcp_servers: Additional MCP servers (stdio or HTTP)
             merged into the CLI's ``--mcp-config`` at subprocess spawn
             time. Each entry follows Claude Code's mcp.json shape:
@@ -574,11 +572,6 @@ class AnthropicCLI(Anthropic):
             provider=self,
             capability=capability,
             settings=settings,
-            max_request_tokens=(
-                max_request_tokens
-                if max_request_tokens is not None
-                else settings.limits.max_request_tokens
-            ),
             extra_mcp_servers=extra_mcp_servers,
             session_id=session_id,
             subprocess_read_timeout_sec=subprocess_read_timeout_sec,
@@ -617,7 +610,6 @@ class _AnthropicCLIModel(ModelDefaults):
         provider: AnthropicCLI,
         capability: ModelCapability,
         settings: ModelSettings,
-        max_request_tokens: int,
         extra_mcp_servers: dict[str, dict[str, object]] | None = None,
         session_id: str | None = None,
         subprocess_read_timeout_sec: float | None = None,
@@ -626,7 +618,6 @@ class _AnthropicCLIModel(ModelDefaults):
         self._provider = provider
         self._capability = capability
         self._settings = settings
-        self._max_request_tokens = max_request_tokens
         # Cap (seconds) on waiting for the CLI to fetch the MCP catalog
         # before feeding the first user line. See ``AnthropicCLI.model``.
         self._mcp_connect_timeout_sec = mcp_connect_timeout_sec
@@ -772,11 +763,6 @@ class _AnthropicCLIModel(ModelDefaults):
     def settings(self) -> ModelSettings:
         """What this instance chose."""
         return self._settings
-
-    @property
-    def max_request_tokens(self) -> int:
-        """Per-request input token cap."""
-        return self._max_request_tokens
 
     def _interrupt_active_proc(self) -> bool:
         """SIGINT the active CLI subprocess to abort the current turn.
@@ -1135,7 +1121,7 @@ class _AnthropicCLIModel(ModelDefaults):
         return respawn_for_cadence(
             turn_count=self._turn_count,
             last_input_tokens=self._last_input_tokens,
-            max_request_tokens=self._max_request_tokens,
+            max_request_tokens=self.limits.max_request_tokens,
         )
 
     def _sync_tools_bridge(

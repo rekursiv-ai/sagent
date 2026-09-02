@@ -74,6 +74,21 @@ def test_dashscope_is_effort_model(model_id: str, is_effort: bool) -> None:
     assert m._is_effort_model(model_id) is is_effort
 
 
+@pytest.mark.parametrize("model_id", sorted(DashScope.CAPABILITIES))
+def test_the_effort_predicate_agrees_with_every_row(model_id: str) -> None:
+    """The id-shape predicate and the catalog row must say the same thing.
+
+    ``_is_effort_model`` matches id PREFIXES while the row states the axis
+    directly -- two vocabularies for one fact, which is the bug class
+    ``wire_conformance_test`` exists to catch. The cases above pin the
+    predicate against hand-written ids; nothing pinned it against the
+    catalog it actually runs on.
+    """
+    model = DashScope.from_key("k").model(model_id)
+    offers_effort = model.capability.thinking_effort != frozenset({"none"})
+    assert model._is_effort_model(model_id) is offers_effort
+
+
 def _model(model_id: str, effort: ThinkingEffort | None = None) -> _DashScopeModel:
     """A model with ``effort`` selected, or its own narrowest when omitted.
 

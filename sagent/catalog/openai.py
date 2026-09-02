@@ -14,7 +14,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import replace
 from types import MappingProxyType
-from typing import Final
 
 from sagent.types.capability import (
     ContextTag,
@@ -80,11 +79,17 @@ def models() -> Mapping[str, ModelCapability]:
         thinking_output={"none"},
     )
     rows = (
-        replace(gpt56, model_id="gpt-5.6-sol"),
+        replace(
+            gpt56,
+            model_id="gpt-5.6-sol",
+        ),
         # Absent from ``GET /v1/models`` yet serves ``POST /v1/responses``
         # normally. Listing is an entitlement view, not the model set, so a
         # row must be dropped only on ``model_not_found`` from a real call.
-        replace(gpt56, model_id="gpt-5.6"),
+        replace(
+            gpt56,
+            model_id="gpt-5.6",
+        ),
         replace(
             gpt56,
             model_id="gpt-5.6-luna",
@@ -318,12 +323,6 @@ def chat() -> ModelCapability:
     )
 
 
-# Prompts above 272K input tokens bill at 2x input / 1.5x output for the whole
-# request on gpt-5.4 and later. The untagged id caps the window here; a ``+1m``
-# id opts into the full window and thus into the surcharge.
-_TWO_TIER: Final = 272_000
-
-
 def _one(*, request: int, response: int, gpt56_images: bool = False) -> ModelLimits:
     """Pre-5.6 tiles ``detail:high`` from a 2048px square; 5.6 does not."""
     if gpt56_images:
@@ -371,6 +370,10 @@ def _prices(
     two_tier: bool = False,
 ) -> PriceCatalog:
     """USD per million tokens, plus the >272K surcharge row when two-tier."""
+    # Prompts above 272K input tokens bill at 2x input / 1.5x output for the
+    # whole request on gpt-5.4 and later. The untagged id caps the window
+    # there; a ``+1m`` id opts into the full window and thus the surcharge.
+    two_tier_floor = 272_000
     rows = {
         PriceCatalogProduct(): TokenPrice(
             request=request,
@@ -382,7 +385,7 @@ def _prices(
     if two_tier:
         # The >272K surcharge applies the input multiplier to all three input
         # pools and the output multiplier to the whole response.
-        rows[PriceCatalogProduct(min_request_tokens=_TWO_TIER)] = TokenPrice(
+        rows[PriceCatalogProduct(min_request_tokens=two_tier_floor)] = TokenPrice(
             request=request * 2.0,
             response=response * 1.5,
             cache_write=cache_write * 2.0,

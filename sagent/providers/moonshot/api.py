@@ -45,6 +45,11 @@ class Moonshot(OpenAICompat):
     """Moonshot AI provider."""
 
     DEFAULT_MODEL: ClassVar[str] = "kimi-k2.6"
+    # Cheapest row that keeps the default's 256k window: the ``moonshot-v1``
+    # ids undercut it but cap at 8k-128k, and a utility model still has to
+    # hold the conversation it is summarizing. Without this,
+    # ``utility_model()`` falls back to the default and bills 1.6x.
+    DEFAULT_UTILITY_MODEL: ClassVar[str] = "kimi-k2-0905-preview"
     ENV_VAR: ClassVar[str] = "MOONSHOT_API_KEY"
     BASE_URL: ClassVar[str] = "https://api.moonshot.ai/v1"
     # Model limits and pricing.
