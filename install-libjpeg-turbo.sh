@@ -11,11 +11,13 @@
 #
 # That .deb unpacks to /opt/libjpeg-turbo because the prefix is compiled in
 # (every binary carries RPATH=[/opt/libjpeg-turbo/lib64]), so relocating the
-# payload breaks it. Instead one symlink publishes the library on
-# /usr/local/lib, which ld.so.conf.d already searches ahead of /usr/lib.
+# payload breaks it. Instead symlinks publish the library on the local linker
+# paths, ahead of the distro copy under /usr/lib.
 #
 # Run AFTER apt. Idempotent. Undo:
-#   sudo rm -f /usr/local/lib/libturbojpeg.so.0
+#   multiarch="$(uname -m)-linux-gnu"
+#   sudo rm -f /usr/local/lib/libturbojpeg.so.0 \
+#     "/usr/local/lib/${multiarch}/libturbojpeg.so.0"
 #   sudo dpkg -r libjpeg-turbo-official && sudo ldconfig
 
 set -euo pipefail
@@ -26,6 +28,15 @@ MINIMUM=3.0.0
 
 SUDO=""
 [ "$(id -u)" -eq 0 ] || SUDO="sudo"
+multiarch_local="/usr/local/lib/$(uname -m)-linux-gnu"
+target=/opt/libjpeg-turbo/lib64/libturbojpeg.so.0
+
+remove_managed_link() {
+  local link="$1"
+  if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then
+    $SUDO rm -f -- "$link"
+  fi
+}
 
 candidate="$(apt-cache policy libturbojpeg 2>/dev/null |
   awk '/Candidate:/{if (!f++) c=$2} END{print c}')"
@@ -38,6 +49,13 @@ if [ -n "${candidate}" ] && [ "${candidate}" != "(none)" ] &&
   dpkg --compare-versions "${candidate#*:}" ge "${MINIMUM}"; then
   echo "libturbojpeg ${candidate} from apt is >= ${MINIMUM}; using it."
   $SUDO apt-get install -y --no-install-recommends libturbojpeg
+  remove_managed_link /usr/local/lib/libturbojpeg.so.0
+  remove_managed_link "$multiarch_local/libturbojpeg.so.0"
+  if dpkg-query -W -f='${db:Status-Abbrev}' libjpeg-turbo-official \
+    2>/dev/null | grep -q '^ii '; then
+    $SUDO dpkg -r libjpeg-turbo-official
+  fi
+  $SUDO ldconfig
   exit 0
 fi
 
@@ -54,6 +72,12 @@ curl -fsSL -o "${tmp}/${deb}" \
 $SUDO dpkg -i "${tmp}/${deb}"
 
 # Target the deb's own unversioned symlink: 3.0.4 ships .so.0.3.0 and 3.2.0
-# ships .so.0.5.0, so a versioned target dangles on the next bump.
-$SUDO ln -sf /opt/libjpeg-turbo/lib64/libturbojpeg.so.0 /usr/local/lib/libturbojpeg.so.0
+# ships .so.0.5.0, so a versioned target dangles on the next bump. Debian's
+# multiarch linker path puts /usr/local/lib/<triplet> before /lib/<triplet>,
+# while generic /usr/local/lib may be processed later (observed on AArch64).
+# Publish both: the multiarch link wins there and the generic link preserves
+# the installer contract on hosts without the architecture-specific path.
+$SUDO install -d -m 0755 "$multiarch_local"
+$SUDO ln -sf "$target" /usr/local/lib/libturbojpeg.so.0
+$SUDO ln -sf "$target" "$multiarch_local/libturbojpeg.so.0"
 $SUDO ldconfig
