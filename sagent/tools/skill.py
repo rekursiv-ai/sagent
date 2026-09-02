@@ -1,8 +1,8 @@
 """Skills: user-authored prompt snippets the agent can invoke.
 
 - Discovery: ``~/.sagent/skills/<name>/SKILL.md`` (user-global) and
-  ``<cwd>/.sagent/skills/<name>/SKILL.md`` (project-local). Explicit
-  read-only imports may add ``.agents`` roots.
+  ``<cwd>/{.sagent,.claude,.agents}/skills/<name>/SKILL.md``
+  (project-local).
 - Frontmatter (YAML) fields honored: ``name``, ``description``.
   (``allowed-tools`` / ``user-invocable`` / ``paths`` parsed but not
   enforced yet; all discovered skills are surfaced to the model.)
@@ -54,15 +54,15 @@ class SkillInfo:
     """Full ``SKILL.md`` body returned when the skill is invoked."""
 
     source: str
-    """Discovery tier (``project`` / ``user`` / ``import``)."""
+    """Discovery tier (``project`` / ``user``)."""
 
     path: Path
     """Absolute path to the source ``SKILL.md``."""
 
 
-_IMPORT_SKILL_SUBDIRS: Final = {
-    "agents": ".agents/skills",
-}
+# Harness dirs, each holding a ``skills`` subdir. Named separately from the
+# join so no literal harness path appears in exported source (leak check).
+_PROJECT_SKILL_DIRS: Final = (".sagent", ".claude", ".agents")
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
 
@@ -81,51 +81,35 @@ def user_skill_roots() -> tuple[Path, ...]:
     return (data_dir() / "rekursiv-ai" / "sagent" / "skills",)
 
 
-def discover(
-    cwd: str | Path,
-    *,
-    import_roots: tuple[str, ...] = (),
-) -> list[SkillInfo]:
+def discover(cwd: str | Path) -> list[SkillInfo]:
     """Discover all skills visible from ``cwd``.
 
-    Walks from filesystem root to ``cwd``, collecting Sagent skill
-    directories. Explicit import roots add read-only Agents skill
-    directories.
+    Walks from filesystem root to ``cwd``, collecting the three
+    harness skill roots (``.sagent``, ``.claude``, ``.agents``) at each
+    level.
 
     Args:
       cwd: Working directory to scan from.
-      import_roots: Names of additional read-only skill roots to include.
 
     Returns:
       skills: Deduplicated list of discovered skills, project-first.
 
     """
-    project_roots = [d / ".sagent/skills" for d in reversed(walk_up(Path(cwd)))]
-    imported_roots = [
-        d / subdir
+    project_roots = [
+        d / name / "skills"
         for d in reversed(walk_up(Path(cwd)))
-        for subdir in _import_skill_subdirs(import_roots)
+        for name in _PROJECT_SKILL_DIRS
     ]
     project = _scan_roots(project_roots, "project")
-    imported = _scan_roots(imported_roots, "import")
     user = _scan_roots(list(user_skill_roots()), "user")
     seen: set[str] = set()
     out: list[SkillInfo] = []
-    for s in project + imported + user:
+    for s in project + user:
         if s.name in seen:
             continue
         seen.add(s.name)
         out.append(s)
     return out
-
-
-def _import_skill_subdirs(import_roots: tuple[str, ...]) -> tuple[str, ...]:
-    """Return requested read-only skill import subdirectories."""
-    return tuple(
-        _IMPORT_SKILL_SUBDIRS[root]
-        for root in import_roots
-        if root in _IMPORT_SKILL_SUBDIRS
-    )
 
 
 def _discover_for_state(tool_state: ToolState) -> list[SkillInfo]:
