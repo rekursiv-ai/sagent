@@ -37,7 +37,6 @@ import shutil
 import subprocess
 import tempfile
 
-from sagent import types
 from sagent.catalog import anthropic as anthropic_catalog
 from sagent.lib.custom_json import (
     JSON,
@@ -66,15 +65,15 @@ from sagent.providers.lib.subproc import (
     Subproc,
     SubprocessTransportError,
 )
-from sagent.types.cost import TokenCost
+from sagent.types.capability import ModelCapability, ModelSettings
+from sagent.types.cost import TokenCost, TokenCount
 from sagent.types.model import (
-    ModelCapability,
     ModelRequest,
     ModelResponse,
-    ModelSpec,
-    TokenCount,
     base_model_id,
-    latency_from_model_id,
+)
+from sagent.types.providers import (
+    resolve,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -364,7 +363,7 @@ class AnthropicCLI(Anthropic):
     the CLI emits on the terminal ``result`` event.
     """
 
-    TRANSPORT: ClassVar[ModelCapability] = anthropic_catalog.CLI
+    TRANSPORT: ClassVar[ModelCapability] = anthropic_catalog.cli()
     """The subprocess exposes no effort, latency, cache, or redaction knob."""
 
     supported_options: ClassVar[frozenset[str]] = frozenset[str]()
@@ -568,22 +567,17 @@ class AnthropicCLI(Anthropic):
 
         """
         mid = model_id if model_id is not None else "default"
-        if latency_from_model_id(mid) is not None:
-            raise ValueError(
-                f"Model {mid!r}: fast mode (+fast) is unsupported via the CLI",
-            )
-        spec = types.providers.resolve(
+        capability, settings = resolve(
             mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT
         )
         return _AnthropicCLIModel(
             provider=self,
-            # ``mid`` may be a role name; the spec carries the resolved id.
-            model_id=spec.tagged_model_id,
-            spec=spec,
+            capability=capability,
+            settings=settings,
             max_request_tokens=(
                 max_request_tokens
                 if max_request_tokens is not None
-                else spec.context_limits.max_request_tokens
+                else settings.limits.max_request_tokens
             ),
             extra_mcp_servers=extra_mcp_servers,
             session_id=session_id,
@@ -617,25 +611,22 @@ class _AnthropicCLIModel(ModelDefaults):
 
     """
 
-    spec: ModelSpec = ModelSpec()
-    """What this model can do; replaced from the catalog at construction."""
-
     def __init__(
         self,
         *,
         provider: AnthropicCLI,
-        model_id: str,
+        capability: ModelCapability,
+        settings: ModelSettings,
         max_request_tokens: int,
-        spec: ModelSpec | None = None,
         extra_mcp_servers: dict[str, dict[str, object]] | None = None,
         session_id: str | None = None,
         subprocess_read_timeout_sec: float | None = None,
         mcp_connect_timeout_sec: float = 8.0,
     ) -> None:
         self._provider = provider
-        self._model_id = model_id
+        self._capability = capability
+        self._settings = settings
         self._max_request_tokens = max_request_tokens
-        self.spec = spec or ModelSpec()
         # Cap (seconds) on waiting for the CLI to fetch the MCP catalog
         # before feeding the first user line. See ``AnthropicCLI.model``.
         self._mcp_connect_timeout_sec = mcp_connect_timeout_sec
@@ -771,14 +762,21 @@ class _AnthropicCLIModel(ModelDefaults):
             self._delete_session_jsonl(reason="construction (rebuild from tape)")
 
     @property
+    @override
+    def capability(self) -> ModelCapability:
+        """What this model offers on this transport."""
+        return self._capability
+
+    @property
+    @override
+    def settings(self) -> ModelSettings:
+        """What this instance chose."""
+        return self._settings
+
+    @property
     def max_request_tokens(self) -> int:
         """Per-request input token cap."""
         return self._max_request_tokens
-
-    @property
-    def model_id(self) -> str:
-        """Model identifier passed to ``claude --model``."""
-        return self._model_id
 
     def _interrupt_active_proc(self) -> bool:
         """SIGINT the active CLI subprocess to abort the current turn.
@@ -811,70 +809,12 @@ class _AnthropicCLIModel(ModelDefaults):
             return False
         return self._active_proc.interrupt()
 
-    @property
-    def max_response_tokens(self) -> int:
-        """Per-request output token cap from the profile."""
-        return self.spec.context_limits.max_response_tokens
-
-    @property
-    def supports_streaming(self) -> bool:
-        """``True``: the wrapped CLI always streams."""
-        return True
-
-    @property
-    def supports_thinking(self) -> bool:
-        """Whether the active spec supports extended thinking."""
-        return bool(self.spec.supported_thinking_budgets)
-
-    @property
-    def supports_effort(self) -> bool:
-        """``False``: the CLI does not expose the effort knob on stream-json."""
-        return bool(self.spec.supported_thinking_efforts)
-
-    @property
-    def valid_efforts(self) -> tuple[str, ...]:
-        """No effort knob on the CLI transport."""
-        return tuple(self.spec.supported_thinking_efforts.values())
-
-    @property
-    def supports_cache_control(self) -> bool:
-        """``False``: prompt cache is the CLI's concern, not ours."""
-        return self.spec.prompt_cache_breakpoints
-
-    @property
-    def supports_context_management(self) -> bool:
-        """``True``: the CLI itself rolls history under quota pressure."""
-        return True
-
-    @property
-    def supports_persistent_retry(self) -> bool:
-        """``False``: persistent retry conflicts with subprocess lifecycle."""
-        return self.spec.retries_internally
-
-    @property
-    def supports_account_auth(self) -> bool:
-        """``True``: the provider runs on the user's CLI subscription."""
-        return True
-
-    @property
-    def max_image_dim(self) -> int:
-        """Maximum image edge (pixels) accepted, from the model profile."""
-        return self.spec.context_limits.max_image_edge_px
-
-    @property
-    def max_image_bytes(self) -> int:
-        """Maximum size (bytes) of a single image, from the model profile."""
-        return self.spec.context_limits.max_image_bytes
-
-    @property
-    def max_request_bytes(self) -> int:
-        """Maximum request-body size (bytes), from the model profile."""
-        return self.spec.context_limits.max_request_bytes
-
     @override
     def approx_text_tokens(self, text: str) -> int:
         """Local estimate via ``chars_per_token``."""
-        return int(len(text) / self.spec.chars_per_token)
+        return int(
+            len(text) / anthropic_catalog.chars_per_token(self.capability.model_id)
+        )
 
     @override
     def approx_image_tokens(self, data: bytes) -> int:
@@ -1305,7 +1245,9 @@ class _AnthropicCLIModel(ModelDefaults):
         """
         await self._await_mcp_listed(proc)
         line = json.dumps(
-            _serialize_for_stdin(entry, self.max_image_dim, self.max_image_bytes)
+            _serialize_for_stdin(
+                entry, self.limits.max_image_edge_px, self.limits.max_image_bytes
+            )
         )
         await proc.write_line(line)
 
@@ -1464,7 +1406,7 @@ class _AnthropicCLIModel(ModelDefaults):
             _populate_anthropic_tmpdir(tmpdir, self._provider.account)
             spawn_owned_tmpdir = tmpdir
         argv = _build_anthropic_argv(
-            model_id=base_model_id(self._model_id),
+            model_id=base_model_id(self.capability.model_id),
             system_prompt=self._pending_system,
             bridge_url=self._tools_bridge.url,
             bridge_server_name=self._tools_bridge.server_name,

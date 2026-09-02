@@ -16,6 +16,7 @@ from __future__ import annotations
 import pytest
 
 from sagent.providers.openai.sub import OpenAISubscription
+from sagent.types.capability import ModelSettings, ThinkingEffort
 from sagent.types.model import ModelRequest
 from sagent.types.runtime import UserMessage
 
@@ -48,15 +49,13 @@ _requires_subscription = pytest.mark.skipif(
     ],
 )
 @pytest.mark.asyncio
-async def test_gpt_56_subscription_turn(model_id: str, effort: str) -> None:
+async def test_gpt_56_subscription_turn(model_id: str, effort: ThinkingEffort) -> None:
     provider = OpenAISubscription.from_credentials()
     model = provider.model(model_id)
+    model._settings = ModelSettings(capability=model.capability, thinking_effort=effort)
     try:
         response = await model.buffer(
-            ModelRequest(
-                messages=[UserMessage(text="Reply with exactly: OK")],
-                effort=effort,
-            )
+            ModelRequest(messages=[UserMessage(text="Reply with exactly: OK")])
         )
     finally:
         await model.close()

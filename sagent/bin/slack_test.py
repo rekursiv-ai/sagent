@@ -1418,7 +1418,6 @@ class TestAdapterConstruction:
         adapter._model = MagicMock()
         adapter._model_recipe = MagicMock()
         adapter._compactor = None
-        adapter._effort = None
         adapter._max_tool_call_rounds = None
         adapter._max_budget_usd = None
         fake_child = MagicMock()
@@ -1489,7 +1488,6 @@ class TestAdapterConstruction:
             compactor=None,
             log_prefix="agent-",
             router_log_channel="ch",
-            effort="high",
             max_tool_call_rounds=5,
             max_budget_usd=1.0,
         )

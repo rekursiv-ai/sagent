@@ -35,7 +35,6 @@ else:
     httpx2 = lazy_import("httpx2")  # 100ms cold
     image_lib = lazy_import("sagent.lib.image")
 
-from sagent import types
 from sagent.catalog import google as google_catalog
 from sagent.lib.custom_json import (
     IntCodec,
@@ -52,15 +51,21 @@ from sagent.providers.lib.errors import (
 from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.lib.stop_reason import normalize_stop_reason
-from sagent.types.model import (
+from sagent.types.capability import (
     ModelCapability,
+    ModelLimits,
+    ModelSettings,
+)
+from sagent.types.cost import TokenCount
+from sagent.types.model import (
     ModelRequest,
     ModelResponse,
-    ModelSpec,
     PromptTooLongError,
     StreamInterruptedError,
-    ThinkingEffort,
-    TokenCount,
+)
+from sagent.types.providers import (
+    ModelRole,
+    resolve,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -99,14 +104,14 @@ class Google:
     # Model limits and pricing.
     # ModelLimits: https://ai.google.dev/gemini-api/docs/models
     # Pricing: https://ai.google.dev/gemini-api/docs/pricing
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = google_catalog.MODELS
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = google_catalog.models()
     """Per-model capability, shared by every Gemini transport."""
 
-    TRANSPORT: ClassVar[ModelCapability] = google_catalog.API
+    TRANSPORT: ClassVar[ModelCapability] = google_catalog.api()
     """What this transport lets through; subclasses declare their own."""
 
     @property
-    def ROLES(self) -> Mapping[types.providers.ModelRole, str]:  # noqa: N802
+    def ROLES(self) -> Mapping[ModelRole, str]:  # noqa: N802
         """Role name to base id; ``utility`` falls back to the default."""
         return MappingProxyType(
             {
@@ -166,19 +171,19 @@ class Google:
 
         """
         mid = model_id if model_id is not None else "default"
-        spec = types.providers.resolve(
+        capability, settings = resolve(
             mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT
         )
+        limits = settings.limits
         return _GeminiModel(
             provider=self,
-            # ``mid`` may be a role name; the spec carries the resolved id.
-            model_id=spec.tagged_model_id,
+            capability=capability,
+            settings=settings,
             max_request_tokens=(
                 max_request_tokens
                 if max_request_tokens is not None
-                else spec.context_limits.max_request_tokens
+                else limits.max_request_tokens
             ),
-            spec=spec,
         )
 
     def utility_model(self) -> _GeminiModel:
@@ -194,20 +199,17 @@ class Google:
 class _GeminiModel(ModelDefaults):
     """Gemini model backend."""
 
-    spec: ModelSpec = ModelSpec()
-    """What this model can do; replaced from the catalog at construction."""
-
     def __init__(
         self,
         provider: Google,
-        model_id: str,
+        capability: ModelCapability,
+        settings: ModelSettings,
         max_request_tokens: int,
-        spec: ModelSpec | None = None,
     ) -> None:
         self._provider = provider
-        self._model_id = model_id
+        self._capability = capability
+        self._settings = settings
         self._max_request_tokens = max_request_tokens
-        self.spec = spec or ModelSpec()
         # Per loop: an httpx2.AsyncClient holds a connection pool owned by
         # the loop that opened it, and the guarding lock binds to the loop
         # that first contends on it. Sharing either across loops raises
@@ -251,59 +253,21 @@ class _GeminiModel(ModelDefaults):
             await client.aclose()
 
     @property
+    @override
+    def capability(self) -> ModelCapability:
+        """What this model offers on this transport."""
+        return self._capability
+
+    @property
+    @override
+    def settings(self) -> ModelSettings:
+        """What this instance chose."""
+        return self._settings
+
+    @property
     def max_request_tokens(self) -> int:
         """Maximum input tokens the model accepts."""
         return self._max_request_tokens
-
-    @property
-    def model_id(self) -> str:
-        """Provider-specific model identifier."""
-        return self._model_id
-
-    @property
-    def max_response_tokens(self) -> int:
-        """Maximum output tokens the model can generate."""
-        return self.spec.context_limits.max_response_tokens
-
-    @property
-    def supports_streaming(self) -> bool:
-        """Whether the model supports token-by-token streaming."""
-        return True
-
-    @property
-    def supports_thinking(self) -> bool:
-        """Whether the model supports extended thinking."""
-        return bool(self.spec.supported_thinking_budgets)
-
-    @property
-    def supports_effort(self) -> bool:
-        """Whether the model accepts an effort hint."""
-        return bool(self.spec.supported_thinking_efforts)
-
-    @property
-    def valid_efforts(self) -> tuple[str, ...]:
-        """Gemini effort levels (mapped to ``thinkingBudget``)."""
-        return tuple(self.spec.supported_thinking_efforts)
-
-    @property
-    def supports_cache_control(self) -> bool:
-        """Whether the provider supports prompt caching."""
-        return self.spec.prompt_cache_breakpoints
-
-    @property
-    def supports_context_management(self) -> bool:
-        """Whether the provider manages context overflow internally."""
-        return False
-
-    @property
-    def supports_persistent_retry(self) -> bool:
-        """Whether the provider retries internally on transient failures."""
-        return self.spec.retries_internally
-
-    @property
-    def supports_account_auth(self) -> bool:
-        """Whether the provider uses account-based authentication."""
-        return self.spec.account_auth
 
     @override
     def approx_text_tokens(self, text: str) -> int:
@@ -323,10 +287,8 @@ class _GeminiModel(ModelDefaults):
     @override
     async def actual_request_tokens(self, request: ModelRequest) -> int:
         """Call ``:countTokens`` for the exact server-side count."""
-        url = f"{_API_BASE}/models/{self._model_id}:countTokens"
-        body = _build_request(
-            request, self.spec, self.max_image_dim, self.max_image_bytes
-        )
+        url = f"{_API_BASE}/models/{self.capability.model_id}:countTokens"
+        body = _build_request(request, self.capability, self.settings, self.limits)
         client = await self._get_client()
         r = await client.post(
             url,
@@ -347,21 +309,6 @@ class _GeminiModel(ModelDefaults):
                 raise PromptTooLongError(r.text)
         r.raise_for_status()
         return IntCodec.coerce(cast(MutableJSON, r.json()).get("totalTokens"), 0)
-
-    @property
-    def max_image_dim(self) -> int:
-        """Maximum image edge (pixels) accepted, from the model profile."""
-        return self.spec.context_limits.max_image_edge_px
-
-    @property
-    def max_image_bytes(self) -> int:
-        """Maximum size (bytes) of a single image, from the model profile."""
-        return self.spec.context_limits.max_image_bytes
-
-    @property
-    def max_request_bytes(self) -> int:
-        """Maximum request-body size (bytes), from the model profile."""
-        return self.spec.context_limits.max_request_bytes
 
     def is_context_overflow(self, error: Exception) -> bool:
         """Classify an error as a token context-window overflow.
@@ -401,10 +348,8 @@ class _GeminiModel(ModelDefaults):
           ValueError: Server returns ``400`` for non-overflow reasons.
 
         """
-        url = f"{_API_BASE}/models/{self._model_id}:streamGenerateContent?alt=sse"
-        body = _build_request(
-            request, self.spec, self.max_image_dim, self.max_image_bytes
-        )
+        url = f"{_API_BASE}/models/{self.capability.model_id}:streamGenerateContent?alt=sse"
+        body = _build_request(request, self.capability, self.settings, self.limits)
         client = await self._get_client()
         async with client.stream(
             "POST",
@@ -429,11 +374,7 @@ class _GeminiModel(ModelDefaults):
                 if r.status_code == 400:
                     raise ValueError(f"Google API 400: {err_body}")
             r.raise_for_status()
-            return await _consume_gemini_stream(
-                r,
-                publish=publish,
-                spec=self.spec,
-            )
+            return await _consume_gemini_stream(r, publish=publish, model=self)
 
 
 def _strip_additional_properties(schema: MutableJSONValue) -> MutableJSONValue:
@@ -458,9 +399,9 @@ def _strip_additional_properties(schema: MutableJSONValue) -> MutableJSONValue:
 
 def _build_request(
     request: ModelRequest,
-    spec: ModelSpec,
-    max_image_dim: int = 0,
-    max_image_bytes: int = 0,
+    capability: ModelCapability,
+    settings: ModelSettings,
+    limits: ModelLimits,
 ) -> MutableJSON:
     """Convert history entries to the Gemini API request body.
 
@@ -486,7 +427,9 @@ def _build_request(
             if entry.text:
                 parts.append({"text": entry.text})
             for att in entry.attachments:
-                block = _attachment_part(att, max_image_dim, max_image_bytes)
+                block = _attachment_part(
+                    att, limits.max_image_edge_px, limits.max_image_bytes
+                )
                 if block is not None:
                     parts.append(block)
             if not parts:
@@ -546,12 +489,14 @@ def _build_request(
                 }
             )
             for att in entry.attachments:
-                block = _attachment_part(att, max_image_dim, max_image_bytes)
+                block = _attachment_part(
+                    att, limits.max_image_edge_px, limits.max_image_bytes
+                )
                 if block is not None:
                     pending_tool_parts.append(block)
     _flush_tool_parts(contents, pending_tool_parts)
 
-    thinking_config = _thinking_config(request, spec)
+    thinking_config = _thinking_config(capability, settings)
     gen_config: MutableJSON = {}
     if thinking_config is None:
         gen_config["temperature"] = request.temperature
@@ -594,28 +539,19 @@ def _build_request(
     return body
 
 
-def _thinking_config(request: ModelRequest, spec: ModelSpec) -> MutableJSON | None:
-    """Return Gemini thinking config for a sagent request."""
-    if not spec.supported_thinking_budgets:
-        # gemini-1.5 rejects ``thinkingConfig`` outright. A private budget
-        # table sent one anyway for any effort the caller passed, on a row
-        # whose whole point is that the knob does not exist.
+def _thinking_config(
+    capability: ModelCapability, settings: ModelSettings
+) -> MutableJSON | None:
+    """Return Gemini thinking config, or ``None`` when thinking is off."""
+    # gemini-1.5 rejects ``thinkingConfig`` outright, so an off row must send
+    # no key at all rather than a zero budget.
+    if settings.thinking_budget == "none" or "none" not in capability.thinking_budget:
         return None
-    if request.effort is not None:
-        # The catalog holds the wire budget as data; a parallel ladder here
-        # drifted from it, so the reader saw one number and the server another.
-        budget = spec.supported_thinking_efforts.get(
-            cast(ThinkingEffort, request.effort)
-        )
-        if budget is None:
-            valid = ", ".join(spec.supported_thinking_efforts)
-            raise ValueError(
-                f"Invalid Google effort {request.effort!r}. Valid efforts: {valid}.",
-            )
-        return {"includeThoughts": True, "thinkingBudget": int(budget)}
-    if request.thinking in ("adaptive", "enabled"):
-        return {"includeThoughts": True, "thinkingBudget": -1}
-    return None
+    include = settings.thinking_output == "text"
+    if settings.thinking_budget == "auto":
+        return {"includeThoughts": include, "thinkingBudget": -1}
+    budget = google_catalog.thinking_budget(settings.thinking_effort)
+    return {"includeThoughts": include, "thinkingBudget": int(budget)}
 
 
 def _attachment_part(
@@ -656,7 +592,7 @@ async def _consume_gemini_stream(
     r: httpx2.Response,
     *,
     publish: Callable[[RuntimeEvent], None] | None = None,
-    spec: ModelSpec,
+    model: _GeminiModel,
     chunk_unwrap: Callable[[MutableJSON], MutableJSON] | None = None,
 ) -> ModelResponse:
     """Parse SSE stream from :streamGenerateContent?alt=sse.
@@ -749,7 +685,7 @@ async def _consume_gemini_stream(
         tool_calls=tool_calls,
         usage=usage,
         finish_reason=finish_reason,
-        spec=spec,
+        model=model,
     )
     if finish_reason is None:
         raise StreamInterruptedError(response)
@@ -764,7 +700,7 @@ def _build_response(
     tool_calls: list[ToolCall],
     usage: MutableJSON,
     finish_reason: str | None,
-    spec: ModelSpec,
+    model: _GeminiModel,
 ) -> ModelResponse:
     """Build a ``ModelResponse`` from Gemini's parsed stream fields."""
     output_tokens = IntCodec.coerce(usage.get("candidatesTokenCount"), 0)
@@ -798,5 +734,5 @@ def _build_response(
         ),
         message_id=message_id,
         request_id=message_id,
-        spend=spec.spend(tokens),
+        spend=model.spend(tokens),
     )

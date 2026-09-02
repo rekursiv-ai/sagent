@@ -53,14 +53,18 @@ from sagent.providers import (
     build_provider,
     default_auth_for_provider,
 )
-from sagent.thinking import ThinkingState
-from sagent.tools.agent_self import plan_model_options
+from sagent.thinking import apply_thinking_command
+from sagent.tools.agent_self import (
+    CACHE_TTL_SEC,
+    plan_model_options,
+)
 from sagent.tools.core import (
     load_tool_description,
     opt_int,
     opt_str,
     provider_not_allowed_result,
 )
+from sagent.types.capability import ServiceTier, ThinkingEffort
 from sagent.types.compactor import Compactor
 from sagent.types.model import Model, ModelRecipe
 from sagent.types.runtime import (
@@ -305,9 +309,6 @@ class AgentSpawn:
         max_depth: int | None = None,
         compactor: Compactor | None = None,
         max_attempts: int | None = None,
-        thinking: str | None = None,
-        thinking_state: ThinkingState | None = None,
-        effort: str | None = None,
         session_root_dir: str | Path | None = None,
         verbosity: int = 1,
         allow_providers: tuple[str, ...] | None = None,
@@ -322,9 +323,6 @@ class AgentSpawn:
         self._max_depth = max_depth
         self._compactor = compactor
         self._max_attempts = max_attempts
-        self._thinking = thinking
-        self._thinking_state = thinking_state
-        self._effort = effort
         self._session_root_dir = (
             Path(session_root_dir) if session_root_dir is not None else None
         )
@@ -551,10 +549,10 @@ class AgentSpawn:
     ) -> _Agent:
         """Build a child Agent with inherited knobs and explicit options.
 
-        ``model_options`` (already validated against ``child_model``)
-        override inherited defaults: ``thinking``/``effort`` feed the
-        constructor, while ``cache_ttl``/``service_tier`` are applied
-        via the post-construction setters that validate them.
+        Every model knob rides ``child_model.settings``, so they are applied
+        there rather than passed to the constructor: the child adopts the
+        parent's whole selection, then ``model_options`` (already validated
+        against ``child_model``) overrides individual axes.
         """
         child_system = self._resolve_system(system, parent_agent)
         child_max_rounds = (
@@ -569,20 +567,29 @@ class AgentSpawn:
             "max_tool_call_rounds": child_max_rounds,
             "session_dir": self._child_session_dir(parent_agent),
         }
-        for name in ("max_attempts", "thinking", "thinking_state", "effort"):
-            resolved = self._inherit(name, parent_agent)
-            if resolved is not None:
-                init_kwargs[name] = resolved
+        inherited_attempts = self._inherit("max_attempts", parent_agent)
+        if inherited_attempts is not None:
+            init_kwargs["max_attempts"] = inherited_attempts
+        settings = child_model.settings
+        if parent_agent is not None:
+            # ``adopt`` drops what the child's model does not offer, so a
+            # spawn onto a narrower model cannot fail on an inherited knob.
+            settings.adopt(parent_agent.model.settings)
         if "thinking" in model_options:
-            init_kwargs["thinking"] = "adaptive" if model_options["thinking"] else None
+            _ = apply_thinking_command(
+                "adaptive" if model_options["thinking"] else "off",
+                settings,
+                show=False,
+            )
         if "effort" in model_options:
-            init_kwargs["effort"] = model_options["effort"]
-        child = _get_agent_class()(**init_kwargs)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- dynamic kwargs from directive
+            settings.thinking_effort = cast(ThinkingEffort, model_options["effort"])
         if "cache_ttl" in model_options:
-            child.cache_ttl = cast(Literal["5m", "1h"], model_options["cache_ttl"])
+            settings.cache_ttl_sec = CACHE_TTL_SEC[
+                cast(str, model_options["cache_ttl"])
+            ]
         if "service_tier" in model_options:
-            child.service_tier = cast(str | None, model_options["service_tier"])
-        return child
+            settings.service_tier = cast(ServiceTier, model_options["service_tier"])
+        return _get_agent_class()(**init_kwargs)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- dynamic kwargs from directive
 
     async def _spawn_child(
         self,
@@ -902,12 +909,11 @@ class AgentSpawn:
     def _inherit(self, name: str, parent_agent: _Agent | None) -> object:
         """Generic ``factory arg → parent → None`` fall-through.
 
-        Used for knobs that are NOT LLM-settable: ``compactor``,
-        ``max_attempts``, ``thinking``, ``thinking_state``, ``effort``. The factory stores
-        these as ``self._<name>`` (private); the parent exposes them
-        as ``<name>`` (public property). Convention is rigid across
-        all inheritable knobs so a single arg is enough. When every
-        layer is ``None`` the child uses ``Agent.__init__``'s default.
+        Used for the knobs that are NOT LLM-settable and NOT model
+        settings: ``compactor`` and ``max_attempts``. The factory stores
+        these as ``self._<name>`` (private); the parent exposes them as
+        ``<name>`` (public property). When every layer is ``None`` the
+        child uses ``Agent.__init__``'s default.
         """
         factory_val = getattr(self, f"_{name}")
         if factory_val is not None:
@@ -1036,7 +1042,7 @@ class AgentSpawn:
         new_spec = ModelRecipe(
             provider=p,
             auth=a,
-            model_id=new_model.spec.tagged_model_id,
+            model_id=new_model.tagged_model_id,
             account=ac,
         )
         return new_model, new_spec

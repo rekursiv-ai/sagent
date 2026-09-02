@@ -49,9 +49,8 @@ from sagent.agent.context import (
 from sagent.agent.state import ReadCacheEntry, ToolState
 from sagent.lib.custom_json import FloatCodec, IntCodec
 from sagent.sessions import restrict_path
-from sagent.types.cost import TokenCost
-from sagent.types.model import Model, ModelRecipe, TokenCount
-from sagent.types.providers import ProviderOptions
+from sagent.types.cost import TokenCost, TokenCount
+from sagent.types.model import Model, ModelRecipe
 from sagent.types.runtime import (
     CANCELLED_PLACEHOLDER,
     DETACHED_PLACEHOLDER,
@@ -121,14 +120,17 @@ class PersistentAgentRecord:
     max_tool_call_rounds: int | None = None
     max_request_tokens: int | None = None
     max_response_tokens: int | None = None
-    thinking: str | None = None
-    thinking_state: str | None = None
-    effort: str | None = None
-    cache_ttl: str = "5m"
-    service_tier: str | None = None
+    thinking_budget: str = "none"
+    thinking_output: str = "none"
+    show_thinking: bool = True
+    effort: str = "none"
+    # 300s, not 0: the wire spells this as a label, and a model that caches
+    # at all has no "off" -- 0.0 still shipped a ``5m`` breakpoint while the
+    # record claimed no caching. Matches ``_cache_ttl_sec``'s read default.
+    cache_ttl_sec: float = 300.0
+    service_tier: str = "auto"
     max_budget_usd: float | None = None
     persistent_retry: bool = False
-    provider_options: ProviderOptions = ProviderOptions()  # noqa: RUF009 -- frozen dataclass, no mutable default risk
 
 
 def _att_to_json(att: BytesMessage) -> dict[str, str]:
@@ -1107,9 +1109,7 @@ def _persistent_agent_from_json(
         if isinstance(raw_tools, list)
         else ()
     )
-    provider_options = _provider_options_from_json(
-        record.get("provider_options", record.get("provider_args")),
-    )
+    budget, output, show = _thinking_axes(record)
     return PersistentAgentRecord(
         label=str(record.get("label") or ""),
         run_id=str(record.get("run_id") or ""),
@@ -1125,42 +1125,64 @@ def _persistent_agent_from_json(
         max_tool_call_rounds=_optional_int(record.get("max_tool_call_rounds")),
         max_request_tokens=_optional_int(record.get("max_request_tokens")),
         max_response_tokens=_optional_int(record.get("max_response_tokens")),
-        thinking=_optional_str(record.get("thinking")),
-        thinking_state=_optional_str(record.get("thinking_state")),
-        effort=_optional_str(record.get("effort")),
-        cache_ttl=str(record.get("cache_ttl") or "5m"),
-        service_tier=_optional_str(record.get("service_tier")),
+        thinking_budget=budget,
+        thinking_output=output,
+        show_thinking=show,
+        effort=str(record.get("effort") or "none"),
+        cache_ttl_sec=_cache_ttl_sec(record),
+        service_tier=str(record.get("service_tier") or "auto"),
         max_budget_usd=_optional_float(record.get("max_budget_usd")),
         persistent_retry=_json_bool(record.get("persistent_retry")),
-        provider_options=provider_options,
     )
 
 
-def _provider_options_from_json(raw: object) -> ProviderOptions:
-    """Decode construction options, tolerating the legacy ``provider_args`` bag.
+def _cache_ttl_sec(record: Mapping[str, object]) -> float:
+    """Read the cache lifetime, upgrading a record that spelled it ``"5m"``."""
+    raw = record.get("cache_ttl_sec")
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return float(raw)
+    return 3600.0 if record.get("cache_ttl") == "1h" else 300.0
 
-    Known field names decode into ``ProviderOptions``; anything else in
-    a legacy record is dropped with one warning (the untyped bag it
-    came from no longer exists).
+
+def _thinking_axes(record: Mapping[str, object]) -> tuple[str, str, bool]:
+    """Read the three thinking axes, upgrading a pre-split record.
+
+    Sessions written before the split carry a fused ``thinking_state``
+    (and a ``thinking`` wire mode); both spell the same two axes plus the
+    display bit, so an old record is decoded rather than dropped.
+
+    Args:
+      record: One persisted persistent-agent record.
+
+    Returns:
+      axes: ``(thinking_budget, thinking_output, show_thinking)``.
+
     """
-    if not isinstance(raw, Mapping):
-        return ProviderOptions()
-    record = cast(Mapping[str, object], raw)
-    known = {field.name for field in dataclasses.fields(ProviderOptions)}
-    usable = {
-        key: value
-        for key, value in record.items()
-        if key in known and isinstance(value, bool)
-    }
-    # A known key with a non-bool value (legacy JSON bag) is dropped too
-    # and must warn just like an unknown key.
-    dropped = sorted(str(key) for key in record if key not in usable)
-    if dropped:
-        logger.warning(
-            "Dropping unusable provider option(s) from session record: %s",
-            ", ".join(dropped),
+    if "thinking_budget" in record:
+        return (
+            str(record.get("thinking_budget") or "none"),
+            str(record.get("thinking_output") or "none"),
+            _json_bool(record.get("show_thinking"), default=True),
         )
-    return ProviderOptions(**usable)
+    legacy = str(record.get("thinking_state") or "")
+    show = legacy.endswith("-show")
+    if legacy.startswith("adaptive-"):
+        return ("auto", "text", show)
+    if legacy.startswith("on-"):
+        return ("fixed", "text", show)
+    if legacy == "redact-hide":
+        return ("auto", "redacted", False)
+    if legacy == "off-hide":
+        return ("none", "none", False)
+    # No state: fall back to the wire mode the legacy ``thinking`` field
+    # carried, which is the only other place the budget was recorded.
+    match str(record.get("thinking") or ""):
+        case "adaptive":
+            return ("auto", "text", True)
+        case "enabled":
+            return ("fixed", "text", True)
+        case _:
+            return ("none", "none", True)
 
 
 def _persistent_state(raw: object) -> PersistentAgentState | None:
@@ -1221,16 +1243,14 @@ def _persistent_agent_to_json(record: PersistentAgentRecord) -> dict[str, object
         "max_tool_call_rounds": record.max_tool_call_rounds,
         "max_request_tokens": record.max_request_tokens,
         "max_response_tokens": record.max_response_tokens,
-        "thinking": record.thinking,
-        "thinking_state": record.thinking_state,
+        "thinking_budget": record.thinking_budget,
+        "thinking_output": record.thinking_output,
+        "show_thinking": record.show_thinking,
         "effort": record.effort,
-        "cache_ttl": record.cache_ttl,
+        "cache_ttl_sec": record.cache_ttl_sec,
         "service_tier": record.service_tier,
         "max_budget_usd": record.max_budget_usd,
         "persistent_retry": record.persistent_retry,
-        "provider_options": cast(
-            dict[str, object], record.provider_options.set_fields()
-        ),
         "timestamp": time.time(),
     }
 
@@ -1243,11 +1263,26 @@ def append_persistent_agent_lifecycle(
     *,
     state: PersistentAgentState,
     notify_on_asleep: bool,
+    show_thinking: bool = True,
 ) -> None:
-    """Append one parent-side persistent-agent lifecycle record."""
+    """Append one parent-side persistent-agent lifecycle record.
+
+    Args:
+      parent_agent: Agent whose session.jsonl receives the record.
+      child: The persistent subagent being recorded.
+      label: Its stable registry label.
+      run_id: Identity of this run of it.
+      state: Lifecycle phase this record marks.
+      notify_on_asleep: Whether its idles ping the parent.
+      show_thinking: Whether a resumed session renders its reasoning. A
+          display choice, so it is persisted alongside the model settings
+          rather than read off them.
+
+    """
     if parent_agent.session_dir is None:
         return
     spec = child.model_recipe
+    settings = child.model.settings
     append_session(
         parent_agent.session_dir / "session.jsonl",
         persistent_agents=[
@@ -1259,21 +1294,21 @@ def append_persistent_agent_lifecycle(
                 provider=spec.provider if spec else type(child.model).__name__,
                 auth=spec.auth if spec else "",
                 account=spec.account if spec else None,
-                model_id=child.model.spec.tagged_model_id,
+                model_id=child.model.tagged_model_id,
                 tools=tuple(tool.name for tool in child.tools),
                 system=child.base_system_spec,
                 notify_on_asleep=notify_on_asleep,
                 max_tool_call_rounds=child.max_tool_call_rounds,
                 max_request_tokens=child.max_request_tokens,
                 max_response_tokens=child.max_response_tokens,
-                thinking=child.thinking,
-                thinking_state=child.thinking_state,
-                effort=child.effort,
-                cache_ttl=child.cache_ttl,
-                service_tier=child.service_tier,
+                thinking_budget=settings.thinking_budget,
+                thinking_output=settings.thinking_output,
+                show_thinking=show_thinking,
+                effort=settings.thinking_effort,
+                cache_ttl_sec=settings.cache_ttl_sec,
+                service_tier=settings.service_tier,
                 max_budget_usd=child.max_budget_usd,
                 persistent_retry=child.persistent_retry,
-                provider_options=child.provider_options,
             )
         ],
     )
@@ -1495,7 +1530,7 @@ def install_session_persistence(agent: Agent, session_dir: Path) -> Callable[[],
         spec = agent.model_recipe
         meta = SessionMeta(
             session_id=agent.session_id,
-            model_id=agent.model.spec.tagged_model_id,
+            model_id=agent.model.tagged_model_id,
             provider=spec.provider if spec else "",
             auth=spec.auth if spec else "",
             account=(spec.account or "") if spec else "",
@@ -2154,7 +2189,7 @@ def restore_model(
         spec = ModelRecipe(
             provider=meta.provider,
             auth=meta.auth,
-            model_id=model.spec.tagged_model_id,
+            model_id=model.tagged_model_id,
             account=meta.account or None,
         )
         logger.info("Restored model %s/%s", meta.provider, meta.model_id)

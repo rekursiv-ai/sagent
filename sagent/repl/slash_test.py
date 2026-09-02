@@ -102,23 +102,7 @@ def test_parse_slash_provider_no_args() -> None:
     assert action.args == ""
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        "adaptive-show",
-        "adaptive-hide",
-        "on-show",
-        "on-hide",
-        "off-hide",
-        "redact-hide",
-        "adaptive",
-        "on",
-        "off",
-        "redact",
-        "show",
-        "hide",
-    ],
-)
+@pytest.mark.parametrize("command", ["adaptive", "on", "off", "redact", "show", "hide"])
 def test_parse_slash_thinking_commands(command: str) -> None:
     action = parse_slash(f"/thinking {command}")
     assert isinstance(action, Thinking)
@@ -135,7 +119,7 @@ def test_parse_slash_thinking_bare_returns_empty_command() -> None:
 def test_parse_slash_thinking_unknown_mode_returns_unknown() -> None:
     action = parse_slash("/thinking nope")
     assert isinstance(action, Unknown)
-    assert "redact-hide" in action.text
+    assert "redact" in action.text
 
 
 def test_parse_slash_effort_bare_returns_empty_value() -> None:

@@ -96,7 +96,6 @@ else:
 
 from openai.lib.streaming.responses import AsyncResponseStream
 
-from sagent import types
 from sagent.catalog import openai as openai_catalog
 from sagent.lib import debug_log
 from sagent.lib.atomic_file import atomic_write_bytes
@@ -126,22 +125,24 @@ from sagent.providers.lib.oauth import (
 from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.openai.api import OpenAI, _OpenAIModel
+from sagent.types.capability import (
+    ContextTag,
+    ModelCapability,
+    ModelLimits,
+)
+from sagent.types.cost import TokenCount
 from sagent.types.exceptions import (
     AuthRefreshError,
     UserFacingError,
 )
 from sagent.types.model import (
-    ModelCapability,
-    ModelLimits,
     ModelRequest,
     ModelResponse,
-    ModelSpec,
     PromptTooLongError,
     StreamInterruptedError,
-    ThinkingEffort,
-    TokenCount,
     base_model_id,
 )
+from sagent.types.providers import resolve
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
@@ -214,23 +215,25 @@ class _CredentialFileError(ValueError):
     """Stored credentials do not match the subscription OAuth schema."""
 
 
-def _subscription_limits(cap: ModelCapability) -> ModelLimits:
-    """Clamp a capability's windows to the subscription wire contract.
+def _subscription_context(cap: ModelCapability) -> Mapping[ContextTag, ModelLimits]:
+    """Clamp the untagged window to the subscription wire contract.
 
-    Only the token windows differ between the API and the Codex backend,
-    and the ``+1m`` context is unreachable once clamped -- so the result
-    is a single ``ModelLimits``, not a context map.
+    Only the default tag survives: ``+1m`` clamps to exactly the base id,
+    so offering it would mislead a caller expecting 1M.
     """
-    limits = cap.context_limits
-    base = limits if isinstance(limits, ModelLimits) else limits[""]
-    return replace(
-        base,
-        max_request_tokens=min(
-            base.max_request_tokens, _SUBSCRIPTION_MAX_REQUEST_TOKENS
-        ),
-        max_response_tokens=min(
-            base.max_response_tokens, _SUBSCRIPTION_MAX_RESPONSE_TOKENS
-        ),
+    base = cap.context[""]
+    return MappingProxyType(
+        {
+            "": replace(
+                base,
+                max_request_tokens=min(
+                    base.max_request_tokens, _SUBSCRIPTION_MAX_REQUEST_TOKENS
+                ),
+                max_response_tokens=min(
+                    base.max_response_tokens, _SUBSCRIPTION_MAX_RESPONSE_TOKENS
+                ),
+            )
+        }
     )
 
 
@@ -258,13 +261,13 @@ class OpenAISubscription(OpenAI):
 
     CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = MappingProxyType(
         {
-            name: replace(cap, context_limits=_subscription_limits(cap))
-            for name, cap in openai_catalog.MODELS.items()
+            name: replace(cap, context=_subscription_context(cap))
+            for name, cap in openai_catalog.models().items()
         }
     )
     """The Responses wire: every advertised effort, clamped token windows."""
 
-    TRANSPORT: ClassVar[ModelCapability] = openai_catalog.SUBSCRIPTION
+    TRANSPORT: ClassVar[ModelCapability] = openai_catalog.subscription()
     """Codex subscription: account auth, ``/fast`` maps to the priority tier."""
 
     class Credentials(TypedDict):
@@ -548,19 +551,18 @@ class OpenAISubscription(OpenAI):
         # ``+1m`` is absent from the narrowed subscription catalog, so a
         # ``+1m`` id raises rather than silently clamping: the suffix buys
         # nothing under the subscription wire contract.
-        spec = types.providers.resolve(
+        capability, settings = resolve(
             mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT
         )
-        window = spec.context_limits.max_request_tokens
+        window = settings.limits.max_request_tokens
         return _OpenAISubModel(
             provider=self,
-            # ``mid`` may be a role name; the spec carries the resolved id.
-            model_id=spec.tagged_model_id,
+            capability=capability,
+            settings=settings,
             max_request_tokens=min(
                 max_request_tokens if max_request_tokens is not None else window,
                 window,
             ),
-            spec=spec,
         )
 
     @override
@@ -918,18 +920,6 @@ class _OpenAISubModel(_OpenAIModel):
         await self._provider.close_sdk()
         await super().close()
 
-    @property
-    @override
-    def supports_thinking(self) -> bool:
-        """Whether the model accepts a thinking/reasoning request."""
-        return self.supports_effort
-
-    @property
-    @override
-    def supports_account_auth(self) -> bool:
-        """Whether the provider uses account authentication."""
-        return self.spec.account_auth
-
     @override
     def is_context_overflow(self, error: Exception) -> bool:
         """Check whether an error indicates token context-window overflow.
@@ -983,7 +973,7 @@ class _OpenAISubModel(_OpenAIModel):
         # The ChatGPT Codex subscription endpoint rejects some public
         # Responses API knobs, including ``temperature`` and
         # ``max_output_tokens``.
-        reasoning_effort = self._reasoning_effort(request)
+        reasoning_effort = self._reasoning_effort()
         # The Responses API only streams reasoning-text deltas when a
         # ``summary`` is requested; without it the model reasons silently
         # and ``on_thinking`` never fires. Request the auto summary whenever
@@ -993,7 +983,7 @@ class _OpenAISubModel(_OpenAIModel):
         reasoning_dict: dict[str, str] | None = None
         if reasoning_effort is not None:
             reasoning_dict = {"effort": reasoning_effort, "summary": "auto"}
-            if base_model_id(self._model_id).startswith("gpt-5.6"):
+            if base_model_id(self.capability.model_id).startswith("gpt-5.6"):
                 # Sagent replays complete local history with store=False, so
                 # GPT-5.6 must render reasoning across all supplied turns.
                 reasoning_dict["context"] = "all_turns"
@@ -1002,26 +992,25 @@ class _OpenAISubModel(_OpenAIModel):
             "model": self._wire_model_id,
             "input": _build_input(
                 request,
-                max_image_dim=self.max_image_dim,
-                max_image_bytes=self.max_image_bytes,
+                max_image_dim=self.limits.max_image_edge_px,
+                max_image_bytes=self.limits.max_image_bytes,
             ),
             "instructions": request.system or "",
             "store": False,
             "stream": True,
             "include": ["reasoning.encrypted_content"]
-            if self.supports_effort
+            if reasoning_effort is not None
             else openai.omit,
             "tools": _build_tools(request.tools) if request.tools else openai.omit,
             "reasoning": reasoning,
         }
-        tier = self._effective_service_tier(request)
+        tier = self._effective_service_tier()
         if tier is not None:
             create_kwargs["service_tier"] = tier
         debug_log.trace(
             "api_call",
             kind="openai_responses",
             model=self._wire_model_id,
-            latency=request.latency,
             service_tier=tier,
         )
         try:
@@ -1042,7 +1031,7 @@ class _OpenAISubModel(_OpenAIModel):
                 )
             return await _consume_stream(
                 event_stream,
-                spec=self.spec,
+                model=self,
                 publish=publish,
             )
         except Exception as exc:
@@ -1059,35 +1048,13 @@ class _OpenAISubModel(_OpenAIModel):
                 raise PromptTooLongError(str(exc)) from exc
             raise
 
-    def _reasoning_effort(self, request: ModelRequest) -> str | None:
-        """Map sagent thinking/effort knobs onto OpenAI reasoning effort.
-
-        Raises:
-          ValueError: If ``request.effort`` is not one the model accepts.
-              Silently substituting ``"high"`` billed reasoning the caller
-              never asked for -- at the most expensive level.
-
-        """
-        if not self.supports_effort:
+    def _reasoning_effort(self) -> str | None:
+        """The wire reasoning effort, or ``None`` to omit reasoning."""
+        if self.settings.thinking_effort == "none":
             return None
-        if request.effort is not None:
-            # The catalog holds the wire value; the Responses rows differ from
-            # the Chat rows only in how ``max`` maps, which is data, not code.
-            wire = self.spec.supported_thinking_efforts.get(
-                cast(ThinkingEffort, request.effort)
-            )
-            if wire is None:
-                valid = ", ".join(self.spec.supported_thinking_efforts)
-                raise ValueError(
-                    f"Unknown effort {request.effort!r} for {self._model_id}."
-                    f" Valid efforts: {valid}",
-                )
-            return wire
-        if request.thinking == "adaptive":
-            return "medium"
-        if request.thinking == "enabled":
-            return "high"
-        return None
+        return openai_catalog.reasoning_effort(
+            self.settings.thinking_effort, model_id=self.capability.model_id
+        )
 
 
 def _build_tools(
@@ -1307,7 +1274,7 @@ class _OpenAIStreamError(UserFacingError):
 async def _consume_stream(
     stream: AsyncIterable[object],
     *,
-    spec: ModelSpec,
+    model: _OpenAISubModel,
     publish: Callable[[RuntimeEvent], None] | None,
 ) -> ModelResponse:
     """Parse a Responses API event stream into an assembled ModelResponse."""
@@ -1451,7 +1418,7 @@ async def _consume_stream(
         cache_read=cache_read,
         finish_reason=finish_reason,
         message_id=message_id,
-        spec=spec,
+        model=model,
     )
     if not completed:
         raise StreamInterruptedError(response)
@@ -1512,7 +1479,7 @@ def _build_stream_response(
     cache_read: int,
     finish_reason: str | None,
     message_id: str,
-    spec: ModelSpec,
+    model: _OpenAISubModel,
 ) -> ModelResponse:
     raw_reason = _FINISH_MAP.get(finish_reason or "", finish_reason)
 
@@ -1542,7 +1509,7 @@ def _build_stream_response(
         ),
         message_id=message_id,
         request_id=message_id,
-        spend=spec.spend(tokens),
+        spend=model.spend(tokens),
     )
 
 

@@ -1,40 +1,33 @@
 """Model contract and its data classes.
 
-The "how do I call a model" types: the ``Model`` Protocol, the request
-and response shapes, the budget and pricing primitives, and the
-``ModelRecipe`` recipe used to build a Model from CLI-style strings.
+The ``Model`` Protocol, the request and response shapes, ``AgentSettings``,
+and the ``ModelRecipe`` used to build a Model from CLI-style strings.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
     Final,
-    Literal,
     Protocol,
-    Self,
+    get_args,
     runtime_checkable,
 )
 
-from sagent.types.capability import ModelCapability, ModelLimits
-from sagent.types.cost import (
-    PriceCatalogProduct,
-    TokenCost,
-    TokenCount,
+from sagent.types.capability import (
+    ContextTag,
+    ModelCapability,
+    ModelLimits,
+    ModelSettings,
 )
+from sagent.types.cost import TokenCost, TokenCount
 from sagent.types.exceptions import UserFacingError
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
     RuntimeEvent,
-)
-from sagent.types.thinking import (
-    ALL_THINKING_EFFORTS,
-    ThinkingBudget,
-    ThinkingEffort,
-    ThinkingOutput,
 )
 
 
@@ -47,142 +40,161 @@ if TYPE_CHECKING:
 
 
 __all__ = [
-    "ALL_THINKING_EFFORTS",
     "CONTEXT_TAGS",
-    "LATENCY_TAGS",
-    "ContextBudget",
+    "AgentSettings",
     "Model",
-    "ModelCapability",
-    "ModelLimits",
     "ModelRecipe",
     "ModelRequest",
     "ModelResponse",
-    "ModelSpec",
     "ModelTerminationError",
     "PromptTooLongError",
     "RequestTooLargeError",
     "StreamInterruptedError",
-    "ThinkingBudget",
-    "ThinkingEffort",
-    "ThinkingOutput",
-    "TokenCount",
     "UsageSnapshot",
     "UsageWindow",
     "base_model_id",
     "default_buffer_tokens",
-    "latency_from_model_id",
     "split_model_id",
 ]
 
 
+# Derived from ``ContextTag``, not restated: a tag the type admits but a
+# hand-written tuple omitted would be unparseable while type-checking clean.
+# The default window's ``""`` is filtered out -- no id carries it.
+CONTEXT_TAGS: Final = tuple(t for t in get_args(ContextTag.__value__) if t)
+"""Window-size suffixes a model id may carry (e.g. ``...+1m``)."""
+
+
+def split_model_id(model_id: str) -> tuple[str, frozenset[ContextTag]]:
+    """Split a model id into its base id and trailing context tags.
+
+    Tags may appear in any order; matching is case-insensitive, and an
+    unknown suffix stays part of the base id.
+
+    Args:
+      model_id: Model id, possibly with trailing context tags.
+
+    Returns:
+      base_id: ``model_id`` without its tags.
+      tags: The stripped tags, lowercased (e.g. ``{"+1m"}``).
+
+    """
+    tags: set[ContextTag] = set()
+    base = model_id
+    while True:
+        lower = base.lower()
+        tag = next((t for t in CONTEXT_TAGS if lower.endswith(t)), None)
+        if tag is None:
+            return base, frozenset(tags)
+        tags.add(tag)
+        base = base[: -len(tag)]
+
+
+def base_model_id(model_id: str) -> str:
+    """Strip trailing context tags, yielding the canonical model id.
+
+    Args:
+      model_id: Model id, possibly with trailing context tags.
+
+    Returns:
+      base_id: ``model_id`` without its tags.
+
+    """
+    return split_model_id(model_id)[0]
+
+
+def default_buffer_tokens(max_request_tokens: int) -> int:
+    """Return proportional compaction headroom for a given input window.
+
+    Seeds ``AgentSettings.buffer_tokens``; ``Compactor.largest_context``,
+    not this function, defines the compaction threshold.
+
+    Args:
+      max_request_tokens: The model's input-token window.
+
+    Returns:
+      buffer: Tokens of headroom reserved below the effective cap.
+
+    """
+    return min(max(max_request_tokens // 15, 8_000), max(max_request_tokens // 2, 0))
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ModelSpec(ModelCapability):
-    """A capability resolved to one context tag and one latency tier."""
+class AgentSettings:
+    """What one Agent chose, within what its model's capability offers.
 
-    context_limits: ModelLimits = field(default_factory=ModelLimits)
-    """The one context's limits; ``narrow`` collapsed the mapping."""
+    There is no ``AgentCapability``: a capability needs an external
+    declarer, and an Agent has none -- its ceiling is ``model.capability``.
+    Use :meth:`from_limits` for proportional defaults.
+    """
 
-    context: str = ""
-    """The selected context tag (``""`` or e.g. ``"+1m"``)."""
+    max_request_tokens: int
+    """Maximum input tokens the agent will send."""
 
-    serve_fast: bool = False
-    """Whether this instance requests the fast tier."""
+    max_response_tokens: int
+    """Maximum output tokens reserved for the response."""
 
-    @property
-    def valid_latency_modes(self) -> tuple[str, ...]:
-        """Latency hints reachable here.
+    buffer_tokens: int = 0
+    """Headroom a ``Compactor`` deducts in ``largest_context``, in tokens."""
 
-        ``fast`` needs both transport support and a way to bill it: a
-        priced fast row (Anthropic) or a fast service tier (OpenAI).
-        """
-        if "fast" not in self.latency_modes:
-            return ()
-        if not self.serves_fast and "priority" not in self.service_tiers:
-            return ()
-        return tuple(sorted(self.latency_modes))
+    max_attempts: int = 5
+    """Retry attempts inside one send before the error surfaces."""
 
-    @property
-    def valid_service_tiers(self) -> tuple[str, ...]:
-        """Service tiers reachable here."""
-        return tuple(sorted(self.service_tiers))
+    max_tool_call_rounds: int | None = None
+    """Cap on tool-call rounds per turn; ``None`` for no cap."""
 
-    def spend(
-        self, tokens: TokenCount, *, served_fast: bool | None = None
-    ) -> TokenCost:
-        """Price ``tokens`` at the tier its request size falls into.
+    max_budget_usd: float | None = None
+    """Hard spend cap for this agent's own tree; ``None`` for no cap."""
 
-        Tier selection uses the whole prompt: ordinary, cache-write, and
-        cache-read pools stay disjoint for billing, but vendors size the
-        tier from their sum.
-
-        Args:
-          tokens: What the server reported.
-          served_fast: Overrides ``serve_fast`` when the vendor reports
-              the speed it actually served (Anthropic's ``usage.speed``):
-              a request that asked for fast can fall back to standard and
-              is billed at standard rates.
-
-        Returns:
-          spend: USD cost, per bucket.
-
-        """
-        fast = self.serve_fast if served_fast is None else served_fast
-        prompt = tokens.request + tokens.cache_write + tokens.cache_read
-        return self.prices[PriceCatalogProduct(fast, prompt)] * tokens
-
-    @property
-    def tagged_model_id(self) -> str:
-        """Display id carrying its option tags; ``model_id`` is the wire id."""
-        return f"{self.model_id}{self.context}{'+fast' if self.serve_fast else ''}"
+    def __post_init__(self) -> None:
+        if self.max_request_tokens <= 0:
+            raise ValueError(
+                f"max_request_tokens must be > 0, got {self.max_request_tokens}"
+            )
+        if self.max_response_tokens <= 0:
+            raise ValueError(
+                f"max_response_tokens must be > 0, got {self.max_response_tokens}"
+            )
+        if self.buffer_tokens < 0 or self.buffer_tokens >= self.max_request_tokens:
+            raise ValueError(
+                f"buffer_tokens ({self.buffer_tokens}) must be in"
+                f" [0, max_request_tokens={self.max_request_tokens})"
+            )
+        if self.max_attempts < 1:
+            # A zero would send nothing at all: the loop checks the attempt
+            # count before the first send, so "no retries" is 1, not 0.
+            raise ValueError(f"max_attempts must be >= 1, got {self.max_attempts}")
+        if self.max_tool_call_rounds is not None and self.max_tool_call_rounds < 0:
+            raise ValueError(
+                "max_tool_call_rounds must be >= 0 or None, got"
+                f" {self.max_tool_call_rounds}"
+            )
+        if self.max_budget_usd is not None and self.max_budget_usd < 0:
+            raise ValueError(
+                f"max_budget_usd must be >= 0 or None, got {self.max_budget_usd}"
+            )
 
     @classmethod
-    def narrow(
-        cls,
-        cap: ModelCapability,
-        /,
-        *,
-        context: str = "",
-        fast: bool = False,
-    ) -> Self:
-        """Resolve ``cap`` to one context tag.
+    def from_limits(cls, limits: ModelLimits) -> AgentSettings:
+        """Derive proportional defaults from the selected context's limits.
 
-        A ``ModelSpec`` IS a ``ModelCapability``, so an already-narrowed
-        spec type-checks as input here. Narrowing one again keeps its
-        tags rather than resetting them, which would leave a spec
-        claiming the default context while carrying another's limits.
+        Takes ``ModelLimits`` rather than a ``Model`` so a caller sizing a
+        window it has not built yet -- ``swap_model`` rescaling to a
+        candidate -- reaches the same definition as one that has.
 
         Args:
-          cap: Catalog row, already met with its transport.
-          context: Context tag to select (``""`` for the default).
-          fast: Whether this instance serves the fast tier.
+          limits: Ceilings of the context tag the model selected, i.e.
+              ``model.settings.limits(model.capability)``.
 
         Returns:
-          spec: The narrowed spec.
+          settings: New ``AgentSettings`` with proportional defaults.
 
         """
-        limits = cap.context_limits
-        if isinstance(cap, ModelSpec):
-            context = context or cap.context
-            fast = fast or cap.serve_fast
         return cls(
-            **{
-                f.name: getattr(cap, f.name)
-                for f in fields(ModelCapability)
-                if f.name != "context_limits"
-            },
-            context=context,
-            serve_fast=fast,
-            context_limits=limits
-            if isinstance(limits, ModelLimits)
-            else limits[context],
+            max_request_tokens=limits.max_request_tokens,
+            max_response_tokens=limits.max_response_tokens,
+            buffer_tokens=default_buffer_tokens(limits.max_request_tokens),
         )
-
-
-CONTEXT_TAGS: Final = ("+1m", "+200k")
-"""Window-size suffixes a sagent model id may carry (e.g. ``...+1m``)."""
-
-LATENCY_TAGS: Final = ("+fast",)
-"""Latency suffixes a sagent model id may carry (e.g. ``...+fast``)."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -222,66 +234,13 @@ class UsageSnapshot:
     """Per-window utilization, in provider declaration order (not sorted)."""
 
 
-def split_model_id(model_id: str) -> tuple[str, frozenset[str]]:
-    """Split a model id into its base id and trailing option tags.
-
-    A sagent model id may carry ``+``-suffixed option tags -- a
-    ``+1m`` / ``+200k`` context window and/or ``+fast`` latency -- in
-    any order (e.g. ``claude-opus-4-8+1m+fast``). Matching is
-    case-insensitive; unknown suffixes stay part of the base id.
-
-    Args:
-      model_id: Model id, possibly with trailing option tags.
-
-    Returns:
-      base_id: ``model_id`` without its option tags.
-      tags: The stripped tags, lowercased (e.g. ``{"+1m", "+fast"}``).
-
-    """
-    known = CONTEXT_TAGS + LATENCY_TAGS
-    tags: set[str] = set()
-    base = model_id
-    while True:
-        lower = base.lower()
-        tag = next((t for t in known if lower.endswith(t)), None)
-        if tag is None:
-            return base, frozenset(tags)
-        tags.add(tag)
-        base = base[: -len(tag)]
-
-
-def base_model_id(model_id: str) -> str:
-    """Strip trailing option tags, yielding the canonical model id.
-
-    The wire id, capability lookups, and metadata tables all key off
-    the base id.
-
-    Args:
-      model_id: Model id, possibly with trailing option tags.
-
-    Returns:
-      base_id: ``model_id`` without its option tags.
-
-    """
-    return split_model_id(model_id)[0]
-
-
-def latency_from_model_id(model_id: str) -> str | None:
-    """Return the latency hint encoded in a model id's option tags.
-
-    Args:
-      model_id: Model id, possibly with trailing option tags.
-
-    Returns:
-      latency: ``"fast"`` when the id carries a ``+fast`` tag, else ``None``.
-
-    """
-    return "fast" if "+fast" in split_model_id(model_id)[1] else None
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelRequest:
-    """Full conversation sent to an LLM backend."""
+    """Full conversation sent to an LLM backend.
+
+    Payload only: a knob a caller CHOOSES lives on ``model.settings``,
+    where its capability can validate it.
+    """
 
     messages: list[ModelContextEvent]
     """Conversation history sent to the model."""
@@ -295,23 +254,10 @@ class ModelRequest:
     max_response_tokens: int | None = None
     """Max output tokens; ``None`` uses the model default."""
 
+    # Not on ``ModelSettings``: a continuous range cannot join the
+    # membership check that validates every other knob.
     temperature: float = 1.0
-    """Sampling temperature."""
-
-    thinking: str | None = None
-    """Extended-thinking mode; ``None`` disables thinking."""
-
-    effort: str | None = None
-    """Effort hint; ``None`` omits the field. See ``spec.supported_thinking_efforts``."""
-
-    cache_ttl: Literal["5m", "1h"] = "5m"
-    """Prompt-cache TTL; providers without prompt caching ignore this."""
-
-    service_tier: str | None = None
-    """Processing-tier hint; ``None`` omits it. See ``spec.valid_service_tiers``."""
-
-    latency: str | None = None
-    """Cross-provider latency hint; only ``"fast"`` is defined."""
+    """Sampling temperature; transports without the knob ignore it."""
 
     stop_sequences: tuple[str, ...] = ()
     """Optional stop sequences; provider-specific support."""
@@ -444,31 +390,42 @@ class Model(Protocol):
     AssistantMessage`` form. Cost is recorded out-of-band via
     ``Agent.record_response``, which writes through to the root
     ``CostTracker``.
+
+    ``model_id``, ``retries_internally``, and ``account_auth`` are read
+    from :attr:`capability`; a transport declares them and ``&`` computes
+    them, so a second home here would make every provider restate the meet.
     """
 
     @property
-    def spec(self) -> ModelSpec:
-        """What this model can do, narrowed to the selected context.
+    def capability(self) -> ModelCapability:
+        """The catalog row met with this transport's restrictions."""
+        ...
 
-        Every capability question -- window size, byte ceilings, which
-        thinking efforts the wire accepts, whether a fast tier exists --
-        is answered from here. Reading it needs no credentials and no
-        request.
+    @property
+    def settings(self) -> ModelSettings:
+        """What this instance chose, validated against :attr:`capability`."""
+        ...
 
-        Declared read-only so an implementation may store it as a plain
-        attribute or derive it; a bare attribute annotation would reject
-        the latter.
+    @property
+    def limits(self) -> ModelLimits:
+        """Ceilings of the selected context tag.
+
+        ``settings.limits(capability)``, named here because ~40 call sites
+        read a window and would otherwise each spell the lookup.
         """
         ...
 
-    def approx_text_tokens(self, text: str) -> int:
-        """Cheap local estimate of input tokens for a text string.
+    @property
+    def tagged_model_id(self) -> str:
+        """Display id carrying its context tag; ``capability.model_id`` is bare."""
+        ...
 
-        Synchronous; no I/O. The chars-per-token ratio (or a real
-        tokenizer) is a provider-internal detail. Consumers must call
-        this for any token estimate and must NOT divide a character count
-        by a ratio of their own -- that mislabels chars as tokens and
-        breaks for non-linear tokenizers.
+    def approx_text_tokens(self, text: str) -> int:
+        """Estimate input tokens for a text string, locally and synchronously.
+
+        Callers must use this rather than dividing a character count by a
+        ratio of their own; that mislabels chars as tokens and breaks for
+        non-linear tokenizers.
 
         Args:
           text: Text to score.
@@ -596,6 +553,18 @@ class Model(Protocol):
         """
         ...
 
+    def spend(self, tokens: TokenCount) -> TokenCost:
+        """Price ``tokens`` at the tier this instance's settings select.
+
+        Args:
+          tokens: What the server reported.
+
+        Returns:
+          spend: USD cost, per bucket.
+
+        """
+        ...
+
     def is_context_overflow(self, error: Exception) -> bool:
         """Classify an error as a context-window overflow.
 
@@ -649,149 +618,6 @@ class Model(Protocol):
         ...
 
 
-def default_buffer_tokens(max_request_tokens: int) -> int:
-    """Proportional compaction headroom for a given input window.
-
-    The single source of truth for force-compaction headroom: both
-    ``ContextBudget.from_model`` (the reactive/scrunch reservation) and
-    ``SummaryCompactor.should_compact`` (the proactive trigger) derive
-    their buffer here, so one rule governs when compaction fires across a
-    model swap. Scales as ``max_request_tokens // 15`` with an 8_000-token
-    floor, capped at half the window so it never collides with the
-    ``buffer_tokens < max_request_tokens`` budget invariant.
-
-    Args:
-      max_request_tokens: The model's input-token window.
-
-    Returns:
-      buffer: Tokens of headroom reserved below the effective cap.
-
-    """
-    return min(max(max_request_tokens // 15, 8_000), max(max_request_tokens // 2, 0))
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ContextBudget:
-    """How an Agent allocates its context window across competing uses.
-
-    Use ``from_model`` for proportional defaults; override individual
-    fields with ``dataclasses.replace`` or pass an explicit instance
-    to ``Agent(budget=...)``.
-    """
-
-    max_request_tokens: int
-    """Maximum input tokens the agent will send."""
-
-    max_response_tokens: int
-    """Maximum output tokens reserved for the response."""
-
-    chars_per_token: int = 4
-    """Approximate characters per token, for the two re-attach caps only.
-
-    Every OTHER field below is a token count. Re-attach reads whole files
-    off disk before any tokenizer sees them, so its two caps stay in
-    characters; nothing else may reintroduce the conversion.
-    """
-
-    buffer_tokens: int = 0
-    """Headroom (tokens) before force-compaction triggers."""
-
-    reattach_count: int = 5
-    """Number of recently-read files to re-attach post-compaction."""
-
-    reattach_max_chars: int = 0
-    """Per-file character cap for re-attached files."""
-
-    reattach_budget: int = 0
-    """Total character budget for all re-attached files."""
-
-    persist_tokens: int = 0
-    """Per-result token threshold for disk offloading."""
-
-    message_budget_tokens: int = 0
-    """Per-request aggregate token budget for tool results."""
-
-    keep_recent_on_compact: int | None = None
-    """Recent entries the compactor keeps verbatim; ``None`` lets it choose."""
-
-    def __post_init__(self) -> None:
-        if self.max_request_tokens <= 0:
-            raise ValueError(
-                f"max_request_tokens must be > 0, got {self.max_request_tokens}"
-            )
-        if self.max_response_tokens <= 0:
-            raise ValueError(
-                f"max_response_tokens must be > 0, got {self.max_response_tokens}"
-            )
-        if self.buffer_tokens < 0 or self.buffer_tokens >= self.max_request_tokens:
-            raise ValueError(
-                f"buffer_tokens ({self.buffer_tokens}) must be in"
-                f" [0, max_request_tokens={self.max_request_tokens})"
-            )
-        if self.chars_per_token <= 0:
-            raise ValueError(f"chars_per_token must be > 0, got {self.chars_per_token}")
-        if self.reattach_count < 0:
-            raise ValueError(f"reattach_count must be >= 0, got {self.reattach_count}")
-        if self.reattach_max_chars < 0:
-            raise ValueError(
-                f"reattach_max_chars must be >= 0, got {self.reattach_max_chars}"
-            )
-        if self.reattach_budget < 0:
-            raise ValueError(
-                f"reattach_budget must be >= 0, got {self.reattach_budget}"
-            )
-        if self.persist_tokens < 0:
-            raise ValueError(f"persist_tokens must be >= 0, got {self.persist_tokens}")
-        if self.message_budget_tokens < 0:
-            raise ValueError(
-                f"message_budget_tokens must be >= 0, got {self.message_budget_tokens}"
-            )
-        if self.keep_recent_on_compact is not None and self.keep_recent_on_compact < 0:
-            raise ValueError(
-                "keep_recent_on_compact must be >= 0 or None, got"
-                f" {self.keep_recent_on_compact}"
-            )
-
-    @classmethod
-    def from_model(cls, model: Model) -> ContextBudget:
-        """Derive proportional ``ContextBudget`` defaults from a model's limits.
-
-        Args:
-          model: Model whose limits and measured tokenizer density seed
-              the budget.
-
-        Returns:
-          budget: New ``ContextBudget`` with proportional defaults.
-
-        """
-        inp = model.spec.context_limits.max_request_tokens
-        out = model.spec.context_limits.max_response_tokens
-        # Only the two re-attach caps still need the ratio: they bound
-        # file bytes read off disk, before any tokenizer sees them.
-        cpt = max(1, round(model.spec.chars_per_token))
-        buffer = default_buffer_tokens(inp)
-        return cls(
-            max_request_tokens=inp,
-            max_response_tokens=out,
-            chars_per_token=cpt,
-            buffer_tokens=buffer,
-            reattach_count=5,
-            reattach_max_chars=cpt * max(inp // 40, 2_000),
-            reattach_budget=cpt * max(inp // 4, 10_000),
-            # No floor. A floor is not a bound: at ``gpt-4``'s 8_192-token
-            # window a 20_000-token floor let ONE tool result exceed the
-            # whole context 2.4x. ``offset`` reaches whatever a smaller
-            # cap left behind, so erring small is recoverable and erring
-            # large is not.
-            persist_tokens=inp // 4,
-            message_budget_tokens=inp // 2,
-            # ``None`` defers to the compactor's own ``keep_recent``
-            # default, which adapts per-strategy; baking a number here
-            # would override that without the caller knowing.
-            keep_recent_on_compact=None,
-        )
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelRecipe:
     """Recipe for building a ``Model`` from CLI-style strings."""
@@ -810,7 +636,7 @@ class ModelRecipe:
 
     def __post_init__(self) -> None:
         # Empty ``provider``/``auth``/``model_id`` produce a degenerate
-        # spec that the provider factory rejects with a confusing
+        # model that the provider factory rejects with a confusing
         # "no such provider" error far from the construction site.
         # ``account`` may legitimately be empty / ``None`` (default
         # backend).

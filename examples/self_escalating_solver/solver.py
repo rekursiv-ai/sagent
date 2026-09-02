@@ -291,7 +291,7 @@ async def run_condition(
     except Exception as e:  # noqa: BLE001
         err = f"{type(e).__name__}: {str(e)[:100]}"
 
-    timeline = _build_timeline(agent.history, tool, model.spec.tagged_model_id)
+    timeline = _build_timeline(agent.history, tool, model.tagged_model_id)
     swaps = [s for s in timeline if s["kind"] == "swap"]
     verdicts = [c["verdict"] for c in tool.calls if c["verdict"]]
     first_verdict = verdicts[0] if verdicts else None
@@ -305,7 +305,7 @@ async def run_condition(
     )
     return {
         "condition": condition,
-        "models": [model.spec.tagged_model_id] + [s["to"] for s in swaps],
+        "models": [model.tagged_model_id] + [s["to"] for s in swaps],
         "timeline": timeline,
         "n_runs": len(tool.calls),
         "n_checks": len(verdicts),

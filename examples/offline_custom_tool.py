@@ -11,17 +11,21 @@ import sys
 from sagent.agent import Agent
 from sagent.lib import token_count
 from sagent.tools import tool
+from sagent.types.capability import (
+    ModelCapability,
+    ModelLimits,
+    ModelSettings,
+)
 from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
+    TokenCost,
+    TokenCount,
     TokenPrice,
 )
 from sagent.types.model import (
-    ModelLimits,
     ModelRequest,
     ModelResponse,
-    ModelSpec,
-    TokenCount,
     UsageSnapshot,
 )
 from sagent.types.runtime import (
@@ -51,29 +55,33 @@ def echo(text: str) -> str:
 class ScriptedModel:
     """Minimal offline model used to demonstrate Sagent's model contract.
 
-    Everything the agent asks about capability comes from one ``spec``;
-    an implementation declares limits and prices, not a flag per question.
+    What the model OFFERS is ``capability``; what this instance CHOSE is
+    ``settings``. An implementation declares both, not a flag per question.
     """
 
-    spec = ModelSpec(
+    capability = ModelCapability(
         model_id="scripted-offline",
-        context_limits=ModelLimits(
-            max_request_tokens=16_384, max_response_tokens=1_024
+        context=MappingProxyType(
+            {"": ModelLimits(max_request_tokens=16_384, max_response_tokens=1_024)}
         ),
         # An offline model bills nothing, but an empty catalog would raise.
         prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
-        supported_thinking_efforts=MappingProxyType({}),
-        supported_thinking_budgets=frozenset(),
-        supported_thinking_outputs=frozenset(),
-        fast=False,
-        manages_context=False,
-        prompt_cache_breakpoints=False,
-        retries_internally=False,
-        account_auth=False,
     )
-    valid_service_tiers: tuple[str, ...] = ()
-    valid_latency_modes: tuple[str, ...] = ()
-    valid_thinking_states: tuple[str, ...] = ("off-hide",)
+    settings = ModelSettings(capability=capability)
+
+    @property
+    def limits(self) -> ModelLimits:
+        """Ceilings of the selected context tag."""
+        return self.settings.limits
+
+    @property
+    def tagged_model_id(self) -> str:
+        """Display id carrying its context tag."""
+        return f"{self.capability.model_id}{self.settings.context}"
+
+    def spend(self, tokens: TokenCount) -> TokenCost:
+        """An offline model bills nothing."""
+        return self.capability.prices[PriceCatalogProduct()] * tokens
 
     def approx_text_tokens(self, text: str) -> int:
         """Offline ``len(text) // 4`` heuristic; minimum 1."""
@@ -193,7 +201,6 @@ async def run_example() -> str:
         system="Use Echo when asked to repeat text.",
         tools=[echo],
         max_tool_call_rounds=3,
-        thinking=None,
     )
     async for _event in agent.run(UserMessage(text="Echo hello.")):
         pass

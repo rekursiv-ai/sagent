@@ -176,7 +176,15 @@ materializes from streamed ``ModelResponsePartial`` text on flush.
 
 
 class Printer(Protocol):
-    """Sink for REPL output, fully covering the rendering surface."""
+    """Sink for REPL output, fully covering the rendering surface.
+
+    ``show_thinking`` lives here rather than on the agent or the model:
+    it decides what reaches THIS screen, while ``settings.thinking_output``
+    decides what the model sends. ``/thinking show|hide`` flips it, and the
+    observer reads it per event, so the toggle takes effect mid-stream.
+    """
+
+    show_thinking: bool
 
     def write_line(self, text: str) -> None: ...
     def write_dim_line(self, text: str) -> None: ...
@@ -271,7 +279,11 @@ class RecordingPrinter:
     titles: list[str]
     """``set_terminal_title`` payloads."""
 
+    show_thinking: bool
+    """Whether reasoning renders; ``/thinking show|hide`` flips it."""
+
     def __init__(self) -> None:
+        self.show_thinking = True
         self.lines = []
         self.dim_lines = []
         self.chunks = []
@@ -432,14 +444,13 @@ _REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>\s*", re.DOTAL
 def make_render_observer(
     printer: Printer,
     *,
-    show_thinking: Callable[[], bool] | None = None,
     output_policy: Callable[[str], ToolDisplay] | None = None,
 ) -> RenderObserver:
     """Return a ``RuntimeEvent``-consuming observer bound to ``printer``.
 
     Args:
-      printer: Printer that receives formatted output.
-      show_thinking: Predicate controlling thinking display. ``None`` always shows.
+      printer: Printer that receives formatted output. Its
+          ``show_thinking`` decides whether reasoning renders.
       output_policy: Maps a result's ``call_id`` to the ``output``
           :class:`OutputSpec` of its originating tool. ``None`` shows no
           result bodies -- the historical behaviour.
@@ -449,9 +460,7 @@ def make_render_observer(
           ``self.observers``; callable on each ``RuntimeEvent``.
 
     """
-    return RenderObserver(
-        printer, show_thinking=show_thinking, output_policy=output_policy
-    )
+    return RenderObserver(printer, output_policy=output_policy)
 
 
 def _no_output(call_id: str) -> ToolDisplay:
@@ -472,11 +481,9 @@ class RenderObserver:
         self,
         printer: Printer,
         *,
-        show_thinking: Callable[[], bool] | None = None,
         output_policy: Callable[[str], ToolDisplay] | None = None,
     ) -> None:
         self._printer = printer
-        self._show_thinking = show_thinking or (lambda: True)
         self._output_policy: Callable[[str], ToolDisplay] = (
             output_policy if output_policy is not None else _no_output
         )
@@ -515,7 +522,9 @@ class RenderObserver:
             case ModelResponsePartial(text=text):
                 self._feed_stream(text)
             case ModelResponseThinking(text=text):
-                if self._show_thinking():
+                # Read per event, not captured: ``/thinking hide`` must take
+                # effect on the stream already in flight.
+                if self._printer.show_thinking:
                     self._printer.write_thinking(text)
             case ModelResponseComplete():
                 self._flush_stream()

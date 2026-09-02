@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Final, cast
+from typing import Final
 
 import inspect
 import sys
 
-from sagent.types.providers import Provider, ProviderOptions
+from sagent.types.providers import Provider
 
 
 _MODEL_PROVIDER_MAP: Final[list[tuple[str, str]]] = [
@@ -93,7 +93,6 @@ def build_provider(
     auth: str = "env",
     *,
     account: str | None = None,
-    options: ProviderOptions | None = None,
 ) -> Provider:
     """Dispatch ``<provider>.from_<auth>()``.
 
@@ -102,10 +101,6 @@ def build_provider(
       auth: Auth method suffix (``"env"``, ``"credentials"``, ``"key"``).
       account: Credential slot forwarded to providers that accept it.
           Ignored by providers without an ``account`` parameter.
-      options: Construction-time knobs. Every explicitly set field must
-          appear in the provider class's ``supported_options``
-          declaration; an unsupported set field raises rather than
-          being silently dropped.
 
     Returns:
       provider: Constructed provider instance.
@@ -113,8 +108,6 @@ def build_provider(
     Raises:
       AttributeError: If the provider class is unknown or has no
           matching auth method.
-      ValueError: If ``options`` sets a field the provider does not
-          declare in ``supported_options``.
 
     """
     providers = sys.modules["sagent.providers"]
@@ -126,15 +119,7 @@ def build_provider(
         raise AttributeError(
             f"provider {provider_name!r} has no ``from_{auth}`` method",
         )
-    kwargs: dict[str, object] = dict((options or ProviderOptions()).set_fields())
-    supported = supported_provider_options(provider_name)
-    unsupported = sorted(kwargs.keys() - supported)
-    if unsupported:
-        raise ValueError(
-            f"provider {provider_name!r} does not support option(s) "
-            f"{', '.join(unsupported)}; supported: "
-            f"{', '.join(sorted(supported)) or '(none)'}"
-        )
+    kwargs: dict[str, object] = {}
     try:
         sig = inspect.signature(factory)
     except (TypeError, ValueError):
@@ -142,30 +127,6 @@ def build_provider(
     if sig is not None and "account" in sig.parameters:
         kwargs["account"] = account
     return factory(**kwargs)
-
-
-def supported_provider_options(provider_name: str) -> frozenset[str]:
-    """Return the ``ProviderOptions`` field names ``provider_name`` supports.
-
-    Provider classes declare support via a ``supported_options`` class
-    attribute; a class without the attribute takes no construction
-    options.
-
-    Args:
-      provider_name: Provider class name (e.g. ``"Anthropic"``).
-
-    Returns:
-      supported: Declared ``ProviderOptions`` field names.
-
-    Raises:
-      AttributeError: If the provider class is unknown.
-
-    """
-    providers = sys.modules["sagent.providers"]
-    cls = getattr(providers, provider_name, None)
-    if cls is None:
-        raise AttributeError(f"unknown provider {provider_name!r}")
-    return cast(frozenset[str], getattr(cls, "supported_options", frozenset[str]()))
 
 
 def default_auth_for_provider(provider_name: str) -> str:

@@ -290,6 +290,11 @@ async def test_run_appends_args(tmp_path: Path) -> None:
     assert "Arguments: &lt;go&gt;" in result.content
 
 
+def _estimate(text: str) -> int:
+    """Stand-in for the model's tokenizer; four chars to the token."""
+    return len(text) // 4
+
+
 @pytest.mark.asyncio
 async def test_post_compact_restore_noop_without_invoked(tmp_path: Path) -> None:
     _write_skill(tmp_path, "alpha", body="b")
@@ -297,7 +302,9 @@ async def test_post_compact_restore_noop_without_invoked(tmp_path: Path) -> None
     state = ToolState()
     state.bash_cwd = str(tmp_path)
     history: list[ModelContextEvent] = [UserMessage(text="hi")]
-    await t.post_compact_restore(history, state)
+    await t.post_compact_restore(
+        history, state, budget_tokens=0, estimate_tokens=_estimate
+    )
     entry = history[0]
     assert isinstance(entry, UserMessage)
     assert entry.text == "hi"
@@ -311,7 +318,9 @@ async def test_post_compact_restore_default_disabled(tmp_path: Path) -> None:
     state.bash_cwd = str(tmp_path)
     state.invoked_skills.add("alpha")
     history: list[ModelContextEvent] = [UserMessage(text="hi")]
-    await Skill().post_compact_restore(history, state)
+    await Skill().post_compact_restore(
+        history, state, budget_tokens=0, estimate_tokens=_estimate
+    )
     entry = history[0]
     assert isinstance(entry, UserMessage)
     assert entry.text == "hi"
@@ -324,7 +333,9 @@ async def test_post_compact_restore_reattaches_into_first_user(tmp_path: Path) -
     state.bash_cwd = str(tmp_path)
     state.invoked_skills.add("alpha")
     history: list[ModelContextEvent] = [UserMessage(text="hi")]
-    await Skill(restore_after_compact=True).post_compact_restore(history, state)
+    await Skill(restore_after_compact=True).post_compact_restore(
+        history, state, budget_tokens=0, estimate_tokens=_estimate
+    )
     entry = history[0]
     assert isinstance(entry, UserMessage)
     assert "instr-body" in entry.text
@@ -338,7 +349,9 @@ async def test_post_compact_restore_skips_when_cwd_unset(tmp_path: Path) -> None
     state.bash_cwd = ""
     state.invoked_skills.add("alpha")
     history: list[ModelContextEvent] = [UserMessage(text="hi")]
-    await Skill(restore_after_compact=True).post_compact_restore(history, state)
+    await Skill(restore_after_compact=True).post_compact_restore(
+        history, state, budget_tokens=0, estimate_tokens=_estimate
+    )
     entry = history[0]
     assert isinstance(entry, UserMessage)
     assert entry.text == "hi"
@@ -353,7 +366,9 @@ async def test_post_compact_restore_keeps_huge_body_whole(tmp_path: Path) -> Non
     state.bash_cwd = str(tmp_path)
     state.invoked_skills.add("alpha")
     history: list[ModelContextEvent] = [UserMessage(text="hi")]
-    await Skill(restore_after_compact=True).post_compact_restore(history, state)
+    await Skill(restore_after_compact=True).post_compact_restore(
+        history, state, budget_tokens=0, estimate_tokens=_estimate
+    )
     entry = history[0]
     assert isinstance(entry, UserMessage)
     assert huge in entry.text
@@ -370,7 +385,7 @@ async def test_post_compact_restore_keeps_every_skill(tmp_path: Path) -> None:
     state.invoked_skills.update({"alpha", "beta"})
     history: list[ModelContextEvent] = [UserMessage(text="hi")]
     await Skill(restore_after_compact=True).post_compact_restore(
-        history, state, budget_chars=0
+        history, state, budget_tokens=0, estimate_tokens=_estimate
     )
     entry = history[0]
     assert isinstance(entry, UserMessage)
@@ -395,13 +410,15 @@ async def test_post_compact_restore_honors_the_budget(tmp_path: Path) -> None:
     state.invoked_skills.update({"alpha", "beta"})
     history: list[ModelContextEvent] = [UserMessage(text="hi")]
     await Skill(restore_after_compact=True).post_compact_restore(
-        history, state, budget_chars=600
+        history, state, budget_tokens=150, estimate_tokens=_estimate
     )
     entry = history[0]
     assert isinstance(entry, UserMessage)
-    injected = len(entry.text)
-    assert injected <= 600 + 400, (
-        f"hook injected {injected} chars against a 600-char budget"
+    # The overrun allowance covers the wrapper prose, which is outside the
+    # per-skill accounting the budget governs.
+    injected = _estimate(entry.text)
+    assert injected <= 150 + 100, (
+        f"hook injected {injected} tokens against a 150-token budget"
     )
     assert "A" * 500 in entry.text or "B" * 500 in entry.text
     assert "Not restored" in entry.text, (

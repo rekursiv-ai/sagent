@@ -12,6 +12,13 @@ from sagent.agent.agent import Agent
 from sagent.compaction.files import MICROCOMPACTED_ARGS_KEY
 from sagent.repl.render import RecordingPrinter
 from sagent.repl.replay import replay_messages
+from sagent.types.capability import (
+    ModelCapability,
+    ModelSettings,
+    ServiceTier,
+    ThinkingBudget,
+    ThinkingEffort,
+)
 from sagent.types.cost import TokenCost
 from sagent.types.runtime import (
     AssistantMessage,
@@ -61,6 +68,26 @@ def _StubCostTracker_factory() -> _StubCostTracker:  # noqa: N802
     return _StubCostTracker()
 
 
+_WIDE = ModelCapability(
+    model_id="m",
+    thinking_effort=frozenset({"none", "high"}),
+    thinking_budget=frozenset({"none", "auto", "fixed"}),
+    thinking_output=frozenset({"none", "text", "redacted"}),
+    service_tier=frozenset({"auto", "default", "priority"}),
+    cache_ttl_sec=3600.0,
+)
+"""A capability offering every knob the footer can print."""
+
+
+@dataclass(slots=True, kw_only=True)
+class _StubModel:
+    """Only the settings surface the resume footer reads."""
+
+    settings: ModelSettings = field(
+        default_factory=lambda: ModelSettings(capability=_WIDE)
+    )
+
+
 @dataclass(slots=True, kw_only=True)
 class _StubAgent:
     """Minimum surface ``replay_messages`` consumes."""
@@ -76,13 +103,8 @@ class _StubAgent:
         default_factory=lambda: cast(Mapping[str, _StubTool], {}),
     )
     cost_tracker: _StubCostTracker = field(default_factory=_StubCostTracker_factory)
-    show_thinking: bool = True
     model_recipe: _StubModelRecipe | None = None
-    thinking: str | None = None
-    effort: str | None = None
-    cache_ttl: str = "5m"
-    service_tier: str | None = None
-    latency: str | None = None
+    model: _StubModel = field(default_factory=_StubModel)
 
 
 def _agent(
@@ -91,31 +113,29 @@ def _agent(
     tape: list[object] | None = None,
     tools_map: Mapping[str, _StubTool] | None = None,
     total_cost_usd: float = 0.0,
-    show_thinking: bool = True,
     model_recipe: _StubModelRecipe | None = None,
-    thinking: str | None = None,
-    effort: str | None = None,
-    cache_ttl: str = "5m",
-    service_tier: str | None = None,
-    latency: str | None = None,
+    thinking_budget: ThinkingBudget = "none",
+    effort: ThinkingEffort = "none",
+    cache_ttl_sec: float = 0.0,
+    service_tier: ServiceTier = "auto",
 ) -> Agent:
     """Build a ``_StubAgent`` typed as ``Agent`` for replay_messages."""
     history_records = [
         ReferrableTapeEvent(ref=TapeRef(session_id="t", ordinal=i), event=entry)
         for i, entry in enumerate(history or [])
     ]
+    settings = ModelSettings(capability=_WIDE, thinking_budget=thinking_budget)
+    settings.thinking_output = "text" if thinking_budget != "none" else "none"
+    settings.thinking_effort = effort
+    settings.cache_ttl_sec = cache_ttl_sec
+    settings.service_tier = service_tier
     stub = _StubAgent(
         history=list(history) if history else [],
         tape=list(tape) if tape is not None else cast(list[object], history_records),
         tools_map=tools_map or {},
         cost_tracker=_StubCostTracker(spend=TokenCost(request=total_cost_usd)),
-        show_thinking=show_thinking,
         model_recipe=model_recipe,
-        thinking=thinking,
-        effort=effort,
-        cache_ttl=cache_ttl,
-        service_tier=service_tier,
-        latency=latency,
+        model=_StubModel(settings=settings),
     )
     return cast(Agent, stub)
 
@@ -168,11 +188,13 @@ def test_replay_assistant_thinking_blocks() -> None:
 
 
 def test_replay_assistant_thinking_blocks_can_be_hidden() -> None:
+    """The printer owns the display flag, so replay reads it from there."""
     history: list[TapeEvent] = [
         AssistantMessage(text="ok", thinking_blocks=({"thinking": "hidden"},))
     ]
     p = RecordingPrinter()
-    replay_messages(_agent(history=history, show_thinking=False), p)
+    p.show_thinking = False
+    replay_messages(_agent(history=history), p)
     assert p.thinkings == []
     assert p.markdowns == ["ok"]
 
@@ -313,11 +335,10 @@ def test_replay_footer_includes_model_and_modes() -> None:
                 model_id="gpt-5.5",
                 account="work",
             ),
-            thinking="adaptive",
+            thinking_budget="auto",
             effort="high",
-            cache_ttl="1h",
+            cache_ttl_sec=3600.0,
             service_tier="priority",
-            latency="fast",
         ),
         p,
     )
@@ -326,11 +347,10 @@ def test_replay_footer_includes_model_and_modes() -> None:
     assert "OpenAISubscription/gpt-5.5" in footer
     assert "auth=credentials" in footer
     assert "account=work" in footer
-    assert "thinking=adaptive" in footer
+    assert "thinking=auto" in footer
     assert "effort=high" in footer
-    assert "cache_ttl=1h" in footer
+    assert "cache_ttl=3600s" in footer
     assert "service_tier=priority" in footer
-    assert "latency=fast" in footer
 
 
 def test_replay_renders_resolved_view_after_compaction_splice() -> None:

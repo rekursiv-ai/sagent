@@ -24,12 +24,18 @@ from typing import override
 import asyncio
 import time
 
-from sagent import types
 from sagent.agent import agent_test
 from sagent.agent.agent import Agent
 from sagent.agent.state import agent_registry, current_agent_var
 from sagent.repl.run_repl import _background_tasks_for_repl_cancel
 from sagent.tools.agent_spawn import AgentSpawn
+from sagent.types.model import (
+    ModelRequest,
+    ModelResponse,
+)
+from sagent.types.runtime import (
+    RuntimeEvent,
+)
 
 
 class BlockingModel(agent_test.StubModel):
@@ -38,9 +44,9 @@ class BlockingModel(agent_test.StubModel):
     @override
     async def stream(
         self,
-        request: types.model.ModelRequest,
-        publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
-    ) -> types.model.ModelResponse:
+        request: ModelRequest,
+        publish: Callable[[RuntimeEvent], None] | None = None,
+    ) -> ModelResponse:
         del request, publish
         # Block as a live provider stream would while awaiting bytes.
         await asyncio.Event().wait()

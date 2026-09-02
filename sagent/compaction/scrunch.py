@@ -194,10 +194,10 @@ def plan_scrunch(
       context: Resolved messages to scrunch.
       model: Model whose tokenizer measures partition sizes.
       target_input_tokens: Token budget the resolved view must end up
-          under. Typically ``model.spec.context_limits.max_request_tokens -
-          model.spec.context_limits.max_response_tokens - safety_floor``.
+          under. Typically ``model.limits.max_request_tokens -
+          model.limits.max_response_tokens - safety_floor``.
       max_partition_tokens: Per-partition cap. Typically
-          ``model.spec.context_limits.max_request_tokens - safety_floor`` so each
+          ``model.limits.max_request_tokens - safety_floor`` so each
           producer-compactor call fits.
       summary_size_estimate_tokens: Expected token count of one
           producer-compactor summary. Tightens the cumulative-removed

@@ -40,6 +40,33 @@ from sagent.lib.custom_json import JSON, IntCodec, json_freeze
 from sagent.types.runtime import ToolResult
 
 
+# Only names this module DEFINES. Re-exporting what ``agent.state`` owns
+# gave every such symbol two import paths; reach into the owner instead.
+__all__ = (
+    "bound_by_tokens",
+    "changed_files_context",
+    "file_lock_key",
+    "get_file_write_lock",
+    "has_been_read",
+    "load_tool_description",
+    "locked_file_write",
+    "mark_read",
+    "opt_int",
+    "opt_str",
+    "provider_not_allowed_result",
+    "read_asset",
+    "recipe_dict",
+    "recipe_list",
+    "resolve_recipe",
+    "resolve_tool_path",
+    "result_token_budget",
+    "run_sync",
+    "set_recipe",
+    "to_result",
+    "tool",
+    "truncate_to_budget",
+)
+
 logger = logging.getLogger(__name__)
 
 _ASSETS_DIR = Path(__file__).parent.parent / "assets"
@@ -929,31 +956,3 @@ def changed_files_context() -> str:
             f" line numbers):\n{snippet}",
         )
     return "<system-reminder>\n" + "\n".join(parts) + "\n</system-reminder>"
-
-
-# Only names this module DEFINES. Re-exporting what ``agent.state`` owns
-# gave every such symbol two import paths; reach into the owner instead.
-__all__ = (
-    "bound_by_tokens",
-    "changed_files_context",
-    "file_lock_key",
-    "get_file_write_lock",
-    "has_been_read",
-    "load_tool_description",
-    "locked_file_write",
-    "mark_read",
-    "opt_int",
-    "opt_str",
-    "provider_not_allowed_result",
-    "read_asset",
-    "recipe_dict",
-    "recipe_list",
-    "resolve_recipe",
-    "resolve_tool_path",
-    "result_token_budget",
-    "run_sync",
-    "set_recipe",
-    "to_result",
-    "tool",
-    "truncate_to_budget",
-)

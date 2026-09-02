@@ -18,6 +18,11 @@ import tiktoken
 from sagent.catalog import openai as openai_catalog
 from sagent.lib.custom_json import DictCodec, StrCodec
 from sagent.providers.openai.api import OpenAI
+from sagent.types.capability import (
+    ModelSettings,
+    ServiceTier,
+    ThinkingEffort,
+)
 from sagent.types.cost import PriceCatalogProduct
 from sagent.types.model import ModelRequest
 from sagent.types.runtime import UserMessage
@@ -71,7 +76,7 @@ async def test_every_catalog_row_is_a_model_the_vendor_serves() -> None:
     # Bounded concurrency: firing one connection per row made the slowest
     # response the whole test's fate, and `ReadTimeout` under that fan-out was
     # the observed failure rather than any catalog defect.
-    model_ids = tuple(openai_catalog.MODELS)
+    model_ids = tuple(openai_catalog.models())
     gate = asyncio.Semaphore(8)
 
     async def _probe(client: httpx2.AsyncClient, model_id: str) -> bool | None:
@@ -117,13 +122,13 @@ def test_openai_from_env_reads_key(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_openai_default_model_known() -> None:
     p = OpenAI.from_key("k")
     m = p.model()  # picks DEFAULT_MODEL.
-    assert m.model_id == OpenAI.DEFAULT_MODEL
+    assert m.tagged_model_id == OpenAI.DEFAULT_MODEL
 
 
 def test_openai_known_model_returns_backend() -> None:
     p = OpenAI.from_key("k")
     m = p.model("gpt-4o")
-    assert m.model_id == "gpt-4o"
+    assert m.capability.model_id == "gpt-4o"
     assert m.max_request_tokens == 128_000
 
 
@@ -152,20 +157,20 @@ def test_openai_two_tier_default_caps_at_272k(base_id: str, full_tokens: int) ->
     full = p.model(f"{base_id}+1m")
     assert base.max_request_tokens == 272_000
     assert full.max_request_tokens == full_tokens
-    assert full.model_id == f"{base_id}+1m"
+    assert full.tagged_model_id == f"{base_id}+1m"
     # ``+1m`` only widens the window; pricing and other limits track the base.
     assert (
-        full.spec.prices[PriceCatalogProduct()]
-        == base.spec.prices[PriceCatalogProduct()]
+        full.capability.prices[PriceCatalogProduct()]
+        == base.capability.prices[PriceCatalogProduct()]
     )
-    assert full.max_request_bytes == base.max_request_bytes
+    assert full.limits.max_request_bytes == base.limits.max_request_bytes
 
 
 def test_openai_default_model_opts_into_full_window() -> None:
     # API-key default is the ``+1m`` variant: full window out of the box.
     p = OpenAI.from_key("k")
     m = p.model()
-    assert m.model_id == "gpt-5.6-sol+1m"
+    assert m.tagged_model_id == "gpt-5.6-sol+1m"
     assert m.max_request_tokens == 1_050_000
 
 
@@ -186,21 +191,21 @@ def test_openai_gpt_56_profiles(
 ) -> None:
     m = OpenAI.from_key("k").model(model_id)
     assert m.max_request_tokens == 272_000
-    assert m.max_response_tokens == 128_000
-    assert m.spec.prices[PriceCatalogProduct()].request == request_price
-    assert m.spec.prices[PriceCatalogProduct()].response == response_price
-    assert m.spec.prices[PriceCatalogProduct()].cache_write == cache_write_price
-    assert m.spec.prices[PriceCatalogProduct()].cache_read == request_price / 10
+    assert m.limits.max_response_tokens == 128_000
+    assert m.capability.prices[PriceCatalogProduct()].request == request_price
+    assert m.capability.prices[PriceCatalogProduct()].response == response_price
+    assert m.capability.prices[PriceCatalogProduct()].cache_write == cache_write_price
+    assert m.capability.prices[PriceCatalogProduct()].cache_read == request_price / 10
     # The >272K surcharge is a second catalog row, not a multiplier field:
     # 2x on every input pool, 1.5x on the response.
-    tier = m.spec.prices[PriceCatalogProduct(min_request_tokens=272_000)]
+    tier = m.capability.prices[PriceCatalogProduct(min_request_tokens=272_000)]
     assert tier.request == request_price * 2.0
     assert tier.cache_write == cache_write_price * 2.0
     assert tier.cache_read == request_price / 10 * 2.0
     assert tier.response == response_price * 1.5
-    assert m.max_image_dim == 0
-    assert m.max_image_bytes == 0
-    assert m.max_request_bytes == 512 * 1024 * 1024
+    assert m.limits.max_image_edge_px == 0
+    assert m.limits.max_image_bytes == 0
+    assert m.limits.max_request_bytes == 512 * 1024 * 1024
 
 
 def _png(width: int, height: int) -> bytes:
@@ -257,7 +262,7 @@ def test_openai_400k_model_has_no_plus1m(model_id: str) -> None:
 def test_openai_utility_model_default() -> None:
     p = OpenAI.from_key("k")
     m = p.utility_model()
-    assert m.model_id == OpenAI.DEFAULT_UTILITY_MODEL
+    assert m.capability.model_id == OpenAI.DEFAULT_UTILITY_MODEL
 
 
 @pytest.mark.parametrize(
@@ -278,13 +283,13 @@ def test_openai_effort_gating(model_id: str, expected: bool) -> None:
     a reasoning-effort table for.
     """
     m = OpenAI.from_key("k").model(model_id)
-    assert m.supports_effort is expected
+    assert (m.capability.thinking_effort != frozenset({"none"})) is expected
 
 
 def test_openai_pricing_attached_to_model() -> None:
     p = OpenAI.from_key("k")
     m = p.model("gpt-5.5")
-    price = m.spec.prices[PriceCatalogProduct()]
+    price = m.capability.prices[PriceCatalogProduct()]
     assert price.request > 0
     assert price.response > 0
 
@@ -292,22 +297,25 @@ def test_openai_pricing_attached_to_model() -> None:
 def test_openai_valid_service_tiers() -> None:
     p = OpenAI.from_key("k")
     m = p.model("gpt-5.5")
-    assert m.spec.valid_service_tiers == ("auto", "default", "flex", "priority")
+    assert m.capability.service_tier == frozenset(
+        {"auto", "default", "flex", "priority"}
+    )
 
 
-def test_openai_build_body_emits_service_tier() -> None:
-    p = OpenAI.from_key("k")
-    m = p.model("gpt-5.5")
+@pytest.mark.parametrize("tier", ["default", "flex", "priority"])
+def test_openai_build_body_emits_service_tier(tier: ServiceTier) -> None:
+    m = OpenAI.from_key("k").model("gpt-5.5")
+    m._settings = ModelSettings(capability=m.capability, service_tier=tier)
     body = m._build_body(
-        ModelRequest(messages=[UserMessage(text="x")], service_tier="priority"),
+        ModelRequest(messages=[UserMessage(text="x")]),
         stream=False,
     )
-    assert body["service_tier"] == "priority"
+    assert body["service_tier"] == tier
 
 
-def test_openai_build_body_omits_unset_service_tier() -> None:
-    p = OpenAI.from_key("k")
-    m = p.model("gpt-5.5")
+def test_openai_build_body_omits_the_default_tier() -> None:
+    """``auto`` is "let the vendor pick"; sending it pins nothing."""
+    m = OpenAI.from_key("k").model("gpt-5.5")
     body = m._build_body(
         ModelRequest(messages=[UserMessage(text="x")]),
         stream=False,
@@ -315,30 +323,44 @@ def test_openai_build_body_omits_unset_service_tier() -> None:
     assert "service_tier" not in body
 
 
-def test_openai_build_body_maps_effort_to_wire_vocabulary() -> None:
-    """Chat-completions effort is mapped, not sent raw.
-
-    sagent's ladder is ``off``..``max``; the pre-5.6 OpenAI wire accepts
-    only ``minimal``/``low``/``medium``/``high``. The catalog holds that
-    mapping as data, so ``off`` -> ``minimal`` and ``max`` -> ``high``.
-    """
+def test_openai_build_body_omits_effort_when_none() -> None:
+    """``none`` means "send no knob", not "send the wire's off value"."""
     m = OpenAI.from_key("k").model("gpt-5.5")
-    none_body = m._build_body(
-        ModelRequest(messages=[UserMessage(text="x")], effort="off"),
+    body = m._build_body(
+        ModelRequest(messages=[UserMessage(text="x")]),
         stream=False,
     )
-    assert none_body["reasoning_effort"] == "minimal"
-    max_body = m._build_body(
-        ModelRequest(messages=[UserMessage(text="x")], effort="max"),
-        stream=False,
-    )
-    assert max_body["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in body
 
 
 @pytest.mark.parametrize(
     ("effort", "wire_effort"),
     [
-        ("off", "none"),
+        ("min", "minimal"),
+        ("low", "low"),
+        ("medium", "medium"),
+        ("high", "high"),
+        ("xhigh", "high"),
+        ("max", "high"),
+    ],
+)
+def test_openai_pre_56_maps_effort_to_wire_vocabulary(
+    effort: ThinkingEffort,
+    wire_effort: str,
+) -> None:
+    """The pre-5.6 wire takes only ``minimal``/``low``/``medium``/``high``."""
+    m = OpenAI.from_key("k").model("gpt-5.5")
+    m._settings = ModelSettings(capability=m.capability, thinking_effort=effort)
+    body = m._build_body(
+        ModelRequest(messages=[UserMessage(text="x")]),
+        stream=False,
+    )
+    assert body["reasoning_effort"] == wire_effort
+
+
+@pytest.mark.parametrize(
+    ("effort", "wire_effort"),
+    [
         ("min", "none"),
         ("low", "low"),
         ("medium", "medium"),
@@ -348,21 +370,20 @@ def test_openai_build_body_maps_effort_to_wire_vocabulary() -> None:
     ],
 )
 def test_openai_gpt_56_maps_effort_for_chat_completions(
-    effort: str,
+    effort: ThinkingEffort,
     wire_effort: str,
 ) -> None:
     m = OpenAI.from_key("k").model("gpt-5.6-sol")
+    m._settings = ModelSettings(capability=m.capability, thinking_effort=effort)
     body = m._build_body(
-        ModelRequest(messages=[UserMessage(text="x")], effort=effort),
+        ModelRequest(messages=[UserMessage(text="x")]),
         stream=False,
     )
     assert body["reasoning_effort"] == wire_effort
 
 
-@pytest.mark.parametrize("effort", [None, "low", "max"])
-def test_openai_gpt_56_chat_tools_force_none_effort(
-    effort: str | None,
-) -> None:
+@pytest.mark.parametrize("effort", ["none", "low", "max"])
+def test_openai_gpt_56_chat_tools_force_none_effort(effort: ThinkingEffort) -> None:
     tool = cast(
         Tool,
         SimpleNamespace(
@@ -372,12 +393,9 @@ def test_openai_gpt_56_chat_tools_force_none_effort(
         ),
     )
     model = OpenAI.from_key("k").model("gpt-5.6-sol")
+    model._settings = ModelSettings(capability=model.capability, thinking_effort=effort)
     body = model._build_body(
-        ModelRequest(
-            messages=[UserMessage(text="x")],
-            tools=[tool],
-            effort=effort,
-        ),
+        ModelRequest(messages=[UserMessage(text="x")], tools=[tool]),
         stream=False,
     )
     assert body["reasoning_effort"] == "none"
@@ -396,78 +414,26 @@ def test_openai_reasoning_model_uses_max_completion_tokens() -> None:
     assert "max_tokens" not in body
 
 
-def test_openai_valid_latency_modes_fast() -> None:
-    p = OpenAI.from_key("k")
-    assert p.model("gpt-5.5").spec.valid_latency_modes == ("fast",)
+def test_catalog_efforts_are_all_buildable() -> None:
+    """Every effort the catalog offers must reach the wire.
 
-
-def test_openai_fast_latency_maps_to_priority_tier() -> None:
-    p = OpenAI.from_key("k")
-    m = p.model("gpt-5.5")
-    body = m._build_body(
-        ModelRequest(messages=[UserMessage(text="x")], latency="fast"),
-        stream=False,
-    )
-    assert body["service_tier"] == "priority"
-
-
-def test_openai_fast_latency_overrides_explicit_service_tier() -> None:
-    p = OpenAI.from_key("k")
-    m = p.model("gpt-5.5")
-    body = m._build_body(
-        ModelRequest(
-            messages=[UserMessage(text="x")], latency="fast", service_tier="flex"
-        ),
-        stream=False,
-    )
-    assert body["service_tier"] == "priority"
-
-
-def test_openai_build_body_omits_unknown_service_tier() -> None:
-    p = OpenAI.from_key("k")
-    m = p.model("gpt-5.5")
-    body = m._build_body(
-        ModelRequest(messages=[UserMessage(text="x")], service_tier="bogus"),
-        stream=False,
-    )
-    assert "service_tier" not in body
+    The catalog stores the wire value as data; a parallel mapper keyed off a
+    different vocabulary made ``min`` pass validation and then raise at
+    body-build time.
+    """
+    m = OpenAI.from_key("k").model("gpt-5.6-sol")
+    for effort in m.capability.thinking_effort - {"none"}:
+        m._settings = ModelSettings(capability=m.capability, thinking_effort=effort)
+        body = m._build_body(
+            ModelRequest(messages=[UserMessage(text="x")]),
+            stream=False,
+        )
+        assert body["reasoning_effort"] == openai_catalog.reasoning_effort(
+            effort, model_id="gpt-5.6-sol", chat=True
+        )
 
 
 if __name__ == "__main__":
     from sagent.lib.testing.main import test_main
 
     test_main(__file__)
-
-
-def test_openai_chat_rejects_unmappable_effort_rather_than_billing_high() -> None:
-    """An unknown effort must raise, not silently run at the priciest level.
-
-    The old code logged a warning and substituted ``"high"``, billing
-    reasoning the caller never requested.
-    """
-    m = OpenAI.from_key("k").model("gpt-5.5")
-    req = ModelRequest(messages=[UserMessage(text="x")], effort="bogus")
-    with pytest.raises(ValueError, match="Unknown effort"):
-        _ = m._build_body(req, stream=False)
-
-
-def test_catalog_efforts_are_all_buildable() -> None:
-    """Every effort the catalog offers must reach the wire.
-
-    The catalog stores the wire value as data; a parallel mapper keyed
-    off a different vocabulary made ``off``/``min`` pass the agent's
-    validation and then raise at body-build time.
-    """
-    m = OpenAI.from_key("k").model("gpt-5.6-sol")
-    for effort, wire in m.spec.supported_thinking_efforts.items():
-        body = m._build_body(
-            ModelRequest(messages=[UserMessage(text="x")], effort=effort),
-            stream=False,
-        )
-        assert body["reasoning_effort"] == wire
-
-
-def test_valid_efforts_never_exceeds_the_catalog() -> None:
-    """The UI must not offer an effort ``Agent.effort`` would reject."""
-    m = OpenAI.from_key("k").model("gpt-5.6-sol")
-    assert set(m.valid_efforts) <= set(m.spec.supported_thinking_efforts)

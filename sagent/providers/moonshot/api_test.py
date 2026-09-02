@@ -29,9 +29,9 @@ def test_moonshot_from_env_reads(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_moonshot_default_model() -> None:
     p = Moonshot.from_key("k")
     m = p.model()
-    assert m.model_id == Moonshot.DEFAULT_MODEL
+    assert m.capability.model_id == Moonshot.DEFAULT_MODEL
     # Kimi surfaces reasoning via ``reasoning_content``.
-    assert m.supports_thinking is True
+    assert m.capability.thinking_output == frozenset({"none", "text"})
 
 
 def test_moonshot_unknown_model_raises() -> None:
@@ -45,7 +45,7 @@ def test_moonshot_known_models_have_pricing_and_limits() -> None:
     for mid in Moonshot.CAPABILITIES:
         m = p.model(mid)
         assert m.max_request_tokens > 0
-        assert m.max_response_tokens > 0
+        assert m.limits.max_response_tokens > 0
 
 
 def test_moonshot_base_url_override_via_from_key() -> None:
@@ -53,10 +53,10 @@ def test_moonshot_base_url_override_via_from_key() -> None:
     assert p.base_url == "http://localhost:8000/v1"
 
 
-def test_moonshot_supports_cache_control_false() -> None:
+def test_moonshot_offers_no_prompt_cache() -> None:
     p = Moonshot.from_key("k")
     m = p.model("kimi-k2.6")
-    assert m.supports_cache_control is False
+    assert m.capability.cache_ttl_sec == 0.0
 
 
 if __name__ == "__main__":

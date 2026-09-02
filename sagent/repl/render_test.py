@@ -238,10 +238,22 @@ def test_model_response_thinking_routes_to_printer() -> None:
 
 
 def test_model_response_thinking_can_be_hidden() -> None:
+    """The printer owns the flag, and the observer reads it per event."""
     p = RecordingPrinter()
-    obs = make_render_observer(p, show_thinking=lambda: False)
+    p.show_thinking = False
+    obs = make_render_observer(p)
     obs(ModelResponseThinking(text="hmm"))
     assert p.thinkings == []
+
+
+def test_hiding_thinking_takes_effect_mid_stream() -> None:
+    """``/thinking hide`` must apply to the response already in flight."""
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    obs(ModelResponseThinking(text="shown"))
+    p.show_thinking = False
+    obs(ModelResponseThinking(text="hidden"))
+    assert p.thinkings == ["shown"]
 
 
 def test_model_service_suspended_flushes_stream_and_renders_dim_line() -> None:

@@ -18,7 +18,6 @@ from prompt_toolkit.history import FileHistory
 
 import pytest
 
-from sagent import thinking
 from sagent.agent import runtime as agent_runtime
 from sagent.agent.agent import Agent, _resolve_target_spec
 from sagent.agent.background import BackgroundTaskEntry
@@ -49,17 +48,19 @@ from sagent.repl.run_repl import (
     install_input_queue_committer,
     run_repl,
 )
+from sagent.types.capability import (
+    ModelCapability,
+    ModelLimits,
+    ModelSettings,
+    ThinkingEffort,
+    ThinkingOutput,
+)
 from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
     TokenPrice,
 )
-from sagent.types.model import (
-    ModelLimits,
-    ModelRecipe,
-    ModelSpec,
-    ThinkingEffort,
-)
+from sagent.types.model import ModelRecipe
 from sagent.types.runtime import (
     DETACHED_PLACEHOLDER,
     AgentIdle,
@@ -387,29 +388,50 @@ class _FakeModel:
     model_id: str = "claude-opus-4-7"
     supports_thinking: bool = True
     supports_redaction: bool = True
-    valid_efforts: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+    valid_efforts: tuple[ThinkingEffort, ...] = (
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    )
     _provider: object | None = None
 
     @property
-    def spec(self) -> ModelSpec:
-        return ModelSpec(
+    def capability(self) -> ModelCapability:
+        outputs: frozenset[ThinkingOutput] = (
+            frozenset({"none", "text", "redacted"})
+            if self.supports_redaction
+            else frozenset({"none", "text"})
+        )
+        return ModelCapability(
             model_id=self.model_id,
-            context_limits=ModelLimits(
-                max_request_tokens=200_000, max_response_tokens=8_192
+            context=MappingProxyType(
+                {"": ModelLimits(max_request_tokens=200_000, max_response_tokens=8_192)}
             ),
-            supported_thinking_efforts=MappingProxyType(
-                {cast(ThinkingEffort, e): e for e in self.valid_efforts}
+            thinking_effort=frozenset({"none", *self.valid_efforts}),
+            thinking_budget=(
+                frozenset({"none", "auto", "fixed"})
+                if self.supports_thinking
+                else frozenset({"none"})
             ),
-            supported_thinking_budgets=(
-                frozenset({"auto", "fixed"}) if self.supports_thinking else frozenset()
-            ),
-            supported_thinking_outputs=(
-                frozenset({"text", "redacted"})
-                if self.supports_redaction
-                else frozenset({"text"})
-            ),
+            thinking_output=outputs,
             prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
         )
+
+    # Materialized once and cached: settings are mutable state the caller
+    # writes through, so a fresh object per read discarded every selection.
+    _settings: ModelSettings | None = None
+
+    @property
+    def settings(self) -> ModelSettings:
+        if self._settings is None:
+            self._settings = ModelSettings.narrowest(self.capability)
+        return self._settings
+
+    @property
+    def tagged_model_id(self) -> str:
+        return self.model_id
 
 
 @dataclass(slots=True, kw_only=True)
@@ -453,51 +475,11 @@ class _FakeAgent:
     change_model_side_effect: BaseException | None = None
     relogin_calls: int = 0
     relogin_side_effect: BaseException | None = None
-    thinking_state: str | None = None
-    thinking: str | None = "adaptive"
-    show_thinking: bool = True
     background: dict[str, BackgroundTaskEntry] = field(default_factory=dict)
-    _effort: str | None = None
 
-    @property
-    def effort(self) -> str | None:
-        return self._effort
-
-    @effort.setter
-    def effort(self, value: str | None) -> None:
-        # Mirror ``Agent.effort`` setter EXACTLY (agent.py), including the
-        # no-support branch the earlier copy omitted, so this fake cannot
-        # diverge from production. The real setter's own branches are
-        # tested directly in agent_test.py (test_effort_setter_*); this
-        # mirror only lets the REPL-adapter tests drive a faithful agent.
-        if value is not None:
-            valid = self.model.spec.supported_thinking_efforts
-            if not valid:
-                raise ValueError(
-                    f"Model {self.model.spec.tagged_model_id!r} does not support effort."
-                )
-            if value not in valid:
-                quoted = ", ".join(repr(e) for e in valid)
-                raise ValueError(f"effort must be one of {quoted}, got {value!r}")
-        self._effort = value
-
-    def set_thinking_state(self, state: str) -> None:
-        # Delegate to the REAL derivation so these tests exercise
-        # production logic, not a divergent copy. ``thinking`` /
-        # ``show_thinking`` mirror ``Agent.set_thinking_state``.
-        # (``redact_thinking`` is derived at provider-build time inside
-        # ``Agent._provider_build_options`` -- no bag to mirror here.)
-        canonical = cast(thinking.ThinkingState, state)
-        self.thinking_state = state
-        self.thinking = thinking.request_thinking(canonical)
-        self.show_thinking = thinking.should_show_thinking(canonical)
-
-    def restore_thinking_state(
-        self, state: str | None, thinking: str | None, show_thinking: bool
-    ) -> None:
-        self.thinking_state = state
-        self.thinking = thinking
-        self.show_thinking = show_thinking
+    # No thinking / effort / tier fields: every knob is the MODEL's, so a
+    # fake carrying its own could drift from production the way its
+    # hand-mirrored setters did.
 
     def swap_model(self, model: _FakeModel, *, spec: ModelRecipe | None = None) -> None:
         self.swap_calls.append((model, spec))
@@ -658,149 +640,71 @@ def test_do_switch_model_change_model_error_writes_to_printer() -> None:
     assert any("no credentials" in line for line in printer.slash_blocks)
 
 
-def test_do_switch_thinking_full_state_sets_adaptive_show() -> None:
-    agent = _FakeAgent(
-        model_recipe=ModelRecipe(
-            provider="Anthropic",
-            auth="env",
-            model_id="claude-opus-4-7",
-        )
-    )
+def test_do_switch_thinking_selects_the_budget() -> None:
+    agent = _FakeAgent()
     printer = RecordingPrinter()
-    do_switch_thinking(_as_agent(agent), "adaptive-show", printer)
-    assert agent.thinking_state == "adaptive-show"
-    assert agent.thinking == "adaptive"
-    assert agent.show_thinking is True
-    assert len(agent.change_model_calls) == 1
-
-
-def test_do_switch_thinking_same_state_skips_model_change() -> None:
-    agent = _FakeAgent(
-        model_recipe=ModelRecipe(
-            provider="Anthropic",
-            auth="env",
-            model_id="claude-opus-4-7",
-        ),
-        thinking_state="adaptive-show",
-        thinking="adaptive",
-        show_thinking=True,
-    )
-    printer = RecordingPrinter()
-    do_switch_thinking(_as_agent(agent), "adaptive-show", printer)
-    assert agent.thinking_state == "adaptive-show"
-    assert agent.thinking == "adaptive"
-    assert agent.show_thinking is True
+    do_switch_thinking(_as_agent(agent), "adaptive", printer)
+    assert agent.model.settings.thinking_budget == "auto"
+    # A settings write, not a provider rebuild.
     assert agent.change_model_calls == []
 
 
-def test_do_switch_thinking_hide_preserves_adaptive_mode() -> None:
-    agent = _FakeAgent(
-        model_recipe=ModelRecipe(
-            provider="Anthropic",
-            auth="env",
-            model_id="claude-opus-4-7",
-        )
-    )
+def test_do_switch_thinking_hide_preserves_the_budget() -> None:
+    """The split's whole point: display and budget move independently."""
+    agent = _FakeAgent()
     printer = RecordingPrinter()
-    agent.thinking_state = "adaptive-show"
+    do_switch_thinking(_as_agent(agent), "adaptive", printer)
     do_switch_thinking(_as_agent(agent), "hide", printer)
-    assert agent.thinking_state == "adaptive-hide"
-    assert agent.thinking == "adaptive"
-    assert agent.show_thinking is False
-    assert len(agent.change_model_calls) == 1
+    assert agent.model.settings.thinking_budget == "auto"
+    assert printer.show_thinking is False
 
 
-def test_do_switch_thinking_redact_enables_redaction_and_hides() -> None:
-    agent = _FakeAgent(
-        model_recipe=ModelRecipe(
-            provider="Anthropic",
-            auth="env",
-            model_id="claude-opus-4-7",
-        )
-    )
+def test_do_switch_thinking_hide_lands_on_the_printer_not_the_wire() -> None:
+    """The screen decides what it renders; the model decides what it sends."""
+    agent = _FakeAgent()
+    printer = RecordingPrinter()
+    do_switch_thinking(_as_agent(agent), "adaptive", printer)
+    before = agent.model.settings.thinking_output
+    do_switch_thinking(_as_agent(agent), "hide", printer)
+    assert agent.model.settings.thinking_output == before
+    assert printer.show_thinking is False
+
+
+def test_do_switch_thinking_redact_hides_and_keeps_thinking() -> None:
+    agent = _FakeAgent()
     printer = RecordingPrinter()
     do_switch_thinking(_as_agent(agent), "redact", printer)
-    assert agent.thinking_state == "redact-hide"
-    assert agent.thinking == "adaptive"
-    assert agent.show_thinking is False
-    # The redact-supporting provider triggers a rebuild; the redaction
-    # value itself is derived inside ``Agent._provider_build_options``
-    # (covered by agent_test.py).
-    assert len(agent.change_model_calls) == 1
+    assert agent.model.settings.thinking_output == "redacted"
+    assert agent.model.settings.thinking_budget == "auto"
+    assert printer.show_thinking is False
 
 
-def test_do_switch_thinking_rejects_models_without_thinking() -> None:
+def test_do_switch_thinking_rejects_a_model_that_cannot_think() -> None:
     agent = _FakeAgent(model=_FakeModel(supports_thinking=False))
     printer = RecordingPrinter()
-    do_switch_thinking(_as_agent(agent), "adaptive-show", printer)
-    assert "not supported" in printer.slash_blocks[0]
-    assert "off-hide" in printer.slash_blocks[0]
-    assert agent.change_model_calls == []
+    do_switch_thinking(_as_agent(agent), "adaptive", printer)
+    assert "not offered" in printer.slash_blocks[0]
+    assert agent.model.settings.thinking_budget == "none"
 
 
 def test_do_switch_thinking_allows_off_without_model_thinking() -> None:
+    """Turning it off is always offerable: ``none`` is on every ladder."""
     agent = _FakeAgent(model=_FakeModel(supports_thinking=False))
     printer = RecordingPrinter()
     do_switch_thinking(_as_agent(agent), "off", printer)
-    assert agent.thinking_state == "off-hide"
-    assert agent.thinking is None
-
-
-def test_do_switch_thinking_show_errors_from_off() -> None:
-    agent = _FakeAgent(thinking_state="off-hide", thinking=None, show_thinking=False)
-    printer = RecordingPrinter()
-    do_switch_thinking(_as_agent(agent), "show", printer)
-    assert "cannot show" in printer.slash_blocks[0]
-    assert agent.change_model_calls == []
-
-
-def test_do_switch_thinking_no_rebuild_without_provider_support() -> None:
-    """A provider without the redact option changes state locally, no rebuild."""
-    agent = _FakeAgent(
-        model_recipe=ModelRecipe(
-            provider="Google", auth="env", model_id="gemini-3-pro"
-        ),
-    )
-    printer = RecordingPrinter()
-    do_switch_thinking(_as_agent(agent), "adaptive-show", printer)
-    assert agent.thinking_state == "adaptive-show"
-    assert agent.thinking == "adaptive"
-    assert agent.show_thinking is True
-    assert agent.change_model_calls == []
+    assert agent.model.settings.thinking_budget == "none"
+    assert "off" in printer.slash_blocks[0]
 
 
 def test_do_switch_thinking_rejects_redact_without_provider_support() -> None:
     agent = _FakeAgent(
         model=_FakeModel(model_id="gemini-3-pro", supports_redaction=False),
-        model_recipe=ModelRecipe(
-            provider="Google", auth="env", model_id="gemini-3-pro"
-        ),
     )
     printer = RecordingPrinter()
     do_switch_thinking(_as_agent(agent), "redact", printer)
-    assert "not supported" in printer.slash_blocks[0]
-    assert "redact-hide" not in printer.slash_blocks[0].split("options:")[1]
-    assert agent.change_model_calls == []
-
-
-def test_do_switch_thinking_rebuild_failure_preserves_state() -> None:
-    agent = _FakeAgent(
-        model_recipe=ModelRecipe(
-            provider="Anthropic",
-            auth="env",
-            model_id="claude-opus-4-7",
-        ),
-        thinking_state="adaptive-show",
-        thinking="adaptive",
-        show_thinking=True,
-    )
-    agent.change_model_side_effect = RuntimeError("rebuild failed")
-    printer = RecordingPrinter()
-    do_switch_thinking(_as_agent(agent), "redact", printer)
-    assert agent.thinking_state == "adaptive-show"
-    assert agent.thinking == "adaptive"
-    assert agent.show_thinking is True
-    assert "rebuild failed" in printer.slash_blocks[0]
+    assert "not offered" in printer.slash_blocks[0]
+    assert "redact" not in printer.slash_blocks[0].split("options:")[1]
+    assert agent.model.settings.thinking_output != "redacted"
 
 
 def test_do_switch_effort_bare_lists_current_and_options() -> None:
@@ -809,94 +713,56 @@ def test_do_switch_effort_bare_lists_current_and_options() -> None:
     printer = RecordingPrinter()
     do_switch_effort(_as_agent(agent), "", printer)
     block = printer.slash_blocks[0]
-    assert "unset" in block
+    assert "none" in block
     assert "options:" in block
     assert "high" in block
 
 
 def test_do_switch_effort_sets_value() -> None:
-
     agent = _FakeAgent()
     printer = RecordingPrinter()
     do_switch_effort(_as_agent(agent), "high", printer)
-    assert agent.effort == "high"
+    assert agent.model.settings.thinking_effort == "high"
     assert "high" in printer.slash_blocks[0]
 
 
 def test_do_switch_effort_rejects_invalid_value() -> None:
-
     agent = _FakeAgent()
     printer = RecordingPrinter()
     do_switch_effort(_as_agent(agent), "bogus", printer)
-    assert agent.effort is None
-    assert "must be one of" in printer.slash_blocks[0]
+    assert agent.model.settings.thinking_effort == "none"
+    assert "is not one of" in printer.slash_blocks[0]
 
 
 def test_do_switch_effort_clears_with_alias() -> None:
-    agent = _FakeAgent(_effort="high")
+    agent = _FakeAgent()
     printer = RecordingPrinter()
+    do_switch_effort(_as_agent(agent), "high", printer)
     do_switch_effort(_as_agent(agent), "off", printer)
-    assert agent.effort is None
-    assert "unset" in printer.slash_blocks[0]
+    assert agent.model.settings.thinking_effort == "none"
 
 
-def test_do_switch_effort_none_sets_literal_not_clears() -> None:
-    """``none`` is a real effort value on some providers, not a clear alias."""
-    agent = _FakeAgent(
-        model=_FakeModel(valid_efforts=("none", "low", "high")), _effort="high"
-    )
-    printer = RecordingPrinter()
-    do_switch_effort(_as_agent(agent), "none", printer)
-    assert agent.effort == "none"
-    assert "none" in printer.slash_blocks[0]
-
-
-def test_do_switch_thinking_bare_lists_state_and_options() -> None:
-    """Bare ``/thinking`` prints current state plus provider's valid options."""
-    agent = _FakeAgent(
-        model_recipe=ModelRecipe(
-            provider="Anthropic", auth="env", model_id="claude-opus-4-7"
-        ),
-        thinking_state="adaptive-hide",
-    )
+def test_do_switch_thinking_bare_lists_current_and_options() -> None:
+    """Bare ``/thinking`` prints the current selection plus valid words."""
+    agent = _FakeAgent()
     printer = RecordingPrinter()
     do_switch_thinking(_as_agent(agent), "", printer)
     block = printer.slash_blocks[0]
-    assert "adaptive-hide" in block
     assert "options:" in block
-    assert "redact-hide" in block
+    assert "redact" in block
     assert agent.change_model_calls == []
 
 
-def test_do_switch_thinking_bare_options_provider_specific() -> None:
-    """A no-redaction provider omits ``redact-hide`` from the listed options."""
+def test_do_switch_thinking_bare_options_are_model_specific() -> None:
+    """A no-redaction model omits ``redact`` from the listed words."""
     agent = _FakeAgent(
         model=_FakeModel(model_id="gemini-3-pro", supports_redaction=False),
-        model_recipe=ModelRecipe(
-            provider="Google", auth="env", model_id="gemini-3-pro"
-        ),
     )
     printer = RecordingPrinter()
     do_switch_thinking(_as_agent(agent), "", printer)
     options = printer.slash_blocks[0].split("options:")[1]
-    assert "adaptive-show" in options
-    assert "redact-hide" not in options
-
-
-def test_do_switch_thinking_show_errors_from_redact() -> None:
-    agent = _FakeAgent(
-        model_recipe=ModelRecipe(
-            provider="Anthropic",
-            auth="env",
-            model_id="claude-opus-4-7",
-        ),
-        thinking_state="redact-hide",
-        show_thinking=False,
-    )
-    printer = RecordingPrinter()
-    do_switch_thinking(_as_agent(agent), "show", printer)
-    assert "cannot show" in printer.slash_blocks[0]
-    assert agent.change_model_calls == []
+    assert "adaptive" in options
+    assert "redact" not in options
 
 
 @pytest.mark.asyncio

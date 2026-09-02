@@ -372,24 +372,23 @@ def test_self_hosted_model_properties() -> None:
     stub = _StubProvider()
     m = SelfHostedModel(provider=stub)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- partial protocol stub
     assert m.max_request_tokens == 1234
-    assert m.model_id == "stub/qwen"
-    assert m.max_response_tokens == 567
-    assert m.supports_streaming is False
-    assert m.supports_thinking is False
-    assert m.supports_effort is True
-    assert m.supports_cache_control is False
-    assert m.supports_context_management is False
-    assert m.supports_persistent_retry is False
-    assert m.supports_account_auth is False
+    assert m.capability.model_id == "stub/qwen"
+    assert m.limits.max_response_tokens == 567
+    assert m.capability.thinking_budget == frozenset({"none"})
+    assert m.capability.thinking_effort == frozenset({"none"})
+    assert m.capability.cache_ttl_sec == 0.0
+    assert m.capability.manage_context_server_side == frozenset({False})
+    assert m.capability.retries_internally is False
+    assert m.capability.account_auth is False
     # A local model has no provider-imposed image/wire caps -- all three are
     # the 0=unlimited sentinel (consistent: no borrowed pixel cap either).
-    assert m.max_image_dim == 0
-    assert m.max_image_bytes == 0
-    assert m.max_request_bytes == 0
+    assert m.limits.max_image_edge_px == 0
+    assert m.limits.max_image_bytes == 0
+    assert m.limits.max_request_bytes == 0
     assert m.approx_text_tokens("a" * 16) == 4
     assert m.is_context_overflow(RuntimeError("x")) is False
     assert m.is_retryable_provider_error(RuntimeError("x")) is False
-    assert m.spec.prices[PriceCatalogProduct()].request == 0.0
+    assert m.capability.prices[PriceCatalogProduct()].request == 0.0
 
 
 if __name__ == "__main__":

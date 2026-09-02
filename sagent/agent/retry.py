@@ -452,7 +452,6 @@ async def send_with_retry(
     request: ModelRequest,
     *,
     publish: Callable[[runtime_types.RuntimeEvent], None] | None = None,
-    show_thinking: bool = True,
     max_attempts: int,
     persistent_retry: bool,
     publish_recoverable: Callable[[str], None],
@@ -479,8 +478,6 @@ async def send_with_retry(
           a failed first attempt so the prefix is skipped on retry;
           thinking only fires on the first attempt (on retry it is read
           from the final response so the renderer never repeats it).
-      show_thinking: When ``False``, ``ModelResponseThinking`` events are
-          dropped before reaching ``publish``.
       max_attempts: Maximum number of retry attempts.
       persistent_retry: Enable persistent backoff for 429/529 errors.
       publish_recoverable: Callback for transient errors that recovered;
@@ -545,7 +542,7 @@ async def send_with_retry(
             break
         live = attempt == 0 and not prior_emitted
         chunks: list[str] = []
-        sink = _make_stream_sink(chunks, publish if live else None, show_thinking)
+        sink = _make_stream_sink(chunks, publish if live else None)
         stream_attempt += 1
         try:
             resp = await model.stream(request=request, publish=sink)
@@ -618,7 +615,7 @@ async def send_with_retry(
             overloaded = status == 529 or _body_error_type(e) == "overloaded_error"
             persistent = (
                 persistent_retry
-                and model.spec.retries_internally
+                and model.capability.retries_internally
                 and (rate_limited or overloaded or is_protocol_flake)
             )
             server_delay = extract_retry_after(e)
@@ -824,24 +821,20 @@ def _error_status(error: Exception, depth: int) -> int | None:
 def _make_stream_sink(
     chunks: list[str],
     live: Callable[[runtime_types.RuntimeEvent], None] | None,
-    show_thinking: bool,
 ) -> Callable[[runtime_types.RuntimeEvent], None]:
     """Build the ``publish`` sink handed to ``model.stream``.
 
     Always captures text chunks into ``chunks`` for cross-attempt
-    retry-dedup. When ``live`` is set (first attempt, nothing emitted
-    yet) it also forwards events to the runtime sink: text and labels
-    unconditionally, thinking only when ``show_thinking``.
+    retry-dedup. When ``live`` is set (first attempt, nothing emitted yet)
+    it also forwards every event. Whether reasoning reaches a screen is the
+    renderer's decision, so dropping it here hid it from every observer.
     """
 
     def _sink(event: runtime_types.RuntimeEvent) -> None:
         if isinstance(event, runtime_types.ModelResponsePartial):
             chunks.append(event.text)
-        if live is None:
-            return
-        if isinstance(event, runtime_types.ModelResponseThinking) and not show_thinking:
-            return
-        live(event)
+        if live is not None:
+            live(event)
 
     return _sink
 

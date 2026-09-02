@@ -42,7 +42,7 @@ from sagent import providers
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.google.api import Google
 from sagent.providers.openai.api import OpenAI
-from sagent.types.model import ModelCapability, ModelLimits
+from sagent.types.capability import ModelCapability
 
 
 def _out(msg: str) -> None:
@@ -220,8 +220,7 @@ def compare(
             continue
         # The untagged context is the one the vendor API reports; ``+1m``
         # is an opt-in the model list does not enumerate.
-        limits = k.context_limits
-        base = limits if isinstance(limits, ModelLimits) else limits[""]
+        base = k.context[""]
         k_req = base.max_request_tokens
         k_resp = base.max_response_tokens
         if k_req != lv.max_request_tokens:
@@ -267,9 +266,7 @@ def audit_catalogs() -> int:
             if not cap.prices:
                 _out(f"  {name}.{mid}: no price rows -- spend() would raise")
                 errors += 1
-            limits = cap.context_limits
-            per_tag = {"": limits} if isinstance(limits, ModelLimits) else limits
-            for tag, lim in per_tag.items():
+            for tag, lim in cap.context.items():
                 where = f"{name}.{mid}{tag}"
                 if lim.max_request_tokens <= 0:
                     _out(f"  {where}: max_request_tokens is 0")

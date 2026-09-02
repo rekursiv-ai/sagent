@@ -5,8 +5,8 @@ Three parallel shapes over the same four token buckets: ``TokenCount``
 ``TokenCost`` (USD). ``TokenPrice * TokenCount -> TokenCost``; the
 illegal products are absent methods rather than runtime checks.
 
-``PriceCatalog`` maps a ``PriceCatalogProduct`` -- the (fast, request
-size) pair a vendor prices on -- to a ``TokenPrice``, resolving a
+``PriceCatalog`` maps a ``PriceCatalogProduct`` -- the (service tier,
+request size) pair a vendor prices on -- to a ``TokenPrice``, resolving a
 request size to the highest tier at or below it.
 """
 
@@ -15,7 +15,12 @@ from __future__ import annotations
 from bisect import bisect_right
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, replace
-from typing import NamedTuple, Self, override
+from typing import TYPE_CHECKING, NamedTuple, Self, override
+
+
+if TYPE_CHECKING:
+    # Prevent cycle since ``capability`` imports ``PriceCatalog``.
+    from sagent.types.capability import ServiceTier
 
 
 __all__ = [
@@ -32,9 +37,8 @@ __all__ = [
 class TokenStats[T: (int, float)]:
     """Four token buckets, shared by counts, prices, and costs.
 
-    Defaults live on each concrete subclass: a dataclass default cannot
-    be typed ``T`` here, since pyright rejects ``Literal[0]`` against an
-    unbound TypeVar (microsoft/pyright#11226).
+    Subclasses carry the defaults: pyright rejects ``Literal[0]`` against
+    an unbound TypeVar (microsoft/pyright#11226).
     """
 
     request: T
@@ -169,8 +173,8 @@ class TokenPrice(TokenStats[float]):
 class PriceCatalogProduct(NamedTuple):
     """The billable product a vendor quotes a ``TokenPrice`` for."""
 
-    fast: bool = False
-    """Whether this row prices the fast tier."""
+    service_tier: ServiceTier = "auto"
+    """Which speed/price tier this row prices."""
 
     min_request_tokens: int = 0
     """Prompt size at which this row takes over from the one below."""
@@ -201,18 +205,21 @@ class PriceCatalog(Mapping[PriceCatalogProduct, TokenPrice]):
         self._prices: dict[PriceCatalogProduct, TokenPrice] = dict(
             sorted((prices or {}).items())
         )
-        self._by_mode: dict[bool, list[PriceCatalogProduct]] = {}
+        self._by_tier: dict[ServiceTier, list[PriceCatalogProduct]] = {}
         for key in self._prices:
-            self._by_mode.setdefault(key.fast, []).append(key)
+            self._by_tier.setdefault(key.service_tier, []).append(key)
 
     @override
     def __getitem__(self, key: PriceCatalogProduct) -> TokenPrice:
-        keys = self._by_mode.get(key.fast, [])
+        keys = self._by_tier.get(key.service_tier, [])
         i = bisect_right(keys, key)
         if i:
             return self._prices[keys[i - 1]]
-        if key.fast:
-            return self[PriceCatalogProduct(False, key.min_request_tokens)]
+        # A tier a vendor does not price separately bills at its standard
+        # rate. Falling back rather than raising keeps a catalog from having
+        # to restate every row per tier.
+        if key.service_tier != "auto":
+            return self[PriceCatalogProduct("auto", key.min_request_tokens)]
         raise KeyError(key)
 
     @override

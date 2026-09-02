@@ -13,13 +13,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextvars import ContextVar
+from types import MappingProxyType
 from typing import cast
 
 import dataclasses
 
 from sagent import (
     providers as providers_module,
-    types,
 )
 from sagent.agent.agent import Agent
 from sagent.agent.state import current_agent_var
@@ -30,17 +30,32 @@ from sagent.providers import (
     default_auth_for_provider,
     infer_provider,
 )
+from sagent.thinking import apply_thinking_command
 from sagent.tools.core import (
     load_tool_description,
     provider_not_allowed_result,
 )
+from sagent.types.capability import (
+    ModelCapability,
+    ServiceTier,
+    ThinkingEffort,
+)
 from sagent.types.model import (
     CONTEXT_TAGS,
-    ModelCapability,
-    ModelLimits,
+    Model,
+    ModelRecipe,
     base_model_id,
 )
+from sagent.types.runtime import (
+    Clear,
+    Compact,
+    Recompact,
+    ToolResult,
+)
 
+
+CACHE_TTL_SEC: Mapping[str, float] = MappingProxyType({"5m": 300.0, "1h": 3600.0})
+"""The two prompt-cache lifetimes the wire spells, in seconds."""
 
 _allow_providers_var: ContextVar[tuple[str, ...]] = ContextVar(
     "_allow_providers", default=tuple(PROVIDER_NAMES)
@@ -196,7 +211,7 @@ class AgentSelf:
         del args
         return None
 
-    async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Apply an AgentSelf patch object.
 
         Args:
@@ -217,17 +232,14 @@ class AgentSelf:
 class _ModelPlan:
     """Pending model swap (model + spec + display label)."""
 
-    model: types.model.Model
+    model: Model
     """New rich provider model to install."""
 
-    spec: types.model.ModelRecipe
+    spec: ModelRecipe
     """Recipe describing how the model was built (for re-resume)."""
 
     label: str
     """Human-readable change label (``old → new``)."""
-
-
-_UNSET = object()
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
@@ -243,14 +255,14 @@ class _PatchPlan:
     thinking: bool | None = None
     """Toggle for extended-thinking; ``None`` to keep."""
 
-    effort: str | object | None = _UNSET
-    """Effort hint; ``_UNSET`` means leave unchanged."""
+    effort: ThinkingEffort | None = None
+    """Effort level; ``None`` means leave unchanged."""
 
     cache_ttl: str | None = None
     """Cache TTL (``"5m"`` / ``"1h"``); ``None`` to keep."""
 
-    service_tier: str | object | None = _UNSET
-    """OpenAI service-tier hint; ``_UNSET`` means leave unchanged."""
+    service_tier: ServiceTier | None = None
+    """Speed/price tier; ``None`` means leave unchanged."""
 
     max_request_tokens: int | None = None
     """New per-request input budget; ``None`` to keep."""
@@ -289,16 +301,14 @@ def _summary_parts(d: Mapping[str, object]) -> list[str]:
     return parts
 
 
-def _apply_patch(d: Mapping[str, object]) -> types.runtime.ToolResult:
+def _apply_patch(d: Mapping[str, object]) -> ToolResult:
     """Validate and apply an AgentSelf patch object."""
     active = current_agent_var.get(None)
     if active is None:
-        return types.runtime.ToolResult(
-            call_id="", content="No active agent.", is_error=True
-        )
+        return ToolResult(call_id="", content="No active agent.", is_error=True)
     agent = cast(Agent, active)
     plan_or_err = _build_patch_plan(agent, d)
-    if isinstance(plan_or_err, types.runtime.ToolResult):
+    if isinstance(plan_or_err, ToolResult):
         return plan_or_err
     parts = _commit_patch_plan(agent, plan_or_err)
     if d.get("diagnostics") is True:
@@ -310,38 +320,36 @@ def _apply_patch(d: Mapping[str, object]) -> types.runtime.ToolResult:
         if parts:
             lines.append("AgentSelf updated: " + ", ".join(parts))
         lines.extend(_catalog_lines(d, agent))
-        return types.runtime.ToolResult(call_id="", content="\n".join(lines))
-    return types.runtime.ToolResult(
+        return ToolResult(call_id="", content="\n".join(lines))
+    return ToolResult(
         call_id="",
         content="AgentSelf updated: " + ", ".join(parts) if parts else "No changes.",
     )
 
 
-def _build_patch_plan(
-    agent: Agent, d: Mapping[str, object]
-) -> _PatchPlan | types.runtime.ToolResult:
+def _build_patch_plan(agent: Agent, d: Mapping[str, object]) -> _PatchPlan | ToolResult:
     """Validate an AgentSelf patch without mutating state."""
     err = _validate_patch(d)
     if err is not None:
         return err
     model_plan = _plan_model(agent, d)
-    if isinstance(model_plan, types.runtime.ToolResult):
+    if isinstance(model_plan, ToolResult):
         return model_plan
     target_model = model_plan.model if model_plan is not None else agent.model
     status = _plan_status(d)
-    if isinstance(status, types.runtime.ToolResult):
+    if isinstance(status, ToolResult):
         return status
     options_or_err = plan_model_options(target_model, d)
-    if isinstance(options_or_err, types.runtime.ToolResult):
+    if isinstance(options_or_err, ToolResult):
         return options_or_err
     options = options_or_err
     thinking = cast(bool | None, options.get("thinking"))
     cache_ttl = cast(str | None, options.get("cache_ttl"))
-    service_tier = options.get("service_tier", _UNSET)
+    service_tier = cast(ServiceTier | None, options.get("service_tier"))
     has_explicit_limits = "max_request_tokens" in d or "max_response_tokens" in d
     if has_explicit_limits:
         limits = _plan_limits(agent, target_model, d)
-        if isinstance(limits, types.runtime.ToolResult):
+        if isinstance(limits, ToolResult):
             return limits
     else:
         limits = {}
@@ -350,7 +358,7 @@ def _build_patch_plan(
         status=status,
         model=model_plan,
         thinking=thinking,
-        effort=options.get("effort", _UNSET),
+        effort=cast(ThinkingEffort | None, options.get("effort")),
         cache_ttl=cache_ttl,
         service_tier=service_tier,
         max_request_tokens=limits.get("max_request_tokens"),
@@ -367,43 +375,34 @@ def _commit_patch_plan(agent: Agent, plan: _PatchPlan) -> list[str]:
         agent.status = plan.status
         parts.append(f"status={plan.status}")
     if plan.model is not None:
-        new_model = plan.model.model
-        # ``swap_model`` rescales the budget into the new model's window
-        # (whole-window budgets follow the new ceiling; pinned values clamp
-        # down), so no explicit budget reset is needed here. Snapshot the
-        # capability flags first: ``swap_model`` zeroes effort / thinking /
-        # service_tier when the new model lacks support, so a post-swap
-        # check would never see them set. Compare pre vs post to emit the
-        # ``(unsupported)`` confirmation lines. (Latency needs no clearing:
-        # it derives from the model id's ``+fast`` tag.)
-        had_effort = agent.effort is not None
-        had_thinking = agent.thinking is not None
-        had_service_tier = agent.service_tier is not None
+        # ``swap_model`` carries the selections across and drops the ones the
+        # new model rejects, so report what it DID rather than re-deriving
+        # the rule here: two copies of it disagreed, and this one answered
+        # "supported" for every model because each axis is total and so is
+        # never empty.
+        names = ("thinking_effort", "thinking_budget", "service_tier")
+        before = [getattr(agent.model.settings, name) for name in names]
         agent.swap_model(plan.model.model, spec=plan.model.spec)
         parts.append(f"model={plan.model.label}")
-        if not bool(new_model.spec.supported_thinking_efforts) and had_effort:
-            agent.effort = None
-            parts.append("effort=unset (unsupported)")
-        if not bool(new_model.spec.supported_thinking_budgets) and had_thinking:
-            agent.thinking = None
-            parts.append("thinking=off (unsupported)")
-        if not new_model.spec.valid_service_tiers and had_service_tier:
-            agent.service_tier = None
-            parts.append("service_tier=unset (unsupported)")
+        for name, was in zip(names, before, strict=True):
+            now = getattr(agent.model.settings, name)
+            if was != now:
+                parts.append(f"{name}={now} (unsupported)")
+    settings = agent.model.settings
     if plan.thinking is not None:
-        agent.thinking = "adaptive" if plan.thinking else None
+        _ = apply_thinking_command(
+            "adaptive" if plan.thinking else "off", settings, show=False
+        )
         parts.append(f"thinking={'on' if plan.thinking else 'off'}")
-    if plan.effort is not _UNSET:
-        effort = cast(str | None, plan.effort)
-        agent.effort = effort
-        parts.append(f"effort={effort or 'unset'}")
+    if plan.effort is not None:
+        settings.thinking_effort = plan.effort
+        parts.append(f"effort={plan.effort}")
     if plan.cache_ttl is not None:
-        agent.cache_ttl = plan.cache_ttl
-        parts.append(f"cache_ttl={agent.cache_ttl}")
-    if plan.service_tier is not _UNSET:
-        service_tier = cast(str | None, plan.service_tier)
-        agent.service_tier = service_tier
-        parts.append(f"service_tier={service_tier or 'unset'}")
+        settings.cache_ttl_sec = CACHE_TTL_SEC[plan.cache_ttl]
+        parts.append(f"cache_ttl={plan.cache_ttl}")
+    if plan.service_tier is not None:
+        settings.service_tier = plan.service_tier
+        parts.append(f"service_tier={plan.service_tier}")
     if plan.max_request_tokens is not None:
         agent.max_request_tokens = plan.max_request_tokens
         parts.append(f"max_request_tokens={agent.max_request_tokens:,}")
@@ -416,31 +415,31 @@ def _commit_patch_plan(agent: Agent, plan: _PatchPlan) -> list[str]:
     return parts
 
 
-def _validate_patch(d: Mapping[str, object]) -> types.runtime.ToolResult | None:
+def _validate_patch(d: Mapping[str, object]) -> ToolResult | None:
     """Validate cross-field AgentSelf patch constraints."""
     if "context_prompt" in d and "context" not in d:
-        return types.runtime.ToolResult(
+        return ToolResult(
             call_id="",
             content="context_prompt is only valid when context is set.",
             is_error=True,
         )
     context = d.get("context")
     if context is not None and context not in ("clear", "compact", "recompact"):
-        return types.runtime.ToolResult(
+        return ToolResult(
             call_id="", content=f"Invalid context: {context!r}.", is_error=True
         )
     options = d.get("model_options")
     if options is not None and not isinstance(options, Mapping):
-        return types.runtime.ToolResult(
+        return ToolResult(
             call_id="", content="model_options must be an object.", is_error=True
         )
     catalog = d.get("catalog")
     if catalog is not None and catalog not in ("providers", "models"):
-        return types.runtime.ToolResult(
+        return ToolResult(
             call_id="", content=f"Invalid catalog: {catalog!r}.", is_error=True
         )
     if "catalog_provider" in d and catalog != "models":
-        return types.runtime.ToolResult(
+        return ToolResult(
             call_id="",
             content="catalog_provider is only valid with catalog='models'.",
             is_error=True,
@@ -448,14 +447,14 @@ def _validate_patch(d: Mapping[str, object]) -> types.runtime.ToolResult | None:
     return None
 
 
-def _plan_status(d: Mapping[str, object]) -> str | types.runtime.ToolResult | None:
+def _plan_status(d: Mapping[str, object]) -> str | ToolResult | None:
     """Validate an optional status update."""
     raw = d.get("status")
     if raw is None:
         return None
     status = str(raw).strip()
     if not status:
-        return types.runtime.ToolResult(
+        return ToolResult(
             call_id="", content="status cannot be empty when provided.", is_error=True
         )
     return status
@@ -463,13 +462,13 @@ def _plan_status(d: Mapping[str, object]) -> str | types.runtime.ToolResult | No
 
 def _plan_model(
     agent: Agent, d: Mapping[str, object]
-) -> _ModelPlan | types.runtime.ToolResult | None:
+) -> _ModelPlan | ToolResult | None:
     """Build an optional model/provider/account update without applying it."""
     if not any(k in d for k in ("model_id", "provider", "auth", "account")):
         return None
     spec = agent.model_recipe
     if spec is None:
-        return types.runtime.ToolResult(
+        return ToolResult(
             call_id="", content="Agent has no model spec; cannot swap.", is_error=True
         )
     model_id = str(d.get("model_id", "")).strip() or None
@@ -483,7 +482,7 @@ def _plan_model(
     if "account" in d:
         account = str(d["account"]).strip()
         if not account:
-            return types.runtime.ToolResult(
+            return ToolResult(
                 call_id="", content="account cannot be empty.", is_error=True
             )
     else:
@@ -505,28 +504,25 @@ def _plan_model(
             prov_name,
             auth,
             account=account,
-            options=agent._provider_build_options(prov_name),  # noqa: SLF001 -- the tool swaps the agent's own provider; reuse its scoped options exactly like ``change_model``
         )
         new_model = prov.model(model_id)
     except (AttributeError, RuntimeError, ValueError) as exc:
-        return types.runtime.ToolResult(
+        return ToolResult(
             call_id="",
             content=f"Failed to build model {model_id!r}: {exc}",
             is_error=True,
         )
-    old_id = agent.model.spec.tagged_model_id
-    label = f"{old_id} → {new_model.spec.tagged_model_id}"
+    old_id = agent.model.tagged_model_id
+    label = f"{old_id} → {new_model.tagged_model_id}"
     if prov_name != spec.provider:
-        label = (
-            f"{spec.provider}/{old_id} → {prov_name}/{new_model.spec.tagged_model_id}"
-        )
+        label = f"{spec.provider}/{old_id} → {prov_name}/{new_model.tagged_model_id}"
     return _ModelPlan(
         model=new_model,
         spec=dataclasses.replace(
             spec,
             provider=prov_name,
             auth=auth,
-            model_id=new_model.spec.tagged_model_id,
+            model_id=new_model.tagged_model_id,
             account=account,
         ),
         label=label,
@@ -534,8 +530,8 @@ def _plan_model(
 
 
 def plan_model_options(
-    model: types.model.Model, d: Mapping[str, object]
-) -> dict[str, object] | types.runtime.ToolResult:
+    model: Model, d: Mapping[str, object]
+) -> dict[str, object] | ToolResult:
     """Validate provider/model-specific options against the target model.
 
     Shared with :class:`AgentSpawn`, which applies the validated options
@@ -546,13 +542,13 @@ def plan_model_options(
         return {}
     options = cast(Mapping[str, object], raw)
     if "latency" in options:
-        # Fast mode moved into the model id (like ``+1m``); a targeted
-        # redirect beats the generic unsupported-key error.
-        return types.runtime.ToolResult(
+        # Redirect beats the generic unsupported-key error: this knob was
+        # renamed rather than removed.
+        return ToolResult(
             call_id="",
             content=(
-                "model_options.latency was replaced by the '+fast' model-id"
-                " option tag (e.g. model='claude-opus-4-8+fast')."
+                "model_options.latency was replaced by service_tier"
+                " (e.g. model_options={'service_tier': 'priority'})."
             ),
             is_error=True,
         )
@@ -565,16 +561,16 @@ def plan_model_options(
         k for k in options if k not in supported and options[k] is not None
     )
     if unknown:
-        return types.runtime.ToolResult(
+        return ToolResult(
             call_id="",
-            content=f"Unsupported model_options for {model.spec.tagged_model_id}: {', '.join(unknown)}.",
+            content=f"Unsupported model_options for {model.tagged_model_id}: {', '.join(unknown)}.",
             is_error=True,
         )
     planned: dict[str, object] = {}
     if "thinking" in options:
         value = options["thinking"]
         if not isinstance(value, bool):
-            return types.runtime.ToolResult(
+            return ToolResult(
                 call_id="",
                 content="model_options.thinking must be boolean.",
                 is_error=True,
@@ -583,18 +579,18 @@ def plan_model_options(
     if "effort" in options:
         value = options["effort"]
         if value is not None and not isinstance(value, str):
-            return types.runtime.ToolResult(
+            return ToolResult(
                 call_id="",
                 content="model_options.effort must be a string or null.",
                 is_error=True,
             )
-        valid = model.spec.supported_thinking_efforts
+        valid = model.capability.thinking_effort
         if value is not None and value not in valid:
             quoted = ", ".join(repr(e) for e in valid) or "(none)"
-            return types.runtime.ToolResult(
+            return ToolResult(
                 call_id="",
                 content=(
-                    f"model_options.effort for {model.spec.tagged_model_id} must"
+                    f"model_options.effort for {model.tagged_model_id} must"
                     f" be one of {quoted} or null, got {value!r}."
                 ),
                 is_error=True,
@@ -603,21 +599,25 @@ def plan_model_options(
     if "cache_ttl" in options:
         value = options["cache_ttl"]
         if value not in ("5m", "1h"):
-            return types.runtime.ToolResult(
+            return ToolResult(
                 call_id="",
                 content="model_options.cache_ttl must be '5m' or '1h'.",
                 is_error=True,
             )
         planned["cache_ttl"] = value
     if "service_tier" in options:
-        value = options["service_tier"]
-        valid = model.spec.valid_service_tiers
-        if value is not None and value not in valid:
-            quoted = ", ".join(repr(t) for t in valid) or "(none)"
-            return types.runtime.ToolResult(
+        # ``null`` means "let the vendor pick", which is the axis's own unset
+        # value rather than an absent one.
+        value = (
+            options["service_tier"] if options["service_tier"] is not None else ("auto")
+        )
+        valid = model.capability.service_tier
+        if value not in valid:
+            quoted = ", ".join(repr(t) for t in sorted(valid))
+            return ToolResult(
                 call_id="",
                 content=(
-                    f"model_options.service_tier for {model.spec.tagged_model_id} must"
+                    f"model_options.service_tier for {model.tagged_model_id} must"
                     f" be one of {quoted} or null, got {value!r}."
                 ),
                 is_error=True,
@@ -626,60 +626,65 @@ def plan_model_options(
     return planned
 
 
-def _supported_model_options(model: types.model.Model) -> dict[str, str]:
-    """Return supported model option names with compact descriptions."""
+def _supported_model_options(model: Model) -> dict[str, str]:
+    """Return supported model option names with compact descriptions.
+
+    Every axis is total, so a non-empty set proves nothing: an axis is
+    selectable only when it offers something BESIDES its unset value.
+    """
     supported: dict[str, str] = {}
-    if bool(model.spec.supported_thinking_budgets):
+    capability = model.capability
+    if capability.thinking_budget != frozenset({"none"}):
         supported["thinking"] = "boolean"
-    efforts = model.spec.supported_thinking_efforts
+    efforts = capability.thinking_effort - {"none"}
     if efforts:
-        supported["effort"] = " | ".join(repr(e) for e in efforts)
-    elif bool(model.spec.supported_thinking_efforts):
-        supported["effort"] = "string"
-    if model.spec.prompt_cache_breakpoints:
+        supported["effort"] = " | ".join(repr(e) for e in sorted(efforts))
+    if capability.cache_ttl_sec > 0:
         supported["cache_ttl"] = "'5m' | '1h'"
-    tiers = model.spec.valid_service_tiers
+    tiers = capability.service_tier - {"auto"}
     if tiers:
-        supported["service_tier"] = " | ".join(repr(t) for t in tiers)
+        supported["service_tier"] = " | ".join(
+            repr(t) for t in sorted(capability.service_tier)
+        )
     return supported
 
 
 def _plan_limits(
-    agent: Agent, model: types.model.Model, d: Mapping[str, object]
-) -> dict[str, int] | types.runtime.ToolResult:
+    agent: Agent, model: Model, d: Mapping[str, object]
+) -> dict[str, int] | ToolResult:
     """Validate explicit token-limit updates against the target model."""
     limits: dict[str, int] = {}
     max_request_tokens = _plan_one_limit(
         d.get("max_request_tokens"), "max_request_tokens"
     )
-    if isinstance(max_request_tokens, types.runtime.ToolResult):
+    if isinstance(max_request_tokens, ToolResult):
         return max_request_tokens
     max_response_tokens = _plan_one_limit(
         d.get("max_response_tokens"), "max_response_tokens"
     )
-    if isinstance(max_response_tokens, types.runtime.ToolResult):
+    if isinstance(max_response_tokens, ToolResult):
         return max_response_tokens
     if max_request_tokens is not None:
-        if max_request_tokens > model.spec.context_limits.max_request_tokens:
-            return types.runtime.ToolResult(
+        if max_request_tokens > model.limits.max_request_tokens:
+            return ToolResult(
                 call_id="",
                 content=(
                     "Invalid AgentSelf limit override: "
                     f"max_request_tokens={max_request_tokens:,} exceeds model's"
-                    f" {model.spec.context_limits.max_request_tokens:,}"
+                    f" {model.limits.max_request_tokens:,}"
                     + _window_variant_hint(agent, model, max_request_tokens)
                 ),
                 is_error=True,
             )
         limits["max_request_tokens"] = max_request_tokens
     if max_response_tokens is not None:
-        if max_response_tokens > model.spec.context_limits.max_response_tokens:
-            return types.runtime.ToolResult(
+        if max_response_tokens > model.limits.max_response_tokens:
+            return ToolResult(
                 call_id="",
                 content=(
                     "Invalid AgentSelf limit override: "
                     f"max_response_tokens={max_response_tokens:,} exceeds model's"
-                    f" {model.spec.context_limits.max_response_tokens:,}"
+                    f" {model.limits.max_response_tokens:,}"
                 ),
                 is_error=True,
             )
@@ -695,7 +700,7 @@ def _plan_limits(
                 budget, max_response_tokens=limits["max_response_tokens"]
             )
     except (ValueError, TypeError) as exc:
-        return types.runtime.ToolResult(
+        return ToolResult(
             call_id="",
             content=f"Invalid AgentSelf limit override: {exc}",
             is_error=True,
@@ -703,12 +708,12 @@ def _plan_limits(
     return limits
 
 
-def _plan_one_limit(raw: object, attr: str) -> int | types.runtime.ToolResult | None:
+def _plan_one_limit(raw: object, attr: str) -> int | ToolResult | None:
     """Validate a single token limit without applying it."""
     if raw is None:
         return None
     if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
-        return types.runtime.ToolResult(
+        return ToolResult(
             call_id="",
             content=f"Invalid AgentSelf limit override: {attr} must be a number.",
             is_error=True,
@@ -718,7 +723,7 @@ def _plan_one_limit(raw: object, attr: str) -> int | types.runtime.ToolResult | 
     # is a directive error -- reject so the LLM doesn't see its
     # ``1.9`` request quietly become ``1``.
     if isinstance(raw, float) and not raw.is_integer():
-        return types.runtime.ToolResult(
+        return ToolResult(
             call_id="",
             content=(
                 f"Invalid AgentSelf limit override: {attr} must be an"
@@ -729,13 +734,13 @@ def _plan_one_limit(raw: object, attr: str) -> int | types.runtime.ToolResult | 
     try:
         val = int(raw)
     except ValueError as exc:
-        return types.runtime.ToolResult(
+        return ToolResult(
             call_id="",
             content=f"Invalid AgentSelf limit override: {exc}",
             is_error=True,
         )
     if val < 1:
-        return types.runtime.ToolResult(
+        return ToolResult(
             call_id="",
             content=(
                 f"Invalid AgentSelf limit override: {attr}={val}. Must be at least 1."
@@ -745,7 +750,7 @@ def _plan_one_limit(raw: object, attr: str) -> int | types.runtime.ToolResult | 
     return val
 
 
-def _window_variant_hint(agent: Agent, model: types.model.Model, requested: int) -> str:
+def _window_variant_hint(agent: Agent, model: Model, requested: int) -> str:
     """Suggest a larger-window model id when one would satisfy ``requested``.
 
     Context-window size is encoded in the model id via a ``+1m`` / ``+200k``
@@ -771,17 +776,14 @@ def _window_variant_hint(agent: Agent, model: types.model.Model, requested: int)
     if not isinstance(known, Mapping):
         return ""
     catalog = cast(Mapping[str, ModelCapability], known)
-    base = base_model_id(model.spec.tagged_model_id)
+    base = base_model_id(model.tagged_model_id)
     cap = catalog.get(base)
     if cap is None:
         return ""
     for tag in CONTEXT_TAGS:
         candidate = base + tag
-        limits = cap.context_limits
-        if isinstance(limits, ModelLimits):
-            continue
-        window = getattr(limits.get(tag), "max_request_tokens", 0)
-        if candidate != model.spec.tagged_model_id and window >= requested:
+        window = getattr(cap.context.get(tag), "max_request_tokens", 0)
+        if candidate != model.tagged_model_id and window >= requested:
             return (
                 f". The window is part of the model id: switch to"
                 f" model_id={candidate} (a {window:,}-token window) rather"
@@ -797,17 +799,17 @@ def _commit_context(agent: Agent, context: str, prompt: str) -> None:
     runtime loop dispatches them in arrival order.
     """
     if context == "clear":
-        agent.runtime.inbox.push_back(types.runtime.Clear())
+        agent.runtime.inbox.push_back(Clear())
     elif context == "compact":
-        agent.runtime.inbox.push_back(types.runtime.Compact(args=prompt))
+        agent.runtime.inbox.push_back(Compact(args=prompt))
     elif context == "recompact":
-        agent.runtime.inbox.push_back(types.runtime.Recompact(args=prompt))
+        agent.runtime.inbox.push_back(Recompact(args=prompt))
 
 
 def _do_diagnostics(
     changes: list[str] | None = None,
     d: Mapping[str, object] | None = None,
-) -> types.runtime.ToolResult:
+) -> ToolResult:
     """Return current agent diagnostics."""
     agent = cast("Agent | None", current_agent_var.get(None))
     spec = agent.model_recipe if agent is not None else None
@@ -824,7 +826,7 @@ def _do_diagnostics(
     if agent is not None:
         lines.extend(_agent_option_lines(agent))
         lines.extend(_session_lines(agent))
-    return types.runtime.ToolResult(call_id="", content="\n".join(lines))
+    return ToolResult(call_id="", content="\n".join(lines))
 
 
 def _catalog_lines(d: Mapping[str, object], agent: Agent | None) -> list[str]:
@@ -901,7 +903,7 @@ def _format_stats(agent: Agent) -> list[str]:
     ]
 
 
-def _spec_lines(spec: types.model.ModelRecipe | None) -> list[str]:
+def _spec_lines(spec: ModelRecipe | None) -> list[str]:
     """Format model spec into display lines."""
     if spec is None:
         return []
@@ -915,26 +917,28 @@ def _spec_lines(spec: types.model.ModelRecipe | None) -> list[str]:
 
 def _agent_option_lines(agent: Agent) -> list[str]:
     """Format current and supported model options."""
-    thinking = "on" if agent.thinking is not None else "off"
-    if not bool(agent.model.spec.supported_thinking_budgets):
+    # Each axis is total, so "unsupported" is the SINGLETON unset value, not
+    # an empty set: ``not bool(frozenset)`` was never true and every model
+    # reported every knob as supported.
+    capability = agent.model.capability
+    settings = agent.model.settings
+    budget = settings.thinking_budget
+    thinking = "off" if budget == "none" else budget
+    if capability.thinking_budget == frozenset({"none"}):
         thinking = "unsupported"
-    effort = agent.effort or "unset"
-    if not bool(agent.model.spec.supported_thinking_efforts):
+    effort = settings.thinking_effort
+    if capability.thinking_effort == frozenset({"none"}):
         effort = "unsupported"
-    service_tier = agent.service_tier or "unset"
-    if not agent.model.spec.valid_service_tiers:
+    service_tier = settings.service_tier
+    if capability.service_tier == frozenset({"auto"}):
         service_tier = "unsupported"
-    latency = agent.latency or "unset"
-    if not agent.model.spec.valid_latency_modes:
-        latency = "unsupported"
     supported = _supported_model_options(agent.model)
     supported_text = ", ".join(f"{k}: {v}" for k, v in supported.items()) or "none"
     return [
-        f"Cache TTL:          {agent.cache_ttl}",
+        f"Cache TTL:          {settings.cache_ttl_sec:g}s",
         f"Thinking:           {thinking}",
         f"Effort:             {effort}",
         f"Service tier:       {service_tier}",
-        f"Latency:            {latency}",
         f"Supported model_options: {supported_text}",
     ]
 

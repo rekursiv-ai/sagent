@@ -2,178 +2,138 @@
 
 from __future__ import annotations
 
-from types import MappingProxyType
 from typing import cast
 
 import pytest
 
 from sagent.catalog import anthropic as anthropic_catalog
-from sagent.providers.anthropic import api as anthropic
-from sagent.types.cost import (
-    PriceCatalog,
-    PriceCatalogProduct,
-    TokenPrice,
-)
-from sagent.types.model import (
-    ContextBudget,
-    Model,
+from sagent.types.capability import (
+    ContextTag,
     ModelCapability,
     ModelLimits,
+)
+from sagent.types.cost import (
+    TokenCount,
+)
+from sagent.types.model import (
+    CONTEXT_TAGS,
+    AgentSettings,
     ModelRecipe,
     ModelResponse,
-    ModelSpec,
     StreamInterruptedError,
-    ThinkingBudget,
-    ThinkingOutput,
-    TokenCount,
     base_model_id,
-    latency_from_model_id,
+    default_buffer_tokens,
     split_model_id,
-)
-from sagent.types.providers import (
-    UnsupportedTagError,
-    resolve,
 )
 from sagent.types.runtime import AssistantMessage
 
 
-class _TinyModel:
-    """Smallest-possible ``Model``-shaped stub for ``ContextBudget.from_model``.
-
-    Only the ``spec`` ``from_model`` reads is declared; callers
-    ``cast`` it to ``Model`` because constructing the full Protocol
-    surface for a one-method test is more noise than signal.
-    """
-
-    def __init__(
-        self, *, max_request_tokens: int = 4_096, max_response_tokens: int = 1_024
-    ) -> None:
-        self.spec = ModelSpec(
-            context_limits=ModelLimits(
-                max_request_tokens=max_request_tokens,
-                max_response_tokens=max_response_tokens,
-            )
-        )
+# ---- AgentSettings ---------------------------------------------------------
 
 
-def _tiny(*, max_request_tokens: int = 4_096) -> Model:
-    return cast(Model, _TinyModel(max_request_tokens=max_request_tokens))
+def _limits(*, request: int = 4_096, response: int = 1_024) -> ModelLimits:
+    return ModelLimits(max_request_tokens=request, max_response_tokens=response)
 
 
-# ---- ContextBudget ---------------------------------------------------------
+def test_from_limits_handles_a_small_window() -> None:
+    """B12: a floored buffer used to exceed a sub-8k window and raise."""
+    _ = AgentSettings.from_limits(_limits(request=4_096))
 
 
-def test_context_budget_from_model_handles_small_window() -> None:
-    """B12: small windows must not trip the ``buffer < max_request`` invariant.
-
-    Pre-fix, ``buffer_tokens = max(inp // 15, 8_000)`` floored at
-    8_000; any model with ``max_request_tokens < 8_000`` then failed
-    ``__post_init__``'s ``buffer_tokens < max_request_tokens`` check.
-    Test fakes and small local models broke loud.
-    """
-    _ = ContextBudget.from_model(_tiny(max_request_tokens=4_096))
-
-
-def test_context_budget_from_model_caps_buffer_at_half_window() -> None:
+def test_from_limits_caps_the_buffer_at_half_the_window() -> None:
     """The buffer never exceeds half the window even for tiny models."""
-    budget = ContextBudget.from_model(_tiny(max_request_tokens=4_096))
-    assert budget.buffer_tokens <= 4_096 // 2
+    settings = AgentSettings.from_limits(_limits(request=4_096))
+    assert settings.buffer_tokens <= 4_096 // 2
 
 
-def test_context_budget_from_model_keep_recent_defers_to_compactor() -> None:
-    """B13: ``from_model`` leaves ``keep_recent_on_compact`` as ``None``.
-
-    ``None`` is the "let the compactor pick" contract; baking a number
-    here would silently override the strategy-specific default.
-    """
-    budget = ContextBudget.from_model(_tiny())
-    assert budget.keep_recent_on_compact is None
+def test_from_limits_carries_both_windows() -> None:
+    settings = AgentSettings.from_limits(_limits(request=200_000, response=64_000))
+    assert settings.max_request_tokens == 200_000
+    assert settings.max_response_tokens == 64_000
 
 
-def test_context_budget_rejects_negative_reattach_count() -> None:
-    """S7: ``reattach_count < 0`` underflows downstream slice math."""
-    with pytest.raises(ValueError, match="reattach_count"):
-        _ = ContextBudget(
-            max_request_tokens=1_000,
-            max_response_tokens=100,
-            reattach_count=-1,
-        )
-
-
-def test_context_budget_rejects_negative_reattach_max_chars() -> None:
-    with pytest.raises(ValueError, match="reattach_max_chars"):
-        _ = ContextBudget(
-            max_request_tokens=1_000,
-            max_response_tokens=100,
-            reattach_max_chars=-1,
-        )
-
-
-def test_context_budget_rejects_negative_reattach_budget() -> None:
-    """S7: caught for downstream char-budget math."""
-    with pytest.raises(ValueError, match="reattach_budget"):
-        _ = ContextBudget(
-            max_request_tokens=1_000,
-            max_response_tokens=100,
-            reattach_budget=-1,
-        )
-
-
-def test_context_budget_rejects_negative_persist_tokens() -> None:
-    with pytest.raises(ValueError, match="persist_tokens"):
-        _ = ContextBudget(
-            max_request_tokens=1_000,
-            max_response_tokens=100,
-            persist_tokens=-1,
-        )
-
-
-def test_context_budget_rejects_negative_message_budget_tokens() -> None:
-    with pytest.raises(ValueError, match="message_budget_tokens"):
-        _ = ContextBudget(
-            max_request_tokens=1_000,
-            max_response_tokens=100,
-            message_budget_tokens=-1,
-        )
-
-
-def test_context_budget_rejects_negative_keep_recent_on_compact() -> None:
-    """``keep_recent_on_compact`` is ``None | int``; ``-1`` is neither."""
-    with pytest.raises(ValueError, match="keep_recent_on_compact"):
-        _ = ContextBudget(
-            max_request_tokens=1_000,
-            max_response_tokens=100,
-            keep_recent_on_compact=-1,
-        )
-
-
-def test_context_budget_accepts_none_keep_recent_on_compact() -> None:
-    budget = ContextBudget(
-        max_request_tokens=1_000,
-        max_response_tokens=100,
-        keep_recent_on_compact=None,
+def test_from_limits_takes_limits_not_a_model() -> None:
+    """``swap_model`` sizes a candidate window before that model exists."""
+    limits = _limits(request=1_000_000, response=128_000)
+    assert AgentSettings.from_limits(limits).buffer_tokens == default_buffer_tokens(
+        1_000_000
     )
-    assert budget.keep_recent_on_compact is None
 
 
-def test_context_budget_accepts_zero_buffer_tokens() -> None:
+def test_accepts_zero_buffer_tokens() -> None:
     """``buffer_tokens = 0`` is a legal "no headroom" setting."""
-    budget = ContextBudget(
+    settings = AgentSettings(
         max_request_tokens=1_000,
         max_response_tokens=100,
         buffer_tokens=0,
     )
-    assert budget.buffer_tokens == 0
+    assert settings.buffer_tokens == 0
 
 
-def test_context_budget_rejects_negative_buffer_tokens() -> None:
+def test_rejects_negative_buffer_tokens() -> None:
     """Negative ``buffer_tokens`` would inflate the usable window past the cap."""
     with pytest.raises(ValueError, match="buffer_tokens"):
-        _ = ContextBudget(
+        _ = AgentSettings(
             max_request_tokens=1_000,
             max_response_tokens=100,
             buffer_tokens=-1,
         )
+
+
+def test_rejects_a_buffer_that_swallows_the_window() -> None:
+    with pytest.raises(ValueError, match="buffer_tokens"):
+        _ = AgentSettings(
+            max_request_tokens=1_000,
+            max_response_tokens=100,
+            buffer_tokens=1_000,
+        )
+
+
+def test_rejects_zero_max_attempts() -> None:
+    """Zero sends nothing: the count is checked before the first send."""
+    with pytest.raises(ValueError, match="max_attempts"):
+        _ = AgentSettings(
+            max_request_tokens=1_000,
+            max_response_tokens=100,
+            max_attempts=0,
+        )
+
+
+def test_rejects_negative_max_tool_call_rounds() -> None:
+    with pytest.raises(ValueError, match="max_tool_call_rounds"):
+        _ = AgentSettings(
+            max_request_tokens=1_000,
+            max_response_tokens=100,
+            max_tool_call_rounds=-1,
+        )
+
+
+def test_accepts_none_max_tool_call_rounds() -> None:
+    settings = AgentSettings(
+        max_request_tokens=1_000,
+        max_response_tokens=100,
+        max_tool_call_rounds=None,
+    )
+    assert settings.max_tool_call_rounds is None
+
+
+def test_rejects_negative_max_budget_usd() -> None:
+    with pytest.raises(ValueError, match="max_budget_usd"):
+        _ = AgentSettings(
+            max_request_tokens=1_000,
+            max_response_tokens=100,
+            max_budget_usd=-1.0,
+        )
+
+
+def test_carries_no_compaction_policy() -> None:
+    """Compaction is a heuristic; its knobs live on the ``Compactor``."""
+    names = set(AgentSettings.__dataclass_fields__)
+    assert not {n for n in names if n.startswith("reattach")}
+    assert "persist_tokens" not in names
+    assert "message_budget_tokens" not in names
+    assert "keep_recent_on_compact" not in names
+    assert "chars_per_token" not in names
 
 
 # ---- TokenCount ------------------------------------------------------------
@@ -223,7 +183,7 @@ def test_token_count_sub_returns_not_implemented_for_non_token_count() -> None:
     assert TokenCount().__sub__(other) is NotImplemented
 
 
-# ---- ModelRecipe -------------------------------------------------------------
+# ---- ModelRecipe -----------------------------------------------------------
 
 
 def test_model_recipe_rejects_empty_provider() -> None:
@@ -243,14 +203,14 @@ def test_model_recipe_rejects_empty_model_id() -> None:
 
 
 def test_model_recipe_allows_empty_account() -> None:
-    """``account=""`` means "default backend"; not a degenerate spec."""
-    spec = ModelRecipe(provider="P", auth="env", model_id="m", account="")
-    assert spec.account == ""
+    """``account=""`` means "default backend"; not a degenerate recipe."""
+    recipe = ModelRecipe(provider="P", auth="env", model_id="m", account="")
+    assert recipe.account == ""
 
 
 def test_model_recipe_allows_none_account() -> None:
-    spec = ModelRecipe(provider="P", auth="env", model_id="m", account=None)
-    assert spec.account is None
+    recipe = ModelRecipe(provider="P", auth="env", model_id="m", account=None)
+    assert recipe.account is None
 
 
 # ---- StreamInterruptedError ------------------------------------------------
@@ -275,6 +235,9 @@ def test_stream_interrupted_message_embeds_response_counts() -> None:
     assert "tool_use" in text
 
 
+# ---- model-id tags ---------------------------------------------------------
+
+
 @pytest.mark.parametrize(
     ("model_id", "base"),
     [
@@ -284,323 +247,42 @@ def test_stream_interrupted_message_embeds_response_counts() -> None:
         ("Claude-Opus-4-7+1M", "Claude-Opus-4-7"),
     ],
 )
-def test_base_model_id_strips_window_tag(model_id: str, base: str) -> None:
+def test_base_model_id_strips_the_context_tag(model_id: str, base: str) -> None:
     assert base_model_id(model_id) == base
 
 
 @pytest.mark.parametrize(
     ("model_id", "base", "tags"),
     [
-        ("claude-opus-4-8", "claude-opus-4-8", frozenset[str]()),
-        ("claude-opus-4-8+fast", "claude-opus-4-8", frozenset({"+fast"})),
-        ("claude-opus-4-8+1m+fast", "claude-opus-4-8", frozenset({"+1m", "+fast"})),
-        ("claude-opus-4-8+fast+1m", "claude-opus-4-8", frozenset({"+1m", "+fast"})),
-        ("Claude-Opus-4-8+FAST", "Claude-Opus-4-8", frozenset({"+fast"})),
-        ("model+unknown", "model+unknown", frozenset[str]()),
+        ("claude-opus-4-8", "claude-opus-4-8", frozenset[ContextTag]()),
+        ("claude-opus-4-8+1m", "claude-opus-4-8", frozenset({"+1m"})),
+        ("claude-opus-4-8+200k", "claude-opus-4-8", frozenset({"+200k"})),
+        ("Claude-Opus-4-8+1M", "Claude-Opus-4-8", frozenset({"+1m"})),
+        ("model+unknown", "model+unknown", frozenset[ContextTag]()),
     ],
 )
-def test_split_model_id(model_id: str, base: str, tags: frozenset[str]) -> None:
+def test_split_model_id(model_id: str, base: str, tags: frozenset[ContextTag]) -> None:
     assert split_model_id(model_id) == (base, tags)
 
 
-def test_latency_from_model_id() -> None:
-    assert latency_from_model_id("claude-opus-4-8+fast") == "fast"
-    assert latency_from_model_id("claude-opus-4-8+1m+fast") == "fast"
-    assert latency_from_model_id("claude-opus-4-8+1m") is None
-    assert latency_from_model_id("claude-opus-4-8") is None
+def test_context_tags_derive_from_the_literal() -> None:
+    """A tag the type admits but the tuple omits would be unparseable."""
+    assert set(CONTEXT_TAGS) == {"+1m", "+200k"}
 
 
-# ---- ModelCapability / ModelSpec -------------------------------------------
-
-
-def _opus() -> ModelCapability:
-    return ModelCapability(
-        model_id="claude-opus-4-8",
-        context_limits=MappingProxyType(
-            {
-                "": ModelLimits(max_request_tokens=200_000, max_image_bytes=5_000_000),
-                "+1m": ModelLimits(
-                    max_request_tokens=1_000_000, max_image_bytes=5_000_000
-                ),
-            }
-        ),
-        prices=PriceCatalog(
-            {
-                PriceCatalogProduct(False, 0): TokenPrice(request=5.0),
-                PriceCatalogProduct(True, 0): TokenPrice(request=15.0),
-            }
-        ),
-        supported_thinking_efforts=MappingProxyType({"off": "off", "max": "max"}),
+def test_no_latency_tag_survives() -> None:
+    """``+fast`` was a second spelling of ``service_tier="priority"``."""
+    assert split_model_id("claude-opus-5+fast") == (
+        "claude-opus-5+fast",
+        frozenset(),
     )
 
 
-def _cli() -> ModelCapability:
-    return ModelCapability(
-        fast=False,
-        prompt_cache_breakpoints=False,
-        retries_internally=False,
-        supported_thinking_efforts=MappingProxyType({}),
-        supported_thinking_outputs=frozenset({"text"}),
-    )
-
-
-def test_every_field_is_default_constructible() -> None:
-    assert ModelCapability().model_id == ""
-    assert ModelSpec().context_limits == ModelLimits()
-
-
-def test_bare_capability_restricts_nothing() -> None:
-    assert (_opus() & ModelCapability()) == _opus()
-
-
-def test_meet_only_removes() -> None:
-    met = _opus() & _cli()
-    assert dict(met.supported_thinking_efforts) == {}
-    assert met.prompt_cache_breakpoints is False
-    assert met.retries_internally is False
-    assert met.serves_fast is False
-    assert met.supported_thinking_outputs == frozenset({"text"})
-
-
-def test_meet_cannot_grant() -> None:
-    restricted = ModelCapability(model_id="m", prompt_cache_breakpoints=False)
-    assert (restricted & ModelCapability()).prompt_cache_breakpoints is False
-
-
-def test_meet_drops_fast_price_rows() -> None:
-    met = _opus() & _cli()
-    assert not any(k.fast for k in met.prices)
-
-
-def test_narrow_selects_one_context() -> None:
-    spec = ModelSpec.narrow(_opus(), context="+1m", fast=True)
-    assert spec.context_limits == ModelLimits(
-        max_request_tokens=1_000_000,
-        max_image_bytes=5_000_000,
-    )
-
-
-def test_narrow_of_single_context_capability() -> None:
-    cap = ModelCapability(
-        model_id="haiku", context_limits=ModelLimits(max_request_tokens=7)
-    )
-    assert ModelSpec.narrow(cap).context_limits.max_request_tokens == 7
-
-
-def test_narrow_rejects_an_unknown_context() -> None:
-    with pytest.raises(KeyError):
-        ModelSpec.narrow(_opus(), context="+2m")
-
-
-def test_wire_id_excludes_tags_and_display_id_includes_them() -> None:
-    spec = ModelSpec.narrow(_opus(), context="+1m", fast=True)
-    assert spec.model_id == "claude-opus-4-8"
-    assert spec.tagged_model_id == "claude-opus-4-8+1m+fast"
-
-
-def test_narrow_carries_every_capability_field() -> None:
-    spec = ModelSpec.narrow(_opus() & _cli())
-    assert spec.prompt_cache_breakpoints is False
-    assert dict(spec.supported_thinking_efforts) == {}
-
-
-def test_spend_uses_the_tier_the_request_falls_into() -> None:
-    spec = ModelSpec.narrow(
-        ModelCapability(
-            prices=PriceCatalog(
-                {
-                    PriceCatalogProduct(False, 0): TokenPrice(request=2.0),
-                    PriceCatalogProduct(False, 200_000): TokenPrice(request=4.0),
-                }
-            )
-        )
-    )
-    assert spec.spend(TokenCount(request=1_000_000)).request == 4.0
-    assert spec.spend(TokenCount(request=100_000)).request == 0.2
-
-
-def test_serves_fast_requires_both_a_row_and_transport_support() -> None:
-    assert _opus().serves_fast is True
-    assert (_opus() & _cli()).serves_fast is False
-
-
-def test_spend_honors_the_server_reported_speed() -> None:
-    """A request that asked for fast but fell back bills at standard."""
-    cap = ModelCapability(
-        prices=PriceCatalog(
-            {
-                PriceCatalogProduct(): TokenPrice(request=5.0),
-                PriceCatalogProduct(fast=True): TokenPrice(request=10.0),
-            }
-        )
-    )
-    spec = ModelSpec.narrow(cap, fast=True)
-    tokens = TokenCount(request=1_000_000)
-    assert spec.spend(tokens).request == 10.0
-    assert spec.spend(tokens, served_fast=False).request == 5.0
-
-
-def test_chars_per_token_survives_meet_and_narrow() -> None:
-    cap = ModelCapability(chars_per_token=2.83) & _cli()
-    assert ModelSpec.narrow(cap).chars_per_token == 2.83
-
-
-def _spec(*, budgets: frozenset[str], outputs: frozenset[str]) -> ModelSpec:
-    return ModelSpec(
-        supported_thinking_budgets=cast(frozenset[ThinkingBudget], budgets),
-        supported_thinking_outputs=cast(frozenset[ThinkingOutput], outputs),
-    )
+# ---- catalog facts ---------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("budgets", "outputs", "expected"),
-    [
-        # No thinking (OpenAI-chat, SelfHosted, LlamaCpp): off only.
-        (frozenset[str](), frozenset[str](), ("off-hide",)),
-        # Readable, no redaction (Google, DashScope): all but redact.
-        (
-            frozenset({"auto", "fixed"}),
-            frozenset({"text"}),
-            ("adaptive-show", "adaptive-hide", "on-show", "on-hide", "off-hide"),
-        ),
-        # Readable + redaction (plain Anthropic 4-6): all six.
-        (
-            frozenset({"auto", "fixed"}),
-            frozenset({"text", "redacted"}),
-            (
-                "adaptive-show",
-                "adaptive-hide",
-                "on-show",
-                "on-hide",
-                "off-hide",
-                "redact-hide",
-            ),
-        ),
-        # Signed-but-empty blocks: every ``-show`` drops out.
-        (
-            frozenset({"auto", "fixed"}),
-            frozenset({"redacted"}),
-            ("adaptive-hide", "on-hide", "off-hide", "redact-hide"),
-        ),
-        # Adaptive-only (rejects ``enabled``): the ``on-*`` states drop out.
-        (
-            frozenset({"auto"}),
-            frozenset({"text", "redacted"}),
-            ("adaptive-show", "adaptive-hide", "off-hide", "redact-hide"),
-        ),
-        # opus-4-8: adaptive-only AND no readable text.
-        (
-            frozenset({"auto"}),
-            frozenset({"redacted"}),
-            ("adaptive-hide", "off-hide", "redact-hide"),
-        ),
-        # 4-5 generation: enabled-only, readable, no redaction.
-        (
-            frozenset({"fixed"}),
-            frozenset({"text"}),
-            ("on-show", "on-hide", "off-hide"),
-        ),
-    ],
-)
-def test_valid_thinking_states_derive_from_the_three_axes(
-    budgets: frozenset[str],
-    outputs: frozenset[str],
-    expected: tuple[str, ...],
-) -> None:
-    assert _spec(budgets=budgets, outputs=outputs).valid_thinking_states == expected
-
-
-def test_valid_thinking_states_always_includes_off() -> None:
-    """``off-hide`` is reachable on every model."""
-    cases = cast(
-        tuple[tuple[frozenset[str], frozenset[str]], ...],
-        (
-            (frozenset(), frozenset()),
-            (frozenset({"auto", "fixed"}), frozenset({"text"})),
-            (frozenset({"auto"}), frozenset({"redacted"})),
-            (frozenset({"fixed"}), frozenset({"text", "redacted"})),
-        ),
-    )
-    for budgets, outputs in cases:
-        spec = _spec(budgets=budgets, outputs=outputs)
-        assert "off-hide" in spec.valid_thinking_states
-
-
-if __name__ == "__main__":
-    from sagent.lib.testing.main import test_main
-
-    test_main(__file__)
-
-
-def test_resolve_rejects_fast_the_transport_removed() -> None:
-    """The fast check must run AFTER the transport meet, not before.
-
-    A row with fast rows plus a transport that strips fast (the
-    ``AnthropicCLI`` shape) otherwise yields ``serve_fast=True`` on a
-    spec whose fast price row is gone: sagent believes it is serving
-    fast, sends no fast flag, and bills standard.
-    """
-    models = {
-        "m": ModelCapability(
-            model_id="m",
-            prices=PriceCatalog(
-                {
-                    PriceCatalogProduct(): TokenPrice(request=2.0),
-                    PriceCatalogProduct(fast=True): TokenPrice(request=9.0),
-                }
-            ),
-        )
-    }
-    with pytest.raises(UnsupportedTagError, match="does not support fast"):
-        _ = resolve(
-            "m+fast",
-            models=models,
-            roles={},
-            transport=ModelCapability(fast=False),
-        )
-
-
-def test_narrow_is_idempotent_on_an_already_narrowed_spec() -> None:
-    """Re-narrowing must not silently drop ``context`` / ``serve_fast``.
-
-    ``ModelSpec`` IS a ``ModelCapability``, so it type-checks as input to
-    ``narrow``; dropping the tags there yields a spec that claims the
-    default context while carrying the ``+1m`` limits.
-    """
-    cap = ModelCapability(
-        model_id="m",
-        context_limits=MappingProxyType(
-            {
-                "": ModelLimits(max_request_tokens=1),
-                "+1m": ModelLimits(max_request_tokens=2),
-            }
-        ),
-    )
-    once = ModelSpec.narrow(cap, context="+1m", fast=True)
-    twice = ModelSpec.narrow(once, context="+1m", fast=True)
-    assert twice.context == "+1m"
-    assert twice.serve_fast is True
-    assert twice.tagged_model_id == once.tagged_model_id
-
-
-def test_meet_preserves_the_narrowed_type() -> None:
-    """``ModelSpec & cap`` must stay a ``ModelSpec``.
-
-    Returning the base class silently discards ``context`` and
-    ``serve_fast``, so a later ``tagged_model_id`` read loses the tags.
-    """
-    cap = ModelCapability(
-        model_id="m",
-        context_limits=MappingProxyType({"": ModelLimits(), "+1m": ModelLimits()}),
-    )
-    spec = ModelSpec.narrow(cap, context="+1m", fast=True)
-    met = spec & ModelCapability()
-    assert isinstance(met, ModelSpec)
-    assert met.tagged_model_id == "m+1m+fast"
-
-
-@pytest.mark.parametrize(
-    ("model_id", "serves_fast"),
+    ("model_id", "priority"),
     [
         ("claude-opus-5", True),
         ("claude-opus-4-8", True),
@@ -611,56 +293,33 @@ def test_meet_preserves_the_narrowed_type() -> None:
         ("claude-opus-4-6", False),
     ],
 )
-def test_only_documented_models_carry_a_fast_tier(
-    model_id: str, serves_fast: bool
+def test_only_documented_models_offer_the_priority_tier(
+    model_id: str, priority: bool
 ) -> None:
     """Fast mode is Opus 5 and Opus 4.8 only.
 
     https://code.claude.com/docs/en/fast-mode
     """
-    assert anthropic_catalog.MODELS[model_id].serves_fast is serves_fast
+    row = anthropic_catalog.models()[model_id]
+    assert ("priority" in row.service_tier) is priority
 
 
-def test_resolve_accepts_tags_in_any_order() -> None:
-    """``split_model_id`` documents tags "in any order"; resolve must agree.
-
-    A hand-rolled parser that stripped ``+fast`` only as a trailing
-    suffix made ``+fast+1m`` read as context ``+fast+1m`` and raise,
-    while ``+1m+fast`` resolved.
-    """
-    models = {
-        "m": ModelCapability(
-            model_id="m",
-            context_limits=MappingProxyType(
-                {
-                    "": ModelLimits(max_request_tokens=1),
-                    "+1m": ModelLimits(max_request_tokens=2),
-                }
-            ),
-            prices=PriceCatalog(
-                {
-                    PriceCatalogProduct(): TokenPrice(),
-                    PriceCatalogProduct(fast=True): TokenPrice(),
-                }
-            ),
-        )
-    }
-    first = resolve("m+1m+fast", models=models, roles={})
-    second = resolve("m+fast+1m", models=models, roles={})
-    assert first.context == second.context == "+1m"
-    assert first.serve_fast is second.serve_fast is True
-    assert first.tagged_model_id == second.tagged_model_id
+@pytest.mark.parametrize(
+    ("model_id", "divisor"),
+    [
+        ("claude-opus-5", 2.38),
+        ("claude-opus-4-8", 2.38),
+        ("claude-opus-4-6", 3.12),
+        ("claude-haiku-4-5", 3.12),
+    ],
+)
+def test_chars_per_token_is_provider_internal(model_id: str, divisor: float) -> None:
+    """A divisor is not a capability: nothing SELECTS one."""
+    assert anthropic_catalog.chars_per_token(model_id) == divisor
+    assert "chars_per_token" not in ModelCapability.__dataclass_fields__
 
 
-def test_from_model_uses_the_measured_chars_per_token() -> None:
-    """The budget must plan against the model's real tokenizer density.
+if __name__ == "__main__":
+    from sagent.lib.testing.main import test_main
 
-    The two re-attach caps are the only fields still denominated in
-    characters, so they must plan against the model's real tokenizer
-    density -- hardcoding 4 against a measured 2.38 makes them ~68% too
-    generous against the token window they exist to protect.
-    """
-    model = anthropic.Anthropic.from_key("k").model("claude-opus-5")
-    assert model.spec.chars_per_token == 2.38
-    budget = ContextBudget.from_model(model)
-    assert budget.chars_per_token == 2
+    test_main(__file__)

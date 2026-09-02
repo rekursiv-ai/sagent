@@ -39,6 +39,7 @@ from sagent.tools.agent_spawn import (
     _pick_field,
 )
 from sagent.tools.background_task import BackgroundTask
+from sagent.types.capability import ThinkingEffort
 from sagent.types.model import (
     ModelRecipe,
     ModelRequest,
@@ -609,21 +610,21 @@ def test_resolve_system_no_parent() -> None:
 
 def test_inherit_factory_wins() -> None:
     parent = _make_parent()
-    parent.thinking = "adaptive"
-    t = AgentSpawn(thinking="off")
-    assert t._inherit("thinking", parent) == "off"
+    parent.max_attempts = 7
+    t = AgentSpawn(max_attempts=3)
+    assert t._inherit("max_attempts", parent) == 3
 
 
 def test_inherit_falls_through_to_parent() -> None:
     parent = _make_parent()
-    parent.thinking = "adaptive"
+    parent.max_attempts = 7
     t = AgentSpawn()
-    assert t._inherit("thinking", parent) == "adaptive"
+    assert t._inherit("max_attempts", parent) == 7
 
 
 def test_inherit_no_parent() -> None:
     t = AgentSpawn()
-    assert t._inherit("thinking", None) is None
+    assert t._inherit("max_attempts", None) is None
 
 
 def test_resolve_model_rebuilds_fresh_transport_when_spec_matches() -> None:
@@ -723,38 +724,15 @@ def test_resolve_model_no_spec_falls_back_to_parent_model() -> None:
 
 
 @dataclass(slots=True, kw_only=True)
-class _FastModel(StubProviderModel):
-    """Stub model advertising a fast latency path."""
-
-    latency_modes: tuple[str, ...] = ("fast",)
-
-
-@dataclass(slots=True, kw_only=True)
 class _ThinkingEffortModel(StubProviderModel):
     """Stub model advertising thinking and graded effort."""
 
     supports_thinking: bool = True
-    supports_effort: bool = True
-    valid_efforts: tuple[str, ...] = ("low", "high")
-
-
-def test_build_child_latency_derives_from_fast_model_tag() -> None:
-    """A ``+fast`` model-id tag on the child model sets its latency."""
-    parent = _make_parent()
-    child = AgentSpawn()._build_child(
-        system=None,
-        child_model=_FastModel(model_id="stub-1+fast"),
-        child_spec=None,
-        child_tools=[],
-        max_rounds=None,
-        model_options={},
-        parent_agent=parent,
-    )
-    assert child.latency == "fast"
+    valid_efforts: tuple[ThinkingEffort, ...] = ("low", "high")
 
 
 def test_build_child_applies_thinking_and_effort_from_model_options() -> None:
-    """``thinking``/``effort`` options feed the child constructor."""
+    """``thinking``/``effort`` options land on the child model's settings."""
     parent = _make_parent()
     child = AgentSpawn()._build_child(
         system=None,
@@ -765,20 +743,52 @@ def test_build_child_applies_thinking_and_effort_from_model_options() -> None:
         model_options={"thinking": True, "effort": "high"},
         parent_agent=parent,
     )
-    assert child.thinking == "adaptive"
-    assert child.effort == "high"
+    assert child.model.settings.thinking_budget == "auto"
+    assert child.model.settings.thinking_effort == "high"
+
+
+def test_build_child_inherits_the_parents_selection() -> None:
+    """A spawn keeps what the parent chose, so the child runs the same way."""
+    parent = _make_parent(_ThinkingEffortModel())
+    parent.model.settings.thinking_effort = "high"
+    child = AgentSpawn()._build_child(
+        system=None,
+        child_model=_ThinkingEffortModel(),
+        child_spec=None,
+        child_tools=[],
+        max_rounds=None,
+        model_options={},
+        parent_agent=parent,
+    )
+    assert child.model.settings.thinking_effort == "high"
+
+
+def test_build_child_drops_an_inherited_knob_the_child_model_rejects() -> None:
+    """A spawn onto a narrower model must not fail on the parent's choice."""
+    parent = _make_parent(_ThinkingEffortModel())
+    parent.model.settings.thinking_effort = "high"
+    child = AgentSpawn()._build_child(
+        system=None,
+        child_model=StubProviderModel(),  # offers only the ``none`` effort
+        child_spec=None,
+        child_tools=[],
+        max_rounds=None,
+        model_options={},
+        parent_agent=parent,
+    )
+    assert child.model.settings.thinking_effort == "none"
 
 
 @pytest.mark.asyncio
-async def test_run_redirects_latency_option_to_fast_model_tag() -> None:
-    """``model_options.latency`` is gone; the error points at ``+fast``."""
+async def test_run_redirects_latency_option_to_service_tier() -> None:
+    """``model_options.latency`` is gone; the error names its replacement."""
     parent = _make_parent()
     with _parent_context(parent):
         result = await AgentSpawn().run(
             {"prompt": "p", "model_options": {"latency": "fast"}}
         )
     assert result.is_error
-    assert "+fast" in result.content
+    assert "service_tier" in result.content
 
 
 def test_resolve_model_provider_change_without_auth_uses_target_default() -> None:

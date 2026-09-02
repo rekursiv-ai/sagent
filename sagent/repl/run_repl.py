@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 import asyncio
 import dataclasses
@@ -39,7 +39,6 @@ from sagent.agent.state import agent_registry
 from sagent.lib.userdirs import state_dir
 from sagent.providers import (
     infer_provider,
-    supported_provider_options,
 )
 from sagent.repl.console_pane import ConsolePrinter
 from sagent.repl.input_pane import (
@@ -53,8 +52,14 @@ from sagent.repl.keybindings import NavState, build_key_bindings
 from sagent.repl.render import make_render_observer
 from sagent.repl.replay import replay_messages
 from sagent.repl.status_pane import render_status_pane
-from sagent.thinking import ThinkingState, resolve_thinking_command
+from sagent.thinking import (
+    THINKING_COMMANDS,
+    apply_thinking_command,
+    describe_thinking,
+    thinking_offered,
+)
 from sagent.tools.display import ToolDisplay, row_spec
+from sagent.types.capability import ThinkingEffort
 from sagent.types.exceptions import log_exception_or_warning
 from sagent.types.runtime import (
     AgentIdle,
@@ -75,6 +80,7 @@ async def run_repl(
     agent: Agent,
     *,
     history: Path | None = None,
+    show_thinking: bool = True,
 ) -> None:
     """Drive ``agent`` interactively until the user types ``/quit``.
 
@@ -82,6 +88,9 @@ async def run_repl(
       agent: The agent to drive.
       history: Path to the input-history file. ``None`` -> the per-user
         state directory.
+      show_thinking: Whether reasoning renders locally. Handed to the
+        printer, which owns it: it decides what reaches this terminal,
+        while ``settings.thinking_output`` decides what the model sends.
 
     """
     history_path = history or state_dir() / "rekursiv-ai" / "sagent" / "repl-history"
@@ -113,10 +122,9 @@ async def run_repl(
             enable_open_in_editor=False,
             style=style,
         )
-        printer = ConsolePrinter(console)
+        printer = ConsolePrinter(console, show_thinking=show_thinking)
         render_observer = make_render_observer(
             printer,
-            show_thinking=lambda: agent.show_thinking,
             output_policy=lambda call_id: _tool_output_policy(agent, call_id),
         )
         # Everything that mutates the runtime lives inside the ``try``: the
@@ -363,7 +371,7 @@ def do_switch_model(
         inferred = infer_provider(parsed.model_id, spec.provider)
         if inferred is not None:
             prov_override, auth_override = inferred
-    old_id = agent.model.spec.tagged_model_id
+    old_id = agent.model.tagged_model_id
     try:
         target = agent.change_model(
             provider=prov_override,
@@ -383,118 +391,78 @@ def do_switch_model(
 
 
 def do_switch_thinking(agent: Agent, command: str, printer: Printer | None) -> None:
-    """Render a ``/thinking`` slash command against agent/provider state.
+    """Render a ``/thinking`` slash command against the model's settings.
+
+    ``show`` / ``hide`` land on ``printer.show_thinking`` -- they change
+    what reaches THIS screen and nothing on the wire; the budget and output
+    words land on the model's settings, which validate them.
 
     Args:
-      agent: Agent to mutate.
-      command: Full thinking state or partial command.
-      printer: Optional sink for status messages.
+      agent: Agent whose model carries the settings.
+      command: One word from ``THINKING_COMMANDS``, or ``""`` for status.
+      printer: Optional sink for status messages; also owns the display
+          flag. ``None`` (headless) has no screen, so nothing to toggle.
 
     """
-    current = agent.thinking_state or _infer_thinking_state(agent)
+    settings = agent.model.settings
+    shown = printer.show_thinking if printer is not None else False
     if not command:
-        valid = ", ".join(agent.model.spec.valid_thinking_states)
+        valid = ", ".join(_reachable_thinking_words(agent))
+        current = describe_thinking(settings, show=shown)
         _write(printer, f"[/thinking] {current}\n[/thinking] options: {valid}")
         return
     try:
-        state = resolve_thinking_command(command, current)
+        shown = apply_thinking_command(command, settings, show=shown)
     except ValueError as exc:
-        _write(printer, f"[/thinking] {exc}")
+        options = ", ".join(_reachable_thinking_words(agent))
+        _write(printer, f"[/thinking] {exc}; options: {options}")
         return
-    valid = agent.model.spec.valid_thinking_states
-    if state not in valid:
-        options = ", ".join(valid)
-        _write(
-            printer,
-            f"[/thinking] {state} not supported by {agent.model.spec.tagged_model_id!r};"
-            f" options: {options}",
-        )
-        return
-    if agent.thinking_state == state:
-        _write(printer, f"[/thinking] {state}")
-        return
-    # Snapshot the thinking fields so the ``_rebuild_current_model``
-    # failure branch can roll back transactionally.
-    # ``set_thinking_state`` is a pure attribute mutation, so capturing
-    # the pre-state once is sufficient.
-    old_state = agent.thinking_state
-    old_thinking = agent.thinking
-    old_show = agent.show_thinking
-    agent.set_thinking_state(state)
-    # Only a redact-supporting provider needs a rebuild (redaction is a
-    # provider-construction knob derived from the thinking state); on
-    # other providers the state change is purely local.
-    if _provider_supports_redact(agent) and not _rebuild_current_model(agent, printer):
-        agent.restore_thinking_state(old_state, old_thinking, old_show)
-        return
-    _write(printer, f"[/thinking] {state}")
+    if printer is not None:
+        printer.show_thinking = shown
+    _write(printer, f"[/thinking] {describe_thinking(settings, show=shown)}")
 
 
 def do_switch_effort(agent: Agent, value: str, printer: Printer | None) -> None:
-    """Render an ``/effort`` slash command against agent/model state.
+    """Render an ``/effort`` slash command against the model's settings.
 
     Bare ``/effort`` (empty ``value``) prints the current effort plus the
-    model's valid options. A non-empty value sets the effort; ``off`` /
-    ``unset`` clears it. ``none`` is NOT a clear alias -- some providers
-    (OpenAI, self-hosted) accept a literal ``none`` effort, so clearing
-    uses unambiguous words only. Invalid values error with the option
+    model's valid options. ``off`` / ``unset`` are aliases for ``none``,
+    the axis's own unset value. Invalid values error with the option
     list -- a rejected request, never a silent no-op.
 
     Args:
-      agent: Agent to mutate.
+      agent: Agent whose model carries the settings.
       value: Effort value, ``""`` for status, or a clear alias.
       printer: Optional sink for status messages.
 
     """
-    valid = agent.model.spec.supported_thinking_efforts
+    settings = agent.model.settings
+    options = ", ".join(sorted(agent.model.capability.thinking_effort))
     if not value:
-        current = agent.effort or "unset"
-        options = ", ".join(valid) or "(none)"
-        _write(printer, f"[/effort] {current}\n[/effort] options: {options}")
+        _write(
+            printer,
+            f"[/effort] {settings.thinking_effort}\n[/effort] options: {options}",
+        )
         return
-    target = None if value in ("off", "unset") else value
     try:
-        agent.effort = target
-    except ValueError as exc:
-        _write(printer, f"[/effort] {exc}")
+        settings.thinking_effort = cast(
+            ThinkingEffort, "none" if value in ("off", "unset") else value
+        )
+    except ValueError:
+        _write(printer, f"[/effort] {value!r} is not one of: {options}")
         return
-    _write(printer, f"[/effort] {agent.effort or 'unset'}")
+    _write(printer, f"[/effort] {settings.thinking_effort}")
 
 
-def _infer_thinking_state(agent: Agent) -> ThinkingState:
-    """Infer a canonical current state from legacy thinking/display fields."""
-    if agent.thinking is None:
-        return "off-hide"
-    if agent.thinking == "enabled":
-        return "on-show" if agent.show_thinking else "on-hide"
-    return "adaptive-show" if agent.show_thinking else "adaptive-hide"
+def _reachable_thinking_words(agent: Agent) -> tuple[str, ...]:
+    """The ``/thinking`` words this model can actually honor.
 
-
-def _provider_supports_redact(agent: Agent) -> bool:
-    """Return whether the current provider takes the redact-thinking option."""
-    spec = agent.model_recipe
-    if spec is None:
-        return False
-    try:
-        return "redact_thinking" in supported_provider_options(spec.provider)
-    except AttributeError:
-        return False
-
-
-def _rebuild_current_model(agent: Agent, printer: Printer | None) -> bool:
-    """Queue a rebuild of the current provider/model with stored provider args."""
-    spec = agent.model_recipe
-    if spec is None:
-        _write(printer, "[/thinking] agent has no model spec; cannot rebuild model")
-        return False
-    try:
-        target = agent.change_model()
-    except (ValueError, RuntimeError) as exc:
-        _write(printer, f"[/thinking] {exc}")
-        return False
-    queued = " (queued)" if agent.work is not None else ""
-    _write(printer, f"[/thinking] provider args updated for {target.model_id}{queued}")
-    return True
+    Each word is checked by applying it, because a word names one axis and
+    inherits the rest -- ``redact`` is reachable only when the model can
+    both budget the reasoning and withhold its body.
+    """
+    settings = agent.model.settings
+    return tuple(word for word in THINKING_COMMANDS if thinking_offered(word, settings))
 
 
 async def do_login(agent: Agent, printer: Printer | None) -> None:

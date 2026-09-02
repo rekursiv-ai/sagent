@@ -31,7 +31,6 @@ from sagent.providers.providers import (
     build_provider,
     default_auth_for_provider,
     infer_provider,
-    supported_provider_options,
 )
 from sagent.providers.selfhosted.server import (
     SelfHosted,
@@ -77,5 +76,4 @@ __all__ = [
     "build_provider",
     "default_auth_for_provider",
     "infer_provider",
-    "supported_provider_options",
 ]

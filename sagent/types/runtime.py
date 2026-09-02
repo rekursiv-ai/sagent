@@ -50,16 +50,6 @@ exactly the collision this lock exists to prevent.
 """
 
 
-def _next_message_id() -> int:
-    """Mint the next ``SessionMessage.id`` under the counter lock."""
-    with _id_counter_lock:
-        return next(_id_counter)
-
-
-def _empty_headers() -> dict[str, str]:
-    return {}
-
-
 __all__ = [
     "CANCELLED_PLACEHOLDER",
     "DETACHED_ARRIVAL_SUFFIX",
@@ -123,6 +113,16 @@ __all__ = [
     "reset_id_counter",
     "wire_role",
 ]
+
+
+def _next_message_id() -> int:
+    """Mint the next ``SessionMessage.id`` under the counter lock."""
+    with _id_counter_lock:
+        return next(_id_counter)
+
+
+def _empty_headers() -> dict[str, str]:
+    return {}
 
 
 def reset_id_counter(start: int) -> None:
@@ -574,7 +574,7 @@ class ModelSwitchRejected:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class BudgetReset:
-    """Agent ``ContextBudget`` was reset to fit the new model."""
+    """Agent ``AgentSettings`` was reset to fit the new model."""
 
     model_id: str
     """Provider-specific model id the budget was sized for."""

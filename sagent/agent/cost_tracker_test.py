@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 
 from sagent.agent.cost_tracker import CostTracker
-from sagent.types.cost import TokenCost
-from sagent.types.model import ModelResponse, TokenCount
+from sagent.types.cost import TokenCost, TokenCount
+from sagent.types.model import ModelResponse
 from sagent.types.runtime import AssistantMessage
 
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
 import asyncio
@@ -18,7 +18,7 @@ from sagent.agent.compaction import (
 from sagent.agent.state import ToolState
 from sagent.compaction.history import append_to_first_user
 from sagent.lib.custom_json import JSON
-from sagent.types.model import ContextBudget
+from sagent.types.compactor import ReattachPolicy
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
@@ -58,14 +58,12 @@ class _StubTool:
         return ToolResult(call_id="", content="")
 
 
-def _budget() -> ContextBudget:
-    return ContextBudget(
-        max_request_tokens=100_000,
-        max_response_tokens=4_096,
-        reattach_count=2,
-        reattach_max_chars=100,
-        reattach_budget=1_000,
-    )
+def _reattach() -> ReattachPolicy:
+    return ReattachPolicy(count=2, max_tokens=100, budget_tokens=1_000)
+
+
+def _estimate(text: str) -> int:
+    return len(text) // 4
 
 
 async def _noop_coro() -> None:
@@ -188,24 +186,26 @@ async def test_post_compact_enrich_runs_restorable_tool_hook() -> None:
             history: list[ModelContextEvent],
             tool_state: ToolState,
             *,
-            budget_chars: int = 100_000,
+            budget_tokens: int,
+            estimate_tokens: Callable[[str], int],
         ) -> None:
-            del history, tool_state
-            calls.append(budget_chars)
+            del history, tool_state, estimate_tokens
+            calls.append(budget_tokens)
 
     history: list[ModelContextEvent] = [UserMessage(text="x")]
     tools_map: Mapping[str, Tool] = {"R": Restorable()}
     await post_compact_enrich(
         history=history,
         tool_state=ToolState(),
-        budget=_budget(),
+        reattach=_reattach(),
+        estimate_text_tokens=_estimate,
         tools=tools_map,
         background_tasks={},
         estimate_tokens=100,
         headroom=10,
     )
-    # available = max(0, 100 - 10) = 90; chars_per_token = 4 → 360.
-    assert calls == [360]
+    # The hook budget is tokens now, not chars: 100 available less 10 reserved.
+    assert calls == [90]
 
 
 @pytest.mark.asyncio
@@ -224,9 +224,10 @@ async def test_post_compact_enrich_swallows_restorable_failures(
             history: list[ModelContextEvent],
             tool_state: ToolState,
             *,
-            budget_chars: int = 100_000,
+            budget_tokens: int,
+            estimate_tokens: Callable[[str], int],
         ) -> None:
-            del history, tool_state, budget_chars
+            del history, tool_state, budget_tokens, estimate_tokens
             calls.append("B")
             raise RuntimeError("nope")
 
@@ -241,9 +242,10 @@ async def test_post_compact_enrich_swallows_restorable_failures(
             history: list[ModelContextEvent],
             tool_state: ToolState,
             *,
-            budget_chars: int = 100_000,
+            budget_tokens: int,
+            estimate_tokens: Callable[[str], int],
         ) -> None:
-            del history, tool_state, budget_chars
+            del history, tool_state, budget_tokens, estimate_tokens
             calls.append("C")
 
     history: list[ModelContextEvent] = [UserMessage(text="x")]
@@ -252,7 +254,8 @@ async def test_post_compact_enrich_swallows_restorable_failures(
         await post_compact_enrich(
             history=history,
             tool_state=ToolState(),
-            budget=_budget(),
+            reattach=_reattach(),
+            estimate_text_tokens=_estimate,
             tools=tools_map,
             background_tasks={},
             estimate_tokens=0,
@@ -277,7 +280,8 @@ async def test_post_compact_enrich_injects_background_status() -> None:
     await post_compact_enrich(
         history=history,
         tool_state=ToolState(),
-        budget=_budget(),
+        reattach=_reattach(),
+        estimate_text_tokens=_estimate,
         tools=tools_map,
         background_tasks=bg,
         estimate_tokens=0,

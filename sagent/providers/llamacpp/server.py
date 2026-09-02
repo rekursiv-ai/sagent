@@ -23,7 +23,7 @@ from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
 )
-from sagent.types.model import ModelCapability
+from sagent.types.capability import ModelCapability
 
 
 class LlamaCpp(OpenAICompat):
@@ -33,7 +33,7 @@ class LlamaCpp(OpenAICompat):
     DEFAULT_UTILITY_MODEL: ClassVar[str] = "qwen3.6-27b-12gb"
     ENV_VAR: ClassVar[str] = "LLAMA_CPP_API_KEY"
     BASE_URL: ClassVar[str] = "http://127.0.0.1:8081/v1"
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = llamacpp_catalog.MODELS
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = llamacpp_catalog.models()
     """Per-model capability; transport limits live on ``TRANSPORT``."""
 
     def __init__(

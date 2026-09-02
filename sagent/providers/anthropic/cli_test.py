@@ -482,14 +482,14 @@ def test_model_resolves_context_tag_to_profile() -> None:
     """``claude-sonnet-4-5+1m`` finds the same profile as ``claude-sonnet-4-5``."""
     provider = AnthropicCLI()
     model = provider.model("claude-sonnet-4-5+1m")
-    assert model.model_id == "claude-sonnet-4-5+1m"
+    assert model.tagged_model_id == "claude-sonnet-4-5+1m"
     assert model.max_request_tokens == 1_000_000
 
 
-def test_model_rejects_fast_tag() -> None:
-    """The CLI wrapper has no fast path; a ``+fast`` id fails fast."""
+def test_model_rejects_an_unknown_tag() -> None:
+    """``+fast`` is not a context tag, so it stays part of the base id."""
     provider = AnthropicCLI()
-    with pytest.raises(ValueError, match="unsupported via the CLI"):
+    with pytest.raises(ValueError, match="Unknown model"):
         _ = provider.model("claude-opus-4-8+fast")
 
 
@@ -512,20 +512,18 @@ def test_utility_model_picks_haiku() -> None:
     """``utility_model`` returns the cheapest Claude in ``KNOWN_MODELS``."""
     provider = AnthropicCLI()
     model = provider.utility_model()
-    assert model.model_id == "claude-haiku-4-5"
+    assert model.capability.model_id == "claude-haiku-4-5"
 
 
 def test_model_capabilities() -> None:
-    """The wrapped backend declares the supported-flag surface from the spec."""
+    """The CLI transport narrows the row it inherits from the API."""
     provider = AnthropicCLI()
     model = provider.model("claude-sonnet-4-5")
-    assert model.supports_streaming is True
-    assert model.supports_thinking is True
-    assert model.supports_effort is False
-    assert model.supports_cache_control is False
-    assert model.supports_context_management is True
-    assert model.supports_persistent_retry is False
-    assert model.supports_account_auth is True
+    assert model.capability.thinking_budget != frozenset({"none"})
+    assert model.capability.thinking_effort == frozenset({"none"})
+    assert model.capability.cache_ttl_sec == 0.0
+    assert model.capability.manage_context_server_side == frozenset({True})
+    assert model.capability.retries_internally is False
 
 
 def test_is_context_overflow_text_markers() -> None:

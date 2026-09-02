@@ -26,6 +26,7 @@ from sagent.compaction.summary import (
 )
 from sagent.testing import MockModelCaps
 from sagent.types.model import (
+    AgentSettings,
     Model,
     ModelRequest,
     ModelResponse,
@@ -229,29 +230,80 @@ def test_summary_compactor_proactive_property() -> None:
     assert SummaryCompactor(proactive=False).proactive is False
 
 
-def test_should_compact_plain_window_at_full_utilization_no_compression() -> None:
-    # u=1, c=0: body >= (window - system). With system=0, fires at current>=window.
+def test_largest_context_reserves_response_and_buffer() -> None:
+    """The scalar deducts both fixed reservations from the budget's window."""
+    budget = AgentSettings(
+        max_request_tokens=1_000_000,
+        max_response_tokens=128_000,
+        buffer_tokens=66_666,
+    )
+    assert SummaryCompactor().largest_context(budget) == 805_334
+
+
+def test_largest_context_floors_at_zero_for_a_degenerate_budget() -> None:
+    """Reservations exceeding the window yield 0, never a negative limit."""
+    budget = AgentSettings(
+        max_request_tokens=1_000,
+        max_response_tokens=900,
+        buffer_tokens=500,
+    )
+    assert SummaryCompactor().largest_context(budget) == 0
+
+
+def test_overriding_the_strategy_moves_scalar_and_predicate_together() -> None:
+    """A subclass changing ``largest_context`` must change the gate with it.
+
+    The scalar and the predicate are one heuristic. While the scalar lived
+    on ``AgentSettings`` a custom compactor could override only the
+    predicate, leaving its own scrunch target sized by a policy it had
+    replaced -- the compactor would compact at one threshold and then fit
+    the payload to another.
+    """
+
+    class _HalfWindow(SummaryCompactor):
+        @override
+        def largest_context(self, settings: AgentSettings) -> int:
+            return super().largest_context(settings) // 2
+
+    budget = AgentSettings(
+        max_request_tokens=1_000_000,
+        max_response_tokens=128_000,
+        buffer_tokens=66_666,
+    )
+    strict = _HalfWindow()
+    base = SummaryCompactor()
+    assert strict.largest_context(budget) == base.largest_context(budget) // 2
+
+    # A context the base strategy accepts, the strict one must reject --
+    # via the SAME predicate, fed each strategy's own scalar.
+    used = 500_000
+    assert base.should_compact(used, base.largest_context(budget), 0) is False
+    assert strict.should_compact(used, strict.largest_context(budget), 0) is True
+
+
+def test_should_compact_plain_target_at_full_utilization_no_compression() -> None:
+    # u=1, c=0: body >= (target - system). With system=0, fires at current>=target.
     compactor = SummaryCompactor(utilization_trigger=1.0, compression=0.0)
     assert compactor.should_compact(200_000, 200_000, 0) is True
     assert compactor.should_compact(199_999, 200_000, 0) is False
 
 
 def test_should_compact_subtracts_system() -> None:
-    # u=1, c=0: body = current - system >= window - system.
-    # system=50k, window=200k: fires when current-50k >= 150k -> current >= 200k.
+    # u=1, c=0: body = current - system >= target - system.
+    # system=50k, target=200k: fires when current-50k >= 150k -> current >= 200k.
     compactor = SummaryCompactor(utilization_trigger=1.0, compression=0.0)
     assert compactor.should_compact(200_000, 200_000, 50_000) is True
     assert compactor.should_compact(199_999, 200_000, 50_000) is False
 
 
-def test_should_compact_utilization_trigger_reserves_usable_window() -> None:
+def test_should_compact_utilization_trigger_reserves_usable_target() -> None:
     # u=0.95, c=0, system=0: body >= 0.95 * 200_000 = 190_000.
     compactor = SummaryCompactor(utilization_trigger=0.95, compression=0.0)
     assert compactor.should_compact(190_000, 200_000, 0) is True
     assert compactor.should_compact(189_999, 200_000, 0) is False
 
 
-def test_should_compact_compression_reserves_response() -> None:
+def test_should_compact_compression_reserves_summary_landing_room() -> None:
     # u=1, c=0.25, system=0: body >= 200_000 / 1.25 = 160_000.
     compactor = SummaryCompactor(utilization_trigger=1.0, compression=0.25)
     assert compactor.should_compact(160_000, 200_000, 0) is True
@@ -259,24 +311,31 @@ def test_should_compact_compression_reserves_response() -> None:
 
 
 def test_should_compact_default_no_token_constant() -> None:
-    """Rule: ``body >= u*(W-S)/(1+c*u)``; every term proportional.
+    """Rule: ``body >= u*(T-S)/(1+c*u)``; every term proportional to the limit.
 
-    Defaults u=0.95, c=0.01. On a 1M window, system=0:
-    threshold = 0.95 * 1_000_000 / (1 + 0.01*0.95) = 950_000 / 1.0095
-    = 941_059.93 -> fires at body >= 941_059.93, i.e. current >= 941_060.
+    Defaults u=0.95, c=0.01, so the divisor is 1.0095. On an 800k
+    ``largest_context``, system=0: threshold = 800_000 * 0.95 / 1.0095 =
+    752_847.94 -> fires at body >= 752_847.94, i.e. current >= 752_848.
     """
     compactor = SummaryCompactor()
-    assert compactor.should_compact(941_060, 1_000_000, 0) is True
-    assert compactor.should_compact(941_059, 1_000_000, 0) is False
+    assert compactor.should_compact(752_848, 800_000, 0) is True
+    assert compactor.should_compact(752_847, 800_000, 0) is False
 
 
-def test_should_compact_buffer_adds_live_slack() -> None:
-    # u=1, c=0, system=0, buffer=10_000: body + 10_000 >= 200_000 -> body >= 190_000.
-    compactor = SummaryCompactor(
-        utilization_trigger=1.0, compression=0.0, buffer_tokens=10_000
-    )
-    assert compactor.should_compact(190_000, 200_000, 0) is True
-    assert compactor.should_compact(189_999, 200_000, 0) is False
+def test_should_compact_scales_with_no_absolute_term() -> None:
+    """Halving the limit halves the threshold: no token constant anywhere.
+
+    Both reservations this gate adds are proportional (``u`` slack and
+    ``c * body``), so the trigger is a pure multiple of the limit handed
+    in. A constant here would make the gate wrong at some window size --
+    which is the defect ``largest_context`` fixed on the response side.
+    """
+    compactor = SummaryCompactor()
+    assert compactor.should_compact(188_212, 200_000, 0) is True
+    assert compactor.should_compact(188_211, 200_000, 0) is False
+    # 200_000 * 0.95 / 1.0095 = 188_211.99, exactly a quarter of the
+    # 800k case above.
+    assert pytest.approx(4.0) == 752_847.94 / 188_211.99
 
 
 @pytest.mark.asyncio
@@ -990,8 +1049,8 @@ class _OverrideAware(MockModelCaps):
 
 def test_override_aware_constructs_cleanly() -> None:
     m = _OverrideAware()
-    assert m.spec.tagged_model_id == "ov"
-    assert m.spec.context_limits.max_request_tokens == 1_000
+    assert m.tagged_model_id == "ov"
+    assert m.limits.max_request_tokens == 1_000
 
 
 # --- verify_summary flag --------------------------------------------------

@@ -49,9 +49,9 @@ def test_price_has_no_total() -> None:
 def _catalog() -> PriceCatalog:
     return PriceCatalog(
         {
-            PriceCatalogProduct(False, 0): TokenPrice(request=2.0),
-            PriceCatalogProduct(False, 200_000): TokenPrice(request=4.0),
-            PriceCatalogProduct(True, 0): TokenPrice(request=6.0),
+            PriceCatalogProduct("auto", 0): TokenPrice(request=2.0),
+            PriceCatalogProduct("auto", 200_000): TokenPrice(request=4.0),
+            PriceCatalogProduct("priority", 0): TokenPrice(request=6.0),
         }
     )
 
@@ -65,17 +65,17 @@ def test_floor_lookup_picks_the_tier_at_or_below(
     expected: float,
 ) -> None:
     catalog = _catalog()
-    key = PriceCatalogProduct(False, request_tokens)
+    key = PriceCatalogProduct("auto", request_tokens)
     assert catalog[key].request == expected
 
 
-def test_fast_falls_back_to_standard_when_no_fast_tier() -> None:
-    catalog = PriceCatalog({PriceCatalogProduct(False, 0): TokenPrice(request=2.0)})
-    assert catalog[PriceCatalogProduct(True, 0)].request == 2.0
+def test_tier_falls_back_to_auto_when_not_priced_separately() -> None:
+    catalog = PriceCatalog({PriceCatalogProduct("auto", 0): TokenPrice(request=2.0)})
+    assert catalog[PriceCatalogProduct("priority", 0)].request == 2.0
 
 
-def test_fast_tier_wins_when_present() -> None:
-    assert _catalog()[PriceCatalogProduct(True, 5)].request == 6.0
+def test_priced_tier_wins_when_present() -> None:
+    assert _catalog()[PriceCatalogProduct("priority", 5)].request == 6.0
 
 
 def test_empty_catalog_raises_rather_than_billing_zero() -> None:
@@ -86,8 +86,8 @@ def test_empty_catalog_raises_rather_than_billing_zero() -> None:
 def test_contains_agrees_with_getitem() -> None:
     catalog = _catalog()
     for key in (
-        PriceCatalogProduct(False, 0),
-        PriceCatalogProduct(True, 10**9),
+        PriceCatalogProduct("auto", 0),
+        PriceCatalogProduct("priority", 10**9),
     ):
         assert key in catalog
         assert catalog[key] is not None
@@ -98,9 +98,9 @@ def test_len_and_iter_report_declared_tiers() -> None:
     catalog = _catalog()
     assert len(catalog) == 3
     assert sorted(catalog) == [
-        PriceCatalogProduct(False, 0),
-        PriceCatalogProduct(False, 200_000),
-        PriceCatalogProduct(True, 0),
+        PriceCatalogProduct("auto", 0),
+        PriceCatalogProduct("auto", 200_000),
+        PriceCatalogProduct("priority", 0),
     ]
 
 
@@ -112,9 +112,9 @@ def test_contains_agrees_with_getitem_above_the_lowest_tier() -> None:
     then raised on access.
     """
     catalog = PriceCatalog(
-        {PriceCatalogProduct(False, 272_000): TokenPrice(request=1.0)}
+        {PriceCatalogProduct("auto", 272_000): TokenPrice(request=1.0)}
     )
-    key = PriceCatalogProduct(False, 0)
+    key = PriceCatalogProduct("auto", 0)
     assert (key in catalog) is _resolves(catalog, key)
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import cast
 
 import logging
@@ -16,6 +17,7 @@ from sagent.providers.google.api import (
     _build_response,
     _strip_additional_properties,
 )
+from sagent.types.capability import ModelCapability, ModelSettings
 from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
@@ -23,7 +25,6 @@ from sagent.types.cost import (
 )
 from sagent.types.model import (
     ModelRequest,
-    ModelSpec,
     PromptTooLongError,
     RequestTooLargeError,
     StreamInterruptedError,
@@ -83,9 +84,26 @@ def _make_request(messages: list[ModelContextEvent], **kw: object) -> ModelReque
     return ModelRequest(messages=messages)
 
 
-def _wire(request: ModelRequest) -> MutableJSON:
+def _thinking_capability() -> ModelCapability:
+    """The catalog row every wire test builds against."""
+    return Google.from_key("k").model("gemini-2.5-pro").capability
+
+
+def _settings(**choices: object) -> ModelSettings:
+    """Settings bound to the thinking-capable row.
+
+    Bound rather than bare: every axis validates on assignment, so a
+    default-capability object cannot hold the thinking selections these
+    tests are about.
+    """
+    return ModelSettings(capability=_thinking_capability(), **choices)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- kwargs forwarded to the dataclass
+
+
+def _wire(request: ModelRequest, settings: ModelSettings | None = None) -> MutableJSON:
     """Build the wire body against a thinking-capable catalog row."""
-    return _build_request(request, Google.from_key("k").model("gemini-2.5-pro").spec)
+    capability = _thinking_capability()
+    chosen = settings or ModelSettings.narrowest(capability)
+    return _build_request(request, capability, chosen, chosen.limits)
 
 
 def test_build_request_user_message_text_part() -> None:
@@ -342,14 +360,16 @@ async def test_google_stream_max_tokens_finish_reason() -> None:
 
 def test_google_build_response_cache_tokens_split_input_cost() -> None:
     """``cache_read`` is subtracted from input before the request-rate charge."""
-    spec = ModelSpec(
+    model = Google.from_key("k").model("gemini-2.5-pro")
+    model._capability = replace(
+        model.capability,
         prices=PriceCatalog(
             {
                 PriceCatalogProduct(): TokenPrice(
                     request=1.0, response=2.0, cache_read=0.5
                 )
             }
-        )
+        ),
     )
     resp = _build_response(
         text="",
@@ -363,7 +383,7 @@ def test_google_build_response_cache_tokens_split_input_cost() -> None:
             },
         ),
         finish_reason="STOP",
-        spec=spec,
+        model=model,
     )
     assert resp.tokens.cache_read == 300
     # ``promptTokenCount`` is cache-inclusive; stored input drops the cached
@@ -402,7 +422,7 @@ def test_google_model_unknown_raises() -> None:
 def test_google_model_default_uses_default_model() -> None:
     p = Google.from_key("k")
     m = p.model()
-    assert m.model_id == Google.DEFAULT_MODEL
+    assert m.capability.model_id == Google.DEFAULT_MODEL
 
 
 def test_google_utility_model_uses_flash_lite() -> None:
@@ -413,22 +433,21 @@ def test_google_utility_model_uses_flash_lite() -> None:
     """
     p = Google.from_key("k")
     m = p.utility_model()
-    assert m.model_id == Google.DEFAULT_UTILITY_MODEL
+    assert m.capability.model_id == Google.DEFAULT_UTILITY_MODEL
 
 
 def test_google_model_properties() -> None:
     p = Google.from_key("k")
     m = p.model("gemini-2.5-pro")
     assert m.max_request_tokens == 1_000_000
-    assert m.supports_streaming is True
-    assert m.supports_thinking is True
-    assert m.supports_effort is True
-    assert m.supports_cache_control is False
+    assert m.capability.thinking_budget != frozenset({"none"})
+    assert m.capability.thinking_effort != frozenset({"none"})
+    assert m.capability.cache_ttl_sec == 0.0
     # Gemini publishes no per-image pixel or byte cap (images are tiled
     # server-side); the only documented limit is the 20 MB total request size.
-    assert m.max_image_dim == 0
-    assert m.max_image_bytes == 0
-    assert m.max_request_bytes == 20 * 1024 * 1024
+    assert m.limits.max_image_edge_px == 0
+    assert m.limits.max_image_bytes == 0
+    assert m.limits.max_request_bytes == 20 * 1024 * 1024
 
 
 def test_legacy_gemini_models_do_not_support_thinking() -> None:
@@ -439,14 +458,17 @@ def test_legacy_gemini_models_do_not_support_thinking() -> None:
     short-circuits before the request flies.
     """
     p = Google.from_key("k")
-    assert p.model("gemini-1.5-flash").supports_thinking is False
-    assert p.model("gemini-1.5-pro").supports_thinking is False
-    assert p.model("gemini-1.5-flash").supports_effort is False
-    assert p.model("gemini-1.5-pro").supports_effort is False
+    off = frozenset({"none"})
+    for mid in ("gemini-1.5-flash", "gemini-1.5-pro"):
+        assert p.model(mid).capability.thinking_budget == off
+        assert p.model(mid).capability.thinking_effort == off
 
 
 def test_build_request_adaptive_thinking_uses_dynamic_budget() -> None:
-    body = _wire(ModelRequest(messages=[UserMessage(text="x")], thinking="adaptive"))
+    body = _wire(
+        ModelRequest(messages=[UserMessage(text="x")]),
+        _settings(thinking_budget="auto", thinking_output="text"),
+    )
     gen_config = cast(MutableJSON, body["generationConfig"])
     assert gen_config["thinkingConfig"] == {
         "includeThoughts": True,
@@ -454,17 +476,27 @@ def test_build_request_adaptive_thinking_uses_dynamic_budget() -> None:
     }
 
 
-def test_build_request_enabled_thinking_uses_dynamic_budget() -> None:
-    body = _wire(ModelRequest(messages=[UserMessage(text="x")], thinking="enabled"))
+def test_build_request_fixed_thinking_uses_the_effort_budget() -> None:
+    body = _wire(
+        ModelRequest(messages=[UserMessage(text="x")]),
+        _settings(
+            thinking_budget="fixed", thinking_effort="max", thinking_output="text"
+        ),
+    )
     gen_config = cast(MutableJSON, body["generationConfig"])
     assert gen_config["thinkingConfig"] == {
         "includeThoughts": True,
-        "thinkingBudget": -1,
+        "thinkingBudget": 24_576,
     }
 
 
 def test_build_request_effort_min_sets_small_budget() -> None:
-    body = _wire(ModelRequest(messages=[UserMessage(text="x")], effort="min"))
+    body = _wire(
+        ModelRequest(messages=[UserMessage(text="x")]),
+        _settings(
+            thinking_budget="fixed", thinking_effort="min", thinking_output="text"
+        ),
+    )
     gen_config = cast(MutableJSON, body["generationConfig"])
     assert gen_config["thinkingConfig"] == {
         "includeThoughts": True,
@@ -473,7 +505,12 @@ def test_build_request_effort_min_sets_small_budget() -> None:
 
 
 def test_build_request_effort_max_sets_largest_budget() -> None:
-    body = _wire(ModelRequest(messages=[UserMessage(text="x")], effort="max"))
+    body = _wire(
+        ModelRequest(messages=[UserMessage(text="x")]),
+        _settings(
+            thinking_budget="fixed", thinking_effort="max", thinking_output="text"
+        ),
+    )
     gen_config = cast(MutableJSON, body["generationConfig"])
     assert gen_config["thinkingConfig"] == {
         "includeThoughts": True,
@@ -481,13 +518,17 @@ def test_build_request_effort_max_sets_largest_budget() -> None:
     }
 
 
-def test_build_request_invalid_effort_raises_value_error() -> None:
-    with pytest.raises(ValueError, match="Invalid Google effort"):
-        _wire(ModelRequest(messages=[UserMessage(text="x")], effort="turbo"))
+def test_build_request_thinking_off_sends_no_config() -> None:
+    """Gemini rejects ``thinkingConfig`` outright when thinking is off."""
+    body = _wire(ModelRequest(messages=[UserMessage(text="x")]))
+    assert "thinkingConfig" not in cast(MutableJSON, body["generationConfig"])
 
 
 def test_build_request_thinking_omits_temperature() -> None:
-    body = _wire(ModelRequest(messages=[UserMessage(text="x")], thinking="adaptive"))
+    body = _wire(
+        ModelRequest(messages=[UserMessage(text="x")]),
+        _settings(thinking_budget="auto", thinking_output="text"),
+    )
     gen_config = cast(MutableJSON, body["generationConfig"])
     assert "thinkingConfig" in gen_config
     assert "temperature" not in gen_config

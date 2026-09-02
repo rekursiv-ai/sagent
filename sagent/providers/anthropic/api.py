@@ -54,7 +54,6 @@ else:
 
 from anthropic.types.raw_message_stream_event import RawMessageStreamEvent
 
-from sagent import types
 from sagent.catalog import anthropic as anthropic_catalog
 from sagent.lib import debug_log
 from sagent.lib.custom_json import MutableJSON, MutableJSONValue, json_unfreeze
@@ -71,18 +70,20 @@ from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.lib.usage import anthropic_usage
+from sagent.types.capability import ModelCapability, ModelSettings
+from sagent.types.cost import PriceCatalogProduct, TokenCount
 from sagent.types.model import (
-    ModelCapability,
     ModelRequest,
     ModelResponse,
-    ModelSpec,
     PromptTooLongError,
     StreamInterruptedError,
-    ThinkingEffort,
-    TokenCount,
     UsageSnapshot,
     base_model_id,
     split_model_id,
+)
+from sagent.types.providers import (
+    ModelRole,
+    resolve,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -142,33 +143,6 @@ _DEFAULT_API_TARGET_INPUT_TOKENS = (
 _DEFAULT_1M_MODELS = frozenset(
     {"claude-fable-5-1", "claude-fable-5", "claude-sonnet-5", "claude-opus-5"}
 )
-
-
-def supports_fast_mode(model_id: str) -> bool:
-    """True when the model accepts ``speed="fast"`` on the Anthropic API.
-
-    Anthropic fast mode is an inference-acceleration feature: it runs the
-    same weights through a faster serving path for higher output
-    tokens/sec, at premium pricing, and is wire-distinct from the
-    ``service_tier`` capacity hint (both can be set on one request). This
-    differs from OpenAI, which has no separate fast field -- its fast path
-    is just ``service_tier="priority"``. The cross-provider ``latency``
-    hint hides that asymmetry from callers.
-
-    Derived from the catalog rather than a second hand-kept list: a
-    private allow-list drifts silently, and had -- it still named 4-7
-    (fast withdrawn 2026-07-24) and 4-6 (never shipped it), so both were
-    sent a ``speed="fast"`` the API rejects.
-
-    Args:
-      model_id: Catalog id, with or without option tags.
-
-    Returns:
-      supported: True when this model serves and bills fast mode.
-
-    """
-    capability = anthropic_catalog.MODELS.get(base_model_id(model_id))
-    return capability is not None and capability.serves_fast
 
 
 # Models that support server-side ``clear_tool_uses_20250919``. Per
@@ -283,11 +257,6 @@ class Anthropic:
     DEFAULT_MODEL = "claude-opus-5"
     DEFAULT_UTILITY_MODEL = "claude-haiku-4-5"
 
-    supported_options: ClassVar[frozenset[str]] = frozenset(
-        {"redact_thinking", "server_side_context_management"}
-    )
-    """``ProviderOptions`` fields the ``from_*`` factories accept."""
-
     # ``chars_per_token`` measured via ``messages.count_tokens`` on a 2.6M-char
     # mixed code+JSON+thinking session (de89f75430bf). Three tokenizer
     # generations cluster: opus-4-7 (2.83), opus/sonnet-4.6-4.5 (3.66),
@@ -305,14 +274,14 @@ class Anthropic:
     #   - opus-4-5 / sonnet-4-5 / haiku-4-5: ``enabled`` only (``adaptive``
     #     400s 'not supported'), readable text. Efforts: opus-4-5
     #     low,medium,high; sonnet-4-5 / haiku-4-5 none.
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = anthropic_catalog.MODELS
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = anthropic_catalog.models()
     """Per-model capability, shared by every Anthropic transport."""
 
-    TRANSPORT: ClassVar[ModelCapability] = anthropic_catalog.API
+    TRANSPORT: ClassVar[ModelCapability] = anthropic_catalog.api()
     """What this transport lets through; subclasses declare their own."""
 
     @property
-    def ROLES(self) -> Mapping[types.providers.ModelRole, str]:  # noqa: N802
+    def ROLES(self) -> Mapping[ModelRole, str]:  # noqa: N802
         """Role name to base id; ``utility`` falls back to the default."""
         return MappingProxyType(
             {
@@ -421,19 +390,18 @@ class Anthropic:
 
         """
         mid = model_id if model_id is not None else "default"
-        spec = types.providers.resolve(
+        capability, settings = resolve(
             mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT
         )
         return _AnthropicModel(
             provider=self,
-            # ``mid`` may be a role name; the spec carries the resolved id.
-            model_id=spec.tagged_model_id,
+            capability=capability,
+            settings=settings,
             max_request_tokens=(
                 max_request_tokens
                 if max_request_tokens is not None
-                else spec.context_limits.max_request_tokens
+                else settings.limits.max_request_tokens
             ),
-            spec=spec,
         )
 
     def utility_model(self) -> _AnthropicModel:
@@ -714,22 +682,35 @@ def _request_id(e: BaseException) -> str | None:
 class _AnthropicModel(ModelDefaults):
     """Claude model backend - translates ModelRequest/ModelResponse."""
 
-    spec: ModelSpec = ModelSpec()
-    """What this model can do; replaced from the catalog at construction."""
-
     def __init__(
         self,
         provider: Anthropic,
-        model_id: str,
+        capability: ModelCapability,
+        settings: ModelSettings,
         max_request_tokens: int = 200_000,
-        spec: ModelSpec | None = None,
     ) -> None:
         self._provider = provider
-        self._model_id = model_id
+        self._capability = capability
+        self._settings = settings
         self._max_request_tokens = max_request_tokens
-        self.spec = spec or ModelSpec()
         self._last_response_time = time.time()
         self._last_usage: UsageSnapshot | None = None
+
+    @property
+    @override
+    def capability(self) -> ModelCapability:
+        """What this model offers on this transport."""
+        return self._capability
+
+    @property
+    @override
+    def settings(self) -> ModelSettings:
+        """What this instance chose."""
+        return self._settings
+
+    def _cache_ttl_wire(self) -> str:
+        """Anthropic spells the cache TTL as a label, not seconds."""
+        return "1h" if self.settings.cache_ttl_sec >= 3600.0 else "5m"
 
     @property
     def _cache_cold(self) -> bool:
@@ -740,56 +721,6 @@ class _AnthropicModel(ModelDefaults):
     def max_request_tokens(self) -> int:
         """Maximum input tokens the model accepts."""
         return self._max_request_tokens
-
-    @property
-    def model_id(self) -> str:
-        """Provider-specific model identifier."""
-        return self._model_id
-
-    @property
-    def max_response_tokens(self) -> int:
-        """Maximum output tokens the model can generate."""
-        return self.spec.context_limits.max_response_tokens
-
-    @property
-    def supports_streaming(self) -> bool:
-        """Whether the model supports token-by-token streaming."""
-        return True
-
-    @property
-    def supports_thinking(self) -> bool:
-        """Whether the model supports extended thinking."""
-        return bool(self.spec.supported_thinking_budgets)
-
-    @property
-    def supports_effort(self) -> bool:
-        """Whether the model accepts an effort hint."""
-        return bool(self.spec.supported_thinking_efforts)
-
-    @property
-    def valid_efforts(self) -> tuple[str, ...]:
-        """Per-model ``output_config.effort`` levels (measured)."""
-        return tuple(self.spec.supported_thinking_efforts.values())
-
-    @property
-    def supports_cache_control(self) -> bool:
-        """Whether the provider supports prompt caching."""
-        return self.spec.prompt_cache_breakpoints
-
-    @property
-    def supports_context_management(self) -> bool:
-        """Whether the provider manages context overflow internally."""
-        return self._provider.server_side_context_management
-
-    @property
-    def supports_persistent_retry(self) -> bool:
-        """Whether the provider retries internally on transient failures."""
-        return self.spec.retries_internally
-
-    @property
-    def supports_account_auth(self) -> bool:
-        """Whether the provider uses account-based authentication."""
-        return self._provider.subscription
 
     @override
     def approx_text_tokens(self, text: str) -> int:
@@ -802,7 +733,9 @@ class _AnthropicModel(ModelDefaults):
           tokens: Approximate input token count.
 
         """
-        return int(len(text) / self.spec.chars_per_token)
+        return int(
+            len(text) / anthropic_catalog.chars_per_token(self.capability.model_id)
+        )
 
     @override
     def approx_image_tokens(self, data: bytes) -> int:
@@ -824,7 +757,12 @@ class _AnthropicModel(ModelDefaults):
     @override
     async def actual_request_tokens(self, request: ModelRequest) -> int:
         """Call the server's ``messages.count_tokens`` for an exact count."""
-        messages = _build_messages(request, self.max_image_dim, self.max_image_bytes)
+        messages = _build_messages(
+            request,
+            self.limits.max_image_edge_px,
+            self.limits.max_image_bytes,
+            self._cache_ttl_wire(),
+        )
         sdk = await self._provider.get_sdk()
         kwargs = self._build_kwargs(request, messages)
         # ``count_tokens`` accepts a subset of ``messages.create``'s kwargs.
@@ -836,25 +774,10 @@ class _AnthropicModel(ModelDefaults):
             await self._provider.handle_auth_error()
             sdk = await self._provider.get_sdk()
             kwargs["system"] = self._provider.build_system(
-                request.system, messages, cache_ttl=request.cache_ttl
+                request.system, messages, cache_ttl=self._cache_ttl_wire()
             )
             result = await sdk.messages.count_tokens(**kwargs)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- dynamic kwargs
         return result.input_tokens
-
-    @property
-    def max_image_dim(self) -> int:
-        """Maximum image edge (pixels) accepted, from the model profile."""
-        return self.spec.context_limits.max_image_edge_px
-
-    @property
-    def max_image_bytes(self) -> int:
-        """Maximum size (bytes) of a single image, from the model profile."""
-        return self.spec.context_limits.max_image_bytes
-
-    @property
-    def max_request_bytes(self) -> int:
-        """Maximum request-body size (bytes), from the model profile."""
-        return self.spec.context_limits.max_request_bytes
 
     def is_context_overflow(self, error: Exception) -> bool:
         """Classify an error as a token-context-window overflow.
@@ -923,28 +846,28 @@ class _AnthropicModel(ModelDefaults):
         messages: list[anthropic.types.MessageParam],
     ) -> dict[str, object]:
         """Build kwargs for the Anthropic messages API."""
-        thinking = request.thinking if self.supports_thinking else None
-        has_thinking = thinking in ("adaptive", "enabled")
-        max_tok = request.max_response_tokens or self.max_response_tokens
+        budget = self.settings.thinking_budget
+        has_thinking = budget != "none"
+        max_tok = request.max_response_tokens or self.limits.max_response_tokens
         kwargs: dict[str, object] = {
-            "model": base_model_id(self._model_id),
+            "model": base_model_id(self.capability.model_id),
             "messages": messages,
             "max_tokens": max_tok,
             "temperature": request.temperature,
             "system": self._provider.build_system(
-                request.system, messages, cache_ttl=request.cache_ttl
+                request.system, messages, cache_ttl=self._cache_ttl_wire()
             ),
         }
-        if thinking == "adaptive":
+        if budget == "auto":
             kwargs["thinking"] = {"type": "adaptive"}
             kwargs["temperature"] = 1.0
-        elif thinking == "enabled":
+        elif budget == "fixed":
             # Anthropic counts thinking against ``max_tokens``, so the
             # total must leave room for the visible reply. Double the
             # request, but clamp to the model cap (opus-4-8's cap equals
             # the API ceiling, where the raw double overflows). Split the
             # total so ``budget_tokens`` stays strictly below ``max_tokens``.
-            total = min(max_tok * 2, self.max_response_tokens)
+            total = min(max_tok * 2, self.limits.max_response_tokens)
             kwargs["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": total // 2,
@@ -960,40 +883,26 @@ class _AnthropicModel(ModelDefaults):
                 }
                 for t in request.tools
             ]
-        # A row advertising no effort is claiming the model rejects
+        # A row advertising only ``none`` claims the model rejects
         # ``output_config`` (the 4-5 generation); sending one earns a 400.
-        # Dropping rather than raising matches every other transport: the
-        # agent already clears an effort the model does not accept.
-        if request.effort is not None and self.spec.supported_thinking_efforts:
-            effort = self.spec.supported_thinking_efforts.get(
-                cast(ThinkingEffort, request.effort)
-            )
-            if effort is None:
-                valid = ", ".join(self.spec.supported_thinking_efforts)
-                raise ValueError(
-                    f"Unknown effort {request.effort!r} for {self._model_id}."
-                    f" Valid efforts: {valid}",
-                )
-            kwargs["output_config"] = {"effort": effort}
-        if (
-            request.service_tier is not None
-            and request.service_tier in self.spec.valid_service_tiers
-        ):
-            kwargs["service_tier"] = request.service_tier
+        if self.settings.thinking_effort != "none":
+            kwargs["output_config"] = {"effort": self.settings.thinking_effort}
+        if self.settings.service_tier != "auto":
+            kwargs["service_tier"] = self.settings.service_tier
         body = self._provider.extra_body(
             has_thinking=has_thinking,
             cache_cold=self._cache_cold,
             trigger_tokens=(
                 self.max_request_tokens // 2
-                if supports_native_context_management(self._model_id)
+                if supports_native_context_management(self.capability.model_id)
                 else 0
             ),
             tools=request.tools or (),
         )
         if body is not None:
             kwargs["extra_body"] = body
-        headers = self._provider.extra_headers(self._model_id)
-        if request.latency == "fast":
+        headers = self._provider.extra_headers(self.capability.model_id)
+        if self.settings.service_tier == "priority":
             # ``speed`` is a first-class parameter only on the SDK's beta
             # endpoints (``beta.messages.*``); the stream path here is a
             # custom raw POST to ``/v1/messages`` (see ``_raw_message_stream``),
@@ -1001,13 +910,6 @@ class _AnthropicModel(ModelDefaults):
             # preview beta header. That is the wire-equivalent of calling
             # ``beta.messages.create(speed="fast", betas=[...])`` -- do not
             # drop this injection without moving the stream onto the beta SDK.
-            # Reject early on unsupported models so the agent is told rather
-            # than silently billed standard speed.
-            if not supports_fast_mode(self._model_id):
-                raise ValueError(
-                    f"Model {self._model_id!r} does not support fast mode "
-                    f"(latency='fast').",
-                )
             body = cast(dict[str, object], kwargs.get("extra_body") or {})
             body["speed"] = "fast"
             kwargs["extra_body"] = body
@@ -1040,7 +942,12 @@ class _AnthropicModel(ModelDefaults):
           PromptTooLongError: Server reports context overflow.
 
         """
-        messages = _build_messages(request, self.max_image_dim, self.max_image_bytes)
+        messages = _build_messages(
+            request,
+            self.limits.max_image_edge_px,
+            self.limits.max_image_bytes,
+            self._cache_ttl_wire(),
+        )
         sdk = await self._provider.get_sdk()
         kwargs = self._build_kwargs(request, messages)
         extra_body = cast(Mapping[str, object], kwargs.get("extra_body") or {})
@@ -1048,7 +955,7 @@ class _AnthropicModel(ModelDefaults):
         debug_log.trace(
             "api_call",
             kind="stream",
-            model=self._model_id,
+            model=self.capability.model_id,
             roles=debug_log.role_sequence(messages),
             n_messages=len(messages),
             n_tools=len(kwargs.get("tools") or []),  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- kwargs.tools always list
@@ -1062,7 +969,7 @@ class _AnthropicModel(ModelDefaults):
             await self._provider.handle_auth_error()
             sdk = await self._provider.get_sdk()
             kwargs["system"] = self._provider.build_system(
-                request.system, messages, cache_ttl=request.cache_ttl
+                request.system, messages, cache_ttl=self._cache_ttl_wire()
             )
             raw = await _stream_impl(sdk, kwargs, publish)
         except anthropic.APIStatusError as e:
@@ -1078,7 +985,7 @@ class _AnthropicModel(ModelDefaults):
             debug_log.trace_error(
                 "bad_request",
                 kind="stream",
-                model=self._model_id,
+                model=self.capability.model_id,
                 error=str(e),
                 status=getattr(e, "status_code", None),
                 request_id=_request_id(e),
@@ -1099,13 +1006,13 @@ class _AnthropicModel(ModelDefaults):
             if not_read is not None:
                 raise StreamingResponseNotReadError(provider_name="Anthropic") from e
             raise
-        resp = _parse_response(raw, self.spec)
+        resp = _parse_response(raw, self)
         self._last_response_time = time.time()
         # Clear stale usage when a path yields no headers, so ``usage_snapshot``
         # never reports a prior request's windows for the current one.
         headers = _response_headers_var.get()
         self._last_usage = anthropic_usage(headers) if headers is not None else None
-        _guard_stream_interrupt(resp, kind="stream", model_id=self._model_id)
+        _guard_stream_interrupt(resp, kind="stream", model_id=self.capability.model_id)
         return resp
 
     @override
@@ -1269,6 +1176,7 @@ def _build_messages(
     request: ModelRequest,
     max_image_dim: int = 0,
     max_image_bytes: int = 0,
+    cache_ttl: str = "5m",
 ) -> list[anthropic.types.MessageParam]:
     """Convert history entries to Anthropic message format.
 
@@ -1321,7 +1229,7 @@ def _build_messages(
     _flush_tool_results(messages, pending_tool_results)
 
     if messages:
-        _add_cache_breakpoint(messages, request.cache_ttl)
+        _add_cache_breakpoint(messages, cache_ttl)
 
     return messages
 
@@ -1505,7 +1413,9 @@ def _is_valid_tool_name(name: str) -> bool:
     return name.isidentifier()
 
 
-def _parse_response(raw: anthropic.types.Message, spec: ModelSpec) -> ModelResponse:
+def _parse_response(
+    raw: anthropic.types.Message, model: _AnthropicModel
+) -> ModelResponse:
     """Convert Anthropic Message to ModelResponse with AssistantMessage."""
     text_parts: list[str] = []
     tool_calls: list[ToolCall] = []
@@ -1561,7 +1471,16 @@ def _parse_response(raw: anthropic.types.Message, spec: ModelSpec) -> ModelRespo
         cache_write=cache_write,
         cache_read=cache_read,
     )
-    spend = spec.spend(tokens, served_fast=served_fast)
+    # Anthropic reports the speed it actually served: a request that asked
+    # for priority and fell back must bill standard.
+    tier = model.settings.service_tier if served_fast else "auto"
+    prompt = tokens.request + tokens.cache_write + tokens.cache_read
+    spend = (
+        model.capability.prices[
+            PriceCatalogProduct(service_tier=tier, min_request_tokens=prompt)
+        ]
+        * tokens
+    )
     debug_log.trace(
         "api_response",
         kind="anthropic",

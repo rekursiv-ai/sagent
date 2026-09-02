@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -235,7 +235,8 @@ class Skill:
         history: list[ModelContextEvent],
         tool_state: ToolState,
         *,
-        budget_chars: int = 0,
+        budget_tokens: int,
+        estimate_tokens: Callable[[str], int],
     ) -> None:
         """Re-attach previously invoked skill bodies after compaction.
 
@@ -253,11 +254,12 @@ class Skill:
           history: Post-compaction history; mutated in place.
           tool_state: Active tool state; ``invoked_skills`` selects which
               bodies to restore.
-          budget_chars: Characters this hook may add. The compactor
-              derives it from the space actually left after compaction,
-              so overrunning it can push the just-compacted request back
+          budget_tokens: Tokens this hook may add. The compactor derives
+              it from the space actually left after compaction, so
+              overrunning it can push the just-compacted request back
               over the window -- the very condition compaction ran to
               relieve. ``0`` means unbounded.
+          estimate_tokens: The model's own tokenizer.
 
         """
         if not self.restore_after_compact:
@@ -277,10 +279,11 @@ class Skill:
                 continue
             body = escape_prompt_text(s.body)
             block = f"<skill name='{s.name}' source='{s.source}'>\n{body}\n</skill>"
-            if budget_chars > 0 and total + len(block) > budget_chars:
+            cost = estimate_tokens(block)
+            if budget_tokens > 0 and total + cost > budget_tokens:
                 skipped.append(s.name)
                 continue
-            total += len(block)
+            total += cost
             parts.append(block)
         if skipped:
             parts.append(
