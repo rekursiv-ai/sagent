@@ -439,7 +439,7 @@ def test_google_utility_model_uses_flash_lite() -> None:
 def test_google_model_properties() -> None:
     p = Google.from_key("k")
     m = p.model("gemini-2.5-pro")
-    assert m.max_request_tokens == 1_000_000
+    assert m.limits.max_request_tokens == 1_000_000
     assert m.capability.thinking_budget != frozenset({"none"})
     assert m.capability.thinking_effort != frozenset({"none"})
     assert m.capability.cache_ttl_sec == frozenset({0.0})

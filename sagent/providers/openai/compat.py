@@ -176,13 +176,11 @@ class OpenAICompat:
     def model(
         self,
         model_id: str | None = None,
-        max_request_tokens: int | None = None,
     ) -> OpenAICompatModel:
         """Create a model backend.
 
         Args:
           model_id: Catalog id with optional tags, or a role name.
-          max_request_tokens: Override max input tokens.
 
         Returns:
           model: Chat-completions model backend.
@@ -200,11 +198,6 @@ class OpenAICompat:
             provider=self,
             capability=capability,
             settings=settings,
-            max_request_tokens=(
-                max_request_tokens
-                if max_request_tokens is not None
-                else settings.limits.max_request_tokens
-            ),
         )
 
     def utility_model(self) -> OpenAICompatModel:
@@ -256,12 +249,10 @@ class OpenAICompatModel(ModelDefaults):
         provider: OpenAICompat,
         capability: ModelCapability,
         settings: ModelSettings,
-        max_request_tokens: int,
     ) -> None:
         self._provider = provider
         self._capability = capability
         self._settings = settings
-        self._max_request_tokens = max_request_tokens
         # Per loop: an httpx2.AsyncClient holds a connection pool owned by
         # the loop that opened it, and the guarding lock binds to the loop
         # that first contends on it. Sharing either across loops raises
@@ -304,11 +295,6 @@ class OpenAICompatModel(ModelDefaults):
         self._clients.clear()
         if client is not None:
             await client.aclose()
-
-    @property
-    def max_request_tokens(self) -> int:
-        """Maximum input tokens the model accepts."""
-        return self._max_request_tokens
 
     @property
     def _wire_model_id(self) -> str:

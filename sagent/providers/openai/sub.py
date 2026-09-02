@@ -530,13 +530,11 @@ class OpenAISubscription(OpenAI):
         self,
         model_id: str | None = None,
         /,
-        max_request_tokens: int | None = None,
     ) -> _OpenAISubModel:
         """Create a Responses API model backend.
 
         Args:
           model_id: Catalog id with optional tags, or a role name.
-          max_request_tokens: Override max input tokens. ``None`` uses profile default.
 
         Returns:
           model: Responses API model backend.
@@ -554,15 +552,10 @@ class OpenAISubscription(OpenAI):
         capability, settings = resolve(
             mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT
         )
-        window = settings.limits.max_request_tokens
         return _OpenAISubModel(
             provider=self,
             capability=capability,
             settings=settings,
-            max_request_tokens=min(
-                max_request_tokens if max_request_tokens is not None else window,
-                window,
-            ),
         )
 
     @override

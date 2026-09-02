@@ -371,14 +371,11 @@ class Anthropic:
             redact_thinking=redact_thinking,
         )
 
-    def model(
-        self, model_id: str | None = None, max_request_tokens: int | None = None
-    ) -> _AnthropicModel:
+    def model(self, model_id: str | None = None) -> _AnthropicModel:
         """Create a model backend.
 
         Args:
           model_id: Catalog id with optional tags, or a role name.
-          max_request_tokens: Override max input tokens. ``None`` uses profile default.
 
         Returns:
           model: Anthropic model backend.
@@ -397,11 +394,6 @@ class Anthropic:
             provider=self,
             capability=capability,
             settings=settings,
-            max_request_tokens=(
-                max_request_tokens
-                if max_request_tokens is not None
-                else settings.limits.max_request_tokens
-            ),
         )
 
     def utility_model(self) -> _AnthropicModel:
@@ -687,12 +679,10 @@ class _AnthropicModel(ModelDefaults):
         provider: Anthropic,
         capability: ModelCapability,
         settings: ModelSettings,
-        max_request_tokens: int = 200_000,
     ) -> None:
         self._provider = provider
         self._capability = capability
         self._settings = settings
-        self._max_request_tokens = max_request_tokens
         self._last_response_time = time.time()
         self._last_usage: UsageSnapshot | None = None
 
@@ -716,11 +706,6 @@ class _AnthropicModel(ModelDefaults):
     def _cache_cold(self) -> bool:
         """True when prompt cache TTL likely expired (>1h idle)."""
         return time.time() - self._last_response_time > 3600.0
-
-    @property
-    def max_request_tokens(self) -> int:
-        """Maximum input tokens the model accepts."""
-        return self._max_request_tokens
 
     @override
     def approx_text_tokens(self, text: str) -> int:
@@ -893,7 +878,7 @@ class _AnthropicModel(ModelDefaults):
             has_thinking=has_thinking,
             cache_cold=self._cache_cold,
             trigger_tokens=(
-                self.max_request_tokens // 2
+                self.limits.max_request_tokens // 2
                 if supports_native_context_management(self.capability.model_id)
                 else 0
             ),

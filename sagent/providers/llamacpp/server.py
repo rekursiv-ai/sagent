@@ -123,20 +123,18 @@ class LlamaCpp(OpenAICompat):
     def model(
         self,
         model_id: str | None = None,
-        max_request_tokens: int | None = None,
     ) -> OpenAICompatModel:
         """Start llama-server if needed and return the OpenAI-compatible model.
 
         Args:
           model_id: Model ID exposed to the OpenAI-compatible endpoint.
-          max_request_tokens: Override max input tokens.
 
         Returns:
           model: Chat-completions model backend.
 
         """
         self._ensure_started()
-        return super().model(model_id, max_request_tokens)
+        return super().model(model_id)
 
     def close(self) -> None:
         """Terminate the managed llama-server process if it is running."""

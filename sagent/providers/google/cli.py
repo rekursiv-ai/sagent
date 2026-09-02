@@ -188,13 +188,11 @@ class GoogleCLI(Google):
     def model(  # ty: ignore[invalid-method-override]  -- shared catalog, different transport; the CLI model can't subclass _GeminiModel
         self,
         model_id: str | None = None,
-        max_request_tokens: int | None = None,
     ) -> _GoogleCLIModel:
         """Build a CLI-backed model.
 
         Args:
           model_id: Gemini model id; ``None`` uses ``DEFAULT_MODEL``.
-          max_request_tokens: Override the profile's input cap.
 
         Returns:
           model: Backend wrapping a managed ``gemini --experimental-acp`` subprocess.
@@ -211,11 +209,6 @@ class GoogleCLI(Google):
             provider=self,
             capability=capability,
             settings=settings,
-            max_request_tokens=(
-                max_request_tokens
-                if max_request_tokens is not None
-                else settings.limits.max_request_tokens
-            ),
         )
 
     @override
@@ -255,12 +248,10 @@ class _GoogleCLIModel(ModelDefaults):
         provider: GoogleCLI,
         capability: ModelCapability,
         settings: ModelSettings,
-        max_request_tokens: int,
     ) -> None:
         self._provider = provider
         self._capability = capability
         self._settings = settings
-        self._max_request_tokens = max_request_tokens
         self._last_sent_index = 0
         self._system_hash: str = ""
         self._turn_count = 0
@@ -289,11 +280,6 @@ class _GoogleCLIModel(ModelDefaults):
     def settings(self) -> ModelSettings:
         """What this instance chose."""
         return self._settings
-
-    @property
-    def max_request_tokens(self) -> int:
-        """Per-request input token cap."""
-        return self._max_request_tokens
 
     @override
     def approx_text_tokens(self, text: str) -> int:
@@ -402,7 +388,7 @@ class _GoogleCLIModel(ModelDefaults):
         return respawn_for_cadence(
             turn_count=self._turn_count,
             last_input_tokens=self._last_input_tokens,
-            max_request_tokens=self._max_request_tokens,
+            max_request_tokens=self.limits.max_request_tokens,
         )
 
     def _sync_tools_bridge(self, request: ModelRequest) -> None:

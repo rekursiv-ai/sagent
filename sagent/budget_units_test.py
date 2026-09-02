@@ -23,31 +23,41 @@ import ast
 import pytest
 
 
-_PACKAGE: Final = Path(__file__).resolve().parent
+_CWD: Final = Path(__file__).resolve().parent
 
-# Files exempt from the ratio ban, each for a stated reason.
+# Files exempt from the ratio ban, each for a stated reason. Kept minimal on
+# purpose: an exemption that no longer covers a real division is a licence
+# nobody is using, and it silently re-opens the hole if one is added later.
 _RATIO_ALLOWED: Final = frozenset(
     {
-        # Declares the ratio as catalog DATA, per model, measured.
-        "providers/anthropic/catalog.py",
-        "providers/google/catalog.py",
-        "providers/openai/catalog.py",
         # Providers with no local tokenizer: the ratio IS their estimator.
-        "providers/anthropic/api.py",
-        "providers/anthropic/cli.py",
-        "providers/anthropic/sub.py",
         "providers/google/api.py",
         "providers/google/cli.py",
-        "providers/google/sub.py",
+        # tiktoken-less compat vendors (Kimi, Qwen, MiniMax) fall back to it.
         "providers/openai/compat.py",
-        # The type that owns the field, and the two re-attach caps that
-        # legitimately bound FILE BYTES read before any tokenizer runs.
-        "types/model.py",
         # The single no-agent fallback, and the test seam mirroring it.
         "agent/state.py",
         "testing.py",
     }
 )
+
+
+def test_every_ratio_exemption_is_load_bearing() -> None:
+    """An exemption must name a file that exists AND still needs one.
+
+    The catalogs moved to ``sagent.catalog`` and took their measured
+    divisors with them, leaving three entries naming files that no longer
+    exist plus three that no longer divide -- six licences covering nothing.
+    """
+    stale = sorted(rel for rel in _RATIO_ALLOWED if not (_CWD / rel).exists())
+    assert not stale, f"exemption names a file that does not exist: {stale}"
+    unused = sorted(
+        rel
+        for rel in _RATIO_ALLOWED
+        if not _ratio_divisions((_CWD / rel).read_text(encoding="utf-8"), rel)
+    )
+    assert not unused, f"exemption is no longer needed; drop it: {unused}"
+
 
 _BANNED_NAMES: Final = (
     "_ASSUMED_CHARS_PER_LINE",
@@ -68,8 +78,8 @@ def _sources() -> Iterator[tuple[str, str]]:
     tokenizer-free, so a ratio there IS the estimator, not a conversion
     away from one.
     """
-    for path in sorted(_PACKAGE.rglob("*.py")):
-        rel = str(path.relative_to(_PACKAGE))
+    for path in sorted(_CWD.rglob("*.py")):
+        rel = str(path.relative_to(_CWD))
         if path.name.endswith("_test.py") or ".export/" in rel:
             continue
         if rel.startswith("examples/"):
@@ -93,6 +103,38 @@ def test_the_deleted_constants_stay_deleted(banned: str) -> None:
     )
 
 
+def _ratio_divisions(text: str, rel: str) -> list[int]:
+    """Line numbers where ``text`` divides a string length by a constant.
+
+    ``len(sequence) // n`` takes a FRACTION of a collection -- a retry step,
+    a midpoint. Only ``len(<str>) // <const>`` is the tokenizer guess, so
+    both a literal divisor and a textually-named argument are required.
+    """
+    lines: list[int] = []
+    for node in ast.walk(ast.parse(text, rel)):
+        if not isinstance(node, ast.BinOp) or not isinstance(
+            node.op, (ast.FloorDiv, ast.Div)
+        ):
+            continue
+        if not isinstance(node.left, ast.Call):
+            continue
+        fn = node.left.func
+        if not (isinstance(fn, ast.Name) and fn.id == "len"):
+            continue
+        if not isinstance(node.right, ast.Constant):
+            continue
+        arg = node.left.args[0] if node.left.args else None
+        if isinstance(arg, ast.Name) and arg.id in (
+            "text",
+            "content",
+            "body",
+            "unit",
+            "s",
+        ):
+            lines.append(node.lineno)
+    return lines
+
+
 def test_no_module_divides_by_a_chars_per_token_ratio() -> None:
     """``len(text) // 4`` is a tokenizer guess wearing arithmetic.
 
@@ -101,31 +143,12 @@ def test_no_module_divides_by_a_chars_per_token_ratio() -> None:
     content by 14%, and that content is tool results, which dominate.
     Call ``approx_text_tokens`` and let the model answer.
     """
-    offenders: list[str] = []
-    for rel, text in _sources():
-        if rel in _RATIO_ALLOWED:
-            continue
-        tree = ast.parse(text, rel)
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.BinOp) or not isinstance(
-                node.op, (ast.FloorDiv, ast.Div)
-            ):
-                continue
-            if not isinstance(node.left, ast.Call):
-                continue
-            fn = node.left.func
-            if not (isinstance(fn, ast.Name) and fn.id == "len"):
-                continue
-            # ``len(sequence) // n`` takes a FRACTION of a collection --
-            # a retry step, a midpoint. Only ``len(<str>) // <const>`` is
-            # the tokenizer guess, so require a literal divisor AND an
-            # argument that is textual by name.
-            if not isinstance(node.right, ast.Constant):
-                continue
-            arg = node.left.args[0] if node.left.args else None
-            name = arg.id if isinstance(arg, ast.Name) else ""
-            if name in ("text", "content", "body", "unit", "s"):
-                offenders.append(f"{rel}:{node.lineno}")
+    offenders = [
+        f"{rel}:{line}"
+        for rel, text in _sources()
+        if rel not in _RATIO_ALLOWED
+        for line in _ratio_divisions(text, rel)
+    ]
     assert not offenders, (
         f"a chars-per-token division survives at {offenders}; use"
         " approx_text_tokens so the ACTIVE model's tokenizer decides"

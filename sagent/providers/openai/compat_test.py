@@ -54,7 +54,6 @@ def _priced_model(prices: PriceCatalog) -> OpenAICompatModel:
         provider=OpenAICompat.from_key("k"),
         capability=capability,
         settings=ModelSettings.narrowest(capability),
-        max_request_tokens=1000,
     )
 
 
@@ -510,7 +509,7 @@ def test_provider_utility_model_uses_default_when_not_set() -> None:
 def test_model_properties_defaults() -> None:
     p = _DummyProvider.from_key("k")
     m = p.model()
-    assert m.max_request_tokens == 1000
+    assert m.limits.max_request_tokens == 1000
     assert m.limits.max_response_tokens == 200
     assert m.capability.thinking_budget == frozenset({"none"})
     assert m.capability.thinking_effort == frozenset({"none"})
@@ -552,12 +551,6 @@ def test_model_is_context_overflow_rejects_unrelated_errors(message: str) -> Non
     p = _DummyProvider.from_key("k")
     m = p.model()
     assert m.is_context_overflow(RuntimeError(message)) is False
-
-
-def test_model_max_request_tokens_override() -> None:
-    p = _DummyProvider.from_key("k")
-    m = p.model("stub-1", max_request_tokens=500)
-    assert m.max_request_tokens == 500
 
 
 @pytest.mark.asyncio
@@ -706,7 +699,7 @@ def test_build_body_strips_window_tag_from_wire_model() -> None:
     p = _DummyProvider.from_key("k")
     m = p.model("stub-1+1m")
     assert m.tagged_model_id == "stub-1+1m"
-    assert m.max_request_tokens == 1_000_000
+    assert m.limits.max_request_tokens == 1_000_000
     body = m._build_body(
         ModelRequest(messages=[UserMessage(text="x")]),
         stream=False,

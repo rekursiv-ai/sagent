@@ -371,7 +371,7 @@ def test_self_hosted_model_properties() -> None:
     # here, so only ``native_model`` stays absent.
     stub = _StubProvider()
     m = SelfHostedModel(provider=stub)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- partial protocol stub
-    assert m.max_request_tokens == 1234
+    assert m.limits.max_request_tokens == 1234
     assert m.capability.model_id == "stub/qwen"
     assert m.limits.max_response_tokens == 567
     assert m.capability.thinking_budget == frozenset({"none"})

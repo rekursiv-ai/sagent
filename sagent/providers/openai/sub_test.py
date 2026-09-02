@@ -79,7 +79,6 @@ def _free_model() -> _OpenAISubModel:
             prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()})
         ),
         settings=ModelSettings(),
-        max_request_tokens=1_000,
     )
 
 
@@ -93,7 +92,6 @@ def _priced_model() -> _OpenAISubModel:
             )
         ),
         settings=ModelSettings(),
-        max_request_tokens=1_000,
     )
 
 
@@ -352,7 +350,6 @@ def test_subscription_context_inherits_size_caps_from_parent() -> None:
         context=MappingProxyType(
             {
                 "": ModelLimits(
-                    max_request_tokens=1_000_000,
                     max_response_tokens=1_000_000,
                     max_image_edge_px=4096,
                     max_image_bytes=7_000_000,
@@ -814,13 +811,8 @@ def test_subscription_utility_model_uses_utility_default() -> None:
 def test_subscription_model_clamps_against_wire_contract() -> None:
     m = _make_provider().model("gpt-5.5")
     # KNOWN_MODELS is clamped via ``_subscription_profile``.
-    assert m.max_request_tokens == 272_000
+    assert m.limits.max_request_tokens == 272_000
     assert m.limits.max_response_tokens == 32_000
-
-
-def test_subscription_model_override_cannot_bypass_wire_contract() -> None:
-    m = _make_provider().model("gpt-5.6-sol", max_request_tokens=1_050_000)
-    assert m.max_request_tokens == 272_000
 
 
 def test_subscription_rejects_1m_ids() -> None:
