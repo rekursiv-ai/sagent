@@ -12,7 +12,12 @@ Each axis is TOTAL: its unset value is spelled ``none``, so no field is
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import (
+    Collection,
+    Mapping,
+    Sequence,
+    Set as AbstractSet,
+)
 from dataclasses import dataclass, field, fields, replace
 from types import MappingProxyType
 from typing import Literal, Self, TypeAliasType, cast, get_args, override
@@ -92,39 +97,59 @@ class ModelCapability:
     prices: PriceCatalog = field(default_factory=PriceCatalog)
     """USD rates, keyed by service tier and request-size threshold."""
 
-    thinking_effort: frozenset[ThinkingEffort] = frozenset({"none"})
+    thinking_effort: AbstractSet[ThinkingEffort] = frozenset({"none"})
     """Effort levels this transport accepts."""
 
-    thinking_budget: frozenset[ThinkingBudget] = frozenset({"none"})
+    thinking_budget: AbstractSet[ThinkingBudget] = frozenset({"none"})
     """Budget modes this transport accepts."""
 
-    thinking_output: frozenset[ThinkingOutput] = frozenset({"none"})
+    thinking_output: AbstractSet[ThinkingOutput] = frozenset({"none"})
     """Reasoning-visibility modes this transport accepts."""
 
-    service_tier: frozenset[ServiceTier] = frozenset({"auto", "default"})
+    service_tier: AbstractSet[ServiceTier] = frozenset({"auto", "default"})
     """Speed/price tiers this transport accepts.
 
     ``auto`` and ``default`` are universal -- every vendor serves a request
     that names no tier. ``flex`` and ``priority`` are opt-in per row.
     """
 
-    cache_ttl_sec: float = 0.0
-    """Longest prompt-cache lifetime accepted, in seconds; ``0`` = no cache."""
-
     # Defaults to BOTH values, not to its unset one: a model row does not know
     # whether the server rolls history, and ``&`` can only remove -- so a row
     # asserting ``{False}`` would pin every transport and empty the meet.
-    manage_context_server_side: frozenset[bool] = frozenset({False, True})
+    manage_context_server_side: AbstractSet[bool] = frozenset({False, True})
     """Whether the server may roll history under quota pressure."""
 
-    # The two below are DECLARED by the transport, not narrowed from the row:
-    # a catalog row cannot know who bills it or who retries it, so ``&`` takes
-    # the transport's answer rather than intersecting with a meaningless one.
+    # The three below are DECLARED by the transport, not narrowed from the row:
+    # a catalog row cannot know who bills it, who retries it, or whether the
+    # request path writes a cache breakpoint, so ``&`` takes the transport's
+    # answer rather than intersecting with a meaningless one.
+    cache_ttl_sec: AbstractSet[float] = frozenset({0.0})
+    """Prompt-cache lifetimes this transport accepts, in seconds.
+
+    A set, not a ceiling: vendors sell two discrete lifetimes (Anthropic's
+    ``5m`` / ``1h``), so a bound admitted values no wire spells. A transport
+    that writes a breakpoint on every request omits ``0`` -- "do not cache"
+    is then unselectable rather than a claim the settings make and the wire
+    contradicts.
+    """
+
     retries_internally: bool = False
     """Whether the transport retries transient failures on its own."""
 
     account_auth: bool = False
     """Whether this transport bills an account rather than an API key."""
+
+    def __post_init__(self) -> None:
+        """Freeze every axis so callers may write a plain set literal.
+
+        The axes are hashed and intersected, so they must be frozen; making
+        each of ~90 catalog entries spell ``frozenset({...})`` buys nothing
+        the constructor cannot do once.
+        """
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if isinstance(value, (set, frozenset)):
+                object.__setattr__(self, f.name, frozenset(cast(set[object], value)))
 
     def __and__(self, other: ModelCapability) -> Self:
         """Narrow to what BOTH offer -- a catalog row met with a transport.
@@ -148,10 +173,10 @@ class ModelCapability:
             thinking_budget=self.thinking_budget & other.thinking_budget,
             thinking_output=self.thinking_output & other.thinking_output,
             service_tier=self.service_tier & other.service_tier,
-            cache_ttl_sec=min(self.cache_ttl_sec, other.cache_ttl_sec),
             manage_context_server_side=(
                 self.manage_context_server_side & other.manage_context_server_side
             ),
+            cache_ttl_sec=other.cache_ttl_sec,
             retries_internally=other.retries_internally,
             account_auth=other.account_auth,
         )
@@ -307,11 +332,11 @@ class ModelSettings:
             service_tier=_lowest(
                 "service_tier", capability.service_tier, _ladder(ServiceTier)
             ),
-            # Not the field default: a bound's lowest value is the EXPENSIVE
-            # one, and the wire caches whether or not this says so. 300s is
-            # the tier every price row encodes; a transport offering less
-            # (or none) clamps.
-            cache_ttl_sec=min(300.0, capability.cache_ttl_sec),
+            cache_ttl_sec=_lowest(
+                "cache_ttl_sec",
+                capability.cache_ttl_sec,
+                sorted(capability.cache_ttl_sec),
+            ),
             manage_context_server_side=_lowest(
                 "manage_context_server_side",
                 capability.manage_context_server_side,
@@ -327,12 +352,7 @@ class ModelSettings:
 
 def _offers(capability: ModelCapability, name: str, value: object) -> bool:
     """Whether ``capability`` allows ``value`` on the axis ``name``."""
-    allowed = getattr(capability, name)
-    # A ``Collection`` is the enumerated shape; anything else on a capability
-    # is a numeric upper bound, checked by comparison.
-    if isinstance(allowed, Collection):
-        return value in allowed
-    return cast(float, value) <= allowed
+    return value in cast(Collection[object], getattr(capability, name))
 
 
 def _reject_unoffered(capability: ModelCapability, name: str, value: object) -> None:
@@ -340,15 +360,12 @@ def _reject_unoffered(capability: ModelCapability, name: str, value: object) -> 
     if _offers(capability, name, value):
         return
     model = capability.model_id or "this model"
-    allowed = getattr(capability, name)
-    if isinstance(allowed, Collection):
-        # ``repr`` before ``sorted``: these sets mix strings and bools, which
-        # do not order against each other.
-        offered = ", ".join(sorted(repr(v) for v in allowed))
-        detail = f"is not offered by {model}; allowed: {offered}"
-    else:
-        detail = f"exceeds the most {model} offers: {allowed!r}"
-    raise ValueError(f"{name}={value!r} {detail}")
+    # ``repr`` before ``sorted``: these sets mix strings, floats, and bools,
+    # which do not order against each other.
+    offered = ", ".join(
+        sorted(repr(v) for v in cast(Collection[object], getattr(capability, name)))
+    )
+    raise ValueError(f"{name}={value!r} is not offered by {model}; allowed: {offered}")
 
 
 def _ladder[T](alias: object) -> tuple[T, ...]:

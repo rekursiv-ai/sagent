@@ -519,7 +519,7 @@ class SelfHostedModel(ModelDefaults):
             ),
             prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
             # In-process weights: there is no server to roll history.
-            manage_context_server_side=frozenset({False}),
+            manage_context_server_side={False},
         )
         self._settings = ModelSettings(capability=self.capability)
 

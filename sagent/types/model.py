@@ -184,7 +184,7 @@ class AgentSettings:
 
         Args:
           limits: Ceilings of the context tag the model selected, i.e.
-              ``model.settings.limits(model.capability)``.
+              ``model.settings.limits``.
 
         Returns:
           settings: New ``AgentSettings`` with proportional defaults.
@@ -410,8 +410,8 @@ class Model(Protocol):
     def limits(self) -> ModelLimits:
         """Ceilings of the selected context tag.
 
-        ``settings.limits(capability)``, named here because ~40 call sites
-        read a window and would otherwise each spell the lookup.
+        ``settings.limits``, named here because ~40 call sites read a
+        window and would otherwise each spell the lookup.
         """
         ...
 

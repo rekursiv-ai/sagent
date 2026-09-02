@@ -70,11 +70,11 @@ def _StubCostTracker_factory() -> _StubCostTracker:  # noqa: N802
 
 _WIDE = ModelCapability(
     model_id="m",
-    thinking_effort=frozenset({"none", "high"}),
-    thinking_budget=frozenset({"none", "auto", "fixed"}),
-    thinking_output=frozenset({"none", "text", "redacted"}),
-    service_tier=frozenset({"auto", "default", "priority"}),
-    cache_ttl_sec=3600.0,
+    thinking_effort={"none", "high"},
+    thinking_budget={"none", "auto", "fixed"},
+    thinking_output={"none", "text", "redacted"},
+    service_tier={"auto", "default", "priority"},
+    cache_ttl_sec={0.0, 3600.0},
 )
 """A capability offering every knob the footer can print."""
 
@@ -84,7 +84,7 @@ class _StubModel:
     """Only the settings surface the resume footer reads."""
 
     settings: ModelSettings = field(
-        default_factory=lambda: ModelSettings(capability=_WIDE)
+        default_factory=lambda: ModelSettings.narrowest(_WIDE)
     )
 
 

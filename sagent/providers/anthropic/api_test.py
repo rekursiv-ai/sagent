@@ -86,7 +86,7 @@ def _fast_model() -> _AnthropicModel:
             }
         ),
     )
-    m._settings = ModelSettings(capability=m.capability, service_tier="priority")
+    m._settings = replace(m.settings, service_tier="priority")
     return m
 
 
@@ -739,7 +739,7 @@ def test_anthropic_model_capability() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-7")
     assert m.capability.thinking_effort != frozenset({"none"})
-    assert m.capability.cache_ttl_sec > 0
+    assert m.capability.cache_ttl_sec == frozenset({300.0, 3600.0})
     assert m.capability.retries_internally is True
     assert m.capability.manage_context_server_side == frozenset({False, True})
     assert m.capability.account_auth is False
@@ -757,7 +757,7 @@ def test_anthropic_model_supports_context_management_when_opted_in() -> None:
 def test_anthropic_build_kwargs_emits_service_tier() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-7")
-    m._settings = ModelSettings(capability=m.capability, service_tier="default")
+    m._settings = replace(m.settings, service_tier="default")
     kwargs = m._build_kwargs(ModelRequest(messages=[UserMessage(text="x")]), [])
     assert kwargs["service_tier"] == "default"
 
@@ -779,7 +779,7 @@ def test_anthropic_build_kwargs_enabled_thinking_respects_max_tokens_cap() -> No
     # newest row that still offers the ``fixed`` budget.
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-6")
-    m._settings = ModelSettings(capability=m.capability, thinking_budget="fixed")
+    m._settings = replace(m.settings, thinking_budget="fixed")
     kwargs = m._build_kwargs(ModelRequest(messages=[UserMessage(text="x")]), [])
     max_tokens = IntCodec.coerce(kwargs["max_tokens"], 0)
     thinking = cast(dict[str, object], kwargs["thinking"])
@@ -836,7 +836,7 @@ def test_anthropic_priority_tier_sets_speed_and_beta() -> None:
     """
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-8")
-    m._settings = ModelSettings(capability=m.capability, service_tier="priority")
+    m._settings = replace(m.settings, service_tier="priority")
     kwargs = m._build_kwargs(ModelRequest(messages=[UserMessage(text="x")]), [])
     body = cast(dict[str, object], kwargs["extra_body"])
     assert body["speed"] == "fast"
@@ -915,7 +915,7 @@ def test_anthropic_image_byte_limits_read_from_the_row_not_a_constant() -> None:
     m = _AnthropicModel(
         provider=Anthropic.from_key("k"),
         capability=row,
-        settings=ModelSettings(capability=row),
+        settings=ModelSettings.narrowest(row),
     )
     assert m.limits.max_image_edge_px == 4096
     assert m.limits.max_image_bytes == 7 * 1024 * 1024

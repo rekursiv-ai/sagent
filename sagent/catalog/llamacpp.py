@@ -11,9 +11,10 @@ so ``ModelLimits`` carries only the two token windows.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from types import MappingProxyType
 
-from sagent.types.capability import ModelCapability, ModelLimits
+from sagent.types.capability import ContextTag, ModelCapability, ModelLimits
 from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
@@ -31,48 +32,34 @@ def models() -> Mapping[str, ModelCapability]:
       models: Capability per base model id.
 
     """
+    # A local server bills nothing, but a missing price row would raise.
+    local = ModelCapability(
+        context=_limits(window=16_384, response=1_024),
+        prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+    )
+    rows = (
+        replace(local, model_id="qwen3.6-27b-12gb"),
+        replace(
+            local,
+            model_id="qwen3.6-27b-mtp-64k",
+            context=_limits(window=65_536, response=4_096),
+        ),
+        replace(
+            local,
+            model_id="local",
+            context=_limits(window=32_768, response=4_096),
+        ),
+    )
+    return MappingProxyType({row.model_id: row for row in rows})
+
+
+def _limits(*, window: int, response: int) -> Mapping[ContextTag, ModelLimits]:
+    """One context tag: these vendors ship no window variants."""
     return MappingProxyType(
         {
-            "qwen3.6-27b-12gb": ModelCapability(
-                model_id="qwen3.6-27b-12gb",
-                context=MappingProxyType(
-                    {
-                        "": ModelLimits(
-                            max_request_tokens=16_384,
-                            max_response_tokens=1_024,
-                        ),
-                    }
-                ),
-                prices=_free(),
-            ),
-            "qwen3.6-27b-mtp-64k": ModelCapability(
-                model_id="qwen3.6-27b-mtp-64k",
-                context=MappingProxyType(
-                    {
-                        "": ModelLimits(
-                            max_request_tokens=65_536,
-                            max_response_tokens=4_096,
-                        ),
-                    }
-                ),
-                prices=_free(),
-            ),
-            "local": ModelCapability(
-                model_id="local",
-                context=MappingProxyType(
-                    {
-                        "": ModelLimits(
-                            max_request_tokens=32_768,
-                            max_response_tokens=4_096,
-                        ),
-                    }
-                ),
-                prices=_free(),
-            ),
+            "": ModelLimits(
+                max_request_tokens=window,
+                max_response_tokens=response,
+            )
         }
     )
-
-
-def _free() -> PriceCatalog:
-    """A local server bills nothing, but a missing row would raise."""
-    return PriceCatalog({PriceCatalogProduct(): TokenPrice()})

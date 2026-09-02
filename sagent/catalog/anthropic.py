@@ -12,7 +12,10 @@ Sources:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import (
+    Mapping,
+)
+from dataclasses import replace
 from types import MappingProxyType
 
 from sagent.types.capability import (
@@ -27,7 +30,16 @@ from sagent.types.cost import (
 )
 
 
-__all__ = ["api", "chars_per_token", "cli", "models", "subscription"]
+__all__ = ["api", "cache_ttls", "chars_per_token", "cli", "models", "subscription"]
+
+
+def cache_ttls() -> frozenset[float]:
+    """The two lifetimes ``cache_control`` spells, in seconds.
+
+    No ``0``: these transports write a breakpoint on every request, so
+    "do not cache" is not a selection this vendor offers.
+    """
+    return frozenset({300.0, 3600.0})
 
 
 def chars_per_token(model_id: str) -> float:
@@ -75,128 +87,94 @@ def models() -> Mapping[str, ModelCapability]:
       models: Capability per base model id.
 
     """
-    return MappingProxyType(
-        {
-            "claude-fable-5-1": ModelCapability(
-                model_id="claude-fable-5-1",
-                context=_windowed(edge=2576, default=1_000_000),
-                prices=_prices(request=10.0, response=50.0),
-                cache_ttl_sec=3600.0,
-                thinking_effort=frozenset(
-                    {"none", "low", "medium", "high", "xhigh", "max"}
-                ),
-                thinking_budget=frozenset({"none", "auto"}),
-                thinking_output=frozenset({"none", "redacted"}),
-            ),
-            "claude-fable-5": ModelCapability(
-                model_id="claude-fable-5",
-                context=_windowed(edge=2576, default=1_000_000),
-                prices=_prices(request=10.0, response=50.0),
-                cache_ttl_sec=3600.0,
-                thinking_effort=frozenset(
-                    {"none", "low", "medium", "high", "xhigh", "max"}
-                ),
-                thinking_budget=frozenset({"none", "auto"}),
-                thinking_output=frozenset({"none", "redacted"}),
-            ),
-            "claude-opus-5": ModelCapability(
-                model_id="claude-opus-5",
-                context=_windowed(edge=2576, default=1_000_000),
-                prices=_prices(request=5.0, response=25.0, fast_multiple=2.0),
-                cache_ttl_sec=3600.0,
-                thinking_effort=frozenset(
-                    {"none", "low", "medium", "high", "xhigh", "max"}
-                ),
-                thinking_budget=frozenset({"none", "auto"}),
-                thinking_output=frozenset({"none", "redacted"}),
-                service_tier=frozenset({"auto", "default", "priority"}),
-            ),
-            "claude-opus-4-8": ModelCapability(
-                model_id="claude-opus-4-8",
-                context=_windowed(edge=2576),
-                prices=_prices(request=5.0, response=25.0, fast_multiple=2.0),
-                cache_ttl_sec=3600.0,
-                thinking_effort=frozenset(
-                    {"none", "low", "medium", "high", "xhigh", "max"}
-                ),
-                thinking_budget=frozenset({"none", "auto"}),
-                thinking_output=frozenset({"none", "redacted"}),
-                service_tier=frozenset({"auto", "default", "priority"}),
-            ),
-            "claude-opus-4-7": ModelCapability(
-                model_id="claude-opus-4-7",
-                context=_windowed(edge=2576),
-                # Fast mode was removed from 4-7 on 2026-07-24; the API now
-                # rejects ``speed="fast"`` rather than serving it.
-                prices=_prices(request=5.0, response=25.0),
-                cache_ttl_sec=3600.0,
-                thinking_effort=frozenset(
-                    {"none", "low", "medium", "high", "xhigh", "max"}
-                ),
-                thinking_budget=frozenset({"none", "auto"}),
-                thinking_output=frozenset({"none", "redacted"}),
-            ),
-            "claude-opus-4-6": ModelCapability(
-                model_id="claude-opus-4-6",
-                context=_windowed(edge=1568),
-                # 4-6 never shipped fast mode: a ``speed="fast"`` request runs at
-                # standard speed and bills standard, reporting usage.speed
-                # "standard". A fast price row would overstate the cost.
-                prices=_prices(request=5.0, response=25.0),
-                cache_ttl_sec=3600.0,
-                thinking_effort=frozenset({"none", "low", "medium", "high", "max"}),
-                thinking_budget=frozenset({"none", "auto", "fixed"}),
-                thinking_output=frozenset({"none", "text", "redacted"}),
-            ),
-            "claude-opus-4-5": ModelCapability(
-                model_id="claude-opus-4-5",
-                context=_windowed(edge=1568),
-                prices=_prices(request=5.0, response=25.0),
-                cache_ttl_sec=3600.0,
-                thinking_effort=frozenset({"none", "low", "medium", "high"}),
-                thinking_budget=frozenset({"none", "fixed"}),
-                thinking_output=frozenset({"none", "text", "redacted"}),
-            ),
-            "claude-sonnet-5": ModelCapability(
-                model_id="claude-sonnet-5",
-                context=_windowed(edge=2576, default=1_000_000),
-                prices=_prices(request=3.0, response=15.0),
-                cache_ttl_sec=3600.0,
-                thinking_effort=frozenset(
-                    {"none", "low", "medium", "high", "xhigh", "max"}
-                ),
-                thinking_budget=frozenset({"none", "auto"}),
-                thinking_output=frozenset({"none", "redacted"}),
-            ),
-            "claude-sonnet-4-6": ModelCapability(
-                model_id="claude-sonnet-4-6",
-                context=_windowed(edge=1568),
-                prices=_prices(request=3.0, response=15.0),
-                cache_ttl_sec=3600.0,
-                thinking_effort=frozenset({"none", "low", "medium", "high", "max"}),
-                thinking_budget=frozenset({"none", "auto", "fixed"}),
-                thinking_output=frozenset({"none", "text", "redacted"}),
-            ),
-            "claude-sonnet-4-5": ModelCapability(
-                model_id="claude-sonnet-4-5",
-                context=_windowed(edge=1568),
-                prices=_prices(request=3.0, response=15.0),
-                cache_ttl_sec=3600.0,
-                thinking_budget=frozenset({"none", "fixed"}),
-                thinking_output=frozenset({"none", "text", "redacted"}),
-            ),
-            "claude-haiku-4-5": ModelCapability(
-                model_id="claude-haiku-4-5",
-                context=MappingProxyType(
-                    {"": _limits(request=200_000, response=64_000, edge=1568)}
-                ),
-                prices=_prices(request=1.0, response=5.0),
-                cache_ttl_sec=3600.0,
-                thinking_budget=frozenset({"none", "fixed"}),
-                thinking_output=frozenset({"none", "text", "redacted"}),
-            ),
-        }
+    # The 5 generation, as a row: every model below is this one with its
+    # differences replaced. ``_limits`` and ``_prices`` build the two composed
+    # fields, which ``replace`` cannot reach into.
+    five = ModelCapability(
+        context=_limits(window=1_000_000, edge=2576),
+        prices=_prices(request=10.0, response=50.0),
+        thinking_effort={"none", "low", "medium", "high", "xhigh", "max"},
+        thinking_budget={"none", "auto"},
+        thinking_output={"none", "redacted"},
     )
+    # The 4-x generation differs from it in four ways at once: smaller images,
+    # a 200k untagged window, readable reasoning, a fixed budget.
+    four = replace(
+        five,
+        context=_limits(window=200_000, edge=1568),
+        prices=_prices(request=3.0, response=15.0),
+        thinking_effort={"none"},
+        thinking_budget={"none", "auto", "fixed"},
+        thinking_output={"none", "text", "redacted"},
+    )
+    rows = (
+        replace(
+            five,
+            model_id="claude-fable-5-1",
+        ),
+        replace(
+            five,
+            model_id="claude-fable-5",
+        ),
+        replace(
+            five,
+            model_id="claude-opus-5",
+            prices=_prices(request=5.0, response=25.0, fast_multiple=2.0),
+            service_tier={"auto", "default", "priority"},
+        ),
+        replace(
+            five,
+            model_id="claude-opus-4-8",
+            context=_limits(window=200_000, edge=2576),
+            prices=_prices(request=5.0, response=25.0, fast_multiple=2.0),
+            service_tier={"auto", "default", "priority"},
+        ),
+        # No fast price row on 4-7 or 4-6: 4-7 lost fast mode on 2026-07-24 and
+        # the API now rejects ``speed="fast"``; 4-6 never shipped it and bills
+        # standard, so a fast row would misprice both.
+        replace(
+            five,
+            model_id="claude-opus-4-7",
+            context=_limits(window=200_000, edge=2576),
+            prices=_prices(request=5.0, response=25.0),
+        ),
+        replace(
+            four,
+            model_id="claude-opus-4-6",
+            prices=_prices(request=5.0, response=25.0),
+            thinking_effort={"none", "low", "medium", "high", "max"},
+        ),
+        replace(
+            four,
+            model_id="claude-opus-4-5",
+            prices=_prices(request=5.0, response=25.0),
+            thinking_effort={"none", "low", "medium", "high"},
+            thinking_budget={"none", "fixed"},
+        ),
+        replace(
+            five,
+            model_id="claude-sonnet-5",
+            prices=_prices(request=3.0, response=15.0),
+        ),
+        replace(
+            four,
+            model_id="claude-sonnet-4-6",
+            thinking_effort={"none", "low", "medium", "high", "max"},
+        ),
+        replace(
+            four,
+            model_id="claude-sonnet-4-5",
+            thinking_budget={"none", "fixed"},
+        ),
+        replace(
+            four,
+            model_id="claude-haiku-4-5",
+            context=_limits(window=200_000, edge=1568, response=64_000, long=0),
+            prices=_prices(request=1.0, response=5.0),
+            thinking_budget={"none", "fixed"},
+        ),
+    )
+    return MappingProxyType({row.model_id: row for row in rows})
 
 
 # A row carries only what the MODEL can do; caching, retry, and auth mode are
@@ -218,18 +196,16 @@ def api() -> ModelCapability:
 
     """
     return ModelCapability(
-        thinking_effort=frozenset(
-            {"none", "min", "low", "medium", "high", "xhigh", "max"}
-        ),
-        thinking_budget=frozenset({"none", "auto", "fixed"}),
-        thinking_output=frozenset({"none", "text", "redacted"}),
-        cache_ttl_sec=3600.0,
-        manage_context_server_side=frozenset({False, True}),
+        thinking_effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
+        thinking_budget={"none", "auto", "fixed"},
+        thinking_output={"none", "text", "redacted"},
+        cache_ttl_sec=cache_ttls(),
+        manage_context_server_side={False, True},
         retries_internally=True,
         # No ``flex``: the Messages API takes only ``auto`` / ``standard_only``
         # (https://platform.claude.com/docs/en/api/messages/create), which map to
         # ``auto`` / ``default`` here. ``priority`` is the fast-mode beta.
-        service_tier=frozenset({"auto", "default", "priority"}),
+        service_tier={"auto", "default", "priority"},
     )
 
 
@@ -247,10 +223,10 @@ def cli() -> ModelCapability:
 
     """
     return ModelCapability(
-        thinking_effort=frozenset({"none"}),
-        thinking_budget=frozenset({"none", "auto", "fixed"}),
-        thinking_output=frozenset({"none", "text"}),
-        manage_context_server_side=frozenset({True}),
+        thinking_effort={"none"},
+        thinking_budget={"none", "auto", "fixed"},
+        thinking_output={"none", "text"},
+        manage_context_server_side={True},
     )
 
 
@@ -268,50 +244,45 @@ def subscription() -> ModelCapability:
 
     """
     return ModelCapability(
-        thinking_effort=frozenset(
-            {"none", "min", "low", "medium", "high", "xhigh", "max"}
-        ),
-        thinking_budget=frozenset({"none", "auto", "fixed"}),
-        thinking_output=frozenset({"none", "text", "redacted"}),
-        cache_ttl_sec=3600.0,
-        manage_context_server_side=frozenset({False, True}),
+        thinking_effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
+        thinking_budget={"none", "auto", "fixed"},
+        thinking_output={"none", "text", "redacted"},
+        cache_ttl_sec=cache_ttls(),
+        manage_context_server_side={False, True},
         retries_internally=True,
         account_auth=True,
         # No ``flex``: the Messages API takes only ``auto`` / ``standard_only``
         # (https://platform.claude.com/docs/en/api/messages/create), which map to
         # ``auto`` / ``default`` here. ``priority`` is the fast-mode beta.
-        service_tier=frozenset({"auto", "default", "priority"}),
+        service_tier={"auto", "default", "priority"},
     )
 
 
-def _limits(*, request: int, response: int = 128_000, edge: int) -> ModelLimits:
-    """``edge`` is the native resolution above which the server downscales."""
-    return ModelLimits(
-        max_request_tokens=request,
+def _limits(
+    *, window: int, edge: int, response: int = 128_000, long: int = 1_000_000
+) -> Mapping[ContextTag, ModelLimits]:
+    """Both context tags; ``long=0`` offers no ``+1m`` variant."""
+    limits = ModelLimits(
+        max_request_tokens=window,
         max_response_tokens=response,
         max_request_bytes=32 * 1024 * 1024,
         max_image_edge_px=edge,
         max_image_bytes=5 * 1024 * 1024,
     )
-
-
-def _windowed(*, edge: int, default: int = 200_000) -> Mapping[ContextTag, ModelLimits]:
-    """Both context tags; the 5 generation passes ``default=1_000_000``."""
-    return MappingProxyType(
-        {
-            "": _limits(request=default, edge=edge),
-            "+1m": _limits(request=1_000_000, edge=edge),
-        }
-    )
+    context: dict[ContextTag, ModelLimits] = {"": limits}
+    if long:
+        context["+1m"] = replace(limits, max_request_tokens=long)
+    return MappingProxyType(context)
 
 
 def _prices(
-    *,
-    request: float,
-    response: float,
-    fast_multiple: float = 0.0,
+    *, request: float, response: float, fast_multiple: float = 0.0
 ) -> PriceCatalog:
-    """USD per million tokens, plus the fast-tier surcharge row when priced."""
+    """USD per million tokens, plus the priority row when the model has one.
+
+    Fast mode surcharges request/response only: Anthropic's fast-mode table
+    lists no separate cache rates.
+    """
     rows = {
         PriceCatalogProduct(): TokenPrice(
             request=request,
@@ -321,8 +292,6 @@ def _prices(
         )
     }
     if fast_multiple:
-        # Fast mode surcharges request/response only: Anthropic's fast-mode
-        # table lists no separate cache rates.
         rows[PriceCatalogProduct(service_tier="priority")] = TokenPrice(
             request=request * fast_multiple,
             response=response * fast_multiple,

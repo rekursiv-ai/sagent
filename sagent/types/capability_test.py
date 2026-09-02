@@ -30,7 +30,7 @@ def _row() -> ModelCapability:
         thinking_budget=frozenset({"none", "auto"}),
         thinking_output=frozenset({"none", "text", "redacted"}),
         service_tier=frozenset({"auto", "default", "priority"}),
-        cache_ttl_sec=3600.0,
+        cache_ttl_sec={300.0, 3600.0},
         manage_context_server_side=frozenset({False, True}),
         retries_internally=True,
     )
@@ -57,7 +57,7 @@ def test_a_bare_transport_keeps_the_axis_a_row_cannot_know() -> None:
     # think and which tiers the vendor sells it at.
     assert met.thinking_effort == frozenset({"none"})
     assert met.service_tier == frozenset({"auto", "default"})
-    assert met.cache_ttl_sec == 0.0
+    assert met.cache_ttl_sec == frozenset({0.0})
 
 
 def test_the_meet_only_removes() -> None:
@@ -66,7 +66,7 @@ def test_the_meet_only_removes() -> None:
         thinking_budget=frozenset({"none", "auto", "fixed"}),
         thinking_output=frozenset({"none", "text", "redacted"}),
         service_tier=frozenset({"auto", "default", "flex", "priority"}),
-        cache_ttl_sec=7200.0,
+        cache_ttl_sec={300.0, 3600.0, 7200.0},
         manage_context_server_side=frozenset({False, True}),
         retries_internally=True,
     )
@@ -82,9 +82,11 @@ def test_the_meet_cannot_grant() -> None:
     assert met.thinking_effort == frozenset({"none"})
 
 
-def test_the_meet_takes_the_lower_cache_bound() -> None:
-    assert (_row() & ModelCapability(cache_ttl_sec=300.0)).cache_ttl_sec == 300.0
-    assert (_row() & ModelCapability(cache_ttl_sec=7200.0)).cache_ttl_sec == 3600.0
+def test_the_transport_declares_the_cache_lifetimes() -> None:
+    """Not intersected: only the transport knows if it writes a breakpoint."""
+    offered = frozenset({300.0, 3600.0})
+    assert (_row() & ModelCapability(cache_ttl_sec=offered)).cache_ttl_sec == offered
+    assert (_row() & ModelCapability()).cache_ttl_sec == frozenset({0.0})
 
 
 def test_the_meet_passes_context_and_prices_through() -> None:
@@ -137,7 +139,7 @@ def test_defaults_construct_against_a_default_capability() -> None:
 
 def test_assignment_rejects_what_the_model_withholds() -> None:
     """The whole point of the setter: a stale knob never reaches the wire."""
-    settings = ModelSettings(capability=_row())
+    settings = ModelSettings.narrowest(_row())
     with pytest.raises(ValueError, match="thinking_effort='medium'"):
         settings.thinking_effort = "medium"
     assert settings.thinking_effort == "none"
@@ -145,20 +147,20 @@ def test_assignment_rejects_what_the_model_withholds() -> None:
 
 def test_construction_rejects_what_the_model_withholds() -> None:
     with pytest.raises(ValueError, match="thinking_effort='medium'"):
-        ModelSettings(capability=_row(), thinking_effort="medium")
+        ModelSettings(capability=_row(), cache_ttl_sec=300.0, thinking_effort="medium")
 
 
 def test_an_unoffered_context_is_rejected() -> None:
     with pytest.raises(ValueError, match="context='\\+200k'"):
-        ModelSettings(capability=_row(), context="+200k")
+        ModelSettings(capability=_row(), cache_ttl_sec=300.0, context="+200k")
 
 
-def test_a_bound_is_checked_by_comparison_not_membership() -> None:
-    """A duration is a quantity: any value up to the bound is selectable."""
-    ModelSettings(capability=_row(), cache_ttl_sec=1.0)
+def test_the_cache_axis_validates_by_membership() -> None:
+    """Vendors sell discrete lifetimes, so a bound admitted unspellable values."""
+    ModelSettings(capability=_row(), cache_ttl_sec=300.0)
     ModelSettings(capability=_row(), cache_ttl_sec=3600.0)
-    with pytest.raises(ValueError, match="exceeds the most"):
-        ModelSettings(capability=_row(), cache_ttl_sec=3600.1)
+    with pytest.raises(ValueError, match="not offered by m"):
+        ModelSettings(capability=_row(), cache_ttl_sec=1800.0)
 
 
 def test_a_boolean_axis_validates_by_membership() -> None:
@@ -170,7 +172,7 @@ def test_a_boolean_axis_validates_by_membership() -> None:
 
 def test_the_error_names_the_model_and_what_it_offers() -> None:
     with pytest.raises(ValueError, match="not offered by m") as excinfo:
-        ModelSettings(capability=_row(), service_tier="flex")
+        ModelSettings(capability=_row(), cache_ttl_sec=300.0, service_tier="flex")
     assert "'priority'" in str(excinfo.value)
 
 
@@ -179,7 +181,7 @@ _OFF = ModelCapability(
     thinking_budget=frozenset({"none"}),
     thinking_output=frozenset({"none"}),
     service_tier=frozenset({"auto"}),
-    cache_ttl_sec=0.0,
+    cache_ttl_sec={0.0},
     manage_context_server_side=frozenset({False}),
 )
 
@@ -189,14 +191,14 @@ _UNOFFERED: Final = (
     ("thinking_budget", "fixed"),
     ("thinking_output", "text"),
     ("service_tier", "flex"),
-    ("cache_ttl_sec", 1.0),
+    ("cache_ttl_sec", 300.0),
     ("manage_context_server_side", True),
 )
 
 
 @pytest.mark.parametrize(("name", "value"), _UNOFFERED, ids=[n for n, _ in _UNOFFERED])
 def test_assignment_checks_every_axis(name: str, value: object) -> None:
-    settings = ModelSettings(capability=_OFF)
+    settings = ModelSettings.narrowest(_OFF)
     with pytest.raises(ValueError, match=name):
         setattr(settings, name, value)
 
@@ -209,7 +211,7 @@ def test_the_axis_cases_cover_every_settings_axis() -> None:
 
 def test_the_capability_itself_is_assignable() -> None:
     """It is the authority, not a choice, so it cannot validate against itself."""
-    settings = ModelSettings(capability=_OFF)
+    settings = ModelSettings.narrowest(_OFF)
     settings.capability = _row()
     settings.thinking_effort = "high"
 
@@ -218,7 +220,7 @@ def test_the_capability_itself_is_assignable() -> None:
 
 
 def test_take_applies_what_is_offered() -> None:
-    settings = ModelSettings(capability=_row())
+    settings = ModelSettings.narrowest(_row())
     settings.take(thinking_effort="high", thinking_budget="auto")
     assert settings.thinking_effort == "high"
     assert settings.thinking_budget == "auto"
@@ -226,7 +228,7 @@ def test_take_applies_what_is_offered() -> None:
 
 def test_take_drops_what_is_not_offered_instead_of_raising() -> None:
     """A swap or resume must not FAIL on a knob the new model withholds."""
-    settings = ModelSettings(capability=_row())
+    settings = ModelSettings.narrowest(_row())
     settings.take(thinking_effort="max", thinking_budget="auto")
     assert settings.thinking_effort == "none"
     assert settings.thinking_budget == "auto"
@@ -239,9 +241,12 @@ def test_take_rejects_a_name_that_is_not_an_axis() -> None:
 
 def test_adopt_carries_the_selection_across_a_swap() -> None:
     old = ModelSettings(
-        capability=_row(), thinking_effort="high", service_tier="priority"
+        capability=_row(),
+        cache_ttl_sec=300.0,
+        thinking_effort="high",
+        service_tier="priority",
     )
-    new = ModelSettings(capability=_row(), context="+1m")
+    new = ModelSettings(capability=_row(), cache_ttl_sec=300.0, context="+1m")
     new.adopt(old)
     assert new.thinking_effort == "high"
     assert new.service_tier == "priority"
@@ -249,15 +254,15 @@ def test_adopt_carries_the_selection_across_a_swap() -> None:
 
 def test_adopt_keeps_the_incoming_context_tag() -> None:
     """The new model id already named its window; the swap must not undo it."""
-    old = ModelSettings(capability=_row(), context="")
-    new = ModelSettings(capability=_row(), context="+1m")
+    old = ModelSettings(capability=_row(), cache_ttl_sec=300.0, context="")
+    new = ModelSettings(capability=_row(), cache_ttl_sec=300.0, context="+1m")
     new.adopt(old)
     assert new.context == "+1m"
 
 
 def test_adopt_drops_a_knob_the_new_model_rejects() -> None:
-    old = ModelSettings(capability=_row(), thinking_effort="high")
-    new = ModelSettings(capability=_OFF)
+    old = ModelSettings(capability=_row(), cache_ttl_sec=300.0, thinking_effort="high")
+    new = ModelSettings.narrowest(_OFF)
     new.adopt(old)
     assert new.thinking_effort == "none"
 
@@ -275,10 +280,8 @@ def test_narrowest_selects_the_cache_the_wire_already_ships() -> None:
     """``0.0`` claimed no caching while a ``5m`` breakpoint shipped anyway."""
     assert ModelSettings.narrowest(_row()).cache_ttl_sec == 300.0
     assert ModelSettings.narrowest(ModelCapability()).cache_ttl_sec == 0.0
-    assert (
-        ModelSettings.narrowest(ModelCapability(cache_ttl_sec=60.0)).cache_ttl_sec
-        == 60.0
-    )
+    only_long = ModelCapability(cache_ttl_sec={3600.0})
+    assert ModelSettings.narrowest(only_long).cache_ttl_sec == 3600.0
 
 
 def test_narrowest_carries_the_context_the_id_selected() -> None:
@@ -330,9 +333,9 @@ def test_narrowest_rejects_an_empty_axis() -> None:
 def test_limits_are_derived_not_cached() -> None:
     """A cached row let a spec claim one context and carry another's."""
     row = _row()
-    assert ModelSettings(capability=row).limits.max_request_tokens == 200_000
+    assert ModelSettings.narrowest(row).limits.max_request_tokens == 200_000
     assert (
-        ModelSettings(capability=row, context="+1m").limits.max_request_tokens
+        ModelSettings.narrowest(row, context="+1m").limits.max_request_tokens
         == 1_000_000
     )
 

@@ -219,7 +219,7 @@ class Agent:
           on overflow recovery.
       session_dir: Directory for session persistence and pre-compact
           transcripts; ``None`` disables both.
-      budget: Context budget; defaults to ``types.model.AgentSettings.from_model``.
+      budget: Context budget; defaults to ``AgentSettings.from_limits``.
       max_attempts: Retry attempts inside ``send_with_retry``.
       name: Human-readable agent label.
       description: Agent description for parent agents and the UI.

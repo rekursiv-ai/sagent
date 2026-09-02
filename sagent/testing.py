@@ -129,7 +129,7 @@ class MockModelCaps:
                 if self.supports_thinking
                 else frozenset({"none"})
             ),
-            service_tier=frozenset({"auto", *self.service_tiers}),
+            service_tier={"auto", *self.service_tiers},
             retries_internally=self.supports_persistent_retry,
         )
 

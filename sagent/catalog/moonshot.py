@@ -11,9 +11,10 @@ so ``ModelLimits`` carries only the two token windows.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from types import MappingProxyType
 
-from sagent.types.capability import ModelCapability, ModelLimits
+from sagent.types.capability import ContextTag, ModelCapability, ModelLimits
 from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
@@ -31,112 +32,67 @@ def models() -> Mapping[str, ModelCapability]:
       models: Capability per base model id.
 
     """
+    # Every Kimi row is this one with its window and price replaced.
+    kimi = ModelCapability(
+        context=_limits(window=256_000, response=96_000),
+        prices=_prices(request=0.95, response=4.0, cache_read=0.16),
+        thinking_output={"none", "text"},
+    )
+    rows = (
+        replace(kimi, model_id="kimi-k2.6"),
+        replace(
+            kimi,
+            model_id="kimi-k2.5",
+            prices=_prices(request=0.6, response=3.0, cache_read=0.1),
+        ),
+        replace(
+            kimi,
+            model_id="kimi-k2-0905-preview",
+            context=_limits(window=256_000, response=32_768),
+            prices=_prices(request=0.6, response=2.5, cache_read=0.15),
+        ),
+        replace(
+            kimi,
+            model_id="kimi-k2-0711-preview",
+            context=_limits(window=131_072, response=32_768),
+            prices=_prices(request=0.6, response=2.5, cache_read=0.15),
+        ),
+        replace(
+            kimi,
+            model_id="kimi-k2-turbo-preview",
+            context=_limits(window=256_000, response=32_768),
+            prices=_prices(request=1.2, response=5.0, cache_read=0.3),
+        ),
+        replace(
+            kimi,
+            model_id="moonshot-v1-8k",
+            context=_limits(window=8_000, response=16_384),
+            prices=_prices(request=0.2, response=2.0),
+        ),
+        replace(
+            kimi,
+            model_id="moonshot-v1-32k",
+            context=_limits(window=32_000, response=16_384),
+            prices=_prices(request=0.4, response=4.0),
+        ),
+        replace(
+            kimi,
+            model_id="moonshot-v1-128k",
+            context=_limits(window=128_000, response=16_384),
+            prices=_prices(request=0.6, response=6.0),
+        ),
+    )
+    return MappingProxyType({row.model_id: row for row in rows})
+
+
+def _limits(*, window: int, response: int) -> Mapping[ContextTag, ModelLimits]:
+    """One context tag: these vendors ship no window variants."""
     return MappingProxyType(
         {
-            "kimi-k2.6": ModelCapability(
-                model_id="kimi-k2.6",
-                context=MappingProxyType(
-                    {
-                        "": ModelLimits(
-                            max_request_tokens=256_000,
-                            max_response_tokens=96_000,
-                        ),
-                    }
-                ),
-                prices=_prices(request=0.95, response=4.0, cache_read=0.16),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "kimi-k2.5": ModelCapability(
-                model_id="kimi-k2.5",
-                context=MappingProxyType(
-                    {
-                        "": ModelLimits(
-                            max_request_tokens=256_000,
-                            max_response_tokens=96_000,
-                        ),
-                    }
-                ),
-                prices=_prices(request=0.6, response=3.0, cache_read=0.1),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "kimi-k2-0905-preview": ModelCapability(
-                model_id="kimi-k2-0905-preview",
-                context=MappingProxyType(
-                    {
-                        "": ModelLimits(
-                            max_request_tokens=256_000,
-                            max_response_tokens=32_768,
-                        ),
-                    }
-                ),
-                prices=_prices(request=0.6, response=2.5, cache_read=0.15),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "kimi-k2-0711-preview": ModelCapability(
-                model_id="kimi-k2-0711-preview",
-                context=MappingProxyType(
-                    {
-                        "": ModelLimits(
-                            max_request_tokens=131_072,
-                            max_response_tokens=32_768,
-                        ),
-                    }
-                ),
-                prices=_prices(request=0.6, response=2.5, cache_read=0.15),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "kimi-k2-turbo-preview": ModelCapability(
-                model_id="kimi-k2-turbo-preview",
-                context=MappingProxyType(
-                    {
-                        "": ModelLimits(
-                            max_request_tokens=256_000,
-                            max_response_tokens=32_768,
-                        ),
-                    }
-                ),
-                prices=_prices(request=1.2, response=5.0, cache_read=0.3),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "moonshot-v1-8k": ModelCapability(
-                model_id="moonshot-v1-8k",
-                context=MappingProxyType(
-                    {
-                        "": ModelLimits(
-                            max_request_tokens=8_000,
-                            max_response_tokens=16_384,
-                        ),
-                    }
-                ),
-                prices=_prices(request=0.2, response=2.0),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "moonshot-v1-32k": ModelCapability(
-                model_id="moonshot-v1-32k",
-                context=MappingProxyType(
-                    {
-                        "": ModelLimits(
-                            max_request_tokens=32_000,
-                            max_response_tokens=16_384,
-                        ),
-                    }
-                ),
-                prices=_prices(request=0.4, response=4.0),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "moonshot-v1-128k": ModelCapability(
-                model_id="moonshot-v1-128k",
-                context=MappingProxyType(
-                    {
-                        "": ModelLimits(
-                            max_request_tokens=128_000,
-                            max_response_tokens=16_384,
-                        ),
-                    }
-                ),
-                prices=_prices(request=0.6, response=6.0),
-                thinking_output=frozenset({"none", "text"}),
-            ),
+            "": ModelLimits(
+                max_request_tokens=window,
+                max_response_tokens=response,
+            )
         }
     )
 
