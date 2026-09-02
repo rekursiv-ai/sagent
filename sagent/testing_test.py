@@ -28,22 +28,20 @@ from sagent.types.runtime import (
 def test_mock_model_caps_static_flags() -> None:
     """Capability flags expose the documented defaults."""
     m = MockModelCaps()
-    assert m.spec.context_limits.max_response_tokens == 8_192
-    assert m.supports_streaming is True
-    assert bool(m.spec.supported_thinking_budgets) is False
-    assert bool(m.spec.supported_thinking_efforts) is False
-    assert m.spec.prompt_cache_breakpoints is False
-    assert m.spec.manages_context is False
-    assert m.spec.retries_internally is False
-    assert m.spec.account_auth is False
-    assert m.spec.context_limits.max_image_edge_px == 8_000
-    assert m.spec.context_limits.max_image_bytes == 5 * 1024 * 1024
+    assert m.limits.max_response_tokens == 8_192
+    assert m.capability.thinking_budget == frozenset({"none"})
+    assert m.capability.thinking_effort == frozenset({"none"})
+    assert m.capability.cache_ttl_sec == 0.0
+    assert m.capability.retries_internally is False
+    assert m.capability.account_auth is False
+    assert m.limits.max_image_edge_px == 8_000
+    assert m.limits.max_image_bytes == 5 * 1024 * 1024
 
 
 def test_mock_model_caps_pricing_zero() -> None:
     """Every rate defaults to zero, so mocks never fabricate spend."""
     m = MockModelCaps()
-    assert m.spec.prices[PriceCatalogProduct()] == TokenPrice()
+    assert m.capability.prices[PriceCatalogProduct()] == TokenPrice()
 
 
 def test_mock_model_caps_estimate_text() -> None:

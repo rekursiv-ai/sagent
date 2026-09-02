@@ -87,6 +87,7 @@ from sagent.lib.custom_json import MutableJSON
 from sagent.lib.userdirs import data_dir
 from sagent.providers import build_provider
 from sagent.tools.slack import Slack
+from sagent.types.capability import ThinkingEffort
 from sagent.types.model import ModelRecipe
 from sagent.types.runtime import (
     AssistantMessage,
@@ -260,7 +261,6 @@ class SlackAdapter:
         compactor: SummaryCompactor | None,
         log_prefix: str,
         router_log_channel: str = "",
-        effort: str | None = None,
         max_tool_call_rounds: int | None = None,
         max_budget_usd: float | None = None,
     ) -> None:
@@ -278,7 +278,6 @@ class SlackAdapter:
         self._compactor = compactor
         self._log_prefix = log_prefix
         self._router_log_channel = router_log_channel
-        self._effort = effort
         self._max_tool_call_rounds = max_tool_call_rounds
         self._max_budget_usd = max_budget_usd
         self._self_user_id: str = ""
@@ -660,7 +659,6 @@ class SlackAdapter:
             system=system_text,
             tools=tools,
             compactor=self._compactor,
-            effort=self._effort,
             max_tool_call_rounds=self._max_tool_call_rounds,
             max_budget_usd=self._max_budget_usd,
             session_dir=self._session_dir / label,
@@ -1061,13 +1059,16 @@ async def _run(args: argparse.Namespace) -> None:
     model_recipe = ModelRecipe(
         provider=args.provider,
         auth=args.auth,
-        model_id=model.spec.tagged_model_id,
+        model_id=model.tagged_model_id,
         account=args.account,
     )
+    # Every spawned agent shares this model object, so the flag lands on
+    # its settings once here rather than riding each constructor.
+    model.settings.thinking_effort = cast(ThinkingEffort, args.effort)
     compactor = SummaryCompactor() if args.compact else None
     persona_dir = Path(args.persona_dir)
 
-    _ = sys.stderr.write(f"[{args.provider}] {model.spec.tagged_model_id}\n")
+    _ = sys.stderr.write(f"[{args.provider}] {model.tagged_model_id}\n")
     _ = sys.stderr.write(f"[personas] {persona_dir}\n")
 
     session_root = Path(args.session_dir)
@@ -1092,7 +1093,6 @@ async def _run(args: argparse.Namespace) -> None:
         compactor=compactor,
         log_prefix=args.log_prefix,
         router_log_channel=args.router_log_channel,
-        effort=args.effort,
         max_tool_call_rounds=args.max_tool_call_rounds,
         max_budget_usd=args.max_budget_usd,
     )

@@ -1,102 +1,181 @@
-"""Tests for canonical thinking-state parsing."""
+"""Tests for ``thinking``: one word names one axis, the rest are inherited."""
 
 from __future__ import annotations
+
+from types import MappingProxyType
 
 import pytest
 
 from sagent.thinking import (
-    ThinkingState,
-    request_thinking,
-    resolve_thinking_command,
-    should_redact_thinking,
-    should_show_thinking,
-    thinking_mode_supported,
+    THINKING_COMMANDS,
+    apply_thinking_command,
+    describe_thinking,
+    thinking_offered,
+)
+from sagent.types.capability import (
+    ModelCapability,
+    ModelLimits,
+    ModelSettings,
+    ThinkingBudget,
+    ThinkingOutput,
 )
 
 
-def test_resolve_full_state() -> None:
-    assert resolve_thinking_command("on-show") == "on-show"
+def _capability(
+    *,
+    budgets: frozenset[ThinkingBudget] = frozenset({"none", "auto", "fixed"}),
+    outputs: frozenset[ThinkingOutput] = frozenset({"none", "text", "redacted"}),
+) -> ModelCapability:
+    return ModelCapability(
+        model_id="m",
+        context=MappingProxyType({"": ModelLimits(max_request_tokens=1_000)}),
+        thinking_budget=budgets,
+        thinking_output=outputs,
+    )
+
+
+def _thinking() -> ModelSettings:
+    """A model that thinks, with the reasoning currently on."""
+    return ModelSettings(
+        capability=_capability(), thinking_budget="auto", thinking_output="text"
+    )
+
+
+def test_a_budget_word_leaves_the_display_alone() -> None:
+    """The point of the split: "think harder" must not also un-hide."""
+    assert apply_thinking_command("on", _thinking(), show=False) is False
+    assert apply_thinking_command("on", _thinking(), show=True) is True
+
+
+def test_a_display_word_leaves_the_budget_alone() -> None:
+    """And "stop showing me" must not stop the thinking."""
+    settings = _thinking()
+    assert apply_thinking_command("hide", settings, show=True) is False
+    assert settings.thinking_budget == "auto"
+    assert settings.thinking_output == "text"
 
 
 @pytest.mark.parametrize(
-    ("command", "state"),
-    [
-        ("adaptive", "adaptive-hide"),
-        ("on", "on-hide"),
-        ("off", "off-hide"),
-        ("redact", "redact-hide"),
-        ("show", "adaptive-show"),
-        ("hide", "adaptive-hide"),
-    ],
+    ("word", "budget"), [("adaptive", "auto"), ("on", "fixed"), ("off", "none")]
 )
-def test_resolve_startup_partial(command: str, state: str) -> None:
-    assert resolve_thinking_command(command) == state
+def test_each_budget_word_selects_its_rung(word: str, budget: ThinkingBudget) -> None:
+    settings = _thinking()
+    _ = apply_thinking_command(word, settings, show=True)
+    assert settings.thinking_budget == budget
+
+
+def test_off_also_pins_the_display() -> None:
+    """There is no reasoning to render, so ``show`` cannot stay true."""
+    settings = _thinking()
+    assert apply_thinking_command("off", settings, show=True) is False
+    assert settings.thinking_budget == "none"
+    assert settings.thinking_output == "none"
+
+
+def test_redact_withholds_the_body_without_stopping_the_thinking() -> None:
+    """Server-side redaction still spends budget; only the text is withheld."""
+    settings = _thinking()
+    assert apply_thinking_command("redact", settings, show=True) is False
+    assert settings.thinking_output == "redacted"
+    assert settings.thinking_budget == "auto"
+
+
+def test_redact_from_off_turns_thinking_back_on() -> None:
+    """Redacting nothing is not a state; the word implies reasoning happens."""
+    settings = ModelSettings(capability=_capability())
+    _ = apply_thinking_command("redact", settings, show=False)
+    assert settings.thinking_budget == "auto"
+
+
+def test_an_unknown_word_lists_the_valid_ones() -> None:
+    with pytest.raises(ValueError, match="thinking must be one of"):
+        _ = apply_thinking_command("louder", _thinking(), show=True)
+
+
+def test_every_advertised_word_applies() -> None:
+    """Without this a word could be offered by the REPL and then raise."""
+    for word in THINKING_COMMANDS:
+        _ = apply_thinking_command(word, _thinking(), show=True)
+
+
+def test_offered_checks_both_axes_a_word_touches() -> None:
+    """A word is two selections, so one axis passing proves nothing.
+
+    The gate this replaced compared a fused state against ``thinking_budget``
+    alone -- disjoint vocabularies, so it accepted every state on every model.
+    """
+    no_redaction = ModelSettings(
+        capability=_capability(outputs=frozenset({"none", "text"})),
+        thinking_budget="auto",
+        thinking_output="text",
+    )
+    assert not thinking_offered("redact", no_redaction)
+    assert thinking_offered("redact", _thinking())
+
+
+def test_offered_rejects_a_budget_the_model_withholds() -> None:
+    settings = ModelSettings(
+        capability=_capability(budgets=frozenset({"none", "auto"})),
+        thinking_budget="auto",
+        thinking_output="text",
+    )
+    assert not thinking_offered("on", settings)
+
+
+def test_an_unofferable_word_leaves_the_settings_untouched() -> None:
+    """Half-applying is a state neither the caller nor the wire agreed to."""
+    settings = ModelSettings(
+        capability=_capability(outputs=frozenset({"none", "text"})),
+        thinking_budget="auto",
+        thinking_output="text",
+    )
+    with pytest.raises(ValueError, match="not offered by m"):
+        _ = apply_thinking_command("redact", settings, show=True)
+    assert settings.thinking_output == "text"
+    assert settings.thinking_budget == "auto"
+
+
+def test_off_is_offerable_even_on_a_model_that_cannot_think() -> None:
+    """``none`` is on every ladder, so turning it off never fails."""
+    settings = ModelSettings(
+        capability=_capability(budgets=frozenset({"none"}), outputs=frozenset({"none"}))
+    )
+    assert thinking_offered("off", settings)
+    assert not thinking_offered("adaptive", settings)
 
 
 @pytest.mark.parametrize(
-    ("command", "current", "state"),
+    ("word", "show", "described"),
     [
-        ("adaptive", "on-show", "adaptive-show"),
-        ("on", "adaptive-hide", "on-hide"),
-        ("off", "adaptive-show", "off-hide"),
-        ("redact", "adaptive-show", "redact-hide"),
-        ("hide", "on-show", "on-hide"),
-        ("show", "adaptive-hide", "adaptive-show"),
+        ("off", True, "off"),
+        ("adaptive", True, "adaptive show"),
+        ("adaptive", False, "adaptive hide"),
+        ("on", True, "on show"),
+        ("redact", True, "redact"),
     ],
 )
-def test_resolve_live_partial(
-    command: str, current: ThinkingState, state: ThinkingState
+def test_describe_renders_the_words_that_reproduce_the_selection(
+    word: str, show: bool, described: str
 ) -> None:
-    assert resolve_thinking_command(command, current) == state
+    settings = _thinking()
+    shown = apply_thinking_command(word, settings, show=show)
+    assert describe_thinking(settings, show=shown) == described
 
 
-@pytest.mark.parametrize("current", ["off-hide", "redact-hide"])
-def test_show_invalid_from_unshowable_states(current: ThinkingState) -> None:
-    with pytest.raises(ValueError, match="cannot show"):
-        resolve_thinking_command("show", current)
+@pytest.mark.parametrize("word", THINKING_COMMANDS)
+def test_describe_survives_every_advertised_word(word: str) -> None:
+    """``describe`` maps the budget ladder by hand, so a new rung KeyErrors.
 
-
-@pytest.mark.parametrize("current", ["off-hide", "redact-hide"])
-def test_hide_invalid_from_unhidable_states(current: ThinkingState) -> None:
-    """``hide`` must reject impossible transitions just like ``show``."""
-    with pytest.raises(ValueError, match="cannot hide"):
-        resolve_thinking_command("hide", current)
-
-
-@pytest.mark.parametrize(
-    ("state", "request_mode", "show", "redact"),
-    [
-        ("adaptive-show", "adaptive", True, False),
-        ("adaptive-hide", "adaptive", False, False),
-        ("on-show", "enabled", True, False),
-        ("on-hide", "enabled", False, False),
-        ("off-hide", None, False, False),
-        ("redact-hide", "adaptive", False, True),
-    ],
-)
-def test_state_projections(
-    state: ThinkingState, request_mode: str | None, show: bool, redact: bool
-) -> None:
-    assert request_thinking(state) == request_mode
-    assert should_show_thinking(state) is show
-    assert should_redact_thinking(state) is redact
-
-
-@pytest.mark.parametrize(
-    ("mode", "valid_states", "expected"),
-    [
-        (None, ("off-hide",), True),  # off always supported
-        ("adaptive", ("adaptive-hide", "off-hide"), True),
-        ("adaptive", ("on-hide", "off-hide"), False),  # enabled-only model
-        ("enabled", ("on-hide", "off-hide"), True),
-        ("enabled", ("adaptive-hide", "off-hide"), False),  # adaptive-only model
-        ("adaptive", ("off-hide",), False),  # thinking effectively off
-    ],
-)
-def test_thinking_mode_supported(
-    mode: str | None, valid_states: tuple[str, ...], expected: bool
-) -> None:
-    assert thinking_mode_supported(mode, valid_states) is expected
+    ``apply`` is total over the words by construction (its ``match`` ends in
+    a raise); ``describe``'s dict does not, and only the round trip crosses
+    both. Without this, adding a ``ThinkingBudget`` rung passes every test
+    and then crashes the ``/thinking`` handler that prints the result.
+    """
+    settings = _thinking()
+    for show in (True, False):
+        shown = apply_thinking_command(word, settings, show=show)
+        described = describe_thinking(settings, show=shown)
+        assert described.split()[0] in THINKING_COMMANDS
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ def test_minimax_from_env_reads(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_minimax_default_model_known() -> None:
     p = MiniMax.from_key("k")
     m = p.model()
-    assert m.model_id == MiniMax.DEFAULT_MODEL
+    assert m.capability.model_id == MiniMax.DEFAULT_MODEL
 
 
 def test_minimax_unknown_model_raises() -> None:
@@ -42,16 +42,16 @@ def test_minimax_unknown_model_raises() -> None:
 def test_minimax_model_supports_thinking_via_reasoning_field() -> None:
     p = MiniMax.from_key("k")
     m = p.model("MiniMax-M2.7")
-    # ``_reasoning_field = "reasoning_content"`` → supports_thinking True.
-    assert m.supports_thinking is True
+    # The provider parses ``reasoning_content``, so the row must offer it.
+    assert m.capability.thinking_output == frozenset({"none", "text"})
 
 
 def test_minimax_known_models_have_pricing() -> None:
     p = MiniMax.from_key("k")
     for mid in MiniMax.CAPABILITIES:
         m = p.model(mid)
-        assert m.spec.prices[PriceCatalogProduct()].request > 0
-        assert m.spec.prices[PriceCatalogProduct()].response > 0
+        assert m.capability.prices[PriceCatalogProduct()].request > 0
+        assert m.capability.prices[PriceCatalogProduct()].response > 0
 
 
 def test_minimax_base_url_override_via_from_key() -> None:

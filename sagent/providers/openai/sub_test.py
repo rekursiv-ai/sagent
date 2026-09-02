@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, cast
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncio
@@ -19,6 +19,7 @@ import openai
 import pytest
 
 from sagent.agent.retry import is_rate_limited, is_retryable
+from sagent.catalog import openai as openai_catalog
 from sagent.lib.custom_json import JSONValue
 from sagent.providers import OpenAI
 from sagent.providers.lib.errors import (
@@ -39,8 +40,15 @@ from sagent.providers.openai.sub import (
     _jwt_claim,
     _jwt_exp,
     _jwt_payload,
+    _OpenAISubModel,
     _parse_tool_arguments,
-    _subscription_limits,
+    _subscription_context,
+)
+from sagent.types.capability import (
+    ModelCapability,
+    ModelLimits,
+    ModelSettings,
+    ThinkingEffort,
 )
 from sagent.types.cost import (
     PriceCatalog,
@@ -49,10 +57,7 @@ from sagent.types.cost import (
 )
 from sagent.types.exceptions import AuthRefreshError, UserFacingError
 from sagent.types.model import (
-    ModelCapability,
-    ModelLimits,
     ModelRequest,
-    ModelSpec,
     StreamInterruptedError,
 )
 from sagent.types.runtime import (
@@ -66,19 +71,29 @@ from sagent.types.runtime import (
 )
 
 
-def _free_spec() -> ModelSpec:
-    """A spec whose every rate is zero -- cost is not what these assert."""
-    return ModelSpec(
-        prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+def _free_model() -> _OpenAISubModel:
+    """A model whose every rate is zero -- cost is not what these assert."""
+    return _OpenAISubModel(
+        provider=_make_provider(),
+        capability=ModelCapability(
+            prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()})
+        ),
+        settings=ModelSettings(),
+        max_request_tokens=1_000,
     )
 
 
-def _priced_spec() -> ModelSpec:
+def _priced_model() -> _OpenAISubModel:
     """$1/Mtok request with the usual 1.25x cache-write multiplier."""
-    return ModelSpec(
-        prices=PriceCatalog(
-            {PriceCatalogProduct(): TokenPrice(request=1.0, cache_write=1.25)}
-        )
+    return _OpenAISubModel(
+        provider=_make_provider(),
+        capability=ModelCapability(
+            prices=PriceCatalog(
+                {PriceCatalogProduct(): TokenPrice(request=1.0, cache_write=1.25)}
+            )
+        ),
+        settings=ModelSettings(),
+        max_request_tokens=1_000,
     )
 
 
@@ -288,44 +303,65 @@ def _stub_request_messages(
     return ModelRequest(messages=list(items))
 
 
-def test_subscription_limits_clamp_request_tokens() -> None:
+def test_subscription_context_clamps_request_tokens() -> None:
     cap = ModelCapability(
-        context_limits=ModelLimits(
-            max_request_tokens=1_000_000, max_response_tokens=1_000_000
+        context=MappingProxyType(
+            {
+                "": ModelLimits(
+                    max_request_tokens=1_000_000, max_response_tokens=1_000_000
+                )
+            }
         )
     )
-    clamped = _subscription_limits(cap)
-    # Wire contract is 272_000 / 32_000 -- see openai_sub._SUBSCRIPTION_MAX_*.
+    clamped = _subscription_context(cap)[""]
+    # Wire contract is 272_000 / 32_000 -- see sub._SUBSCRIPTION_MAX_*.
     assert clamped.max_request_tokens == 272_000
     assert clamped.max_response_tokens == 32_000
 
 
-def test_subscription_limits_keep_small_windows() -> None:
+def test_subscription_context_keeps_small_windows() -> None:
     cap = ModelCapability(
-        context_limits=ModelLimits(
-            max_request_tokens=100_000, max_response_tokens=10_000
+        context=MappingProxyType(
+            {"": ModelLimits(max_request_tokens=100_000, max_response_tokens=10_000)}
         )
     )
-    clamped = _subscription_limits(cap)
+    clamped = _subscription_context(cap)[""]
     assert clamped.max_request_tokens == 100_000
     assert clamped.max_response_tokens == 10_000
 
 
-def test_subscription_limits_inherit_size_caps_from_parent() -> None:
+def test_subscription_context_drops_the_long_window_tag() -> None:
+    """``+1m`` clamps to exactly the base id, so offering it would mislead."""
+    cap = ModelCapability(
+        context=MappingProxyType(
+            {
+                "": ModelLimits(max_request_tokens=272_000),
+                "+1m": ModelLimits(max_request_tokens=1_050_000),
+            }
+        )
+    )
+    assert _subscription_context(cap).keys() == {""}
+
+
+def test_subscription_context_inherits_size_caps_from_parent() -> None:
     # Only the token windows are subscription-specific; the image/wire byte
     # caps are a property of the underlying model and must flow through
     # unchanged, not be overwritten by a stale local constant. A divergent
     # parent capability proves inheritance rather than a hardcoded match.
     cap = ModelCapability(
-        context_limits=ModelLimits(
-            max_request_tokens=1_000_000,
-            max_response_tokens=1_000_000,
-            max_image_edge_px=4096,
-            max_image_bytes=7_000_000,
-            max_request_bytes=33_000_000,
+        context=MappingProxyType(
+            {
+                "": ModelLimits(
+                    max_request_tokens=1_000_000,
+                    max_response_tokens=1_000_000,
+                    max_image_edge_px=4096,
+                    max_image_bytes=7_000_000,
+                    max_request_bytes=33_000_000,
+                )
+            }
         )
     )
-    clamped = _subscription_limits(cap)
+    clamped = _subscription_context(cap)[""]
     assert clamped.max_image_edge_px == 4096
     assert clamped.max_image_bytes == 7_000_000
     assert clamped.max_request_bytes == 33_000_000
@@ -754,7 +790,7 @@ def test_subscription_model_unknown_id_raises() -> None:
 
 def test_subscription_model_uses_default_when_unset() -> None:
     m = _make_provider().model()
-    assert m.model_id == OpenAISubscription.DEFAULT_MODEL
+    assert m.capability.model_id == OpenAISubscription.DEFAULT_MODEL
 
 
 def test_subscription_default_model_is_openai_default_without_1m() -> None:
@@ -772,14 +808,14 @@ def test_subscription_default_utility_model_inherits_from_openai() -> None:
 
 def test_subscription_utility_model_uses_utility_default() -> None:
     m = _make_provider().utility_model()
-    assert m.model_id == OpenAISubscription.DEFAULT_UTILITY_MODEL
+    assert m.capability.model_id == OpenAISubscription.DEFAULT_UTILITY_MODEL
 
 
 def test_subscription_model_clamps_against_wire_contract() -> None:
     m = _make_provider().model("gpt-5.5")
     # KNOWN_MODELS is clamped via ``_subscription_profile``.
     assert m.max_request_tokens == 272_000
-    assert m.max_response_tokens == 32_000
+    assert m.limits.max_response_tokens == 32_000
 
 
 def test_subscription_model_override_cannot_bypass_wire_contract() -> None:
@@ -797,8 +833,8 @@ def test_subscription_rejects_1m_ids() -> None:
 
 def test_subscription_model_supports_thinking_via_reasoning_effort() -> None:
     m = _make_provider().model("gpt-5.5")
-    assert m.supports_thinking is True
-    assert m.supports_account_auth is True
+    assert m.capability.thinking_budget == frozenset({"none", "auto"})
+    assert m.capability.account_auth is True
 
 
 def test_subscription_effort_matches_api_key_path() -> None:
@@ -811,8 +847,9 @@ def test_subscription_effort_matches_api_key_path() -> None:
     sub_p = _make_provider()
     api_p = OpenAI.from_key("k")
     for model_id in ("o1", "o3-mini", "gpt-5.5"):
-        assert sub_p.model(model_id).supports_effort is (
-            api_p.model(model_id).supports_effort
+        assert (
+            sub_p.model(model_id).capability.thinking_effort
+            == api_p.model(model_id).capability.thinking_effort
         )
     for provider in (sub_p, api_p):
         with pytest.raises(ValueError, match="Unknown model"):
@@ -820,15 +857,10 @@ def test_subscription_effort_matches_api_key_path() -> None:
 
 
 def test_subscription_valid_service_tiers_priority_only() -> None:
-    # Codex ``/fast`` slash command sets service_tier="priority"; the
-    # subscription endpoint accepts no other values.
+    # ``/fast`` sets service_tier="priority"; an unqualified request still
+    # sends the vendor default, so ``auto`` stays selectable and nothing else.
     m = _make_provider().model("gpt-5.5")
-    assert m.spec.valid_service_tiers == ("priority",)
-
-
-def test_subscription_valid_latency_modes_fast() -> None:
-    m = _make_provider().model("gpt-5.5")
-    assert m.spec.valid_latency_modes == ("fast",)
+    assert m.capability.service_tier == frozenset({"auto", "priority"})
 
 
 @pytest.mark.anyio
@@ -855,12 +887,15 @@ async def test_subscription_close_releases_sdk_and_http_client() -> None:
     assert provider._sdk_token is None
 
 
-def test_subscription_fast_latency_resolves_to_priority_tier() -> None:
+def test_subscription_priority_tier_reaches_the_wire() -> None:
     m = _make_provider().model("gpt-5.5")
-    tier = m._effective_service_tier(
-        ModelRequest(messages=[UserMessage(text="x")], latency="fast")
-    )
-    assert tier == "priority"
+    m._settings = ModelSettings(capability=m.capability, service_tier="priority")
+    assert m._effective_service_tier() == "priority"
+
+
+def test_subscription_omits_the_default_tier() -> None:
+    """``auto`` is "let the vendor pick"; sending it pins nothing."""
+    assert _make_provider().model("gpt-5.5")._effective_service_tier() is None
 
 
 class _StatusError(Exception):
@@ -939,10 +974,12 @@ def test_subscription_expired_property_false_when_far_future() -> None:
     assert p.expired is False
 
 
-async def _reasoning_effort_for(
-    request: ModelRequest,
-    model_id: str = "gpt-5.5",
-) -> str:
+async def _create_kwargs_for(
+    *,
+    model_id: str = "gpt-5.6-sol",
+    effort: ThinkingEffort = "none",
+) -> dict[str, object]:
+    """Kwargs ``stream`` hands ``responses.create`` at ``effort``."""
     provider = _make_provider()
     sdk = MagicMock()
     sdk.responses = MagicMock()
@@ -957,107 +994,64 @@ async def _reasoning_effort_for(
         ),
     ):
         model = provider.model(model_id)
-        await model.stream(request)
-    await_args = sdk.responses.create.await_args
-    assert await_args is not None
-    raw_reasoning: object = await_args.kwargs["reasoning"]
-    assert isinstance(raw_reasoning, dict)
-    reasoning = cast(dict[str, object], raw_reasoning)
-    effort = reasoning["effort"]
-    assert isinstance(effort, str)
-    return effort
-
-
-async def _create_kwargs_for(
-    request: ModelRequest,
-    *,
-    model_id: str = "gpt-5.6-sol",
-) -> dict[str, object]:
-    provider = _make_provider()
-    sdk = MagicMock()
-    sdk.responses = MagicMock()
-    sdk.responses.create = AsyncMock(
-        return_value=_DelayedStream([_CompletedEvent()], delay_sec=0.0)
-    )
-    with (
-        patch.object(provider, "get_sdk", AsyncMock(return_value=sdk)),
-        patch(
-            "sagent.providers.openai.sub.oai_responses.ResponseCompletedEvent",
-            _CompletedEvent,
-        ),
-    ):
-        await provider.model(model_id).stream(request)
+        model._settings = ModelSettings(
+            capability=model.capability,
+            thinking_effort=effort,
+        )
+        await model.stream(ModelRequest(messages=[UserMessage(text="hi")]))
     await_args = sdk.responses.create.await_args
     assert await_args is not None
     return cast(dict[str, object], await_args.kwargs)
 
 
-@pytest.mark.anyio
-async def test_subscription_stream_maps_adaptive_thinking_to_reasoning_effort() -> None:
-    effort = await _reasoning_effort_for(
-        ModelRequest(messages=[UserMessage(text="hi")], thinking="adaptive")
-    )
-    assert effort == "medium"
-
-
-@pytest.mark.anyio
-async def test_subscription_stream_maps_sagent_max_effort_to_openai_high() -> None:
-    effort = await _reasoning_effort_for(
-        ModelRequest(messages=[UserMessage(text="hi")], effort="max")
-    )
-    assert effort == "high"
+async def _wire_effort_for(*, model_id: str, effort: ThinkingEffort) -> object:
+    """The ``reasoning.effort`` value the request carried."""
+    reasoning = (await _create_kwargs_for(model_id=model_id, effort=effort))[
+        "reasoning"
+    ]
+    assert isinstance(reasoning, dict)
+    return cast(dict[str, object], reasoning)["effort"]
 
 
 @pytest.mark.parametrize(
     ("effort", "wire_effort"),
-    [("off", "none"), ("xhigh", "xhigh"), ("max", "max")],
+    [("min", "minimal"), ("medium", "medium"), ("xhigh", "high"), ("max", "high")],
+)
+@pytest.mark.anyio
+async def test_subscription_stream_maps_pre_56_effort_to_wire_vocabulary(
+    effort: ThinkingEffort,
+    wire_effort: str,
+) -> None:
+    """The Responses transport reads the wire value from the same catalog.
+
+    Locks the cross-transport contract: the pre-5.6 wire takes only
+    ``minimal``/``low``/``medium``/``high`` here exactly as it does in the
+    chat-completions ``_build_body`` path.
+    """
+    assert await _wire_effort_for(model_id="gpt-5.5", effort=effort) == wire_effort
+
+
+@pytest.mark.parametrize(
+    ("effort", "wire_effort"),
+    [("min", "none"), ("medium", "medium"), ("xhigh", "xhigh"), ("max", "max")],
 )
 @pytest.mark.anyio
 async def test_subscription_stream_preserves_gpt_56_effort(
-    effort: str,
+    effort: ThinkingEffort,
     wire_effort: str,
 ) -> None:
-    actual = await _reasoning_effort_for(
-        ModelRequest(messages=[UserMessage(text="hi")], effort=effort),
-        model_id="gpt-5.6-sol",
-    )
-    assert actual == wire_effort
+    assert await _wire_effort_for(model_id="gpt-5.6-sol", effort=effort) == wire_effort
 
 
 @pytest.mark.anyio
-async def test_subscription_stream_maps_sagent_off_effort_to_openai_minimal() -> None:
-    """Responses transport reads the wire value from the same catalog.
-
-    Locks the cross-transport contract: ``off`` maps to ``minimal`` here
-    exactly as it does in the chat-completions ``_build_body`` path, so the
-    two OpenAI transports never disagree on the wire vocabulary.
-    """
-    effort = await _reasoning_effort_for(
-        ModelRequest(messages=[UserMessage(text="hi")], effort="off")
-    )
-    assert effort == "minimal"
-
-
-async def _reasoning_for(request: ModelRequest) -> object:
-    """Return the ``reasoning`` object passed to ``responses.create``."""
-    provider = _make_provider()
-    sdk = MagicMock()
-    sdk.responses = MagicMock()
-    sdk.responses.create = AsyncMock(
-        return_value=_DelayedStream([_CompletedEvent()], delay_sec=0.0)
-    )
-    with (
-        patch.object(provider, "get_sdk", AsyncMock(return_value=sdk)),
-        patch(
-            "sagent.providers.openai.sub.oai_responses.ResponseCompletedEvent",
-            _CompletedEvent,
-        ),
-    ):
-        model = provider.model("gpt-5.5")
-        await model.stream(request)
-    await_args = sdk.responses.create.await_args
-    assert await_args is not None
-    return await_args.kwargs["reasoning"]
+async def test_subscription_catalog_efforts_are_all_buildable() -> None:
+    """Every effort the catalog offers must reach the wire."""
+    model_id = "gpt-5.6-sol"
+    capability = _make_provider().model(model_id).capability
+    for effort in capability.thinking_effort - {"none"}:
+        assert await _wire_effort_for(
+            model_id=model_id, effort=effort
+        ) == openai_catalog.reasoning_effort(effort, model_id=model_id)
 
 
 @pytest.mark.anyio
@@ -1069,9 +1063,9 @@ async def test_subscription_stream_requests_reasoning_summary_when_thinking() ->
     and ``on_thinking`` never fires. Requesting thinking must therefore
     set ``summary`` so the reasoning surface is actually populated.
     """
-    reasoning = await _reasoning_for(
-        ModelRequest(messages=[UserMessage(text="hi")], thinking="adaptive")
-    )
+    reasoning = (await _create_kwargs_for(model_id="gpt-5.5", effort="medium"))[
+        "reasoning"
+    ]
     assert isinstance(reasoning, dict)
     assert cast(dict[str, object], reasoning)["summary"] == "auto"
 
@@ -1080,9 +1074,7 @@ async def test_subscription_stream_requests_reasoning_summary_when_thinking() ->
 async def test_subscription_stream_requests_encrypted_reasoning_for_stateless_history() -> (
     None
 ):
-    kwargs = await _create_kwargs_for(
-        ModelRequest(messages=[UserMessage(text="hi")], effort="medium")
-    )
+    kwargs = await _create_kwargs_for(effort="medium")
     assert kwargs["store"] is False
     assert kwargs["include"] == ["reasoning.encrypted_content"]
     reasoning = kwargs["reasoning"]
@@ -1091,12 +1083,11 @@ async def test_subscription_stream_requests_encrypted_reasoning_for_stateless_hi
 
 
 @pytest.mark.anyio
-async def test_subscription_stream_omits_reasoning_summary_without_thinking() -> None:
-    """No thinking requested -> no reasoning object (and no summary)."""
-    reasoning = await _reasoning_for(
-        ModelRequest(messages=[UserMessage(text="hi")], thinking=None)
-    )
-    assert getattr(reasoning, "summary", None) is None
+async def test_subscription_stream_omits_reasoning_object_without_thinking() -> None:
+    """``none`` means "send no knob", not "send the wire's off value"."""
+    kwargs = await _create_kwargs_for(model_id="gpt-5.5")
+    assert kwargs["reasoning"] is openai.omit
+    assert kwargs["include"] is openai.omit
 
 
 class TestHandleAuthError:
@@ -1533,11 +1524,7 @@ class TestStreamAuthRetry:
         request = httpx2.Request("POST", "https://chatgpt.com/backend-api/codex")
         response = httpx2.Response(401, request=request)
         auth_err = openai.AuthenticationError(
-            "Unauthorized",
-            # openai vendors httpx2; the two Response classes are structurally
-            # identical but nominally distinct to the checker.
-            response=cast(Any, response),
-            body=None,
+            "Unauthorized", response=response, body=None
         )
         # Return DIFFERENT SDKs from get_sdk so the test can prove the
         # retry call landed on a freshly-built SDK (with a rotated
@@ -1582,7 +1569,7 @@ class TestStreamIdleTimeout:
             await asyncio.wait_for(
                 _consume_stream(
                     stream,
-                    spec=_free_spec(),
+                    model=_free_model(),
                     publish=None,
                 ),
                 timeout=0.2,
@@ -1614,7 +1601,7 @@ class TestStreamIdleTimeout:
         response = await asyncio.wait_for(
             _consume_stream(
                 stream,
-                spec=_free_spec(),
+                model=_free_model(),
                 publish=None,
             ),
             timeout=0.2,
@@ -1636,7 +1623,7 @@ class TestStreamIdleTimeout:
         with pytest.raises(StreamInterruptedError) as raised:
             await _consume_stream(
                 stream,
-                spec=_free_spec(),
+                model=_free_model(),
                 publish=None,
             )
 
@@ -1656,7 +1643,7 @@ class TestStreamIdleTimeout:
         with pytest.raises(UserFacingError) as raised:
             await _consume_stream(
                 stream,
-                spec=_free_spec(),
+                model=_free_model(),
                 publish=None,
             )
 
@@ -1703,7 +1690,7 @@ class TestStreamIdleTimeout:
 
         stream = _ClosableStream([_ResponseErrorEvent()])
         with pytest.raises(UserFacingError):
-            await _consume_stream(stream, spec=_free_spec(), publish=None)
+            await _consume_stream(stream, model=_free_model(), publish=None)
         assert stream.closed, "error-event path leaked the stream (aclose never called)"
 
     @pytest.mark.anyio
@@ -1719,7 +1706,7 @@ class TestStreamIdleTimeout:
         with pytest.raises(UserFacingError) as raised:
             await _consume_stream(
                 stream,
-                spec=_free_spec(),
+                model=_free_model(),
                 publish=None,
             )
 
@@ -1750,7 +1737,7 @@ class TestStreamIdleTimeout:
 
         response = await _consume_stream(
             stream,
-            spec=_free_spec(),
+            model=_free_model(),
             publish=None,
         )
 
@@ -1777,7 +1764,7 @@ class TestStreamIdleTimeout:
 
         response = await _consume_stream(
             stream,
-            spec=_free_spec(),
+            model=_free_model(),
             publish=None,
         )
 
@@ -1803,7 +1790,7 @@ class TestStreamIdleTimeout:
         )
         response = await _consume_stream(
             _DelayedStream([event], delay_sec=0.0),
-            spec=_priced_spec(),
+            model=_priced_model(),
             publish=None,
         )
         assert response.tokens.request == 3
@@ -1831,7 +1818,7 @@ class TestStreamIdleTimeout:
                 [_ReasoningOutputDoneEvent(), _CompletedEvent()],
                 delay_sec=0.0,
             ),
-            spec=_priced_spec(),
+            model=_priced_model(),
             publish=None,
         )
         encrypted = next(
@@ -1870,7 +1857,7 @@ class TestStreamIdleTimeout:
                 ],
                 delay_sec=0.0,
             ),
-            spec=_priced_spec(),
+            model=_priced_model(),
             publish=None,
         )
         assert response.message.text == "I can’t help with that."
@@ -1914,7 +1901,7 @@ class TestStreamIdleTimeout:
 
         response = await _consume_stream(
             stream,
-            spec=_priced_spec(),
+            model=_priced_model(),
             publish=_sink,
         )
 
@@ -1930,7 +1917,7 @@ class TestStreamIdleTimeout:
         task = asyncio.create_task(
             _consume_stream(
                 stream,
-                spec=_priced_spec(),
+                model=_priced_model(),
                 publish=None,
             ),
         )
@@ -2052,11 +2039,3 @@ if __name__ == "__main__":
     from sagent.lib.testing.main import test_main
 
     test_main(__file__)
-
-
-def test_subscription_rejects_unmappable_effort_rather_than_billing_high() -> None:
-    """An unknown effort must raise, not silently run at the priciest level."""
-    m = _make_provider().model("gpt-5.5")
-    req = ModelRequest(messages=[UserMessage(text="x")], effort="bogus")
-    with pytest.raises(ValueError, match="Unknown effort"):
-        _ = m._reasoning_effort(req)

@@ -20,7 +20,7 @@ from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
 )
-from sagent.types.model import ModelCapability
+from sagent.types.capability import ModelCapability
 
 
 __all__ = [
@@ -72,10 +72,10 @@ class OpenAI(OpenAICompat):
     # Pricing: https://developers.openai.com/api/docs/pricing
     # Cross-ref: https://github.com/taylorwilsdon/llm-context-limits
     #
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = openai_catalog.CHAT_MODELS
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = openai_catalog.models()
     """Chat Completions rows: GPT-5.6 ``max`` downgrades to ``xhigh``."""
 
-    TRANSPORT: ClassVar[ModelCapability] = openai_catalog.API
+    TRANSPORT: ClassVar[ModelCapability] = openai_catalog.api()
     """What this transport lets through; subclasses declare their own."""
 
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _OpenAIModel

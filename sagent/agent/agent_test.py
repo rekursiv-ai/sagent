@@ -23,7 +23,6 @@ import pytest
 
 from sagent import (
     providers as providers_module,
-    types,
 )
 from sagent.agent import (
     agent as agent_module,
@@ -62,28 +61,102 @@ from sagent.lib import last_models, token_count
 from sagent.lib.custom_json import JSON, json_freeze
 from sagent.providers import Google
 from sagent.tools.read import Read
-from sagent.types.compactor import CompactRestorable
+from sagent.types.capability import (
+    ModelCapability,
+    ModelLimits,
+    ModelSettings,
+    ServiceTier,
+    ThinkingEffort,
+)
+from sagent.types.compactor import (
+    CompactRestorable,
+    ReattachPolicy,
+)
 from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
     TokenCost,
+    TokenCount,
     TokenPrice,
 )
+from sagent.types.exceptions import (
+    BudgetExhaustedError,
+    ContextOverflowError,
+)
 from sagent.types.model import (
-    ModelLimits,
-    ModelSpec,
-    ThinkingEffort,
+    AgentSettings,
+    Model,
+    ModelRecipe,
+    ModelRequest,
+    ModelResponse,
+    PromptTooLongError,
+    RequestTooLargeError,
+    UsageSnapshot,
+    UsageWindow,
+    default_buffer_tokens,
+)
+from sagent.types.runtime import (
+    CANCELLED_PLACEHOLDER,
+    DETACHED_ARRIVED_SYSTEM_NOTE,
+    DETACHED_ARRIVED_TOOL,
+    DETACHED_PLACEHOLDER,
+    AgentIdle,
+    AgentSendMessage,
+    AssistantMessage,
+    BytesMessage,
+    Compact,
+    CompactComplete,
+    CompactFailed,
+    CompactStarted,
+    DetachedResult,
+    Halt,
+    Kill,
+    ModelCallStarted,
+    ModelContextEvent,
+    ModelIdle,
+    ModelResponseComplete,
+    ModelResponseError,
+    ModelResponsePartial,
+    ModelServiceSuspended,
+    ModelSwitch,
+    NoticeMessage,
+    Quit,
+    RuntimeEvent,
+    SaveSession,
+    ServiceErrorSnapshot,
+    StatusChanged,
+    ToolCall,
+    ToolLabel,
+    ToolResult,
+    UserMessage,
 )
 from sagent.types.tape import (
     ContextSplice,
+    MaskRange,
+    ReferrableTapeEvent,
     TapeRecord,
     TapeRef,
     full_tape_mask,
 )
+from sagent.types.tools import (
+    Tool,
+    ToolResultPolicy,
+)
+
+
+def _stub_largest_context(budget: AgentSettings) -> int:
+    """``largest_context`` for the stub compactors below.
+
+    Delegates to the real ``SummaryCompactor`` so a stub that stubs only
+    the PREDICATE still reports the production scalar -- the two are one
+    heuristic, and a stub answering them independently would let a test
+    pass against a combination production cannot produce.
+    """
+    return SummaryCompactor().largest_context(budget)
 
 
 def _summary_override(
-    summary: list[types.runtime.ModelContextEvent],
+    summary: list[ModelContextEvent],
     mint_ref: Callable[[], TapeRef],
     *,
     tape: Sequence[TapeRecord] | None = None,
@@ -101,9 +174,7 @@ def _summary_override(
     care about the payload and don't need barrier semantics).
     """
     if tape:
-        mask: tuple[types.tape.MaskRange, ...] = (
-            types.tape.MaskRange.between(tape[0].ref, tape[-1].ref),
-        )
+        mask: tuple[MaskRange, ...] = (MaskRange.between(tape[0].ref, tape[-1].ref),)
     else:
         mask = ()
     return ContextSplice(
@@ -126,67 +197,101 @@ class StubModel:
     model_id: str = "stub-1"
     max_request_tokens: int = 100_000
     max_response_tokens: int = 1_024
-    supports_streaming: bool = True
     supports_thinking: bool = False
-    supports_effort: bool = False
-    valid_efforts: tuple[str, ...] = ()
+    valid_efforts: tuple[ThinkingEffort, ...] = ()
     supports_cache_control: bool = False
-    valid_service_tiers: tuple[str, ...] = ()
-    valid_latency_modes: tuple[str, ...] = ()
+    valid_service_tiers: tuple[ServiceTier, ...] = ()
     supports_context_management: bool = False
     supports_persistent_retry: bool = False
     supports_account_auth: bool = False
     max_image_dim: int = 8_000
     max_image_bytes: int = 5 * 1024 * 1024
     max_request_bytes: int = 32 * 1024 * 1024
-    responses: list[types.runtime.AssistantMessage] = field(default_factory=list)
-    received: list[types.model.ModelRequest] = field(default_factory=list)
-    usage: types.model.UsageSnapshot | None = None
+    chosen: ModelSettings | None = None
+    responses: list[AssistantMessage] = field(default_factory=list)
+    received: list[ModelRequest] = field(default_factory=list)
+    usage: UsageSnapshot | None = None
 
     @property
-    def valid_thinking_states(self) -> tuple[str, ...]:
-        return (
-            ("adaptive-hide", "on-hide", "off-hide")
-            if self.supports_thinking
-            else ("off-hide",)
-        )
-
-    @property
-    def spec(self) -> ModelSpec:
-        """Derive the spec from this stub's configured flags."""
-        return ModelSpec(
+    def capability(self) -> ModelCapability:
+        """Derive the capability row from this stub's configured flags."""
+        thinking: frozenset[ThinkingEffort] = frozenset({"none", *self.valid_efforts})
+        return ModelCapability(
             model_id=self.model_id,
-            context_limits=ModelLimits(
-                max_request_tokens=self.max_request_tokens,
-                max_response_tokens=self.max_response_tokens,
-                max_request_bytes=self.max_request_bytes,
-                max_image_edge_px=self.max_image_dim,
-                max_image_bytes=self.max_image_bytes,
+            context=MappingProxyType(
+                {
+                    "": ModelLimits(
+                        max_request_tokens=self.max_request_tokens,
+                        max_response_tokens=self.max_response_tokens,
+                        max_request_bytes=self.max_request_bytes,
+                        max_image_edge_px=self.max_image_dim,
+                        max_image_bytes=self.max_image_bytes,
+                    )
+                }
             ),
             prices=PriceCatalog(
                 {PriceCatalogProduct(): TokenPrice()}
-                | (
-                    {PriceCatalogProduct(fast=True): TokenPrice()}
-                    if self.valid_latency_modes
-                    else {}
-                )
+                | {
+                    PriceCatalogProduct(service_tier=t): TokenPrice()
+                    for t in self.valid_service_tiers
+                }
             ),
-            supported_thinking_efforts=MappingProxyType(
-                {cast(ThinkingEffort, e): e for e in self.valid_efforts}
+            thinking_effort=thinking,
+            thinking_budget=(
+                frozenset({"none", "auto", "fixed"})
+                if self.supports_thinking
+                else frozenset({"none"})
             ),
-            supported_thinking_budgets=(
-                frozenset({"auto", "fixed"}) if self.supports_thinking else frozenset()
+            thinking_output=(
+                frozenset({"none", "text"})
+                if self.supports_thinking
+                else frozenset({"none"})
             ),
-            supported_thinking_outputs=(
-                frozenset({"text"}) if self.supports_thinking else frozenset()
+            service_tier=frozenset({"auto", *self.valid_service_tiers}),
+            cache_ttl_sec=3600.0 if self.supports_cache_control else 0.0,
+            manage_context_server_side=(
+                frozenset({False, True})
+                if self.supports_context_management
+                else frozenset({False})
             ),
-            fast=bool(self.valid_latency_modes),
-            latency_modes=frozenset(self.valid_latency_modes),
-            service_tiers=frozenset(self.valid_service_tiers),
-            manages_context=self.supports_context_management,
-            prompt_cache_breakpoints=self.supports_cache_control,
             retries_internally=self.supports_persistent_retry,
             account_auth=self.supports_account_auth,
+        )
+
+    @property
+    def settings(self) -> ModelSettings:
+        """What this stub chose; materialized once and cached.
+
+        Settings are state the caller writes through, so returning a fresh
+        object per read discarded every selection made against the stub.
+        Lazy because the narrowest selection depends on ``capability``,
+        which the configured flags above derive.
+        """
+        if self.chosen is None:
+            self.chosen = ModelSettings.narrowest(self.capability)
+        return self.chosen
+
+    @property
+    def limits(self) -> ModelLimits:
+        """Ceilings of the selected context tag."""
+        return self.settings.limits
+
+    @property
+    def tagged_model_id(self) -> str:
+        """Display id carrying its context tag."""
+        return f"{self.model_id}{self.settings.context}"
+
+    def spend(self, tokens: TokenCount) -> TokenCost:
+        """Price ``tokens`` at the tier these settings select."""
+        prompt = tokens.request + tokens.cache_write + tokens.cache_read
+        return (
+            self.capability.prices[
+                PriceCatalogProduct(
+                    service_tier=self.settings.service_tier,
+                    min_request_tokens=prompt,
+                )
+            ]
+            * tokens
         )
 
     def approx_text_tokens(self, text: str) -> int:
@@ -196,7 +301,7 @@ class StubModel:
         del data
         return 256
 
-    def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+    def approx_request_tokens(self, request: ModelRequest) -> int:
         return token_count.approx_request_tokens(request, self)
 
     async def actual_text_tokens(self, text: str) -> int:
@@ -205,7 +310,7 @@ class StubModel:
     async def actual_image_tokens(self, data: bytes) -> int:
         return self.approx_image_tokens(data)
 
-    async def actual_request_tokens(self, request: types.model.ModelRequest) -> int:
+    async def actual_request_tokens(self, request: ModelRequest) -> int:
         return self.approx_request_tokens(request)
 
     def is_context_overflow(self, error: Exception) -> bool:
@@ -216,27 +321,21 @@ class StubModel:
         del error
         return False
 
-    def usage_snapshot(self) -> types.model.UsageSnapshot | None:
+    def usage_snapshot(self) -> UsageSnapshot | None:
         return self.usage
 
-    async def buffer(
-        self, request: types.model.ModelRequest
-    ) -> types.model.ModelResponse:
+    async def buffer(self, request: ModelRequest) -> ModelResponse:
         return await self.stream(request)
 
     async def stream(
         self,
-        request: types.model.ModelRequest,
-        publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
-    ) -> types.model.ModelResponse:
+        request: ModelRequest,
+        publish: Callable[[RuntimeEvent], None] | None = None,
+    ) -> ModelResponse:
         del publish
         self.received.append(request)
-        msg = (
-            self.responses.pop(0)
-            if self.responses
-            else types.runtime.AssistantMessage(text="ok")
-        )
-        return types.model.ModelResponse(message=msg)
+        msg = self.responses.pop(0) if self.responses else AssistantMessage(text="ok")
+        return ModelResponse(message=msg)
 
     async def close(self) -> None:
         """No-op teardown -- the stub holds no resources.
@@ -268,7 +367,7 @@ class StubTool:
         del args
         return "echo"
 
-    def summary_result(self, result: types.runtime.ToolResult) -> str | None:
+    def summary_result(self, result: ToolResult) -> str | None:
         del result
         return None
 
@@ -279,23 +378,22 @@ class StubTool:
         del args
         return None
 
-    async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
         self.calls.append(args)
         content = (
             self.response if self.response is not None else str(args.get("msg", ""))
         )
-        return types.runtime.ToolResult(call_id="", content=content)
+        return ToolResult(call_id="", content=content)
 
 
 def _build_agent(
     *,
-    model: types.model.Model | None = None,
-    tools: list[types.tools.Tool] | None = None,
+    model: Model | None = None,
+    tools: list[Tool] | None = None,
     system: SystemPromptArg = "",
-    budget: types.model.ContextBudget | None = None,
+    budget: AgentSettings | None = None,
     max_budget_usd: float | None = None,
     session_dir: Path | None = None,
-    effort: str | None = None,
 ) -> Agent:
     return Agent(
         model=model or StubModel(),
@@ -304,7 +402,6 @@ def _build_agent(
         budget=budget,
         max_budget_usd=max_budget_usd,
         session_dir=session_dir,
-        effort=effort,
     )
 
 
@@ -319,7 +416,7 @@ def test_agent_init_sets_basics() -> None:
 
 def test_agent_budget_defaults_from_model() -> None:
     a = _build_agent()
-    assert isinstance(a.budget, types.model.ContextBudget)
+    assert isinstance(a.budget, AgentSettings)
     assert a.budget.max_request_tokens == 100_000
 
 
@@ -345,31 +442,25 @@ async def test_agent_tool_injects_conditional_agents_md_rule(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_agent_model_stream_materializes_request() -> None:
-    call = types.runtime.ToolCall(id="call_1", name="Bash", args={})
+    call = ToolCall(id="call_1", name="Bash", args={})
     model = StubModel()
-    budget = types.model.ContextBudget(
-        max_request_tokens=100_000,
-        max_response_tokens=1_024,
-        message_budget_tokens=10,
-    )
-    agent = Agent(model=model, budget=budget)
+    agent = Agent(model=model)
+    agent._tool_results = ToolResultPolicy(message_budget_tokens=10)
 
-    agent.runtime.append_history(types.runtime.UserMessage(text="start"))
-    agent.runtime.append_history(types.runtime.AssistantMessage(tool_calls=(call,)))
-    agent.runtime.append_history(
-        types.runtime.ToolResult(call_id="call_1", content="x" * 1_000)
-    )
+    agent.runtime.append_history(UserMessage(text="start"))
+    agent.runtime.append_history(AssistantMessage(tool_calls=(call,)))
+    agent.runtime.append_history(ToolResult(call_id="call_1", content="x" * 1_000))
     _ = await agent._agent_model.stream(
         agent.runtime.context().messages,
         lambda _: None,
     )
     result = model.received[-1].messages[2]
-    assert isinstance(result, types.runtime.ToolResult)
+    assert isinstance(result, ToolResult)
     assert "<elided>" in result.content
 
 
 def test_agent_budget_override_respected() -> None:
-    b = types.model.ContextBudget.from_model(StubModel())
+    b = AgentSettings.from_limits(StubModel().limits)
     a = _build_agent(budget=b)
     assert a.budget is b
 
@@ -398,23 +489,19 @@ def test_persist_budget_used_tokens_excludes_error_results() -> None:
     session ``190b6baec7ed`` -- so every non-error result counts.
     """
     a = _build_agent()
-    read_call = types.runtime.ToolCall(id="read-1", name="Read", args={})
-    bash_call = types.runtime.ToolCall(id="bash-1", name="Bash", args={})
-    err_call = types.runtime.ToolCall(id="bash-err", name="Bash", args={})
-    a.runtime.append_history(types.runtime.UserMessage(text="go"))
+    read_call = ToolCall(id="read-1", name="Read", args={})
+    bash_call = ToolCall(id="bash-1", name="Bash", args={})
+    err_call = ToolCall(id="bash-err", name="Bash", args={})
+    a.runtime.append_history(UserMessage(text="go"))
     a.runtime.append_history(
-        types.runtime.AssistantMessage(
+        AssistantMessage(
             tool_calls=(read_call, bash_call, err_call),
         )
     )
+    a.runtime.append_history(ToolResult(call_id="read-1", content="r" * 200))
+    a.runtime.append_history(ToolResult(call_id="bash-1", content="b" * 50))
     a.runtime.append_history(
-        types.runtime.ToolResult(call_id="read-1", content="r" * 200)
-    )
-    a.runtime.append_history(
-        types.runtime.ToolResult(call_id="bash-1", content="b" * 50)
-    )
-    a.runtime.append_history(
-        types.runtime.ToolResult(call_id="bash-err", content="e" * 30, is_error=True)
+        ToolResult(call_id="bash-err", content="e" * 30, is_error=True)
     )
     # Both non-error results count (200 + 50 chars at 4 chars/token);
     # only the error result is excluded.
@@ -560,7 +647,7 @@ def test_agent_tools_map_stores_raw_tools() -> None:
     etc.) pass through. Wrapping happens per-request in
     ``_AgentModel.stream``.
     """
-    tool: types.tools.Tool = StubTool()
+    tool: Tool = StubTool()
     a = _build_agent(tools=[tool])
     assert "Echo" in a.tools_map
     stored = a.tools_map["Echo"]
@@ -585,7 +672,7 @@ def test_agent_tools_map_preserves_compact_restorable_identity() -> None:
     class _RestorableStub(StubTool):
         async def post_compact_restore(
             self,
-            history: list[types.runtime.ModelContextEvent],
+            history: list[ModelContextEvent],
             tool_state: object,
             *,
             budget_chars: int = 100_000,
@@ -613,7 +700,7 @@ async def test_agent_request_tools_wrapped_in_background_aware() -> None:
         ),
     )
     a = _build_agent(model=model, tools=[tool])
-    async for _ in a.run(types.runtime.UserMessage(text="hi")):
+    async for _ in a.run(UserMessage(text="hi")):
         pass
     assert model.received
     req = model.received[-1]
@@ -628,11 +715,11 @@ async def test_agent_request_tools_wrapped_in_background_aware() -> None:
 async def test_agent_run_yields_idle_at_end() -> None:
     a = _build_agent()
     events: list[str] = [
-        type(ev).__name__ async for ev in a.run(types.runtime.UserMessage(text="ping"))
+        type(ev).__name__ async for ev in a.run(UserMessage(text="ping"))
     ]
     assert "ModelIdle" in events
     assert len(a.history) >= 2
-    assert isinstance(a.history[0], types.runtime.UserMessage)
+    assert isinstance(a.history[0], UserMessage)
 
 
 @pytest.mark.asyncio
@@ -644,9 +731,9 @@ async def test_drive_until_first_idle_returns_first_post_work_result() -> None:
     method must NOT return on that edge; it returns only on the first
     post-work idle, carrying the assistant's actual reply.
     """
-    model = StubModel(responses=[types.runtime.AssistantMessage(text="real answer")])
+    model = StubModel(responses=[AssistantMessage(text="real answer")])
     a = _build_agent(model=model)
-    result = await a.drive_until_first_idle(types.runtime.UserMessage(text="go"))
+    result = await a.drive_until_first_idle(UserMessage(text="go"))
     assert result.content == "real answer"
     # ``drive_until_first_idle`` does NOT shut down; the loop is still live.
     assert not a._shutting_down
@@ -703,16 +790,14 @@ async def test_agent_run_does_not_silently_drop_failed_detached_redrive() -> Non
         @override
         async def stream(
             self,
-            request: types.model.ModelRequest,
-            publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
-        ) -> types.model.ModelResponse:
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
             del publish
             self.received.append(request)
             self._calls += 1
             if self._calls == 1:
-                return types.model.ModelResponse(
-                    message=types.runtime.AssistantMessage(text="the real answer")
-                )
+                return ModelResponse(message=AssistantMessage(text="the real answer"))
             # Yield once so a cancellation can preempt, mimicking a
             # transient transport failure mid-stream on the re-drive.
             await asyncio.sleep(0)
@@ -726,14 +811,10 @@ async def test_agent_run_does_not_silently_drop_failed_detached_redrive() -> Non
 
     # Seed a settled detached cohort: an answered placeholder whose real
     # result will arrive forward after the model idles.
-    call = types.runtime.ToolCall(id="t1", name="echo", args={})
-    a.runtime.append_history(types.runtime.UserMessage(text="go"))
-    a.runtime.append_history(types.runtime.AssistantMessage(tool_calls=(call,)))
-    a.runtime.append_history(
-        types.runtime.ToolResult(
-            call_id="t1", content=types.runtime.DETACHED_PLACEHOLDER
-        )
-    )
+    call = ToolCall(id="t1", name="echo", args={})
+    a.runtime.append_history(UserMessage(text="go"))
+    a.runtime.append_history(AssistantMessage(tool_calls=(call,)))
+    a.runtime.append_history(ToolResult(call_id="t1", content=DETACHED_PLACEHOLDER))
 
     # Capture errors exactly as ``AgentSpawn._run_oneshot_child`` does: via
     # an observer watching for ``ModelResponseError``, registered *first*
@@ -741,8 +822,8 @@ async def test_agent_run_does_not_silently_drop_failed_detached_redrive() -> Non
     # decides ``is_error`` for the spawned child -- not the yielded stream.
     captured_errors: list[BaseException] = []
 
-    def _capture_error(event: types.runtime.RuntimeEvent) -> None:
-        if isinstance(event, types.runtime.ModelResponseError):
+    def _capture_error(event: RuntimeEvent) -> None:
+        if isinstance(event, ModelResponseError):
             captured_errors.append(event.exception)
 
     a.runtime.observers.append(_capture_error)
@@ -751,29 +832,27 @@ async def test_agent_run_does_not_silently_drop_failed_detached_redrive() -> Non
     # the exact production ordering that re-drives into the failing call.
     idle_count = 0
 
-    def _land_detached_after_idle(event: types.runtime.RuntimeEvent) -> None:
+    def _land_detached_after_idle(event: RuntimeEvent) -> None:
         nonlocal idle_count
-        if isinstance(event, types.runtime.ModelIdle):
+        if isinstance(event, ModelIdle):
             idle_count += 1
             if idle_count == 1:
                 a.runtime.inbox.push_back(
-                    types.runtime.DetachedResult(
-                        result=types.runtime.ToolResult(
-                            call_id="t1", content="late evidence"
-                        )
+                    DetachedResult(
+                        result=ToolResult(call_id="t1", content="late evidence")
                     )
                 )
 
     a.runtime.observers.append(_land_detached_after_idle)
 
     async def _drive() -> None:
-        async for _ in a.run(types.runtime.UserMessage(text="kick")):
+        async for _ in a.run(UserMessage(text="kick")):
             pass
 
     await asyncio.wait_for(_drive(), timeout=3.0)
 
     last_assistant = next(
-        m for m in reversed(a.history) if isinstance(m, types.runtime.AssistantMessage)
+        m for m in reversed(a.history) if isinstance(m, AssistantMessage)
     )
     answer_lost = last_assistant.text == ""
 
@@ -826,7 +905,7 @@ async def test_agent_run_waits_for_background_tool_result() -> None:
             del args
             return "slow_echo"
 
-        def summary_result(self, result: types.runtime.ToolResult) -> str | None:
+        def summary_result(self, result: ToolResult) -> str | None:
             del result
             return None
 
@@ -837,24 +916,22 @@ async def test_agent_run_waits_for_background_tool_result() -> None:
             del args
             return None
 
-        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             await asyncio.sleep(0.05)
             completed.set()
-            return types.runtime.ToolResult(call_id="", content="scout finding")
+            return ToolResult(call_id="", content="scout finding")
 
-    bg_call = types.runtime.ToolCall(
-        id="bg1", name="slow_echo", args={"background": True}
-    )
+    bg_call = ToolCall(id="bg1", name="slow_echo", args={"background": True})
     model = StubModel(
         responses=[
-            types.runtime.AssistantMessage(tool_calls=(bg_call,)),
-            types.runtime.AssistantMessage(text="ack, working in background"),
+            AssistantMessage(tool_calls=(bg_call,)),
+            AssistantMessage(text="ack, working in background"),
         ]
     )
     a = _build_agent(model=model, tools=[SlowEchoTool()])
 
-    async for _ in a.run(types.runtime.UserMessage(text="scout")):
+    async for _ in a.run(UserMessage(text="scout")):
         pass
 
     assert completed.is_set(), (
@@ -884,7 +961,7 @@ async def test_agent_run_not_blocked_by_persistent_subagent() -> None:
     as pending, ``AgentIdle`` never fires and ``Agent.run`` hangs forever
     waiting on a daemon that never completes.
     """
-    model = StubModel(responses=[types.runtime.AssistantMessage(text="done")])
+    model = StubModel(responses=[AssistantMessage(text="done")])
     a = _build_agent(model=model)
 
     daemon = asyncio.create_task(asyncio.sleep(3600))
@@ -902,7 +979,7 @@ async def test_agent_run_not_blocked_by_persistent_subagent() -> None:
     )
 
     async def _drive() -> None:
-        async for _ in a.run(types.runtime.UserMessage(text="hi")):
+        async for _ in a.run(UserMessage(text="hi")):
             pass
 
     try:
@@ -926,7 +1003,7 @@ async def test_agent_run_not_blocked_by_hidden_background_infra() -> None:
     not turn work; ``_should_cancel_background`` skips them. The idle gate
     must skip them too, or a one-shot ``Agent.run`` hangs forever.
     """
-    model = StubModel(responses=[types.runtime.AssistantMessage(text="done")])
+    model = StubModel(responses=[AssistantMessage(text="done")])
     a = _build_agent(model=model)
 
     pump = asyncio.create_task(asyncio.sleep(3600))
@@ -943,7 +1020,7 @@ async def test_agent_run_not_blocked_by_hidden_background_infra() -> None:
     )
 
     async def _drive() -> None:
-        async for _ in a.run(types.runtime.UserMessage(text="hi")):
+        async for _ in a.run(UserMessage(text="hi")):
             pass
 
     try:
@@ -1065,9 +1142,9 @@ async def test_agent_run_does_not_hang_on_external_quit() -> None:
         @override
         async def stream(
             self,
-            request: types.model.ModelRequest,
-            publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
-        ) -> types.model.ModelResponse:
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
             del request, publish
             blocked.set()
             await asyncio.Event().wait()  # never returns
@@ -1076,14 +1153,14 @@ async def test_agent_run_does_not_hang_on_external_quit() -> None:
     a = _build_agent(model=BlockingModel())
 
     async def _drive() -> None:
-        async for _ in a.run(types.runtime.UserMessage(text="go")):
+        async for _ in a.run(UserMessage(text="go")):
             pass
 
     driver = asyncio.create_task(_drive())
     # Wait until the model call is in flight, then inject a raw Quit -- the
     # runtime returns from run_forever with no terminal event published.
     await asyncio.wait_for(blocked.wait(), timeout=2.0)
-    a.runtime.inbox.push_back(types.runtime.Quit())
+    a.runtime.inbox.push_back(Quit())
 
     try:
         await asyncio.wait_for(driver, timeout=2.0)
@@ -1129,7 +1206,7 @@ async def test_background_result_lands_before_single_agent_idle() -> None:
             del args
             return "slow_echo"
 
-        def summary_result(self, result: types.runtime.ToolResult) -> str | None:
+        def summary_result(self, result: ToolResult) -> str | None:
             del result
             return None
 
@@ -1140,19 +1217,17 @@ async def test_background_result_lands_before_single_agent_idle() -> None:
             del args
             return None
 
-        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             await asyncio.sleep(0.05)
             completed.set()
-            return types.runtime.ToolResult(call_id="", content="bg payload")
+            return ToolResult(call_id="", content="bg payload")
 
-    bg_call = types.runtime.ToolCall(
-        id="bg1", name="slow_echo", args={"background": True}
-    )
+    bg_call = ToolCall(id="bg1", name="slow_echo", args={"background": True})
     model = StubModel(
         responses=[
-            types.runtime.AssistantMessage(tool_calls=(bg_call,)),
-            types.runtime.AssistantMessage(text="ack"),
+            AssistantMessage(tool_calls=(bg_call,)),
+            AssistantMessage(text="ack"),
         ]
     )
     a = _build_agent(model=model, tools=[SlowEchoTool()])
@@ -1162,15 +1237,15 @@ async def test_background_result_lands_before_single_agent_idle() -> None:
     history_at_idle: list[str] = []
     idle_count = 0
 
-    def _on_idle(event: types.runtime.RuntimeEvent) -> None:
+    def _on_idle(event: RuntimeEvent) -> None:
         nonlocal idle_count
-        if isinstance(event, types.runtime.AgentIdle):
+        if isinstance(event, AgentIdle):
             idle_count += 1
             history_at_idle.extend(getattr(m, "content", "") or "" for m in a.history)
 
     a.runtime.observers.append(_on_idle)
 
-    async for _ in a.run(types.runtime.UserMessage(text="go")):
+    async for _ in a.run(UserMessage(text="go")):
         pass
 
     assert completed.is_set()
@@ -1195,29 +1270,29 @@ async def test_agent_run_drains_queued_events_when_driver_exits_externally() -> 
     the break never races ahead of a pending event.
     """
     model = StubModel(
-        responses=[types.runtime.AssistantMessage(text="hello")],
+        responses=[AssistantMessage(text="hello")],
     )
     a = _build_agent(model=model)
 
-    yielded: list[types.runtime.RuntimeEvent] = []
+    yielded: list[RuntimeEvent] = []
 
     async def _drive() -> None:
-        async for ev in a.run(types.runtime.UserMessage(text="go")):
+        async for ev in a.run(UserMessage(text="go")):
             yielded.append(ev)
             # On the first event, inject a raw external Quit so the driver
             # exits without a terminal event while more events may be queued.
             if len(yielded) == 1:
-                a.runtime.inbox.push_back(types.runtime.Quit())
+                a.runtime.inbox.push_back(Quit())
 
     await asyncio.wait_for(_drive(), timeout=2.0)
 
     # The driver exited via Quit, but the queued events were drained first --
     # the model's response publish (carried by ModelResponseComplete) and the
     # terminal AgentIdle are not lost to a premature break.
-    assert any(isinstance(e, types.runtime.ModelResponseComplete) for e in yielded), (
+    assert any(isinstance(e, ModelResponseComplete) for e in yielded), (
         f"queued response event dropped when driver exited externally: {yielded}"
     )
-    assert any(isinstance(e, types.runtime.AgentIdle) for e in yielded), (
+    assert any(isinstance(e, AgentIdle) for e in yielded), (
         f"terminal AgentIdle dropped when driver exited externally: {yielded}"
     )
 
@@ -1242,21 +1317,18 @@ def test_fully_drained_ignores_background_when_callback_unset() -> None:
 
 @pytest.mark.asyncio
 async def test_agent_tool_persists_with_runtime_call_id(tmp_path: Path) -> None:
-    call = types.runtime.ToolCall(id="tool_call_1", name="Echo", args={})
+    call = ToolCall(id="tool_call_1", name="Echo", args={})
     model = StubModel(
         responses=[
-            types.runtime.AssistantMessage(tool_calls=(call,)),
-            types.runtime.AssistantMessage(text="done"),
+            AssistantMessage(tool_calls=(call,)),
+            AssistantMessage(text="done"),
         ]
     )
-    budget = replace(
-        types.model.ContextBudget.from_model(model),
-        persist_tokens=1_000,
-    )
     tool = StubTool(response="X" * 5_000)
-    a = _build_agent(model=model, tools=[tool], budget=budget, session_dir=tmp_path)
+    a = _build_agent(model=model, tools=[tool], session_dir=tmp_path)
+    a._tool_results = ToolResultPolicy(persist_tokens=1_000)
 
-    async for _ in a.run(types.runtime.UserMessage(text="hi")):
+    async for _ in a.run(UserMessage(text="hi")):
         pass
 
     assert (tmp_path / "tool-results" / "tool_call_1.txt").read_text() == "X" * 5_000
@@ -1272,9 +1344,9 @@ async def test_agent_run_passes_rich_tools_to_model() -> None:
     Tool surface.
     """
     model = StubModel()
-    tool: types.tools.Tool = StubTool()
+    tool: Tool = StubTool()
     a = _build_agent(model=model, tools=[tool])
-    async for _ in a.run(types.runtime.UserMessage(text="hi")):
+    async for _ in a.run(UserMessage(text="hi")):
         pass
     assert model.received, "model.stream must have been invoked"
     req = model.received[-1]
@@ -1301,9 +1373,9 @@ async def test_agent_run_passes_rich_tools_to_model() -> None:
 async def test_agent_records_response_into_cost_tracker() -> None:
     model = StubModel()
     a = _build_agent(model=model)
-    async for _ in a.run(types.runtime.UserMessage(text="ping")):
+    async for _ in a.run(UserMessage(text="ping")):
         pass
-    # StubModel emits empty types.model.TokenCount, but ``calls_by_model`` records
+    # StubModel emits empty TokenCount, but ``calls_by_model`` records
     # one entry per model invocation.
     assert a.cost_tracker.calls_by_model.get("stub-1", 0) >= 1
 
@@ -1311,17 +1383,15 @@ async def test_agent_records_response_into_cost_tracker() -> None:
 def test_agent_record_response_budget_exhaustion_raises() -> None:
     a = _build_agent(max_budget_usd=1.0)
     # First response below the cap: clean.
-    a.record_response(
-        types.model.ModelResponse(message=types.runtime.AssistantMessage(text="x"))
-    )
+    a.record_response(ModelResponse(message=AssistantMessage(text="x")))
     # The per-agent cap is checked against ``_own_spend`` (this agent's
     # own spend), not the shared root cost sink. A single over-cap response
     # trips it; verify the raise is a ``UserFacingError`` subclass (polished
     # remediation, not raw ``RuntimeError``).
-    with pytest.raises(types.exceptions.BudgetExhaustedError) as exc_info:
+    with pytest.raises(BudgetExhaustedError) as exc_info:
         a.record_response(
-            types.model.ModelResponse(
-                message=types.runtime.AssistantMessage(text="x"),
+            ModelResponse(
+                message=AssistantMessage(text="x"),
                 spend=TokenCost(request=2.0),
             )
         )
@@ -1340,9 +1410,9 @@ def test_record_response_anchors_on_disjoint_token_pools() -> None:
     """
     a = _build_agent()
     a.record_response(
-        types.model.ModelResponse(
-            message=types.runtime.AssistantMessage(text="x"),
-            tokens=types.model.TokenCount(
+        ModelResponse(
+            message=AssistantMessage(text="x"),
+            tokens=TokenCount(
                 request=100_000,
                 response=500,
                 cache_read=400_000,
@@ -1358,20 +1428,16 @@ def test_record_response_surfaces_usage_warning_once() -> None:
     published: list[object] = []
     a.runtime.observers.append(published.append)
 
-    resp = types.model.ModelResponse(message=types.runtime.AssistantMessage(text="x"))
+    resp = ModelResponse(message=AssistantMessage(text="x"))
     # Below threshold: no advisory.
-    model.usage = types.model.UsageSnapshot(
-        windows=(types.model.UsageWindow(label="7d", utilization=0.5),)
-    )
+    model.usage = UsageSnapshot(windows=(UsageWindow(label="7d", utilization=0.5),))
     a.record_response(resp)
     # Crosses 0.75: one advisory.
-    model.usage = types.model.UsageSnapshot(
-        windows=(types.model.UsageWindow(label="7d", utilization=0.89),)
-    )
+    model.usage = UsageSnapshot(windows=(UsageWindow(label="7d", utilization=0.89),))
     a.record_response(resp)
     a.record_response(resp)  # still high -> not re-warned
 
-    notices = [e for e in published if isinstance(e, types.runtime.NoticeMessage)]
+    notices = [e for e in published if isinstance(e, NoticeMessage)]
     assert len(notices) == 1
     assert notices[0].tier == "advisory"
     assert "7d" in notices[0].text
@@ -1383,14 +1449,14 @@ def test_record_response_usage_warning_rearms_after_drop() -> None:
     a = Agent(model=model, tools=[])
     published: list[object] = []
     a.runtime.observers.append(published.append)
-    resp = types.model.ModelResponse(message=types.runtime.AssistantMessage(text="x"))
+    resp = ModelResponse(message=AssistantMessage(text="x"))
     for util in (0.9, 0.5, 0.9):
-        model.usage = types.model.UsageSnapshot(
-            windows=(types.model.UsageWindow(label="5h", utilization=util),)
+        model.usage = UsageSnapshot(
+            windows=(UsageWindow(label="5h", utilization=util),)
         )
         a.record_response(resp)
     # Warned at the first 0.9, cleared at 0.5 (< 0.60), re-warned at 0.9.
-    notices = [e for e in published if isinstance(e, types.runtime.NoticeMessage)]
+    notices = [e for e in published if isinstance(e, NoticeMessage)]
     assert len(notices) == 2
 
 
@@ -1399,19 +1465,17 @@ def test_record_response_usage_warning_escalates_to_blocked() -> None:
     a = Agent(model=model, tools=[])
     published: list[object] = []
     a.runtime.observers.append(published.append)
-    resp = types.model.ModelResponse(message=types.runtime.AssistantMessage(text="x"))
+    resp = ModelResponse(message=AssistantMessage(text="x"))
 
-    model.usage = types.model.UsageSnapshot(
-        windows=(types.model.UsageWindow(label="7d", utilization=0.89),)
-    )
+    model.usage = UsageSnapshot(windows=(UsageWindow(label="7d", utilization=0.89),))
     a.record_response(resp)
     # Same window now hard-blocked: the escalation must surface a new advisory.
-    model.usage = types.model.UsageSnapshot(
-        windows=(types.model.UsageWindow(label="7d", utilization=1.0, blocked=True),)
+    model.usage = UsageSnapshot(
+        windows=(UsageWindow(label="7d", utilization=1.0, blocked=True),)
     )
     a.record_response(resp)
 
-    notices = [e for e in published if isinstance(e, types.runtime.NoticeMessage)]
+    notices = [e for e in published if isinstance(e, NoticeMessage)]
     assert [n.text for n in notices] == [
         "[usage: 7d window 89% used]",
         "[usage: 7d window blocked]",
@@ -1423,24 +1487,24 @@ def test_record_response_usage_warning_no_chatter_above_clear() -> None:
     a = Agent(model=model, tools=[])
     published: list[object] = []
     a.runtime.observers.append(published.append)
-    resp = types.model.ModelResponse(message=types.runtime.AssistantMessage(text="x"))
+    resp = ModelResponse(message=AssistantMessage(text="x"))
     # Oscillating between 0.78 and 0.72 -- both above the 0.60 clear point --
     # must warn once, not on every crossing of 0.75.
     for util in (0.78, 0.72, 0.78, 0.72):
-        model.usage = types.model.UsageSnapshot(
-            windows=(types.model.UsageWindow(label="5h", utilization=util),)
+        model.usage = UsageSnapshot(
+            windows=(UsageWindow(label="5h", utilization=util),)
         )
         a.record_response(resp)
-    notices = [e for e in published if isinstance(e, types.runtime.NoticeMessage)]
+    notices = [e for e in published if isinstance(e, NoticeMessage)]
     assert len(notices) == 1
 
 
 def test_token_count_addable() -> None:
-    """``types.model.TokenCount`` supports ``+`` so ``CostTracker.record`` can fold."""
-    a = types.model.TokenCount()
-    b = types.model.TokenCount()
+    """``TokenCount`` supports ``+`` so ``CostTracker.record`` can fold."""
+    a = TokenCount()
+    b = TokenCount()
     c = a + b
-    assert isinstance(c, types.model.TokenCount)
+    assert isinstance(c, TokenCount)
 
 
 def test_agent_shutdown_idempotent() -> None:
@@ -1489,7 +1553,7 @@ def test_system_prompt_rejects_dict() -> None:
 def test_max_request_tokens_setter_rejects_over_model_limit() -> None:
     a = _build_agent()
     with pytest.raises(ValueError, match="exceeds model's"):
-        a.max_request_tokens = a.model.spec.context_limits.max_request_tokens + 1
+        a.max_request_tokens = a.model.limits.max_request_tokens + 1
 
 
 def test_max_request_tokens_setter_accepts_within_limit() -> None:
@@ -1501,7 +1565,7 @@ def test_max_request_tokens_setter_accepts_within_limit() -> None:
 def test_max_response_tokens_setter_rejects_over_model_limit() -> None:
     a = _build_agent()
     with pytest.raises(ValueError, match="exceeds model's"):
-        a.max_response_tokens = a.model.spec.context_limits.max_response_tokens + 1
+        a.max_response_tokens = a.model.limits.max_response_tokens + 1
 
 
 def test_max_response_tokens_setter_accepts_within_limit() -> None:
@@ -1510,177 +1574,104 @@ def test_max_response_tokens_setter_accepts_within_limit() -> None:
     assert a.budget.max_response_tokens == 256
 
 
-def test_thinking_setter() -> None:
-    a = _build_agent()
-    a.thinking = "extended"
-    assert a.thinking == "extended"
-    assert a.thinking_state is None
-    a.thinking = None
-    assert a.thinking is None
+def test_the_agent_keeps_no_copy_of_a_model_setting() -> None:
+    """What the model reports is what the wire will send.
+
+    A shadow field on ``Agent`` was set by ``/thinking`` and never read by
+    the wire builders, so the selection silently never shipped. The axes
+    live on ``model.settings`` and nowhere else.
+    """
+    a = _build_agent(model=StubModel(supports_thinking=True))
+    shadowed = ("thinking", "show_thinking", "effort", "cache_ttl", "service_tier")
+    for name in shadowed:
+        assert not hasattr(a, name), name
 
 
-def test_thinking_state_sets_request_and_display_without_provider_option() -> None:
-    a = _build_agent()
-    a.set_thinking_state("on-show")
-    assert a.thinking_state == "on-show"
-    assert a.thinking == "enabled"
-    assert a.show_thinking is True
-    assert a.provider_options.redact_thinking is None
-    a.set_thinking_state("redact-hide")
-    assert a.thinking == "adaptive"
-    assert a.show_thinking is False
-    assert a.provider_options.redact_thinking is None
+def test_thinking_writes_through_to_the_model() -> None:
+    a = _build_agent(model=StubModel(supports_thinking=True))
+    a.model.settings.thinking_budget = "fixed"
+    a.model.settings.thinking_output = "text"
+    assert a.model.settings.thinking_budget == "fixed"
 
 
-def test_restore_thinking_state_writes_all_three_fields() -> None:
-    """Public rollback API for a failed thinking-mode rebuild."""
-    a = _build_agent()
-    a.set_thinking_state("adaptive-show")
-    a.restore_thinking_state("off-hide", None, False)
-    assert a.thinking_state == "off-hide"
-    assert a.thinking is None
-    assert a.show_thinking is False
-    a.restore_thinking_state("on-show", "enabled", True)
-    assert a.thinking_state == "on-show"
-    assert a.thinking == "enabled"
-    assert a.show_thinking is True
+def test_thinking_rejects_what_the_model_does_not_offer() -> None:
+    a = _build_agent()  # StubModel offers only the ``none`` budget.
+    with pytest.raises(ValueError, match="thinking_budget"):
+        a.model.settings.thinking_budget = "fixed"
 
 
-def test_change_model_derives_redact_thinking_from_state(
+def test_change_model_builds_the_provider_without_construction_options(
     patched_build_provider: Mapping[str, object],
 ) -> None:
+    """Construction knobs are the factory's; the swap invents none."""
     del patched_build_provider
     a = _build_agent_with_spec()
-    a.set_thinking_state("redact-hide")
     _ = a.change_model(model_id="claude-sonnet-4-6")
     build_provider = cast(Mock, providers_module.build_provider)
-    build_provider.assert_called_with(
-        "Anthropic",
-        "api",
-        account=None,
-        options=types.providers.ProviderOptions(redact_thinking=True),
-    )
+    build_provider.assert_called_with("Anthropic", "api", account=None)
 
 
-@pytest.mark.asyncio
-async def test_agent_default_omits_thinking_from_request() -> None:
-    model = StubModel(supports_thinking=True)
-    a = _build_agent(model=model)
-    async for _ in a.run(types.runtime.UserMessage(text="hi")):
-        pass
-    assert model.received[-1].thinking is None
+def test_effort_rejects_when_model_lacks_support() -> None:
+    a = _build_agent()  # StubModel offers only the ``none`` effort.
+    with pytest.raises(ValueError, match="thinking_effort"):
+        a.model.settings.thinking_effort = "high"
 
 
-@pytest.mark.asyncio
-async def test_agent_thinking_state_sets_request_thinking() -> None:
-    model = StubModel(supports_thinking=True)
-    a = Agent(model=model, tools=[], thinking_state="adaptive-hide")
-    async for _ in a.run(types.runtime.UserMessage(text="hi")):
-        pass
-    assert model.received[-1].thinking == "adaptive"
+def test_effort_accepts_when_model_supports() -> None:
+    a = _build_agent(model=StubModel(valid_efforts=("low", "medium", "high")))
+    a.model.settings.thinking_effort = "medium"
+    assert a.model.settings.thinking_effort == "medium"
 
 
-def test_effort_setter_rejects_when_model_lacks_support() -> None:
-    a = _build_agent()  # StubModel.supports_effort = False
-    with pytest.raises(ValueError, match="does not support effort"):
-        a.effort = "high"
+def test_effort_rejects_a_value_outside_valid_efforts() -> None:
+    a = _build_agent(model=StubModel(valid_efforts=("low", "high")))
+    with pytest.raises(ValueError, match="thinking_effort"):
+        a.model.settings.thinking_effort = "medium"
 
 
-def test_effort_setter_accepts_when_model_supports() -> None:
-    model = StubModel(supports_effort=True, valid_efforts=("low", "medium", "high"))
-    a = _build_agent(model=model)
-    a.effort = "medium"
-    assert a.effort == "medium"
-
-
-def test_effort_setter_rejects_value_outside_valid_efforts() -> None:
-    model = StubModel(supports_effort=True, valid_efforts=("low", "high"))
-    a = _build_agent(model=model)
-    with pytest.raises(ValueError, match="effort must be one of"):
-        a.effort = "medium"
-
-
-def test_effort_setter_accepts_none_unconditionally() -> None:
+def test_effort_accepts_none_unconditionally() -> None:
     a = _build_agent()
-    a.effort = None
-    assert a.effort is None
+    a.model.settings.thinking_effort = "none"
+    assert a.model.settings.thinking_effort == "none"
 
 
-def test_constructor_drops_effort_the_model_does_not_accept() -> None:
-    """The ctor must not install an effort the setter would reject.
-
-    ``AgentSpawn`` inherits the parent's effort into a child that may run
-    a different model, and it arrives through the ctor. Storing it raw
-    sends a rejected value on the child's first request.
-    """
-    a = _build_agent(effort="high")  # StubModel.supports_effort = False
-    assert a.effort is None
+def test_cache_ttl_rejects_more_than_the_model_caches() -> None:
+    a = _build_agent()  # StubModel has no prompt cache.
+    with pytest.raises(ValueError, match="cache_ttl_sec"):
+        a.model.settings.cache_ttl_sec = 3600.0
 
 
-def test_constructor_drops_effort_outside_valid_efforts() -> None:
-    model = StubModel(supports_effort=True, valid_efforts=("low", "high"))
-    a = _build_agent(model=model, effort="medium")
-    assert a.effort is None
+def test_cache_ttl_accepts_within_the_bound() -> None:
+    a = _build_agent(model=StubModel(supports_cache_control=True))
+    a.model.settings.cache_ttl_sec = 3600.0
+    assert a.model.settings.cache_ttl_sec == 3600.0
 
 
-def test_constructor_keeps_effort_the_model_accepts() -> None:
-    model = StubModel(supports_effort=True, valid_efforts=("low", "high"))
-    a = _build_agent(model=model, effort="high")
-    assert a.effort == "high"
-
-
-def test_cache_ttl_setter_rejects_invalid() -> None:
+def test_a_cacheless_model_starts_at_no_cache() -> None:
+    """The default is a value nobody chose, so it must not fail construction."""
     a = _build_agent()
-    with pytest.raises(ValueError, match="cache_ttl must be"):
-        a.cache_ttl = "10m"
+    assert a.model.settings.cache_ttl_sec == 0.0
 
 
-def test_cache_ttl_setter_accepts_valid() -> None:
-    a = _build_agent()
-    a.cache_ttl = "1h"
-    assert a.cache_ttl == "1h"
+def test_service_tier_rejects_when_model_lacks_support() -> None:
+    a = _build_agent()  # StubModel offers only the ``auto`` tier.
+    with pytest.raises(ValueError, match="service_tier"):
+        a.model.settings.service_tier = "priority"
 
 
-def test_service_tier_setter_rejects_when_model_lacks_support() -> None:
-    a = _build_agent()  # StubModel.spec.valid_service_tiers = ()
-    with pytest.raises(ValueError, match="does not support service_tier"):
-        a.service_tier = "priority"
+def test_service_tier_rejects_unknown_value() -> None:
+    a = _build_agent(model=StubModel(valid_service_tiers=("auto", "priority")))
+    with pytest.raises(ValueError, match="service_tier"):
+        a.model.settings.service_tier = "flex"
 
 
-def test_service_tier_setter_rejects_unknown_value() -> None:
+def test_service_tier_accepts_when_model_supports() -> None:
     model = StubModel(valid_service_tiers=("auto", "priority"))
     a = _build_agent(model=model)
-    with pytest.raises(ValueError, match="service_tier must be one of"):
-        a.service_tier = "turbo"
-
-
-def test_service_tier_setter_accepts_when_model_supports() -> None:
-    model = StubModel(valid_service_tiers=("auto", "priority"))
-    a = _build_agent(model=model)
-    a.service_tier = "priority"
-    assert a.service_tier == "priority"
-    a.service_tier = None
-    assert a.service_tier is None
-
-
-def test_latency_derives_from_model_id_fast_tag() -> None:
-    model = StubModel(model_id="stub+fast", valid_latency_modes=("fast",))
-    a = _build_agent(model=model)
-    assert a.latency == "fast"
-
-
-def test_latency_none_without_fast_tag() -> None:
-    a = _build_agent()
-    assert a.latency is None
-
-
-def test_swap_model_latency_follows_model_id() -> None:
-    a = _build_agent(
-        model=StubModel(model_id="stub+fast", valid_latency_modes=("fast",))
-    )
-    assert a.latency == "fast"
-    a.swap_model(StubModel(model_id="stub-2"))
-    assert a.latency is None
+    a.model.settings.service_tier = "priority"
+    assert model.settings.service_tier == "priority"
+    a.model.settings.service_tier = "auto"
+    assert model.settings.service_tier == "auto"
 
 
 def test_status_setter_round_trip() -> None:
@@ -1698,7 +1689,7 @@ def test_ephemeral_session_id_is_hex_string() -> None:
 def test_persisted_session_uses_session_directory_name(tmp_path: Path) -> None:
     session_dir = tmp_path / "d940b751c9fe"
     a = _build_agent(session_dir=session_dir)
-    a.runtime.append_history(types.runtime.UserMessage(text="hello"))
+    a.runtime.append_history(UserMessage(text="hello"))
 
     assert a.session_id == "d940b751c9fe"
     assert a.runtime.session_id == "d940b751c9fe"
@@ -1713,7 +1704,7 @@ def test_inbox_and_work_properties_reflect_runtime() -> None:
 
 
 def test_tools_property_lists_wrapped_tools() -> None:
-    tool: types.tools.Tool = StubTool()
+    tool: Tool = StubTool()
     a = _build_agent(tools=[tool])
     assert len(a.tools) == 1
 
@@ -1741,14 +1732,14 @@ def test_system_prompt_adds_detached_arrived_note_proactively() -> None:
     """
     a = _build_agent(system="root")
     # No detached activity yet -> lean prompt, no note.
-    assert types.runtime.DETACHED_ARRIVED_TOOL not in a.system
+    assert DETACHED_ARRIVED_TOOL not in a.system
 
     loop = asyncio.new_event_loop()
     try:
         # A detached task alone (no DetachedArrived turn yet) -> note present.
         det_task = loop.create_task(asyncio.sleep(0))
         a.runtime.detached["det-1"] = det_task
-        assert types.runtime.DETACHED_ARRIVED_SYSTEM_NOTE in a.system, (
+        assert DETACHED_ARRIVED_SYSTEM_NOTE in a.system, (
             "note must appear while a tool is detached, before its forward "
             "DetachedArrived pair lands"
         )
@@ -1761,15 +1752,13 @@ def test_system_prompt_adds_detached_arrived_note_proactively() -> None:
     # After the task completes, a synthesized DetachedArrived turn in history
     # still surfaces the note.
     a.runtime.append_history(
-        types.runtime.AssistantMessage(
+        AssistantMessage(
             tool_calls=(
-                types.runtime.ToolCall(
-                    id="x:detached", name=types.runtime.DETACHED_ARRIVED_TOOL, args={}
-                ),
+                ToolCall(id="x:detached", name=DETACHED_ARRIVED_TOOL, args={}),
             ),
         ),
     )
-    assert types.runtime.DETACHED_ARRIVED_SYSTEM_NOTE in a.system
+    assert DETACHED_ARRIVED_SYSTEM_NOTE in a.system
 
 
 def test_background_merges_detached_and_explicit() -> None:
@@ -1805,7 +1794,7 @@ def test_swap_model_clamps_whole_window_budget_to_smaller_model() -> None:
     # Default budget == old model's max (the "whole window" case). Swapping
     # to a smaller model clamps the budget down instead of raising.
     a = _build_agent()
-    assert a.budget.max_request_tokens == a.model.spec.context_limits.max_request_tokens
+    assert a.budget.max_request_tokens == a.model.limits.max_request_tokens
     a.swap_model(StubModel(model_id="small", max_request_tokens=50_000))
     assert a.budget.max_request_tokens == 50_000
 
@@ -1813,7 +1802,7 @@ def test_swap_model_clamps_whole_window_budget_to_smaller_model() -> None:
 def test_swap_model_grows_whole_window_budget_to_larger_model() -> None:
     # A budget pinned at the old model's max follows the new model up.
     a = _build_agent()
-    assert a.budget.max_request_tokens == a.model.spec.context_limits.max_request_tokens
+    assert a.budget.max_request_tokens == a.model.limits.max_request_tokens
     a.swap_model(StubModel(model_id="big", max_request_tokens=1_000_000))
     assert a.budget.max_request_tokens == 1_000_000
 
@@ -1837,35 +1826,40 @@ def test_swap_model_clamps_pinned_budget_over_new_max() -> None:
 
 def test_swap_model_rescales_response_window_to_smaller_model() -> None:
     a = _build_agent()
-    assert (
-        a.budget.max_response_tokens == a.model.spec.context_limits.max_response_tokens
-    )
+    assert a.budget.max_response_tokens == a.model.limits.max_response_tokens
     a.swap_model(StubModel(model_id="small", max_response_tokens=256))
     assert a.budget.max_response_tokens == 256
 
 
 @dataclass(slots=True, kw_only=True)
 class _NoopCompactor:
+    @property
+    def reattach(self) -> ReattachPolicy:
+        return ReattachPolicy()
+
+    def largest_context(self, settings: AgentSettings) -> int:
+        return _stub_largest_context(settings)
+
     def should_compact(
         self,
         current_tokens: int,
-        max_request_tokens: int,
+        largest_context: int,
         system_tokens: int = 0,
     ) -> bool:
-        del current_tokens, max_request_tokens, system_tokens
+        del current_tokens, largest_context, system_tokens
         return False
 
     async def compact(
         self,
         tape: Sequence[TapeRecord],
-        context: Sequence[types.runtime.ModelContextEvent],
-        model: types.model.Model,
+        context: Sequence[ModelContextEvent],
+        model: Model,
         mint_ref: Callable[[], TapeRef],
         custom_instructions: str | None = None,
     ) -> ContextSplice:
         del context, model, custom_instructions
         return _summary_override(
-            [types.runtime.UserMessage(text="ok")],
+            [UserMessage(text="ok")],
             mint_ref,
             tape=tape or None,
         )
@@ -1888,17 +1882,20 @@ def test_swap_model_pushes_compact_when_history_exceeds_new_budget() -> None:
         """Returns 500k tokens regardless of actual request size."""
 
         @override
-        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+        def approx_request_tokens(self, request: ModelRequest) -> int:
             del request
             return 500_000
 
+    # A REAL gate, not a stub: the swap gate asks the compactor whether the
+    # rescaled budget holds the history, so a stub answering a constant would
+    # decide this test rather than the budget arithmetic under test.
     a = Agent(
         model=_LyingTokenModel(model_id="big", max_request_tokens=1_000_000),
         tools=[],
-        compactor=_NoopCompactor(),
+        compactor=SummaryCompactor(),
     )
     a.runtime.inbox.drain_nowait()  # clear any startup events
-    a.runtime.append_history(types.runtime.UserMessage(text="payload"))
+    a.runtime.append_history(UserMessage(text="payload"))
 
     # Swap to a smaller model that also reports 500k tokens for the
     # current request -- 500k > (100k - 1024 - small buffer) so the
@@ -1906,7 +1903,7 @@ def test_swap_model_pushes_compact_when_history_exceeds_new_budget() -> None:
     a.swap_model(_LyingTokenModel(model_id="small", max_request_tokens=100_000))
 
     items = a.runtime.inbox.drain_nowait()
-    compacts = [ev for ev in items if isinstance(ev, types.runtime.Compact)]
+    compacts = [ev for ev in items if isinstance(ev, Compact)]
     assert compacts, (
         f"swap_model to smaller model did not push Compact(); inbox was {items!r}"
     )
@@ -1920,9 +1917,134 @@ def test_swap_model_does_not_push_compact_when_history_fits() -> None:
     a.swap_model(StubModel(model_id="same-size"))
 
     items = a.runtime.inbox.drain_nowait()
-    compacts = [ev for ev in items if isinstance(ev, types.runtime.Compact)]
+    compacts = [ev for ev in items if isinstance(ev, Compact)]
     assert not compacts, (
         f"swap_model to fitting model spuriously pushed Compact(); inbox was {items!r}"
+    )
+
+
+def test_swap_model_rescales_buffer_to_the_new_window() -> None:
+    """A window-proportional buffer must shrink with the window.
+
+    ``largest_context`` deducts ``buffer_tokens`` in full, so a buffer left
+    at the outgoing model's value dominates a smaller successor: 1M -> 100k
+    kept 66,666 tokens of headroom on a 100k window, leaving 32% of the new
+    model reachable and compacting sessions it could hold outright.
+    """
+    gate = SummaryCompactor()
+    a = Agent(
+        model=StubModel(max_request_tokens=1_000_000, max_response_tokens=1_024),
+        tools=[],
+        compactor=gate,
+    )
+    assert a.budget.buffer_tokens == default_buffer_tokens(1_000_000)
+
+    a.swap_model(StubModel(model_id="small", max_request_tokens=100_000))
+
+    assert a.budget.buffer_tokens <= default_buffer_tokens(100_000)
+    assert gate.largest_context(a.budget) > 100_000 * 0.85, (
+        f"largest_context {gate.largest_context(a.budget):,} leaves too little"
+        f" of the 100k window; buffer is {a.budget.buffer_tokens:,}"
+    )
+
+
+def test_largest_context_respects_provider_input_plus_max_tokens_ceiling() -> None:
+    """The gate must fire below ``input + max_tokens <= window``.
+
+    Vendors count input and output against ONE window -- Anthropic rejects
+    with ``input length and max_tokens exceed context limit: A + B > W``.
+    The reply must therefore be reserved as an ABSOLUTE count, which is
+    ``largest_context``'s job; the proportional ``u`` slack is estimation
+    headroom on top and cannot substitute for it. While the reply was left
+    to ``u=0.95`` alone the gate fired at 942k against an 872k ceiling on a
+    1M model, and 117k past the ceiling on a 200k one.
+    """
+    gate = SummaryCompactor()
+    for window, response in ((1_000_000, 128_000), (200_000, 128_000)):
+        budget = AgentSettings(
+            max_request_tokens=window,
+            max_response_tokens=response,
+            buffer_tokens=default_buffer_tokens(window),
+        )
+        largest = gate.largest_context(budget)
+        ceiling = window - response
+        assert gate.should_compact(ceiling, largest, 0) is True, (
+            f"window={window:,}: gate must fire at or before the provider"
+            f" ceiling {ceiling:,}"
+        )
+        # And it must not fire so early the model is unusable.
+        assert gate.should_compact(largest // 2, largest, 0) is False
+
+
+def test_swap_gate_and_turn_gate_agree_on_one_threshold() -> None:
+    """A same-size swap must not compact history every turn accepts.
+
+    Both gates route through ``should_compact`` against the compactor's
+    ``largest_context``. While each computed its own threshold the swap
+    gate fired 137k tokens earlier than the turn gate on a 1M window, so a
+    session in that band ran normally until any ``/model`` -- even one to
+    a model with byte-identical limits -- compacted it.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _FixedTokenModel(StubModel):
+        reported: int = 0
+
+        @override
+        def approx_request_tokens(self, request: ModelRequest) -> int:
+            del request
+            return self.reported
+
+        @override
+        def approx_text_tokens(self, text: str) -> int:
+            del text
+            return 0
+
+    gate = SummaryCompactor()
+    budget = AgentSettings(
+        max_request_tokens=1_000_000,
+        max_response_tokens=128_000,
+        buffer_tokens=66_666,
+    )
+    # Land squarely in the old disagreement band: above the old swap-gate
+    # threshold (805_334), below the old turn-gate threshold (~941_060).
+    used = 893_646
+    assert gate.largest_context(budget) < used < 941_060
+
+    a = Agent(
+        model=_FixedTokenModel(
+            model_id="big",
+            max_request_tokens=1_000_000,
+            max_response_tokens=128_000,
+            reported=used,
+        ),
+        tools=[],
+        compactor=gate,
+        budget=budget,
+    )
+    a.runtime.inbox.drain_nowait()
+    a.runtime.append_history(UserMessage(text="payload"))
+
+    turn_gate_fires = gate.should_compact(
+        current_tokens=used,
+        largest_context=gate.largest_context(a.budget),
+        system_tokens=0,
+    )
+    a.swap_model(
+        _FixedTokenModel(
+            model_id="same",
+            max_request_tokens=1_000_000,
+            max_response_tokens=128_000,
+            reported=used,
+        )
+    )
+    swap_gate_fires = any(
+        isinstance(ev, Compact) for ev in a.runtime.inbox.drain_nowait()
+    )
+
+    assert swap_gate_fires == turn_gate_fires, (
+        f"swap gate fired {swap_gate_fires} but turn gate fired"
+        f" {turn_gate_fires} at {used:,} tokens against the same budget"
     )
 
 
@@ -1932,7 +2054,7 @@ def test_swap_model_no_compact_when_no_compactor_configured() -> None:
     @dataclass(slots=True, kw_only=True)
     class _LyingTokenModel(StubModel):
         @override
-        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+        def approx_request_tokens(self, request: ModelRequest) -> int:
             del request
             return 500_000
 
@@ -1941,12 +2063,12 @@ def test_swap_model_no_compact_when_no_compactor_configured() -> None:
         tools=[],
     )
     a.runtime.inbox.drain_nowait()
-    a.runtime.append_history(types.runtime.UserMessage(text="payload"))
+    a.runtime.append_history(UserMessage(text="payload"))
 
     a.swap_model(_LyingTokenModel(model_id="small", max_request_tokens=100_000))
 
     items = a.runtime.inbox.drain_nowait()
-    compacts = [ev for ev in items if isinstance(ev, types.runtime.Compact)]
+    compacts = [ev for ev in items if isinstance(ev, Compact)]
     assert not compacts
 
 
@@ -1990,16 +2112,16 @@ async def test_swap_model_noop_does_not_close_active_model() -> None:
 
 def test_swap_model_clears_unsupported_service_tier() -> None:
     a = _build_agent(model=StubModel(valid_service_tiers=("priority",)))
-    a.service_tier = "priority"
+    a.model.settings.service_tier = "priority"
     a.swap_model(StubModel(model_id="stub-2"))
-    assert a.service_tier is None
+    assert a.model.settings.service_tier == "auto"
 
 
 def test_swap_model_normalizes_unsupported_cache_ttl() -> None:
     a = _build_agent(model=StubModel(supports_cache_control=True))
-    a.cache_ttl = "1h"
+    a.model.settings.cache_ttl_sec = 3600.0
     a.swap_model(StubModel(model_id="stub-2"))
-    assert a.cache_ttl == "5m"
+    assert a.model.settings.cache_ttl_sec == 0.0
 
 
 @pytest.mark.asyncio
@@ -2095,7 +2217,7 @@ def _build_agent_with_spec(model_id: str = "claude-opus-4-7") -> Agent:
     cross-provider case; this helper attaches an Anthropic spec.
     """
     a = _build_agent()
-    a.model_recipe = types.model.ModelRecipe(
+    a.model_recipe = ModelRecipe(
         provider="Anthropic", auth="api", model_id=model_id, account=None
     )
     return a
@@ -2135,54 +2257,31 @@ def test_change_model_same_provider_new_model_queues_swap(
     assert target.provider == "Anthropic"
     assert target.model_id == "claude-sonnet-4-6"
     items = asyncio.new_event_loop().run_until_complete(a.runtime.inbox.drain())
-    switches = [m for m in items if isinstance(m, types.runtime.ModelSwitch)]
+    switches = [m for m in items if isinstance(m, ModelSwitch)]
     assert len(switches) == 1
 
 
-def _drain_model_switches(a: Agent) -> list[types.runtime.ModelSwitch]:
+def _drain_model_switches(a: Agent) -> list[ModelSwitch]:
     items = a.runtime.inbox.drain_nowait()
-    return [m for m in items if isinstance(m, types.runtime.ModelSwitch)]
+    return [m for m in items if isinstance(m, ModelSwitch)]
 
 
-def test_provider_build_options_masks_unsupported_fields_per_target() -> None:
-    """An Anthropic-only knob must not break cross-provider swaps.
-
-    Stored options are session state: masked for a target that lacks
-    the field, re-applied when a later swap returns to a supporting
-    provider (the class-scoped semantics of the old ``--provider-arg``).
-    """
-    a = Agent(
-        model=StubModel(),
-        tools=[],
-        provider_options=types.providers.ProviderOptions(
-            server_side_context_management=True,
-        ),
-    )
-    assert a._provider_build_options("Google") == types.providers.ProviderOptions()
-    assert a._provider_build_options("Anthropic") == types.providers.ProviderOptions(
-        server_side_context_management=True,
-    )
+def test_provider_knows_model_strips_the_context_tag() -> None:
+    """Cross-provider ``change_model`` must not discard a tagged id."""
+    assert _provider_knows_model("Anthropic", "claude-opus-4-8+1m")
+    assert not _provider_knows_model("Anthropic", "unknown-model+1m")
 
 
-def test_provider_knows_model_strips_latency_tag() -> None:
-    """Cross-provider ``change_model`` must not discard a ``+fast`` id."""
-    assert _provider_knows_model("Anthropic", "claude-opus-4-8+1m+fast")
-    assert _provider_knows_model("Anthropic", "claude-opus-4-8+fast")
-    assert not _provider_knows_model("Anthropic", "unknown-model+fast")
-
-
-def test_change_model_fast_tag_rides_the_model_id(
+def test_change_model_context_tag_rides_the_model_id(
     patched_build_provider: Mapping[str, object],
 ) -> None:
-    """A ``+fast`` option tag flows through the swap; latency derives from it."""
+    """The tag flows through the swap and selects the wider window."""
     del patched_build_provider
     a = _build_agent_with_spec()
-    target = a.change_model(model_id="claude-opus-4-8+fast")
-    assert target.model_id == "claude-opus-4-8+fast"
+    target = a.change_model(model_id="claude-opus-4-8+1m")
+    assert target.model_id == "claude-opus-4-8+1m"
     switches = _drain_model_switches(a)
     assert len(switches) == 1
-    switches[0].apply()
-    assert a.latency == "fast"
 
 
 def test_change_model_cross_provider_no_model_preserves_current(
@@ -2201,7 +2300,7 @@ def test_change_model_cross_provider_no_model_preserves_current(
 
 
 def test_resolve_target_spec_provider_change_uses_target_default_auth() -> None:
-    spec = types.model.ModelRecipe(
+    spec = ModelRecipe(
         provider="OpenAISubscription",
         auth="credentials",
         model_id="gpt-5.5",
@@ -2219,7 +2318,7 @@ def test_resolve_target_spec_provider_change_uses_target_default_auth() -> None:
 
 
 def test_resolve_target_spec_explicit_default_account_is_preserved() -> None:
-    spec = types.model.ModelRecipe(
+    spec = ModelRecipe(
         provider="OpenAISubscription",
         auth="credentials",
         model_id="gpt-5.5",
@@ -2311,15 +2410,15 @@ def test_change_model_apply_resets_oversized_budget(
     a = _build_agent(
         model=StubModel(max_request_tokens=1_000_000, max_response_tokens=32_000)
     )
-    a.model_recipe = types.model.ModelRecipe(
+    a.model_recipe = ModelRecipe(
         provider="Anthropic", auth="api", model_id="claude-opus-4-7+1m"
     )
     _ = a.change_model(model_id="claude-sonnet-4-6")
     items = asyncio.new_event_loop().run_until_complete(a.runtime.inbox.drain())
-    switch = next(m for m in items if isinstance(m, types.runtime.ModelSwitch))
+    switch = next(m for m in items if isinstance(m, ModelSwitch))
     switch.apply()
-    assert a.model.spec.tagged_model_id == "claude-sonnet-4-6"
-    assert a.max_request_tokens == a.model.spec.context_limits.max_request_tokens
+    assert a.model.tagged_model_id == "claude-sonnet-4-6"
+    assert a.max_request_tokens == a.model.limits.max_request_tokens
 
 
 # --- Agent.relogin ----------------------------------------------------------
@@ -2341,7 +2440,7 @@ async def test_relogin_calls_login_classmethod() -> None:
 async def test_relogin_anthropic_cli_invokes_native_login() -> None:
     """In-session ``/login`` reaches Claude Code instead of rejecting it."""
     a = _build_agent_with_spec()
-    a.model_recipe = types.model.ModelRecipe(
+    a.model_recipe = ModelRecipe(
         provider="AnthropicCLI",
         auth="credentials",
         model_id="claude-opus-4-8",
@@ -2357,7 +2456,7 @@ async def test_relogin_anthropic_cli_invokes_native_login() -> None:
 async def test_relogin_forwards_named_account() -> None:
     """``/login`` refreshes the active credential slot, not the default one."""
     a = _build_agent_with_spec()
-    a.model_recipe = types.model.ModelRecipe(
+    a.model_recipe = ModelRecipe(
         provider="OpenAISubscription",
         auth="credentials",
         model_id="gpt-5.6-sol",
@@ -2439,7 +2538,7 @@ async def test_relogin_reloads_auth_when_provider_supports_protocol() -> None:
     model = _ModelWithProvider(_provider=live_provider)
 
     a = _build_agent(model=model)
-    a.model_recipe = types.model.ModelRecipe(
+    a.model_recipe = ModelRecipe(
         provider="Anthropic", auth="api", model_id="claude-opus-4-7"
     )
 
@@ -2475,7 +2574,7 @@ async def test_relogin_clears_suspension_and_halts_inflight_call() -> None:
         assert a.runtime.service_suspended_until is None
         assert a.runtime.resume_retry_at is None
         items = a.runtime.inbox.drain_nowait()
-        assert any(isinstance(it, types.runtime.Halt) for it in items)
+        assert any(isinstance(it, Halt) for it in items)
     finally:
         a.runtime.model_call.cancel()
 
@@ -2491,7 +2590,7 @@ async def test_relogin_no_halt_when_idle() -> None:
         await a.relogin()
     assert a.runtime.service_suspended_until is None
     items = a.runtime.inbox.drain_nowait()
-    assert not any(isinstance(it, types.runtime.Halt) for it in items)
+    assert not any(isinstance(it, Halt) for it in items)
 
 
 @pytest.mark.asyncio
@@ -2508,9 +2607,7 @@ async def test_relogin_raises_when_provider_has_no_login() -> None:
 async def test_relogin_unknown_provider_raises() -> None:
     """``relogin`` for an unrecognized provider class raises ``ValueError``."""
     a = _build_agent()
-    a.model_recipe = types.model.ModelRecipe(
-        provider="NotAProvider", auth="api", model_id="x"
-    )
+    a.model_recipe = ModelRecipe(provider="NotAProvider", auth="api", model_id="x")
     with pytest.raises(ValueError, match="unknown provider"):
         await a.relogin()
 
@@ -2519,14 +2616,14 @@ def test_halt_pushes_halt_event() -> None:
     a = _build_agent()
     a.halt()
     items = asyncio.new_event_loop().run_until_complete(a.runtime.inbox.drain())
-    assert any(isinstance(i, types.runtime.Halt) for i in items)
+    assert any(isinstance(i, Halt) for i in items)
 
 
 def test_kill_tool_pushes_kill_event() -> None:
     a = _build_agent()
     a.kill_tool("call-7")
     items = asyncio.new_event_loop().run_until_complete(a.runtime.inbox.drain())
-    kills = [i for i in items if isinstance(i, types.runtime.Kill)]
+    kills = [i for i in items if isinstance(i, Kill)]
     assert len(kills) == 1
     assert kills[0].call_id == "call-7"
 
@@ -2535,7 +2632,7 @@ def test_kill_all_tools_pushes_kill_with_none_id() -> None:
     a = _build_agent()
     a.kill_all_tools()
     items = asyncio.new_event_loop().run_until_complete(a.runtime.inbox.drain())
-    kills = [i for i in items if isinstance(i, types.runtime.Kill)]
+    kills = [i for i in items if isinstance(i, Kill)]
     assert kills[0].call_id is None
 
 
@@ -2643,19 +2740,26 @@ async def test_shutdown_force_preserves_missing_registry_persistent_subagent() -
 async def test_compact_awaits_compact_complete_event() -> None:
     @dataclass(slots=True, kw_only=True)
     class _StubCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -2663,13 +2767,13 @@ async def test_compact_awaits_compact_complete_event() -> None:
             del context, model
             del custom_instructions
             return _summary_override(
-                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -2689,10 +2793,7 @@ async def test_compact_awaits_compact_complete_event() -> None:
         with contextlib.suppress(asyncio.CancelledError):
             await drive_task
 
-    assert any(
-        isinstance(e, types.runtime.UserMessage) and e.text == "[summary]"
-        for e in a.history
-    )
+    assert any(isinstance(e, UserMessage) and e.text == "[summary]" for e in a.history)
 
 
 @pytest.mark.asyncio
@@ -2701,19 +2802,26 @@ async def test_public_compact_returns_when_halt_cancels_compaction() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _HangingCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -2742,19 +2850,26 @@ async def test_public_recompact_returns_when_clear_cancels_compaction() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _HangingCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -2781,19 +2896,26 @@ async def test_public_recompact_returns_when_clear_cancels_compaction() -> None:
 async def test_recompact_awaits_compact_complete_event() -> None:
     @dataclass(slots=True, kw_only=True)
     class _StubCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -2801,13 +2923,13 @@ async def test_recompact_awaits_compact_complete_event() -> None:
             del context, model
             del custom_instructions
             return _summary_override(
-                [types.runtime.UserMessage(text="[recompacted]")], mint_ref, tape=tape
+                [UserMessage(text="[recompacted]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -2824,8 +2946,7 @@ async def test_recompact_awaits_compact_complete_event() -> None:
             await drive_task
 
     assert any(
-        isinstance(e, types.runtime.UserMessage) and e.text == "[recompacted]"
-        for e in a.history
+        isinstance(e, UserMessage) and e.text == "[recompacted]" for e in a.history
     )
 
 
@@ -2841,7 +2962,7 @@ async def test_clear_resets_file_tracking_and_awaits_completion() -> None:
     # Stage state that ``clear`` should reset.
     a.tool_state.mark_read("/tmp/x.txt")  # noqa: S108 -- placeholder
     assert a.tool_state.has_been_read("/tmp/x.txt")  # noqa: S108
-    a.runtime.append_history(types.runtime.UserMessage(text="hello"))
+    a.runtime.append_history(UserMessage(text="hello"))
     assert a.history
 
     drive_task = asyncio.create_task(a.serve_forever())
@@ -2881,33 +3002,29 @@ async def test_activity_active_spans_tool_execution() -> None:
     (``types.runtime.ModelIdle`` / cancel / error).
     """
     a = _build_agent()
-    tc = types.runtime.ToolCall(id="c1", name="Echo", args={})
-    msg_with_tools = types.runtime.AssistantMessage(text="", tool_calls=(tc,))
+    tc = ToolCall(id="c1", name="Echo", args={})
+    msg_with_tools = AssistantMessage(text="", tool_calls=(tc,))
 
-    a.publish(types.runtime.ModelCallStarted())
+    a.publish(ModelCallStarted())
     assert a.activity.active is True
 
-    a.publish(types.runtime.ModelResponseComplete(message=msg_with_tools))
+    a.publish(ModelResponseComplete(message=msg_with_tools))
     assert a.activity.active is True, (
         "spinner should keep ticking while tools run; tool_calls in the "
         "response mean the cohort is about to fire"
     )
 
     # Tool result arrives.
-    a.publish(types.runtime.ToolResult(call_id="c1", content="ok"))
+    a.publish(ToolResult(call_id="c1", content="ok"))
     assert a.activity.active is True
 
     # Round 2 model call fires.
-    a.publish(types.runtime.ModelCallStarted())
+    a.publish(ModelCallStarted())
     assert a.activity.active is True
 
     # Round 2 has no tool calls; model truly idles.
-    a.publish(
-        types.runtime.ModelResponseComplete(
-            message=types.runtime.AssistantMessage(text="done")
-        )
-    )
-    a.publish(types.runtime.ModelIdle())
+    a.publish(ModelResponseComplete(message=AssistantMessage(text="done")))
+    a.publish(ModelIdle())
     assert a.activity.active is False, "ModelIdle marks the end of the round chain"
 
 
@@ -2925,10 +3042,10 @@ async def test_activity_active_clears_on_model_response_error() -> None:
     ``active``.
     """
     a = _build_agent()
-    a.publish(types.runtime.ModelCallStarted())
+    a.publish(ModelCallStarted())
     assert a.activity.active is True
 
-    a.publish(types.runtime.ModelResponseError(RuntimeError("boom")))
+    a.publish(ModelResponseError(RuntimeError("boom")))
     assert a.activity.active is False, (
         "ModelResponseError is terminal -- spinner must stop"
     )
@@ -2943,13 +3060,13 @@ async def test_activity_pauses_during_model_service_suspended() -> None:
     a = _build_agent()
     loop = asyncio.get_running_loop()
 
-    a.publish(types.runtime.ModelCallStarted())
+    a.publish(ModelCallStarted())
     start = a.activity.current_call_start
     assert start > 0
     # Tick the loop's notion of time forward to accrue some elapsed.
     await asyncio.sleep(0.01)
     a.publish(
-        types.runtime.ModelServiceSuspended(
+        ModelServiceSuspended(
             provider="anthropic",
             auth="key",
             account="default",
@@ -2957,7 +3074,7 @@ async def test_activity_pauses_during_model_service_suspended() -> None:
             retry_at=loop.time() + 0.05,
             delay_sec=0.05,
             server_supplied=True,
-            error=types.runtime.ServiceErrorSnapshot(
+            error=ServiceErrorSnapshot(
                 type_name="RateLimitError", message="429", status=429
             ),
         )
@@ -2968,17 +3085,13 @@ async def test_activity_pauses_during_model_service_suspended() -> None:
     assert a.activity.active is True
 
     await asyncio.sleep(0.05)
-    a.publish(types.runtime.ModelResponsePartial(text="x"))
+    a.publish(ModelResponsePartial(text="x"))
     assert a.activity.current_call_start > 0
     # No further banking yet; live timer has just resumed.
     assert a.activity.elapsed_seconds == banked
 
     await asyncio.sleep(0.01)
-    a.publish(
-        types.runtime.ModelResponseComplete(
-            message=types.runtime.AssistantMessage(text="done")
-        )
-    )
+    a.publish(ModelResponseComplete(message=AssistantMessage(text="done")))
     # Total elapsed should exclude the ~0.05s suspension sleep.
     assert a.activity.elapsed_seconds < 0.05
 
@@ -3013,7 +3126,7 @@ async def test_run_bg_propagates_external_cancellation() -> None:
             del args
             return ""
 
-        def summary_result(self, result: types.runtime.ToolResult) -> str | None:
+        def summary_result(self, result: ToolResult) -> str | None:
             del result
             return None
 
@@ -3024,11 +3137,11 @@ async def test_run_bg_propagates_external_cancellation() -> None:
             del args
             return None
 
-        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             tool_started.set()
             await release.wait()  # never released
-            return types.runtime.ToolResult(call_id="", content="unreached")
+            return ToolResult(call_id="", content="unreached")
 
     a = _build_agent()
     wrapped = _AgentTool(_BlockingTool(), a)
@@ -3064,22 +3177,22 @@ async def test_activity_current_call_start_resets_on_each_model_call() -> None:
     call 2 starts even if it just began.
     """
     a = _build_agent()
-    a.publish(types.runtime.ModelCallStarted())
+    a.publish(ModelCallStarted())
     t1 = a.activity.current_call_start
     assert t1 > 0
     await asyncio.sleep(0.02)
     # Mid-chain tool-bearing response: spinner keeps ticking; the next
     # ``ModelCallStarted`` is the start of a new call.
     a.publish(
-        types.runtime.ModelResponseComplete(
-            message=types.runtime.AssistantMessage(
+        ModelResponseComplete(
+            message=AssistantMessage(
                 text="",
-                tool_calls=(types.runtime.ToolCall(id="t1", name="Bash", args={}),),
+                tool_calls=(ToolCall(id="t1", name="Bash", args={}),),
             )
         )
     )
     await asyncio.sleep(0.02)
-    a.publish(types.runtime.ModelCallStarted())
+    a.publish(ModelCallStarted())
     t2 = a.activity.current_call_start
     assert t2 > t1, (
         "second ModelCallStarted must restamp current_call_start so the"
@@ -3092,9 +3205,9 @@ async def test_activity_current_call_start_resets_on_each_model_call() -> None:
 async def test_activity_current_compact_start_resets_on_compact_complete() -> None:
     """``CompactComplete`` clears ``activity.current_compact_start``."""
     a = _build_agent()
-    a.publish(types.runtime.CompactStarted())
+    a.publish(CompactStarted())
     assert a.activity.current_compact_start > 0.0
-    a.publish(types.runtime.CompactComplete(records=()))
+    a.publish(CompactComplete(records=()))
     assert a.activity.current_compact_start == 0.0
 
 
@@ -3108,10 +3221,10 @@ async def test_streaming_tokens_recorded_in_activity() -> None:
     """
     a = _build_agent()
     # Pre-bracket partial is ignored (handler only acts when ``active``).
-    a.publish(types.runtime.ModelResponsePartial(text="abc"))
-    a.publish(types.runtime.ModelCallStarted())
-    a.publish(types.runtime.ModelResponsePartial(text="x" * 8))
-    a.publish(types.runtime.ModelResponsePartial(text="y" * 4))
+    a.publish(ModelResponsePartial(text="abc"))
+    a.publish(ModelCallStarted())
+    a.publish(ModelResponsePartial(text="x" * 8))
+    a.publish(ModelResponsePartial(text="y" * 4))
     assert a.model.approx_text_tokens(a.activity.live_response_text) == 3
 
 
@@ -3133,9 +3246,9 @@ async def test_streaming_live_tokens_tokenize_whole_not_per_chunk() -> None:
             return int(len(text) / 3)
 
     a = _build_agent(model=_Floor3Model())
-    a.publish(types.runtime.ModelCallStarted())
+    a.publish(ModelCallStarted())
     for _ in range(9):  # nine 1-char chunks
-        a.publish(types.runtime.ModelResponsePartial(text="x"))
+        a.publish(ModelResponsePartial(text="x"))
     # Per-chunk: 9 * int(1/3) = 0. Whole: int(9/3) = 3.
     assert a.model.approx_text_tokens(a.activity.live_response_text) == 3
 
@@ -3143,9 +3256,9 @@ async def test_streaming_live_tokens_tokenize_whole_not_per_chunk() -> None:
 def test_tool_registry_recorded_on_response_with_tool_calls() -> None:
     """``_track_tool_registry`` records cohort id → tool name and bumps rounds."""
     a = _build_agent()
-    tc = types.runtime.ToolCall(id="c1", name="Echo", args={})
-    msg = types.runtime.AssistantMessage(text="", tool_calls=(tc,))
-    a.publish(types.runtime.ModelResponseComplete(message=msg))
+    tc = ToolCall(id="c1", name="Echo", args={})
+    msg = AssistantMessage(text="", tool_calls=(tc,))
+    a.publish(ModelResponseComplete(message=msg))
     assert a._tool_registry["c1"][0] == "Echo"
     assert a.activity.num_tool_call_rounds == 1
 
@@ -3153,21 +3266,21 @@ def test_tool_registry_recorded_on_response_with_tool_calls() -> None:
 def test_enforce_caps_pushes_error_when_limit_reached() -> None:
     """``_enforce_caps`` posts a types.runtime.ModelResponseError when rounds cap is hit."""
     a = Agent(model=StubModel(), tools=[], max_tool_call_rounds=1)
-    tc = types.runtime.ToolCall(id="c1", name="Echo", args={})
-    msg = types.runtime.AssistantMessage(text="", tool_calls=(tc,))
-    a.publish(types.runtime.ModelResponseComplete(message=msg))
+    tc = ToolCall(id="c1", name="Echo", args={})
+    msg = AssistantMessage(text="", tool_calls=(tc,))
+    a.publish(ModelResponseComplete(message=msg))
 
     # Round count is now 1 == cap; the next observation triggers the
     # error push.
-    a.publish(types.runtime.ModelResponseComplete(message=msg))
+    a.publish(ModelResponseComplete(message=msg))
     items = asyncio.new_event_loop().run_until_complete(a.runtime.inbox.drain())
-    assert any(isinstance(i, types.runtime.ModelResponseError) for i in items)
+    assert any(isinstance(i, ModelResponseError) for i in items)
 
 
 @pytest.mark.asyncio
 async def test_compact_now_no_compactor_is_noop() -> None:
     a = _build_agent()
-    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+    a.runtime.append_history(UserMessage(text="x"))
     await a.compact_now()
     # History untouched: no compactor wired.
     assert len(a.runtime.context().messages) == 1
@@ -3177,19 +3290,26 @@ async def test_compact_now_no_compactor_is_noop() -> None:
 async def test_compact_now_replaces_history_in_place() -> None:
     @dataclass(slots=True, kw_only=True)
     class _ReplaceCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -3197,13 +3317,13 @@ async def test_compact_now_replaces_history_in_place() -> None:
             del context, model
             del custom_instructions
             return _summary_override(
-                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -3211,11 +3331,11 @@ async def test_compact_now_replaces_history_in_place() -> None:
             return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_ReplaceCompactor())
-    a.runtime.append_history(types.runtime.UserMessage(text="old"))
+    a.runtime.append_history(UserMessage(text="old"))
     await a.compact_now()
     assert len(a.runtime.context().messages) == 1
     entry = a.runtime.context().messages[0]
-    assert isinstance(entry, types.runtime.UserMessage)
+    assert isinstance(entry, UserMessage)
     assert entry.text == "[summary]"
 
 
@@ -3235,32 +3355,37 @@ async def test_compact_now_survives_a_tape_carrying_an_alive_coalesce() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _SummaryCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del tape, context, model, custom_instructions
-            return _summary_override(
-                [types.runtime.UserMessage(text="[summary]")], mint_ref
-            )
+            return _summary_override([UserMessage(text="[summary]")], mint_ref)
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -3268,22 +3393,22 @@ async def test_compact_now_survives_a_tape_carrying_an_alive_coalesce() -> None:
             return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_SummaryCompactor())
-    a.runtime.append_history(types.runtime.UserMessage(text="first"))
-    a.runtime.append_history(types.runtime.AssistantMessage(text="reply"))
+    a.runtime.append_history(UserMessage(text="first"))
+    a.runtime.append_history(AssistantMessage(text="reply"))
     # Resume's ``orphan_tool_result_repair`` barrier carries the whole
     # conversation; the next user message coalesces onto it and inherits that
     # payload. The resulting alive splice is therefore many entries wide, which
     # is what the compactor's one-entry summary is measured against.
     a.runtime.append_splice(
-        mask=types.tape.full_tape_mask(a.runtime.tape),
+        mask=full_tape_mask(a.runtime.tape),
         insert_after=None,
         payload=(
-            types.runtime.UserMessage(text="first"),
-            types.runtime.AssistantMessage(text="reply"),
+            UserMessage(text="first"),
+            AssistantMessage(text="reply"),
         ),
         strategy="orphan_tool_result_repair",
     )
-    a.runtime._append_or_coalesce_user(types.runtime.UserMessage(text="second"))
+    a.runtime._append_or_coalesce_user(UserMessage(text="second"))
 
     assert await a.compact_now(), f"compaction failed: {a.last_compact_error!r}"
     texts = [getattr(m, "text", "") for m in a.runtime.context().messages]
@@ -3294,26 +3419,33 @@ async def test_compact_now_survives_a_tape_carrying_an_alive_coalesce() -> None:
 async def test_compact_recall_reset_waits_for_barrier_adoption(tmp_path: Path) -> None:
     @dataclass(slots=True, kw_only=True)
     class _NoopCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
     a = Agent(model=StubModel(), tools=[], compactor=_NoopCompactor())
@@ -3323,7 +3455,7 @@ async def test_compact_recall_reset_waits_for_barrier_adoption(tmp_path: Path) -
     f.write_text("x")
     a.tool_state.mark_read(str(f), content="x")
     a.tool_state.invoked_skills.update({"alpha", "beta"})
-    a.runtime.append_history(types.runtime.UserMessage(text="old"))
+    a.runtime.append_history(UserMessage(text="old"))
 
     override = await agent_compactor.compact(
         a.runtime.tape,
@@ -3337,7 +3469,7 @@ async def test_compact_recall_reset_waits_for_barrier_adoption(tmp_path: Path) -
     assert a.tool_state.invoked_skills == {"alpha", "beta"}
 
     a.runtime.adopt_record(override)
-    a.publish(types.runtime.CompactComplete(records=(override,)))
+    a.publish(CompactComplete(records=(override,)))
 
     assert a.tool_state.read_cache == {}
     assert a.tool_state.invoked_skills == set()
@@ -3347,26 +3479,33 @@ async def test_compact_recall_reset_waits_for_barrier_adoption(tmp_path: Path) -
 async def test_compact_now_clears_tool_recall(tmp_path: Path) -> None:
     @dataclass(slots=True, kw_only=True)
     class _NoopCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
     a = Agent(model=StubModel(), tools=[], compactor=_NoopCompactor())
@@ -3377,7 +3516,7 @@ async def test_compact_now_clears_tool_recall(tmp_path: Path) -> None:
     assert a.tool_state.read_cache
     assert a.tool_state.invoked_skills == {"alpha", "beta"}
 
-    a.runtime.append_history(types.runtime.UserMessage(text="old"))
+    a.runtime.append_history(UserMessage(text="old"))
     await a.compact_now()
 
     assert a.tool_state.read_cache == {}
@@ -3397,19 +3536,26 @@ async def test_compact_now_returns_true_on_success() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _OkCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -3417,13 +3563,13 @@ async def test_compact_now_returns_true_on_success() -> None:
             del context, model
             del custom_instructions
             return _summary_override(
-                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -3431,7 +3577,7 @@ async def test_compact_now_returns_true_on_success() -> None:
             return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_OkCompactor())
-    a.runtime.append_history(types.runtime.UserMessage(text="old"))
+    a.runtime.append_history(UserMessage(text="old"))
     ok = await a.compact_now()
     assert ok is True
 
@@ -3449,19 +3595,26 @@ async def test_compact_now_returns_false_on_compactor_failure() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _BrokenCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -3473,7 +3626,7 @@ async def test_compact_now_returns_false_on_compactor_failure() -> None:
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -3481,7 +3634,7 @@ async def test_compact_now_returns_false_on_compactor_failure() -> None:
             return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_BrokenCompactor())
-    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+    a.runtime.append_history(UserMessage(text="x"))
     ok = await a.compact_now()
     assert ok is False
 
@@ -3496,7 +3649,7 @@ async def test_compact_now_returns_true_when_no_compactor_wired() -> None:
     "no compactor" path is intentional configuration, not a failure.
     """
     a = _build_agent()
-    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+    a.runtime.append_history(UserMessage(text="x"))
     ok = await a.compact_now()
     assert ok is True
 
@@ -3513,34 +3666,37 @@ class _ThresholdCompactor:
     compacted: bool = False
     _gate: SummaryCompactor = field(default_factory=SummaryCompactor)
 
+    @property
+    def reattach(self) -> ReattachPolicy:
+        return ReattachPolicy()
+
+    def largest_context(self, settings: AgentSettings) -> int:
+        return _stub_largest_context(settings)
+
     def should_compact(
         self,
         current_tokens: int,
-        max_request_tokens: int,
+        largest_context: int,
         system_tokens: int = 0,
     ) -> bool:
-        return self._gate.should_compact(
-            current_tokens, max_request_tokens, system_tokens
-        )
+        return self._gate.should_compact(current_tokens, largest_context, system_tokens)
 
     async def compact(
         self,
         tape: Sequence[TapeRecord],
-        context: Sequence[types.runtime.ModelContextEvent],
+        context: Sequence[ModelContextEvent],
         model: object,
         mint_ref: Callable[[], TapeRef],
         custom_instructions: str | None = None,
     ) -> ContextSplice:
         del context, model, custom_instructions
         self.compacted = True
-        return _summary_override(
-            [types.runtime.UserMessage(text="[s]")], mint_ref, tape=tape
-        )
+        return _summary_override([UserMessage(text="[s]")], mint_ref, tape=tape)
 
     def maintain(
         self,
         tape: Sequence[TapeRecord],
-        context: Sequence[types.runtime.ModelContextEvent],
+        context: Sequence[ModelContextEvent],
         tools: object,
         mint_ref: Callable[[], TapeRef],
     ) -> tuple[ContextSplice, ...]:
@@ -3560,9 +3716,7 @@ async def test_compact_if_needed_returns_true_when_no_compactor_wired() -> None:
     "tried to compact and the inner compactor raised".
     """
     a = _build_agent()
-    history: list[types.runtime.ModelContextEvent] = [
-        types.runtime.UserMessage(text="x")
-    ]
+    history: list[ModelContextEvent] = [UserMessage(text="x")]
     progressed = await a.compact_if_needed(history, a.model)
     assert progressed is True
 
@@ -3571,10 +3725,10 @@ def test_wire_attachment_bytes_pdf_base64_no_resize() -> None:
     """PDF wire bytes = exact base64 length ``4 * ceil(n/3)`` (no resize)."""
     raw = b"%PDF-" + b"\x00" * (3 * 1024 * 1024)
     msgs = [
-        types.runtime.ToolResult(
+        ToolResult(
             call_id="c",
             content="pdf",
-            attachments=(types.runtime.BytesMessage(raw, "application/pdf"),),
+            attachments=(BytesMessage(raw, "application/pdf"),),
         )
     ]
     got = _wire_attachment_bytes(msgs, max_image_bytes=5 * 1024 * 1024)
@@ -3586,9 +3740,9 @@ def test_wire_attachment_bytes_image_clamped_then_base64() -> None:
     raw = b"\xff\xd8" + b"\x00" * (30 * 1024 * 1024)
     cap = 5 * 1024 * 1024
     msgs = [
-        types.runtime.UserMessage(
+        UserMessage(
             text="",
-            attachments=(types.runtime.BytesMessage(raw, "image/jpeg"),),
+            attachments=(BytesMessage(raw, "image/jpeg"),),
         )
     ]
     got = _wire_attachment_bytes(msgs, max_image_bytes=cap)
@@ -3598,8 +3752,8 @@ def test_wire_attachment_bytes_image_clamped_then_base64() -> None:
 def test_wire_attachment_bytes_ignores_non_bytes_and_empty() -> None:
     """Entries without attachments contribute zero."""
     msgs = [
-        types.runtime.AssistantMessage(text="no attachments"),
-        types.runtime.UserMessage(text="also none"),
+        AssistantMessage(text="no attachments"),
+        UserMessage(text="also none"),
     ]
     assert _wire_attachment_bytes(msgs, max_image_bytes=5 * 1024 * 1024) == 0
 
@@ -3613,9 +3767,9 @@ def test_wire_attachment_bytes_zero_image_cap_means_unlimited() -> None:
     image_lib.resize, the byte gate's ``> 0`` guard).
     """
     msgs = [
-        types.runtime.UserMessage(
+        UserMessage(
             text="",
-            attachments=(types.runtime.BytesMessage(b"abcd", "image/png"),),
+            attachments=(BytesMessage(b"abcd", "image/png"),),
         )
     ]
     # 4 raw bytes, no clamp -> base64 wire size 4*ceil(4/3) = 8, NOT 0.
@@ -3625,9 +3779,9 @@ def test_wire_attachment_bytes_zero_image_cap_means_unlimited() -> None:
 def test_wire_attachment_bytes_positive_image_cap_still_clamps() -> None:
     """A positive cap still clamps (the 0-sentinel fix must not break this)."""
     msgs = [
-        types.runtime.UserMessage(
+        UserMessage(
             text="",
-            attachments=(types.runtime.BytesMessage(b"abcdefghij", "image/png"),),
+            attachments=(BytesMessage(b"abcdefghij", "image/png"),),
         )
     ]
     # 10 raw bytes clamped to 5 -> base64 4*ceil(5/3) = 8.
@@ -3645,12 +3799,10 @@ def test_wire_attachment_bytes_exact_base64_length(raw_len: int, expected: int) 
     bytes, biasing the gate to fire one turn late.
     """
     msgs = [
-        types.runtime.ToolResult(
+        ToolResult(
             call_id="c",
             content="pdf",
-            attachments=(
-                types.runtime.BytesMessage(b"x" * raw_len, "application/pdf"),
-            ),
+            attachments=(BytesMessage(b"x" * raw_len, "application/pdf"),),
         )
     ]
     assert _wire_attachment_bytes(msgs, max_image_bytes=5 * 1024 * 1024) == expected
@@ -3664,14 +3816,14 @@ class _TokenIdleByteTightModel(StubModel):
     max_image_bytes: int = 4 * 1024 * 1024
 
     @override
-    def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+    def approx_request_tokens(self, request: ModelRequest) -> int:
         del request
         return 1  # trivially under any token threshold
 
 
 def _sent_turn(
-    attachment: types.runtime.BytesMessage,
-) -> list[types.runtime.ModelContextEvent]:
+    attachment: BytesMessage,
+) -> list[ModelContextEvent]:
     """A compactable (already-sent) turn: AM tool_call + its ToolResult.
 
     The byte gate only counts attachments in the prefix up to and including
@@ -3681,15 +3833,11 @@ def _sent_turn(
     plus a following AssistantMessage to land in the compactable prefix.
     """
     return [
-        types.runtime.AssistantMessage(
-            tool_calls=(types.runtime.ToolCall(id="c", name="Read", args={}),)
-        ),
-        types.runtime.ToolResult(
-            call_id="c", content="[PDF: big.pdf]", attachments=(attachment,)
-        ),
+        AssistantMessage(tool_calls=(ToolCall(id="c", name="Read", args={}),)),
+        ToolResult(call_id="c", content="[PDF: big.pdf]", attachments=(attachment,)),
         # A later assistant turn makes the ToolResult above part of the
         # already-sent, compactable prefix (not this turn's fresh tail).
-        types.runtime.AssistantMessage(text="ok"),
+        AssistantMessage(text="ok"),
     ]
 
 
@@ -3713,7 +3861,7 @@ async def test_compact_if_needed_fires_on_byte_pressure_even_when_token_gate_idl
     )
     # PDF (not resized at the wire): 3 MB raw -> ~4 MB base64 >= 0.8 * 4 MB.
     big = b"%PDF-" + b"\x00" * (3 * 1024 * 1024)
-    history = _sent_turn(types.runtime.BytesMessage(big, "application/pdf"))
+    history = _sent_turn(BytesMessage(big, "application/pdf"))
     progressed = await a.compact_if_needed(history, a.model)
     assert progressed is True
     assert rec.compacted is True, "byte pressure must trigger proactive compaction"
@@ -3730,7 +3878,7 @@ async def test_compact_if_needed_byte_trigger_is_overridable_kwarg() -> None:
     # ~2 MB raw PDF -> ~2.8 MB base64. Ceiling 4 MB: 0.8*4=3.2MB (no fire),
     # 0.5*4=2.0MB (fire).
     big = b"%PDF-" + b"\x00" * (2 * 1024 * 1024)
-    history = _sent_turn(types.runtime.BytesMessage(big, "application/pdf"))
+    history = _sent_turn(BytesMessage(big, "application/pdf"))
 
     default_rec = _ThresholdCompactor()
     a_default = Agent(
@@ -3776,10 +3924,10 @@ async def test_byte_gate_does_not_strip_fresh_turn_user_attachment() -> None:
     # 5 MB user attachment, well over the 4 MB ceiling, but it is THIS turn's
     # input (no prior assistant response) -> not compactable -> gate idle.
     huge = b"%PDF-" + b"\x00" * (5 * 1024 * 1024)
-    history: list[types.runtime.ModelContextEvent] = [
-        types.runtime.UserMessage(
+    history: list[ModelContextEvent] = [
+        UserMessage(
             text="describe this",
-            attachments=(types.runtime.BytesMessage(huge, "application/pdf"),),
+            attachments=(BytesMessage(huge, "application/pdf"),),
         ),
     ]
     progressed = await a.compact_if_needed(history, a.model)
@@ -3811,7 +3959,7 @@ async def test_byte_gate_counts_base64_wire_expansion() -> None:
     # 13 MB raw PDF: below 0.8 * 20 MB = 16 MB raw, but base64 ~= 17.3 MB,
     # which is over the 16 MB trigger. Must fire on the expanded size.
     raw = b"%PDF-" + b"\x00" * (13 * 1024 * 1024)
-    history = _sent_turn(types.runtime.BytesMessage(raw, "application/pdf"))
+    history = _sent_turn(BytesMessage(raw, "application/pdf"))
     await a.compact_if_needed(history, a.model)
     assert rec.compacted is True, "gate must count base64-expanded wire bytes"
 
@@ -3838,7 +3986,7 @@ async def test_byte_gate_clamps_image_to_max_image_bytes() -> None:
     # 30 MB raw JPEG clamps to 5 MB post-resize -> ~6.7 MB wire, far under
     # 0.8 * 32 MB = 25.6 MB. Must NOT fire (no over-count of the raw size).
     raw = b"\xff\xd8\xff\xe0" + b"\x00" * (30 * 1024 * 1024)
-    history = _sent_turn(types.runtime.BytesMessage(raw, "image/jpeg"))
+    history = _sent_turn(BytesMessage(raw, "image/jpeg"))
     await a.compact_if_needed(history, a.model)
     assert rec.compacted is False, "image bytes must clamp to max_image_bytes"
 
@@ -3854,19 +4002,26 @@ async def test_compact_if_needed_returns_true_when_should_compact_false() -> Non
 
     @dataclass(slots=True, kw_only=True)
     class _NeverCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -3878,7 +4033,7 @@ async def test_compact_if_needed_returns_true_when_should_compact_false() -> Non
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -3886,9 +4041,7 @@ async def test_compact_if_needed_returns_true_when_should_compact_false() -> Non
             return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_NeverCompactor())
-    history: list[types.runtime.ModelContextEvent] = [
-        types.runtime.UserMessage(text="x")
-    ]
+    history: list[ModelContextEvent] = [UserMessage(text="x")]
     progressed = await a.compact_if_needed(history, a.model)
     assert progressed is True
 
@@ -3907,13 +4060,11 @@ async def test_compact_if_needed_triggers_on_last_response_total() -> None:
 
     class _UndercountModel(StubModel):
         @override
-        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+        def approx_request_tokens(self, request: ModelRequest) -> int:
             del request
             return 100_000
 
-    history: list[types.runtime.ModelContextEvent] = [
-        types.runtime.UserMessage(text="x")
-    ]
+    history: list[ModelContextEvent] = [UserMessage(text="x")]
 
     # Turn 1: no response recorded yet -> fall back to the estimate (100k <
     # threshold), so no compaction.
@@ -3932,9 +4083,9 @@ async def test_compact_if_needed_triggers_on_last_response_total() -> None:
     # window, i.e. 1.1 * 990_000 = 1_089_000 >= 1_000_000. The estimate still
     # under-counts at 100k, but the gate must now use the real 990k.
     a.record_response(
-        types.model.ModelResponse(
-            message=types.runtime.AssistantMessage(text=""),
-            tokens=types.model.TokenCount(request=990_000),
+        ModelResponse(
+            message=AssistantMessage(text=""),
+            tokens=TokenCount(request=990_000),
         )
     )
     await a.compact_if_needed(history, a.model)
@@ -3958,17 +4109,17 @@ async def test_compact_if_needed_adds_tokens_appended_since_last_response() -> N
     )
     # Anchor: provider counted the last request at 800k.
     a.record_response(
-        types.model.ModelResponse(
-            message=types.runtime.AssistantMessage(text=""),
-            tokens=types.model.TokenCount(request=800_000),
+        ModelResponse(
+            message=AssistantMessage(text=""),
+            tokens=TokenCount(request=800_000),
         )
     )
     # History ends with the response's AssistantMessage, then a fresh
     # ToolResult appended this turn: 600_000 chars / 4 = ~150_000 est tokens
     # (StubModel: len // 4). X=950k; 950k + 0.075*950k = 1_021_250 >= 1M.
-    history: list[types.runtime.ModelContextEvent] = [
-        types.runtime.AssistantMessage(text=""),
-        types.runtime.ToolResult(call_id="c", content="x" * 600_000),
+    history: list[ModelContextEvent] = [
+        AssistantMessage(text=""),
+        ToolResult(call_id="c", content="x" * 600_000),
     ]
     await a.compact_if_needed(history, a.model)
     assert rec.compacted is True
@@ -3978,8 +4129,12 @@ async def test_compact_if_needed_adds_tokens_appended_since_last_response() -> N
 async def test_compact_if_needed_no_since_term_when_response_is_tail() -> None:
     """When history ends at the last response, the since-term is zero.
 
-    Anchor 800k: 800k + 0.075*800k = 860k < 1M window, and nothing has been
-    appended since the last ``AssistantMessage``, so the gate must NOT compact.
+    Anchor 700k sits under the budget's threshold (1M window - 128k
+    response - 66,666 buffer = 805,334 target, /1.01 for the summary's
+    landing room = 797,360), and nothing has been appended since the last
+    ``AssistantMessage``, so the gate must NOT compact. Its sibling above
+    appends a fresh ``ToolResult`` on the same anchor and DOES compact --
+    together they pin the since-term as the only difference.
     """
     rec = _ThresholdCompactor()
     a = Agent(
@@ -3988,14 +4143,14 @@ async def test_compact_if_needed_no_since_term_when_response_is_tail() -> None:
         compactor=rec,
     )
     a.record_response(
-        types.model.ModelResponse(
-            message=types.runtime.AssistantMessage(text=""),
-            tokens=types.model.TokenCount(request=800_000),
+        ModelResponse(
+            message=AssistantMessage(text=""),
+            tokens=TokenCount(request=700_000),
         )
     )
-    history: list[types.runtime.ModelContextEvent] = [
-        types.runtime.UserMessage(text="q"),
-        types.runtime.AssistantMessage(text=""),
+    history: list[ModelContextEvent] = [
+        UserMessage(text="q"),
+        AssistantMessage(text=""),
     ]
     assert await a.compact_if_needed(history, a.model) is True
     assert rec.compacted is False
@@ -4017,13 +4172,11 @@ async def test_compact_if_needed_counts_cached_input_tokens() -> None:
         tools=[],
         compactor=rec,
     )
-    history: list[types.runtime.ModelContextEvent] = [
-        types.runtime.UserMessage(text="x")
-    ]
+    history: list[ModelContextEvent] = [UserMessage(text="x")]
     a.record_response(
-        types.model.ModelResponse(
-            message=types.runtime.AssistantMessage(text=""),
-            tokens=types.model.TokenCount(request=5_000, cache_read=985_000),
+        ModelResponse(
+            message=AssistantMessage(text=""),
+            tokens=TokenCount(request=5_000, cache_read=985_000),
         )
     )
     # 5_000 + 985_000 = 990_000; 1.1 * 990_000 = 1_089_000 >= 1M -> fires.
@@ -4042,19 +4195,26 @@ async def test_compact_if_needed_returns_false_on_compaction_failure() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _CompactBrokenButGatedTrue:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return True
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -4066,7 +4226,7 @@ async def test_compact_if_needed_returns_false_on_compaction_failure() -> None:
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -4074,9 +4234,7 @@ async def test_compact_if_needed_returns_false_on_compaction_failure() -> None:
             return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_CompactBrokenButGatedTrue())
-    history: list[types.runtime.ModelContextEvent] = [
-        types.runtime.UserMessage(text="x")
-    ]
+    history: list[ModelContextEvent] = [UserMessage(text="x")]
     progressed = await a.compact_if_needed(history, a.model)
     assert progressed is False
 
@@ -4089,19 +4247,26 @@ async def test_circuit_breaker_short_circuits_after_consecutive_failures() -> No
     class _AlwaysBroken:
         call_count: int = 0
 
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return True
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -4113,7 +4278,7 @@ async def test_circuit_breaker_short_circuits_after_consecutive_failures() -> No
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -4122,9 +4287,7 @@ async def test_circuit_breaker_short_circuits_after_consecutive_failures() -> No
 
     compactor = _AlwaysBroken()
     a = Agent(model=StubModel(), tools=[], compactor=compactor)
-    history: list[types.runtime.ModelContextEvent] = [
-        types.runtime.UserMessage(text="x")
-    ]
+    history: list[ModelContextEvent] = [UserMessage(text="x")]
 
     # First 3 calls invoke the compactor and fail.
     for _ in range(3):
@@ -4147,32 +4310,39 @@ async def test_circuit_breaker_resets_on_successful_compaction() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _SuccessfulCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return True
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -4182,9 +4352,7 @@ async def test_circuit_breaker_resets_on_successful_compaction() -> None:
     a = Agent(model=StubModel(), tools=[], compactor=_SuccessfulCompactor())
     # Pre-populate failure count -- simulating prior auto-failures.
     a.compaction_state.compact_failures = 2
-    history: list[types.runtime.ModelContextEvent] = [
-        types.runtime.UserMessage(text="x")
-    ]
+    history: list[ModelContextEvent] = [UserMessage(text="x")]
     progressed = await a.compact_if_needed(history, a.model)
     assert progressed is True
     assert a.compaction_state.compact_failures == 0
@@ -4207,10 +4375,10 @@ def test_validate_payload_pending_check_subtracts_paired_externally() -> None:
         mask=(),
         insert_after=None,
         payload=(
-            types.runtime.AssistantMessage(
-                tool_calls=(types.runtime.ToolCall(id="c1", name="Bash", args={}),),
+            AssistantMessage(
+                tool_calls=(ToolCall(id="c1", name="Bash", args={}),),
             ),
-            types.runtime.UserMessage(text="[continuation]"),
+            UserMessage(text="[continuation]"),
         ),
         strategy="external_am_then_user",
         paired_externally=frozenset({"c1"}),
@@ -4236,19 +4404,26 @@ async def test_agent_compactor_recomputes_paired_externally_from_final_payload()
 
     @dataclass(slots=True, kw_only=True)
     class _ExternalAmCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -4262,17 +4437,17 @@ async def test_agent_compactor_recomputes_paired_externally_from_final_payload()
                 mask=full_tape_mask(tape) if tape else (),
                 insert_after=None,
                 payload=(
-                    types.runtime.AssistantMessage(
+                    AssistantMessage(
                         text="resuming",
                         tool_calls=(
-                            types.runtime.ToolCall(
+                            ToolCall(
                                 id="external_c1",
                                 name="Bash",
                                 args={},
                             ),
                         ),
                     ),
-                    types.runtime.UserMessage(text="postscript"),
+                    UserMessage(text="postscript"),
                 ),
                 strategy="external_am_then_user",
                 paired_externally=frozenset({"external_c1"}),
@@ -4281,7 +4456,7 @@ async def test_agent_compactor_recomputes_paired_externally_from_final_payload()
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -4289,7 +4464,7 @@ async def test_agent_compactor_recomputes_paired_externally_from_final_payload()
             return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_ExternalAmCompactor())
-    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+    a.runtime.append_history(UserMessage(text="x"))
     bridge = _AgentCompactor(_ExternalAmCompactor(), a)
     # If the validator regression returns, ContextSplice.__post_init__
     # raises InvalidPayloadError inside dataclasses.replace and the
@@ -4308,9 +4483,9 @@ async def test_agent_compactor_recomputes_paired_externally_from_final_payload()
     am_call_ids: set[str] = set()
     tr_call_ids: set[str] = set()
     for entry in override.payload:
-        if isinstance(entry, types.runtime.AssistantMessage):
+        if isinstance(entry, AssistantMessage):
             am_call_ids.update(tc.id for tc in entry.tool_calls)
-        elif isinstance(entry, types.runtime.ToolResult):
+        elif isinstance(entry, ToolResult):
             tr_call_ids.add(entry.call_id)
     assert "external_c1" in am_call_ids
     assert "external_c1" not in tr_call_ids
@@ -4333,20 +4508,27 @@ async def test_agent_compactor_scrunches_when_inner_output_still_oversized() -> 
     class _OversizedCompactor:
         compact_calls: int = 0
 
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            effective = max_request_tokens - system_tokens
+            effective = largest_context - system_tokens
             return current_tokens >= max(0, effective - 10)
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
-            model: types.model.Model,
+            context: Sequence[ModelContextEvent],
+            model: Model,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
@@ -4358,7 +4540,7 @@ async def test_agent_compactor_scrunches_when_inner_output_still_oversized() -> 
             # progress and stops within a few iterations.
             payload_text = "X" * 5_000 if self.compact_calls == 1 else "ok"
             return _summary_override(
-                [types.runtime.UserMessage(text=payload_text)],
+                [UserMessage(text=payload_text)],
                 mint_ref,
                 tape=tape or None,
             )
@@ -4369,18 +4551,16 @@ async def test_agent_compactor_scrunches_when_inner_output_still_oversized() -> 
         max_response_tokens: int = 100
 
         @override
-        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+        def approx_request_tokens(self, request: ModelRequest) -> int:
             # Each entry's text length / 4 = tokens. Mirrors the chars
             # heuristic the scrunch planner uses.
             return sum(
                 len(m.text) // 4
                 for m in request.messages
-                if isinstance(
-                    m, (types.runtime.UserMessage, types.runtime.AgentSendMessage)
-                )
+                if isinstance(m, (UserMessage, AgentSendMessage))
             )
 
-    budget = types.model.ContextBudget(
+    budget = AgentSettings(
         max_request_tokens=1_000,
         max_response_tokens=100,
         buffer_tokens=100,
@@ -4392,7 +4572,7 @@ async def test_agent_compactor_scrunches_when_inner_output_still_oversized() -> 
         budget=budget,
     )
     # Seed history just so the runtime has something to compact.
-    a.runtime.append_history(types.runtime.UserMessage(text="x" * 4_000))
+    a.runtime.append_history(UserMessage(text="x" * 4_000))
 
     assert await a.compact_now() is True
 
@@ -4405,12 +4585,10 @@ async def test_agent_compactor_scrunches_when_inner_output_still_oversized() -> 
     # Final resolved view must fit (input + buffer below max).
     resolved = a.runtime.context().messages
     visible_chars = sum(
-        len(m.text)
-        for m in resolved
-        if isinstance(m, (types.runtime.UserMessage, types.runtime.AgentSendMessage))
+        len(m.text) for m in resolved if isinstance(m, (UserMessage, AgentSendMessage))
     )
     target = (
-        a.model.spec.context_limits.max_request_tokens
+        a.model.limits.max_request_tokens
         - a.max_response_tokens
         - a.budget.buffer_tokens
     )
@@ -4435,7 +4613,7 @@ async def test_agent_compactor_retrigger_estimate_failure_is_nonfatal() -> None:
         n: int = 0
 
         @override
-        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+        def approx_request_tokens(self, request: ModelRequest) -> int:
             del request
             self.n += 1
             # The third estimate call is the willRetriggerNextTurn probe;
@@ -4446,32 +4624,39 @@ async def test_agent_compactor_retrigger_estimate_failure_is_nonfatal() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _OkCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -4479,7 +4664,7 @@ async def test_agent_compactor_retrigger_estimate_failure_is_nonfatal() -> None:
             return ()
 
     a = Agent(model=_FlakyEstimateModel(), tools=[], compactor=_OkCompactor())
-    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+    a.runtime.append_history(UserMessage(text="x"))
     # Must not raise -- the RuntimeError inside the retrigger probe is caught.
     assert await a.compact_now() is True
 
@@ -4500,19 +4685,26 @@ async def test_agent_compactor_repairs_payload_after_scrunch() -> None:
     class _UnpairedScrunchCompactor:
         compact_calls: int = 0
 
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -4522,18 +4714,16 @@ async def test_agent_compactor_repairs_payload_after_scrunch() -> None:
             if self.compact_calls == 1:
                 # First pass: oversized so the bridge triggers scrunch.
                 return _summary_override(
-                    [types.runtime.UserMessage(text="X" * 5_000)],
+                    [UserMessage(text="X" * 5_000)],
                     mint_ref,
                     tape=tape or None,
                 )
             # Scrunch passes: emit an AM with a tool_call but NO ToolResult.
             return _summary_override(
                 [
-                    types.runtime.AssistantMessage(
+                    AssistantMessage(
                         text="partial",
-                        tool_calls=(
-                            types.runtime.ToolCall(id="orphan", name="x", args={}),
-                        ),
+                        tool_calls=(ToolCall(id="orphan", name="x", args={}),),
                     )
                 ],
                 mint_ref,
@@ -4543,7 +4733,7 @@ async def test_agent_compactor_repairs_payload_after_scrunch() -> None:
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -4556,16 +4746,14 @@ async def test_agent_compactor_repairs_payload_after_scrunch() -> None:
         max_response_tokens: int = 100
 
         @override
-        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+        def approx_request_tokens(self, request: ModelRequest) -> int:
             return sum(
                 len(m.text) // 4
                 for m in request.messages
-                if isinstance(
-                    m, (types.runtime.UserMessage, types.runtime.AgentSendMessage)
-                )
+                if isinstance(m, (UserMessage, AgentSendMessage))
             )
 
-    budget = types.model.ContextBudget(
+    budget = AgentSettings(
         max_request_tokens=1_000, max_response_tokens=100, buffer_tokens=100
     )
     a = Agent(
@@ -4573,7 +4761,7 @@ async def test_agent_compactor_repairs_payload_after_scrunch() -> None:
         compactor=_UnpairedScrunchCompactor(),
         budget=budget,
     )
-    a.runtime.append_history(types.runtime.UserMessage(text="x" * 4_000))
+    a.runtime.append_history(UserMessage(text="x" * 4_000))
 
     assert await a.compact_now() is True
 
@@ -4584,12 +4772,10 @@ async def test_agent_compactor_repairs_payload_after_scrunch() -> None:
     am_ids = {
         tc.id
         for e in splice.payload
-        if isinstance(e, types.runtime.AssistantMessage)
+        if isinstance(e, AssistantMessage)
         for tc in e.tool_calls
     }
-    tr_ids = {
-        e.call_id for e in splice.payload if isinstance(e, types.runtime.ToolResult)
-    }
+    tr_ids = {e.call_id for e in splice.payload if isinstance(e, ToolResult)}
     # Every AM tool_call in the payload has a local TR pair.
     assert am_ids <= tr_ids, f"unpaired AM tool_calls in payload: {am_ids - tr_ids}"
 
@@ -4609,19 +4795,26 @@ async def test_agent_compactor_scrunch_uses_agent_budget_not_model_cap() -> None
     class _RecordingScrunchCompactor:
         compact_calls: int = 0
 
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -4630,7 +4823,7 @@ async def test_agent_compactor_scrunch_uses_agent_budget_not_model_cap() -> None
             self.compact_calls += 1
             payload_text = "X" * 5_000 if self.compact_calls == 1 else "ok"
             return _summary_override(
-                [types.runtime.UserMessage(text=payload_text)],
+                [UserMessage(text=payload_text)],
                 mint_ref,
                 tape=tape or None,
             )
@@ -4638,7 +4831,7 @@ async def test_agent_compactor_scrunch_uses_agent_budget_not_model_cap() -> None
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -4651,17 +4844,15 @@ async def test_agent_compactor_scrunch_uses_agent_budget_not_model_cap() -> None
         max_response_tokens: int = 100
 
         @override
-        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+        def approx_request_tokens(self, request: ModelRequest) -> int:
             return sum(
                 len(m.text) // 4
                 for m in request.messages
-                if isinstance(
-                    m, (types.runtime.UserMessage, types.runtime.AgentSendMessage)
-                )
+                if isinstance(m, (UserMessage, AgentSendMessage))
             )
 
     # Agent budget far below the model cap.
-    budget = types.model.ContextBudget(
+    budget = AgentSettings(
         max_request_tokens=1_000, max_response_tokens=100, buffer_tokens=100
     )
     a = Agent(
@@ -4673,23 +4864,23 @@ async def test_agent_compactor_scrunch_uses_agent_budget_not_model_cap() -> None
     async def _spy(
         self: _AgentCompactor,
         *,
-        payload: list[types.runtime.ModelContextEvent],
+        payload: list[ModelContextEvent],
         mint_ref: Callable[[], TapeRef],
         target_input_tokens: int,
-    ) -> list[types.runtime.ModelContextEvent]:
+    ) -> list[ModelContextEvent]:
         del self, mint_ref
         seen_targets.append(target_input_tokens)
         return list(payload)
 
     with patch.object(_AgentCompactor, "_scrunch_payload", _spy):
-        a.runtime.append_history(types.runtime.UserMessage(text="x" * 4_000))
+        a.runtime.append_history(UserMessage(text="x" * 4_000))
         await a.compact_now()
 
     assert seen_targets, "scrunch was never invoked"
     expected = a.max_request_tokens - a.max_response_tokens - a.budget.buffer_tokens
     assert seen_targets[0] == expected, (
         f"scrunch target {seen_targets[0]} != agent budget {expected}"
-        f" (model cap is {a.model.spec.context_limits.max_request_tokens})"
+        f" (model cap is {a.model.limits.max_request_tokens})"
     )
 
 
@@ -4717,12 +4908,10 @@ async def test_agent_compactor_scrunch_target_subtracts_system_tool_overhead() -
             return len(text) // 4
 
         @override
-        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+        def approx_request_tokens(self, request: ModelRequest) -> int:
             total = len(request.system or "") // 4
             for m in request.messages:
-                if isinstance(
-                    m, (types.runtime.UserMessage, types.runtime.AgentSendMessage)
-                ):
+                if isinstance(m, (UserMessage, AgentSendMessage)):
                     total += len(m.text) // 4
             return total
 
@@ -4730,16 +4919,23 @@ async def test_agent_compactor_scrunch_target_subtracts_system_tool_overhead() -
     class _OversizedCompactor:
         compact_calls: int = 0
 
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
-            self, current_tokens: int, max_request_tokens: int, system_tokens: int = 0
+            self, current_tokens: int, largest_context: int, system_tokens: int = 0
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -4748,14 +4944,14 @@ async def test_agent_compactor_scrunch_target_subtracts_system_tool_overhead() -
             self.compact_calls += 1
             payload_text = "X" * 5_000 if self.compact_calls == 1 else "ok"
             return _summary_override(
-                [types.runtime.UserMessage(text=payload_text)],
+                [UserMessage(text=payload_text)],
                 mint_ref,
                 tape=tape or None,
             )
 
     # System prompt of 800 chars -> 200 tokens of fixed overhead.
     system = "s" * 800
-    budget = types.model.ContextBudget(
+    budget = AgentSettings(
         max_request_tokens=1_000, max_response_tokens=100, buffer_tokens=100
     )
     a = Agent(
@@ -4768,16 +4964,16 @@ async def test_agent_compactor_scrunch_target_subtracts_system_tool_overhead() -
     async def _spy(
         self: _AgentCompactor,
         *,
-        payload: list[types.runtime.ModelContextEvent],
+        payload: list[ModelContextEvent],
         mint_ref: Callable[[], TapeRef],
         target_input_tokens: int,
-    ) -> list[types.runtime.ModelContextEvent]:
+    ) -> list[ModelContextEvent]:
         del self, mint_ref
         seen_targets.append(target_input_tokens)
         return list(payload)
 
     with patch.object(_AgentCompactor, "_scrunch_payload", _spy):
-        a.runtime.append_history(types.runtime.UserMessage(text="x" * 4_000))
+        a.runtime.append_history(UserMessage(text="x" * 4_000))
         await a.compact_now()
 
     assert seen_targets, "scrunch was never invoked"
@@ -4805,34 +5001,41 @@ async def test_agent_compactor_skips_scrunch_when_inner_output_fits() -> None:
     class _NormalCompactor:
         compact_calls: int = 0
 
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return True
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
-            model: types.model.Model,
+            context: Sequence[ModelContextEvent],
+            model: Model,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del context, model, custom_instructions
             self.compact_calls += 1
             return _summary_override(
-                [types.runtime.UserMessage(text="ok")],
+                [UserMessage(text="ok")],
                 mint_ref,
                 tape=tape or None,
             )
 
     compactor = _NormalCompactor()
     a = Agent(model=StubModel(), compactor=compactor)
-    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+    a.runtime.append_history(UserMessage(text="x"))
 
     assert await a.compact_now() is True
 
@@ -4846,19 +5049,26 @@ async def test_agent_compactor_skips_scrunch_when_inner_output_fits() -> None:
 async def test_compact_now_failure_publishes_event_not_context_pollution() -> None:
     @dataclass(slots=True, kw_only=True)
     class _BrokenCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -4870,7 +5080,7 @@ async def test_compact_now_failure_publishes_event_not_context_pollution() -> No
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -4880,7 +5090,7 @@ async def test_compact_now_failure_publishes_event_not_context_pollution() -> No
     a = Agent(model=StubModel(), tools=[], compactor=_BrokenCompactor())
     published: list[object] = []
     a.runtime.observers.append(published.append)
-    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+    a.runtime.append_history(UserMessage(text="x"))
     await a.compact_now()
     # Issue#316 #6: the failure does not enter model context. It surfaces via a
     # published ``CompactFailed`` event (taped + rendered dim), not as a
@@ -4888,10 +5098,10 @@ async def test_compact_now_failure_publishes_event_not_context_pollution() -> No
     polluted = [
         e
         for e in a.runtime.context().messages
-        if isinstance(e, types.runtime.UserMessage) and "[Compaction error:" in e.text
+        if isinstance(e, UserMessage) and "[Compaction error:" in e.text
     ]
     assert polluted == []
-    assert any(isinstance(e, types.runtime.CompactFailed) for e in published)
+    assert any(isinstance(e, CompactFailed) for e in published)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -4901,33 +5111,38 @@ class _OverflowModel:
     model_id: str = "ovf"
     max_request_tokens: int = 100_000
     max_response_tokens: int = 1_024
-    supports_streaming: bool = True
-    supports_thinking: bool = False
-    valid_thinking_states: tuple[str, ...] = ("off-hide",)
-    supports_effort: bool = False
-    valid_efforts: tuple[str, ...] = ()
-    supports_cache_control: bool = False
-    valid_service_tiers: tuple[str, ...] = ()
-    valid_latency_modes: tuple[str, ...] = ()
-    supports_context_management: bool = False
-    supports_persistent_retry: bool = False
-    supports_account_auth: bool = False
-    max_image_dim: int = 8_000
-    max_image_bytes: int = 5 * 1024 * 1024
-    max_request_bytes: int = 32 * 1024 * 1024
     overflow_count: int = 0
     call_index: int = 0
 
     @property
-    def spec(self) -> ModelSpec:
-        return ModelSpec(
+    def capability(self) -> ModelCapability:
+        return ModelCapability(
             model_id=self.model_id,
-            context_limits=ModelLimits(
-                max_request_tokens=self.max_request_tokens,
-                max_response_tokens=self.max_response_tokens,
+            context=MappingProxyType(
+                {
+                    "": ModelLimits(
+                        max_request_tokens=self.max_request_tokens,
+                        max_response_tokens=self.max_response_tokens,
+                    )
+                }
             ),
             prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
         )
+
+    @property
+    def settings(self) -> ModelSettings:
+        return ModelSettings(capability=self.capability)
+
+    @property
+    def limits(self) -> ModelLimits:
+        return self.settings.limits
+
+    @property
+    def tagged_model_id(self) -> str:
+        return self.model_id
+
+    def spend(self, tokens: TokenCount) -> TokenCost:
+        return self.capability.prices[PriceCatalogProduct()] * tokens
 
     def approx_text_tokens(self, text: str) -> int:
         return max(1, len(text) // 4)
@@ -4936,7 +5151,7 @@ class _OverflowModel:
         del data
         return 256
 
-    def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+    def approx_request_tokens(self, request: ModelRequest) -> int:
         return token_count.approx_request_tokens(request, self)
 
     async def actual_text_tokens(self, text: str) -> int:
@@ -4945,37 +5160,33 @@ class _OverflowModel:
     async def actual_image_tokens(self, data: bytes) -> int:
         return self.approx_image_tokens(data)
 
-    async def actual_request_tokens(self, request: types.model.ModelRequest) -> int:
+    async def actual_request_tokens(self, request: ModelRequest) -> int:
         return self.approx_request_tokens(request)
 
     def is_context_overflow(self, error: Exception) -> bool:
-        return isinstance(error, types.model.PromptTooLongError)
+        return isinstance(error, PromptTooLongError)
 
     def is_retryable_provider_error(self, error: Exception) -> bool:
         del error
         return False
 
-    def usage_snapshot(self) -> types.model.UsageSnapshot | None:
+    def usage_snapshot(self) -> UsageSnapshot | None:
         return None
 
-    async def buffer(
-        self, request: types.model.ModelRequest
-    ) -> types.model.ModelResponse:
+    async def buffer(self, request: ModelRequest) -> ModelResponse:
         return await self.stream(request)
 
     async def stream(
         self,
-        request: types.model.ModelRequest,
-        publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
-    ) -> types.model.ModelResponse:
+        request: ModelRequest,
+        publish: Callable[[RuntimeEvent], None] | None = None,
+    ) -> ModelResponse:
         del request, publish
         idx = self.call_index
         self.call_index += 1
         if idx < self.overflow_count:
-            raise types.model.PromptTooLongError("too long")
-        return types.model.ModelResponse(
-            message=types.runtime.AssistantMessage(text="recovered")
-        )
+            raise PromptTooLongError("too long")
+        return ModelResponse(message=AssistantMessage(text="recovered"))
 
     async def close(self) -> None:
         return
@@ -5012,15 +5223,34 @@ class _RawOverflowModel:
     call_index: int = 0
 
     @property
-    def spec(self) -> ModelSpec:
-        return ModelSpec(
+    def capability(self) -> ModelCapability:
+        return ModelCapability(
             model_id=self.model_id,
-            context_limits=ModelLimits(
-                max_request_tokens=self.max_request_tokens,
-                max_response_tokens=self.max_response_tokens,
+            context=MappingProxyType(
+                {
+                    "": ModelLimits(
+                        max_request_tokens=self.max_request_tokens,
+                        max_response_tokens=self.max_response_tokens,
+                    )
+                }
             ),
             prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
         )
+
+    @property
+    def settings(self) -> ModelSettings:
+        return ModelSettings(capability=self.capability)
+
+    @property
+    def limits(self) -> ModelLimits:
+        return self.settings.limits
+
+    @property
+    def tagged_model_id(self) -> str:
+        return self.model_id
+
+    def spend(self, tokens: TokenCount) -> TokenCost:
+        return self.capability.prices[PriceCatalogProduct()] * tokens
 
     def approx_text_tokens(self, text: str) -> int:
         return max(1, len(text) // 4)
@@ -5029,7 +5259,7 @@ class _RawOverflowModel:
         del data
         return 256
 
-    def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+    def approx_request_tokens(self, request: ModelRequest) -> int:
         return token_count.approx_request_tokens(request, self)
 
     async def actual_text_tokens(self, text: str) -> int:
@@ -5038,7 +5268,7 @@ class _RawOverflowModel:
     async def actual_image_tokens(self, data: bytes) -> int:
         return self.approx_image_tokens(data)
 
-    async def actual_request_tokens(self, request: types.model.ModelRequest) -> int:
+    async def actual_request_tokens(self, request: ModelRequest) -> int:
         return self.approx_request_tokens(request)
 
     def is_context_overflow(self, error: Exception) -> bool:
@@ -5048,27 +5278,23 @@ class _RawOverflowModel:
         del error
         return False
 
-    def usage_snapshot(self) -> types.model.UsageSnapshot | None:
+    def usage_snapshot(self) -> UsageSnapshot | None:
         return None
 
-    async def buffer(
-        self, request: types.model.ModelRequest
-    ) -> types.model.ModelResponse:
+    async def buffer(self, request: ModelRequest) -> ModelResponse:
         return await self.stream(request)
 
     async def stream(
         self,
-        request: types.model.ModelRequest,
-        publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
-    ) -> types.model.ModelResponse:
+        request: ModelRequest,
+        publish: Callable[[RuntimeEvent], None] | None = None,
+    ) -> ModelResponse:
         del request, publish
         idx = self.call_index
         self.call_index += 1
         if idx < self.overflow_count:
             raise RuntimeError("Request size exceeds model context window")
-        return types.model.ModelResponse(
-            message=types.runtime.AssistantMessage(text="recovered")
-        )
+        return ModelResponse(message=AssistantMessage(text="recovered"))
 
     async def close(self) -> None:
         return
@@ -5081,19 +5307,26 @@ async def test_agent_model_overflow_triggers_compact_now() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _CountingCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -5102,13 +5335,13 @@ async def test_agent_model_overflow_triggers_compact_now() -> None:
             del custom_instructions
             compact_calls.append(1)
             return _summary_override(
-                [types.runtime.UserMessage(text="[compact]")], mint_ref, tape=tape
+                [UserMessage(text="[compact]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -5117,13 +5350,12 @@ async def test_agent_model_overflow_triggers_compact_now() -> None:
 
     model = _OverflowModel(overflow_count=1)
     a = Agent(model=model, tools=[], compactor=_CountingCompactor())
-    async for _ in a.run(types.runtime.UserMessage(text="hi")):
+    async for _ in a.run(UserMessage(text="hi")):
         pass
     assert len(compact_calls) == 1
     # _OverflowModel emitted "recovered" on the second call.
     assert any(
-        isinstance(e, types.runtime.AssistantMessage) and e.text == "recovered"
-        for e in a.history
+        isinstance(e, AssistantMessage) and e.text == "recovered" for e in a.history
     )
 
 
@@ -5149,13 +5381,20 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
     class _OneShotCompactor:
         triggered: bool = False
 
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             if self.triggered:
                 return False
             self.triggered = True
@@ -5164,7 +5403,7 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -5173,13 +5412,13 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
             del custom_instructions
             order.append("compact")
             return _summary_override(
-                [types.runtime.UserMessage(text="[compact]")], mint_ref, tape=tape
+                [UserMessage(text="[compact]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -5208,15 +5447,34 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
         max_request_bytes: int = 32 * 1024 * 1024
 
         @property
-        def spec(self) -> ModelSpec:
-            return ModelSpec(
+        def capability(self) -> ModelCapability:
+            return ModelCapability(
                 model_id=self.model_id,
-                context_limits=ModelLimits(
-                    max_request_tokens=self.max_request_tokens,
-                    max_response_tokens=self.max_response_tokens,
+                context=MappingProxyType(
+                    {
+                        "": ModelLimits(
+                            max_request_tokens=self.max_request_tokens,
+                            max_response_tokens=self.max_response_tokens,
+                        )
+                    }
                 ),
                 prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
             )
+
+        @property
+        def settings(self) -> ModelSettings:
+            return ModelSettings(capability=self.capability)
+
+        @property
+        def limits(self) -> ModelLimits:
+            return self.settings.limits
+
+        @property
+        def tagged_model_id(self) -> str:
+            return self.model_id
+
+        def spend(self, tokens: TokenCount) -> TokenCost:
+            return self.capability.prices[PriceCatalogProduct()] * tokens
 
         def approx_text_tokens(self, text: str) -> int:
             return max(1, len(text) // 4)
@@ -5225,7 +5483,7 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
             del data
             return 256
 
-        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+        def approx_request_tokens(self, request: ModelRequest) -> int:
             return token_count.approx_request_tokens(request, self)
 
         async def actual_text_tokens(self, text: str) -> int:
@@ -5234,7 +5492,7 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
         async def actual_image_tokens(self, data: bytes) -> int:
             return self.approx_image_tokens(data)
 
-        async def actual_request_tokens(self, request: types.model.ModelRequest) -> int:
+        async def actual_request_tokens(self, request: ModelRequest) -> int:
             return self.approx_request_tokens(request)
 
         def is_context_overflow(self, error: Exception) -> bool:
@@ -5245,23 +5503,21 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
             del error
             return False
 
-        def usage_snapshot(self) -> types.model.UsageSnapshot | None:
+        def usage_snapshot(self) -> UsageSnapshot | None:
             return None
 
-        async def buffer(
-            self, request: types.model.ModelRequest
-        ) -> types.model.ModelResponse:
+        async def buffer(self, request: ModelRequest) -> ModelResponse:
             return await self.stream(request)
 
         async def stream(
             self,
-            request: types.model.ModelRequest,
-            publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
-        ) -> types.model.ModelResponse:
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
             del request, publish
             self.order_log.append("stream")
-            return types.model.ModelResponse(
-                message=types.runtime.AssistantMessage(text="ok"),
+            return ModelResponse(
+                message=AssistantMessage(text="ok"),
             )
 
         async def close(self) -> None:
@@ -5269,7 +5525,7 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
 
     model = _RecordingModel(order_log=order)
     a = Agent(model=model, tools=[], compactor=_OneShotCompactor())
-    async for _ in a.run(types.runtime.UserMessage(text="hi")):
+    async for _ in a.run(UserMessage(text="hi")):
         pass
     assert order == ["compact", "stream"], order
 
@@ -5280,19 +5536,26 @@ async def test_compact_now_publishes_compaction_progress_events() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _OkCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return True
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -5300,32 +5563,32 @@ async def test_compact_now_publishes_compaction_progress_events() -> None:
             del context, model
             del custom_instructions
             return _summary_override(
-                [types.runtime.UserMessage(text="[compact]")], mint_ref, tape=tape
+                [UserMessage(text="[compact]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
-    events: list[types.runtime.RuntimeEvent] = []
+    events: list[RuntimeEvent] = []
     a = Agent(model=StubModel(), tools=[], compactor=_OkCompactor())
-    a.runtime.append_history(types.runtime.UserMessage(text="hi"))
+    a.runtime.append_history(UserMessage(text="hi"))
     a.runtime.observers.append(events.append)
 
     assert await a.compact_now() is True
 
     assert [type(event) for event in events] == [
-        types.runtime.CompactStarted,
-        types.runtime.CompactComplete,
+        CompactStarted,
+        CompactComplete,
     ]
     complete = events[-1]
-    assert isinstance(complete, types.runtime.CompactComplete)
+    assert isinstance(complete, CompactComplete)
     assert len(complete.records) == 1
     record = complete.records[0]
     assert isinstance(record, ContextSplice)
@@ -5348,26 +5611,33 @@ async def test_sync_compact_now_reports_token_counts_from_override() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _OkCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return True
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [types.runtime.UserMessage(text="[compact]")],
+                [UserMessage(text="[compact]")],
                 mint_ref,
                 tape=tape,
                 token_before=120,
@@ -5377,22 +5647,22 @@ async def test_sync_compact_now_reports_token_counts_from_override() -> None:
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
             del tape, context, tools, mint_ref
             return ()
 
-    events: list[types.runtime.RuntimeEvent] = []
+    events: list[RuntimeEvent] = []
     a = Agent(model=StubModel(), tools=[], compactor=_OkCompactor())
-    a.runtime.append_history(types.runtime.UserMessage(text="hi"))
+    a.runtime.append_history(UserMessage(text="hi"))
     a.runtime.observers.append(events.append)
 
     assert await a.compact_now() is True
 
     complete = events[-1]
-    assert isinstance(complete, types.runtime.CompactComplete)
+    assert isinstance(complete, CompactComplete)
     assert complete.token_before == 120
     assert complete.token_after == 10
     assert complete.payload_entries == 1
@@ -5412,32 +5682,39 @@ async def test_sync_compact_now_appends_lifecycle_markers_to_tape() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _OkCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return True
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [types.runtime.UserMessage(text="[compact]")], mint_ref, tape=tape
+                [UserMessage(text="[compact]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -5445,18 +5722,18 @@ async def test_sync_compact_now_appends_lifecycle_markers_to_tape() -> None:
             return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_OkCompactor())
-    a.runtime.append_history(types.runtime.UserMessage(text="hi"))
+    a.runtime.append_history(UserMessage(text="hi"))
 
     assert await a.compact_now() is True
 
     started_seen = any(
-        isinstance(record, types.tape.ReferrableTapeEvent)
-        and isinstance(record.event, types.runtime.CompactStarted)
+        isinstance(record, ReferrableTapeEvent)
+        and isinstance(record.event, CompactStarted)
         for record in a.runtime.tape
     )
     complete_seen = any(
-        isinstance(record, types.tape.ReferrableTapeEvent)
-        and isinstance(record.event, types.runtime.CompactComplete)
+        isinstance(record, ReferrableTapeEvent)
+        and isinstance(record.event, CompactComplete)
         for record in a.runtime.tape
     )
     assert started_seen
@@ -5469,19 +5746,26 @@ async def test_sync_compact_now_failure_appends_compact_failed_to_tape() -> None
 
     @dataclass(slots=True, kw_only=True)
     class _BrokenCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return True
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -5492,7 +5776,7 @@ async def test_sync_compact_now_failure_appends_compact_failed_to_tape() -> None
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -5500,18 +5784,18 @@ async def test_sync_compact_now_failure_appends_compact_failed_to_tape() -> None
             return ()
 
     a = Agent(model=StubModel(), tools=[], compactor=_BrokenCompactor())
-    a.runtime.append_history(types.runtime.UserMessage(text="hi"))
+    a.runtime.append_history(UserMessage(text="hi"))
 
     assert await a.compact_now() is False
 
     started_seen = any(
-        isinstance(record, types.tape.ReferrableTapeEvent)
-        and isinstance(record.event, types.runtime.CompactStarted)
+        isinstance(record, ReferrableTapeEvent)
+        and isinstance(record.event, CompactStarted)
         for record in a.runtime.tape
     )
     failed_seen = any(
-        isinstance(record, types.tape.ReferrableTapeEvent)
-        and isinstance(record.event, types.runtime.CompactFailed)
+        isinstance(record, ReferrableTapeEvent)
+        and isinstance(record.event, CompactFailed)
         for record in a.runtime.tape
     )
     assert started_seen
@@ -5540,19 +5824,26 @@ async def test_agent_model_proactive_compaction_failure_short_circuits() -> None
     class _BrokenProactiveCompactor:
         calls: int = 0
 
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return True
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -5565,7 +5856,7 @@ async def test_agent_model_proactive_compaction_failure_short_circuits() -> None
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -5578,7 +5869,7 @@ async def test_agent_model_proactive_compaction_failure_short_circuits() -> None
 
     with pytest.raises(RuntimeError, match="compaction disconnected"):
         await a._agent_model.stream(
-            history=[types.runtime.UserMessage(text="hi")],
+            history=[UserMessage(text="hi")],
             publish=lambda _ev: None,
         )
 
@@ -5601,31 +5892,38 @@ async def test_agent_model_proactive_compaction_overflow_surfaces_polished() -> 
 
     @dataclass(slots=True, kw_only=True)
     class _OverflowingCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return True
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del tape, context, model, mint_ref
             del custom_instructions
-            raise types.model.PromptTooLongError("compactor saw overflow")
+            raise PromptTooLongError("compactor saw overflow")
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -5636,15 +5934,15 @@ async def test_agent_model_proactive_compaction_overflow_surfaces_polished() -> 
         model=_OverflowModel(overflow_count=0),
         compactor=_OverflowingCompactor(),
     )
-    with pytest.raises(types.exceptions.ContextOverflowError) as ei:
+    with pytest.raises(ContextOverflowError) as ei:
         await a._agent_model.stream(
-            history=[types.runtime.UserMessage(text="hi")],
+            history=[UserMessage(text="hi")],
             publish=lambda _ev: None,
         )
     msg = str(ei.value)
     assert "/clear" in msg
     assert "/compact" in msg
-    assert isinstance(ei.value.__cause__, types.model.PromptTooLongError)
+    assert isinstance(ei.value.__cause__, PromptTooLongError)
 
 
 @pytest.mark.asyncio
@@ -5661,19 +5959,26 @@ async def test_agent_model_overflow_exhausts_recovery_raises() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _NoOpCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -5682,13 +5987,13 @@ async def test_agent_model_overflow_exhausts_recovery_raises() -> None:
             del custom_instructions
             # Returns short summary; model keeps overflowing.
             return _summary_override(
-                [types.runtime.UserMessage(text="[compact]")], mint_ref, tape=tape
+                [UserMessage(text="[compact]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -5697,15 +6002,15 @@ async def test_agent_model_overflow_exhausts_recovery_raises() -> None:
 
     model = _OverflowModel(overflow_count=10)  # always overflow
     a = Agent(model=model, tools=[], compactor=_NoOpCompactor())
-    with pytest.raises(types.exceptions.ContextOverflowError) as ei:
+    with pytest.raises(ContextOverflowError) as ei:
         await a._agent_model.stream(
-            history=[types.runtime.UserMessage(text="x")],
+            history=[UserMessage(text="x")],
             publish=lambda _ev: None,
         )
     msg = str(ei.value)
     assert "/clear" in msg
     assert "/compact" in msg
-    assert isinstance(ei.value.__cause__, types.model.PromptTooLongError)
+    assert isinstance(ei.value.__cause__, PromptTooLongError)
     # The polished message should not embed the underlying exception
     # again -- ``__cause__`` already carries it. Duplicating the cause
     # in the message dilutes the actionable text with Python internals.
@@ -5735,19 +6040,26 @@ async def test_agent_model_overflow_short_circuits_on_compaction_failure() -> No
     class _BrokenCompactor:
         calls: int = 0
 
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -5760,7 +6072,7 @@ async def test_agent_model_overflow_short_circuits_on_compaction_failure() -> No
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -5772,7 +6084,7 @@ async def test_agent_model_overflow_short_circuits_on_compaction_failure() -> No
     a = Agent(model=model, tools=[], compactor=compactor)
     with pytest.raises(RuntimeError, match="compaction blew up"):
         await a._agent_model.stream(
-            history=[types.runtime.UserMessage(text="x")],
+            history=[UserMessage(text="x")],
             publish=lambda _ev: None,
         )
     # Model was hit once (first attempt), compactor once (the failed
@@ -5800,19 +6112,26 @@ async def test_agent_model_overflow_recovery_via_classifier_not_isinstance() -> 
 
     @dataclass(slots=True, kw_only=True)
     class _CountingCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -5821,13 +6140,13 @@ async def test_agent_model_overflow_recovery_via_classifier_not_isinstance() -> 
             del custom_instructions
             compact_calls.append(1)
             return _summary_override(
-                [types.runtime.UserMessage(text="[compact]")], mint_ref, tape=tape
+                [UserMessage(text="[compact]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -5836,12 +6155,11 @@ async def test_agent_model_overflow_recovery_via_classifier_not_isinstance() -> 
 
     model = _RawOverflowModel(overflow_count=1)
     a = Agent(model=model, tools=[], compactor=_CountingCompactor())
-    async for _ in a.run(types.runtime.UserMessage(text="hi")):
+    async for _ in a.run(UserMessage(text="hi")):
         pass
     assert len(compact_calls) == 1
     assert any(
-        isinstance(e, types.runtime.AssistantMessage) and e.text == "recovered"
-        for e in a.history
+        isinstance(e, AssistantMessage) and e.text == "recovered" for e in a.history
     )
 
 
@@ -5866,17 +6184,15 @@ class _ByteOverflowModel(StubModel):
     @override
     async def stream(
         self,
-        request: types.model.ModelRequest,
-        publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
-    ) -> types.model.ModelResponse:
+        request: ModelRequest,
+        publish: Callable[[RuntimeEvent], None] | None = None,
+    ) -> ModelResponse:
         del request, publish
         idx = self.call_index
         self.call_index += 1
         if idx < self.overflow_count:
-            raise types.model.RequestTooLargeError("Request exceeds the maximum size")
-        return types.model.ModelResponse(
-            message=types.runtime.AssistantMessage(text="recovered")
-        )
+            raise RequestTooLargeError("Request exceeds the maximum size")
+        return ModelResponse(message=AssistantMessage(text="recovered"))
 
 
 @pytest.mark.asyncio
@@ -5892,19 +6208,26 @@ async def test_agent_model_request_too_large_recovers_via_compaction() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _CountingCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -5912,13 +6235,13 @@ async def test_agent_model_request_too_large_recovers_via_compaction() -> None:
             del context, model, custom_instructions
             compact_calls.append(1)
             return _summary_override(
-                [types.runtime.UserMessage(text="[compact]")], mint_ref, tape=tape
+                [UserMessage(text="[compact]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -5928,7 +6251,7 @@ async def test_agent_model_request_too_large_recovers_via_compaction() -> None:
     model = _ByteOverflowModel(overflow_count=1)
     a = Agent(model=model, tools=[], compactor=_CountingCompactor())
     message = await a._agent_model.stream(
-        history=[types.runtime.UserMessage(text="x")],
+        history=[UserMessage(text="x")],
         publish=lambda _ev: None,
     )
     assert message.text == "recovered"
@@ -5947,32 +6270,39 @@ async def test_resume_retry_at_consumed_once_across_overflow_recovery() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _PassThroughCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [types.runtime.UserMessage(text="[compact]")], mint_ref, tape=tape
+                [UserMessage(text="[compact]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -5998,7 +6328,7 @@ async def test_resume_retry_at_consumed_once_across_overflow_recovery() -> None:
 
     with patch("sagent.agent.retry.asyncio.sleep", _recording_sleep):
         message = await a._agent_model.stream(
-            history=[types.runtime.UserMessage(text="x")],
+            history=[UserMessage(text="x")],
             publish=lambda _ev: None,
         )
     assert message.text == "recovered"
@@ -6019,32 +6349,39 @@ async def test_agent_model_request_too_large_exhaustion_byte_remediation() -> No
 
     @dataclass(slots=True, kw_only=True)
     class _NoOpCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [types.runtime.UserMessage(text="[compact]")], mint_ref, tape=tape
+                [UserMessage(text="[compact]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -6053,16 +6390,16 @@ async def test_agent_model_request_too_large_exhaustion_byte_remediation() -> No
 
     model = _ByteOverflowModel(overflow_count=10)  # always too large
     a = Agent(model=model, tools=[], compactor=_NoOpCompactor())
-    with pytest.raises(types.model.RequestTooLargeError) as ei:
+    with pytest.raises(RequestTooLargeError) as ei:
         await a._agent_model.stream(
-            history=[types.runtime.UserMessage(text="x")],
+            history=[UserMessage(text="x")],
             publish=lambda _ev: None,
         )
     msg = str(ei.value)
     assert "larger" not in msg.lower(), (
         f"byte-overflow remediation must not advise a larger window; got {msg!r}"
     )
-    assert isinstance(ei.value.__cause__, types.model.RequestTooLargeError)
+    assert isinstance(ei.value.__cause__, RequestTooLargeError)
     # Prove the recovery loop actually iterated (compacted between attempts),
     # not short-circuited on the first failure: model hit once per attempt.
     assert model.call_index >= MAX_OVERFLOW_RECOVERY + 1, (
@@ -6089,14 +6426,12 @@ async def test_fresh_oversize_attachment_rejected_before_send() -> None:
         @override
         async def stream(
             self,
-            request: types.model.ModelRequest,
-            publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
-        ) -> types.model.ModelResponse:
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
             del request, publish
             self.call_index += 1
-            return types.model.ModelResponse(
-                message=types.runtime.AssistantMessage(text="should not be reached")
-            )
+            return ModelResponse(message=AssistantMessage(text="should not be reached"))
 
     model = _SmallByteModel()
     a = Agent(model=model, tools=[], compactor=_ThresholdCompactor())
@@ -6104,13 +6439,13 @@ async def test_fresh_oversize_attachment_rejected_before_send() -> None:
     # turn's fresh input -> not compactable. Seed the runtime tape (the
     # production source the stream loop refetches from), not just the arg.
     huge = b"%PDF-" + b"\x00" * (6 * 1024 * 1024)
-    user = types.runtime.UserMessage(
+    user = UserMessage(
         text="describe",
-        attachments=(types.runtime.BytesMessage(huge, "application/pdf"),),
+        attachments=(BytesMessage(huge, "application/pdf"),),
     )
     a.runtime.append_history(user)
     history = a.runtime.context().messages
-    with pytest.raises(types.model.RequestTooLargeError):
+    with pytest.raises(RequestTooLargeError):
         await a._agent_model.stream(history=history, publish=lambda _ev: None)
     assert model.call_index == 0, "oversize fresh attachment must be rejected pre-send"
 
@@ -6135,14 +6470,12 @@ async def test_fresh_text_heavy_request_rejected_before_send() -> None:
         @override
         async def stream(
             self,
-            request: types.model.ModelRequest,
-            publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
-        ) -> types.model.ModelResponse:
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
             del request, publish
             self.call_index += 1
-            return types.model.ModelResponse(
-                message=types.runtime.AssistantMessage(text="should not be reached")
-            )
+            return ModelResponse(message=AssistantMessage(text="should not be reached"))
 
     model = _SmallByteModel()
     # No compactor: ``compact_if_needed`` is a no-op, so the fresh text reaches
@@ -6151,10 +6484,10 @@ async def test_fresh_text_heavy_request_rejected_before_send() -> None:
     a = Agent(model=model, tools=[], compactor=None)
     # No attachments at all: 5 MB of fresh user text over the 4 MB ceiling.
     # Attachment-only accounting would see 0 bytes and wave it through.
-    user = types.runtime.UserMessage(text="x" * (5 * 1024 * 1024))
+    user = UserMessage(text="x" * (5 * 1024 * 1024))
     a.runtime.append_history(user)
     history = a.runtime.context().messages
-    with pytest.raises(types.model.RequestTooLargeError):
+    with pytest.raises(RequestTooLargeError):
         await a._agent_model.stream(history=history, publish=lambda _ev: None)
     assert model.call_index == 0, "text-heavy fresh request must be rejected pre-send"
 
@@ -6181,39 +6514,33 @@ async def test_pre_send_guard_measures_materialized_not_raw_history() -> None:
         @override
         async def stream(
             self,
-            request: types.model.ModelRequest,
-            publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
-        ) -> types.model.ModelResponse:
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
             del publish
             self.call_index += 1
             self.received.append(request)
-            return types.model.ModelResponse(
-                message=types.runtime.AssistantMessage(text="done")
-            )
+            return ModelResponse(message=AssistantMessage(text="done"))
 
     model = _CapturingModel()
     # message_budget_tokens=1000 -> the 5 MB historical tool result elides to the
     # short placeholder; the materialized body is tiny and well under 1 MB.
     a = Agent(model=model, tools=[], compactor=None)
-    a._budget = replace(a._budget, message_budget_tokens=1_000)
+    a._tool_results = ToolResultPolicy(message_budget_tokens=1_000)
     # A CLOSED tool pair in HISTORY (not this turn's input): user asks, model
     # calls a tool, a 5 MB tool result returns, then a fresh user turn.
-    a.runtime.append_history(types.runtime.UserMessage(text="hi"))
+    a.runtime.append_history(UserMessage(text="hi"))
     a.runtime.append_history(
-        types.runtime.AssistantMessage(
-            tool_calls=(types.runtime.ToolCall(id="c1", name="Bash", args={}),)
-        )
+        AssistantMessage(tool_calls=(ToolCall(id="c1", name="Bash", args={}),))
     )
-    a.runtime.append_history(
-        types.runtime.ToolResult(call_id="c1", content="x" * (5 * 1024 * 1024))
-    )
-    a.runtime.append_history(types.runtime.UserMessage(text="continue"))
+    a.runtime.append_history(ToolResult(call_id="c1", content="x" * (5 * 1024 * 1024)))
+    a.runtime.append_history(UserMessage(text="continue"))
     history = a.runtime.context().messages
     # Must NOT raise: the materialized request elides the oversized tool result.
     await a._agent_model.stream(history=history, publish=lambda _ev: None)
     assert model.call_index == 1, "guard false-rejected an elidable historical result"
     sent = model.received[0]
-    shed = next(m for m in sent.messages if isinstance(m, types.runtime.ToolResult))
+    shed = next(m for m in sent.messages if isinstance(m, ToolResult))
     assert len(shed.content) < len("x" * (5 * 1024 * 1024)), (
         "oversized tool result reached the wire intact"
     )
@@ -6231,13 +6558,11 @@ def test_wire_request_bytes_counts_tool_call_and_thinking_surfaces() -> None:
     history slip the guard and 413 reactively. Adding such surfaces must strictly
     increase the estimate.
     """
-    plain = types.runtime.AssistantMessage(text="hi")
-    heavy = types.runtime.AssistantMessage(
+    plain = AssistantMessage(text="hi")
+    heavy = AssistantMessage(
         text="hi",
         thinking_blocks=({"type": "thinking", "thinking": "z" * 5_000},),
-        tool_calls=(
-            types.runtime.ToolCall(id="c1", name="Bash", args={"command": "y" * 5_000}),
-        ),
+        tool_calls=(ToolCall(id="c1", name="Bash", args={"command": "y" * 5_000}),),
     )
     base = _wire_request_bytes([plain], system="", max_image_bytes=0)
     with_payload = _wire_request_bytes([heavy], system="", max_image_bytes=0)
@@ -6252,10 +6577,10 @@ async def test_agent_tool_emits_label_and_delegates() -> None:
     inner = StubTool()
     a = _build_agent(tools=[inner])
 
-    labels: list[types.runtime.ToolLabel] = []
+    labels: list[ToolLabel] = []
 
     def _watch(ev: object) -> None:
-        if isinstance(ev, types.runtime.ToolLabel):
+        if isinstance(ev, ToolLabel):
             labels.append(ev)
 
     a.runtime.observers.append(_watch)
@@ -6287,10 +6612,10 @@ async def test_agent_tool_invalid_input_labels_then_errors() -> None:
         )
     )
     a = _build_agent(tools=[inner])
-    labels: list[types.runtime.ToolLabel] = []
+    labels: list[ToolLabel] = []
 
     def _watch(ev: object) -> None:
-        if isinstance(ev, types.runtime.ToolLabel):
+        if isinstance(ev, ToolLabel):
             labels.append(ev)
 
     a.runtime.observers.append(_watch)
@@ -6317,11 +6642,11 @@ async def test_clear_cancels_explicit_background_jobs() -> None:
             return None
 
         @override
-        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             started.set()
             await asyncio.get_running_loop().create_future()
-            return types.runtime.ToolResult(call_id="", content="done")
+            return ToolResult(call_id="", content="done")
 
     a = _build_agent(tools=[SlowTool()])
     wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
@@ -6351,11 +6676,11 @@ async def test_cancelled_background_tool_splices_placeholder() -> None:
             return None
 
         @override
-        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             started.set()
             await asyncio.get_running_loop().create_future()
-            return types.runtime.ToolResult(call_id="", content="done")
+            return ToolResult(call_id="", content="done")
 
     a = _build_agent(tools=[SlowTool()])
     wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
@@ -6365,12 +6690,8 @@ async def test_cancelled_background_tool_splices_placeholder() -> None:
     finally:
         agent_runtime.current_call_id_var.reset(token)
     a.runtime.append_history(
-        types.runtime.AssistantMessage(
-            tool_calls=(
-                types.runtime.ToolCall(
-                    id="bg-1", name="Echo", args={"background": True}
-                ),
-            )
+        AssistantMessage(
+            tool_calls=(ToolCall(id="bg-1", name="Echo", args={"background": True}),)
         )
     )
     a.runtime.append_history(placeholder)
@@ -6385,16 +6706,14 @@ async def test_cancelled_background_tool_splices_placeholder() -> None:
     with contextlib.suppress(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=1.0)
     items = await asyncio.wait_for(a.runtime.inbox.drain(), timeout=1.0)
-    detached = [
-        item for item in items if isinstance(item, types.runtime.DetachedResult)
-    ]
+    detached = [item for item in items if isinstance(item, DetachedResult)]
     assert len(detached) == 1
 
     # The cancelled background job posts a ``[cancelled]`` result. Its delivery
     # into history (foreground-splice) is the BackgroundTask foreground path;
     # here we assert the posted result itself.
     result = detached[0].result
-    assert result.content == types.runtime.CANCELLED_PLACEHOLDER
+    assert result.content == CANCELLED_PLACEHOLDER
     assert result.is_error
 
 
@@ -6410,11 +6729,11 @@ async def test_kill_tool_cancels_explicit_background_job_by_id() -> None:
             return None
 
         @override
-        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             started.set()
             await asyncio.get_running_loop().create_future()
-            return types.runtime.ToolResult(call_id="", content="done")
+            return ToolResult(call_id="", content="done")
 
     a = _build_agent(tools=[SlowTool()])
     wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
@@ -6441,11 +6760,11 @@ async def test_kill_all_tools_cancels_explicit_background_jobs() -> None:
             return None
 
         @override
-        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             started.set()
             await asyncio.get_running_loop().create_future()
-            return types.runtime.ToolResult(call_id="", content="done")
+            return ToolResult(call_id="", content="done")
 
     a = _build_agent(tools=[SlowTool()])
     wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
@@ -6478,25 +6797,23 @@ async def test_tool_call_round_cap_allows_first_round_when_cap_is_one() -> None:
             return None
 
         @override
-        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             started.set()
-            return types.runtime.ToolResult(call_id="", content="side effect")
+            return ToolResult(call_id="", content="side effect")
 
     model = StubModel(
         responses=[
-            types.runtime.AssistantMessage(
-                tool_calls=(types.runtime.ToolCall(id="c1", name="Echo", args={}),)
-            ),
-            types.runtime.AssistantMessage(text="done"),
+            AssistantMessage(tool_calls=(ToolCall(id="c1", name="Echo", args={}),)),
+            AssistantMessage(text="done"),
         ]
     )
     a = Agent(model=model, tools=[SideEffectTool()], max_tool_call_rounds=1)
-    events = [type(ev) async for ev in a.run(types.runtime.UserMessage(text="go"))]
+    events = [type(ev) async for ev in a.run(UserMessage(text="go"))]
 
     assert started.is_set()
-    assert types.runtime.ModelIdle in events
-    assert types.runtime.ModelResponseError not in events
+    assert ModelIdle in events
+    assert ModelResponseError not in events
 
 
 @pytest.mark.asyncio
@@ -6512,27 +6829,23 @@ async def test_tool_call_round_cap_blocks_second_round_when_cap_is_one() -> None
             return None
 
         @override
-        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             nonlocal started_count
             started_count += 1
-            return types.runtime.ToolResult(call_id="", content="ran")
+            return ToolResult(call_id="", content="ran")
 
     model = StubModel(
         responses=[
-            types.runtime.AssistantMessage(
-                tool_calls=(types.runtime.ToolCall(id="c1", name="Echo", args={}),)
-            ),
-            types.runtime.AssistantMessage(
-                tool_calls=(types.runtime.ToolCall(id="c2", name="Echo", args={}),)
-            ),
+            AssistantMessage(tool_calls=(ToolCall(id="c1", name="Echo", args={}),)),
+            AssistantMessage(tool_calls=(ToolCall(id="c2", name="Echo", args={}),)),
         ]
     )
     a = Agent(model=model, tools=[CountingTool()], max_tool_call_rounds=1)
-    events = [type(ev) async for ev in a.run(types.runtime.UserMessage(text="go"))]
+    events = [type(ev) async for ev in a.run(UserMessage(text="go"))]
 
     assert started_count == 1
-    assert types.runtime.ModelResponseError in events
+    assert ModelResponseError in events
 
 
 @pytest.mark.asyncio
@@ -6548,21 +6861,19 @@ async def test_clear_drops_cancelled_background_result_after_fresh_turn() -> Non
             return None
 
         @override
-        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             started.set()
             await asyncio.get_running_loop().create_future()
-            return types.runtime.ToolResult(call_id="", content="done")
+            return ToolResult(call_id="", content="done")
 
     a = _build_agent(
-        model=StubModel(
-            responses=[types.runtime.AssistantMessage(text="fresh response")]
-        ),
+        model=StubModel(responses=[AssistantMessage(text="fresh response")]),
         tools=[SlowTool()],
     )
 
-    def _watch(event: types.runtime.RuntimeEvent) -> None:
-        if isinstance(event, types.runtime.ModelIdle):
+    def _watch(event: RuntimeEvent) -> None:
+        if isinstance(event, ModelIdle):
             idle.set()
 
     a.runtime.observers.append(_watch)
@@ -6573,7 +6884,7 @@ async def test_clear_drops_cancelled_background_result_after_fresh_turn() -> Non
     try:
         await a.clear()
         await asyncio.sleep(0)
-        a.runtime.inbox.push_back(types.runtime.UserMessage(text="fresh"))
+        a.runtime.inbox.push_back(UserMessage(text="fresh"))
         await asyncio.wait_for(idle.wait(), timeout=1.0)
     finally:
         a.shutdown(force=True)
@@ -6581,12 +6892,8 @@ async def test_clear_drops_cancelled_background_result_after_fresh_turn() -> Non
             await drive
         a.runtime.observers.remove(_watch)
 
-    user_texts = [
-        entry.text
-        for entry in a.history
-        if isinstance(entry, types.runtime.UserMessage)
-    ]
-    assert not any(types.runtime.CANCELLED_PLACEHOLDER in text for text in user_texts)
+    user_texts = [entry.text for entry in a.history if isinstance(entry, UserMessage)]
+    assert not any(CANCELLED_PLACEHOLDER in text for text in user_texts)
     assert not any(text.startswith("[Tool ") for text in user_texts)
 
 
@@ -6602,7 +6909,7 @@ async def test_agent_tool_background_exception_is_logged(
             return None
 
         @override
-        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             raise RuntimeError("boom")
 
@@ -6617,7 +6924,7 @@ async def test_agent_tool_background_exception_is_logged(
         "background tool 'Echo' failed" in r.getMessage() for r in caplog.records
     )
     items = a.runtime.inbox.drain_nowait()
-    detached = [i for i in items if isinstance(i, types.runtime.DetachedResult)]
+    detached = [i for i in items if isinstance(i, DetachedResult)]
     assert len(detached) == 1
     assert detached[0].is_error
 
@@ -6630,19 +6937,26 @@ async def test_agent_compactor_appends_continuation_when_summary_ends_assistant(
 
     @dataclass(slots=True, kw_only=True)
     class _AssistantTerminatedCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -6650,13 +6964,13 @@ async def test_agent_compactor_appends_continuation_when_summary_ends_assistant(
             del context, model
             del custom_instructions
             return _summary_override(
-                [types.runtime.AssistantMessage(text="model said")], mint_ref, tape=tape
+                [AssistantMessage(text="model said")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -6668,11 +6982,11 @@ async def test_agent_compactor_appends_continuation_when_summary_ends_assistant(
         compactor=_AssistantTerminatedCompactor(),
         session_dir=tmp_path,
     )
-    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+    a.runtime.append_history(UserMessage(text="x"))
     await a.compact_now()
     # The continuation user-message terminator was appended.
     last = a.runtime.context().messages[-1]
-    assert isinstance(last, types.runtime.UserMessage)
+    assert isinstance(last, UserMessage)
     assert last.text == "[continuation]"
 
 
@@ -6684,19 +6998,26 @@ async def test_agent_compactor_post_enrich_failure_swallowed(
 
     @dataclass(slots=True, kw_only=True)
     class _OkCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -6704,13 +7025,13 @@ async def test_agent_compactor_post_enrich_failure_swallowed(
             del context, model
             del custom_instructions
             return _summary_override(
-                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -6726,14 +7047,14 @@ async def test_agent_compactor_post_enrich_failure_swallowed(
         compactor=_OkCompactor(),
         session_dir=tmp_path,
     )
-    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+    a.runtime.append_history(UserMessage(text="x"))
 
     monkeypatch.setattr("sagent.agent.agent.post_compact_enrich", _boom)
     await a.compact_now()
 
     # Summary still survived; the enrich failure was swallowed.
     assert any(
-        isinstance(e, types.runtime.UserMessage) and e.text == "[summary]"
+        isinstance(e, UserMessage) and e.text == "[summary]"
         for e in a.runtime.context().messages
     )
 
@@ -6782,7 +7103,7 @@ async def test_stream_rebuilds_system_per_request() -> None:
     model = StubModel()
     a = _build_agent(model=model, system=factory)
     pre_run_count = call_count
-    async for _ in a.run(types.runtime.UserMessage(text="hi")):
+    async for _ in a.run(UserMessage(text="hi")):
         pass
     assert call_count > pre_run_count
     assert model.received[-1].system == f"sys-v{call_count}"
@@ -6808,12 +7129,12 @@ async def test_stream_forwards_publish_sink_to_inner_model() -> None:
         @override
         async def stream(
             self,
-            request: types.model.ModelRequest,
-            publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
-        ) -> types.model.ModelResponse:
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
             if publish is not None:
-                publish(types.runtime.ToolLabel(call_id="probe", text="probe"))
-                publish(types.runtime.ModelResponsePartial(text="hello"))
+                publish(ToolLabel(call_id="probe", text="probe"))
+                publish(ModelResponsePartial(text="hello"))
             # Zero-arg ``super()`` breaks under ``@dataclass(slots=True)`` on
             # Python <3.13 (CPython gh-90562): slots rebuilds the class, so the
             # ``__class__`` cell points at the pre-slots class and the
@@ -6822,23 +7143,19 @@ async def test_stream_forwards_publish_sink_to_inner_model() -> None:
 
     model = _PublishingModel()
     a = _build_agent(model=model)
-    delivered: list[types.runtime.RuntimeEvent] = []
+    delivered: list[RuntimeEvent] = []
     _ = await a._agent_model.stream(
-        [types.runtime.UserMessage(text="hi")],
+        [UserMessage(text="hi")],
         delivered.append,
     )
 
-    assert any(
-        isinstance(e, types.runtime.ToolLabel) and e.call_id == "probe"
-        for e in delivered
-    ), (
+    assert any(isinstance(e, ToolLabel) and e.call_id == "probe" for e in delivered), (
         "inner-model-published ToolLabel did not reach the runtime publisher;"
         " ``_AgentModel.stream`` must forward a ``publish`` sink into"
         " ``send_with_retry`` so the CLI bridge's labels fan out"
     )
     assert any(
-        isinstance(e, types.runtime.ModelResponsePartial) and e.text == "hello"
-        for e in delivered
+        isinstance(e, ModelResponsePartial) and e.text == "hello" for e in delivered
     ), "inner-model-published text chunk did not reach the runtime publisher"
 
 
@@ -6846,9 +7163,9 @@ def test_subagent_inherits_root_cost_tracker() -> None:
     """C5: non-persistent subagent's cost folds into the root tracker."""
     root = _build_agent()
     child = _build_agent()
-    response = types.model.ModelResponse(
-        message=types.runtime.AssistantMessage(text="ok"),
-        tokens=types.model.TokenCount(request=10, response=5),
+    response = ModelResponse(
+        message=AssistantMessage(text="ok"),
+        tokens=TokenCount(request=10, response=5),
         spend=TokenCost(request=0.02),
     )
     with root._install_contextvars(), child._install_contextvars():
@@ -6868,9 +7185,9 @@ def test_serviced_subagent_cost_rolls_up_to_root() -> None:
     root = _build_agent()
     child = _build_agent()
     child._lifecycle = "serviced"
-    response = types.model.ModelResponse(
-        message=types.runtime.AssistantMessage(text="ok"),
-        tokens=types.model.TokenCount(),
+    response = ModelResponse(
+        message=AssistantMessage(text="ok"),
+        tokens=TokenCount(),
         spend=TokenCost(request=0.02),
     )
     with root._install_contextvars(), child._install_contextvars():
@@ -6889,16 +7206,16 @@ def test_child_cost_records_once_on_root_tokens_self_only() -> None:
     """
     root = _build_agent()
     child = _build_agent()
-    response = types.model.ModelResponse(
-        message=types.runtime.AssistantMessage(text="ok"),
-        tokens=types.model.TokenCount(request=42, response=7),
+    response = ModelResponse(
+        message=AssistantMessage(text="ok"),
+        tokens=TokenCount(request=42, response=7),
         spend=TokenCost(request=0.03),
     )
     with root._install_contextvars(), child._install_contextvars():
         child.record_response(response)
     assert root.cost_tracker.spend.total == pytest.approx(0.03)
-    assert root.cost_tracker.total == types.model.TokenCount()
-    assert child.cost_tracker.total == types.model.TokenCount(request=42, response=7)
+    assert root.cost_tracker.total == TokenCount()
+    assert child.cost_tracker.total == TokenCount(request=42, response=7)
     assert child._own_spend.total == pytest.approx(0.03)
 
 
@@ -6949,7 +7266,7 @@ def test_status_setter_publishes_status_changed() -> None:
     events: list[str] = []
 
     def watch(event: object) -> None:
-        if isinstance(event, types.runtime.StatusChanged):
+        if isinstance(event, StatusChanged):
             events.append(event.text)
 
     a.runtime.observers.append(watch)
@@ -6991,15 +7308,15 @@ async def test_model_switch_event_queues_swap_until_call_drains() -> None:
         @override
         async def stream(
             self,
-            request: types.model.ModelRequest,
-            publish: Callable[[types.runtime.RuntimeEvent], None] | None = None,
-        ) -> types.model.ModelResponse:
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
             del publish
             self.received.append(request)
             stream_entered.set()
             await gate.wait()
-            return types.model.ModelResponse(
-                message=types.runtime.AssistantMessage(text="from A"),
+            return ModelResponse(
+                message=AssistantMessage(text="from A"),
                 spend=TokenCost(request=0.10),
             )
 
@@ -7008,7 +7325,7 @@ async def test_model_switch_event_queues_swap_until_call_drains() -> None:
     agent = _build_agent(model=model_a)
 
     async def consume() -> None:
-        async for _ in agent.run(types.runtime.UserMessage(text="hi")):
+        async for _ in agent.run(UserMessage(text="hi")):
             pass
 
     drive = asyncio.create_task(consume())
@@ -7017,9 +7334,7 @@ async def test_model_switch_event_queues_swap_until_call_drains() -> None:
     # User types ``/model model-B``. Slash handler pushes a
     # ``ModelSwitch`` event into the inbox; runtime defers it.
     agent.runtime.inbox.push_back(
-        types.runtime.ModelSwitch(
-            apply=lambda: agent.swap_model(model_b), label="A -> B"
-        ),
+        ModelSwitch(apply=lambda: agent.swap_model(model_b), label="A -> B"),
     )
 
     # Release the in-flight call.
@@ -7037,64 +7352,23 @@ async def test_model_switch_event_queues_swap_until_call_drains() -> None:
 
 
 def test_swap_model_clears_unsupported_thinking() -> None:
-    """L4: swapping to a model without thinking support clears ``_thinking``."""
+    """Swapping to a model without thinking support drops the budget."""
 
     @dataclass(slots=True, kw_only=True)
     class _NoThinkingModel(StubModel):
         supports_thinking: bool = False
 
-    a = _build_agent()
-    a.thinking = "adaptive"
+    a = _build_agent(model=StubModel(supports_thinking=True))
+    a.model.settings.thinking_budget = "auto"
     a.swap_model(_NoThinkingModel())
-    assert a.thinking is None
+    assert a.model.settings.thinking_budget == "none"
 
 
-def test_swap_model_resets_thinking_state_invalid_for_new_model() -> None:
-    """Swapping to a model that supports thinking but rejects the current
-    state's wire mode must reset the state, not leave it to 400.
+def test_swap_model_resets_a_budget_the_new_model_rejects() -> None:
+    """Mirrors the live generation split: 4-8 takes ``adaptive``, 4-5 does not.
 
-    Mirrors the live generation split: an ``adaptive-*`` state is valid on
-    opus-4-8 but the 4-5 generation rejects ``adaptive`` (only ``on-*``).
-    The swap must drop the now-invalid state to ``off-hide`` rather than
-    send ``thinking.type=adaptive`` and 400 on the next turn.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _EnabledOnlyModel(StubModel):
-        """Reasons, but only via the ``fixed`` budget -- no ``adaptive``."""
-
-        @property
-        @override
-        def spec(self) -> ModelSpec:
-            # Two-arg ``super``: ``slots=True`` rebuilds the class, so the
-            # zero-arg form's ``__class__`` cell points at the discarded
-            # original and raises on Python < 3.14 (python/cpython#90562).
-            return dataclasses.replace(
-                super(_EnabledOnlyModel, self).spec,
-                supported_thinking_budgets=frozenset({"fixed"}),
-            )
-
-    a = Agent(model=StubModel(), tools=[], thinking_state="adaptive-hide")
-    assert a.thinking_state == "adaptive-hide"
-    a.swap_model(_EnabledOnlyModel())
-    assert a.thinking_state == "off-hide"
-    assert a.thinking is None
-    assert a.show_thinking is False
-
-
-def test_swap_model_keeps_thinking_state_valid_for_new_model() -> None:
-    """A state still valid for the new model survives the swap unchanged."""
-    a = Agent(
-        model=StubModel(supports_thinking=True), tools=[], thinking_state="on-hide"
-    )
-    a.swap_model(StubModel(model_id="other", supports_thinking=True))
-    assert a.thinking_state == "on-hide"
-
-
-def test_swap_model_resets_legacy_thinking_mode_invalid_for_new_model() -> None:
-    """The legacy ``agent.thinking = "adaptive"`` path (state ``None``, set by
-    ``AgentSelf`` and direct assignment) must also reset on an incompatible
-    swap, or the materialized request sends a rejected wire mode and 400s.
+    The swap must drop the now-unofferable budget rather than send
+    ``thinking.type=adaptive`` and earn a 400 on the next turn.
     """
 
     @dataclass(slots=True, kw_only=True)
@@ -7105,31 +7379,35 @@ def test_swap_model_resets_legacy_thinking_mode_invalid_for_new_model() -> None:
 
         @property
         @override
-        def spec(self) -> ModelSpec:
+        def capability(self) -> ModelCapability:
             # Two-arg ``super``: ``slots=True`` rebuilds the class, so the
             # zero-arg form's ``__class__`` cell points at the discarded
             # original and raises on Python < 3.14 (python/cpython#90562).
             return dataclasses.replace(
-                super(_EnabledOnlyModel, self).spec,
-                supported_thinking_budgets=frozenset({"fixed"}),
+                super(_EnabledOnlyModel, self).capability,
+                thinking_budget=frozenset({"none", "fixed"}),
             )
 
     a = _build_agent(model=StubModel(supports_thinking=True))
-    a.thinking = "adaptive"  # state=None, wire mode "adaptive"
-    assert a.thinking_state is None
+    a.model.settings.thinking_budget = "auto"
     a.swap_model(_EnabledOnlyModel())
-    # "adaptive" is unsatisfiable on an enabled-only model; must be cleared.
-    assert a.thinking is None
+    assert a.model.settings.thinking_budget == "none"
+
+
+def test_swap_model_carries_a_selection_the_new_model_still_offers() -> None:
+    """A swap keeps what the user chose; only the unofferable is dropped."""
+    a = _build_agent(model=StubModel(supports_thinking=True))
+    a.model.settings.thinking_budget = "fixed"
+    a.swap_model(StubModel(model_id="other", supports_thinking=True))
+    assert a.model.settings.thinking_budget == "fixed"
 
 
 def test_swap_model_resets_effort_invalid_for_new_model() -> None:
     """Effort outside the new model's ``valid_efforts`` resets to unset."""
-    a = _build_agent(
-        model=StubModel(supports_effort=True, valid_efforts=("low", "high"))
-    )
-    a.effort = "high"
-    a.swap_model(StubModel(supports_effort=True, valid_efforts=("low", "medium")))
-    assert a.effort is None
+    a = _build_agent(model=StubModel(valid_efforts=("low", "high")))
+    a.model.settings.thinking_effort = "high"
+    a.swap_model(StubModel(valid_efforts=("low", "medium")))
+    assert a.model.settings.thinking_effort == "none"
 
 
 def test_recompact_docstring_describes_alias_semantics() -> None:
@@ -7141,22 +7419,29 @@ def test_recompact_docstring_describes_alias_semantics() -> None:
 async def test_compact_if_needed_uses_agent_request_cap() -> None:
     @dataclass(slots=True, kw_only=True)
     class _RecorderCompactor:
-        seen_max_request_tokens: list[int] = field(default_factory=list)
+        seen_limits: list[int] = field(default_factory=list)
+
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
 
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
             del current_tokens, system_tokens
-            self.seen_max_request_tokens.append(max_request_tokens)
+            self.seen_limits.append(largest_context)
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -7168,31 +7453,39 @@ async def test_compact_if_needed_uses_agent_request_cap() -> None:
     a = Agent(model=StubModel(max_request_tokens=100_000), compactor=compactor)
     a.max_request_tokens = 10_000
 
-    progressed = await a.compact_if_needed(
-        [types.runtime.UserMessage(text="x")], a.model
-    )
+    progressed = await a.compact_if_needed([UserMessage(text="x")], a.model)
 
     assert progressed is True
-    assert compactor.seen_max_request_tokens == [10_000]
+    # The agent's lowered cap (10_000), not the model's 100_000, and net of
+    # the response + buffer reservations the strategy makes.
+    assert compactor.seen_limits == [compactor.largest_context(a.budget)]
+    assert compactor.seen_limits[0] < 10_000
 
 
 @pytest.mark.asyncio
 async def test_compact_if_needed_resets_failure_breaker_when_healthy() -> None:
     @dataclass(slots=True, kw_only=True)
     class _HealthyCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -7203,9 +7496,7 @@ async def test_compact_if_needed_resets_failure_breaker_when_healthy() -> None:
     a = Agent(model=StubModel(), compactor=_HealthyCompactor())
     a.compaction_state.compact_failures = 3
 
-    progressed = await a.compact_if_needed(
-        [types.runtime.UserMessage(text="x")], a.model
-    )
+    progressed = await a.compact_if_needed([UserMessage(text="x")], a.model)
 
     assert progressed is True
     assert a.compaction_state.compact_failures == 0
@@ -7215,30 +7506,35 @@ async def test_compact_if_needed_resets_failure_breaker_when_healthy() -> None:
 async def test_compactor_estimates_use_live_background_aware_tools() -> None:
     @dataclass(slots=True, kw_only=True)
     class _RecordingModel(StubModel):
-        estimated_tools: list[Sequence[types.tools.Tool] | None] = field(
-            default_factory=list
-        )
+        estimated_tools: list[Sequence[Tool] | None] = field(default_factory=list)
 
         @override
-        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+        def approx_request_tokens(self, request: ModelRequest) -> int:
             self.estimated_tools.append(request.tools)
             return StubModel.approx_request_tokens(self, request)
 
     @dataclass(slots=True, kw_only=True)
     class _NoopCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return False
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -7254,7 +7550,7 @@ async def test_compactor_estimates_use_live_background_aware_tools() -> None:
     )
     a = Agent(model=model, tools=[tool], compactor=_NoopCompactor())
 
-    progressed = await a.compact_if_needed([types.runtime.UserMessage(text="x")], model)
+    progressed = await a.compact_if_needed([UserMessage(text="x")], model)
 
     assert progressed is True
     tools_seen = model.estimated_tools[-1]
@@ -7264,23 +7560,30 @@ async def test_compactor_estimates_use_live_background_aware_tools() -> None:
 
 @pytest.mark.asyncio
 async def test_agent_compactor_receives_canonical_context() -> None:
-    seen_context: list[Sequence[types.runtime.ModelContextEvent]] = []
+    seen_context: list[Sequence[ModelContextEvent]] = []
 
     @dataclass(slots=True, kw_only=True)
     class _RecordingCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return True
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -7288,25 +7591,19 @@ async def test_agent_compactor_receives_canonical_context() -> None:
             del model, custom_instructions
             seen_context.append(context)
             return _summary_override(
-                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
-    call = types.runtime.ToolCall(id="call_1", name="Bash", args={})
-    budget = types.model.ContextBudget(
-        max_request_tokens=100_000,
-        max_response_tokens=1_024,
-        message_budget_tokens=10,
-    )
-    a = Agent(model=StubModel(), compactor=_RecordingCompactor(), budget=budget)
-    a.runtime.append_history(types.runtime.UserMessage(text="start"))
-    a.runtime.append_history(types.runtime.AssistantMessage(tool_calls=(call,)))
-    a.runtime.append_history(
-        types.runtime.ToolResult(call_id="call_1", content="x" * 1_000)
-    )
+    call = ToolCall(id="call_1", name="Bash", args={})
+    a = Agent(model=StubModel(), compactor=_RecordingCompactor())
+    a._tool_results = ToolResultPolicy(message_budget_tokens=10)
+    a.runtime.append_history(UserMessage(text="start"))
+    a.runtime.append_history(AssistantMessage(tool_calls=(call,)))
+    a.runtime.append_history(ToolResult(call_id="call_1", content="x" * 1_000))
 
     assert await a.compact_now() is True
     result = seen_context[-1][2]
-    assert isinstance(result, types.runtime.ToolResult)
+    assert isinstance(result, ToolResult)
     assert result.content == "x" * 1_000
 
 
@@ -7314,38 +7611,43 @@ async def test_agent_compactor_receives_canonical_context() -> None:
 async def test_post_compact_estimates_use_live_background_aware_tools() -> None:
     @dataclass(slots=True, kw_only=True)
     class _RecordingModel(StubModel):
-        estimated_tools: list[Sequence[types.tools.Tool] | None] = field(
-            default_factory=list
-        )
+        estimated_tools: list[Sequence[Tool] | None] = field(default_factory=list)
 
         @override
-        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+        def approx_request_tokens(self, request: ModelRequest) -> int:
             self.estimated_tools.append(request.tools)
             # Two-arg ``super``: see ``_EnabledOnlyModel``.
             return super(_RecordingModel, self).approx_request_tokens(request)
 
     @dataclass(slots=True, kw_only=True)
     class _OkCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return True
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
     model = _RecordingModel()
@@ -7355,7 +7657,7 @@ async def test_post_compact_estimates_use_live_background_aware_tools() -> None:
         )
     )
     a = Agent(model=model, tools=[tool], compactor=_OkCompactor())
-    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+    a.runtime.append_history(UserMessage(text="x"))
 
     assert await a.compact_now() is True
 
@@ -7375,42 +7677,49 @@ async def test_compact_payload_ending_with_tool_calls_gets_synthetic_results() -
     """
 
     class _ToolCallCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return True
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
-            model: types.model.Model,
+            context: Sequence[ModelContextEvent],
+            model: Model,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del context, model, custom_instructions
-            call = types.runtime.ToolCall(id="call-1", name="Echo", args={})
+            call = ToolCall(id="call-1", name="Echo", args={})
             del tape
             return ContextSplice.replay(
                 ref=mint_ref(),
                 mask=(),
                 insert_after=None,
-                payload=(types.runtime.AssistantMessage(tool_calls=(call,)),),
+                payload=(AssistantMessage(tool_calls=(call,)),),
                 strategy="legacy",
             )
 
     a = Agent(model=StubModel(), compactor=_ToolCallCompactor())
-    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+    a.runtime.append_history(UserMessage(text="x"))
 
     assert await a.compact_now() is True
 
     payload = a.runtime.context().messages
     validate_context(payload)
-    assert isinstance(payload[-1], types.runtime.ToolResult)
+    assert isinstance(payload[-1], ToolResult)
     assert payload[-1].call_id == "call-1"
     assert payload[-1].is_error is True
 
@@ -7423,20 +7732,27 @@ async def test_compact_now_awaits_active_runtime_compact_task() -> None:
     call_count = 0
 
     class _SlowCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return True
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
-            model: types.model.Model,
+            context: Sequence[ModelContextEvent],
+            model: Model,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
@@ -7446,13 +7762,13 @@ async def test_compact_now_awaits_active_runtime_compact_task() -> None:
             started.set()
             await release.wait()
             return _summary_override(
-                [types.runtime.UserMessage(text="[summary]")],
+                [UserMessage(text="[summary]")],
                 mint_ref,
                 tape=tape,
             )
 
     a = Agent(model=StubModel(), compactor=_SlowCompactor())
-    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+    a.runtime.append_history(UserMessage(text="x"))
     a.runtime.compact_task = asyncio.create_task(a.runtime._compact_and_post(""))
     await started.wait()
 
@@ -7474,7 +7790,7 @@ async def test_will_retrigger_uses_agent_budget_not_model_cap() -> None:
     @dataclass(slots=True, kw_only=True)
     class _BudgetModel(StubModel):
         @override
-        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+        def approx_request_tokens(self, request: ModelRequest) -> int:
             del request
             return 90
 
@@ -7482,33 +7798,40 @@ async def test_will_retrigger_uses_agent_budget_not_model_cap() -> None:
     class _RecordingCompactor:
         should_compact_calls: list[tuple[int, int, int]] = field(default_factory=list)
 
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
             self.should_compact_calls.append(
-                (current_tokens, max_request_tokens, system_tokens),
+                (current_tokens, largest_context, system_tokens),
             )
             return True
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
-            model: types.model.Model,
+            context: Sequence[ModelContextEvent],
+            model: Model,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [types.runtime.UserMessage(text="[summary]")],
+                [UserMessage(text="[summary]")],
                 mint_ref,
                 tape=tape,
             )
 
-    budget = types.model.ContextBudget(
+    budget = AgentSettings(
         max_request_tokens=100,
         max_response_tokens=10,
         buffer_tokens=10,
@@ -7519,45 +7842,38 @@ async def test_will_retrigger_uses_agent_budget_not_model_cap() -> None:
         compactor=compactor,
         budget=budget,
     )
-    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+    a.runtime.append_history(UserMessage(text="x"))
 
     assert await a.compact_now() is True
 
     splices = [record for record in a.runtime.tape if isinstance(record, ContextSplice)]
     assert len(splices) == 1
     assert "re-trigger compaction" in splices[0].fallback_reason
-    # The retry-prediction call must use the agent budget (100), not the
-    # raw model cap (1_000). The leading should_compact call is the
-    # proactive gate; the trailing one is the willRetriggerNextTurn
-    # prediction -- both run against agent.max_request_tokens.
+    # The retry-prediction call must use the agent budget (100 - 10 - 10 =
+    # 80), not the raw model cap (1_000). The leading should_compact call is
+    # the proactive gate; the trailing one is the willRetriggerNextTurn
+    # prediction -- both run against the agent budget's ``input_target``.
     assert compactor.should_compact_calls, "should_compact never called"
-    for _input, max_req, _max_resp in compactor.should_compact_calls:
-        assert max_req == 100, (
-            f"willRetriggerNextTurn used max_request_tokens={max_req}, expected 100"
+    for _input, target, _system in compactor.should_compact_calls:
+        assert target == 80, (
+            f"willRetriggerNextTurn used input_target={target}, expected 80"
         )
 
 
 @pytest.mark.asyncio
-async def test_post_compact_hook_budget_uses_active_model_ratio() -> None:
-    """The hook budget scales by the model's own chars-per-token.
+async def test_post_compact_hook_budget_is_what_the_strategy_left_over() -> None:
+    """The hook may spend exactly the window the strategy did not reserve.
 
-    The ratio comes from ``spec.chars_per_token`` (one rule, set from the
-    catalog) rather than a probe of ``approx_text_tokens``.
+    Tokens throughout: the budget was once scaled by a ``chars_per_token``
+    divisor, so a hook measuring its own output with the model's tokenizer
+    overran the very window compaction had just cleared.
     """
     calls: list[int] = []
 
     @dataclass(slots=True, kw_only=True)
-    class _RatioModel(StubModel):
-        @property
+    class _SaturatedModel(StubModel):
         @override
-        def spec(self) -> ModelSpec:
-            # Two-arg ``super``: see ``_EnabledOnlyModel`` above.
-            return dataclasses.replace(
-                super(_RatioModel, self).spec, chars_per_token=2.0
-            )
-
-        @override
-        def approx_request_tokens(self, request: types.model.ModelRequest) -> int:
+        def approx_request_tokens(self, request: ModelRequest) -> int:
             del request
             return self.max_request_tokens - 100
 
@@ -7565,55 +7881,63 @@ async def test_post_compact_hook_budget_uses_active_model_ratio() -> None:
     class _RestorableTool(StubTool):
         async def post_compact_restore(
             self,
-            history: list[types.runtime.ModelContextEvent],
+            history: list[ModelContextEvent],
             tool_state: ToolState,
             *,
-            budget_chars: int = 100_000,
+            budget_tokens: int,
+            estimate_tokens: Callable[[str], int],
         ) -> None:
-            del history, tool_state
-            calls.append(budget_chars)
+            del history, tool_state, estimate_tokens
+            calls.append(budget_tokens)
 
     @dataclass(slots=True, kw_only=True)
     class _OkCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return True
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [types.runtime.UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")], mint_ref, tape=tape
             )
 
-    budget = types.model.ContextBudget(
+    budget = AgentSettings(
         max_request_tokens=1_000,
         max_response_tokens=5,
-        chars_per_token=2,
         buffer_tokens=5,
     )
     a = Agent(
-        model=_RatioModel(max_request_tokens=1_000, max_response_tokens=5),
+        model=_SaturatedModel(max_request_tokens=1_000, max_response_tokens=5),
         tools=[_RestorableTool()],
         compactor=_OkCompactor(),
         budget=budget,
     )
-    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+    a.runtime.append_history(UserMessage(text="x"))
 
     assert await a.compact_now() is True
 
-    assert calls == [180]
+    # 100 tokens left of the 1,000 window, less the 10 the strategy reserves.
+    assert calls == [90]
 
 
 def test_agent_with_session_dir_auto_persists(tmp_path: Path) -> None:
@@ -7657,7 +7981,7 @@ def test_agent_resume_rebaselines_persistence(tmp_path: Path) -> None:
     a1 = _build_agent(session_dir=tmp_path)
     a1.status = "first"
     a1.status = "second"  # ensure at least one tape record gets written
-    a1.runtime.publish(types.runtime.SaveSession())
+    a1.runtime.publish(SaveSession())
     session_file = tmp_path / "session.jsonl"
     assert session_file.exists()
     size_after_phase1 = session_file.stat().st_size
@@ -7668,7 +7992,7 @@ def test_agent_resume_rebaselines_persistence(tmp_path: Path) -> None:
     assert loaded is not None
     a2 = _build_agent(session_dir=tmp_path)
     a2.resume(*loaded)
-    a2.runtime.publish(types.runtime.SaveSession())
+    a2.runtime.publish(SaveSession())
 
     # File should not have grown materially -- the resumed tape was
     # already on disk, so the SaveSession after resume must be a no-op
@@ -7685,7 +8009,7 @@ def test_agent_resume_rebaselines_persistence(tmp_path: Path) -> None:
 def test_agent_resume_loads_service_suspended_retry_at(tmp_path: Path) -> None:
     """``resume()`` populates ``runtime.resume_retry_at`` from the latest event."""
     a1 = _build_agent(session_dir=tmp_path)
-    later = types.runtime.ModelServiceSuspended(
+    later = ModelServiceSuspended(
         provider="anthropic",
         auth="key",
         account="default",
@@ -7693,12 +8017,10 @@ def test_agent_resume_loads_service_suspended_retry_at(tmp_path: Path) -> None:
         retry_at=2_000.0,
         delay_sec=120.0,
         server_supplied=True,
-        error=types.runtime.ServiceErrorSnapshot(
-            type_name="RateLimitError", message="429"
-        ),
+        error=ServiceErrorSnapshot(type_name="RateLimitError", message="429"),
     )
     earlier = replace(later, retry_at=1_000.0)
-    a1.runtime.publish(types.runtime.SaveSession())
+    a1.runtime.publish(SaveSession())
     append_session(tmp_path / "session.jsonl", runtime_events=[earlier, later])
 
     loaded = load_session(tmp_path)
@@ -7769,25 +8091,18 @@ def test_repair_compact_payload_fills_missing_tool_results_with_interrupted() ->
     a synthetic ``[interrupted]`` placeholder so the payload is a
     wire-valid compaction input.
     """
-    am = types.runtime.AssistantMessage(
+    am = AssistantMessage(
         tool_calls=tuple(
-            types.runtime.ToolCall(id=f"c{idx}", name="x", args={}) for idx in range(20)
+            ToolCall(id=f"c{idx}", name="x", args={}) for idx in range(20)
         ),
     )
     # Only every other id has a real result; the rest must be filled.
-    results = [
-        types.runtime.ToolResult(call_id=f"c{idx}", content="ok")
-        for idx in range(0, 20, 2)
-    ]
-    out = _repair_compact_payload(
-        [am, *results, types.runtime.UserMessage(text="next")]
-    )
-    seen_ids = {e.call_id for e in out if isinstance(e, types.runtime.ToolResult)}
+    results = [ToolResult(call_id=f"c{idx}", content="ok") for idx in range(0, 20, 2)]
+    out = _repair_compact_payload([am, *results, UserMessage(text="next")])
+    seen_ids = {e.call_id for e in out if isinstance(e, ToolResult)}
     assert seen_ids == {f"c{idx}" for idx in range(20)}
     interrupted = [
-        e
-        for e in out
-        if isinstance(e, types.runtime.ToolResult) and e.content == "[interrupted]"
+        e for e in out if isinstance(e, ToolResult) and e.content == "[interrupted]"
     ]
     assert len(interrupted) == 10
 
@@ -7806,13 +8121,13 @@ def test_repair_compact_payload_coalesces_cross_source_user_turns() -> None:
     """
     out = _repair_compact_payload(
         [
-            types.runtime.UserMessage(text="please review"),
-            types.runtime.AgentSendMessage(source="rev-gpt2", text="End of review."),
+            UserMessage(text="please review"),
+            AgentSendMessage(source="rev-gpt2", text="End of review."),
         ],
     )
     assert len(out) == 1
     merged = out[0]
-    assert isinstance(merged, types.runtime.UserMessage)
+    assert isinstance(merged, UserMessage)
     # The agent send keeps its attribution via an inlined ``[from X]: `` label
     # on demotion; the human turn is unlabeled.
     assert merged.text == "please review\n\n[from rev-gpt2]: End of review."
@@ -7822,7 +8137,7 @@ def test_repair_compact_payload_coalesces_cross_source_user_turns() -> None:
         mask=(),
         insert_after=None,
         strategy="summary",
-        payload=(types.runtime.UserMessage(text="[summary]"),),
+        payload=(UserMessage(text="[summary]"),),
     )
     replace(splice, payload=tuple(out))
 
@@ -7831,13 +8146,13 @@ def test_repair_compact_payload_keeps_same_source_agent_send_type() -> None:
     """Same-source ``AgentSendMessage`` pairs keep their type and ``source``."""
     out = _repair_compact_payload(
         [
-            types.runtime.AgentSendMessage(source="a", text="x"),
-            types.runtime.AgentSendMessage(source="a", text="y"),
+            AgentSendMessage(source="a", text="x"),
+            AgentSendMessage(source="a", text="y"),
         ],
     )
     assert len(out) == 1
     merged = out[0]
-    assert isinstance(merged, types.runtime.AgentSendMessage)
+    assert isinstance(merged, AgentSendMessage)
     assert merged.source == "a"
     assert merged.text == "x\n\ny"
 
@@ -7853,14 +8168,14 @@ def test_repair_compact_payload_dedups_tool_call_ids_across_assistants() -> None
     ``InvalidPayloadError`` and wedges compaction. Repair must dedupe so its
     output is splice-valid.
     """
-    tc = types.runtime.ToolCall(id="t1", name="x", args={})
+    tc = ToolCall(id="t1", name="x", args={})
     out = _repair_compact_payload(
         [
-            types.runtime.AssistantMessage(tool_calls=(tc,)),
-            types.runtime.AssistantMessage(tool_calls=(tc,)),
+            AssistantMessage(tool_calls=(tc,)),
+            AssistantMessage(tool_calls=(tc,)),
         ],
     )
-    tr_ids = [e.call_id for e in out if isinstance(e, types.runtime.ToolResult)]
+    tr_ids = [e.call_id for e in out if isinstance(e, ToolResult)]
     assert len(tr_ids) == len(set(tr_ids)), f"duplicate ToolResult ids: {tr_ids}"
     # Exactly one synthetic [interrupted] result survives -- locks that the
     # cross-AM dedup (here) and the in-merge dedup (_merge_assistant) together
@@ -7885,19 +8200,19 @@ def test_repair_compact_payload_drops_hollow_dup_only_assistant() -> None:
     turn -- wire-dropped by the provider but polluting the splice payload and
     size accounting. Mirror ``_sanitize_for_send``: drop it (F6).
     """
-    tc = types.runtime.ToolCall(id="t1", name="x", args={})
+    tc = ToolCall(id="t1", name="x", args={})
     out = _repair_compact_payload(
         [
-            types.runtime.AssistantMessage(tool_calls=(tc,)),
-            types.runtime.ToolResult(call_id="t1", content="r"),
-            types.runtime.UserMessage(text="hi"),
-            types.runtime.AssistantMessage(tool_calls=(tc,)),
+            AssistantMessage(tool_calls=(tc,)),
+            ToolResult(call_id="t1", content="r"),
+            UserMessage(text="hi"),
+            AssistantMessage(tool_calls=(tc,)),
         ],
     )
     hollow = [
         e
         for e in out
-        if isinstance(e, types.runtime.AssistantMessage)
+        if isinstance(e, AssistantMessage)
         and not e.tool_calls
         and not e.text
         and not e.thinking_blocks
@@ -7912,13 +8227,11 @@ def test_repair_compact_payload_interrupted_results_are_ordered() -> None:
     ``set.pop()`` (arbitrary), so the same input always yields the same
     on-disk ``session.jsonl`` and a deterministic resume (R2O-6).
     """
-    calls = tuple(
-        types.runtime.ToolCall(id=f"c{i}", name="x", args={}) for i in range(8)
-    )
+    calls = tuple(ToolCall(id=f"c{i}", name="x", args={}) for i in range(8))
     out = _repair_compact_payload(
-        [types.runtime.AssistantMessage(tool_calls=calls)],
+        [AssistantMessage(tool_calls=calls)],
     )
-    tr_ids = [e.call_id for e in out if isinstance(e, types.runtime.ToolResult)]
+    tr_ids = [e.call_id for e in out if isinstance(e, ToolResult)]
     assert tr_ids == sorted(tr_ids) == [f"c{i}" for i in range(8)]
 
 
@@ -7935,8 +8248,8 @@ def test_repair_compact_payload_coalesces_adjacent_assistants() -> None:
     """
     out = _repair_compact_payload(
         [
-            types.runtime.AssistantMessage(text="one"),
-            types.runtime.AssistantMessage(text="two"),
+            AssistantMessage(text="one"),
+            AssistantMessage(text="two"),
         ],
     )
     # The construct-time validator the live wedge tripped must now accept it.
@@ -7945,10 +8258,10 @@ def test_repair_compact_payload_coalesces_adjacent_assistants() -> None:
         mask=(),
         insert_after=None,
         strategy="summary",
-        payload=(types.runtime.UserMessage(text="[summary]"),),
+        payload=(UserMessage(text="[summary]"),),
     )
     replace(splice, payload=tuple(out))
-    assert sum(isinstance(e, types.runtime.AssistantMessage) for e in out) == 1
+    assert sum(isinstance(e, AssistantMessage) for e in out) == 1
 
 
 @pytest.mark.asyncio
@@ -7963,7 +8276,7 @@ async def test_agent_run_rejects_concurrent_drivers() -> None:
     a._run_active = True
     try:
         with pytest.raises(RuntimeError, match="not reentrant"):
-            async for _event in a.run(types.runtime.UserMessage(text="second")):
+            async for _event in a.run(UserMessage(text="second")):
                 pass
     finally:
         a._run_active = False
@@ -8149,9 +8462,9 @@ async def test_background_aware_tool_strips_bg_keys_before_inner() -> None:
             return None
 
         @override
-        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
             inner_calls.append(dict(args))
-            return types.runtime.ToolResult(call_id="", content="ok")
+            return ToolResult(call_id="", content="ok")
 
     wrap = BackgroundAwareTool(CapturingTool())
     _ = await wrap.run({"background": True, "msg": "hi"})
@@ -8204,19 +8517,26 @@ async def test_compact_if_needed_circuit_breaker_stashes_synthetic_error(
 
     @dataclass(slots=True, kw_only=True)
     class _AlwaysCompactCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
         def should_compact(
             self,
             current_tokens: int,
-            max_request_tokens: int,
+            largest_context: int,
             system_tokens: int = 0,
         ) -> bool:
-            del current_tokens, max_request_tokens, system_tokens
+            del current_tokens, largest_context, system_tokens
             return True
 
         async def compact(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             model: object,
             mint_ref: Callable[[], TapeRef],
             custom_instructions: str | None = None,
@@ -8227,7 +8547,7 @@ async def test_compact_if_needed_circuit_breaker_stashes_synthetic_error(
         def maintain(
             self,
             tape: Sequence[TapeRecord],
-            context: Sequence[types.runtime.ModelContextEvent],
+            context: Sequence[ModelContextEvent],
             tools: object,
             mint_ref: Callable[[], TapeRef],
         ) -> tuple[ContextSplice, ...]:
@@ -8243,7 +8563,7 @@ async def test_compact_if_needed_circuit_breaker_stashes_synthetic_error(
     # coupling slip the assert is supposed to defend against.
     a.compaction_state.compact_failures = 3
     a.last_compact_error = None
-    a.runtime.append_history(types.runtime.UserMessage(text="x"))
+    a.runtime.append_history(UserMessage(text="x"))
     progressed = await a.compact_if_needed(a.runtime.context().messages, a.model)
     assert progressed is False
     assert a.last_compact_error is not None
@@ -8298,26 +8618,22 @@ def test_tool_round_cap_pushes_single_error_when_before_spawn_blocks() -> None:
             return None
 
         @override
-        async def run(self, args: Mapping[str, object]) -> types.runtime.ToolResult:
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
-            return types.runtime.ToolResult(call_id="", content="ran")
+            return ToolResult(call_id="", content="ran")
 
     model = StubModel(
         responses=[
-            types.runtime.AssistantMessage(
-                tool_calls=(types.runtime.ToolCall(id="c1", name="Echo", args={}),)
-            ),
-            types.runtime.AssistantMessage(
-                tool_calls=(types.runtime.ToolCall(id="c2", name="Echo", args={}),)
-            ),
+            AssistantMessage(tool_calls=(ToolCall(id="c1", name="Echo", args={}),)),
+            AssistantMessage(tool_calls=(ToolCall(id="c2", name="Echo", args={}),)),
         ]
     )
     a = Agent(model=model, tools=[CountingTool()], max_tool_call_rounds=1)
 
     async def _drive() -> int:
         count = 0
-        async for ev in a.run(types.runtime.UserMessage(text="go")):
-            if isinstance(ev, types.runtime.ModelResponseError):
+        async for ev in a.run(UserMessage(text="go")):
+            if isinstance(ev, ModelResponseError):
                 count += 1
         return count
 
@@ -8338,7 +8654,7 @@ async def test_serve_forever_rejects_a_concurrent_run() -> None:
     await asyncio.sleep(0)
     try:
         with pytest.raises(RuntimeError):
-            async for _ in a.run(types.runtime.UserMessage(text="hi")):
+            async for _ in a.run(UserMessage(text="hi")):
                 pass
     finally:
         a.shutdown(force=True)
@@ -8358,7 +8674,7 @@ async def test_drive_until_first_idle_propagates_a_driver_crash() -> None:
     # ty: ignore[invalid-assignment] -- stubbing the driver is the point
     a.serve_forever = _boom
     with pytest.raises(RuntimeError, match="boom"):
-        _ = await a.drive_until_first_idle(types.runtime.UserMessage(text="hi"))
+        _ = await a.drive_until_first_idle(UserMessage(text="hi"))
 
 
 def test_tool_registry_is_bounded_across_a_long_session(
@@ -8370,12 +8686,10 @@ def test_tool_registry_is_bounded_across_a_long_session(
     a = _build_agent()
     for i in range(registry_max + 2):
         a._track_tool_registry(
-            types.runtime.ModelResponseComplete(
-                message=types.runtime.AssistantMessage(
+            ModelResponseComplete(
+                message=AssistantMessage(
                     text="",
-                    tool_calls=(
-                        types.runtime.ToolCall(id=f"c{i}", name="Echo", args={}),
-                    ),
+                    tool_calls=(ToolCall(id=f"c{i}", name="Echo", args={}),),
                 ),
             ),
         )
@@ -8393,12 +8707,10 @@ def test_tool_registry_keeps_detached_calls_however_old(
     a._tool_registry["old"] = ("Bash", 0.0)
     for i in range(registry_max + 2):
         a._track_tool_registry(
-            types.runtime.ModelResponseComplete(
-                message=types.runtime.AssistantMessage(
+            ModelResponseComplete(
+                message=AssistantMessage(
                     text="",
-                    tool_calls=(
-                        types.runtime.ToolCall(id=f"c{i}", name="Echo", args={}),
-                    ),
+                    tool_calls=(ToolCall(id=f"c{i}", name="Echo", args={}),),
                 ),
             ),
         )
@@ -8415,16 +8727,14 @@ async def test_a_live_drive_loop_still_blocks_a_second_driver() -> None:
     past the guard onto the same inbox. Two drivers then consume each other's
     events, and whichever exits first pushes ``Quit`` into the other's loop.
     """
-    a = _build_agent(
-        model=StubModel(responses=[types.runtime.AssistantMessage(text="hi")])
-    )
-    _ = await a.drive_until_first_idle(types.runtime.UserMessage(text="go"))
+    a = _build_agent(model=StubModel(responses=[AssistantMessage(text="hi")]))
+    _ = await a.drive_until_first_idle(UserMessage(text="go"))
     # The loop must still be live, or the guard has nothing to protect.
     assert a._drive_task is not None
     assert not a._drive_task.done()
 
     with pytest.raises(RuntimeError, match="not reentrant"):
-        _ = await a.drive_until_first_idle(types.runtime.UserMessage(text="again"))
+        _ = await a.drive_until_first_idle(UserMessage(text="again"))
 
     a.shutdown(force=True)
     with contextlib.suppress(asyncio.CancelledError):
@@ -8434,10 +8744,8 @@ async def test_a_live_drive_loop_still_blocks_a_second_driver() -> None:
 @pytest.mark.asyncio
 async def test_the_driver_claim_clears_once_the_loop_exits() -> None:
     """The guard must not latch: after shutdown a fresh driver is allowed."""
-    a = _build_agent(
-        model=StubModel(responses=[types.runtime.AssistantMessage(text="hi")])
-    )
-    _ = await a.drive_until_first_idle(types.runtime.UserMessage(text="go"))
+    a = _build_agent(model=StubModel(responses=[AssistantMessage(text="hi")]))
+    _ = await a.drive_until_first_idle(UserMessage(text="go"))
     a.shutdown(force=True)
     assert a._drive_task is not None
     with contextlib.suppress(asyncio.CancelledError):

@@ -8,6 +8,7 @@ microcompacted tool-call args.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 
@@ -16,6 +17,7 @@ import html
 import logging
 
 from sagent.compaction.history import append_to_first_user
+from sagent.types.compactor import ReattachPolicy
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
@@ -40,9 +42,8 @@ async def reattach_files(
     history: list[ModelContextEvent],
     recent_files: list[str],
     *,
-    count: int,
-    max_chars: int,
-    budget: int,
+    policy: ReattachPolicy,
+    estimate_tokens: Callable[[str], int],
 ) -> None:
     """Re-inject recently-read files after compaction.
 
@@ -53,14 +54,13 @@ async def reattach_files(
     Args:
       history: History list to mutate in place.
       recent_files: Original file paths in recency order (oldest first).
-      count: Take only the last ``count`` files.
-      max_chars: Per-file character cap; longer files are truncated.
-      budget: Total character budget across all reattached files.
+      policy: How many files to re-attach and the token caps on them.
+      estimate_tokens: The model's own tokenizer.
 
     """
-    if count <= 0:
+    if policy.count <= 0:
         return
-    recent = list(reversed(recent_files[-count:]))
+    recent = list(reversed(recent_files[-policy.count :]))
     if not recent:
         return
     preserved = _collect_inlined_paths(history)
@@ -68,7 +68,7 @@ async def reattach_files(
         lambda: [str(Path(p).resolve()) for p in recent],
     )
     parts: list[str] = []
-    total_chars = 0
+    total_tokens = 0
     for file_path, res in zip(recent, resolved, strict=True):
         if res in preserved:
             continue
@@ -80,17 +80,11 @@ async def reattach_files(
                 p.read_text,
                 encoding="utf-8",
             )
-            truncation_suffix = "\n... (truncated for re-attachment)"
-            if len(content) > max_chars:
-                # Reserve room for ``truncation_suffix`` inside ``max_chars``
-                # so the final string actually fits the cap; before the
-                # reservation the suffix was appended *after* the cap and
-                # silently overshot by ``len(truncation_suffix)`` chars.
-                head = max(0, max_chars - len(truncation_suffix))
-                content = content[:head] + truncation_suffix
-            if total_chars + len(content) > budget:
+            content = _truncate_to_tokens(content, policy.max_tokens, estimate_tokens)
+            tokens = estimate_tokens(content)
+            if total_tokens + tokens > policy.budget_tokens:
                 break
-            total_chars += len(content)
+            total_tokens += tokens
             # Escape both the attribute and any literal ``</file>`` in the
             # body so untrusted paths/content can't corrupt the wrapper.
             safe_path = html.escape(file_path, quote=True)
@@ -111,10 +105,27 @@ async def reattach_files(
     )
     append_to_first_user(history, reattach)
     logger.debug(
-        "Re-attached %d files post-compaction (%d chars).",
+        "Re-attached %d files post-compaction (%d tokens).",
         len(parts),
-        total_chars,
+        total_tokens,
     )
+
+
+def _truncate_to_tokens(
+    content: str, max_tokens: int, estimate_tokens: Callable[[str], int]
+) -> str:
+    """Cut ``content`` down to ``max_tokens``, suffix included in the cap."""
+    if max_tokens <= 0 or estimate_tokens(content) <= max_tokens:
+        return content
+    suffix = "\n... (truncated for re-attachment)"
+    budget = max(0, max_tokens - estimate_tokens(suffix))
+    # Tokens are not uniform, so converge by ratio rather than assuming a
+    # fixed characters-per-token divisor.
+    head = content
+    while head and estimate_tokens(head) > budget:
+        keep = int(len(head) * budget / max(1, estimate_tokens(head)))
+        head = head[: max(0, min(keep, len(head) - 1))]
+    return head + suffix
 
 
 _INLINING_TOOLS = frozenset({"read", "write"})

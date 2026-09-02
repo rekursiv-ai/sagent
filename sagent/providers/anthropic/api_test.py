@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
+from types import MappingProxyType
 from typing import cast, override
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -31,20 +33,23 @@ from sagent.providers.anthropic.api import (
 )
 from sagent.providers.lib.errors import StreamingResponseNotReadError
 from sagent.providers.lib.id_remap import IdRemapper
+from sagent.types.capability import (
+    ModelCapability,
+    ModelLimits,
+    ModelSettings,
+)
 from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
+    TokenCount,
     TokenPrice,
 )
 from sagent.types.model import (
-    ModelLimits,
     ModelRequest,
     ModelResponse,
-    ModelSpec,
     PromptTooLongError,
     RequestTooLargeError,
     StreamInterruptedError,
-    TokenCount,
 )
 from sagent.types.runtime import (
     DETACHED_PLACEHOLDER,
@@ -58,21 +63,31 @@ from sagent.types.runtime import (
 from sagent.types.tools import Tool
 
 
-def _free_spec() -> ModelSpec:
-    """A spec whose every rate is zero -- cost is not what these assert."""
-    return ModelSpec(prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}))
+def _free_model() -> _AnthropicModel:
+    """A model whose every rate is zero -- cost is not what these assert."""
+    m = Anthropic.from_key("k").model("claude-opus-4-7")
+    m._capability = replace(
+        m.capability, prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()})
+    )
+    return m
 
 
-def _fast_spec() -> ModelSpec:
-    """Opus rates with a 2x fast tier, for the server-billed-speed tests."""
-    return ModelSpec(
+def _fast_model() -> _AnthropicModel:
+    """Opus rates with a 2x priority tier, for the billed-speed tests."""
+    m = Anthropic.from_key("k").model("claude-opus-4-8")
+    m._capability = replace(
+        m.capability,
         prices=PriceCatalog(
             {
                 PriceCatalogProduct(): TokenPrice(request=5.0, response=25.0),
-                PriceCatalogProduct(fast=True): TokenPrice(request=10.0, response=50.0),
+                PriceCatalogProduct(service_tier="priority"): TokenPrice(
+                    request=10.0, response=50.0
+                ),
             }
-        )
+        ),
     )
+    m._settings = ModelSettings(capability=m.capability, service_tier="priority")
+    return m
 
 
 def _make_request(
@@ -445,7 +460,7 @@ def _build_anthropic_message(
 
 def test_parse_response_text_only() -> None:
     raw = _build_anthropic_message(text="hi", input_tokens=5, output_tokens=2)
-    resp = _parse_response(raw, _free_spec())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
+    resp = _parse_response(raw, _free_model())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
     assert resp.message.text == "hi"
     assert resp.stop_reason == "model_finished"
     assert resp.tokens.request == 5
@@ -457,7 +472,7 @@ def test_parse_response_tool_call_extracted() -> None:
         tool_calls=(("toolu_xyz", "Bash", {"cmd": "ls"}),),
         stop_reason="tool_use",
     )
-    resp = _parse_response(raw, _free_spec())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
+    resp = _parse_response(raw, _free_model())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
     assert len(resp.message.tool_calls) == 1
     call = resp.message.tool_calls[0]
     assert call.id == "toolu_xyz"
@@ -485,7 +500,7 @@ def test_parse_response_drops_placeholder_tool_name() -> None:
         ),
         stop_reason="tool_use",
     )
-    resp = _parse_response(raw, _free_spec())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
+    resp = _parse_response(raw, _free_model())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
     assert [c.name for c in resp.message.tool_calls] == ["Bash"]
 
 
@@ -496,16 +511,18 @@ def test_parse_response_cache_tokens_split_correctly() -> None:
         cache_creation=200,
         cache_read=400,
     )
-    spec = ModelSpec(
+    model = Anthropic.from_key("k").model("claude-opus-4-7")
+    model._capability = replace(
+        model.capability,
         prices=PriceCatalog(
             {
                 PriceCatalogProduct(): TokenPrice(
                     request=1.0, response=2.0, cache_write=4.0, cache_read=0.5
                 )
             }
-        )
+        ),
     )
-    resp = _parse_response(raw, spec)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
+    resp = _parse_response(raw, model)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
     assert resp.tokens.cache_write == 200
     assert resp.tokens.cache_read == 400
     # input cost = 1000*1 + 200*4 + 400*0.5 = 2000 / 1M = 0.002.
@@ -516,7 +533,7 @@ def test_parse_response_cache_tokens_split_correctly() -> None:
 
 def test_parse_response_carries_message_and_request_ids() -> None:
     raw = _build_anthropic_message()
-    resp = _parse_response(raw, _free_spec())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
+    resp = _parse_response(raw, _free_model())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
     assert resp.message_id == "msg_xyz"
     assert resp.request_id == "req_xyz"
 
@@ -569,10 +586,10 @@ def test_anthropic_from_env_reads(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_anthropic_model_known_id_returns_backend() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-haiku-4-5")
-    assert m.model_id == "claude-haiku-4-5"
+    assert m.capability.model_id == "claude-haiku-4-5"
     # haiku supports thinking via ``enabled`` only (measured: 249 readable
     # thinking chars; ``adaptive`` 400s 'not supported on this model').
-    assert m.supports_thinking is True
+    assert m.capability.thinking_budget != frozenset({"none"})
     assert m.max_request_tokens == 200_000
 
 
@@ -589,36 +606,16 @@ def test_anthropic_model_strips_context_tag_for_profile_lookup() -> None:
     assert m.max_request_tokens == 1_000_000
 
 
-def test_anthropic_model_accepts_fast_tag_on_supported_model() -> None:
-    p = Anthropic.from_key("k")
-    m = p.model("claude-opus-4-8+fast")
-    assert m.model_id == "claude-opus-4-8+fast"
-    assert m.spec.valid_latency_modes == ("fast",)
-
-
-def test_anthropic_model_fast_tag_keeps_context_profile() -> None:
-    """``+1m+fast`` resolves the ``+1m`` profile, not the base one."""
-    p = Anthropic.from_key("k")
-    m = p.model("claude-opus-4-8+1m+fast")
-    assert m.max_request_tokens == 1_000_000
-
-
-def test_anthropic_model_rejects_fast_tag_on_unsupported_model() -> None:
-    p = Anthropic.from_key("k")
-    with pytest.raises(ValueError, match="does not support fast mode"):
-        _ = p.model("claude-haiku-4-5+fast")
-
-
 def test_anthropic_default_model_resolves() -> None:
     p = Anthropic.from_key("k")
     m = p.model()
-    assert m.model_id == Anthropic.DEFAULT_MODEL
+    assert m.capability.model_id == Anthropic.DEFAULT_MODEL
 
 
 def test_anthropic_utility_model_uses_haiku() -> None:
     p = Anthropic.from_key("k")
     m = p.utility_model()
-    assert m.model_id == "claude-haiku-4-5"
+    assert m.capability.model_id == "claude-haiku-4-5"
 
 
 def test_anthropic_subscription_property_false_on_api_key() -> None:
@@ -634,14 +631,14 @@ def test_anthropic_model_is_context_overflow_via_prompt_too_long() -> None:
 def test_anthropic_model_token_estimate_uses_profile_chars_per_token() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-7")
-    # chars_per_token = 2.83; 28 chars / 2.83 ≈ 9.89 → int → 9.
+    # chars_per_token = 2.38 for the claude-5 / 4-8 / 4-7 tokenizer family.
     assert m.approx_text_tokens("a" * 28) == 11
 
 
 def test_anthropic_model_pricing_exposed() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-haiku-4-5")
-    assert m.spec.prices[PriceCatalogProduct()].request > 0
+    assert m.capability.prices[PriceCatalogProduct()].request > 0
 
 
 def test_anthropic_fable_5_1_model_profile() -> None:
@@ -651,18 +648,21 @@ def test_anthropic_fable_5_1_model_profile() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-fable-5-1")
     assert m.max_request_tokens == 1_000_000
-    assert m.max_response_tokens == 128_000
-    assert m.spec.prices[PriceCatalogProduct()].request == 10.0
-    assert m.spec.prices[PriceCatalogProduct()].response == 50.0
-    assert m.valid_efforts == ("low", "medium", "high", "xhigh", "max")
-    assert m.spec.valid_latency_modes == ()
-    assert m.spec.valid_thinking_states == ("adaptive-hide", "off-hide", "redact-hide")
+    assert m.limits.max_response_tokens == 128_000
+    assert m.capability.prices[PriceCatalogProduct()].request == 10.0
+    assert m.capability.prices[PriceCatalogProduct()].response == 50.0
+    assert m.capability.thinking_effort == frozenset(
+        {"none", "low", "medium", "high", "xhigh", "max"}
+    )
+    assert "priority" not in m.capability.service_tier
+    # ``enabled`` 400s, so the row offers the adaptive budget only.
+    assert m.capability.thinking_budget == frozenset({"none", "auto"})
 
 
 def test_anthropic_fable_5_1_one_million_alias() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-fable-5-1+1m")
-    assert m.model_id == "claude-fable-5-1+1m"
+    assert m.tagged_model_id == "claude-fable-5-1+1m"
     assert m.max_request_tokens == 1_000_000
 
 
@@ -671,17 +671,17 @@ def test_anthropic_fable_model_profile() -> None:
     assert Anthropic.DEFAULT_MODEL == "claude-opus-5"
     m = p.model("claude-fable-5")
     assert m.max_request_tokens == 1_000_000
-    assert m.max_response_tokens == 128_000
-    assert m.spec.prices[PriceCatalogProduct()].request == 10.0
-    assert m.spec.prices[PriceCatalogProduct()].response == 50.0
-    assert m.spec.prices[PriceCatalogProduct()].cache_write == 12.5
-    assert m.spec.prices[PriceCatalogProduct()].cache_read == 1.0
+    assert m.limits.max_response_tokens == 128_000
+    assert m.capability.prices[PriceCatalogProduct()].request == 10.0
+    assert m.capability.prices[PriceCatalogProduct()].response == 50.0
+    assert m.capability.prices[PriceCatalogProduct()].cache_write == 12.5
+    assert m.capability.prices[PriceCatalogProduct()].cache_read == 1.0
 
 
 def test_anthropic_fable_one_million_alias() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-fable-5+1m")
-    assert m.model_id == "claude-fable-5+1m"
+    assert m.tagged_model_id == "claude-fable-5+1m"
     assert m.max_request_tokens == 1_000_000
 
 
@@ -689,16 +689,18 @@ def test_anthropic_sonnet_5_model_profile() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-sonnet-5")
     assert m.max_request_tokens == 1_000_000
-    assert m.max_response_tokens == 128_000
-    assert m.spec.prices[PriceCatalogProduct()].request == 3.0
-    assert m.spec.prices[PriceCatalogProduct()].response == 15.0
-    assert m.valid_efforts == ("low", "medium", "high", "xhigh", "max")
+    assert m.limits.max_response_tokens == 128_000
+    assert m.capability.prices[PriceCatalogProduct()].request == 3.0
+    assert m.capability.prices[PriceCatalogProduct()].response == 15.0
+    assert m.capability.thinking_effort == frozenset(
+        {"none", "low", "medium", "high", "xhigh", "max"}
+    )
 
 
 def test_anthropic_sonnet_5_one_million_alias() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-sonnet-5+1m")
-    assert m.model_id == "claude-sonnet-5+1m"
+    assert m.tagged_model_id == "claude-sonnet-5+1m"
     assert m.max_request_tokens == 1_000_000
 
 
@@ -733,140 +735,127 @@ def test_anthropic_token_count_default_typing() -> None:
     assert t.response == 2
 
 
-def test_anthropic_model_supports_flags() -> None:
+def test_anthropic_model_capability() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-7")
-    assert m.supports_streaming is True
-    assert m.supports_effort is True
-    assert m.supports_cache_control is True
-    assert m.supports_persistent_retry is True
-    assert m.supports_context_management is False
-    assert m.supports_account_auth is False
-    assert m.spec.valid_service_tiers == ("auto", "standard_only")
+    assert m.capability.thinking_effort != frozenset({"none"})
+    assert m.capability.cache_ttl_sec > 0
+    assert m.capability.retries_internally is True
+    assert m.capability.manage_context_server_side == frozenset({False, True})
+    assert m.capability.account_auth is False
+    # 4-7 withdrew fast mode, so it prices no ``priority``; ``flex`` is not
+    # an Anthropic tier at all.
+    assert m.capability.service_tier == frozenset({"auto", "default"})
 
 
 def test_anthropic_model_supports_context_management_when_opted_in() -> None:
     p = Anthropic.from_key("k", server_side_context_management=True)
     m = p.model("claude-opus-4-7")
-    assert m.supports_context_management is True
+    assert m.capability.manage_context_server_side == frozenset({False, True})
 
 
 def test_anthropic_build_kwargs_emits_service_tier() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-7")
-    req = ModelRequest(messages=[UserMessage(text="x")], service_tier="standard_only")
-    kwargs = m._build_kwargs(req, [])
-    assert kwargs["service_tier"] == "standard_only"
+    m._settings = ModelSettings(capability=m.capability, service_tier="default")
+    kwargs = m._build_kwargs(ModelRequest(messages=[UserMessage(text="x")]), [])
+    assert kwargs["service_tier"] == "default"
 
 
-def test_anthropic_build_kwargs_omits_unknown_service_tier() -> None:
+def test_anthropic_build_kwargs_omits_the_default_tier() -> None:
+    """``auto`` is "let the vendor pick"; sending it pins nothing."""
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-7")
-    req = ModelRequest(messages=[UserMessage(text="x")], service_tier="priority")
-    kwargs = m._build_kwargs(req, [])
+    kwargs = m._build_kwargs(ModelRequest(messages=[UserMessage(text="x")]), [])
     assert "service_tier" not in kwargs
 
 
 def test_anthropic_build_kwargs_enabled_thinking_respects_max_tokens_cap() -> None:
-    # ``thinking="enabled"`` must never push ``max_tokens`` past the
-    # model's output cap. opus-4-8's profile cap equals the API ceiling
-    # (128k), so the old unconditional ``max_tok * 2`` emitted 256k and
-    # the API rejected it. ``budget_tokens`` must stay strictly below
-    # ``max_tokens`` per Anthropic's contract.
+    # A fixed budget must never push ``max_tokens`` past the model's
+    # output cap. opus-4-6's profile cap equals the API ceiling (128k), so
+    # the old unconditional ``max_tok * 2`` emitted 256k and the API
+    # rejected it. ``budget_tokens`` must stay strictly below
+    # ``max_tokens`` per Anthropic's contract. Uses 4-6 because it is the
+    # newest row that still offers the ``fixed`` budget.
     p = Anthropic.from_key("k")
-    m = p.model("claude-opus-4-8")
-    req = ModelRequest(messages=[UserMessage(text="x")], thinking="enabled")
-    kwargs = m._build_kwargs(req, [])
+    m = p.model("claude-opus-4-6")
+    m._settings = ModelSettings(capability=m.capability, thinking_budget="fixed")
+    kwargs = m._build_kwargs(ModelRequest(messages=[UserMessage(text="x")]), [])
     max_tokens = IntCodec.coerce(kwargs["max_tokens"], 0)
     thinking = cast(dict[str, object], kwargs["thinking"])
     budget = IntCodec.coerce(thinking["budget_tokens"], 0)
-    assert max_tokens <= m.max_response_tokens
+    assert max_tokens <= m.limits.max_response_tokens
     assert budget < max_tokens
 
 
-def test_anthropic_valid_thinking_states_opus_4_6_all_six() -> None:
-    """opus-4-6 streams readable thinking and accepts enabled: all six."""
-    p = Anthropic.from_key("k")
-    m = p.model("claude-opus-4-6")
-    assert m.spec.valid_thinking_states == (
-        "adaptive-show",
-        "adaptive-hide",
-        "on-show",
-        "on-hide",
-        "off-hide",
-        "redact-hide",
-    )
+def test_anthropic_thinking_axes_opus_4_6() -> None:
+    """opus-4-6 streams readable thinking and accepts a fixed budget."""
+    m = Anthropic.from_key("k").model("claude-opus-4-6")
+    assert m.capability.thinking_budget == frozenset({"none", "auto", "fixed"})
+    assert m.capability.thinking_output == frozenset({"none", "text", "redacted"})
 
 
-def test_anthropic_valid_thinking_states_opus_4_8_adaptive_only_no_text() -> None:
-    """opus-4-8 returns empty thinking and rejects enabled: no -show, no on-*.
+def test_anthropic_thinking_axes_opus_4_8_adaptive_only_no_text() -> None:
+    """opus-4-8 returns a signed-but-empty block and rejects ``enabled``.
 
-    Measured via API key: opus-4-8 streams zero ``thinking_delta`` chars
-    (signed-but-empty block) and 400s on ``thinking.type=enabled``. So
-    every ``-show`` state and every ``on-*`` state is unsatisfiable.
+    Measured via API key: it streams zero ``thinking_delta`` chars and 400s
+    on ``thinking.type=enabled``.
     """
     p = Anthropic.from_key("k")
     for model_id in ("claude-opus-4-8", "claude-opus-4-8+1m"):
         m = p.model(model_id)
-        assert m.spec.valid_thinking_states == (
-            "adaptive-hide",
-            "off-hide",
-            "redact-hide",
-        ), model_id
+        assert m.capability.thinking_budget == frozenset({"none", "auto"}), model_id
+        assert m.capability.thinking_output == frozenset({"none", "redacted"}), model_id
 
 
-def test_anthropic_valid_thinking_states_4_5_generation_enabled_only() -> None:
-    """4-5 generation rejects ``adaptive`` (400); only ``on-*`` / ``off``.
-
-    Measured via API key: opus-4-5, sonnet-4-5, haiku-4-5 all 400 on
-    ``thinking.type=adaptive`` ('not supported on this model') and stream
-    readable thinking under ``enabled``. So ``adaptive-*`` and
-    ``redact-hide`` (which rides ``adaptive``) are excluded.
-    """
+def test_anthropic_thinking_axes_4_5_generation_enabled_only() -> None:
+    """The 4-5 generation 400s on ``adaptive`` and streams readable text."""
     p = Anthropic.from_key("k")
     for model_id in ("claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"):
         m = p.model(model_id)
-        assert m.spec.valid_thinking_states == (
-            "on-show",
-            "on-hide",
-            "off-hide",
-        ), model_id
+        assert m.capability.thinking_budget == frozenset({"none", "fixed"}), model_id
+        assert "text" in m.capability.thinking_output, model_id
 
 
-def test_anthropic_valid_latency_modes_fast_on_opus() -> None:
+def test_anthropic_priority_tier_is_opus_only() -> None:
+    """Fast mode is Opus 5 and Opus 4.8 only; 4-7 withdrew it, 4-6 never had it."""
     p = Anthropic.from_key("k")
-    assert p.model("claude-opus-4-8").spec.valid_latency_modes == ("fast",)
-    assert p.model("claude-opus-4-8+1m").spec.valid_latency_modes == ("fast",)
-    assert p.model("claude-fable-5-1").spec.valid_latency_modes == ()
-    assert p.model("claude-fable-5").spec.valid_latency_modes == ()
-    assert p.model("claude-sonnet-5").spec.valid_latency_modes == ()
-    assert p.model("claude-haiku-4-5").spec.valid_latency_modes == ()
+    assert "priority" in p.model("claude-opus-4-8").capability.service_tier
+    assert "priority" in p.model("claude-opus-4-8+1m").capability.service_tier
+    assert "priority" not in p.model("claude-fable-5-1").capability.service_tier
+    assert "priority" not in p.model("claude-fable-5").capability.service_tier
+    assert "priority" not in p.model("claude-sonnet-5").capability.service_tier
+    assert "priority" not in p.model("claude-haiku-4-5").capability.service_tier
 
 
-def test_anthropic_fast_latency_sets_speed_and_beta() -> None:
+def test_anthropic_priority_tier_sets_speed_and_beta() -> None:
+    """``speed`` rides ``extra_body``: the stream path is a raw POST.
+
+    A first-class ``speed=`` exists only on the SDK's beta endpoints, so
+    dropping this injection silently bills standard.
+    """
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-8")
-    req = ModelRequest(messages=[UserMessage(text="x")], latency="fast")
-    kwargs = m._build_kwargs(req, [])
+    m._settings = ModelSettings(capability=m.capability, service_tier="priority")
+    kwargs = m._build_kwargs(ModelRequest(messages=[UserMessage(text="x")]), [])
     body = cast(dict[str, object], kwargs["extra_body"])
     assert body["speed"] == "fast"
     headers = cast(dict[str, str], kwargs["extra_headers"])
     assert "fast-mode-2026-02-01" in headers["anthropic-beta"].split(",")
 
 
-def test_anthropic_fast_latency_rejected_on_unsupported_model() -> None:
-    p = Anthropic.from_key("k")
-    m = p.model("claude-fable-5")
-    req = ModelRequest(messages=[UserMessage(text="x")], latency="fast")
-    with pytest.raises(ValueError, match="does not support fast mode"):
-        m._build_kwargs(req, [])
+def test_anthropic_priority_tier_is_unselectable_on_an_unsupported_model() -> None:
+    """The capability rejects it up front rather than billing standard."""
+    m = Anthropic.from_key("k").model("claude-fable-5")
+    with pytest.raises(ValueError, match="service_tier"):
+        m.settings.service_tier = "priority"
 
 
 def test_parse_response_bills_fast_when_server_reports_fast() -> None:
     raw = _build_anthropic_message(
         text="x", input_tokens=1_000_000, output_tokens=1_000_000, speed="fast"
     )
-    resp = _parse_response(raw, _fast_spec())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
+    resp = _parse_response(raw, _fast_model())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
     assert (resp.spend.request + resp.spend.cache_write + resp.spend.cache_read) == 10.0
     assert resp.spend.response == 50.0
 
@@ -875,7 +864,7 @@ def test_parse_response_bills_standard_when_server_falls_back() -> None:
     raw = _build_anthropic_message(
         text="x", input_tokens=1_000_000, output_tokens=1_000_000, speed="standard"
     )
-    resp = _parse_response(raw, _fast_spec())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
+    resp = _parse_response(raw, _fast_model())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
     assert (resp.spend.request + resp.spend.cache_write + resp.spend.cache_read) == 5.0
     assert resp.spend.response == 25.0
 
@@ -885,47 +874,52 @@ def test_anthropic_model_image_limits() -> None:
     m = p.model("claude-opus-4-7")
     # opus-4-7 is a high-resolution model: native long edge 2576 px (server
     # downscales above this), per the Anthropic Vision docs.
-    assert m.max_image_dim == 2576
-    assert m.max_image_bytes == 5 * 1024 * 1024
+    assert m.limits.max_image_edge_px == 2576
+    assert m.limits.max_image_bytes == 5 * 1024 * 1024
 
 
 def test_anthropic_standard_model_image_dim_is_native_1568() -> None:
     """Pre-4.7 models cap the native long edge at 1568 px, not the high-res 2576."""
     m = Anthropic.from_key("k").model("claude-sonnet-4-5")
-    assert m.max_image_dim == 1568
+    assert m.limits.max_image_edge_px == 1568
 
 
 def test_anthropic_model_max_request_bytes() -> None:
     """Anthropic's request wire ceiling is ~32 MB (distinct from per-image)."""
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-7")
-    assert m.max_request_bytes == 32 * 1024 * 1024
+    assert m.limits.max_request_bytes == 32 * 1024 * 1024
     # The request ceiling is much larger than the per-image cap.
-    assert m.max_request_bytes > m.max_image_bytes
+    assert m.limits.max_request_bytes > m.limits.max_image_bytes
 
 
-def test_anthropic_image_byte_limits_read_from_spec_not_constant() -> None:
-    """The three byte/image limits derive from the model SPEC, per-model.
+def test_anthropic_image_byte_limits_read_from_the_row_not_a_constant() -> None:
+    """The three byte/image limits come from the capability, per-model.
 
-    A constant ``return`` would report the same value for every model; reading
-    the spec lets a future model with different vision/wire limits diverge
-    without touching the provider class. Proven by a spec with distinct
-    values flowing through to the model properties.
+    A constant ``return`` would report one value for every model; reading
+    the row lets a future model with different vision/wire limits diverge
+    without touching the provider class.
     """
-    m = _AnthropicModel(
-        provider=Anthropic.from_key("k"),
+    row = ModelCapability(
         model_id="claude-opus-4-7",
-        spec=ModelSpec(
-            context_limits=ModelLimits(
-                max_image_edge_px=4096,
-                max_image_bytes=7 * 1024 * 1024,
-                max_request_bytes=15 * 1024 * 1024,
-            )
+        context=MappingProxyType(
+            {
+                "": ModelLimits(
+                    max_image_edge_px=4096,
+                    max_image_bytes=7 * 1024 * 1024,
+                    max_request_bytes=15 * 1024 * 1024,
+                )
+            }
         ),
     )
-    assert m.max_image_dim == 4096
-    assert m.max_image_bytes == 7 * 1024 * 1024
-    assert m.max_request_bytes == 15 * 1024 * 1024
+    m = _AnthropicModel(
+        provider=Anthropic.from_key("k"),
+        capability=row,
+        settings=ModelSettings(capability=row),
+    )
+    assert m.limits.max_image_edge_px == 4096
+    assert m.limits.max_image_bytes == 7 * 1024 * 1024
+    assert m.limits.max_request_bytes == 15 * 1024 * 1024
 
 
 def test_anthropic_model_is_context_overflow_non_api_status_error() -> None:
@@ -1501,7 +1495,7 @@ def test_anthropic_model_max_request_tokens_override() -> None:
 def test_anthropic_model_max_response_tokens_from_profile() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-7")
-    assert m.max_response_tokens == 128_000
+    assert m.limits.max_response_tokens == 128_000
 
 
 if __name__ == "__main__":

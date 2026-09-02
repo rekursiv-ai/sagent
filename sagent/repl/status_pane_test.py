@@ -15,8 +15,8 @@ from sagent.agent.agent import ActivityTracker, Agent
 from sagent.agent.cost_tracker import CostTracker
 from sagent.lib.custom_json import FloatCodec
 from sagent.repl.status_pane import render_status_pane
-from sagent.types.cost import TokenCost
-from sagent.types.model import ContextBudget, TokenCount
+from sagent.types.cost import TokenCost, TokenCount
+from sagent.types.model import AgentSettings
 
 
 @dataclass(slots=True, kw_only=True)
@@ -56,13 +56,11 @@ class _FakeAgent:
     cost_tracker: _FakeCostTracker = field(default_factory=_FakeCostTracker)
     runtime: _FakeRuntime = field(default_factory=_FakeRuntime)
     model: _FakeModel = field(default_factory=_FakeModel)
-    budget: ContextBudget = field(
-        default_factory=lambda: ContextBudget(
+    budget: AgentSettings = field(
+        default_factory=lambda: AgentSettings(
             max_request_tokens=200_000,
             max_response_tokens=8_192,
-            keep_recent_on_compact=8,
             buffer_tokens=4_096,
-            chars_per_token=4,
         ),
     )
 
@@ -386,12 +384,10 @@ def test_real_agent_cost_tracker_is_compatible() -> None:
     class _Dummy:
         activity = ActivityTracker(elapsed_seconds=2.0)
         cost_tracker = CostTracker()
-        budget = ContextBudget(
+        budget = AgentSettings(
             max_request_tokens=1000,
             max_response_tokens=100,
-            keep_recent_on_compact=4,
             buffer_tokens=10,
-            chars_per_token=4,
         )
 
     s = render_status_pane(cast(Agent, _Dummy()))

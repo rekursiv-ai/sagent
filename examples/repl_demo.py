@@ -29,7 +29,8 @@ from sagent.agent.agent import Agent
 from sagent.providers import build_provider
 from sagent.repl import run_repl
 from sagent.testing import MockModelCaps
-from sagent.types.model import ModelRequest, ModelResponse, TokenCount
+from sagent.types.cost import TokenCount
+from sagent.types.model import ModelRequest, ModelResponse
 from sagent.types.runtime import (
     AssistantMessage,
     ModelResponsePartial,
@@ -113,7 +114,7 @@ def main() -> None:
         provider = build_provider(args.provider, args.auth, account=args.account)
         model = provider.model(args.model)
 
-    sys.stderr.write(f"{model.spec.tagged_model_id}\n")
+    sys.stderr.write(f"{model.tagged_model_id}\n")
 
     agent = Agent(model=model)
     asyncio.run(run_repl(agent))

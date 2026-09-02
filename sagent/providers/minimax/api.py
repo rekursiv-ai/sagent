@@ -26,7 +26,7 @@ from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
 )
-from sagent.types.model import ModelCapability
+from sagent.types.capability import ModelCapability
 
 
 class _MiniMaxModel(OpenAICompatModel):
@@ -53,7 +53,7 @@ class MiniMax(OpenAICompat):
     #
     # To add a new model: check the MiniMax platform docs for the
     # model's context window and max output tokens.
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = minimax_catalog.MODELS
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = minimax_catalog.models()
     """Per-model capability; transport limits live on ``TRANSPORT``."""
 
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _MiniMaxModel

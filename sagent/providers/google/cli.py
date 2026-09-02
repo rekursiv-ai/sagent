@@ -40,7 +40,6 @@ import os
 import shutil
 import tempfile
 
-from sagent import types
 from sagent.catalog import google as google_catalog
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import JSON, FloatCodec, MutableJSON, validate_json_schema
@@ -63,13 +62,13 @@ from sagent.providers.lib.subproc import (
     Subproc,
     SubprocessTransportError,
 )
+from sagent.types.capability import ModelCapability, ModelSettings
+from sagent.types.cost import TokenCount
 from sagent.types.model import (
-    ModelCapability,
     ModelRequest,
     ModelResponse,
-    ModelSpec,
-    TokenCount,
 )
+from sagent.types.providers import resolve
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
@@ -127,7 +126,7 @@ class GoogleCLI(Google):
     does not surface per-turn usage on ``session/prompt`` responses.
     """
 
-    TRANSPORT: ClassVar[ModelCapability] = google_catalog.CLI
+    TRANSPORT: ClassVar[ModelCapability] = google_catalog.cli()
     """ACP exposes no effort knob and rolls its own history."""
 
     def __init__(self, *, account: str | None = None) -> None:
@@ -205,18 +204,17 @@ class GoogleCLI(Google):
 
         """
         mid = model_id if model_id is not None else "default"
-        spec = types.providers.resolve(
+        capability, settings = resolve(
             mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT
         )
         return _GoogleCLIModel(
             provider=self,
-            # ``mid`` may be a role name; the spec carries the resolved id.
-            model_id=spec.tagged_model_id,
-            spec=spec,
+            capability=capability,
+            settings=settings,
             max_request_tokens=(
                 max_request_tokens
                 if max_request_tokens is not None
-                else spec.context_limits.max_request_tokens
+                else settings.limits.max_request_tokens
             ),
         )
 
@@ -251,21 +249,18 @@ class _GoogleCLIModel(ModelDefaults):
 
     """
 
-    spec: ModelSpec = ModelSpec()
-    """What this model can do; replaced from the catalog at construction."""
-
     def __init__(
         self,
         *,
         provider: GoogleCLI,
-        model_id: str,
+        capability: ModelCapability,
+        settings: ModelSettings,
         max_request_tokens: int,
-        spec: ModelSpec | None = None,
     ) -> None:
         self._provider = provider
-        self._model_id = model_id
+        self._capability = capability
+        self._settings = settings
         self._max_request_tokens = max_request_tokens
-        self.spec = spec or ModelSpec()
         self._last_sent_index = 0
         self._system_hash: str = ""
         self._turn_count = 0
@@ -284,80 +279,21 @@ class _GoogleCLIModel(ModelDefaults):
         self._sent_history_head: TapeEvent | None = None
 
     @property
+    @override
+    def capability(self) -> ModelCapability:
+        """What this model offers on this transport."""
+        return self._capability
+
+    @property
+    @override
+    def settings(self) -> ModelSettings:
+        """What this instance chose."""
+        return self._settings
+
+    @property
     def max_request_tokens(self) -> int:
         """Per-request input token cap."""
         return self._max_request_tokens
-
-    @property
-    def model_id(self) -> str:
-        """Model identifier passed to ``gemini --model``."""
-        return self._model_id
-
-    @property
-    def max_response_tokens(self) -> int:
-        """Per-request output token cap from the profile."""
-        return self.spec.context_limits.max_response_tokens
-
-    @property
-    def supports_streaming(self) -> bool:
-        """``True``: ACP streams updates per turn."""
-        return True
-
-    @property
-    def supports_thinking(self) -> bool:
-        """Whether the active model supports thinking.
-
-        ACP exposes ``agent_thought_chunk`` notifications, but legacy Gemini
-        models (``gemini-1.5-*``) cannot accept ``thinkingConfig`` on the
-        underlying API. Honor the per-model spec rather than blanket-
-        advertising support.
-        """
-        return bool(self.spec.supported_thinking_budgets)
-
-    @property
-    def supports_effort(self) -> bool:
-        """``False``: ACP has no effort knob on ``session/prompt``."""
-        return bool(self.spec.supported_thinking_efforts)
-
-    @property
-    def valid_efforts(self) -> tuple[str, ...]:
-        """No effort knob on the ACP transport."""
-        return tuple(self.spec.supported_thinking_efforts)
-
-    @property
-    def supports_cache_control(self) -> bool:
-        """``False``: prompt cache is the CLI's concern, not ours."""
-        return self.spec.prompt_cache_breakpoints
-
-    @property
-    def supports_context_management(self) -> bool:
-        """``True``: the CLI itself rolls history under quota pressure."""
-        return True
-
-    @property
-    def supports_persistent_retry(self) -> bool:
-        """``False``: persistent retry conflicts with subprocess lifecycle."""
-        return self.spec.retries_internally
-
-    @property
-    def supports_account_auth(self) -> bool:
-        """``True``: the provider runs on the user's CLI subscription."""
-        return self.spec.account_auth
-
-    @property
-    def max_image_dim(self) -> int:
-        """Maximum image edge (pixels) accepted, from the model profile."""
-        return self.spec.context_limits.max_image_edge_px
-
-    @property
-    def max_image_bytes(self) -> int:
-        """Maximum size (bytes) of a single image, from the model profile."""
-        return self.spec.context_limits.max_image_bytes
-
-    @property
-    def max_request_bytes(self) -> int:
-        """Maximum request-body size (bytes), from the model profile."""
-        return self.spec.context_limits.max_request_bytes
 
     @override
     def approx_text_tokens(self, text: str) -> int:
@@ -511,7 +447,7 @@ class _GoogleCLIModel(ModelDefaults):
         ]
         for entry in user_like_entries[:-1]:
             blocks = _serialize_prompt_blocks(
-                entry, self.max_image_dim, self.max_image_bytes
+                entry, self.limits.max_image_edge_px, self.limits.max_image_bytes
             )
             _ = await self._send_prompt(
                 proc,
@@ -525,7 +461,9 @@ class _GoogleCLIModel(ModelDefaults):
         stop_reason: str | None = None
         if user_like_entries:
             blocks = _serialize_prompt_blocks(
-                user_like_entries[-1], self.max_image_dim, self.max_image_bytes
+                user_like_entries[-1],
+                self.limits.max_image_edge_px,
+                self.limits.max_image_bytes,
             )
             stop_reason = await self._send_prompt(
                 proc,
@@ -605,7 +543,7 @@ class _GoogleCLIModel(ModelDefaults):
             ),
             message_id=self._session_id,
             request_id=self._session_id,
-            spend=self.spec.spend(tokens),
+            spend=self.spend(tokens),
         )
 
     async def _spawn_initialized_proc(self) -> Subproc:
@@ -635,7 +573,7 @@ class _GoogleCLIModel(ModelDefaults):
         _populate_google_tmpdir(tmpdir, self._provider.account, self._pending_system)
         workdir = tmpdir / "workdir"
         proc = Subproc(
-            ["gemini", "--experimental-acp", "--model", self._model_id],
+            ["gemini", "--experimental-acp", "--model", self.capability.model_id],
             env=_google_subprocess_env(tmpdir),
             tmpdir=tmpdir,
             cwd=workdir,

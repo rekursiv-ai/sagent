@@ -58,8 +58,12 @@ class ConsolePrinter:
     """Underlying rich console (exposed for one-off rich renderers that
     need to emit Text/Panel/Syntax objects)."""
 
-    def __init__(self, console: Console) -> None:
+    show_thinking: bool
+    """Whether reasoning renders here; ``/thinking show|hide`` flips it."""
+
+    def __init__(self, console: Console, *, show_thinking: bool = True) -> None:
         self.console = console
+        self.show_thinking = show_thinking
 
     def write_line(self, text: str) -> None:
         """Render a complete line; the console adds the newline.

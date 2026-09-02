@@ -25,7 +25,9 @@ import re
 from sagent.agent.retry import send_with_retry
 from sagent.compaction.history import estimate_entry_tokens
 from sagent.tools.core import read_asset, recipe_dict
+from sagent.types.compactor import ReattachPolicy
 from sagent.types.model import (
+    AgentSettings,
     Model,
     ModelRequest,
     ModelResponse,
@@ -85,14 +87,12 @@ class SummaryCompactor:
           next ``compact``.
       partial_prompt: Prompt used when ``keep_recent`` preserves a tail.
           ``None`` resolves ``compactor.partial`` from the live recipe.
-      buffer_tokens: Optional extra slack (tokens) added to the live side of
-          the ``should_compact`` inequality. ``0`` (the default) leaves the
-          gate purely proportional.
       utilization_trigger: Fraction of the usable (non-system,
-          post-compaction) window the request may fill before compaction
-          fires; the ``(1 - utilization_trigger)`` slack is the reservation
-          for the model's response and estimation safety. Dimensionless in
-          ``(0, 1]``. Default ``0.95``.
+          post-compaction) context the request may fill before compaction
+          fires; the ``(1 - utilization_trigger)`` slack absorbs estimation
+          error, which is one-sided -- an UNDER-estimate is what reaches
+          the provider as a rejected request. Dimensionless in ``(0, 1]``.
+          Default ``0.95``.
       compression: Compaction compression factor
           (``post_compact_size / pre_compact_size``) for the non-system body,
           reserved out of the window. Default ``0.01``. See
@@ -122,7 +122,6 @@ class SummaryCompactor:
         *,
         prompt: str | None = None,
         partial_prompt: str | None = None,
-        buffer_tokens: int = 0,
         utilization_trigger: float = 0.95,
         compression: float = 0.01,
         max_attempts: int = 3,
@@ -131,6 +130,7 @@ class SummaryCompactor:
         proactive: bool = False,
         verify_summary: bool = False,
         retry_tool_result_cap_chars: int = 8_000,
+        reattach: ReattachPolicy | None = None,
         model: Model | None = None,
     ) -> None:
         if max_attempts < 1:
@@ -151,7 +151,6 @@ class SummaryCompactor:
             )
         self._prompt = prompt
         self._partial_prompt = partial_prompt
-        self._buffer_tokens = buffer_tokens
         self._utilization_trigger = utilization_trigger
         self._compression = compression
         self._max_attempts = max_attempts
@@ -160,7 +159,13 @@ class SummaryCompactor:
         self._proactive = proactive
         self._verify_summary = verify_summary
         self._retry_tool_result_cap_chars = retry_tool_result_cap_chars
+        self._reattach = reattach or ReattachPolicy()
         self._model = model
+
+    @property
+    def reattach(self) -> ReattachPolicy:
+        """How much file content this strategy pulls back after compacting."""
+        return self._reattach
 
     @property
     def proactive(self) -> bool:
@@ -170,34 +175,62 @@ class SummaryCompactor:
         """
         return self._proactive
 
+    def largest_context(self, settings: AgentSettings) -> int:
+        """Return the largest input this strategy lets a request reach.
+
+        Two reservations come out of the window, and the model's own
+        window is not one of them -- the caller's ``budget`` may already
+        cap ``max_request_tokens`` below it:
+
+          - ``max_response_tokens``: vendors bill input and output against
+            one window (Anthropic rejects with ``input length and
+            max_tokens exceed context limit: A + B > W``), so the reply's
+            ceiling is unusable input space rather than slack. Reserving a
+            FRACTION of the window instead -- what ``utilization_trigger``
+            used to do alone -- cannot honour an ABSOLUTE token count: at
+            0.95 it left 57k for a 128k reply on a 1M window, and 10k on a
+            200k one.
+          - ``buffer_tokens``: estimation error, plus the headroom that
+            keeps a fired compaction from landing right at the cliff.
+
+        :meth:`should_compact` is this same number as a predicate; the
+        third reservation (room for the summary itself) lives there
+        because it scales with the body being summarized, which a budget
+        does not know.
+
+        Args:
+          settings: The agent's chosen caps.
+
+        Returns:
+          largest: Input tokens a request may occupy, floored at ``0`` for
+              a budget whose reservations exceed its window.
+
+        """
+        return max(
+            0,
+            settings.max_request_tokens
+            - settings.max_response_tokens
+            - settings.buffer_tokens,
+        )
+
     def should_compact(
         self,
         current_tokens: int,
-        max_request_tokens: int,
+        largest_context: int,
         system_tokens: int = 0,
     ) -> bool:
-        """Compact if the non-system request exceeds the usable input window.
+        """Compact if the non-system request exceeds the usable context.
 
-        Compact when the current ``body`` is at least ``utilization_trigger``
-        of the usable window that remains after setting aside ``compression *
-        body`` for the compacted result itself.
-
-        Three things are reserved out of the raw context window before the
-        body is allowed to fill it:
-
-          - the system prompt: non-negotiable lost window, subtracted from
-            both sides as ``max_usable = window - system`` (it is fixed
-            overhead compaction never shrinks);
-          - the compacted result: ``compression * body`` of room kept so the
-            summary this compaction produces has somewhere to land;
-          - the model's response: covered by ``utilization_trigger < 1`` --
-            the ``(1 - u)`` slack below ``max_usable`` is the reservation for
-            the reply the next call will generate (plus estimation safety).
+        ``largest_context`` arrives already net of every fixed reservation
+        :meth:`largest_context` makes. This method adds the two that scale
+        with the request: ``compression * body`` of room for the summary
+        THIS compaction is about to produce, and the ``(1 - u)`` slack for
+        estimation error.
 
         Definitions (``c = compression`` = post_compact_size /
         pre_compact_size of the non-system body; ``u = utilization_trigger``)::
 
-            max_usable            = ContextWindow - approx(SystemPrompt)
+            max_usable            = largest_context - approx(SystemPrompt)
             body                  = approx(TotalRequest) - approx(SystemPrompt)
             expected_compact_size = c * body
             expected_usable       = max_usable - expected_compact_size
@@ -210,10 +243,10 @@ class SummaryCompactor:
             <==> body >= u * max_usable / (1 + c * u)
 
         where ``approx(TotalRequest) = Last + approx(since(Last))`` and
-        ``body = current_tokens - system_tokens``. At ``c = 0`` and ``u = 1``
-        this reduces to ``body >= max_usable`` i.e.
-        ``approx(TotalRequest) >= ContextWindow`` -- no compaction- or
-        response-headroom, fire only at the hard window.
+        ``body = current_tokens - system_tokens``. At the defaults
+        (``u = 0.95``, ``c = 0.01``) the divisor is ``1.0095``. At ``c = 0``
+        and ``u = 1`` this reduces to ``body >= max_usable`` -- fire exactly
+        at :meth:`largest_context`, with no slack for either.
 
         Concerns:
           - ``body`` (``current - system``) cannot go meaningfully negative:
@@ -222,28 +255,27 @@ class SummaryCompactor:
             estimation overshoot in ``system_tokens`` is clamped to ``0``.
           - Mis-estimating ``system``/``c`` only shifts the threshold by a
             ``u``-scaled amount and is bounded since ``system <=
-            ContextWindow`` by assumption.
+            largest_context`` by assumption.
 
         Args:
           current_tokens: ``approx(TotalRequest)`` -- provider's exact last
               request total plus an estimate of entries appended since.
-          max_request_tokens: ``ContextWindow`` -- the model's input-token
-              window.
+          largest_context: Result of :meth:`largest_context`. NOT the raw
+              context window: passing the window drops the response
+              reservation, and the provider counts input and output against
+              one window.
           system_tokens: ``approx(System)`` -- estimated system-prompt
-              tokens, incompressible overhead reserved out of the window.
+              tokens, incompressible overhead reserved out of the limit.
 
         Returns:
           should: True when compaction should run before the next call.
 
         """
-        return _should_compact(
-            current_tokens=current_tokens,
-            max_request_tokens=max_request_tokens,
-            system_tokens=system_tokens,
-            utilization_trigger=self._utilization_trigger,
-            compression=self._compression,
-            buffer_tokens=self._buffer_tokens,
-        )
+        body = max(0, current_tokens - system_tokens)
+        max_usable = max(0, largest_context - system_tokens)
+        u = self._utilization_trigger
+        # ``>=`` so the at-boundary case compacts.
+        return body >= max_usable * u / (1.0 + self._compression * u)
 
     async def compact(
         self,
@@ -550,28 +582,6 @@ class SummaryCompactor:
             logger.warning("verifier returned no <summary> block; keeping the original")
             return raw_summary
         return improved
-
-
-def _should_compact(
-    *,
-    current_tokens: int,
-    max_request_tokens: int,
-    system_tokens: int,
-    utilization_trigger: float,
-    compression: float,
-    buffer_tokens: int,
-) -> bool:
-    """Compaction-trigger arithmetic; see ``SummaryCompactor.should_compact``.
-
-    body >= u * max_usable / (1 + c * u)   (+ buffer slack on the live side).
-    ``>=`` so the at-boundary case compacts.
-    """
-    body = max(0, current_tokens - system_tokens)
-    max_usable = max(0, max_request_tokens - system_tokens)
-    threshold = (
-        max_usable * utilization_trigger / (1.0 + compression * utilization_trigger)
-    )
-    return body + buffer_tokens >= threshold
 
 
 def _groups_to_drop(

@@ -35,7 +35,6 @@ from sagent.bin.cli import (
     _build_persistent_child,
     _build_provider_model,
     _build_provider_model_once,
-    _cli_provider_options,
     _configure_logging,
     _credential_error_message,
     _credential_fallback_providers,
@@ -47,7 +46,6 @@ from sagent.bin.cli import (
     _parse_allow_providers,
     _parse_cli_args,
     _parse_stream_json,
-    _resolve_cli_thinking_state,
     _resolve_provider_and_allow,
     _resolve_resume,
     _resolve_resume_hash,
@@ -60,14 +58,8 @@ from sagent.bin.cli import (
 )
 from sagent.providers import PROVIDER_NAMES
 from sagent.sessions import SessionInfo, project_dir
-from sagent.testing import FakeAgent
-from sagent.types.cost import (
-    PriceCatalog,
-    PriceCatalogProduct,
-    TokenPrice,
-)
-from sagent.types.model import Model, ModelLimits, ModelSpec
-from sagent.types.providers import ProviderOptions
+from sagent.testing import FakeAgent, MockModelCaps
+from sagent.types.model import Model
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
@@ -128,58 +120,21 @@ def test_parse_cli_args_no_compact() -> None:
 def test_parse_cli_args_thinking_default() -> None:
     ns = _parse([])
     assert ns.thinking == "default"
-    assert _resolve_cli_thinking_state(ns) is None
 
 
-def test_parse_cli_args_thinking_full_state() -> None:
-    ns = _parse(["--thinking", "on-show"])
-    assert _resolve_cli_thinking_state(ns) == "on-show"
-
-
-def test_cli_provider_options_default_unset() -> None:
-    ns = _parse([])
-    assert ns.server_side_context_management is None
-    assert _cli_provider_options(ns).set_fields() == {}
-
-
-def test_cli_provider_options_server_side_context_management_flag() -> None:
-    ns = _parse(["--server-side-context-management"])
-    assert _cli_provider_options(ns).set_fields() == {
-        "server_side_context_management": True,
-    }
-
-
-def test_cli_provider_options_negated_flag_is_explicit_false() -> None:
-    ns = _parse(["--no-server-side-context-management"])
-    assert _cli_provider_options(ns).set_fields() == {
-        "server_side_context_management": False,
-    }
+def test_parse_cli_args_thinking_word() -> None:
+    ns = _parse(["--thinking", "on"])
+    assert ns.thinking == "on"
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
-class _ChildStubModel:
+class _ChildStubModel(MockModelCaps):
     """Minimal rich-model stand-in for ``_build_persistent_child`` tests."""
 
     model_id: str = "claude-opus-4-8"
     max_request_tokens: int = 100_000
     max_response_tokens: int = 1_024
     supports_thinking: bool = True
-    supports_effort: bool = False
-    valid_efforts: tuple[str, ...] = ()
-    supports_cache_control: bool = False
-    service_tiers: tuple[str, ...] = ()
-    latency_modes: tuple[str, ...] = ()
-
-    @property
-    def spec(self) -> ModelSpec:
-        return ModelSpec(
-            model_id=self.model_id,
-            context_limits=ModelLimits(
-                max_request_tokens=self.max_request_tokens,
-                max_response_tokens=self.max_response_tokens,
-            ),
-            prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
-        )
 
 
 def _child_record(**overrides: object) -> PersistentAgentRecord:
@@ -199,21 +154,16 @@ def _child_record(**overrides: object) -> PersistentAgentRecord:
     return dataclasses.replace(record, **overrides)
 
 
-def _capture_build_provider(
-    monkeypatch: pytest.MonkeyPatch,
-) -> dict[str, ProviderOptions | None]:
-    """Stub ``cli.build_provider``; capture the forwarded ``options``."""
-    captured: dict[str, ProviderOptions | None] = {}
+def _stub_build_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub ``cli.build_provider`` with one handing out ``_ChildStubModel``."""
 
     def fake_build_provider(
         provider_name: str,
         auth: str = "env",
         *,
         account: str | None = None,
-        options: ProviderOptions | None = None,
     ) -> object:
         del provider_name, auth, account
-        captured["options"] = options
 
         class _Provider:
             def model(self, model_id: str | None = None) -> _ChildStubModel:
@@ -225,20 +175,6 @@ def _capture_build_provider(
         "sagent.bin.cli.build_provider",
         fake_build_provider,
     )
-    return captured
-
-
-def test_build_persistent_child_forwards_provider_options(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Resume must rebuild the provider with the record's construction options."""
-    captured = _capture_build_provider(monkeypatch)
-    record = _child_record(
-        provider_options=ProviderOptions(server_side_context_management=True),
-    )
-    child = _build_persistent_child(record, allow_providers=(), parent_label="parent")
-    assert captured["options"] == ProviderOptions(server_side_context_management=True)
-    assert child.provider_options == record.provider_options
 
 
 @pytest.mark.asyncio
@@ -283,18 +219,14 @@ async def test_resume_does_not_resurrect_completed_oneshot(tmp_path: Path) -> No
 def test_build_persistent_child_restores_thinking_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Canonical thinking state round-trips, including derived redaction."""
-    captured = _capture_build_provider(monkeypatch)
-    record = _child_record(thinking="adaptive", thinking_state="redact-hide")
+    """The thinking axes round-trip through a persistent-child rebuild."""
+    _stub_build_provider(monkeypatch)
+    record = _child_record(
+        thinking_budget="auto", thinking_output="text", show_thinking=False
+    )
     child = _build_persistent_child(record, allow_providers=(), parent_label="parent")
-    assert child.thinking_state == "redact-hide"
-    assert child.show_thinking is False
-    assert child.thinking == "adaptive"
-    # Anthropic supports the redact option, so the provider rebuild
-    # derives it from the restored thinking state.
-    options = captured["options"]
-    assert options is not None
-    assert options.redact_thinking is True
+    assert child.model.settings.thinking_budget == "auto"
+    assert child.model.settings.thinking_output == "text"
 
 
 def test_default_allow_providers_leads_with_default_provider() -> None:
@@ -320,7 +252,7 @@ def test_implicit_provider_derives_auth_from_provider(
 
     class _Provider:
         def model(self, model_id: str | None = None) -> object:
-            return argparse.Namespace(spec=ModelSpec(model_id=model_id or "m"))
+            return argparse.Namespace(tagged_model_id=model_id or "m")
 
     calls: list[tuple[str, str]] = []
 
@@ -340,7 +272,7 @@ def test_implicit_provider_derives_auth_from_provider(
         fake_build_provider,
     )
 
-    _, _, auth = _build_provider_model_once(ns, None)
+    _, _, auth = _build_provider_model_once(ns)
 
     assert calls == [("Anthropic", "env")]
     assert auth == "env"
@@ -356,9 +288,7 @@ def test_implicit_startup_falls_back_from_missing_api_key_to_claude_login(
 
     class _Provider:
         def model(self, model_id: str | None = None) -> object:
-            return argparse.Namespace(
-                spec=ModelSpec(model_id=model_id or "claude-test")
-            )
+            return argparse.Namespace(tagged_model_id=model_id or "claude-test")
 
     def fake_build_provider(
         provider_name: str,
@@ -376,7 +306,6 @@ def test_implicit_startup_falls_back_from_missing_api_key_to_claude_login(
 
     _, model, auth = _build_provider_model(
         ns,
-        None,
         allow_providers=("Anthropic", "AnthropicCLI", "OpenAISubscription"),
     )
 
@@ -385,7 +314,7 @@ def test_implicit_startup_falls_back_from_missing_api_key_to_claude_login(
         ("AnthropicCLI", "credentials"),
     ]
     assert ns.provider == "AnthropicCLI"
-    assert model.spec.tagged_model_id == "claude-test"
+    assert model.tagged_model_id == "claude-test"
     assert auth == "credentials"
 
 
@@ -418,7 +347,6 @@ def test_resumed_provider_never_implicitly_falls_back(
     with pytest.raises(RuntimeError, match="Anthropic API key not configured"):
         _build_provider_model(
             ns,
-            None,
             allow_providers=("Anthropic", "AnthropicCLI", "OpenAISubscription"),
         )
 
@@ -437,7 +365,7 @@ def test_implicit_startup_fallback_honors_allow_providers(
 
     class _Provider:
         def model(self, model_id: str | None = None) -> object:
-            return argparse.Namespace(spec=ModelSpec(model_id=model_id or "gpt-test"))
+            return argparse.Namespace(tagged_model_id=model_id or "gpt-test")
 
     def fake_build_provider(
         provider_name: str,
@@ -455,7 +383,6 @@ def test_implicit_startup_fallback_honors_allow_providers(
 
     _, model, auth = _build_provider_model(
         ns,
-        None,
         allow_providers=("Anthropic", "OpenAISubscription"),
     )
 
@@ -464,7 +391,7 @@ def test_implicit_startup_fallback_honors_allow_providers(
         ("OpenAISubscription", "credentials"),
     ]
     assert ns.provider == "OpenAISubscription"
-    assert model.spec.tagged_model_id == "gpt-test"
+    assert model.tagged_model_id == "gpt-test"
     assert auth == "credentials"
 
 
@@ -767,21 +694,21 @@ def test_resume_model_defaults_explicit_model_overrides_session_meta() -> None:
     assert ns.model == "gpt-5.5"
 
 
-def test_resume_model_defaults_explicit_provider_keeps_fast_tagged_model() -> None:
-    """A ``+fast`` id is not a catalog key; the check must strip it.
+def test_resume_model_defaults_explicit_provider_keeps_context_tagged_model() -> None:
+    """A ``+1m`` id is not a catalog key; the check must strip it.
 
-    Regression: exact ``KNOWN_MODELS`` membership nulled the persisted
-    model on an explicit same-provider resume, silently dropping the
-    fast tag (and the model choice) in favor of the provider default.
+    Regression: exact catalog membership nulled the persisted model on an
+    explicit same-provider resume, silently dropping the window tag (and
+    the model choice) in favor of the provider default.
     """
     ns = _parse(["--resume", "abc123", "--provider", "Anthropic"])
     meta = SessionMeta(
         provider="Anthropic",
         auth="env",
-        model_id="claude-opus-4-8+1m+fast",
+        model_id="claude-opus-4-8+1m",
     )
     _apply_resume_model_defaults(ns, meta)
-    assert ns.model == "claude-opus-4-8+1m+fast"
+    assert ns.model == "claude-opus-4-8+1m"
 
 
 def test_parse_agent_args_known_unknown_split() -> None:

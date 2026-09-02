@@ -14,7 +14,7 @@ can be unit-tested without spinning up an ``Agent``.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 import dataclasses
 import logging
@@ -24,8 +24,10 @@ from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.state import ToolState
 from sagent.compaction.files import reattach_files
 from sagent.compaction.history import append_to_first_user
-from sagent.types.compactor import CompactRestorable
-from sagent.types.model import ContextBudget
+from sagent.types.compactor import (
+    CompactRestorable,
+    ReattachPolicy,
+)
 from sagent.types.runtime import (
     ModelContextEvent,
 )
@@ -89,7 +91,8 @@ async def post_compact_enrich(
     *,
     history: list[ModelContextEvent],
     tool_state: ToolState,
-    budget: ContextBudget,
+    reattach: ReattachPolicy,
+    estimate_text_tokens: Callable[[str], int],
     tools: Mapping[str, Tool],
     background_tasks: Mapping[str, BackgroundTaskEntry],
     estimate_tokens: int,
@@ -104,7 +107,8 @@ async def post_compact_enrich(
     Args:
       history: Payload-under-construction; mutated in place.
       tool_state: Active tool state; ``recent_files`` drives re-attach.
-      budget: Context budget for re-attach sizing and hook budgets.
+      reattach: How much file content survives the compaction.
+      estimate_text_tokens: The model's own tokenizer.
       tools: Tool registry; entries implementing ``CompactRestorable``
           are notified.
       background_tasks: Live background-task registry.
@@ -118,23 +122,22 @@ async def post_compact_enrich(
         await reattach_files(
             history,
             tool_state.recent_files,
-            count=budget.reattach_count,
-            max_chars=budget.reattach_max_chars,
-            budget=budget.reattach_budget,
+            policy=reattach,
+            estimate_tokens=estimate_text_tokens,
         )
     except Exception:
         logger.warning("reattach_files failed", exc_info=True)
 
     # 2. Run post-compact hooks on tools.
-    available = max(0, estimate_tokens - headroom)
-    hook_budget = available * budget.chars_per_token
+    hook_budget = max(0, estimate_tokens - headroom)
     for tool in tools.values():
         if isinstance(tool, CompactRestorable):
             try:
                 await tool.post_compact_restore(
                     history,
                     tool_state,
-                    budget_chars=hook_budget,
+                    budget_tokens=hook_budget,
+                    estimate_tokens=estimate_text_tokens,
                 )
             except Exception:
                 logger.warning(

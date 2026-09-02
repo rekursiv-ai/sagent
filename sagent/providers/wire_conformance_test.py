@@ -21,7 +21,8 @@ another mapping table would restate the bug.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, ClassVar, Protocol
+from dataclasses import replace
+from typing import TYPE_CHECKING, ClassVar, Protocol, get_args
 
 import pytest
 
@@ -33,18 +34,25 @@ from sagent.providers.minimax.api import MiniMax
 from sagent.providers.moonshot.api import Moonshot
 from sagent.providers.openai.api import OpenAI
 from sagent.providers.openai.compat import OpenAICompatModel
-from sagent.types.model import ModelLimits, ModelRequest
+from sagent.types.capability import (
+    ContextTag,
+    ModelCapability,
+    ModelSettings,
+    ThinkingBudget,
+    ThinkingEffort,
+    ThinkingOutput,
+)
+from sagent.types.model import ModelRequest
 from sagent.types.providers import (
     UnsupportedTagError,
     resolve,
 )
 from sagent.types.runtime import UserMessage
-from sagent.types.thinking import ALL_THINKING_EFFORTS
 
 
 if TYPE_CHECKING:
     from sagent.lib.custom_json import MutableJSON
-    from sagent.types.model import Model, ModelCapability
+    from sagent.types.model import Model
     from sagent.types.providers import ModelRole
 
 
@@ -65,29 +73,33 @@ class _CatalogProvider(Protocol):
     def model(self, model_id: str | None = None) -> Model: ...
 
 
-def _request(effort: str) -> ModelRequest:
-    """The smallest request that carries an effort to the wire."""
-    return ModelRequest(messages=[UserMessage(text="x")], effort=effort)
+def _request() -> ModelRequest:
+    """The smallest request that carries a thinking knob to the wire."""
+    return ModelRequest(messages=[UserMessage(text="x")])
 
 
-def _anthropic_thinking(model: Model, effort: str) -> object:
+def _anthropic_thinking(model: Model, settings: ModelSettings) -> object:
     """Anthropic's ``output_config``, or ``None`` when it sends none."""
     assert isinstance(model, _AnthropicModel)
-    return model._build_kwargs(_request(effort), []).get("output_config")
+    model._settings = settings
+    return model._build_kwargs(_request(), []).get("output_config")
 
 
-def _google_thinking(model: Model, effort: str) -> object:
+def _google_thinking(model: Model, settings: ModelSettings) -> object:
     """Gemini's ``thinkingConfig``, or ``None`` when it sends none."""
-    body: MutableJSON = _build_request(_request(effort), model.spec)
+    body: MutableJSON = _build_request(
+        _request(), model.capability, settings, settings.limits
+    )
     gen_config = body["generationConfig"]
     assert isinstance(gen_config, dict)
     return gen_config.get("thinkingConfig")
 
 
-def _chat_thinking(model: Model, effort: str) -> object:
+def _chat_thinking(model: Model, settings: ModelSettings) -> object:
     """Chat-completions reasoning knobs, or ``None`` when it sends none."""
     assert isinstance(model, OpenAICompatModel)
-    body = model._build_body(_request(effort), stream=False)
+    model._settings = settings
+    body = model._build_body(_request(), stream=False)
     knobs = {
         k: v
         for k, v in body.items()
@@ -99,7 +111,9 @@ def _chat_thinking(model: Model, effort: str) -> object:
 # Each provider paired with the builder that turns a request into its
 # wire body. Adding a provider without adding it here leaves its catalog
 # unverified, so the roster is asserted complete below.
-_WireBuilder = tuple[Callable[[], "_CatalogProvider"], Callable[["Model", str], object]]
+_WireBuilder = tuple[
+    Callable[[], "_CatalogProvider"], Callable[["Model", ModelSettings], object]
+]
 _WIRE_BUILDERS: Mapping[str, _WireBuilder] = {
     "Anthropic": (lambda: Anthropic.from_key("k"), _anthropic_thinking),
     "Google": (lambda: Google.from_key("k"), _google_thinking),
@@ -122,20 +136,36 @@ def _rows() -> list[tuple[str, str]]:
 _ROWS = _rows()
 
 
+def _settings_for(capability: ModelCapability, effort: ThinkingEffort) -> ModelSettings:
+    """The settings that ask for ``effort`` with the widest budget offered."""
+    budgets: tuple[ThinkingBudget, ...] = ("fixed", "auto", "none")
+    budget: ThinkingBudget = next(b for b in budgets if b in capability.thinking_budget)
+    output: ThinkingOutput = "text" if "text" in capability.thinking_output else "none"
+    # ``replace`` re-runs ``__init__``, which validates every axis against
+    # the carried capability -- so an unofferable combination raises here
+    # rather than reaching a wire builder.
+    return replace(
+        ModelSettings.narrowest(capability),
+        thinking_effort=effort,
+        thinking_budget=budget if effort != "none" else "none",
+        thinking_output=output,
+    )
+
+
 @pytest.mark.parametrize(("provider_name", "model_id"), _ROWS, ids=str)
 def test_every_advertised_effort_reaches_the_wire(
     provider_name: str, model_id: str
 ) -> None:
     """Each effort the row advertises builds a body carrying it.
 
-    ``supported_thinking_efforts`` is what the agent offers the user and
-    what ``Agent.effort`` validates against. An effort that passes that
-    gate and then finds no wire mapping is a crash at send time.
+    ``capability.thinking_effort`` is what ``ModelSettings.validate``
+    accepts. An effort that passes that gate and then finds no wire
+    mapping is a crash at send time.
     """
     make, thinking_of = _WIRE_BUILDERS[provider_name]
     model = make().model(model_id)
-    for effort in model.spec.supported_thinking_efforts:
-        sent = thinking_of(model, effort)
+    for effort in model.capability.thinking_effort - {"none"}:
+        sent = thinking_of(model, _settings_for(model.capability, effort))
         assert sent is not None, (
             f"{provider_name}/{model_id} advertises effort {effort!r} but the"
             " wire body carries no thinking knob"
@@ -148,95 +178,103 @@ def test_a_row_with_no_efforts_sends_no_thinking_knob(
 ) -> None:
     """A row that advertises no effort must not send one.
 
-    An empty ``supported_thinking_efforts`` is a positive claim: the
-    model REJECTS the knob (gemini-1.5 rejects ``thinkingConfig``
-    outright, the qwen ``-instruct`` ids reject ``enable_thinking``).
-    A builder reading a private table instead of the row sends it
-    anyway and earns a 400.
+    ``thinking_effort == {"none"}`` is a positive claim: the model
+    REJECTS the knob (gemini-1.5 rejects ``thinkingConfig`` outright, the
+    qwen ``-instruct`` ids reject ``enable_thinking``). A builder reading
+    a private table instead of the row sends it anyway and earns a 400.
     """
     make, thinking_of = _WIRE_BUILDERS[provider_name]
     model = make().model(model_id)
-    if model.spec.supported_thinking_efforts:
+    if model.capability.thinking_effort - {"none"}:
         pytest.skip("row advertises efforts")
-    for effort in ALL_THINKING_EFFORTS:
-        assert thinking_of(model, effort) is None, (
-            f"{provider_name}/{model_id} advertises no effort yet the wire"
-            f" body carries a thinking knob for {effort!r}"
-        )
-
-
-@pytest.mark.parametrize(("provider_name", "model_id"), _ROWS, ids=str)
-def test_distinct_catalog_values_stay_distinct_on_the_wire(
-    provider_name: str, model_id: str
-) -> None:
-    """Efforts the catalog distinguishes must not collapse in the body.
-
-    Two tables encoding one ladder drift silently: the reader sees the
-    catalog's value and the server sees the other one. Comparing the
-    partition the catalog induces against the partition the wire induces
-    catches drift without assuming a vendor's encoding (a number for
-    Gemini, a bare toggle for a zero Qwen budget).
-    """
-    make, thinking_of = _WIRE_BUILDERS[provider_name]
-    model = make().model(model_id)
-    by_wire: dict[str, set[str]] = {}
-    for effort, wire in model.spec.supported_thinking_efforts.items():
-        by_wire.setdefault(str(thinking_of(model, effort)), set()).add(wire)
-    collapsed = {sent: wires for sent, wires in by_wire.items() if len(wires) > 1}
-    assert not collapsed, (
-        f"{provider_name}/{model_id} sends one body for catalog values the"
-        f" row declares distinct: {collapsed}"
+    assert thinking_of(model, _settings_for(model.capability, "none")) is None, (
+        f"{provider_name}/{model_id} advertises no effort yet the wire body"
+        " carries a thinking knob"
     )
 
 
 @pytest.mark.parametrize(("provider_name", "model_id"), _ROWS, ids=str)
-def test_every_advertised_context_and_tier_resolves(
+def test_distinct_efforts_stay_distinct_on_the_wire(
     provider_name: str, model_id: str
 ) -> None:
-    """Every context tag resolves and every priced tier answers ``spend``.
+    """Efforts the row distinguishes must not collapse into one body.
 
-    ``resolve`` is the single path from a tagged id to a ``ModelSpec``;
-    a context the catalog offers but ``resolve`` rejects is a window the
+    A ladder that flattens bills one level while the user selected
+    another, and the collapse is invisible from either side alone.
+    """
+    make, thinking_of = _WIRE_BUILDERS[provider_name]
+    model = make().model(model_id)
+    efforts = sorted(model.capability.thinking_effort - {"none"})
+    if not efforts:
+        pytest.skip("row advertises no efforts")
+    by_wire: dict[str, set[str]] = {}
+    for effort in efforts:
+        sent = str(thinking_of(model, _settings_for(model.capability, effort)))
+        by_wire.setdefault(sent, set()).add(effort)
+    # Vendors legitimately fold the ends of the ladder (OpenAI pre-5.6 maps
+    # both ``xhigh`` and ``max`` to ``high``), so a collapse is a defect only
+    # when every effort lands on one body.
+    assert len(by_wire) > 1 or len(efforts) == 1, (
+        f"{provider_name}/{model_id} sends one body for all {len(efforts)}"
+        " efforts it advertises"
+    )
+
+
+@pytest.mark.parametrize(("provider_name", "model_id"), _ROWS, ids=str)
+def test_every_advertised_context_resolves(provider_name: str, model_id: str) -> None:
+    """``resolve`` is the only path from a tagged id to a capability.
+
+    A context the catalog offers but ``resolve`` rejects is a window the
     user can see and never select.
     """
     make, _ = _WIRE_BUILDERS[provider_name]
     provider = make()
     caps = provider.CAPABILITIES
-    roles = provider.ROLES
-    transport = provider.TRANSPORT
-    limits = caps[model_id].context_limits
-    contexts = [""] if isinstance(limits, ModelLimits) else list(limits)
-    for context in contexts:
-        spec = resolve(
-            model_id + context, models=caps, roles=roles, transport=transport
+    for context in caps[model_id].context:
+        _, settings = resolve(
+            model_id + context,
+            models=caps,
+            roles=provider.ROLES,
+            transport=provider.TRANSPORT,
         )
-        assert spec.context_limits.max_request_tokens > 0
-    if caps[model_id].serves_fast:
-        fast = resolve(
-            model_id + "+fast", models=caps, roles=roles, transport=transport
-        )
-        assert fast.serve_fast
+        assert settings.context == context
+        assert settings.limits.max_request_tokens > 0
 
 
 @pytest.mark.parametrize(("provider_name", "model_id"), _ROWS, ids=str)
-def test_fast_is_rejected_exactly_when_it_is_unpriced(
-    provider_name: str, model_id: str
-) -> None:
-    """``+fast`` resolves iff the row can bill it.
-
-    Accepting the tag without a fast price row bills standard while
-    reporting fast; rejecting it on a row that has one hides a tier the
-    user pays for.
-    """
+def test_an_unoffered_context_is_rejected(provider_name: str, model_id: str) -> None:
+    """Serving the base window under a ``+1m`` id understates the budget 4x."""
     make, _ = _WIRE_BUILDERS[provider_name]
     provider = make()
     caps = provider.CAPABILITIES
-    roles = provider.ROLES
-    transport = provider.TRANSPORT
-    if (caps[model_id] & transport).serves_fast:
-        return
-    with pytest.raises(UnsupportedTagError):
-        resolve(model_id + "+fast", models=caps, roles=roles, transport=transport)
+    for tag in get_args(ContextTag.__value__):
+        if not tag or tag in caps[model_id].context:
+            continue
+        with pytest.raises(UnsupportedTagError):
+            resolve(
+                model_id + tag,
+                models=caps,
+                roles=provider.ROLES,
+                transport=provider.TRANSPORT,
+            )
+
+
+@pytest.mark.parametrize(("provider_name", "model_id"), _ROWS, ids=str)
+def test_every_priced_tier_survives_the_transport(
+    provider_name: str, model_id: str
+) -> None:
+    """A tier the row prices but the transport withholds bills unreachably."""
+    make, _ = _WIRE_BUILDERS[provider_name]
+    provider = make()
+    capability, settings = resolve(
+        model_id,
+        models=provider.CAPABILITIES,
+        roles=provider.ROLES,
+        transport=provider.TRANSPORT,
+    )
+    for product in capability.prices:
+        # Construction validates, so an unreachable tier raises here.
+        _ = replace(settings, service_tier=product.service_tier)
 
 
 def test_every_catalog_backed_provider_has_a_wire_builder() -> None:

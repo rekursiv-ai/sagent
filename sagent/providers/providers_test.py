@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import sys
 
 import pytest
@@ -19,9 +18,7 @@ from sagent.providers import (
     SelfHosted,
     build_provider,
     infer_provider,
-    supported_provider_options,
 )
-from sagent.types.providers import ProviderOptions
 
 
 def test_provider_names_contains_core_providers() -> None:
@@ -217,108 +214,22 @@ def test_self_hosted_imported_via_dispatch() -> None:
     assert SelfHosted.DEFAULT_MODEL
 
 
-# ---- ``ProviderOptions`` mechanism --------------------------------------
-
-
-def test_provider_options_set_fields_returns_only_non_none() -> None:
-    assert ProviderOptions().set_fields() == {}
-    assert ProviderOptions(redact_thinking=False).set_fields() == {
-        "redact_thinking": False,
-    }
-    assert ProviderOptions(
-        redact_thinking=True,
-        server_side_context_management=True,
-    ).set_fields() == {
-        "redact_thinking": True,
-        "server_side_context_management": True,
-    }
-
-
-def test_supported_provider_options_declarations() -> None:
-    assert supported_provider_options("Anthropic") == {
-        "redact_thinking",
-        "server_side_context_management",
-    }
-    # The CLI wrapper's ``from_credentials`` takes no construction options.
-    assert supported_provider_options("AnthropicCLI") == frozenset()
-    # Providers without a declaration take no options.
-    assert supported_provider_options("Google") == frozenset()
-
-
-def test_supported_provider_options_unknown_provider_raises() -> None:
-    with pytest.raises(AttributeError, match="unknown provider"):
-        supported_provider_options("DoesNotExist")
-
-
-def test_build_provider_forwards_supported_options(
+def test_build_provider_defers_to_the_factory_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Construction knobs are the factory's; ``build_provider`` invents none."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-env-key")
-    p = build_provider(
-        "Anthropic",
-        "env",
-        options=ProviderOptions(server_side_context_management=True),
-    )
-    assert isinstance(p, Anthropic)
-    assert p.server_side_context_management is True
-
-
-def test_build_provider_unset_options_defer_to_factory_default(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-env-key")
-    p = build_provider("Anthropic", "env", options=ProviderOptions())
+    p = build_provider("Anthropic", "env")
     assert isinstance(p, Anthropic)
     assert p.server_side_context_management is False
 
 
-def test_build_provider_unsupported_option_raises(
+def test_build_provider_forwards_account_only_where_declared(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An explicitly set option on a non-supporting provider fails fast."""
+    """A factory without an ``account`` parameter must not receive one."""
     monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
-    with pytest.raises(ValueError, match="does not support option"):
-        build_provider(
-            "Google",
-            "env",
-            options=ProviderOptions(redact_thinking=True),
-        )
-
-
-def test_build_provider_unsupported_option_names_the_offender(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
-    with pytest.raises(ValueError, match="server_side_context_management"):
-        build_provider(
-            "Google",
-            "env",
-            options=ProviderOptions(server_side_context_management=True),
-        )
-
-
-def test_anthropic_cli_rejects_options_supported_by_base() -> None:
-    """The CLI wrapper's empty declaration overrides the inherited one."""
-    with pytest.raises(ValueError, match="does not support option"):
-        build_provider(
-            "AnthropicCLI",
-            "credentials",
-            options=ProviderOptions(redact_thinking=True),
-        )
-
-
-def test_anthropic_declarations_match_factory_signatures() -> None:
-    """Every declared option is a real keyword on every ``from_*`` factory.
-
-    Guards the declaration against drifting from the constructor
-    surface -- the failure mode the deleted reflection filter used to
-    paper over.
-    """
-    for auth in ("key", "env"):
-        factory = getattr(Anthropic, f"from_{auth}")
-        params = inspect.signature(factory).parameters
-        missing = Anthropic.supported_options - params.keys()
-        assert not missing, f"Anthropic.from_{auth} missing {missing}"
+    assert isinstance(build_provider("Google", "env", account="ignored"), Google)
 
 
 if __name__ == "__main__":

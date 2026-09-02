@@ -1,23 +1,67 @@
 """Tool contract.
 
-The Protocol every concrete tool implementation must satisfy. The
-runtime needs only ``name`` + ``run``; the wrapper / REPL layer
-consumes the rest (``tool_id``, ``description``, ``directive_schema``,
-``summary``, ``prompt``).
+The Protocol every concrete tool implementation must satisfy, plus
+``ToolResultPolicy`` -- how much of what a tool returns stays in
+history. The runtime needs only ``name`` + ``run``; the wrapper / REPL
+layer consumes the rest (``tool_id``, ``description``,
+``directive_schema``, ``summary``, ``prompt``).
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from sagent.lib.custom_json import JSON
+from sagent.types.model import AgentSettings
 from sagent.types.runtime import ToolResult
 
 
 __all__ = [
     "Tool",
+    "ToolResultPolicy",
 ]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolResultPolicy:
+    """When a tool result is off-loaded to disk instead of kept in history.
+
+    Both thresholds are read against a running per-request total, so a
+    result's fate depends on what ran before it in the same turn.
+    """
+
+    persist_tokens: int = 0
+    """Per-result token threshold for disk off-loading; ``0`` disables."""
+
+    message_budget_tokens: int = 0
+    """Aggregate live tool-result budget for one request; ``0`` disables."""
+
+    def __post_init__(self) -> None:
+        if self.persist_tokens < 0:
+            raise ValueError(f"persist_tokens must be >= 0, got {self.persist_tokens}")
+        if self.message_budget_tokens < 0:
+            raise ValueError(
+                f"message_budget_tokens must be >= 0, got {self.message_budget_tokens}"
+            )
+
+    @classmethod
+    def from_settings(cls, settings: AgentSettings) -> ToolResultPolicy:
+        """Derive proportional defaults from an agent's input window.
+
+        Args:
+          settings: The agent's chosen caps.
+
+        Returns:
+          policy: Off-load thresholds proportional to ``max_request_tokens``.
+
+        """
+        window = settings.max_request_tokens
+        return cls(
+            persist_tokens=window // 4,
+            message_budget_tokens=window // 2,
+        )
 
 
 @runtime_checkable

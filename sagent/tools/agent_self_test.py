@@ -15,16 +15,18 @@ from sagent.agent.agent import Agent
 from sagent.agent.state import current_agent_var, tool_state_var
 from sagent.testing import MockModelCaps
 from sagent.tools.agent_self import AgentSelf
-from sagent.types.cost import TokenCost
-from sagent.types.model import (
+from sagent.types.capability import (
     ModelCapability,
     ModelLimits,
+    ServiceTier,
+    ThinkingEffort,
+)
+from sagent.types.cost import TokenCost, TokenCount
+from sagent.types.model import (
     ModelRecipe,
     ModelRequest,
     ModelResponse,
-    TokenCount,
 )
-from sagent.types.providers import ProviderOptions
 from sagent.types.runtime import (
     AssistantMessage,
     Clear,
@@ -281,7 +283,7 @@ async def test_exceeds_cap_suggests_window_variant_when_one_exists() -> None:
         CAPABILITIES={
             "big-base": ModelCapability(
                 model_id="big-base",
-                context_limits=MappingProxyType(
+                context=MappingProxyType(
                     {
                         "": ModelLimits(
                             max_request_tokens=200_000, max_response_tokens=8_000
@@ -487,12 +489,12 @@ async def test_model_options_unsupported_key_errors() -> None:
 class TierStubModel(StubProviderModel):
     """``StubProviderModel`` advertising a non-empty service-tier set."""
 
-    service_tiers: tuple[str, ...] = ("auto", "default", "flex", "priority")
+    service_tiers: tuple[ServiceTier, ...] = ("auto", "default", "flex", "priority")
 
 
 @pytest.mark.asyncio
 async def test_service_tier_unsupported_when_model_lacks_capability() -> None:
-    agent = _make_agent()  # StubProviderModel.spec.valid_service_tiers = ()
+    agent = _make_agent()  # StubProviderModel.capability.service_tier = ()
     t = AgentSelf()
     with _active(agent):
         result = await t.run({"model_options": {"service_tier": "priority"}})
@@ -518,20 +520,20 @@ async def test_service_tier_priority_applied() -> None:
     with _active(agent):
         result = await t.run({"model_options": {"service_tier": "priority"}})
     assert not result.is_error
-    assert agent.service_tier == "priority"
+    assert agent.model.settings.service_tier == "priority"
     assert "service_tier=priority" in result.content
 
 
 @pytest.mark.asyncio
 async def test_service_tier_null_clears() -> None:
     agent = Agent(model=TierStubModel(), tools=[])
-    agent.service_tier = "priority"
+    agent.model.settings.service_tier = "priority"
     t = AgentSelf()
     with _active(agent):
         result = await t.run({"model_options": {"service_tier": None}})
     assert not result.is_error
-    assert agent.service_tier is None
-    assert "service_tier=unset" in result.content
+    assert agent.model.settings.service_tier == "auto"
+    assert "service_tier=auto" in result.content
 
 
 @pytest.mark.asyncio
@@ -544,48 +546,16 @@ async def test_service_tier_listed_in_supported_diagnostics() -> None:
     assert "Service tier:" in result.content
 
 
-@dataclass(slots=True, kw_only=True)
-class LatencyStubModel(StubProviderModel):
-    """``StubProviderModel`` advertising a fast-latency mode."""
-
-    latency_modes: tuple[str, ...] = ("fast",)
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("value", ["fast", "turbo", None])
-async def test_latency_option_redirects_to_fast_model_tag(
-    value: str | None,
-) -> None:
-    """``model_options.latency`` was replaced by the ``+fast`` model-id tag."""
-    agent = Agent(model=LatencyStubModel(), tools=[])
+async def test_latency_option_redirects_to_service_tier(value: str | None) -> None:
+    """``model_options.latency`` was replaced by ``service_tier``."""
+    agent = _make_agent()
     t = AgentSelf()
     with _active(agent):
         result = await t.run({"model_options": {"latency": value}})
     assert result.is_error
-    assert "+fast" in result.content
-
-
-@pytest.mark.asyncio
-async def test_latency_derives_from_fast_model_tag() -> None:
-    agent = Agent(
-        model=LatencyStubModel(model_id="stub-1+fast"),
-        tools=[],
-    )
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"diagnostics": True})
-    assert not result.is_error
-    assert agent.latency == "fast"
-    assert "Latency:            fast" in result.content
-
-
-@pytest.mark.asyncio
-async def test_latency_shown_in_diagnostics() -> None:
-    agent = Agent(model=LatencyStubModel(), tools=[])
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"diagnostics": True})
-    assert "Latency:" in result.content
+    assert "service_tier" in result.content
 
 
 @pytest.mark.asyncio
@@ -605,7 +575,7 @@ async def test_max_response_tokens_within_cap_applied() -> None:
     with _active(agent):
         result = await t.run({"max_response_tokens": 1_024})
     assert not result.is_error
-    assert agent.max_response_tokens == 1_024
+    assert agent.budget.max_response_tokens == 1_024
 
 
 @pytest.mark.asyncio
@@ -645,9 +615,7 @@ async def test_provider_change_without_auth_uses_target_default() -> None:
         with _active(agent):
             result = await t.run({"provider": "Google", "model_id": "gemini-3-pro"})
     assert not result.is_error
-    build.assert_called_once_with(
-        "Google", "env", account="work", options=ProviderOptions()
-    )
+    build.assert_called_once_with("Google", "env", account="work")
 
 
 @pytest.mark.asyncio
@@ -674,7 +642,6 @@ async def test_account_default_string_is_preserved() -> None:
         "OpenAISubscription",
         "credentials",
         account="default",
-        options=ProviderOptions(),
     )
 
 
@@ -702,7 +669,7 @@ async def test_model_swap_shrinks_budget_to_new_model_window() -> None:
         with _active(agent):
             result = await t.run({"model_id": "small"})
     assert not result.is_error, result.content
-    assert agent.model.spec.tagged_model_id == "small"
+    assert agent.model.tagged_model_id == "small"
     assert agent.budget.max_request_tokens <= 50_000
 
 
@@ -730,7 +697,7 @@ async def test_model_swap_with_explicit_budget_lands_in_one_step() -> None:
         with _active(agent):
             result = await t.run({"model_id": "small", "max_request_tokens": 20_000})
     assert not result.is_error, result.content
-    assert agent.model.spec.tagged_model_id == "small"
+    assert agent.model.tagged_model_id == "small"
     assert agent.max_request_tokens == 20_000
 
 
@@ -748,8 +715,7 @@ async def test_model_swap_clears_effort_and_reports_unset() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class EffortStubModel(StubProviderModel):
-        supports_effort: bool = True
-        valid_efforts: tuple[str, ...] = ("low", "medium", "high")
+        valid_efforts: tuple[ThinkingEffort, ...] = ("low", "medium", "high")
 
     agent = Agent(
         model=EffortStubModel(model_id="rich-stub"),
@@ -761,8 +727,7 @@ async def test_model_swap_clears_effort_and_reports_unset() -> None:
             account="",
         ),
     )
-    agent.effort = "high"
-    assert agent.effort == "high"
+    agent.model.settings.thinking_effort = "high"
     # Target model lacks effort/thinking/service-tier (``MockModelCaps``
     # defaults). Swap must clear ``effort`` AND mention it in the result.
     fake_provider = MagicMock()
@@ -775,8 +740,8 @@ async def test_model_swap_clears_effort_and_reports_unset() -> None:
         with _active(agent):
             result = await t.run({"model_id": "plain-stub"})
     assert not result.is_error, result.content
-    assert agent.effort is None
-    assert "effort=unset" in result.content
+    assert agent.model.settings.thinking_effort == "none"
+    assert "thinking_effort=none (unsupported)" in result.content
 
 
 @pytest.mark.asyncio
@@ -870,7 +835,7 @@ async def test_model_swap_clears_all_capabilities_and_reports_each_unset() -> No
     @dataclass(slots=True, kw_only=True)
     class RichStubModel(StubProviderModel):
         supports_thinking: bool = True
-        service_tiers: tuple[str, ...] = ("priority",)
+        service_tiers: tuple[ServiceTier, ...] = ("priority",)
 
     agent = Agent(
         model=RichStubModel(model_id="rich-stub"),
@@ -882,8 +847,9 @@ async def test_model_swap_clears_all_capabilities_and_reports_each_unset() -> No
             account="",
         ),
     )
-    agent.thinking = "adaptive"
-    agent.service_tier = "priority"
+    agent.model.settings.thinking_budget = "auto"
+    agent.model.settings.thinking_output = "text"
+    agent.model.settings.service_tier = "priority"
     fake_provider = MagicMock()
     fake_provider.model.return_value = StubProviderModel(model_id="plain-stub")
     with patch(
@@ -894,10 +860,10 @@ async def test_model_swap_clears_all_capabilities_and_reports_each_unset() -> No
         with _active(agent):
             result = await t.run({"model_id": "plain-stub"})
     assert not result.is_error, result.content
-    assert agent.thinking is None
-    assert agent.service_tier is None
-    assert "thinking=off (unsupported)" in result.content
-    assert "service_tier=unset (unsupported)" in result.content
+    assert agent.model.settings.thinking_budget == "none"
+    assert agent.model.settings.service_tier == "auto"
+    assert "thinking_budget=none (unsupported)" in result.content
+    assert "service_tier=auto (unsupported)" in result.content
 
 
 if __name__ == "__main__":

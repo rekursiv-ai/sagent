@@ -1,4 +1,4 @@
-"""Tests for ``providers.openai_compat``: wire-format conversion + stream parsing."""
+"""Tests for ``providers.openai.compat``: wire-format conversion + stream parsing."""
 
 from __future__ import annotations
 
@@ -19,16 +19,18 @@ from sagent.providers.openai.compat import (
     build_messages,
     consume_stream,
 )
+from sagent.types.capability import (
+    ModelCapability,
+    ModelLimits,
+    ModelSettings,
+)
 from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
     TokenPrice,
 )
 from sagent.types.model import (
-    ModelCapability,
-    ModelLimits,
     ModelRequest,
-    ModelSpec,
     PromptTooLongError,
     RequestTooLargeError,
     StreamInterruptedError,
@@ -45,17 +47,26 @@ from sagent.types.runtime import (
 )
 
 
-def _free_spec() -> ModelSpec:
-    """A spec whose every rate is zero -- cost is not what these assert."""
-    return ModelSpec(
-        prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+def _priced_model(prices: PriceCatalog) -> OpenAICompatModel:
+    """A model carrying ``prices`` and otherwise every capability default."""
+    capability = ModelCapability(prices=prices)
+    return OpenAICompatModel(
+        provider=OpenAICompat.from_key("k"),
+        capability=capability,
+        settings=ModelSettings.narrowest(capability),
+        max_request_tokens=1000,
     )
 
 
-def _priced_spec() -> ModelSpec:
+def _free_model() -> OpenAICompatModel:
+    """A model whose every rate is zero -- cost is not what these assert."""
+    return _priced_model(PriceCatalog({PriceCatalogProduct(): TokenPrice()}))
+
+
+def _billed_model() -> OpenAICompatModel:
     """$1/$2 per Mtok, with the usual 1.25x cache-write multiplier."""
-    return ModelSpec(
-        prices=PriceCatalog(
+    return _priced_model(
+        PriceCatalog(
             {
                 PriceCatalogProduct(): TokenPrice(
                     request=1.0, response=2.0, cache_write=1.25
@@ -147,9 +158,7 @@ def test_extract_usage_reports_full_input_and_cache_read_separately() -> None:
     ``_extract_usage`` does not subtract the cached portion: it returns the raw
     ``prompt_tokens`` plus ``cached_tokens`` as separate values. The disjoint
     split (input minus cache) happens later in ``consume_stream`` -- see
-    :func:`test_consume_stream_input_tokens_exclude_cache_read`. Preserves the
-    cache-accounting coverage formerly carried by the (now deleted) non-streaming
-    ``parse_response`` path.
+    :func:`test_consume_stream_input_tokens_exclude_cache_read`.
     """
     usage = cast(
         MutableJSON,
@@ -188,7 +197,7 @@ async def test_consume_stream_input_tokens_exclude_cache_read() -> None:
     resp = await consume_stream(
         _sse_response(events),
         publish=None,
-        spec=_free_spec(),
+        model=_free_model(),
         reasoning_field=None,
     )
     assert resp.tokens.request == 600
@@ -214,7 +223,7 @@ async def test_consume_stream_tracks_and_bills_cache_write_tokens() -> None:
     resp = await consume_stream(
         _sse_response(events),
         publish=None,
-        spec=_priced_spec(),
+        model=_billed_model(),
         reasoning_field=None,
     )
     assert resp.tokens.request == 3
@@ -264,7 +273,7 @@ async def test_consume_stream_text_and_usage() -> None:
     resp = await consume_stream(
         r,
         publish=_sink,
-        spec=_free_spec(),
+        model=_free_model(),
         reasoning_field=None,
     )
     assert resp.message.text == "hello"
@@ -292,7 +301,7 @@ async def test_consume_stream_preserves_chat_refusal_text() -> None:
     resp = await consume_stream(
         _sse_response(events),
         publish=None,
-        spec=_free_spec(),
+        model=_free_model(),
         reasoning_field=None,
     )
     assert resp.message.text == "I can’t help with that."
@@ -346,7 +355,7 @@ async def test_consume_stream_tool_call_accumulates() -> None:
     resp = await consume_stream(
         _sse_response(events),
         publish=None,
-        spec=_free_spec(),
+        model=_free_model(),
         reasoning_field=None,
     )
     assert len(resp.message.tool_calls) == 1
@@ -386,7 +395,7 @@ async def test_consume_stream_reasoning_captured() -> None:
     resp = await consume_stream(
         _sse_response(events),
         publish=_sink,
-        spec=_free_spec(),
+        model=_free_model(),
         reasoning_field="reasoning_content",
     )
     assert thinking_chunks == ["think ", "more"]
@@ -405,7 +414,7 @@ async def test_consume_stream_skips_malformed_data() -> None:
     resp = await consume_stream(
         _sse_response_body(body),
         publish=None,
-        spec=_free_spec(),
+        model=_free_model(),
         reasoning_field=None,
     )
     assert resp.message.text == "ok"
@@ -422,7 +431,7 @@ async def test_consume_stream_eof_without_done_raises_interrupted() -> None:
         await consume_stream(
             _sse_response_body(body),
             publish=None,
-            spec=_priced_spec(),
+            model=_billed_model(),
             reasoning_field=None,
         )
     response = exc_info.value.response
@@ -451,14 +460,10 @@ class _DummyProvider(OpenAICompat):
         {
             "stub-1": ModelCapability(
                 model_id="stub-1",
-                context_limits=MappingProxyType(
+                context=MappingProxyType(
                     {"": _stub_limits(1000), "+1m": _stub_limits(1_000_000)}
                 ),
                 prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
-                # Plain chat-completions: no reasoning knob at all.
-                supported_thinking_efforts=MappingProxyType({}),
-                supported_thinking_budgets=frozenset(),
-                supported_thinking_outputs=frozenset(),
             )
         }
     )
@@ -489,41 +494,33 @@ def test_provider_model_unknown_id_raises() -> None:
         _ = p.model("does-not-exist")
 
 
-def test_provider_model_rejects_fast_tag_without_latency_mode() -> None:
-    """Compat vendors expose no fast path; a ``+fast`` id fails fast."""
-    p = _DummyProvider.from_key("k")
-    with pytest.raises(ValueError, match="does not support fast mode"):
-        _ = p.model("stub-1+fast")
-
-
 def test_provider_model_default_picks_default_model() -> None:
     p = _DummyProvider.from_key("k")
     m = p.model()
-    assert m.model_id == "stub-1"
+    assert m.capability.model_id == "stub-1"
     assert isinstance(m, OpenAICompatModel)
 
 
 def test_provider_utility_model_uses_default_when_not_set() -> None:
     p = _DummyProvider.from_key("k")
     m = p.utility_model()
-    assert m.model_id == "stub-1"
+    assert m.capability.model_id == "stub-1"
 
 
 def test_model_properties_defaults() -> None:
     p = _DummyProvider.from_key("k")
     m = p.model()
     assert m.max_request_tokens == 1000
-    assert m.max_response_tokens == 200
-    assert m.supports_streaming is True
-    assert m.supports_thinking is False  # no reasoning field on the base.
-    assert m.supports_effort is False
-    assert m.supports_cache_control is False
-    assert m.supports_context_management is False
-    assert m.supports_persistent_retry is False
-    assert m.supports_account_auth is False
+    assert m.limits.max_response_tokens == 200
+    assert m.capability.thinking_budget == frozenset({"none"})
+    assert m.capability.thinking_effort == frozenset({"none"})
+    assert m.capability.cache_ttl_sec == 0.0
+    assert m.capability.manage_context_server_side == frozenset({False})
+    assert m.capability.retries_internally is False
+    assert m.capability.account_auth is False
     assert m.approx_text_tokens("x" * 12) == 3
-    assert m.max_image_dim == 2048
-    assert m.max_image_bytes == 20 * 1024 * 1024
+    assert m.limits.max_image_edge_px == 2048
+    assert m.limits.max_image_bytes == 20 * 1024 * 1024
 
 
 @pytest.mark.parametrize(
@@ -708,7 +705,7 @@ def test_build_body_strips_window_tag_from_wire_model() -> None:
     """A ``+1m`` model sends the base id on the wire; the API rejects the tag."""
     p = _DummyProvider.from_key("k")
     m = p.model("stub-1+1m")
-    assert m.model_id == "stub-1+1m"
+    assert m.tagged_model_id == "stub-1+1m"
     assert m.max_request_tokens == 1_000_000
     body = m._build_body(
         ModelRequest(messages=[UserMessage(text="x")]),
@@ -742,9 +739,8 @@ def test_build_body_stream_options_include_usage() -> None:
 def test_build_body_skips_effort_when_not_supported() -> None:
     p = _DummyProvider.from_key("k")
     m = p.model()
-    # Base ``OpenAICompatModel`` has supports_effort=False.
     body = m._build_body(
-        ModelRequest(messages=[UserMessage(text="x")], effort="low"),
+        ModelRequest(messages=[UserMessage(text="x")]),
         stream=False,
     )
     assert "reasoning_effort" not in body
@@ -753,9 +749,8 @@ def test_build_body_skips_effort_when_not_supported() -> None:
 def test_build_body_skips_service_tier_when_not_supported() -> None:
     p = _DummyProvider.from_key("k")
     m = p.model()
-    # Base ``OpenAICompatModel`` has valid_service_tiers=().
     body = m._build_body(
-        ModelRequest(messages=[UserMessage(text="x")], service_tier="priority"),
+        ModelRequest(messages=[UserMessage(text="x")]),
         stream=False,
     )
     assert "service_tier" not in body

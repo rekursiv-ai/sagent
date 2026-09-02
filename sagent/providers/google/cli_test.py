@@ -182,7 +182,7 @@ def test_model_uses_default_when_unset() -> None:
     """``provider.model()`` picks ``DEFAULT_MODEL``."""
     provider = GoogleCLI()
     model = provider.model()
-    assert model.model_id == GoogleCLI.DEFAULT_MODEL
+    assert model.capability.model_id == GoogleCLI.DEFAULT_MODEL
 
 
 def test_default_model_inherits_from_google() -> None:
@@ -199,19 +199,18 @@ def test_utility_model_picks_flash_lite() -> None:
     """``utility_model`` returns the cheapest Gemini in ``KNOWN_MODELS``."""
     provider = GoogleCLI()
     model = provider.utility_model()
-    assert model.model_id == GoogleCLI.DEFAULT_UTILITY_MODEL
+    assert model.capability.model_id == GoogleCLI.DEFAULT_UTILITY_MODEL
 
 
 def test_model_capabilities() -> None:
-    """The wrapped backend declares the supported-flag surface from the spec."""
+    """The CLI transport narrows the row it inherits from the API."""
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")
-    assert model.supports_streaming is True
-    assert model.supports_thinking is True
-    assert model.supports_effort is False
-    assert model.supports_cache_control is False
-    assert model.supports_context_management is True
-    assert model.supports_account_auth is True
+    assert model.capability.thinking_budget != frozenset({"none"})
+    assert model.capability.thinking_effort == frozenset({"none"})
+    assert model.capability.cache_ttl_sec == 0.0
+    assert model.capability.manage_context_server_side == frozenset({True})
+    assert model.capability.account_auth is True
 
 
 def test_google_cli_legacy_model_does_not_support_thinking() -> None:
@@ -221,16 +220,17 @@ def test_google_cli_legacy_model_does_not_support_thinking() -> None:
     advertisement must honor the per-model profile flag.
     """
     provider = GoogleCLI()
-    assert provider.model("gemini-1.5-flash").supports_thinking is False
-    assert provider.model("gemini-1.5-pro").supports_thinking is False
+    off = frozenset({"none"})
+    assert provider.model("gemini-1.5-flash").capability.thinking_budget == off
+    assert provider.model("gemini-1.5-pro").capability.thinking_budget == off
 
 
 def test_max_image_limits() -> None:
     """Gemini has no per-image pixel/byte cap; only the 20 MB total applies."""
     model = GoogleCLI().model("gemini-2.5-flash")
-    assert model.max_image_dim == 0
-    assert model.max_image_bytes == 0
-    assert model.max_request_bytes == 20 * 1024 * 1024
+    assert model.limits.max_image_edge_px == 0
+    assert model.limits.max_image_bytes == 0
+    assert model.limits.max_request_bytes == 20 * 1024 * 1024
 
 
 def test_is_context_overflow_text_markers() -> None:

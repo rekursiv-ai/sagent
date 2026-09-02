@@ -48,7 +48,7 @@ else:
     image_lib = lazy_import("sagent.lib.image")
     tiktoken = lazy_import("tiktoken")  # 30ms cold
 
-from sagent import types
+from sagent.catalog import openai as openai_catalog
 from sagent.lib import debug_log, token_count
 from sagent.lib.custom_json import (
     DictCodec,
@@ -68,19 +68,17 @@ from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.lib.usage import openai_usage
+from sagent.types.capability import ModelCapability, ModelSettings
+from sagent.types.cost import TokenCount
 from sagent.types.model import (
-    ModelCapability,
     ModelRequest,
     ModelResponse,
-    ModelSpec,
     PromptTooLongError,
     StreamInterruptedError,
-    ThinkingEffort,
-    TokenCount,
     UsageSnapshot,
     base_model_id,
-    latency_from_model_id,
 )
+from sagent.types.providers import ModelRole, resolve
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
@@ -112,26 +110,24 @@ class OpenAICompat:
     ]({})
     """Per-model capability; empty on the plain compat base."""
 
+    # The thinking axes are stated wide, not omitted: ``&`` can only remove and
+    # an omitted axis defaults to its narrow value, so leaving them out emptied
+    # DashScope's reasoning ladder -- a model nothing can be requested from.
     TRANSPORT: ClassVar[ModelCapability] = ModelCapability(
-        fast=False,
-        manages_context=False,
-        prompt_cache_breakpoints=False,
-        retries_internally=False,
-        account_auth=False,
-        latency_modes=frozenset(),
-        service_tiers=frozenset(),
+        thinking_effort=frozenset(
+            {"none", "min", "low", "medium", "high", "xhigh", "max"}
+        ),
+        thinking_budget=frozenset({"none", "auto", "fixed"}),
+        thinking_output=frozenset({"none", "text", "redacted"}),
+        service_tier=frozenset({"auto"}),
+        manage_context_server_side=frozenset({False}),
     )
-    """Chat-completions vendors expose no cache, tier, or fast knob.
-
-    Efforts are NOT zeroed here: a vendor whose rows declare a reasoning
-    ladder (DashScope) keeps it, and a vendor without one has empty rows
-    already -- so zeroing would only ever destroy real capability.
-    """
+    """Chat-completions vendors expose no cache or tier knob."""
 
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]]
 
     @property
-    def ROLES(self) -> Mapping[types.providers.ModelRole, str]:  # noqa: N802
+    def ROLES(self) -> Mapping[ModelRole, str]:  # noqa: N802
         """Role name to base id; ``utility`` falls back to the default."""
         return MappingProxyType(
             {
@@ -199,29 +195,19 @@ class OpenAICompat:
 
         """
         mid = model_id if model_id is not None else "default"
-        spec = types.providers.resolve(
+        capability, settings = resolve(
             mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT
         )
-        model = self.MODEL_CLASS(
+        return self.MODEL_CLASS(
             provider=self,
-            # ``mid`` may be a role name; the spec carries the resolved id.
-            model_id=spec.tagged_model_id,
+            capability=capability,
+            settings=settings,
             max_request_tokens=(
                 max_request_tokens
                 if max_request_tokens is not None
-                else spec.context_limits.max_request_tokens
+                else settings.limits.max_request_tokens
             ),
-            spec=spec,
         )
-        if (
-            latency_from_model_id(mid) is not None
-            and "fast" not in model.spec.valid_latency_modes
-        ):
-            raise ValueError(
-                f"Model {mid!r} for {type(self).__name__} does not support"
-                " fast mode (+fast)",
-            )
-        return model
 
     def utility_model(self) -> OpenAICompatModel:
         """Return the default utility (fast/cheap) model backend.
@@ -261,9 +247,6 @@ class OpenAICompatModel(ModelDefaults):
     ``_transform_body``) are cheap overrides for provider quirks.
     """
 
-    spec: ModelSpec = ModelSpec()
-    """What this model can do; replaced from the catalog at construction."""
-
     # Message field carrying reasoning/thinking text on responses.
     # Kimi/Qwen/DeepSeek use ``reasoning_content``; OpenAI surfaces
     # reasoning separately via the Responses API only (leave as None).
@@ -273,14 +256,14 @@ class OpenAICompatModel(ModelDefaults):
         self,
         *,
         provider: OpenAICompat,
-        model_id: str,
+        capability: ModelCapability,
+        settings: ModelSettings,
         max_request_tokens: int,
-        spec: ModelSpec | None = None,
     ) -> None:
         self._provider = provider
-        self._model_id = model_id
+        self._capability = capability
+        self._settings = settings
         self._max_request_tokens = max_request_tokens
-        self.spec = spec or ModelSpec()
         # Per loop: an httpx2.AsyncClient holds a connection pool owned by
         # the loop that opened it, and the guarding lock binds to the loop
         # that first contends on it. Sharing either across loops raises
@@ -330,11 +313,6 @@ class OpenAICompatModel(ModelDefaults):
         return self._max_request_tokens
 
     @property
-    def model_id(self) -> str:
-        """Provider-specific model identifier."""
-        return self._model_id
-
-    @property
     def _wire_model_id(self) -> str:
         """Model id sent on the wire, stripped of any ``+1m``/``+200k`` tag.
 
@@ -342,90 +320,34 @@ class OpenAICompatModel(ModelDefaults):
         rejects it as an unknown model. Capability lookups and metadata key off
         the base id too, so the wire name must drop the tag.
         """
-        return base_model_id(self._model_id)
+        return base_model_id(self.capability.model_id)
 
     @property
-    def max_response_tokens(self) -> int:
-        """Maximum output tokens the model can generate."""
-        return self.spec.context_limits.max_response_tokens
+    @override
+    def capability(self) -> ModelCapability:
+        """What this model offers on this transport."""
+        return self._capability
 
     @property
-    def supports_streaming(self) -> bool:
-        """Whether the model supports token-by-token streaming."""
-        return True
-
-    @property
-    def supports_thinking(self) -> bool:
-        """Whether the model exposes a reasoning/thinking field."""
-        return self._reasoning_field is not None
-
-    @property
-    def supports_effort(self) -> bool:
-        """Whether the model accepts a ``reasoning_effort`` hint."""
-        return self._is_effort_model(self._model_id)
+    @override
+    def settings(self) -> ModelSettings:
+        """What this instance chose."""
+        return self._settings
 
     def _is_effort_model(self, model_id: str) -> bool:
         """Whether ``model_id`` accepts a reasoning-effort knob.
 
-        Catalog-backed vendors answer from the spec. A vendor whose
+        Catalog-backed vendors answer from the row. A vendor whose
         reasoning ids are only recognizable by shape (DashScope) overrides
         this with a predicate.
         """
         del model_id
-        return bool(self.spec.supported_thinking_efforts)
+        return self.capability.thinking_effort != frozenset({"none"})
 
-    @property
-    def valid_efforts(self) -> tuple[str, ...]:
-        """Effort levels accepted by reasoning models; empty otherwise."""
-        return tuple(self.spec.supported_thinking_efforts)
-
-    @property
-    def supports_cache_control(self) -> bool:
-        """Whether the provider supports prompt caching."""
-        return self.spec.prompt_cache_breakpoints
-
-    def _effective_service_tier(self, request: ModelRequest) -> str | None:
-        """Resolve the wire ``service_tier``, folding in ``latency="fast"``.
-
-        OpenAI has no separate fast-mode field; the fast path is just the
-        ``priority`` processing tier. ``latency="fast"`` therefore maps to
-        ``service_tier="priority"`` and wins over an explicit
-        ``service_tier`` when both are set.
-
-        Cost note: OpenAI's per-tier pricing is not modeled here (no public
-        per-tier rate data wired into ``Pricing``), so a ``priority``
-        request is currently billed at the model's standard rates. Anthropic
-        fast mode, by contrast, is server-authoritative via ``usage.speed``.
-
-        Args:
-          request: Outgoing model request.
-
-        Returns:
-          tier: Service tier to send, or ``None`` to omit the field.
-
-        """
-        if request.latency == "fast" and "fast" in self.spec.valid_latency_modes:
-            return "priority"
-        if request.service_tier is not None and (
-            request.service_tier in self.spec.valid_service_tiers
-        ):
-            return request.service_tier
-        return None
-
-    @property
-    def supports_context_management(self) -> bool:
-        """Whether the provider manages context overflow internally."""
-        return False
-
-    @property
-    def supports_persistent_retry(self) -> bool:
-        """Whether the provider retries internally on transient failures."""
-        return self.spec.retries_internally
-
-    @property
-    def supports_account_auth(self) -> bool:
-        """Whether the provider uses account-based authentication."""
-        return self.spec.account_auth
+    def _effective_service_tier(self) -> str | None:
+        """The wire ``service_tier``, or ``None`` to omit the field."""
+        tier = self.settings.service_tier
+        return tier if tier != "auto" else None
 
     @override
     def approx_text_tokens(self, text: str) -> int:
@@ -437,12 +359,12 @@ class OpenAICompatModel(ModelDefaults):
         method nothing on the budget path could await. Measured 0.3ms for
         a 4 KB tool result, 17ms for a turn's appends.
 
-        Falls back to the spec ratio for non-OpenAI models whose ids
+        Falls back to a coarse ratio for non-OpenAI models whose ids
         tiktoken does not recognize (Kimi, Qwen, MiniMax, ...).
         """
         enc = self._tiktoken_encoding()
         if enc is None:
-            return int(len(text) / self.spec.chars_per_token)
+            return len(text) // 4
         return len(enc.encode(text))
 
     @override
@@ -456,7 +378,7 @@ class OpenAICompatModel(ModelDefaults):
         dims = image_lib.get_dimensions(data)
         if dims is None:
             return 0
-        if base_model_id(self._model_id).startswith("gpt-5.6"):
+        if base_model_id(self.capability.model_id).startswith("gpt-5.6"):
             # GPT-5.6 ``auto``/``original`` preserves dimensions and bills one
             # token unit per 32x32 patch, with patches rounded up per edge.
             return math.ceil(dims[0] / 32) * math.ceil(dims[1] / 32)
@@ -464,7 +386,7 @@ class OpenAICompatModel(ModelDefaults):
         # edge to ``max_image_edge_px`` before sending, so tiling the
         # source dimensions charged a 4096px image for 64 tiles when 16
         # cross the wire -- a 4x overcount that fires compaction early.
-        width, height = _resized_dims(dims, self.spec.context_limits.max_image_edge_px)
+        width, height = _resized_dims(dims, self.limits.max_image_edge_px)
         tiles = math.ceil(width / 512) * math.ceil(height / 512)
         return 85 + tiles * 170
 
@@ -490,21 +412,6 @@ class OpenAICompatModel(ModelDefaults):
             if base_model_id(self._wire_model_id).startswith("gpt-5."):
                 return tiktoken.get_encoding("o200k_base")
             return None
-
-    @property
-    def max_image_dim(self) -> int:
-        """Maximum image edge (pixels) accepted, from the model profile."""
-        return self.spec.context_limits.max_image_edge_px
-
-    @property
-    def max_image_bytes(self) -> int:
-        """Maximum size (bytes) of a single image, from the model profile."""
-        return self.spec.context_limits.max_image_bytes
-
-    @property
-    def max_request_bytes(self) -> int:
-        """Maximum request-body size (bytes), from the model profile."""
-        return self.spec.context_limits.max_request_bytes
 
     def _transform_body(
         self,
@@ -553,7 +460,9 @@ class OpenAICompatModel(ModelDefaults):
             {
                 "model": self._wire_model_id,
                 "messages": build_messages(
-                    request, self.max_image_dim, self.max_image_bytes
+                    request,
+                    self.limits.max_image_edge_px,
+                    self.limits.max_image_bytes,
                 ),
                 "temperature": request.temperature,
             },
@@ -563,7 +472,11 @@ class OpenAICompatModel(ModelDefaults):
             # with a 400 and require ``max_completion_tokens``; the same model
             # set is gated by ``supports_effort``. Other compat vendors
             # (Moonshot, MiniMax, DashScope) still take ``max_tokens``.
-            field = "max_completion_tokens" if self.supports_effort else "max_tokens"
+            field = (
+                "max_completion_tokens"
+                if self._is_effort_model(self.capability.model_id)
+                else "max_tokens"
+            )
             body[field] = request.max_response_tokens
         if stream:
             body["stream"] = True
@@ -574,35 +487,26 @@ class OpenAICompatModel(ModelDefaults):
             # The Responses transport supports reasoning and tools together;
             # this compatibility transport must explicitly disable reasoning.
             body["reasoning_effort"] = "none"
-            if request.effort not in (None, "none", "minimal"):
+            if self.settings.thinking_effort != "none":
                 logger.warning(
                     "GPT-5.6 Chat Completions requires reasoning effort "
                     "'none' when tools are present; ignoring requested effort %r. "
                     "Use the Responses transport for reasoning with tools.",
-                    request.effort,
+                    self.settings.thinking_effort,
                 )
-        elif request.effort is not None and self.supports_effort:
-            # The catalog stores the wire value as data; a parallel mapper
-            # keyed off a different vocabulary let ``off``/``min`` pass every
-            # agent-side gate and then raise here.
-            mapped = self.spec.supported_thinking_efforts.get(
-                cast(ThinkingEffort, request.effort)
+        elif self.settings.thinking_effort != "none":
+            body["reasoning_effort"] = openai_catalog.reasoning_effort(
+                self.settings.thinking_effort,
+                model_id=self.capability.model_id,
+                chat=True,
             )
-            if mapped is None:
-                valid = ", ".join(self.spec.supported_thinking_efforts)
-                raise ValueError(
-                    f"Unknown effort {request.effort!r} for {self._model_id}."
-                    f" Valid efforts: {valid}",
-                )
-            body["reasoning_effort"] = mapped
-        tier = self._effective_service_tier(request)
+        tier = self._effective_service_tier()
         if tier is not None:
             body["service_tier"] = tier
         debug_log.trace(
             "api_call",
             kind="openai_chat",
             model=self._wire_model_id,
-            latency=request.latency,
             service_tier=tier,
         )
         if request.tools:
@@ -666,7 +570,7 @@ class OpenAICompatModel(ModelDefaults):
             return await consume_stream(
                 r,
                 publish=publish,
-                spec=self.spec,
+                model=self,
                 reasoning_field=self._reasoning_field,
             )
 
@@ -846,7 +750,7 @@ async def consume_stream(
     r: httpx2.Response,
     *,
     publish: Callable[[RuntimeEvent], None] | None,
-    spec: ModelSpec,
+    model: OpenAICompatModel,
     reasoning_field: str | None,
 ) -> ModelResponse:
     """Parse an SSE stream into an assembled ``ModelResponse``.
@@ -859,7 +763,7 @@ async def consume_stream(
       r: Open streaming response from the provider.
       publish: Called per streamed ``RuntimeEvent``; ``None`` disables
           live streaming.
-      spec: Active model spec, used to price the reported usage.
+      model: Active model, used to price the reported usage.
       reasoning_field: Provider-specific reasoning-text field name,
           or ``None`` when the provider does not surface reasoning.
 
@@ -986,7 +890,7 @@ async def consume_stream(
         ),
         message_id=message_id,
         request_id=message_id,
-        spend=spec.spend(tokens),
+        spend=model.spend(tokens),
     )
     if not saw_done:
         raise StreamInterruptedError(response)

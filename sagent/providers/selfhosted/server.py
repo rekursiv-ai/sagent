@@ -36,6 +36,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import (
     TYPE_CHECKING,
     ClassVar,
@@ -58,17 +59,20 @@ from sagent.lib.custom_json import MutableJSON, MutableJSONValue, json_unfreeze
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.lib.stop_reason import normalize_stop_reason
+from sagent.types.capability import (
+    ModelCapability,
+    ModelLimits,
+    ModelSettings,
+)
 from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
+    TokenCount,
     TokenPrice,
 )
 from sagent.types.model import (
-    ModelLimits,
     ModelRequest,
     ModelResponse,
-    ModelSpec,
-    TokenCount,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -503,14 +507,33 @@ class SelfHostedModel(ModelDefaults):
         self._provider = provider
         # In-process weights: every rate is genuinely zero, and the window
         # comes from the loaded model, not a published catalog.
-        self.spec = ModelSpec(
+        self._capability = ModelCapability(
             model_id=provider.hosted_model_id,
-            context_limits=ModelLimits(
-                max_request_tokens=provider.hosted_max_request_tokens,
-                max_response_tokens=provider.hosted_max_response_tokens,
+            context=MappingProxyType(
+                {
+                    "": ModelLimits(
+                        max_request_tokens=provider.hosted_max_request_tokens,
+                        max_response_tokens=provider.hosted_max_response_tokens,
+                    )
+                }
             ),
             prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+            # In-process weights: there is no server to roll history.
+            manage_context_server_side=frozenset({False}),
         )
+        self._settings = ModelSettings(capability=self.capability)
+
+    @property
+    @override
+    def capability(self) -> ModelCapability:
+        """What this model offers; the window comes from the loaded weights."""
+        return self._capability
+
+    @property
+    @override
+    def settings(self) -> ModelSettings:
+        """What this instance chose."""
+        return self._settings
 
     @property
     def max_request_tokens(self) -> int:
@@ -758,8 +781,7 @@ class SelfHostedModel(ModelDefaults):
             "add_generation_prompt": True,
             "return_tensors": "pt",
         }
-        if request.effort is not None:
-            kwargs["enable_thinking"] = request.effort != "none"
+        kwargs["enable_thinking"] = self.settings.thinking_effort != "none"
         if request.tools:
             kwargs["tools"] = [_tool_schema(t) for t in request.tools]
         rendered = _apply_chat_template(

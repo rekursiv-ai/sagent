@@ -57,26 +57,20 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
 
     Args:
       agent: Agent whose ``history`` to replay.
-      printer: Printer that receives all replayed output.
+      printer: Printer that receives all replayed output; its
+          ``show_thinking`` decides whether reasoning renders.
 
     """
+    show_thinking = printer.show_thinking
     tape = agent.runtime.tape
     if not tape:
         return
     tools = agent.tools_map
     policy = functools.partial(_replay_output_policy, tools, _tool_names_by_call(tape))
-    # Replay is a one-shot pass over a frozen tape; snapshot
-    # ``show_thinking`` once and thread the same bool through both the
-    # observer (via a constant-returning closure) and ``_render_entry``.
     # A throwaway observer just for replay: replay rendering doesn't
     # attach to ``agent.observers`` (no live dispatch path), so we build
     # a one-shot instance and hand-feed it each tape event.
-    show_thinking = agent.show_thinking
-    render_event = make_render_observer(
-        printer,
-        show_thinking=lambda: show_thinking,
-        output_policy=policy,
-    )
+    render_event = make_render_observer(printer, output_policy=policy)
     alive = alive_splices(tape)
     masked = masked_refs_by_alive(tape, alive)
     rendered_messages = 0
@@ -138,16 +132,19 @@ def _mode_parts(agent: Agent) -> list[str]:
         parts.append(f"auth={spec.auth}")
         if spec.account:
             parts.append(f"account={spec.account}")
-    if agent.thinking is not None:
-        parts.append(f"thinking={agent.thinking}")
-    if agent.effort is not None:
-        parts.append(f"effort={agent.effort}")
-    if agent.cache_ttl != "5m":
-        parts.append(f"cache_ttl={agent.cache_ttl}")
-    if agent.service_tier is not None:
-        parts.append(f"service_tier={agent.service_tier}")
-    if agent.latency is not None:
-        parts.append(f"latency={agent.latency}")
+    # Each axis is total, so the footer lists what DIFFERS from its unset
+    # value rather than what is non-``None``.
+    settings = agent.model.settings
+    if settings.thinking_budget != "none":
+        parts.append(f"thinking={settings.thinking_budget}")
+    if settings.thinking_output != "none":
+        parts.append(f"reasoning={settings.thinking_output}")
+    if settings.thinking_effort != "none":
+        parts.append(f"effort={settings.thinking_effort}")
+    if settings.cache_ttl_sec:
+        parts.append(f"cache_ttl={settings.cache_ttl_sec:g}s")
+    if settings.service_tier != "auto":
+        parts.append(f"service_tier={settings.service_tier}")
     return parts
 
 

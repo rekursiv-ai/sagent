@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import MappingProxyType
 from typing import Self
 
 import sys
@@ -10,14 +11,14 @@ import httpx2
 import pytest
 
 from sagent.bin import verify_models
-from sagent.types.model import ModelCapability, ModelLimits
+from sagent.types.capability import ModelCapability, ModelLimits
 
 
 def _cap(request: int, response: int) -> ModelCapability:
     """A capability carrying only the two limits ``compare`` reads."""
     return ModelCapability(
-        context_limits=ModelLimits(
-            max_request_tokens=request, max_response_tokens=response
+        context=MappingProxyType(
+            {"": ModelLimits(max_request_tokens=request, max_response_tokens=response)}
         )
     )
 

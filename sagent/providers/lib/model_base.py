@@ -19,11 +19,18 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 from sagent.lib import token_count
+from sagent.types.cost import PriceCatalogProduct
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from sagent.types.capability import (
+        ModelCapability,
+        ModelLimits,
+        ModelSettings,
+    )
+    from sagent.types.cost import TokenCost, TokenCount
     from sagent.types.model import (
         ModelRequest,
         ModelResponse,
@@ -38,6 +45,10 @@ __all__ = ["ModelDefaults"]
 class _Transport(Protocol):
     """What a subclass must supply for these defaults to work."""
 
+    @property
+    def capability(self) -> ModelCapability: ...
+    @property
+    def settings(self) -> ModelSettings: ...
     def approx_text_tokens(self, text: str) -> int: ...
     def approx_image_tokens(self, data: bytes) -> int: ...
     async def stream(
@@ -49,6 +60,34 @@ class _Transport(Protocol):
 
 class ModelDefaults(_Transport, Protocol):
     """Mixin supplying the non-transport half of the ``Model`` Protocol."""
+
+    @property
+    def limits(self) -> ModelLimits:
+        """Ceilings of the selected context tag."""
+        return self.settings.limits
+
+    @property
+    def tagged_model_id(self) -> str:
+        """Display id carrying its context tag."""
+        return f"{self.capability.model_id}{self.settings.context}"
+
+    def spend(self, tokens: TokenCount) -> TokenCost:
+        """Price ``tokens`` at the tier this instance's settings select.
+
+        Args:
+          tokens: What the server reported.
+
+        Returns:
+          spend: USD cost, per bucket.
+
+        """
+        # Vendors size the tier from the whole prompt, though the three
+        # input pools stay disjoint for billing.
+        prompt = tokens.request + tokens.cache_write + tokens.cache_read
+        product = PriceCatalogProduct(
+            service_tier=self.settings.service_tier, min_request_tokens=prompt
+        )
+        return self.capability.prices[product] * tokens
 
     def approx_request_tokens(self, request: ModelRequest) -> int:
         """Walk-and-sum every wire-bearing surface of ``request``."""

@@ -21,7 +21,111 @@ from sagent.types.cost import (
 )
 
 
-__all__ = ["MODELS"]
+__all__ = ["models"]
+
+
+def models() -> Mapping[str, ModelCapability]:
+    """Return every model this vendor serves, keyed by base id.
+
+    Returns:
+      models: Capability per base model id.
+
+    """
+    return MappingProxyType(
+        {
+            "MiniMax-M2.7": ModelCapability(
+                model_id="MiniMax-M2.7",
+                context=MappingProxyType(
+                    {
+                        "": ModelLimits(
+                            max_request_tokens=204_800,
+                            max_response_tokens=32_768,
+                        ),
+                    }
+                ),
+                prices=_prices(request=0.3, response=1.2),
+                thinking_output=frozenset({"none", "text"}),
+            ),
+            "MiniMax-M2.7-highspeed": ModelCapability(
+                model_id="MiniMax-M2.7-highspeed",
+                context=MappingProxyType(
+                    {
+                        "": ModelLimits(
+                            max_request_tokens=204_800,
+                            max_response_tokens=32_768,
+                        ),
+                    }
+                ),
+                prices=_prices(request=0.6, response=2.4),
+                thinking_output=frozenset({"none", "text"}),
+            ),
+            "MiniMax-M2.5": ModelCapability(
+                model_id="MiniMax-M2.5",
+                context=MappingProxyType(
+                    {
+                        "": ModelLimits(
+                            max_request_tokens=204_800,
+                            max_response_tokens=32_768,
+                        ),
+                    }
+                ),
+                prices=_prices(request=0.3, response=1.2),
+                thinking_output=frozenset({"none", "text"}),
+            ),
+            "MiniMax-M1": ModelCapability(
+                model_id="MiniMax-M1",
+                context=MappingProxyType(
+                    {
+                        "": ModelLimits(
+                            max_request_tokens=1_000_000,
+                            max_response_tokens=16_384,
+                        ),
+                    }
+                ),
+                prices=_prices(request=0.4, response=2.2),
+                thinking_output=frozenset({"none", "text"}),
+            ),
+            "MiniMax-Text-01": ModelCapability(
+                model_id="MiniMax-Text-01",
+                context=MappingProxyType(
+                    {
+                        "": ModelLimits(
+                            max_request_tokens=1_000_000,
+                            max_response_tokens=16_384,
+                        ),
+                    }
+                ),
+                prices=_prices(request=0.2, response=1.1),
+                thinking_output=frozenset({"none", "text"}),
+            ),
+            "abab6.5s-chat": ModelCapability(
+                model_id="abab6.5s-chat",
+                context=MappingProxyType(
+                    {
+                        "": ModelLimits(
+                            max_request_tokens=245_000,
+                            max_response_tokens=16_384,
+                        ),
+                    }
+                ),
+                prices=_prices(request=0.15, response=0.15),
+                thinking_output=frozenset({"none", "text"}),
+            ),
+            "abab6.5-chat": ModelCapability(
+                model_id="abab6.5-chat",
+                context=MappingProxyType(
+                    {
+                        "": ModelLimits(
+                            max_request_tokens=245_000,
+                            max_response_tokens=16_384,
+                        ),
+                    }
+                ),
+                prices=_prices(request=1.5, response=1.5),
+                thinking_output=frozenset({"none", "text"}),
+            ),
+        }
+    )
 
 
 def _prices(
@@ -35,65 +139,3 @@ def _prices(
             )
         }
     )
-
-
-MODELS: Mapping[str, ModelCapability] = MappingProxyType(
-    {
-        "MiniMax-M2.7": ModelCapability(
-            model_id="MiniMax-M2.7",
-            context_limits=ModelLimits(
-                max_request_tokens=204_800,
-                max_response_tokens=32_768,
-            ),
-            prices=_prices(request=0.3, response=1.2),
-        ),
-        "MiniMax-M2.7-highspeed": ModelCapability(
-            model_id="MiniMax-M2.7-highspeed",
-            context_limits=ModelLimits(
-                max_request_tokens=204_800,
-                max_response_tokens=32_768,
-            ),
-            prices=_prices(request=0.6, response=2.4),
-        ),
-        "MiniMax-M2.5": ModelCapability(
-            model_id="MiniMax-M2.5",
-            context_limits=ModelLimits(
-                max_request_tokens=204_800,
-                max_response_tokens=32_768,
-            ),
-            prices=_prices(request=0.3, response=1.2),
-        ),
-        "MiniMax-M1": ModelCapability(
-            model_id="MiniMax-M1",
-            context_limits=ModelLimits(
-                max_request_tokens=1_000_000,
-                max_response_tokens=16_384,
-            ),
-            prices=_prices(request=0.4, response=2.2),
-        ),
-        "MiniMax-Text-01": ModelCapability(
-            model_id="MiniMax-Text-01",
-            context_limits=ModelLimits(
-                max_request_tokens=1_000_000,
-                max_response_tokens=16_384,
-            ),
-            prices=_prices(request=0.2, response=1.1),
-        ),
-        "abab6.5s-chat": ModelCapability(
-            model_id="abab6.5s-chat",
-            context_limits=ModelLimits(
-                max_request_tokens=245_000,
-                max_response_tokens=16_384,
-            ),
-            prices=_prices(request=0.15, response=0.15),
-        ),
-        "abab6.5-chat": ModelCapability(
-            model_id="abab6.5-chat",
-            context_limits=ModelLimits(
-                max_request_tokens=245_000,
-                max_response_tokens=16_384,
-            ),
-            prices=_prices(request=1.5, response=1.5),
-        ),
-    }
-)

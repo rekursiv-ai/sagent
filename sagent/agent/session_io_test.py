@@ -5,12 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import cast, override
 from unittest.mock import patch
 
 import dataclasses
 import json
-import logging
 import os
 import stat
 import threading
@@ -50,19 +49,8 @@ from sagent.agent.session_io import (
 )
 from sagent.agent.state import ReadCacheEntry, ToolState
 from sagent.sessions import new_session_dir
-from sagent.types.cost import (
-    PriceCatalog,
-    PriceCatalogProduct,
-    TokenPrice,
-)
-from sagent.types.model import (
-    ModelLimits,
-    ModelRequest,
-    ModelResponse,
-    ModelSpec,
-    UsageSnapshot,
-)
-from sagent.types.providers import ProviderOptions
+from sagent.testing import MockModelCaps
+from sagent.types.model import ModelRequest, ModelResponse
 from sagent.types.runtime import (
     CANCELLED_PLACEHOLDER,
     DETACHED_PLACEHOLDER,
@@ -100,66 +88,15 @@ class _RuntimeModel:
 
 
 @dataclass(slots=True, kw_only=True)
-class _NoopModel:
+class _NoopModel(MockModelCaps):
     model_id: str = "noop"
     max_request_tokens: int = 100_000
     max_response_tokens: int = 1_024
-    supports_streaming: bool = True
-    supports_thinking: bool = False
-    valid_thinking_states: tuple[str, ...] = ("off-hide",)
-    supports_effort: bool = False
-    valid_efforts: tuple[str, ...] = ()
-    supports_cache_control: bool = False
-    service_tiers: tuple[str, ...] = ()
-    latency_modes: tuple[str, ...] = ()
-    supports_context_management: bool = False
-    supports_persistent_retry: bool = False
-    supports_account_auth: bool = False
-    max_image_dim: int = 8_000
-    max_image_bytes: int = 5 * 1024 * 1024
-    max_request_bytes: int = 32 * 1024 * 1024
 
-    @property
-    def spec(self) -> ModelSpec:
-        return ModelSpec(
-            model_id=self.model_id,
-            context_limits=ModelLimits(
-                max_request_tokens=self.max_request_tokens,
-                max_response_tokens=self.max_response_tokens,
-            ),
-            prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
-        )
-
-    def approx_text_tokens(self, text: str) -> int:
-        return max(1, len(text) // 4)
-
-    def approx_image_tokens(self, data: bytes) -> int:
-        del data
-        return 256
-
+    @override
     def approx_request_tokens(self, request: ModelRequest) -> int:
         del request
         return 1
-
-    async def actual_text_tokens(self, text: str) -> int:
-        return self.approx_text_tokens(text)
-
-    async def actual_image_tokens(self, data: bytes) -> int:
-        return self.approx_image_tokens(data)
-
-    async def actual_request_tokens(self, request: ModelRequest) -> int:
-        return self.approx_request_tokens(request)
-
-    def is_context_overflow(self, error: Exception) -> bool:
-        del error
-        return False
-
-    def is_retryable_provider_error(self, error: Exception) -> bool:
-        del error
-        return False
-
-    def usage_snapshot(self) -> UsageSnapshot | None:
-        return None
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
         return await self.stream(request)
@@ -171,9 +108,6 @@ class _NoopModel:
     ) -> ModelResponse:
         del request, publish
         return ModelResponse(message=AssistantMessage(text=""))
-
-    async def close(self) -> None:
-        return
 
 
 def _records_from(entries: list[ModelContextEvent]) -> list[TapeRecord]:
@@ -2155,14 +2089,14 @@ def test_append_session_writes_persistent_agent_lifecycle(tmp_path: Path) -> Non
         "max_tool_call_rounds": None,
         "max_request_tokens": None,
         "max_response_tokens": None,
-        "thinking": None,
-        "thinking_state": None,
-        "effort": None,
-        "cache_ttl": "5m",
-        "service_tier": None,
+        "thinking_budget": "none",
+        "thinking_output": "none",
+        "show_thinking": True,
+        "effort": "none",
+        "cache_ttl_sec": 300.0,
+        "service_tier": "auto",
         "max_budget_usd": None,
         "persistent_retry": False,
-        "provider_options": {},
         "timestamp": record["timestamp"],
     }
 
@@ -2293,6 +2227,57 @@ def test_persistent_agent_legacy_notify_on_asleep_defaults_true(tmp_path: Path) 
     assert records[0].account is None
 
 
+@pytest.mark.parametrize(
+    ("legacy", "budget", "output", "show"),
+    [
+        ({"thinking_state": "adaptive-show"}, "auto", "text", True),
+        ({"thinking_state": "adaptive-hide"}, "auto", "text", False),
+        ({"thinking_state": "on-show"}, "fixed", "text", True),
+        ({"thinking_state": "off-hide"}, "none", "none", False),
+        ({"thinking_state": "redact-hide"}, "auto", "redacted", False),
+        # No state at all: the wire mode was the only other record of it.
+        ({"thinking": "adaptive"}, "auto", "text", True),
+        ({"thinking": "enabled"}, "fixed", "text", True),
+        ({}, "none", "none", True),
+    ],
+)
+def test_persistent_agent_upgrades_a_pre_split_thinking_record(
+    tmp_path: Path,
+    legacy: dict[str, object],
+    budget: str,
+    output: str,
+    show: bool,
+) -> None:
+    """A session written before the split still resumes.
+
+    The fused ``thinking_state`` spelled the same two axes plus the display
+    bit, so an old record is decoded rather than silently read as "off".
+    """
+    _write_jsonl(
+        tmp_path / "session.jsonl",
+        {
+            "kind": "persistent_agent",
+            "label": "fix-tools",
+            "run_id": "run-1",
+            "session_dir": str(tmp_path / "children" / "run-1"),
+            "state": "running",
+            "provider": "Anthropic",
+            "auth": "env",
+            "account": None,
+            "model_id": "claude-opus-4-8",
+            "tools": ["Read"],
+            "system": "system text",
+            **legacy,
+        },
+    )
+
+    record = load_persistent_agents(tmp_path)[0]
+
+    assert record.thinking_budget == budget
+    assert record.thinking_output == output
+    assert record.show_thinking is show
+
+
 def test_json_bool_default_is_reachable_from_every_caller() -> None:
     """A decoder with a ``default=`` no caller passes has two shapes on disk.
 
@@ -2339,69 +2324,6 @@ def test_persistent_agent_notify_on_asleep_decodes_through_json_bool(
 
     assert len(records) == 1
     assert records[0].notify_on_asleep is expected
-
-
-def test_persistent_agent_legacy_provider_args_maps_known_keys(
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A pre-``provider_options`` record's bag decodes into typed fields."""
-    _write_jsonl(
-        tmp_path / "session.jsonl",
-        {
-            "kind": "persistent_agent",
-            "label": "fix-tools",
-            "run_id": "run-1",
-            "session_dir": str(tmp_path / "children" / "run-1"),
-            "state": "running",
-            "provider": "Anthropic",
-            "auth": "env",
-            "account": None,
-            "model_id": "claude-opus-4-8",
-            "tools": ["Read"],
-            "system": "system text",
-            "notify_on_asleep": True,
-            "provider_args": {
-                "redact_thinking": True,
-                "server_side_context_management": "yes",
-                "mystery_knob": 42,
-            },
-        },
-    )
-
-    with caplog.at_level(logging.WARNING):
-        records = load_persistent_agents(tmp_path)
-
-    assert len(records) == 1
-    assert records[0].provider_options == ProviderOptions(redact_thinking=True)
-    # Unknown keys AND known keys carrying non-bool values both warn.
-    assert any("mystery_knob" in rec.message for rec in caplog.records)
-    assert any(
-        "server_side_context_management" in rec.message for rec in caplog.records
-    )
-
-
-def test_persistent_agent_provider_options_round_trip(
-    tmp_path: Path,
-) -> None:
-    session_file = tmp_path / "session.jsonl"
-    record = PersistentAgentRecord(
-        label="fix-tools",
-        run_id="run-1",
-        session_dir=str(tmp_path / "children" / "run-1"),
-        state="running",
-        provider="Anthropic",
-        auth="env",
-        account=None,
-        model_id="claude-opus-4-8+fast",
-        tools=("Read",),
-        system="system text",
-        notify_on_asleep=True,
-        provider_options=ProviderOptions(server_side_context_management=True),
-    )
-    append_session(session_file, persistent_agents=[record])
-
-    assert load_persistent_agents(tmp_path) == [record]
 
 
 def test_session_meta_round_trip() -> None:
@@ -2817,7 +2739,7 @@ def test_restore_model_success_path() -> None:
     """A working provider builds a model and spec."""
 
     class _FakeModel:
-        spec: ModelSpec = ModelSpec(model_id="fake-m")
+        tagged_model_id: str = "fake-m"
 
     class _FakeProvider:
         def model(self, model_id: str) -> _FakeModel:

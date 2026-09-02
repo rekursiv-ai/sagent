@@ -40,7 +40,6 @@ from sagent.agent.agent import (
 )
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.compaction import CompactionState
-from sagent.types.model import ContextBudget
 
 
 __all__ = [
@@ -49,6 +48,5 @@ __all__ = [
     "Agent",
     "BackgroundTaskEntry",
     "CompactionState",
-    "ContextBudget",
     "SystemPromptArg",
 ]

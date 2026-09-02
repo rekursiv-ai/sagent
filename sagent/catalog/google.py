@@ -1,49 +1,231 @@
 """Google (Gemini) model catalog, expressed as ``ModelCapability`` rows.
 
 Sources:
-  - ModelLimits: https://ai.google.dev/gemini-api/docs/models
+  - Limits: https://ai.google.dev/gemini-api/docs/models
   - Pricing: https://ai.google.dev/gemini-api/docs/pricing
 
-``MODELS`` is the API-key view. Other transports narrow it with ``&``
-(see ``CLI``), which can only remove.
+:func:`models` is the API-key view. Other transports narrow it with ``&``
+(see :func:`cli`), which can only remove.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Final
 
 from sagent.types.capability import (
+    ContextTag,
     ModelCapability,
     ModelLimits,
+    ThinkingEffort,
 )
 from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
     TokenPrice,
 )
-from sagent.types.thinking import ThinkingEffort
 
 
-__all__ = ["API", "CLI", "MODELS", "SUBSCRIPTION"]
+__all__ = ["api", "cli", "models", "subscription", "thinking_budget"]
 
 
-def _limits(*, request: int) -> ModelLimits:
-    """Gemini's byte and pixel ceilings are uniform across the range.
+def thinking_budget(effort: ThinkingEffort) -> str:
+    """Return the ``thinkingConfig.thinkingBudget`` an effort sends.
 
-    No per-image pixel or byte cap: larger images are tiled into 768x768
-    tiles server-side, so both stay 0 (no client resize). The only
-    documented ceiling is the 20 MB TOTAL inline request size.
+    Args:
+      effort: Selected effort level.
+
+    Returns:
+      budget: Wire value, as the string the request body carries.
+
+    Raises:
+      ValueError: ``effort`` is ``none``; a disabled request omits
+          ``thinkingConfig`` rather than sending a budget of zero.
+
     """
-    return ModelLimits(
-        max_request_tokens=request,
-        max_response_tokens=65_536,
-        max_request_bytes=20 * 1024 * 1024,
+    match effort:
+        case "none":
+            raise ValueError(f"effort {effort!r} sends no budget; omit thinkingConfig")
+        case "min":
+            return "1024"
+        case "low":
+            return "4096"
+        case "medium":
+            return "8192"
+        case "high":
+            return "16384"
+        case "xhigh":
+            return "20480"
+        case "max":
+            return "24576"
+
+
+# Gemini surfaces readable thought parts and offers no server-side redaction;
+# ``thinkingBudget: -1`` is the auto budget, a positive integer the fixed one.
+# A row carries only what the MODEL can do; caching, retry, auth mode, and the
+# fast path are transport facts, since ``&`` can only remove and a row saying
+# ``False`` would pin every transport.
+def models() -> Mapping[str, ModelCapability]:
+    """Return every Gemini model, as the API-key transport sees it.
+
+    Returns:
+      models: Capability per base model id.
+
+    """
+    return MappingProxyType(
+        {
+            "gemini-3-flash-preview": ModelCapability(
+                model_id="gemini-3-flash-preview",
+                context=_context(request=1_048_576),
+                prices=_prices(request=0.5, response=3.0, cache_read=0.05),
+                thinking_effort=_efforts(),
+                thinking_budget=frozenset({"none", "auto", "fixed"}),
+                thinking_output=frozenset({"none", "text"}),
+            ),
+            "gemini-3.1-pro-preview": ModelCapability(
+                model_id="gemini-3.1-pro-preview",
+                context=_context(request=1_048_576),
+                prices=_prices(request=2.0, response=12.0, cache_read=0.2),
+                thinking_effort=_efforts(),
+                thinking_budget=frozenset({"none", "auto", "fixed"}),
+                thinking_output=frozenset({"none", "text"}),
+            ),
+            "gemini-2.0-flash": ModelCapability(
+                model_id="gemini-2.0-flash",
+                context=_context(request=1_000_000),
+                prices=_prices(request=0.1, response=0.4, cache_read=0.025),
+                thinking_effort=_efforts(),
+                thinking_budget=frozenset({"none", "auto", "fixed"}),
+                thinking_output=frozenset({"none", "text"}),
+            ),
+            "gemini-2.5-flash-lite": ModelCapability(
+                model_id="gemini-2.5-flash-lite",
+                context=_context(request=1_048_576),
+                prices=_prices(request=0.1, response=0.4, cache_read=0.025),
+                thinking_effort=_efforts(),
+                thinking_budget=frozenset({"none", "auto", "fixed"}),
+                thinking_output=frozenset({"none", "text"}),
+            ),
+            "gemini-2.5-flash": ModelCapability(
+                model_id="gemini-2.5-flash",
+                context=_context(request=1_000_000),
+                prices=_prices(request=0.3, response=2.5, cache_read=0.075),
+                thinking_effort=_efforts(),
+                thinking_budget=frozenset({"none", "auto", "fixed"}),
+                thinking_output=frozenset({"none", "text"}),
+            ),
+            "gemini-2.5-pro": ModelCapability(
+                model_id="gemini-2.5-pro",
+                context=_context(request=1_000_000),
+                prices=_prices(request=1.25, response=10.0, cache_read=0.31),
+                thinking_effort=_efforts(),
+                thinking_budget=frozenset({"none", "auto", "fixed"}),
+                thinking_output=frozenset({"none", "text"}),
+            ),
+            "gemini-1.5-flash": ModelCapability(
+                model_id="gemini-1.5-flash",
+                context=_context(request=1_000_000),
+                prices=_prices(request=0.075, response=0.3, cache_read=0.01875),
+                # gemini-1.5 rejects ``thinkingConfig`` outright, so every
+                # thinking axis offers only its off value.
+            ),
+            "gemini-1.5-pro": ModelCapability(
+                model_id="gemini-1.5-pro",
+                context=_context(request=1_000_000),
+                prices=_prices(request=1.25, response=5.0, cache_read=0.3125),
+                # gemini-1.5 rejects ``thinkingConfig`` outright, so every
+                # thinking axis offers only its off value.
+            ),
+        }
+    )
+
+
+def api() -> ModelCapability:
+    """Return what the REST API adds on top of a model row.
+
+    Nothing; named so the three transports read alike at their call sites.
+
+    One model, three ways in::
+
+        models()["gemini-3.1-pro-preview"] & api()          # REST, key auth
+        models()["gemini-3.1-pro-preview"] & subscription() # same wire, OAuth
+        models()["gemini-3.1-pro-preview"] & cli()          # ACP: no effort knob
+
+    Returns:
+      capability: The API transport's restrictions.
+
+    """
+    # Every axis stated: ``&`` can only remove, and a defaulted axis is the
+    # narrow value, so an omitted one would strip the model's real capability.
+    return ModelCapability(
+        thinking_effort=frozenset(
+            {"none", "min", "low", "medium", "high", "xhigh", "max"}
+        ),
+        thinking_budget=frozenset({"none", "auto", "fixed"}),
+        thinking_output=frozenset({"none", "text", "redacted"}),
+    )
+
+
+def cli() -> ModelCapability:
+    """Return what the ``gemini`` subprocess narrows a model row to.
+
+    One model, three ways in::
+
+        models()["gemini-3.1-pro-preview"] & api()          # REST, key auth
+        models()["gemini-3.1-pro-preview"] & subscription() # same wire, OAuth
+        models()["gemini-3.1-pro-preview"] & cli()          # ACP: no effort knob
+
+    Returns:
+      capability: The CLI transport's restrictions.
+
+    """
+    return ModelCapability(
+        thinking_effort=frozenset({"none"}),
+        thinking_budget=frozenset({"none", "auto", "fixed"}),
+        thinking_output=frozenset({"none", "text", "redacted"}),
+        manage_context_server_side=frozenset({True}),
+        account_auth=True,
+    )
+
+
+def subscription() -> ModelCapability:
+    """Return what OAuth billing narrows a model row to.
+
+    One model, three ways in::
+
+        models()["gemini-3.1-pro-preview"] & api()          # REST, key auth
+        models()["gemini-3.1-pro-preview"] & subscription() # same wire, OAuth
+        models()["gemini-3.1-pro-preview"] & cli()          # ACP: no effort knob
+
+    Returns:
+      capability: The subscription transport's restrictions.
+
+    """
+    return ModelCapability(
+        thinking_effort=frozenset(
+            {"none", "min", "low", "medium", "high", "xhigh", "max"}
+        ),
+        thinking_budget=frozenset({"none", "auto", "fixed"}),
+        thinking_output=frozenset({"none", "text", "redacted"}),
+        account_auth=True,
+    )
+
+
+def _context(*, request: int) -> Mapping[ContextTag, ModelLimits]:
+    """No per-image cap: images are tiled server-side, so only bytes bound."""
+    return MappingProxyType(
+        {
+            "": ModelLimits(
+                max_request_tokens=request,
+                max_response_tokens=65_536,
+                max_request_bytes=20 * 1024 * 1024,
+            )
+        }
     )
 
 
 def _prices(*, request: float, response: float, cache_read: float) -> PriceCatalog:
+    """USD per million tokens; Gemini quotes one flat tier."""
     return PriceCatalog(
         {
             PriceCatalogProduct(): TokenPrice(
@@ -55,126 +237,6 @@ def _prices(*, request: float, response: float, cache_read: float) -> PriceCatal
     )
 
 
-# Effort maps to ``thinkingConfig.thinkingBudget``, an integer token cap.
-_THINKING_BUDGETS: Mapping[ThinkingEffort, str] = MappingProxyType(
-    {
-        "min": "1024",
-        "low": "4096",
-        "medium": "8192",
-        "high": "16384",
-        "xhigh": "20480",
-        "max": "24576",
-    }
-)
-
-
-# Gemini surfaces readable thought parts and offers no server-side redaction;
-# ``thinkingBudget: -1`` is the auto budget, a positive integer the fixed one.
-# A row carries only what the MODEL can do; caching, retry, auth mode, and the
-# fast path are transport facts, since ``&`` can only remove and a row saying
-# ``False`` would pin every transport.
-MODELS: Mapping[str, ModelCapability] = MappingProxyType(
-    {
-        "gemini-3-flash-preview": ModelCapability(
-            model_id="gemini-3-flash-preview",
-            context_limits=_limits(request=1_048_576),
-            prices=_prices(request=0.5, response=3.0, cache_read=0.05),
-            supported_thinking_efforts=_THINKING_BUDGETS,
-            supported_thinking_budgets=frozenset({"auto", "fixed"}),
-            supported_thinking_outputs=frozenset({"text"}),
-        ),
-        "gemini-3.1-pro-preview": ModelCapability(
-            model_id="gemini-3.1-pro-preview",
-            context_limits=_limits(request=1_048_576),
-            prices=_prices(request=2.0, response=12.0, cache_read=0.2),
-            supported_thinking_efforts=_THINKING_BUDGETS,
-            supported_thinking_budgets=frozenset({"auto", "fixed"}),
-            supported_thinking_outputs=frozenset({"text"}),
-        ),
-        "gemini-2.0-flash": ModelCapability(
-            model_id="gemini-2.0-flash",
-            context_limits=_limits(request=1_000_000),
-            prices=_prices(request=0.1, response=0.4, cache_read=0.025),
-            supported_thinking_efforts=_THINKING_BUDGETS,
-            supported_thinking_budgets=frozenset({"auto", "fixed"}),
-            supported_thinking_outputs=frozenset({"text"}),
-        ),
-        "gemini-2.5-flash-lite": ModelCapability(
-            model_id="gemini-2.5-flash-lite",
-            context_limits=_limits(request=1_048_576),
-            prices=_prices(request=0.1, response=0.4, cache_read=0.025),
-            supported_thinking_efforts=_THINKING_BUDGETS,
-            supported_thinking_budgets=frozenset({"auto", "fixed"}),
-            supported_thinking_outputs=frozenset({"text"}),
-        ),
-        "gemini-2.5-flash": ModelCapability(
-            model_id="gemini-2.5-flash",
-            context_limits=_limits(request=1_000_000),
-            prices=_prices(request=0.3, response=2.5, cache_read=0.075),
-            supported_thinking_efforts=_THINKING_BUDGETS,
-            supported_thinking_budgets=frozenset({"auto", "fixed"}),
-            supported_thinking_outputs=frozenset({"text"}),
-        ),
-        "gemini-2.5-pro": ModelCapability(
-            model_id="gemini-2.5-pro",
-            context_limits=_limits(request=1_000_000),
-            prices=_prices(request=1.25, response=10.0, cache_read=0.31),
-            supported_thinking_efforts=_THINKING_BUDGETS,
-            supported_thinking_budgets=frozenset({"auto", "fixed"}),
-            supported_thinking_outputs=frozenset({"text"}),
-        ),
-        "gemini-1.5-flash": ModelCapability(
-            model_id="gemini-1.5-flash",
-            context_limits=_limits(request=1_000_000),
-            prices=_prices(request=0.075, response=0.3, cache_read=0.01875),
-            # gemini-1.5 rejects ``thinkingConfig`` outright.
-            supported_thinking_efforts=MappingProxyType({}),
-            supported_thinking_budgets=frozenset(),
-            supported_thinking_outputs=frozenset(),
-        ),
-        "gemini-1.5-pro": ModelCapability(
-            model_id="gemini-1.5-pro",
-            context_limits=_limits(request=1_000_000),
-            prices=_prices(request=1.25, response=5.0, cache_read=0.3125),
-            # gemini-1.5 rejects ``thinkingConfig`` outright.
-            supported_thinking_efforts=MappingProxyType({}),
-            supported_thinking_budgets=frozenset(),
-            supported_thinking_outputs=frozenset(),
-        ),
-    }
-)
-
-
-# The REST API exposes no prompt-cache breakpoint, no fast path, and no
-# server-side context management, and does not retry internally.
-API: Final = ModelCapability(
-    latency_modes=frozenset(),
-    service_tiers=frozenset(),
-    fast=False,
-    manages_context=False,
-    prompt_cache_breakpoints=False,
-    retries_internally=False,
-    account_auth=False,
-)
-
-# ACP exposes no effort knob on ``session/prompt``, and persistent retry
-# conflicts with the subprocess lifecycle. The CLI rolls history itself and
-# runs on the user's subscription.
-CLI: Final = ModelCapability(
-    latency_modes=frozenset(),
-    service_tiers=frozenset(),
-    fast=False,
-    prompt_cache_breakpoints=False,
-    retries_internally=False,
-    supported_thinking_efforts=MappingProxyType({}),
-)
-
-# OAuth billing: same wire as the API key, but account-scoped.
-SUBSCRIPTION: Final = ModelCapability(
-    latency_modes=frozenset(),
-    service_tiers=frozenset(),
-    fast=False,
-    manages_context=False,
-    prompt_cache_breakpoints=False,
-    retries_internally=False,
-)
+def _efforts() -> frozenset[ThinkingEffort]:
+    """Every effort Gemini accepts: its wire-mapped levels, plus ``none``."""
+    return frozenset({"none", "min", "low", "medium", "high", "xhigh", "max"})

@@ -21,7 +21,7 @@ switch behavior (mapped to ``enable_thinking`` in the body).
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import ClassVar, cast, override
+from typing import ClassVar, override
 
 from sagent.catalog import dashscope as dashscope_catalog
 from sagent.lib.custom_json import MutableJSON
@@ -29,10 +29,9 @@ from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
 )
+from sagent.types.capability import ModelCapability
 from sagent.types.model import (
-    ModelCapability,
     ModelRequest,
-    ThinkingEffort,
 )
 
 
@@ -86,29 +85,16 @@ class _DashScopeModel(OpenAICompatModel):
         """Map sagent's effort onto DashScope's thinking knobs.
 
         DashScope rejects ``reasoning_effort``; it exposes ``enable_thinking``
-        (on/off) plus an optional ``thinking_budget`` reasoning-token cap. Read
-        the RAW ``request.effort`` rather than the wire-mapped value the base
-        already wrote into ``reasoning_effort`` -- the base maps ``none`` to
-        ``minimal`` for OpenAI, which would otherwise read as "thinking on" and
-        discard the level entirely.
+        (on/off) plus an optional ``thinking_budget`` reasoning-token cap.
         """
+        del request
         body.pop("reasoning_effort", None)
-        # A row that advertises no effort is claiming the model REJECTS the
-        # knob (the ``-instruct`` / ``-coder`` / ``-turbo`` ids); never send one.
-        if request.effort is None or not self.spec.supported_thinking_efforts:
+        effort = self.settings.thinking_effort
+        # A row offering only ``none`` claims the model REJECTS the knob (the
+        # ``-instruct`` / ``-coder`` / ``-turbo`` ids); never send one.
+        if self.capability.thinking_effort == frozenset({"none"}):
             return body
-        # The catalog holds the wire budget as data. An inline ladder here
-        # drifted from it -- ``xhigh`` billed 24_576 reasoning tokens where
-        # the row (and the UI reading it) said 20_480.
-        budget = self.spec.supported_thinking_efforts.get(
-            cast(ThinkingEffort, request.effort)
-        )
-        if budget is None:
-            valid = ", ".join(self.spec.supported_thinking_efforts)
-            raise ValueError(
-                f"Unknown effort {request.effort!r} for {self._model_id}."
-                f" Valid efforts: {valid}",
-            )
+        budget = dashscope_catalog.thinking_budget(effort)
         # Qwen spells "no reasoning" as a toggle, not a zero budget.
         body["enable_thinking"] = budget != "0"
         if budget != "0":
@@ -138,7 +124,7 @@ class DashScope(OpenAICompat):
     #
     # To add a new model: check the Alibaba Cloud Model Studio docs
     # for context window and max output tokens.
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = dashscope_catalog.MODELS
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = dashscope_catalog.models()
     """Per-model capability; transport limits live on ``TRANSPORT``."""
 
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _DashScopeModel

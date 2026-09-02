@@ -1,43 +1,35 @@
-"""Canonical thinking-state parsing and expansion."""
+"""Parse ``/thinking`` words into the settings they select.
+
+A thinking request is three independent facts: how much budget the model
+gets, whether the reasoning comes back readable, and whether this client
+renders it. The first two are :class:`ModelSettings` axes owned by the
+model; the third belongs to whatever is drawing the screen. A fused enum
+spelling all three was a fourth vocabulary that had to be mapped back onto
+the axes on every read, and the mappers disagreed -- the ``/thinking`` gate
+compared an enum against ``capability.thinking_budget`` and so never
+rejected anything.
+"""
 
 from __future__ import annotations
 
-from typing import Final, Literal, assert_never, cast
+from typing import Final
 
-
-type ThinkingState = Literal[
-    "adaptive-show",
-    "adaptive-hide",
-    "on-show",
-    "on-hide",
-    "off-hide",
-    "redact-hide",
-]
-type ThinkingCommand = Literal[
-    "adaptive-show",
-    "adaptive-hide",
-    "on-show",
-    "on-hide",
-    "off-hide",
-    "redact-hide",
-    "adaptive",
-    "on",
-    "off",
-    "redact",
-    "show",
-    "hide",
-]
-
-THINKING_STATES: Final[tuple[ThinkingState, ...]] = (
-    "adaptive-show",
-    "adaptive-hide",
-    "on-show",
-    "on-hide",
-    "off-hide",
-    "redact-hide",
+from sagent.types.capability import (
+    ModelSettings,
+    ThinkingBudget,
+    ThinkingOutput,
 )
-THINKING_COMMANDS: tuple[ThinkingCommand, ...] = (
-    *THINKING_STATES,
+
+
+__all__ = [
+    "THINKING_COMMANDS",
+    "apply_thinking_command",
+    "describe_thinking",
+    "thinking_offered",
+]
+
+
+THINKING_COMMANDS: Final[tuple[str, ...]] = (
     "adaptive",
     "on",
     "off",
@@ -45,156 +37,106 @@ THINKING_COMMANDS: tuple[ThinkingCommand, ...] = (
     "show",
     "hide",
 )
+"""Every word ``/thinking`` accepts, for completion and error text."""
 
 
-def resolve_thinking_command(
-    command: str,
-    current: ThinkingState | None = None,
-) -> ThinkingState:
-    """Resolve a full or partial thinking command to a canonical state.
+def apply_thinking_command(
+    command: str, settings: ModelSettings, *, show: bool
+) -> bool:
+    """Apply one word to ``settings``; return the new display flag.
+
+    Each word names ONE fact and leaves the others alone:
+    ``adaptive``/``on``/``off`` set the budget, ``redact`` sets the output,
+    ``show``/``hide`` set the display. Composing them is what makes "stop
+    showing me, keep thinking" expressible.
+
+    Both axes move together or neither does: a budget the model accepts
+    paired with an output it rejects would otherwise leave the settings
+    half-applied, in a state neither the caller nor the wire agreed to.
 
     Args:
-      command: Full state or partial command.
-      current: Current state for live partial display changes. ``None`` uses
-        startup defaults for CLI construction.
+      command: A single word from :data:`THINKING_COMMANDS`.
+      settings: The model's settings, mutated in place.
+      show: The display flag in effect.
 
     Returns:
-      state: Canonical thinking state.
+      show: The display flag after ``command``.
 
     Raises:
-      ValueError: If the command is unknown or invalid for the current state.
+      ValueError: ``command`` is unknown, or the model does not offer it.
 
     """
-    if command in THINKING_STATES:
-        return command
-    if command not in THINKING_COMMANDS:
-        valid = ", ".join(THINKING_COMMANDS)
-        raise ValueError(f"thinking must be one of: {valid}")
-    typed_command = command
-    if current is None:
-        return _startup_state(typed_command)
-    return _live_state(typed_command, current)
+    budget, output, display = _axes(command, settings, show=show)
+    if not thinking_offered(command, settings):
+        raise ValueError(
+            f"thinking {command!r} is not offered by"
+            f" {settings.capability.model_id or 'this model'}"
+        )
+    settings.thinking_budget = budget
+    settings.thinking_output = output
+    return display
 
 
-def request_thinking(state: ThinkingState) -> str | None:
-    """Return the provider request thinking mode for ``state``.
-
-    ``redact-hide`` requests the provider's ``"adaptive"`` mode (despite
-    the user-facing name suggesting "off"). The provider returns
-    redacted thinking blocks under adaptive when policy triggers, and we
-    suppress local rendering separately via ``should_show_thinking``.
-    """
-    if state.startswith("adaptive-") or state == "redact-hide":
-        return "adaptive"
-    if state.startswith("on-"):
-        return "enabled"
-    return None
-
-
-def thinking_mode_supported(mode: str | None, valid_states: tuple[str, ...]) -> bool:
-    """Return whether wire ``mode`` is reachable given ``valid_states``.
-
-    ``mode`` is the provider-facing thinking value (``"adaptive"`` /
-    ``"enabled"`` / ``None``) carried by ``Agent._thinking``, which the
-    legacy ``Agent.thinking`` setter writes without a canonical state.
-    A swap must clear it when the new model exposes no valid state mapping
-    to it (else the next request sends a rejected mode and 400s).
-    ``None`` (thinking off) is always supported.
+def thinking_offered(command: str, settings: ModelSettings) -> bool:
+    """Whether ``command`` names a selection the model allows.
 
     Args:
-      mode: Wire thinking mode, or ``None`` for off.
-      valid_states: The model's ``valid_thinking_states``.
+      command: A single word from :data:`THINKING_COMMANDS`.
+      settings: The selection in effect, supplying the untouched axes.
 
     Returns:
-      supported: True when ``mode`` is ``None`` or some valid state maps
-          to it.
+      offered: True when applying ``command`` would succeed.
 
     """
-    if mode is None:
-        return True
-    return any(request_thinking(cast(ThinkingState, s)) == mode for s in valid_states)
+    budget, output, _ = _axes(command, settings, show=True)
+    capability = settings.capability
+    return budget in capability.thinking_budget and output in capability.thinking_output
 
 
-def should_show_thinking(state: ThinkingState) -> bool:
-    """Return whether readable thinking should render locally."""
-    return state.endswith("-show")
+def describe_thinking(settings: ModelSettings, *, show: bool) -> str:
+    """Render the selection as the words that would reproduce it.
 
+    Args:
+      settings: The selection in effect.
+      show: Whether this client renders the reasoning.
 
-def should_redact_thinking(state: ThinkingState) -> bool:
-    """Return whether provider-side thinking redaction is requested."""
-    return state == "redact-hide"
+    Returns:
+      words: One or two words from :data:`THINKING_COMMANDS`.
 
-
-def _startup_state(command: ThinkingCommand) -> ThinkingState:
-    """Expand partial startup commands without a live current state.
-
-    Full states pass through; partial commands map to canonical hides
-    (or adaptive-show for the bare ``show`` alias). ``assert_never``
-    keeps the match exhaustive as ``ThinkingCommand`` grows.
     """
+    if settings.thinking_output == "redacted":
+        return "redact"
+    budget = {"none": "off", "auto": "adaptive", "fixed": "on"}[
+        settings.thinking_budget
+    ]
+    if settings.thinking_budget == "none":
+        return budget
+    return f"{budget} {'show' if show else 'hide'}"
+
+
+def _axes(
+    command: str, settings: ModelSettings, *, show: bool
+) -> tuple[ThinkingBudget, ThinkingOutput, bool]:
+    """Resolve one word against the axes already selected."""
     match command:
-        case (
-            "adaptive-show"
-            | "adaptive-hide"
-            | "on-show"
-            | "on-hide"
-            | "off-hide"
-            | "redact-hide"
-        ):
-            return command
         case "adaptive":
-            return "adaptive-hide"
+            return ("auto", "text", show)
         case "on":
-            return "on-hide"
+            return ("fixed", "text", show)
         case "off":
-            return "off-hide"
+            # The one word that pins display: there is no reasoning to show.
+            return ("none", "none", False)
         case "redact":
-            return "redact-hide"
-        case "show":
-            return "adaptive-show"
-        case "hide":
-            return "adaptive-hide"
+            # Server-side redaction still spends budget; only the body is
+            # withheld, so an off budget turns back on.
+            budget = settings.thinking_budget
+            return ("auto" if budget == "none" else budget, "redacted", False)
+        case "show" | "hide":
+            return (
+                settings.thinking_budget,
+                settings.thinking_output,
+                command == "show",
+            )
         case _:
-            assert_never(command)
-
-
-def _live_state(command: ThinkingCommand, current: ThinkingState) -> ThinkingState:
-    """Expand partial live commands against ``current``.
-
-    ``show`` and ``hide`` are symmetric: each raises when ``current`` is
-    a fixed-display state (``off-hide`` / ``redact-hide``) for which the
-    requested transition is impossible.
-    """
-    suffix = "show" if current.endswith("-show") else "hide"
-    match command:
-        case (
-            "adaptive-show"
-            | "adaptive-hide"
-            | "on-show"
-            | "on-hide"
-            | "off-hide"
-            | "redact-hide"
-        ):
-            return command
-        case "adaptive":
-            return cast(ThinkingState, f"adaptive-{suffix}")
-        case "on":
-            return cast(ThinkingState, f"on-{suffix}")
-        case "off":
-            return "off-hide"
-        case "redact":
-            return "redact-hide"
-        case "hide":
-            if current == "adaptive-show":
-                return "adaptive-hide"
-            if current == "on-show":
-                return "on-hide"
-            raise ValueError(f"cannot hide thinking from state {current!r}")
-        case "show":
-            if current == "adaptive-hide":
-                return "adaptive-show"
-            if current == "on-hide":
-                return "on-show"
-            raise ValueError(f"cannot show thinking from state {current!r}")
-        case _:
-            assert_never(command)
+            valid = ", ".join(THINKING_COMMANDS)
+            raise ValueError(f"thinking must be one of: {valid}")

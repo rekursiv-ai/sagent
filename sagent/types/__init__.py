@@ -15,12 +15,16 @@ Callers must reach into a specific submodule:
 - ``sagent.types.cost`` -- token count / price / cost
   calculus and the price catalog.
 - ``sagent.types.capability`` -- ``ModelLimits``, ``ModelCapability``,
-  and the thinking vocabulary a catalog row declares.
-- ``sagent.types.model`` -- the narrowed ``ModelSpec``,
-  the ``Model`` Protocol, and request/response types.
+  and ``ModelSettings``: what a model offers, and what one instance chose.
+- ``sagent.types.model`` -- the ``Model`` Protocol,
+  ``AgentSettings``, and request/response types.
 - ``sagent.types.providers`` -- provider Protocols.
-- ``sagent.types.tools`` -- ``Tool`` Protocol.
-- ``sagent.types.compactor`` -- compaction Protocols.
+- ``sagent.types.tools`` -- ``Tool`` Protocol and the
+  off-load thresholds for what a tool returns.
+- ``sagent.types.compactor`` -- compaction Protocols
+  and the re-attach policy.
+- ``sagent.types.session`` -- an agent's identity and
+  where it is persisted.
 - ``sagent.types.exceptions`` -- user-facing errors.
 """
 
@@ -30,6 +34,7 @@ from sagent.types import (
     model,
     providers,
     runtime,
+    session,
     tape,
     tools,
 )
@@ -41,6 +46,7 @@ __all__ = [
     "model",
     "providers",
     "runtime",
+    "session",
     "tape",
     "tools",
 ]

@@ -66,7 +66,6 @@ from sagent import (
     providers,
     sessions,
     tools,
-    types,
 )
 from sagent.agent import Agent
 from sagent.agent.background import BackgroundTaskEntry
@@ -86,15 +85,12 @@ from sagent.providers import (
     PROVIDER_NAMES,
     build_provider,
     default_auth_for_provider,
-    supported_provider_options,
 )
 from sagent.repl import run_repl
 from sagent.thinking import (
     THINKING_COMMANDS,
-    THINKING_STATES,
-    ThinkingState,
-    resolve_thinking_command,
-    should_redact_thinking,
+    apply_thinking_command,
+    thinking_offered,
 )
 from sagent.tools.advisor import Advisor
 from sagent.tools.agent_spawn import (
@@ -106,6 +102,34 @@ from sagent.tools.tool_spec import (
     ToolSpecError,
     coerce_kwargs,
     parse_tool_overrides,
+)
+from sagent.types.capability import (
+    ThinkingEffort,
+)
+from sagent.types.model import (
+    Model,
+    ModelRecipe,
+    base_model_id,
+)
+from sagent.types.providers import (
+    Provider,
+    ProviderCloseable,
+)
+from sagent.types.runtime import (
+    AssistantMessage,
+    ModelContextEvent,
+    ModelResponseError,
+    ModelResponsePartial,
+    ModelResponseThinking,
+    ModelServiceSuspended,
+    Quit,
+    RuntimeEvent,
+    ToolLabel,
+    ToolResult,
+    UserMessage,
+)
+from sagent.types.tools import (
+    Tool,
 )
 
 
@@ -152,7 +176,7 @@ def resolve_tools(
     *,
     allow_providers: tuple[str, ...] | None = None,
     overrides: Mapping[str, Mapping[str, str]] | None = None,
-) -> list[types.tools.Tool]:
+) -> list[Tool]:
     """Instantiate tools by class name from the ``tools`` module.
 
     Bash is constructed last with ``peers=`` set to its sibling tools
@@ -190,7 +214,7 @@ def resolve_tools(
     if names == ["none"]:
         return []
     provider_aware = {"AgentSpawn", "AgentSelf"}
-    non_bash: dict[str, types.tools.Tool] = {}
+    non_bash: dict[str, Tool] = {}
     for name in names:
         if name == "Bash":
             continue
@@ -202,7 +226,7 @@ def resolve_tools(
             non_bash[name] = cls(allow_providers=allow_providers, **kwargs)
         else:
             non_bash[name] = cls(**kwargs)
-    resolved: list[types.tools.Tool] = []
+    resolved: list[Tool] = []
     peers = tuple(non_bash.values())
     for name in names:
         if name == "Bash":
@@ -782,17 +806,15 @@ def _resolve_provider_and_allow(
 
 def _build_provider_model(
     args: argparse.Namespace,
-    thinking_state: ThinkingState | None,
     *,
     allow_providers: tuple[str, ...] = PROVIDER_NAMES,
-) -> tuple[types.providers.Provider, types.model.Model, str]:
+) -> tuple[Provider, Model, str]:
     """Build the provider/model pair requested by CLI flags."""
     try:
-        return _build_provider_model_once(args, thinking_state)
+        return _build_provider_model_once(args)
     except _PROVIDER_STARTUP_ERRORS as error:
         return _build_provider_model_fallback(
             args,
-            thinking_state,
             error,
             allow_providers=allow_providers,
         )
@@ -800,8 +822,7 @@ def _build_provider_model(
 
 def _build_provider_model_once(
     args: argparse.Namespace,
-    thinking_state: ThinkingState | None,
-) -> tuple[types.providers.Provider, types.model.Model, str]:
+) -> tuple[Provider, Model, str]:
     """Build one provider/model pair without fallback."""
     provider_name = str(args.provider)
     auth = str(args.auth)
@@ -813,20 +834,7 @@ def _build_provider_model_once(
     if args.provider == "SelfHosted":
         auth = model_id or "env"
         model_id = None
-    options = _cli_provider_options(args)
-    if thinking_state is not None and "redact_thinking" in (
-        supported_provider_options(provider_name)
-    ):
-        options = dataclasses.replace(
-            options,
-            redact_thinking=should_redact_thinking(thinking_state),
-        )
-    provider = build_provider(
-        provider_name,
-        auth,
-        account=args.account,
-        options=options,
-    )
+    provider = build_provider(provider_name, auth, account=args.account)
     if model_id == "utility":
         model = provider.utility_model()
     else:
@@ -836,11 +844,10 @@ def _build_provider_model_once(
 
 def _build_provider_model_fallback(
     args: argparse.Namespace,
-    thinking_state: ThinkingState | None,
     error: Exception,
     *,
     allow_providers: tuple[str, ...],
-) -> tuple[types.providers.Provider, types.model.Model, str]:
+) -> tuple[Provider, Model, str]:
     """Try another subscription provider for implicit startup auth failures."""
     if not _allow_implicit_provider_fallback(args):
         raise RuntimeError(
@@ -860,12 +867,12 @@ def _build_provider_model_fallback(
         args.auth = "credentials"
         args.model = None
         try:
-            provider, model, auth = _build_provider_model_once(args, thinking_state)
+            provider, model, auth = _build_provider_model_once(args)
         except _PROVIDER_STARTUP_ERRORS:
             continue
         sys.stderr.write(
             f"[provider] {original_provider} unavailable: {error}\n"
-            f"[provider] falling back to {fallback_provider} ({model.spec.tagged_model_id}).\n"
+            f"[provider] falling back to {fallback_provider} ({model.tagged_model_id}).\n"
             f"[provider] To use {original_provider}, run: "
             f"sagent --provider {original_provider} login\n"
         )
@@ -975,37 +982,33 @@ def _credential_error_message(
     return "\n".join(lines)
 
 
-def _cli_provider_options(args: argparse.Namespace) -> types.providers.ProviderOptions:
-    """Return construction-time provider options from explicit CLI flags."""
-    return types.providers.ProviderOptions(
-        server_side_context_management=cast(
-            "bool | None", args.server_side_context_management
-        ),
-    )
+def _apply_cli_thinking(args: argparse.Namespace, model: Model) -> bool:
+    """Apply ``--thinking`` to the model's settings; return the display flag.
 
+    Args:
+      args: Parsed CLI namespace.
+      model: The model whose settings the word selects on.
 
-def _resolve_cli_thinking_state(args: argparse.Namespace) -> ThinkingState | None:
-    """Resolve the ``--thinking`` flag to an Agent-level state override."""
+    Returns:
+      show: Whether reasoning renders locally.
+
+    Raises:
+      ValueError: The model does not offer the requested selection.
+
+    """
     raw = str(args.thinking)
     if raw == "default":
-        return None
-    return resolve_thinking_command(raw)
-
-
-def _validate_cli_thinking_state(
-    model: types.model.Model,
-    state: ThinkingState | None,
-) -> None:
-    """Validate a resolved CLI thinking state against model/provider support."""
-    if state is None:
-        return
-    valid = model.spec.valid_thinking_states
-    if state not in valid:
-        options = ", ".join(valid)
+        return True
+    settings = model.settings
+    if not thinking_offered(raw, settings):
+        options = ", ".join(
+            word for word in THINKING_COMMANDS if thinking_offered(word, settings)
+        )
         raise ValueError(
-            f"thinking state {state!r} not supported by {model.spec.tagged_model_id!r};"
+            f"thinking {raw!r} not supported by {model.tagged_model_id!r};"
             f" options: {options}"
         )
+    return apply_thinking_command(raw, settings, show=True)
 
 
 def _apply_resume_model_defaults(args: argparse.Namespace, meta: SessionMeta) -> None:
@@ -1040,7 +1043,7 @@ def _provider_knows_model(provider_name: str, model_id: str) -> bool:
     known = getattr(cls, "CAPABILITIES", None)
     if not isinstance(known, Mapping):
         return False
-    return types.model.base_model_id(model_id) in known
+    return base_model_id(model_id) in known
 
 
 async def _resume_persistent_agents(
@@ -1092,58 +1095,42 @@ def _build_persistent_child(
     parent_label: str,
 ) -> Agent:
     """Construct a persistent child from its lifecycle record."""
-    thinking_state = _persistent_thinking_state(record.thinking_state)
-    options = record.provider_options
-    if thinking_state is not None and "redact_thinking" in (
-        supported_provider_options(record.provider)
-    ):
-        options = dataclasses.replace(
-            options,
-            redact_thinking=should_redact_thinking(thinking_state),
-        )
     provider = build_provider(
         record.provider,
         record.auth,
         account=record.account or None,
-        options=options,
     )
     model = provider.model(record.model_id)
+    # ``take`` rather than assignment: a record written against a wider
+    # model must not fail the resume on a knob this one withholds.
+    model.settings.take(
+        thinking_budget=record.thinking_budget,
+        thinking_output=record.thinking_output,
+        thinking_effort=record.effort,
+        service_tier=record.service_tier,
+        cache_ttl_sec=record.cache_ttl_sec,
+    )
     agent = Agent(
         name=record.label,
         model=model,
-        model_recipe=types.model.ModelRecipe(
+        model_recipe=ModelRecipe(
             provider=record.provider,
             auth=record.auth,
-            model_id=model.spec.tagged_model_id,
+            model_id=model.tagged_model_id,
             account=record.account,
         ),
         system=_augment_system_for_persistent(record.system, parent_label=parent_label),
         tools=resolve_tools(list(record.tools), allow_providers=allow_providers),
         session_dir=record.session_dir,
         max_tool_call_rounds=record.max_tool_call_rounds,
-        thinking=record.thinking,
-        thinking_state=thinking_state,
-        effort=record.effort,
         max_budget_usd=record.max_budget_usd,
         persistent_retry=record.persistent_retry,
-        provider_options=record.provider_options,
     )
     if record.max_request_tokens is not None:
         agent.max_request_tokens = record.max_request_tokens
     if record.max_response_tokens is not None:
         agent.max_response_tokens = record.max_response_tokens
-    if record.service_tier is not None:
-        agent.service_tier = record.service_tier
-    agent.cache_ttl = record.cache_ttl
     return agent
-
-
-def _persistent_thinking_state(raw: str | None) -> ThinkingState | None:
-    """Narrow a persisted thinking-state string to ``ThinkingState``."""
-    for state in THINKING_STATES:
-        if raw == state:
-            return state
-    return None
 
 
 def _resume_label(label: str) -> str:
@@ -1194,7 +1181,7 @@ async def _serve_resumed_persistent(
     parent: Agent,
     child: Agent,
     label: str,
-    forwarder: Callable[[types.runtime.RuntimeEvent], None] | None,
+    forwarder: Callable[[RuntimeEvent], None] | None,
 ) -> None:
     """Run a resumed persistent child and clean parent indexes on exit."""
     bg_key = f"persistent:{label}"
@@ -1315,7 +1302,7 @@ async def _with_signals(
     agent: Agent,
     coro: Coroutine[object, object, None],
     *,
-    provider: types.providers.Provider | None = None,
+    provider: Provider | None = None,
 ) -> None:
     """Install SIGINT/SIGTERM handlers around ``coro`` for graceful + escape exit.
 
@@ -1343,7 +1330,7 @@ async def _with_signals(
         # Awaited here, inside the loop: the provider owns the client its
         # models share, and ``asyncio.run`` cancels stray tasks at their
         # first suspension, so a fire-and-forget close never finishes.
-        if isinstance(provider, types.providers.ProviderCloseable):
+        if isinstance(provider, ProviderCloseable):
             await provider.close_sdk()
 
 
@@ -1372,32 +1359,32 @@ def _parse_stream_json(raw: str) -> str:
     return "\n\n".join(prompts)
 
 
-def _event_to_json_record(event: types.runtime.RuntimeEvent) -> MutableJSON | None:
+def _event_to_json_record(event: RuntimeEvent) -> MutableJSON | None:
     """Serialize a ``RuntimeEvent`` for stream-json output, or skip."""
-    if isinstance(event, types.runtime.ModelResponsePartial):
+    if isinstance(event, ModelResponsePartial):
         return {"descriptor": "text/plain", "content": event.text}
-    if isinstance(event, types.runtime.ModelResponseThinking):
+    if isinstance(event, ModelResponseThinking):
         return {"descriptor": "text/x-thinking", "content": event.text}
-    if isinstance(event, types.runtime.ToolLabel):
+    if isinstance(event, ToolLabel):
         return {
             "descriptor": "text/x-tool-label",
             "content": event.text,
             "call_id": event.call_id,
         }
-    if isinstance(event, types.runtime.ToolResult):
+    if isinstance(event, ToolResult):
         return {
             "descriptor": "application/x-tool-result",
             "call_id": event.call_id,
             "content": event.content,
             "is_error": event.is_error,
         }
-    if isinstance(event, types.runtime.ModelResponseError):
+    if isinstance(event, ModelResponseError):
         exc = event.exception
         return {
             "descriptor": "application/x-error",
             "content": f"{type(exc).__name__}: {exc}",
         }
-    if isinstance(event, types.runtime.ModelServiceSuspended):
+    if isinstance(event, ModelServiceSuspended):
         return {
             "descriptor": "application/x-model-service-suspended",
             "provider": event.provider,
@@ -1464,11 +1451,11 @@ async def _run_headless(
         sys.stderr.write("Error: no input on stdin.\n")
         sys.exit(1)
 
-    user_msg = types.runtime.UserMessage(text=prompt)
+    user_msg = UserMessage(text=prompt)
     model_error: BaseException | None = None
     if output_format == "stream-json":
         async for event in agent.run(user_msg):
-            if isinstance(event, types.runtime.ModelResponseError):
+            if isinstance(event, ModelResponseError):
                 model_error = event.exception
             record = _event_to_json_record(event)
             if record is None:
@@ -1477,7 +1464,7 @@ async def _run_headless(
             sys.stdout.write("\n")
     else:
         async for event in agent.run(user_msg):
-            if isinstance(event, types.runtime.ModelResponseError):
+            if isinstance(event, ModelResponseError):
                 model_error = event.exception
     if model_error is not None:
         message = f"{type(model_error).__name__}: {model_error}"
@@ -1512,10 +1499,10 @@ async def _run_headless(
         sys.stdout.write("\n")
 
 
-def _last_assistant_text(history: list[types.runtime.ModelContextEvent]) -> str:
+def _last_assistant_text(history: list[ModelContextEvent]) -> str:
     """Return the text from the most recent ``AssistantMessage`` in ``history``."""
     for entry in reversed(history):
-        if isinstance(entry, types.runtime.AssistantMessage):
+        if isinstance(entry, AssistantMessage):
             return entry.text
     return ""
 
@@ -1529,7 +1516,7 @@ def _quit_handler(agent: Agent) -> Callable[[], None]:
         if triggered:
             os._exit(1)
         triggered = True
-        agent.runtime.inbox.push_back(types.runtime.Quit())
+        agent.runtime.inbox.push_back(Quit())
 
     return _on_signal
 
@@ -1586,20 +1573,20 @@ def main() -> int:
         from_resume=resumed_provider and not user_explicit,
     )
     try:
-        thinking_state = _resolve_cli_thinking_state(args)
         provider, model, resolved_auth = _build_provider_model(
             args,
-            thinking_state,
             allow_providers=allow_providers,
         )
-        _validate_cli_thinking_state(model, thinking_state)
+        show_thinking = _apply_cli_thinking(args, model)
+        if args.effort is not None:
+            model.settings.thinking_effort = cast(ThinkingEffort, args.effort)
     except (AttributeError, FileNotFoundError, RuntimeError, ValueError) as e:
         sys.stderr.write(f"Error: {e}\n")
         return 1
-    model_recipe = types.model.ModelRecipe(
+    model_recipe = ModelRecipe(
         provider=args.provider,
         auth=resolved_auth,
-        model_id=model.spec.tagged_model_id,
+        model_id=model.tagged_model_id,
         account=args.account,
     )
     if loaded_session is not None:
@@ -1619,7 +1606,7 @@ def main() -> int:
 
     headless = not sys.stdin.isatty()
     if not headless:
-        sys.stderr.write(f"[{args.provider}] {model.spec.tagged_model_id}\n")
+        sys.stderr.write(f"[{args.provider}] {model.tagged_model_id}\n")
 
     tool_names = args.tools or DEFAULT_TOOLS
     agent_tools = resolve_tools(
@@ -1633,13 +1620,13 @@ def main() -> int:
             Advisor(model=advisor_model, max_uses=args.advisor_max_uses),
         )
         if not headless:
-            sys.stderr.write(f"[advisor] {advisor_model.spec.tagged_model_id}\n")
+            sys.stderr.write(f"[advisor] {advisor_model.tagged_model_id}\n")
 
     custom_system = args.system
 
     def _system() -> str:
         return build_system(
-            model.spec.tagged_model_id,
+            model.tagged_model_id,
             custom=custom_system,
             include_memory=not args.ephemeral,
         )
@@ -1653,11 +1640,8 @@ def main() -> int:
         tools=agent_tools,
         compactor=compactor,
         session_dir=session_dir,
-        effort=args.effort,
         max_tool_call_rounds=args.max_tool_call_rounds,
         max_budget_usd=args.max_budget_usd,
-        thinking_state=thinking_state,
-        provider_options=_cli_provider_options(args),
     )
     if args.max_request_tokens is not None:
         agent.max_request_tokens = args.max_request_tokens
@@ -1680,7 +1664,7 @@ def main() -> int:
                 agent,
                 _with_resumed_persistent(
                     agent,
-                    run_repl(agent, history=args.history),
+                    run_repl(agent, history=args.history, show_thinking=show_thinking),
                     session_dir=session_dir,
                     resume_persistent=args.resume_persistent,
                     allow_providers=allow_providers,
