@@ -11,6 +11,7 @@ Sources:
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from types import MappingProxyType
 
 from sagent.types.capability import (
@@ -72,72 +73,67 @@ def models() -> Mapping[str, ModelCapability]:
       models: Capability per base model id.
 
     """
-    return MappingProxyType(
-        {
-            "gemini-3-flash-preview": ModelCapability(
-                model_id="gemini-3-flash-preview",
-                context=_context(request=1_048_576),
-                prices=_prices(request=0.5, response=3.0, cache_read=0.05),
-                thinking_effort=_efforts(),
-                thinking_budget=frozenset({"none", "auto", "fixed"}),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "gemini-3.1-pro-preview": ModelCapability(
-                model_id="gemini-3.1-pro-preview",
-                context=_context(request=1_048_576),
-                prices=_prices(request=2.0, response=12.0, cache_read=0.2),
-                thinking_effort=_efforts(),
-                thinking_budget=frozenset({"none", "auto", "fixed"}),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "gemini-2.0-flash": ModelCapability(
-                model_id="gemini-2.0-flash",
-                context=_context(request=1_000_000),
-                prices=_prices(request=0.1, response=0.4, cache_read=0.025),
-                thinking_effort=_efforts(),
-                thinking_budget=frozenset({"none", "auto", "fixed"}),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "gemini-2.5-flash-lite": ModelCapability(
-                model_id="gemini-2.5-flash-lite",
-                context=_context(request=1_048_576),
-                prices=_prices(request=0.1, response=0.4, cache_read=0.025),
-                thinking_effort=_efforts(),
-                thinking_budget=frozenset({"none", "auto", "fixed"}),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "gemini-2.5-flash": ModelCapability(
-                model_id="gemini-2.5-flash",
-                context=_context(request=1_000_000),
-                prices=_prices(request=0.3, response=2.5, cache_read=0.075),
-                thinking_effort=_efforts(),
-                thinking_budget=frozenset({"none", "auto", "fixed"}),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "gemini-2.5-pro": ModelCapability(
-                model_id="gemini-2.5-pro",
-                context=_context(request=1_000_000),
-                prices=_prices(request=1.25, response=10.0, cache_read=0.31),
-                thinking_effort=_efforts(),
-                thinking_budget=frozenset({"none", "auto", "fixed"}),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "gemini-1.5-flash": ModelCapability(
-                model_id="gemini-1.5-flash",
-                context=_context(request=1_000_000),
-                prices=_prices(request=0.075, response=0.3, cache_read=0.01875),
-                # gemini-1.5 rejects ``thinkingConfig`` outright, so every
-                # thinking axis offers only its off value.
-            ),
-            "gemini-1.5-pro": ModelCapability(
-                model_id="gemini-1.5-pro",
-                context=_context(request=1_000_000),
-                prices=_prices(request=1.25, response=5.0, cache_read=0.3125),
-                # gemini-1.5 rejects ``thinkingConfig`` outright, so every
-                # thinking axis offers only its off value.
-            ),
-        }
+    # A thinking Gemini row: every model below is this one with its window
+    # and price replaced. ``thinkingBudget: -1`` is the auto budget, a
+    # positive integer the fixed one.
+    gemini = ModelCapability(
+        context=_context(request=1_048_576),
+        prices=_prices(request=0.5, response=3.0, cache_read=0.05),
+        thinking_effort=_efforts(),
+        thinking_budget={"none", "auto", "fixed"},
+        thinking_output={"none", "text"},
     )
+    # gemini-1.5 rejects ``thinkingConfig`` outright, so every thinking axis
+    # offers only its off value.
+    legacy = replace(
+        gemini,
+        context=_context(request=1_000_000),
+        thinking_effort={"none"},
+        thinking_budget={"none"},
+        thinking_output={"none"},
+    )
+    rows = (
+        replace(gemini, model_id="gemini-3-flash-preview"),
+        replace(
+            gemini,
+            model_id="gemini-3.1-pro-preview",
+            prices=_prices(request=2.0, response=12.0, cache_read=0.2),
+        ),
+        replace(
+            gemini,
+            model_id="gemini-2.0-flash",
+            context=_context(request=1_000_000),
+            prices=_prices(request=0.1, response=0.4, cache_read=0.025),
+        ),
+        replace(
+            gemini,
+            model_id="gemini-2.5-flash-lite",
+            prices=_prices(request=0.1, response=0.4, cache_read=0.025),
+        ),
+        replace(
+            gemini,
+            model_id="gemini-2.5-flash",
+            context=_context(request=1_000_000),
+            prices=_prices(request=0.3, response=2.5, cache_read=0.075),
+        ),
+        replace(
+            gemini,
+            model_id="gemini-2.5-pro",
+            context=_context(request=1_000_000),
+            prices=_prices(request=1.25, response=10.0, cache_read=0.31),
+        ),
+        replace(
+            legacy,
+            model_id="gemini-1.5-flash",
+            prices=_prices(request=0.075, response=0.3, cache_read=0.01875),
+        ),
+        replace(
+            legacy,
+            model_id="gemini-1.5-pro",
+            prices=_prices(request=1.25, response=5.0, cache_read=0.3125),
+        ),
+    )
+    return MappingProxyType({row.model_id: row for row in rows})
 
 
 def api() -> ModelCapability:
@@ -158,11 +154,9 @@ def api() -> ModelCapability:
     # Every axis stated: ``&`` can only remove, and a defaulted axis is the
     # narrow value, so an omitted one would strip the model's real capability.
     return ModelCapability(
-        thinking_effort=frozenset(
-            {"none", "min", "low", "medium", "high", "xhigh", "max"}
-        ),
-        thinking_budget=frozenset({"none", "auto", "fixed"}),
-        thinking_output=frozenset({"none", "text", "redacted"}),
+        thinking_effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
+        thinking_budget={"none", "auto", "fixed"},
+        thinking_output={"none", "text", "redacted"},
     )
 
 
@@ -180,10 +174,10 @@ def cli() -> ModelCapability:
 
     """
     return ModelCapability(
-        thinking_effort=frozenset({"none"}),
-        thinking_budget=frozenset({"none", "auto", "fixed"}),
-        thinking_output=frozenset({"none", "text", "redacted"}),
-        manage_context_server_side=frozenset({True}),
+        thinking_effort={"none"},
+        thinking_budget={"none", "auto", "fixed"},
+        thinking_output={"none", "text", "redacted"},
+        manage_context_server_side={True},
         account_auth=True,
     )
 
@@ -202,11 +196,9 @@ def subscription() -> ModelCapability:
 
     """
     return ModelCapability(
-        thinking_effort=frozenset(
-            {"none", "min", "low", "medium", "high", "xhigh", "max"}
-        ),
-        thinking_budget=frozenset({"none", "auto", "fixed"}),
-        thinking_output=frozenset({"none", "text", "redacted"}),
+        thinking_effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
+        thinking_budget={"none", "auto", "fixed"},
+        thinking_output={"none", "text", "redacted"},
         account_auth=True,
     )
 

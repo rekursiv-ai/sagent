@@ -598,10 +598,11 @@ def plan_model_options(
         planned["effort"] = value
     if "cache_ttl" in options:
         value = options["cache_ttl"]
-        if value not in ("5m", "1h"):
+        if value is not None and value not in CACHE_TTL_SEC:
+            quoted = ", ".join(repr(k) for k in CACHE_TTL_SEC)
             return ToolResult(
                 call_id="",
-                content="model_options.cache_ttl must be '5m' or '1h'.",
+                content=f"model_options.cache_ttl must be one of {quoted} or null.",
                 is_error=True,
             )
         planned["cache_ttl"] = value
@@ -639,8 +640,10 @@ def _supported_model_options(model: Model) -> dict[str, str]:
     efforts = capability.thinking_effort - {"none"}
     if efforts:
         supported["effort"] = " | ".join(repr(e) for e in sorted(efforts))
-    if capability.cache_ttl_sec > 0:
-        supported["cache_ttl"] = "'5m' | '1h'"
+    if capability.cache_ttl_sec != frozenset({0.0}):
+        supported["cache_ttl"] = " | ".join(
+            repr(k) for k, v in CACHE_TTL_SEC.items() if v in capability.cache_ttl_sec
+        )
     tiers = capability.service_tier - {"auto"}
     if tiers:
         supported["service_tier"] = " | ".join(
@@ -932,10 +935,15 @@ def _agent_option_lines(agent: Agent) -> list[str]:
     service_tier = settings.service_tier
     if capability.service_tier == frozenset({"auto"}):
         service_tier = "unsupported"
+    cache_ttl = (
+        "unsupported"
+        if capability.cache_ttl_sec == frozenset({0.0})
+        else f"{settings.cache_ttl_sec:g}s"
+    )
     supported = _supported_model_options(agent.model)
     supported_text = ", ".join(f"{k}: {v}" for k, v in supported.items()) or "none"
     return [
-        f"Cache TTL:          {settings.cache_ttl_sec:g}s",
+        f"Cache TTL:          {cache_ttl}",
         f"Thinking:           {thinking}",
         f"Effort:             {effort}",
         f"Service tier:       {service_tier}",

@@ -36,16 +36,16 @@ def _opus() -> ModelCapability:
                 PriceCatalogProduct(service_tier="priority"): TokenPrice(request=15.0),
             }
         ),
-        thinking_effort=frozenset({"none", "max"}),
-        service_tier=frozenset({"auto", "default", "priority"}),
+        thinking_effort={"none", "max"},
+        service_tier={"auto", "default", "priority"},
     )
 
 
 def _cli() -> ModelCapability:
     return ModelCapability(
-        thinking_effort=frozenset({"none"}),
-        thinking_output=frozenset({"none", "text"}),
-        manage_context_server_side=frozenset({True}),
+        thinking_effort={"none"},
+        thinking_output={"none", "text"},
+        manage_context_server_side={True},
     )
 
 
@@ -91,7 +91,7 @@ def test_resolve_never_grants_what_the_row_lacks() -> None:
         models={"claude-opus-4-8": _opus()},
         roles={},
         transport=ModelCapability(
-            thinking_effort=frozenset({"none", "min", "low", "medium", "high", "max"})
+            thinking_effort={"none", "min", "low", "medium", "high", "max"}
         ),
     )
     assert capability.thinking_effort == frozenset({"none", "max"})

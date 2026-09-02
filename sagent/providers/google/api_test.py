@@ -442,7 +442,7 @@ def test_google_model_properties() -> None:
     assert m.max_request_tokens == 1_000_000
     assert m.capability.thinking_budget != frozenset({"none"})
     assert m.capability.thinking_effort != frozenset({"none"})
-    assert m.capability.cache_ttl_sec == 0.0
+    assert m.capability.cache_ttl_sec == frozenset({0.0})
     # Gemini publishes no per-image pixel or byte cap (images are tiled
     # server-side); the only documented limit is the 20 MB total request size.
     assert m.limits.max_image_edge_px == 0

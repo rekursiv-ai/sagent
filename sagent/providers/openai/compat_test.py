@@ -514,7 +514,7 @@ def test_model_properties_defaults() -> None:
     assert m.limits.max_response_tokens == 200
     assert m.capability.thinking_budget == frozenset({"none"})
     assert m.capability.thinking_effort == frozenset({"none"})
-    assert m.capability.cache_ttl_sec == 0.0
+    assert m.capability.cache_ttl_sec == frozenset({0.0})
     assert m.capability.manage_context_server_side == frozenset({False})
     assert m.capability.retries_internally is False
     assert m.capability.account_auth is False

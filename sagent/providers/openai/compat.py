@@ -114,13 +114,11 @@ class OpenAICompat:
     # an omitted axis defaults to its narrow value, so leaving them out emptied
     # DashScope's reasoning ladder -- a model nothing can be requested from.
     TRANSPORT: ClassVar[ModelCapability] = ModelCapability(
-        thinking_effort=frozenset(
-            {"none", "min", "low", "medium", "high", "xhigh", "max"}
-        ),
-        thinking_budget=frozenset({"none", "auto", "fixed"}),
-        thinking_output=frozenset({"none", "text", "redacted"}),
-        service_tier=frozenset({"auto"}),
-        manage_context_server_side=frozenset({False}),
+        thinking_effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
+        thinking_budget={"none", "auto", "fixed"},
+        thinking_output={"none", "text", "redacted"},
+        service_tier={"auto"},
+        manage_context_server_side={False},
     )
     """Chat-completions vendors expose no cache or tier knob."""
 

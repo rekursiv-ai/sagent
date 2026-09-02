@@ -12,6 +12,7 @@ Sources:
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from types import MappingProxyType
 from typing import Final
 
@@ -48,233 +49,167 @@ def models() -> Mapping[str, ModelCapability]:
       models: Capability per base model id.
 
     """
-    return MappingProxyType(
-        {
-            "gpt-5.6-sol": ModelCapability(
-                model_id="gpt-5.6-sol",
-                context=_windowed(
-                    request=272_000, response=128_000, gpt56_images=True, long=1_050_000
-                ),
-                prices=_prices(
-                    request=5.0,
-                    response=30.0,
-                    cache_write=6.25,
-                    cache_read=0.5,
-                    two_tier=True,
-                ),
-                service_tier=_tiers(),
-                thinking_effort=_gpt56_efforts(),
-                thinking_budget=frozenset({"none", "auto"}),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            # Absent from ``GET /v1/models`` yet serves ``POST /v1/responses``
-            # normally. Listing is an entitlement view, not the model set, so a
-            # row must be dropped only on ``model_not_found`` from a real call.
-            "gpt-5.6": ModelCapability(
-                model_id="gpt-5.6",
-                context=_windowed(
-                    request=272_000, response=128_000, gpt56_images=True, long=1_050_000
-                ),
-                prices=_prices(
-                    request=5.0,
-                    response=30.0,
-                    cache_write=6.25,
-                    cache_read=0.5,
-                    two_tier=True,
-                ),
-                service_tier=_tiers(),
-                thinking_effort=_gpt56_efforts(),
-                thinking_budget=frozenset({"none", "auto"}),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "gpt-5.6-luna": ModelCapability(
-                model_id="gpt-5.6-luna",
-                context=_windowed(
-                    request=272_000, response=128_000, gpt56_images=True, long=1_050_000
-                ),
-                prices=_prices(
-                    request=1.0,
-                    response=6.0,
-                    cache_write=1.25,
-                    cache_read=0.1,
-                    two_tier=True,
-                ),
-                service_tier=_tiers(),
-                thinking_effort=_gpt56_efforts(),
-                thinking_budget=frozenset({"none", "auto"}),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "gpt-5.6-terra": ModelCapability(
-                model_id="gpt-5.6-terra",
-                context=_windowed(
-                    request=272_000, response=128_000, gpt56_images=True, long=1_050_000
-                ),
-                prices=_prices(
-                    request=2.5,
-                    response=15.0,
-                    cache_write=3.125,
-                    cache_read=0.25,
-                    two_tier=True,
-                ),
-                service_tier=_tiers(),
-                thinking_effort=_gpt56_efforts(),
-                thinking_budget=frozenset({"none", "auto"}),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "gpt-5.5": ModelCapability(
-                model_id="gpt-5.5",
-                context=_windowed(request=272_000, response=128_000, long=1_000_000),
-                prices=_prices(
-                    request=5.0, response=30.0, cache_read=0.5, two_tier=True
-                ),
-                service_tier=_tiers(),
-                thinking_effort=_legacy_efforts(),
-                thinking_budget=frozenset({"none", "auto"}),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "gpt-5.5-pro": ModelCapability(
-                model_id="gpt-5.5-pro",
-                context=_windowed(request=272_000, response=128_000, long=1_050_000),
-                prices=_prices(request=30.0, response=180.0, two_tier=True),
-                service_tier=_tiers(),
-                thinking_effort=_legacy_efforts(),
-                thinking_budget=frozenset({"none", "auto"}),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "gpt-5.4": ModelCapability(
-                model_id="gpt-5.4",
-                context=_windowed(request=272_000, response=128_000, long=1_050_000),
-                prices=_prices(
-                    request=2.5, response=15.0, cache_read=0.25, two_tier=True
-                ),
-                service_tier=_tiers(),
-                thinking_effort=_legacy_efforts(),
-                thinking_budget=frozenset({"none", "auto"}),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "gpt-5.4-pro": ModelCapability(
-                model_id="gpt-5.4-pro",
-                context=_windowed(request=272_000, response=128_000, long=1_050_000),
-                prices=_prices(request=30.0, response=180.0, two_tier=True),
-                service_tier=_tiers(),
-                thinking_effort=_legacy_efforts(),
-                thinking_budget=frozenset({"none", "auto"}),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "gpt-5.4-mini": ModelCapability(
-                model_id="gpt-5.4-mini",
-                context=_context(request=400_000, response=128_000),
-                prices=_prices(request=0.75, response=4.5, cache_read=0.075),
-                service_tier=_tiers(),
-                thinking_effort=_legacy_efforts(),
-                thinking_budget=frozenset({"none", "auto"}),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "gpt-5.4-nano": ModelCapability(
-                model_id="gpt-5.4-nano",
-                context=_context(request=400_000, response=128_000),
-                prices=_prices(request=0.2, response=1.25, cache_read=0.02),
-                service_tier=_tiers(),
-                thinking_effort=_legacy_efforts(),
-                thinking_budget=frozenset({"none", "auto"}),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "gpt-5.3-codex": ModelCapability(
-                model_id="gpt-5.3-codex",
-                context=_context(request=400_000, response=128_000),
-                prices=_prices(request=1.75, response=14.0, cache_read=0.175),
-                service_tier=_tiers(),
-                thinking_effort=_legacy_efforts(),
-                thinking_budget=frozenset({"none", "auto"}),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "gpt-5.3-chat-latest": ModelCapability(
-                model_id="gpt-5.3-chat-latest",
-                context=_context(request=128_000, response=16_384),
-                prices=_prices(request=1.75, response=14.0, cache_read=0.175),
-                service_tier=_tiers(),
-                thinking_effort=_legacy_efforts(),
-                thinking_budget=frozenset({"none", "auto"}),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "gpt-5.2": ModelCapability(
-                model_id="gpt-5.2",
-                context=_context(request=400_000, response=128_000),
-                prices=_prices(request=1.75, response=14.0, cache_read=0.175),
-                service_tier=_tiers(),
-                thinking_effort=_legacy_efforts(),
-                thinking_budget=frozenset({"none", "auto"}),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "o1": ModelCapability(
-                model_id="o1",
-                context=_context(request=200_000, response=100_000),
-                prices=_prices(request=15.0, response=60.0, cache_read=7.5),
-                service_tier=_tiers(),
-                thinking_effort=_legacy_efforts(),
-                thinking_budget=frozenset({"none", "auto"}),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "o3-mini": ModelCapability(
-                model_id="o3-mini",
-                context=_context(request=200_000, response=100_000),
-                prices=_prices(request=1.1, response=4.4, cache_read=0.55),
-                service_tier=_tiers(),
-                thinking_effort=_legacy_efforts(),
-                thinking_budget=frozenset({"none", "auto"}),
-                thinking_output=frozenset({"none", "text"}),
-            ),
-            "gpt-4.1": ModelCapability(
-                model_id="gpt-4.1",
-                context=_windowed(request=1_047_576, response=32_768, long=1_047_576),
-                prices=_prices(request=2.0, response=8.0, cache_read=0.5),
-                service_tier=_tiers(),
-                # No reasoning knob on this generation.
-            ),
-            "gpt-4.1-mini": ModelCapability(
-                model_id="gpt-4.1-mini",
-                context=_windowed(request=1_047_576, response=32_768, long=1_047_576),
-                prices=_prices(request=0.4, response=1.6, cache_read=0.1),
-                service_tier=_tiers(),
-                # No reasoning knob on this generation.
-            ),
-            "gpt-4.1-nano": ModelCapability(
-                model_id="gpt-4.1-nano",
-                context=_windowed(request=1_047_576, response=32_768, long=1_047_576),
-                prices=_prices(request=0.1, response=0.4, cache_read=0.025),
-                service_tier=_tiers(),
-                # No reasoning knob on this generation.
-            ),
-            "gpt-4o": ModelCapability(
-                model_id="gpt-4o",
-                context=_context(request=128_000, response=16_384),
-                prices=_prices(request=2.5, response=10.0, cache_read=1.25),
-                service_tier=_tiers(),
-                # No reasoning knob on this generation.
-            ),
-            "gpt-4o-mini": ModelCapability(
-                model_id="gpt-4o-mini",
-                context=_context(request=128_000, response=16_384),
-                prices=_prices(request=0.15, response=0.6, cache_read=0.075),
-                service_tier=_tiers(),
-                # No reasoning knob on this generation.
-            ),
-            "gpt-4-turbo": ModelCapability(
-                model_id="gpt-4-turbo",
-                context=_context(request=128_000, response=4_096),
-                prices=_prices(request=10.0, response=30.0),
-                service_tier=_tiers(),
-                # No reasoning knob on this generation.
-            ),
-            "gpt-4": ModelCapability(
-                model_id="gpt-4",
-                context=_context(request=8_192, response=8_192),
-                prices=_prices(request=30.0, response=60.0),
-                service_tier=_tiers(),
-                # No reasoning knob on this generation.
-            ),
-        }
+    # A GPT-5.6 row: every model below is this one with its window, price,
+    # and reasoning axes replaced. 5.6 bills images by 32x32 patch and takes
+    # a far larger request body than the generations before it.
+    gpt56 = ModelCapability(
+        context=_windowed(
+            request=272_000, response=128_000, gpt56_images=True, long=1_050_000
+        ),
+        prices=_prices(
+            request=5.0, response=30.0, cache_write=6.25, cache_read=0.5, two_tier=True
+        ),
+        service_tier=_tiers(),
+        thinking_effort=_efforts(),
+        thinking_budget={"none", "auto"},
+        thinking_output={"none", "text"},
     )
+    # Pre-5.6 tiles ``detail:high`` from a 2048px square and caps the body at
+    # 20MB; the SELECTABLE efforts are identical (``reasoning_effort`` remaps
+    # ``none``/``xhigh`` on the wire).
+    legacy = replace(
+        gpt56,
+        context=_windowed(request=272_000, response=128_000, long=1_050_000),
+        prices=_prices(request=2.5, response=15.0, cache_read=0.25, two_tier=True),
+    )
+    # No reasoning knob on the 4-x generation.
+    gpt4 = replace(
+        legacy,
+        thinking_effort={"none"},
+        thinking_budget={"none"},
+        thinking_output={"none"},
+    )
+    rows = (
+        replace(gpt56, model_id="gpt-5.6-sol"),
+        # Absent from ``GET /v1/models`` yet serves ``POST /v1/responses``
+        # normally. Listing is an entitlement view, not the model set, so a
+        # row must be dropped only on ``model_not_found`` from a real call.
+        replace(gpt56, model_id="gpt-5.6"),
+        replace(
+            gpt56,
+            model_id="gpt-5.6-luna",
+            prices=_prices(
+                request=1.0,
+                response=6.0,
+                cache_write=1.25,
+                cache_read=0.1,
+                two_tier=True,
+            ),
+        ),
+        replace(
+            gpt56,
+            model_id="gpt-5.6-terra",
+            prices=_prices(
+                request=2.5,
+                response=15.0,
+                cache_write=3.125,
+                cache_read=0.25,
+                two_tier=True,
+            ),
+        ),
+        replace(
+            legacy,
+            model_id="gpt-5.5",
+            context=_windowed(request=272_000, response=128_000, long=1_000_000),
+            prices=_prices(request=5.0, response=30.0, cache_read=0.5, two_tier=True),
+        ),
+        replace(
+            legacy,
+            model_id="gpt-5.5-pro",
+            prices=_prices(request=30.0, response=180.0, two_tier=True),
+        ),
+        replace(legacy, model_id="gpt-5.4"),
+        replace(
+            legacy,
+            model_id="gpt-5.4-pro",
+            prices=_prices(request=30.0, response=180.0, two_tier=True),
+        ),
+        replace(
+            legacy,
+            model_id="gpt-5.4-mini",
+            context=_context(request=400_000, response=128_000),
+            prices=_prices(request=0.75, response=4.5, cache_read=0.075),
+        ),
+        replace(
+            legacy,
+            model_id="gpt-5.4-nano",
+            context=_context(request=400_000, response=128_000),
+            prices=_prices(request=0.2, response=1.25, cache_read=0.02),
+        ),
+        replace(
+            legacy,
+            model_id="gpt-5.3-codex",
+            context=_context(request=400_000, response=128_000),
+            prices=_prices(request=1.75, response=14.0, cache_read=0.175),
+        ),
+        replace(
+            legacy,
+            model_id="gpt-5.3-chat-latest",
+            context=_context(request=128_000, response=16_384),
+            prices=_prices(request=1.75, response=14.0, cache_read=0.175),
+        ),
+        replace(
+            legacy,
+            model_id="gpt-5.2",
+            context=_context(request=400_000, response=128_000),
+            prices=_prices(request=1.75, response=14.0, cache_read=0.175),
+        ),
+        replace(
+            legacy,
+            model_id="o1",
+            context=_context(request=200_000, response=100_000),
+            prices=_prices(request=15.0, response=60.0, cache_read=7.5),
+        ),
+        replace(
+            legacy,
+            model_id="o3-mini",
+            context=_context(request=200_000, response=100_000),
+            prices=_prices(request=1.1, response=4.4, cache_read=0.55),
+        ),
+        replace(
+            gpt4,
+            model_id="gpt-4.1",
+            context=_windowed(request=1_047_576, response=32_768, long=1_047_576),
+            prices=_prices(request=2.0, response=8.0, cache_read=0.5),
+        ),
+        replace(
+            gpt4,
+            model_id="gpt-4.1-mini",
+            context=_windowed(request=1_047_576, response=32_768, long=1_047_576),
+            prices=_prices(request=0.4, response=1.6, cache_read=0.1),
+        ),
+        replace(
+            gpt4,
+            model_id="gpt-4.1-nano",
+            context=_windowed(request=1_047_576, response=32_768, long=1_047_576),
+            prices=_prices(request=0.1, response=0.4, cache_read=0.025),
+        ),
+        replace(
+            gpt4,
+            model_id="gpt-4o",
+            context=_context(request=128_000, response=16_384),
+            prices=_prices(request=2.5, response=10.0, cache_read=1.25),
+        ),
+        replace(
+            gpt4,
+            model_id="gpt-4o-mini",
+            context=_context(request=128_000, response=16_384),
+            prices=_prices(request=0.15, response=0.6, cache_read=0.075),
+        ),
+        replace(
+            gpt4,
+            model_id="gpt-4-turbo",
+            context=_context(request=128_000, response=4_096),
+            prices=_prices(request=10.0, response=30.0),
+        ),
+        replace(
+            gpt4,
+            model_id="gpt-4",
+            context=_context(request=8_192, response=8_192),
+            prices=_prices(request=30.0, response=60.0),
+        ),
+    )
+    return MappingProxyType({row.model_id: row for row in rows})
 
 
 def reasoning_effort(
@@ -325,12 +260,10 @@ def api() -> ModelCapability:
 
     """
     return ModelCapability(
-        thinking_effort=frozenset(
-            {"none", "min", "low", "medium", "high", "xhigh", "max"}
-        ),
-        thinking_budget=frozenset({"none", "auto", "fixed"}),
-        thinking_output=frozenset({"none", "text", "redacted"}),
-        service_tier=frozenset({"auto", "default", "flex", "priority"}),
+        thinking_effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
+        thinking_budget={"none", "auto", "fixed"},
+        thinking_output={"none", "text", "redacted"},
+        service_tier={"auto", "default", "flex", "priority"},
     )
 
 
@@ -351,12 +284,10 @@ def subscription() -> ModelCapability:
     # unqualified request still sends the default, so dropping it would make
     # ``ModelSettings()`` invalid on every Codex model.
     return ModelCapability(
-        thinking_effort=frozenset(
-            {"none", "min", "low", "medium", "high", "xhigh", "max"}
-        ),
-        thinking_budget=frozenset({"none", "auto", "fixed"}),
-        thinking_output=frozenset({"none", "text", "redacted"}),
-        service_tier=frozenset({"auto", "priority"}),
+        thinking_effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
+        thinking_budget={"none", "auto", "fixed"},
+        thinking_output={"none", "text", "redacted"},
+        service_tier={"auto", "priority"},
         account_auth=True,
     )
 
@@ -380,12 +311,10 @@ def chat() -> ModelCapability:
     # Every axis stated: ``&`` can only remove, and a defaulted axis is the
     # narrow value, so an omitted one would strip the model's real capability.
     return ModelCapability(
-        thinking_effort=frozenset(
-            {"none", "min", "low", "medium", "high", "xhigh", "max"}
-        ),
-        thinking_budget=frozenset({"none", "auto", "fixed"}),
-        thinking_output=frozenset({"none", "text", "redacted"}),
-        service_tier=frozenset({"auto", "default", "flex", "priority"}),
+        thinking_effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
+        thinking_budget={"none", "auto", "fixed"},
+        thinking_output={"none", "text", "redacted"},
+        service_tier={"auto", "default", "flex", "priority"},
     )
 
 
@@ -467,11 +396,11 @@ def _tiers() -> frozenset[ServiceTier]:
     return frozenset({"auto", "default", "flex", "priority"})
 
 
-def _legacy_efforts() -> frozenset[ThinkingEffort]:
-    """Every effort the pre-5.6 reasoning wire accepts."""
-    return frozenset({"none", "min", "low", "medium", "high", "xhigh", "max"})
+def _efforts() -> frozenset[ThinkingEffort]:
+    """Every effort a reasoning row accepts; the ladders differ only on the wire.
 
-
-def _gpt56_efforts() -> frozenset[ThinkingEffort]:
-    """Every effort the GPT-5.6 reasoning wire accepts."""
+    One set, not two: ``reasoning_effort`` remaps ``none``/``xhigh`` for the
+    pre-5.6 wire, so the SELECTABLE levels are identical and a second
+    frozenset only claimed a distinction the catalog does not have.
+    """
     return frozenset({"none", "min", "low", "medium", "high", "xhigh", "max"})

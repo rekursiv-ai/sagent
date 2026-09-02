@@ -56,7 +56,7 @@ def test_moonshot_base_url_override_via_from_key() -> None:
 def test_moonshot_offers_no_prompt_cache() -> None:
     p = Moonshot.from_key("k")
     m = p.model("kimi-k2.6")
-    assert m.capability.cache_ttl_sec == 0.0
+    assert m.capability.cache_ttl_sec == frozenset({0.0})
 
 
 if __name__ == "__main__":

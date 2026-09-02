@@ -521,7 +521,7 @@ def test_model_capabilities() -> None:
     model = provider.model("claude-sonnet-4-5")
     assert model.capability.thinking_budget != frozenset({"none"})
     assert model.capability.thinking_effort == frozenset({"none"})
-    assert model.capability.cache_ttl_sec == 0.0
+    assert model.capability.cache_ttl_sec == frozenset({0.0})
     assert model.capability.manage_context_server_side == frozenset({True})
     assert model.capability.retries_internally is False
 

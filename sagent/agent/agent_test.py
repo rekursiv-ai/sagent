@@ -247,8 +247,8 @@ class StubModel:
                 if self.supports_thinking
                 else frozenset({"none"})
             ),
-            service_tier=frozenset({"auto", *self.valid_service_tiers}),
-            cache_ttl_sec=3600.0 if self.supports_cache_control else 0.0,
+            service_tier={"auto", *self.valid_service_tiers},
+            cache_ttl_sec={3600.0} if self.supports_cache_control else {0.0},
             manage_context_server_side=(
                 frozenset({False, True})
                 if self.supports_context_management
@@ -7385,7 +7385,7 @@ def test_swap_model_resets_a_budget_the_new_model_rejects() -> None:
             # original and raises on Python < 3.14 (python/cpython#90562).
             return dataclasses.replace(
                 super(_EnabledOnlyModel, self).capability,
-                thinking_budget=frozenset({"none", "fixed"}),
+                thinking_budget={"none", "fixed"},
             )
 
     a = _build_agent(model=StubModel(supports_thinking=True))
