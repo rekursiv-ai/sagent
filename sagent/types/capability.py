@@ -307,6 +307,11 @@ class ModelSettings:
             service_tier=_lowest(
                 "service_tier", capability.service_tier, _ladder(ServiceTier)
             ),
+            # Not the field default: a bound's lowest value is the EXPENSIVE
+            # one, and the wire caches whether or not this says so. 300s is
+            # the tier every price row encodes; a transport offering less
+            # (or none) clamps.
+            cache_ttl_sec=min(300.0, capability.cache_ttl_sec),
             manage_context_server_side=_lowest(
                 "manage_context_server_side",
                 capability.manage_context_server_side,

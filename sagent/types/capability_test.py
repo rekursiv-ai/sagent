@@ -266,7 +266,19 @@ def test_adopt_drops_a_knob_the_new_model_rejects() -> None:
 
 
 def test_narrowest_is_the_unset_value_of_every_axis_that_offers_one() -> None:
-    assert ModelSettings.narrowest(_row()) == ModelSettings(capability=_row())
+    assert ModelSettings.narrowest(_row()) == ModelSettings(
+        capability=_row(), cache_ttl_sec=300.0
+    )
+
+
+def test_narrowest_selects_the_cache_the_wire_already_ships() -> None:
+    """``0.0`` claimed no caching while a ``5m`` breakpoint shipped anyway."""
+    assert ModelSettings.narrowest(_row()).cache_ttl_sec == 300.0
+    assert ModelSettings.narrowest(ModelCapability()).cache_ttl_sec == 0.0
+    assert (
+        ModelSettings.narrowest(ModelCapability(cache_ttl_sec=60.0)).cache_ttl_sec
+        == 60.0
+    )
 
 
 def test_narrowest_carries_the_context_the_id_selected() -> None:
