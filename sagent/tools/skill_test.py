@@ -22,12 +22,6 @@ from sagent.types.runtime import (
 )
 
 
-# The live catalog (loaded into every session) plus the archived tree that
-# `discover` no longer scans. Both are authored docs and hold the same
-# frontmatter/token contracts.
-_SKILL_ROOTS = (".sagent/skills", "experimental/skills")
-
-
 def _write_skill(
     root: Path,
     name: str,
