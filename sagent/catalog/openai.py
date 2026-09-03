@@ -147,12 +147,11 @@ def models() -> Mapping[str, ModelCapability]:
             context=_context(request=400_000, response=128_000),
             prices=_prices(request=1.75, response=14.0, cache_read=0.175),
         ),
-        replace(
-            legacy,
-            model_id="gpt-5.3-chat-latest",
-            context=_context(request=128_000, response=16_384),
-            prices=_prices(request=1.75, response=14.0, cache_read=0.175),
-        ),
+        # No `*-chat-latest` row. Those aliases are listed by `/v1/models` but
+        # rejected by `/v1/responses` with `model_not_found` (verified for
+        # gpt-5, gpt-5.2 and gpt-5.3 variants), and the Responses API is the
+        # only one this provider speaks -- so a row for one is a model no
+        # caller here can reach.
         replace(
             legacy,
             model_id="gpt-5.2",

@@ -14,7 +14,7 @@ behavioral test written against the content its author had in mind.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from functools import cache
 from pathlib import Path
 from typing import Final
 
@@ -71,20 +71,33 @@ _BANNED_NAMES: Final = (
 )
 
 
-def _sources() -> Iterator[tuple[str, str]]:
-    """Yield ``(relative_path, text)`` for every shipped non-test module.
+@cache
+def _sources() -> tuple[tuple[str, str], ...]:
+    """Return ``(relative_path, text)`` for every shipped non-test module.
 
     ``examples/`` is excluded: its models are deliberately offline and
     tokenizer-free, so a ratio there IS the estimator, not a conversion
     away from one.
+
+    Dot-prefixed directories are skipped because this walk is over a
+    WORKING TREE, not the shipped package: a developer venv at
+    ``sagent/.venv`` put 38k site-packages files in scope, one of which is
+    latin-1 by design (joblib's encoding fixture) and raised
+    UnicodeDecodeError before any assertion ran. That also covers
+    ``.export/``, whose staged copy would otherwise double every hit.
+
+    Cached because all nine tests in this module walk the same tree, and
+    re-reading it per test was the module's entire runtime.
     """
+    found: list[tuple[str, str]] = []
     for path in sorted(_CWD.rglob("*.py")):
-        rel = str(path.relative_to(_CWD))
-        if path.name.endswith("_test.py") or ".export/" in rel:
+        rel = path.relative_to(_CWD)
+        if any(part.startswith(".") for part in rel.parts):
             continue
-        if rel.startswith("examples/"):
+        if path.name.endswith("_test.py") or rel.parts[0] == "examples":
             continue
-        yield rel, path.read_text(encoding="utf-8")
+        found.append((str(rel), path.read_text(encoding="utf-8")))
+    return tuple(found)
 
 
 @pytest.mark.parametrize("banned", _BANNED_NAMES)
