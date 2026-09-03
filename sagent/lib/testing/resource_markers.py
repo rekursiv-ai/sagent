@@ -177,7 +177,6 @@ def resource_marker_timeout(
         ("compute_large_fixture", 180),
         ("compute_torch_compile", 900),
         ("db_pglite", 180),
-        ("network_openml", 60),
         ("network_shadeform", 300),
         ("network_together", 4800),
     ),
