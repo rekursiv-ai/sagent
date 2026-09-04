@@ -349,7 +349,7 @@ class OpenAICompatModel(ModelDefaults):
         enc = self._tiktoken_encoding()
         if enc is None:
             return len(text) // 4
-        return len(enc.encode(text))
+        return len(enc.encode_ordinary(text))
 
     @override
     def approx_image_tokens(self, data: bytes) -> int:
@@ -579,7 +579,7 @@ class _TiktokenEstimator:
     image_fallback: OpenAICompatModel
 
     def approx_text_tokens(self, text: str) -> int:
-        return len(self.encoding.encode(text))
+        return len(self.encoding.encode_ordinary(text))
 
     def approx_image_tokens(self, data: bytes) -> int:
         return self.image_fallback.approx_image_tokens(data)
