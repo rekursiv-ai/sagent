@@ -690,8 +690,10 @@ def test_anthropic_sonnet_5_model_profile() -> None:
     m = p.model("claude-sonnet-5")
     assert m.limits.max_request_tokens == 1_000_000
     assert m.limits.max_response_tokens == 128_000
-    assert m.capability.prices[PriceCatalogProduct()].request == 3.0
-    assert m.capability.prices[PriceCatalogProduct()].response == 15.0
+    # $2/$10 launched as introductory pricing through 2026-08-31; Anthropic
+    # cancelled the scheduled rise to $3/$15 and made it the standard rate.
+    assert m.capability.prices[PriceCatalogProduct()].request == 2.0
+    assert m.capability.prices[PriceCatalogProduct()].response == 10.0
     assert m.capability.thinking_effort == frozenset(
         {"none", "low", "medium", "high", "xhigh", "max"}
     )

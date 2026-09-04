@@ -108,9 +108,13 @@ def models() -> Mapping[str, ModelCapability]:
         thinking_output={"none", "text", "redacted"},
     )
     rows = (
+        # Fable 5.1 and Mythos 5.1 bill cache hits at 0.025x base input, not
+        # the 0.1x every other model uses -- $0.25/Mtok here, and the flat
+        # 0.1x this catalog assumed charged 4x that.
         replace(
             five,
             model_id="claude-fable-5-1",
+            prices=_prices(request=10.0, response=50.0, cache_read_multiple=0.025),
         ),
         replace(
             five,
@@ -151,10 +155,12 @@ def models() -> Mapping[str, ModelCapability]:
             thinking_effort={"none", "low", "medium", "high"},
             thinking_budget={"none", "fixed"},
         ),
+        # $2/$10 was introductory pricing through 2026-08-31; the scheduled
+        # rise to $3/$15 on 2026-09-01 was cancelled and this is now standard.
         replace(
             five,
             model_id="claude-sonnet-5",
-            prices=_prices(request=3.0, response=15.0),
+            prices=_prices(request=2.0, response=10.0),
         ),
         replace(
             four,
@@ -276,26 +282,45 @@ def _limits(
 
 
 def _prices(
-    *, request: float, response: float, fast_multiple: float = 0.0
+    *,
+    request: float,
+    response: float,
+    fast_multiple: float = 0.0,
+    cache_read_multiple: float = 0.1,
 ) -> PriceCatalog:
     """USD per million tokens, plus the priority row when the model has one.
 
-    Fast mode surcharges request/response only: Anthropic's fast-mode table
-    lists no separate cache rates.
+    Cache rates are multiples of the BASE INPUT price, so they ride every
+    other modifier: "Prompt caching multipliers apply on top of fast mode
+    pricing" (https://docs.anthropic.com/en/docs/about-claude/pricing).
+    Leaving them unmultiplied on the fast row under-billed cached fast
+    requests by half.
+
+    Args:
+      request: Base input price per Mtok.
+      response: Output price per Mtok.
+      fast_multiple: Fast-mode surcharge, or 0 when the model has none.
+      cache_read_multiple: Cache-hit multiple of base input. The 5-series
+        Fable/Mythos ids bill 0.025x; every other model bills 0.1x.
+
+    Returns:
+      prices: Standard row, plus the priority row when fast mode exists.
+
     """
     rows = {
         PriceCatalogProduct(): TokenPrice(
             request=request,
             response=response,
             cache_write=request * 1.25,
-            cache_read=request * 0.1,
+            cache_read=request * cache_read_multiple,
         )
     }
     if fast_multiple:
+        fast_request = request * fast_multiple
         rows[PriceCatalogProduct(service_tier="priority")] = TokenPrice(
-            request=request * fast_multiple,
+            request=fast_request,
             response=response * fast_multiple,
-            cache_write=request * 1.25,
-            cache_read=request * 0.1,
+            cache_write=fast_request * 1.25,
+            cache_read=fast_request * cache_read_multiple,
         )
     return PriceCatalog(rows)

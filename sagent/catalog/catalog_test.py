@@ -96,9 +96,15 @@ def test_no_axis_is_empty(row: ModelCapability) -> None:
 
 @pytest.mark.parametrize("row", _ROWS)
 def test_a_row_that_can_think_can_be_asked_not_to(row: ModelCapability) -> None:
-    """Model Studio's ``-thinking`` ids are the one exception."""
+    """Two exceptions, both vendor-enforced rather than stylistic.
+
+    Model Studio's ``-thinking`` ids reason unconditionally, and
+    ``gpt-6-astra`` 400s on both ``none`` and ``minimal`` (measured
+    2026-09-04) -- a row offering ``none`` there would let a caller
+    select a value the wire refuses.
+    """
     if "none" not in row.thinking_effort:
-        assert row.model_id.endswith("-thinking-2507"), row.model_id
+        assert row.model_id.endswith("-thinking-2507") or row.model_id == "gpt-6-astra"
 
 
 @pytest.mark.parametrize("row", _ROWS)
@@ -166,6 +172,64 @@ def test_a_transport_never_advertises_what_no_row_can_reach(
             f"{name}: transport offers {offered!r} but the widest row"
             f" reaches only {best!r}"
         )
+
+
+# Base input/output USD per Mtok, transcribed from each vendor's pricing page
+# on 2026-09-04. Only rows whose price this repo actually bills against are
+# listed; the point is to catch a REPRICE, which no structural invariant sees.
+# Sources:
+#   https://developers.openai.com/api/docs/pricing
+#   https://docs.anthropic.com/en/docs/about-claude/pricing
+#   https://ai.google.dev/gemini-api/docs/pricing
+_PUBLISHED_PRICES = {
+    "gpt-6-astra": (10.0, 50.0),
+    "gpt-5.6-sol": (4.0, 20.0),
+    "gpt-5.6": (4.0, 20.0),
+    "gpt-5.6-terra": (2.0, 12.0),
+    "gpt-5.6-luna": (0.2, 1.2),
+    "gpt-5.5": (5.0, 30.0),
+    "claude-opus-5": (5.0, 25.0),
+    "claude-fable-5-1": (10.0, 50.0),
+    "claude-sonnet-5": (2.0, 10.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+    "gemini-3.1-pro-preview": (2.0, 12.0),
+    "gemini-2.5-pro": (1.25, 10.0),
+}
+
+
+@pytest.mark.parametrize(("model_id", "published"), _PUBLISHED_PRICES.items())
+def test_a_row_bills_the_vendors_published_rate(
+    model_id: str, published: tuple[float, float]
+) -> None:
+    """Catch a reprice, which every structural invariant here passes through.
+
+    The GPT-5.6 family was repriced after its rows landed (Sol $5/$30 ->
+    $4/$20, Luna $1/$6 -> $0.20/$1.20) and Sonnet 5's introductory $2/$10
+    became permanent. Every other test in this file stayed green: they
+    assert a row IS priced, never that the number is right.
+    """
+    rows = {mid: row for module in _VENDORS for mid, row in module.models().items()}
+    price = rows[model_id].prices[PriceCatalogProduct()]
+    assert (price.request, price.response) == published
+
+
+def test_a_cache_rate_is_a_multiple_of_the_rate_it_rides() -> None:
+    """Anthropic cache rates key off BASE INPUT, so they ride every modifier.
+
+    Fast mode left them unmultiplied, billing a cached fast request at
+    half its real rate. Fable 5.1 bills cache hits at 0.025x rather than
+    the 0.1x every other model uses.
+    """
+    rows = anthropic.models()
+    opus = rows["claude-opus-5"].prices
+    standard = opus[PriceCatalogProduct()]
+    fast = opus[PriceCatalogProduct(service_tier="priority")]
+    assert (fast.request, fast.response) == (10.0, 50.0)
+    assert fast.cache_write == fast.request * 1.25
+    assert fast.cache_read == fast.request * 0.1
+    assert fast.cache_write == standard.cache_write * 2.0
+    fable = rows["claude-fable-5-1"].prices[PriceCatalogProduct()]
+    assert fable.cache_read == 0.25
 
 
 def test_no_catalog_declares_a_latency_tag() -> None:

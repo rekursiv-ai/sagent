@@ -17,6 +17,7 @@ import tiktoken
 
 from sagent.catalog import openai as openai_catalog
 from sagent.lib.custom_json import DictCodec, StrCodec
+from sagent.providers.lib.errors import ChatToolsUnsupportedError
 from sagent.providers.openai.api import OpenAI
 from sagent.types.capability import (
     ModelSettings,
@@ -166,6 +167,70 @@ def test_openai_two_tier_default_caps_at_272k(base_id: str, full_tokens: int) ->
     assert full.limits.max_request_bytes == base.limits.max_request_bytes
 
 
+def test_openai_gpt_6_astra_profile() -> None:
+    """Measured against the live API 2026-09-04.
+
+    ``reasoning.effort`` 400s on ``none``/``minimal`` and takes low..max;
+    ``service_tier`` takes auto/default/flex/priority (``batch`` 400s);
+    the window is 272K untagged with a 1.05M ``+1m`` variant.
+    """
+    m = OpenAI.from_key("k").model("gpt-6-astra")
+    assert m.limits.max_request_tokens == 272_000
+    assert m.limits.max_response_tokens == 128_000
+    assert m.capability.prices[PriceCatalogProduct()].request == 10.0
+    assert m.capability.prices[PriceCatalogProduct()].response == 50.0
+    assert m.capability.prices[PriceCatalogProduct()].cache_write == 12.5
+    assert m.capability.prices[PriceCatalogProduct()].cache_read == 1.0
+    assert m.capability.service_tier == frozenset(
+        {"auto", "default", "flex", "priority"}
+    )
+    assert OpenAI.from_key("k").model("gpt-6-astra+1m").limits.max_request_tokens == (
+        1_050_000
+    )
+
+
+def test_openai_gpt_6_astra_cannot_be_asked_not_to_think() -> None:
+    """Astra is the one OpenAI row that withholds ``none``.
+
+    The API rejects both ``none`` and ``minimal`` outright, so offering
+    them would let a caller select a value the wire refuses.
+    """
+    m = OpenAI.from_key("k").model("gpt-6-astra")
+    assert m.capability.thinking_effort == frozenset(
+        {"low", "medium", "high", "xhigh", "max"}
+    )
+    with pytest.raises(ValueError, match="thinking_effort"):
+        m.settings.thinking_effort = "none"
+
+
+def test_openai_gpt_6_keeps_the_native_effort_ladder() -> None:
+    """GPT-6 spells ``xhigh``/``max`` literally, as 5.6 does.
+
+    Falling back to the pre-5.6 ladder would silently downgrade ``max``
+    to ``high`` and lose the top rung the model actually serves.
+    """
+    assert openai_catalog.reasoning_effort("max", model_id="gpt-6-astra") == "max"
+    assert openai_catalog.reasoning_effort("xhigh", model_id="gpt-6-astra") == "xhigh"
+    # Chat Completions tops out at ``xhigh``; ``max`` is Responses-only.
+    assert (
+        openai_catalog.reasoning_effort("max", model_id="gpt-6-astra", chat=True)
+        == "xhigh"
+    )
+
+
+@pytest.mark.parametrize("effort", ["none", "min"])
+def test_openai_gpt_6_effort_floor_never_emits_a_rejected_value(
+    effort: ThinkingEffort,
+) -> None:
+    """Astra's floor is ``low``: the API 400s on ``none`` and ``minimal``.
+
+    The capability withholds both levels, but this function is public and
+    reachable without that check, so returning ``none`` here would leave
+    the guarantee resting on call order rather than on the mapping.
+    """
+    assert openai_catalog.reasoning_effort(effort, model_id="gpt-6-astra") == "low"
+
+
 def test_openai_default_model_opts_into_full_window() -> None:
     # API-key default is the ``+1m`` variant: full window out of the box.
     p = OpenAI.from_key("k")
@@ -177,10 +242,10 @@ def test_openai_default_model_opts_into_full_window() -> None:
 @pytest.mark.parametrize(
     ("model_id", "request_price", "response_price", "cache_write_price"),
     [
-        ("gpt-5.6-sol", 5.0, 30.0, 6.25),
-        ("gpt-5.6", 5.0, 30.0, 6.25),
-        ("gpt-5.6-terra", 2.5, 15.0, 3.125),
-        ("gpt-5.6-luna", 1.0, 6.0, 1.25),
+        ("gpt-5.6-sol", 4.0, 20.0, 5.0),
+        ("gpt-5.6", 4.0, 20.0, 5.0),
+        ("gpt-5.6-terra", 2.0, 12.0, 2.5),
+        ("gpt-5.6-luna", 0.2, 1.2, 0.25),
     ],
 )
 def test_openai_gpt_56_profiles(
@@ -227,11 +292,45 @@ def test_openai_gpt_56_image_tokens_use_32px_patches(
     assert model.approx_image_tokens(_png(width, height)) == tokens
 
 
+@pytest.mark.parametrize(
+    ("width", "height", "tokens"),
+    [(1, 1, 2), (96, 96, 11), (512, 512, 308), (100, 200, 34), (2048, 1024, 2458)],
+)
+def test_openai_gpt_6_image_tokens_scale_the_patch_grid(
+    width: int,
+    height: int,
+    tokens: int,
+) -> None:
+    """Astra bills ``floor(1.2 * patches) + 1``, not 5.6's bare patch count.
+
+    Every expectation is a server-reported ``usage.input_tokens`` delta
+    measured on 2026-09-04, with the text-only envelope differenced out.
+    Reusing the 5.6 formula under-counts each of these by ~20%.
+    """
+    model = OpenAI.from_key("k").model("gpt-6-astra")
+    assert model.approx_image_tokens(_png(width, height)) == tokens
+
+
 @pytest.mark.anyio
 @pytest.mark.compute_large_fixture
 async def test_openai_gpt_56_uses_o200k_tokenizer() -> None:
     model = OpenAI.from_key("k").model("gpt-5.6-sol")
     text = "GPT-5.6 token counting: 東京 and function_call(arg=42)"
+    expected = len(tiktoken.get_encoding("o200k_base").encode(text))
+    assert await model.actual_text_tokens(text) == expected
+
+
+@pytest.mark.anyio
+@pytest.mark.compute_large_fixture
+async def test_openai_gpt_6_uses_o200k_tokenizer() -> None:
+    """Tiktoken's registry predates ``gpt-6``, so the fallback must catch it.
+
+    Without the generation mapping the model silently degrades to the
+    chars/4 heuristic. Server counts tracked ``o200k_base`` within 1.2%
+    over 2.9k chars of mixed code, prose, and CJK (measured 2026-09-04).
+    """
+    model = OpenAI.from_key("k").model("gpt-6-astra")
+    text = "GPT-6 token counting: 東京 and function_call(arg=42)"
     expected = len(tiktoken.get_encoding("o200k_base").encode(text))
     assert await model.actual_text_tokens(text) == expected
 
@@ -399,6 +498,55 @@ def test_openai_gpt_56_chat_tools_force_none_effort(effort: ThinkingEffort) -> N
         stream=False,
     )
     assert body["reasoning_effort"] == "none"
+
+
+@pytest.mark.parametrize("effort", ["low", "max"])
+def test_openai_gpt_6_chat_tools_raise_rather_than_400(effort: ThinkingEffort) -> None:
+    """Astra has no tool-serving Chat Completions body at any effort.
+
+    5.6's escape hatch is ``reasoning_effort="none"``, which Astra also
+    rejects, so the request is unconditionally doomed. Sending it anyway
+    spends a round-trip to earn a 400 with no remediation; this fails
+    locally with the transport to switch to.
+    """
+    tool = cast(
+        Tool,
+        SimpleNamespace(
+            name="List",
+            description="List files",
+            directive_schema={"type": "object", "properties": {}},
+        ),
+    )
+    model = OpenAI.from_key("k").model("gpt-6-astra")
+    model._settings = ModelSettings(capability=model.capability, thinking_effort=effort)
+    with pytest.raises(ChatToolsUnsupportedError, match="gpt-6-astra"):
+        _ = model._build_body(
+            ModelRequest(messages=[UserMessage(text="x")], tools=[tool]),
+            stream=False,
+        )
+
+
+def test_openai_chat_tool_support_is_keyed_to_astra_not_the_generation() -> None:
+    """A future GPT-6 must not inherit a limit measured only on Astra.
+
+    The rejection was measured on ``gpt-6-astra`` alone, so keying it to
+    the ``gpt-6`` prefix would refuse tools locally for a later model
+    that serves them -- before any request proves it.
+    """
+    assert not openai_catalog.serves_chat_tools("gpt-6-astra")
+    assert openai_catalog.serves_chat_tools("gpt-6-vega")
+    assert openai_catalog.serves_chat_tools("gpt-5.6-sol")
+
+
+def test_openai_gpt_6_without_tools_still_builds_a_body() -> None:
+    """Only the tools+Chat combination is refused, not the model."""
+    model = OpenAI.from_key("k").model("gpt-6-astra")
+    body = model._build_body(
+        ModelRequest(messages=[UserMessage(text="x")]),
+        stream=False,
+    )
+    assert body["model"] == "gpt-6-astra"
+    assert body["reasoning_effort"] == "low"
 
 
 def test_openai_reasoning_model_uses_max_completion_tokens() -> None:
