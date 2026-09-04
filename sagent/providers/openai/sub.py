@@ -976,9 +976,10 @@ class _OpenAISubModel(_OpenAIModel):
         reasoning_dict: dict[str, str] | None = None
         if reasoning_effort is not None:
             reasoning_dict = {"effort": reasoning_effort, "summary": "auto"}
-            if base_model_id(self.capability.model_id).startswith("gpt-5.6"):
+            if base_model_id(self.capability.model_id).startswith(("gpt-5.6", "gpt-6")):
                 # Sagent replays complete local history with store=False, so
-                # GPT-5.6 must render reasoning across all supplied turns.
+                # these must render reasoning across all supplied turns.
+                # Verified accepted by gpt-6-astra on 2026-09-04.
                 reasoning_dict["context"] = "all_turns"
         reasoning: dict[str, str] | openai.Omit = reasoning_dict or openai.omit
         create_kwargs: dict[str, object] = {

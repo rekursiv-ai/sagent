@@ -58,6 +58,7 @@ from sagent.lib.custom_json import (
     json_unfreeze,
 )
 from sagent.providers.lib.errors import (
+    ChatToolsUnsupportedError,
     error_status_code,
     is_context_overflow_text,
     is_request_too_large,
@@ -362,6 +363,13 @@ class OpenAICompatModel(ModelDefaults):
         dims = image_lib.get_dimensions(data)
         if dims is None:
             return 0
+        if base_model_id(self.capability.model_id) == "gpt-6-astra":
+            # Same 32x32 patch grid as 5.6, then a 1.2x multiplier plus one
+            # token. Measured against ``usage.input_tokens`` on 2026-09-04
+            # over eight sizes from 1x1 to 2048x1024, exact at every one;
+            # reusing 5.6's bare patch count under-counts Astra by ~20%.
+            patches = math.ceil(dims[0] / 32) * math.ceil(dims[1] / 32)
+            return math.floor(1.2 * patches) + 1
         if base_model_id(self.capability.model_id).startswith("gpt-5.6"):
             # GPT-5.6 ``auto``/``original`` preserves dimensions and bills one
             # token unit per 32x32 patch, with patches rounded up per edge.
@@ -390,10 +398,12 @@ class OpenAICompatModel(ModelDefaults):
             return tiktoken.encoding_for_model(self._wire_model_id)
         except KeyError:
             # tiktoken 0.13 maps the GPT-5 generation to o200k_base but its
-            # registry predates dotted release ids (gpt-5.4/5.5/5.6). Keep
-            # OpenAI's own generation mapping instead of silently degrading
-            # these models to the chars/4 heuristic.
-            if base_model_id(self._wire_model_id).startswith("gpt-5."):
+            # registry predates dotted release ids (gpt-5.4/5.5/5.6) and
+            # gpt-6 entirely. Keep OpenAI's own generation mapping instead
+            # of silently degrading these models to the chars/4 heuristic.
+            # Astra measured within 1.2% of o200k_base over 2.9k chars of
+            # mixed code/prose/CJK (2026-09-04).
+            if base_model_id(self._wire_model_id).startswith(("gpt-5.", "gpt-6")):
                 return tiktoken.get_encoding("o200k_base")
             return None
 
@@ -465,6 +475,13 @@ class OpenAICompatModel(ModelDefaults):
         if stream:
             body["stream"] = True
             body["stream_options"] = cast(MutableJSONValue, {"include_usage": True})
+        if request.tools and not openai_catalog.serves_chat_tools(self._wire_model_id):
+            # GPT-5.6's escape hatch does not exist for Astra: it rejects
+            # function tools on Chat Completions at EVERY effort, and also
+            # rejects ``reasoning_effort="none"`` outright, so there is no
+            # body this transport can send. Fail with the remediation
+            # rather than issue a request the server is certain to 400.
+            raise ChatToolsUnsupportedError(model_id=self._wire_model_id)
         if request.tools and self._wire_model_id.startswith("gpt-5.6"):
             # GPT-5.6 Chat Completions rejects function tools whenever
             # reasoning is enabled, including its default ``medium`` effort.

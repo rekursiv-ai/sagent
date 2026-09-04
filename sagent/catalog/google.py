@@ -108,19 +108,19 @@ def models() -> Mapping[str, ModelCapability]:
         replace(
             gemini,
             model_id="gemini-2.5-flash-lite",
-            prices=_prices(request=0.1, response=0.4, cache_read=0.025),
+            prices=_prices(request=0.1, response=0.4, cache_read=0.01),
         ),
         replace(
             gemini,
             model_id="gemini-2.5-flash",
             context=_context(request=1_000_000),
-            prices=_prices(request=0.3, response=2.5, cache_read=0.075),
+            prices=_prices(request=0.3, response=2.5, cache_read=0.03),
         ),
         replace(
             gemini,
             model_id="gemini-2.5-pro",
             context=_context(request=1_000_000),
-            prices=_prices(request=1.25, response=10.0, cache_read=0.31),
+            prices=_prices(request=1.25, response=10.0, cache_read=0.125),
         ),
         replace(
             legacy,

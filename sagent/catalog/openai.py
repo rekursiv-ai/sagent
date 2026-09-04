@@ -29,12 +29,24 @@ from sagent.types.cost import (
 )
 
 
-__all__ = ["api", "chat", "models", "reasoning_effort", "subscription"]
+__all__ = [
+    "api",
+    "chat",
+    "models",
+    "reasoning_effort",
+    "serves_chat_tools",
+    "subscription",
+]
 
 
 # A row carries only what the MODEL can do; caching, retry, and auth mode are
 # transport facts declared on ``API`` / ``SUBSCRIPTION``, since ``&`` can only
 # remove. Every reasoning model takes an auto budget and returns readable text.
+#
+# GPT-5.6 prices verified against the vendor table on 2026-09-04. The family
+# was repriced after this catalog first landed -- Sol $5/$30 -> $4/$20, Luna
+# $1/$6 -> $0.20/$1.20 -- so the old rows over-billed by up to 5x. Sol's rate
+# is promotional "at least through November 21, 2026" and needs rechecking then.
 # ``chars_per_token`` measured from SERVER-reported ``usage.input_tokens``
 # on 347k chars of real session text (2026-08-22), differencing out the
 # per-request envelope. 3.71 across the whole range -- the catalog's prior
@@ -56,7 +68,7 @@ def models() -> Mapping[str, ModelCapability]:
             request=272_000, response=128_000, gpt56_images=True, long=1_050_000
         ),
         prices=_prices(
-            request=5.0, response=30.0, cache_write=6.25, cache_read=0.5, two_tier=True
+            request=4.0, response=20.0, cache_write=5.0, cache_read=0.4, two_tier=True
         ),
         service_tier=_tiers(),
         thinking_effort=_efforts(),
@@ -79,6 +91,25 @@ def models() -> Mapping[str, ModelCapability]:
         thinking_output={"none"},
     )
     rows = (
+        # Measured against the live API 2026-09-04: ``reasoning.effort``
+        # takes low..max but 400s on ``none`` and ``minimal``, so Astra is
+        # the one row that cannot be asked not to think. Chat Completions
+        # rejects function tools at every effort (:func:`serves_chat_tools`).
+        # Every GPT-6 rule here was measured on this id alone, so each names
+        # it exactly rather than the generation: a later GPT-6 whose contract
+        # differs would otherwise inherit a limit nothing verified for it.
+        replace(
+            gpt56,
+            model_id="gpt-6-astra",
+            prices=_prices(
+                request=10.0,
+                response=50.0,
+                cache_write=12.5,
+                cache_read=1.0,
+                two_tier=True,
+            ),
+            thinking_effort={"low", "medium", "high", "xhigh", "max"},
+        ),
         replace(
             gpt56,
             model_id="gpt-5.6-sol",
@@ -94,10 +125,10 @@ def models() -> Mapping[str, ModelCapability]:
             gpt56,
             model_id="gpt-5.6-luna",
             prices=_prices(
-                request=1.0,
-                response=6.0,
-                cache_write=1.25,
-                cache_read=0.1,
+                request=0.2,
+                response=1.2,
+                cache_write=0.25,
+                cache_read=0.02,
                 two_tier=True,
             ),
         ),
@@ -105,10 +136,10 @@ def models() -> Mapping[str, ModelCapability]:
             gpt56,
             model_id="gpt-5.6-terra",
             prices=_prices(
-                request=2.5,
-                response=15.0,
-                cache_write=3.125,
-                cache_read=0.25,
+                request=2.0,
+                response=12.0,
+                cache_write=2.5,
+                cache_read=0.2,
                 two_tier=True,
             ),
         ),
@@ -221,8 +252,8 @@ def reasoning_effort(
 ) -> str:
     """Return the wire ``reasoning_effort`` an effort sends.
 
-    Two ladders: GPT-5.6 takes ``none`` and ``xhigh`` natively, while
-    everything earlier absorbs them into ``minimal`` and ``high``.
+    Two ladders: GPT-5.6 and GPT-6 take ``none`` and ``xhigh`` natively,
+    while everything earlier absorbs them into ``minimal`` and ``high``.
 
     Args:
       effort: Selected effort level.
@@ -233,7 +264,7 @@ def reasoning_effort(
       wire: Value the request body carries.
 
     """
-    if not model_id.startswith("gpt-5.6"):
+    if not _native_effort_ladder(model_id):
         match effort:
             case "none" | "min":
                 return "minimal"
@@ -243,11 +274,34 @@ def reasoning_effort(
                 return effort
     match effort:
         case "none" | "min":
-            return "none"
+            # Astra 400s on both ``none`` and ``minimal``, so its floor is
+            # ``low``. The capability withholds these levels, but this is a
+            # public function reachable without that check -- returning a
+            # value the wire rejects would make the guarantee positional.
+            return "low" if model_id == "gpt-6-astra" else "none"
         case "max":
             return "xhigh" if chat else "max"
         case _:
             return effort
+
+
+def serves_chat_tools(model_id: str) -> bool:
+    """Whether the model accepts function tools on Chat Completions.
+
+    Only ``gpt-6-astra`` does not: it rejects them at every effort, and
+    also rejects the ``reasoning_effort="none"`` escape hatch GPT-5.6
+    uses, leaving no sendable body (measured 2026-09-04). Keyed to the
+    exact id rather than the ``gpt-6`` generation, since a later GPT-6
+    model would otherwise inherit a limit nothing measured for it.
+
+    Args:
+      model_id: Base model id, without option tags.
+
+    Returns:
+      serves: True when the Chat transport may send tools.
+
+    """
+    return model_id != "gpt-6-astra"
 
 
 def api() -> ModelCapability:
@@ -320,6 +374,16 @@ def chat() -> ModelCapability:
         thinking_output={"none", "text", "redacted"},
         service_tier={"auto", "default", "flex", "priority"},
     )
+
+
+def _native_effort_ladder(model_id: str) -> bool:
+    """Whether the wire spells ``none``/``xhigh``/``max`` rather than remapping.
+
+    GPT-5.6 introduced the ladder and GPT-6 kept it: both take the literal
+    values, while every earlier generation absorbs them into ``minimal``
+    and ``high``.
+    """
+    return model_id.startswith("gpt-5.6") or model_id == "gpt-6-astra"
 
 
 def _one(*, request: int, response: int, gpt56_images: bool = False) -> ModelLimits:
