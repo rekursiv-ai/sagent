@@ -10,6 +10,7 @@ import json
 
 import httpx2
 import pytest
+import tiktoken
 
 from sagent.lib.custom_json import MutableJSON
 from sagent.providers.openai.compat import (
@@ -72,6 +73,19 @@ def _billed_model() -> OpenAICompatModel:
                 )
             }
         )
+    )
+
+
+def _tiktoken_model() -> OpenAICompatModel:
+    """An OpenAI model whose text counts use the local tiktoken encoding."""
+    capability = ModelCapability(
+        model_id="gpt-5.6-sol",
+        prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+    )
+    return OpenAICompatModel(
+        provider=OpenAICompat.from_key("k"),
+        capability=capability,
+        settings=ModelSettings.narrowest(capability),
     )
 
 
@@ -522,6 +536,13 @@ def test_model_properties_defaults() -> None:
     assert m.limits.max_image_bytes == 20 * 1024 * 1024
 
 
+def test_approx_text_tokens_treats_special_token_text_as_ordinary() -> None:
+    model = _tiktoken_model()
+    text = "literal <|endoftext|> marker"
+    expected = len(tiktoken.get_encoding("o200k_base").encode_ordinary(text))
+    assert model.approx_text_tokens(text) == expected
+
+
 @pytest.mark.parametrize(
     "message",
     [
@@ -568,6 +589,21 @@ async def test_actual_request_tokens_falls_back_to_approx_for_unknown_model() ->
     m = p.model("stub-1")
     req = ModelRequest(messages=[UserMessage(text="hello world")])
     assert await m.actual_request_tokens(req) == m.approx_request_tokens(req)
+
+
+@pytest.mark.asyncio
+async def test_actual_request_tokens_treats_special_token_text_as_ordinary() -> None:
+    model = _tiktoken_model()
+    request = ModelRequest(
+        messages=[
+            ToolResult(
+                call_id="read",
+                content="ValueError for literal <|endoftext|> marker",
+                is_error=True,
+            )
+        ]
+    )
+    assert await model.actual_request_tokens(request) > 0
 
 
 @pytest.mark.asyncio
