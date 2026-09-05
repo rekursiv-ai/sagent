@@ -34,7 +34,7 @@ _RATIO_ALLOWED: Final = frozenset(
         "providers/google/api.py",
         "providers/google/cli.py",
         # tiktoken-less compat vendors (Kimi, Qwen, MiniMax) fall back to it.
-        "providers/openai/compat.py",
+        "providers/openai/token_count.py",
         # The single no-agent fallback, and the test seam mirroring it.
         "agent/state.py",
         "testing.py",

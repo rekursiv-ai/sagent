@@ -44,13 +44,15 @@ IDs for Sagent's full-window API-key budget. `OpenAISubscription` caps every
 request at its 272K backend contract, so `+1m` would widen nothing there; the
 subscription catalog therefore omits `+1m` IDs entirely and a `+1m` ID raises
 as unknown -- use the base ID (e.g. `gpt-5.6-sol`) under subscription auth.
-GPT-5.6 accepts reasoning
-efforts from `none` through `max`. The subscription Responses API sends `max`
-directly; the API-key Chat Completions transport maps it to that endpoint's
-highest accepted value, `xhigh`, for tool-free requests. GPT-5.6 Chat
-Completions rejects function tools when reasoning is enabled, so Sagent forces
-effort to `none` whenever that transport sends tools. Use
-`OpenAISubscription`'s Responses transport for reasoning and tools together.
+Both OpenAI providers use the Responses API, including for older catalog models.
+GPT-5.6 supports reasoning efforts from `none` through `max`; Astra supports
+`low` through `max`. Reasoning and function tools work together under API-key
+and subscription authentication. Supported efforts vary by model.
+
+API-key requests send output-token limits and temperature for non-reasoning
+models. The subscription backend omits those unsupported fields. Both paths
+replay local conversation history with `store: false`, preserving encrypted
+reasoning and image-bearing tool results. Existing sessions need no conversion.
 
 ## CLI dispatch
 

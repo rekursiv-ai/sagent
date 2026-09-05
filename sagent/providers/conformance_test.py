@@ -32,7 +32,7 @@ from sagent.providers.google.api import _GeminiModel
 from sagent.providers.google.cli import _GoogleCLIModel
 from sagent.providers.minimax.api import _MiniMaxModel
 from sagent.providers.moonshot.api import _MoonshotModel
-from sagent.providers.openai.api import _OpenAIModel
+from sagent.providers.openai.responses import _OpenAIResponsesModel
 from sagent.providers.openai.sub import _OpenAISubModel
 from sagent.types.model import Model
 from sagent.types.providers import Provider
@@ -46,7 +46,7 @@ _MODEL_CLASSES = [
     _AnthropicCLIModel,
     _GeminiModel,
     _GoogleCLIModel,
-    _OpenAIModel,
+    _OpenAIResponsesModel,
     _OpenAISubModel,
     _DashScopeModel,
     _MiniMaxModel,

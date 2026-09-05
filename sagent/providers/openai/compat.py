@@ -1,6 +1,6 @@
 """OpenAI chat-completions compatible base.
 
-Concrete providers (OpenAI, Kimi, Qwen, MiniMax, any local vLLM/SGLang
+Third-party providers (Kimi, Qwen, MiniMax, any local vLLM/SGLang
 box) subclass ``OpenAICompat`` and override a handful of class attrs::
 
     class Kimi(OpenAICompat):
@@ -29,16 +29,13 @@ from typing import TYPE_CHECKING, ClassVar, Self, cast, override
 
 import asyncio
 import base64
-import dataclasses
 import json
 import logging
-import math
 import os
 
 
 if TYPE_CHECKING:
     import httpx2
-    import tiktoken
 
     import sagent.lib.image as image_lib
 else:
@@ -46,10 +43,8 @@ else:
 
     httpx2 = lazy_import("httpx2")  # 100ms cold
     image_lib = lazy_import("sagent.lib.image")
-    tiktoken = lazy_import("tiktoken")  # 30ms cold
 
-from sagent.catalog import openai as openai_catalog
-from sagent.lib import debug_log, token_count
+from sagent.lib import debug_log
 from sagent.lib.custom_json import (
     DictCodec,
     IntCodec,
@@ -68,7 +63,8 @@ from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.lib.usage import openai_usage
-from sagent.types.capability import ModelCapability, ModelSettings
+from sagent.providers.openai import token_count
+from sagent.types.capability import ModelCapability, ModelSettings, ServiceTier
 from sagent.types.cost import TokenCount
 from sagent.types.model import (
     ModelRequest,
@@ -210,27 +206,6 @@ class OpenAICompat:
         return self.model("utility")
 
 
-def _resized_dims(dims: tuple[int, int], max_edge: int) -> tuple[int, int]:
-    """Dimensions after the aspect-preserving resize serialization applies.
-
-    ``max_edge <= 0`` means the transport sends the image untouched.
-
-    Args:
-      dims: Source ``(width, height)``.
-      max_edge: Long-edge ceiling from the model's limits.
-
-    Returns:
-      resized: ``(width, height)`` as they will cross the wire.
-
-    """
-    width, height = dims
-    longest = max(width, height)
-    if max_edge <= 0 or longest <= max_edge:
-        return width, height
-    scale = max_edge / longest
-    return max(1, int(width * scale)), max(1, int(height * scale))
-
-
 class OpenAICompatModel(ModelDefaults):
     """Chat-completions model backend.
 
@@ -260,6 +235,78 @@ class OpenAICompatModel(ModelDefaults):
         self._clients: PerLoop[httpx2.AsyncClient | None] = PerLoop(lambda: None)
         self._client_lock: PerLoop[asyncio.Lock] = PerLoop(asyncio.Lock)
         self._last_usage: UsageSnapshot | None = None
+
+    @property
+    @override
+    def capability(self) -> ModelCapability:
+        """Return the model's capabilities on this transport.
+
+        Returns:
+          capability: Supported model settings, limits, and prices.
+
+        """
+        return self._capability
+
+    @property
+    @override
+    def settings(self) -> ModelSettings:
+        """Return the settings selected for this model instance.
+
+        Returns:
+          settings: Mutable selections validated against the model's capabilities.
+
+        """
+        return self._settings
+
+    @override
+    def approx_text_tokens(self, text: str) -> int:
+        """Estimate text tokens using the model's local tokenizer.
+
+        Args:
+          text: Text to count, treating special-token spellings as ordinary text.
+
+        Returns:
+          tokens: Tokenizer count, or chars/4 when the tokenizer is unknown.
+
+        """
+        return token_count.approx_text_tokens(text, model_id=self._wire_model_id)
+
+    @override
+    def approx_image_tokens(self, data: bytes) -> int:
+        """Estimate image tokens with the model's patch or tile formula.
+
+        Args:
+          data: Encoded image bytes.
+
+        Returns:
+          tokens: Model-specific estimate, or zero when dimensions are unavailable.
+
+        """
+        return token_count.approx_image_tokens(
+            data, model_id=self._wire_model_id, max_edge=self.limits.max_image_edge_px
+        )
+
+    def is_context_overflow(self, error: Exception) -> bool:
+        """Classify token-context overflow separately from request-byte limits.
+
+        Args:
+          error: Provider exception to classify.
+
+        Returns:
+          overflow: Whether shortening the token context can address the error.
+
+        """
+        if is_request_too_large(error_status_code(error), str(error)):
+            return False
+        return is_context_overflow_text(str(error))
+
+    @property
+    def _wire_model_id(self) -> str:
+        return base_model_id(self.capability.model_id)
+
+    def _effective_service_tier(self) -> ServiceTier | None:
+        tier = self.settings.service_tier
+        return tier if tier != "auto" else None
 
     @property
     def _client(self) -> httpx2.AsyncClient | None:
@@ -296,28 +343,6 @@ class OpenAICompatModel(ModelDefaults):
         if client is not None:
             await client.aclose()
 
-    @property
-    def _wire_model_id(self) -> str:
-        """Model id sent on the wire, stripped of any ``+1m``/``+200k`` tag.
-
-        The window suffix is a sagent-local budget selector; the OpenAI API
-        rejects it as an unknown model. Capability lookups and metadata key off
-        the base id too, so the wire name must drop the tag.
-        """
-        return base_model_id(self.capability.model_id)
-
-    @property
-    @override
-    def capability(self) -> ModelCapability:
-        """What this model offers on this transport."""
-        return self._capability
-
-    @property
-    @override
-    def settings(self) -> ModelSettings:
-        """What this instance chose."""
-        return self._settings
-
     def _is_effort_model(self, model_id: str) -> bool:
         """Whether ``model_id`` accepts a reasoning-effort knob.
 
@@ -328,84 +353,6 @@ class OpenAICompatModel(ModelDefaults):
         del model_id
         return self.capability.thinking_effort != frozenset({"none"})
 
-    def _effective_service_tier(self) -> str | None:
-        """The wire ``service_tier``, or ``None`` to omit the field."""
-        tier = self.settings.service_tier
-        return tier if tier != "auto" else None
-
-    @override
-    def approx_text_tokens(self, text: str) -> int:
-        """Exact tiktoken count when an encoding for ``model_id`` exists.
-
-        tiktoken is local, synchronous, and OpenAI's own tokenizer, so
-        there is no reason for the hot path to guess: this was
-        ``len(text) // 4`` while the exact count sat behind an ``async``
-        method nothing on the budget path could await. Measured 0.3ms for
-        a 4 KB tool result, 17ms for a turn's appends.
-
-        Falls back to a coarse ratio for non-OpenAI models whose ids
-        tiktoken does not recognize (Kimi, Qwen, MiniMax, ...).
-        """
-        enc = self._tiktoken_encoding()
-        if enc is None:
-            return len(text) // 4
-        return len(enc.encode_ordinary(text))
-
-    @override
-    def approx_image_tokens(self, data: bytes) -> int:
-        """Estimate image tokens using the model family's published formula.
-
-        References:
-          https://developers.openai.com/api/docs/guides/images-vision
-
-        """
-        dims = image_lib.get_dimensions(data)
-        if dims is None:
-            return 0
-        if base_model_id(self.capability.model_id) == "gpt-6-astra":
-            # Same 32x32 patch grid as 5.6, then a 1.2x multiplier plus one
-            # token. Measured against ``usage.input_tokens`` on 2026-09-04
-            # over eight sizes from 1x1 to 2048x1024, exact at every one;
-            # reusing 5.6's bare patch count under-counts Astra by ~20%.
-            patches = math.ceil(dims[0] / 32) * math.ceil(dims[1] / 32)
-            return math.floor(1.2 * patches) + 1
-        if base_model_id(self.capability.model_id).startswith("gpt-5.6"):
-            # GPT-5.6 ``auto``/``original`` preserves dimensions and bills one
-            # token unit per 32x32 patch, with patches rounded up per edge.
-            return math.ceil(dims[0] / 32) * math.ceil(dims[1] / 32)
-        # Count the image as it will SHIP. Serialization resizes the long
-        # edge to ``max_image_edge_px`` before sending, so tiling the
-        # source dimensions charged a 4096px image for 64 tiles when 16
-        # cross the wire -- a 4x overcount that fires compaction early.
-        width, height = _resized_dims(dims, self.limits.max_image_edge_px)
-        tiles = math.ceil(width / 512) * math.ceil(height / 512)
-        return 85 + tiles * 170
-
-    @override
-    async def actual_request_tokens(self, request: ModelRequest) -> int:
-        """Local tiktoken-driven walk; falls back to approx without an encoding."""
-        enc = self._tiktoken_encoding()
-        if enc is None:
-            return self.approx_request_tokens(request)
-        return token_count.approx_request_tokens(
-            request, _TiktokenEstimator(encoding=enc, image_fallback=self)
-        )
-
-    def _tiktoken_encoding(self) -> tiktoken.Encoding | None:
-        """Return tiktoken's encoding for this model, or ``None`` if unknown."""
-        try:
-            return tiktoken.encoding_for_model(self._wire_model_id)
-        except KeyError:
-            # tiktoken 0.13 maps the GPT-5 generation to o200k_base but its
-            # registry predates dotted release ids (gpt-5.4/5.5/5.6) and
-            # gpt-6 entirely. Keep OpenAI's own generation mapping instead
-            # of silently degrading these models to the chars/4 heuristic.
-            # Astra measured within 1.2% of o200k_base over 2.9k chars of
-            # mixed code/prose/CJK (2026-09-04).
-            if base_model_id(self._wire_model_id).startswith(("gpt-5.", "gpt-6")):
-                return tiktoken.get_encoding("o200k_base")
-            return None
-
     def _transform_body(
         self,
         body: MutableJSON,
@@ -414,24 +361,6 @@ class OpenAICompatModel(ModelDefaults):
         """Override: apply provider-specific request-body tweaks."""
         del request
         return body
-
-    def is_context_overflow(self, error: Exception) -> bool:
-        """Classify an error as a token context-window overflow.
-
-        Excludes the byte wire-limit (HTTP 413): that is a different
-        condition handled by ``RequestTooLargeError`` -- a larger-window
-        model does not relieve the byte ceiling.
-
-        Args:
-          error: Exception raised by the provider call.
-
-        Returns:
-          overflow: True when ``error`` indicates token-context overflow.
-
-        """
-        if is_request_too_large(error_status_code(error), str(error)):
-            return False
-        return is_context_overflow_text(str(error))
 
     @property
     def _endpoint(self) -> str:
@@ -474,24 +403,14 @@ class OpenAICompatModel(ModelDefaults):
         if stream:
             body["stream"] = True
             body["stream_options"] = cast(MutableJSONValue, {"include_usage": True})
-        if request.tools and self._wire_model_id.startswith("gpt-5.6"):
-            # GPT-5.6 Chat Completions rejects function tools whenever
-            # reasoning is enabled, including its default ``medium`` effort.
-            # The Responses transport supports reasoning and tools together;
-            # this compatibility transport must explicitly disable reasoning.
-            body["reasoning_effort"] = "none"
-            if self.settings.thinking_effort != "none":
-                logger.warning(
-                    "GPT-5.6 Chat Completions requires reasoning effort "
-                    "'none' when tools are present; ignoring requested effort %r. "
-                    "Use the Responses transport for reasoning with tools.",
-                    self.settings.thinking_effort,
-                )
-        elif self.settings.thinking_effort != "none":
-            body["reasoning_effort"] = openai_catalog.reasoning_effort(
-                self.settings.thinking_effort,
-                model_id=self.capability.model_id,
-                chat=True,
+        if self.settings.thinking_effort != "none":
+            effort = self.settings.thinking_effort
+            body["reasoning_effort"] = (
+                "minimal"
+                if effort == "min"
+                else "high"
+                if effort in {"xhigh", "max"}
+                else effort
             )
         tier = self._effective_service_tier()
         if tier is not None:
@@ -570,29 +489,13 @@ class OpenAICompatModel(ModelDefaults):
 
     @override
     def usage_snapshot(self) -> UsageSnapshot | None:
-        """Return normalized usage from the latest response's headers."""
+        """Return quota telemetry from the latest response headers.
+
+        Returns:
+          usage: Normalized quota windows, or None when unavailable.
+
+        """
         return self._last_usage
-
-
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _TiktokenEstimator:
-    """``TokenEstimator`` adapter using ``tiktoken`` for text and a fallback for images.
-
-    Attributes:
-      encoding: tiktoken encoding for the active model.
-      image_fallback: ``OpenAICompatModel`` whose ``approx_image_tokens``
-          provides image-token estimates (tiktoken doesn't handle images).
-
-    """
-
-    encoding: tiktoken.Encoding
-    image_fallback: OpenAICompatModel
-
-    def approx_text_tokens(self, text: str) -> int:
-        return len(self.encoding.encode_ordinary(text))
-
-    def approx_image_tokens(self, data: bytes) -> int:
-        return self.image_fallback.approx_image_tokens(data)
 
 
 def build_messages(
