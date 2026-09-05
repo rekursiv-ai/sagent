@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from io import BytesIO
-from types import SimpleNamespace
-from typing import cast
 
 import asyncio
 import os
@@ -16,62 +14,20 @@ import pytest
 import tiktoken
 
 from sagent.catalog import openai as openai_catalog
-from sagent.lib.custom_json import DictCodec, StrCodec
 from sagent.providers.openai.api import OpenAI
 from sagent.types.capability import (
-    ModelSettings,
-    ServiceTier,
     ThinkingEffort,
 )
 from sagent.types.cost import PriceCatalogProduct
-from sagent.types.model import ModelRequest
-from sagent.types.runtime import UserMessage
-from sagent.types.tools import Tool
 
 
 @pytest.mark.network_openai
 @pytest.mark.asyncio
 async def test_every_catalog_row_is_a_model_the_vendor_serves() -> None:
-    """A catalog row must name a model the API will actually accept.
-
-    Retirement is only visible from a real call. ``GET /v1/models`` lists
-    what the KEY is entitled to see, which is a different set: ``gpt-5.6``
-    is absent from that listing yet serves ``POST /v1/responses``
-    normally, and trusting the listing removed a live model from this
-    catalog. Only ``model_not_found`` from a real request proves a row is
-    dead, so that is what this asserts.
-    """
+    """Every catalog row must complete a successful Responses request."""
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
         pytest.skip("OPENAI_API_KEY not set")
-
-    # Only `model_not_found` is evidence. A timeout or 5xx says the vendor was
-    # slow, which is not a claim about the catalog -- returning `True` there
-    # reported a live model as retired, and returning `False` would hide a real
-    # one. Unresolved is its own verdict, counted but never failing.
-    async def _is_dead(client: httpx2.AsyncClient, model_id: str) -> bool | None:
-        for attempt in range(3):
-            try:
-                response = await client.post(
-                    "https://api.openai.com/v1/responses",
-                    headers={"authorization": f"Bearer {key}"},
-                    json={
-                        "model": model_id,
-                        "input": [{"role": "user", "content": "."}],
-                        "max_output_tokens": 16,
-                    },
-                )
-            except httpx2.TransportError:
-                await asyncio.sleep(2**attempt)
-                continue
-            if response.status_code == 200:
-                return False
-            if response.status_code >= 500 or response.status_code == 429:
-                await asyncio.sleep(2**attempt)
-                continue
-            error = DictCodec.coerce(DictCodec.coerce(response.json()).get("error"))
-            return StrCodec.coerce(error.get("code")) == "model_not_found"
-        return None
 
     # Bounded concurrency: firing one connection per row made the slowest
     # response the whole test's fate, and `ReadTimeout` under that fan-out was
@@ -79,25 +35,39 @@ async def test_every_catalog_row_is_a_model_the_vendor_serves() -> None:
     model_ids = tuple(openai_catalog.models())
     gate = asyncio.Semaphore(8)
 
-    async def _probe(client: httpx2.AsyncClient, model_id: str) -> bool | None:
+    async def _probe(client: httpx2.AsyncClient, model_id: str) -> bool:
         async with gate:
-            return await _is_dead(client, model_id)
+            return await _is_served(client, model_id=model_id, key=key)
 
     async with httpx2.AsyncClient(timeout=60.0) as client:
         verdicts = await asyncio.gather(
             *(_probe(client, model_id) for model_id in model_ids)
         )
-    dead = [
-        model_id
-        for model_id, is_dead in zip(model_ids, verdicts, strict=True)
-        if is_dead is True
-    ]
-    assert not dead, f"catalog names models the API does not serve: {dead}"
-    # Positive control: every row unresolved means the probe measured nothing,
-    # which must not read as a pass.
-    assert any(verdict is not None for verdict in verdicts), (
-        "every catalog probe failed to reach the API; nothing was verified"
-    )
+    assert all(verdicts), "some catalog probes never completed successfully"
+
+
+async def _is_served(client: httpx2.AsyncClient, *, model_id: str, key: str) -> bool:
+    for attempt in range(3):
+        try:
+            response = await client.post(
+                "https://api.openai.com/v1/responses",
+                headers={"authorization": f"Bearer {key}"},
+                json={
+                    "model": model_id,
+                    "input": [{"role": "user", "content": "."}],
+                    "max_output_tokens": 16,
+                },
+            )
+        except httpx2.TransportError:
+            await asyncio.sleep(2**attempt)
+            continue
+        if response.status_code == 200:
+            return True
+        if response.status_code >= 500 or response.status_code == 429:
+            await asyncio.sleep(2**attempt)
+            continue
+        response.raise_for_status()
+    return False
 
 
 def test_openai_from_key_constructs() -> None:
@@ -189,7 +159,7 @@ def test_openai_gpt_6_astra_profile() -> None:
 
 
 def test_openai_gpt_6_astra_cannot_be_asked_not_to_think() -> None:
-    """Astra is the one OpenAI row that withholds ``none``.
+    """Astra withholds ``none``.
 
     The API rejects both ``none`` and ``minimal`` outright, so offering
     them would let a caller select a value the wire refuses.
@@ -210,11 +180,6 @@ def test_openai_gpt_6_keeps_the_native_effort_ladder() -> None:
     """
     assert openai_catalog.reasoning_effort("max", model_id="gpt-6-astra") == "max"
     assert openai_catalog.reasoning_effort("xhigh", model_id="gpt-6-astra") == "xhigh"
-    # Chat Completions tops out at ``xhigh``; ``max`` is Responses-only.
-    assert (
-        openai_catalog.reasoning_effort("max", model_id="gpt-6-astra", chat=True)
-        == "xhigh"
-    )
 
 
 @pytest.mark.parametrize("effort", ["none", "min"])
@@ -398,211 +363,6 @@ def test_openai_valid_service_tiers() -> None:
     assert m.capability.service_tier == frozenset(
         {"auto", "default", "flex", "priority"}
     )
-
-
-@pytest.mark.parametrize("tier", ["default", "flex", "priority"])
-def test_openai_build_body_emits_service_tier(tier: ServiceTier) -> None:
-    m = OpenAI.from_key("k").model("gpt-5.5")
-    m._settings = ModelSettings(capability=m.capability, service_tier=tier)
-    body = m._build_body(
-        ModelRequest(messages=[UserMessage(text="x")]),
-        stream=False,
-    )
-    assert body["service_tier"] == tier
-
-
-def test_openai_build_body_omits_the_default_tier() -> None:
-    """``auto`` is "let the vendor pick"; sending it pins nothing."""
-    m = OpenAI.from_key("k").model("gpt-5.5")
-    body = m._build_body(
-        ModelRequest(messages=[UserMessage(text="x")]),
-        stream=False,
-    )
-    assert "service_tier" not in body
-
-
-def test_openai_build_body_omits_effort_when_none() -> None:
-    """``none`` means "send no knob", not "send the wire's off value"."""
-    m = OpenAI.from_key("k").model("gpt-5.5")
-    body = m._build_body(
-        ModelRequest(messages=[UserMessage(text="x")]),
-        stream=False,
-    )
-    assert "reasoning_effort" not in body
-
-
-@pytest.mark.parametrize(
-    ("effort", "wire_effort"),
-    [
-        ("min", "minimal"),
-        ("low", "low"),
-        ("medium", "medium"),
-        ("high", "high"),
-        ("xhigh", "high"),
-        ("max", "high"),
-    ],
-)
-def test_openai_pre_56_maps_effort_to_wire_vocabulary(
-    effort: ThinkingEffort,
-    wire_effort: str,
-) -> None:
-    """The pre-5.6 wire takes only ``minimal``/``low``/``medium``/``high``."""
-    m = OpenAI.from_key("k").model("gpt-5.5")
-    m._settings = ModelSettings(capability=m.capability, thinking_effort=effort)
-    body = m._build_body(
-        ModelRequest(messages=[UserMessage(text="x")]),
-        stream=False,
-    )
-    assert body["reasoning_effort"] == wire_effort
-
-
-@pytest.mark.parametrize(
-    ("effort", "wire_effort"),
-    [
-        ("min", "none"),
-        ("low", "low"),
-        ("medium", "medium"),
-        ("high", "high"),
-        ("xhigh", "xhigh"),
-        ("max", "xhigh"),
-    ],
-)
-def test_openai_gpt_56_maps_effort_for_chat_completions(
-    effort: ThinkingEffort,
-    wire_effort: str,
-) -> None:
-    m = OpenAI.from_key("k").model("gpt-5.6-sol")
-    m._settings = ModelSettings(capability=m.capability, thinking_effort=effort)
-    body = m._build_body(
-        ModelRequest(messages=[UserMessage(text="x")]),
-        stream=False,
-    )
-    assert body["reasoning_effort"] == wire_effort
-
-
-@pytest.mark.parametrize("effort", ["none", "low", "max"])
-def test_openai_gpt_56_chat_tools_force_none_effort(effort: ThinkingEffort) -> None:
-    tool = cast(
-        Tool,
-        SimpleNamespace(
-            name="List",
-            description="List files",
-            directive_schema={"type": "object", "properties": {}},
-        ),
-    )
-    model = OpenAI.from_key("k").model("gpt-5.6-sol")
-    model._settings = ModelSettings(capability=model.capability, thinking_effort=effort)
-    body = model._build_body(
-        ModelRequest(messages=[UserMessage(text="x")], tools=[tool]),
-        stream=False,
-    )
-    assert body["reasoning_effort"] == "none"
-
-
-@pytest.mark.parametrize(("effort", "wire_effort"), [("low", "low"), ("max", "xhigh")])
-def test_openai_gpt_6_chat_tools_reach_the_wire(
-    effort: ThinkingEffort, wire_effort: str
-) -> None:
-    """Let the provider decide whether Astra accepts Chat Completions tools."""
-    tool = cast(
-        Tool,
-        SimpleNamespace(
-            name="List",
-            description="List files",
-            directive_schema={"type": "object", "properties": {}},
-        ),
-    )
-    model = OpenAI.from_key("k").model("gpt-6-astra")
-    model._settings = ModelSettings(capability=model.capability, thinking_effort=effort)
-    body = model._build_body(
-        ModelRequest(messages=[UserMessage(text="x")], tools=[tool]),
-        stream=False,
-    )
-    assert body["reasoning_effort"] == wire_effort
-    assert body["tools"] == [
-        {
-            "type": "function",
-            "function": {
-                "name": "List",
-                "description": "List files",
-                "parameters": {"type": "object", "properties": {}},
-            },
-        }
-    ]
-
-
-@pytest.mark.asyncio
-async def test_openai_gpt_6_chat_tools_attempt_surfaces_provider_error() -> None:
-    """Send Astra tools and preserve the provider's rejection text."""
-    requests: list[httpx2.Request] = []
-
-    def handle(request: httpx2.Request) -> httpx2.Response:
-        requests.append(request)
-        return httpx2.Response(400, text="tools temporarily unsupported")
-
-    tool = cast(
-        Tool,
-        SimpleNamespace(
-            name="List",
-            description="List files",
-            directive_schema={"type": "object", "properties": {}},
-        ),
-    )
-    model = OpenAI.from_key("k").model("gpt-6-astra")
-    model._client = httpx2.AsyncClient(transport=httpx2.MockTransport(handle))
-    try:
-        with pytest.raises(
-            httpx2.HTTPStatusError, match="tools temporarily unsupported"
-        ):
-            await model.stream(
-                ModelRequest(messages=[UserMessage(text="x")], tools=[tool])
-            )
-    finally:
-        await model.close()
-    assert len(requests) == 1
-
-
-def test_openai_gpt_6_without_tools_still_builds_a_body() -> None:
-    """Astra builds a normal Chat Completions body without tools."""
-    model = OpenAI.from_key("k").model("gpt-6-astra")
-    body = model._build_body(
-        ModelRequest(messages=[UserMessage(text="x")]),
-        stream=False,
-    )
-    assert body["model"] == "gpt-6-astra"
-    assert body["reasoning_effort"] == "low"
-
-
-def test_openai_reasoning_model_uses_max_completion_tokens() -> None:
-    # gpt-5 / o-series reject ``max_tokens`` (400 unsupported_parameter);
-    # they require ``max_completion_tokens``.
-    p = OpenAI.from_key("k")
-    m = p.model("gpt-5.5")
-    body = m._build_body(
-        ModelRequest(messages=[UserMessage(text="x")], max_response_tokens=42),
-        stream=False,
-    )
-    assert body["max_completion_tokens"] == 42
-    assert "max_tokens" not in body
-
-
-def test_catalog_efforts_are_all_buildable() -> None:
-    """Every effort the catalog offers must reach the wire.
-
-    The catalog stores the wire value as data; a parallel mapper keyed off a
-    different vocabulary made ``min`` pass validation and then raise at
-    body-build time.
-    """
-    m = OpenAI.from_key("k").model("gpt-5.6-sol")
-    for effort in m.capability.thinking_effort - {"none"}:
-        m._settings = ModelSettings(capability=m.capability, thinking_effort=effort)
-        body = m._build_body(
-            ModelRequest(messages=[UserMessage(text="x")]),
-            stream=False,
-        )
-        assert body["reasoning_effort"] == openai_catalog.reasoning_effort(
-            effort, model_id="gpt-5.6-sol", chat=True
-        )
 
 
 if __name__ == "__main__":

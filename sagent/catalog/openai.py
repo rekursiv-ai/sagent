@@ -6,7 +6,7 @@ Sources:
   - Images: https://developers.openai.com/api/docs/guides/images-vision
 
 :func:`models` is the API-key view. Other transports narrow it with ``&``
-(see :func:`chat`, :func:`subscription`), which can only remove.
+(see :func:`subscription`), which can only remove.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import replace
 from types import MappingProxyType
+from typing import Literal
 
 from sagent.types.capability import (
     ContextTag,
@@ -31,7 +32,6 @@ from sagent.types.cost import (
 
 __all__ = [
     "api",
-    "chat",
     "models",
     "reasoning_effort",
     "subscription",
@@ -75,10 +75,10 @@ def models() -> Mapping[str, ModelCapability]:
         thinking_output={"none", "text"},
     )
     # Pre-5.6 tiles ``detail:high`` from a 2048px square and caps the body at
-    # 20MB; the SELECTABLE efforts are identical (``reasoning_effort`` remaps
-    # ``none``/``xhigh`` on the wire).
+    # 20MB.
     legacy = replace(
         gpt56,
+        thinking_effort={"none", "low", "medium", "high", "xhigh"},
         context=_windowed(request=272_000, response=128_000, long=1_050_000),
         prices=_prices(request=2.5, response=15.0, cache_read=0.25, two_tier=True),
     )
@@ -91,8 +91,7 @@ def models() -> Mapping[str, ModelCapability]:
     )
     rows = (
         # Measured against the live API 2026-09-04: ``reasoning.effort``
-        # takes low..max but 400s on ``none`` and ``minimal``, so Astra is
-        # the one row that cannot be asked not to think.
+        # takes low..max but rejects ``none`` and ``minimal``.
         # Every GPT-6 rule here was measured on this id alone, so each names
         # it exactly rather than the generation: a later GPT-6 whose contract
         # differs would otherwise inherit a limit nothing verified for it.
@@ -150,12 +149,14 @@ def models() -> Mapping[str, ModelCapability]:
         replace(
             legacy,
             model_id="gpt-5.5-pro",
+            thinking_effort={"medium", "high", "xhigh"},
             prices=_prices(request=30.0, response=180.0, two_tier=True),
         ),
         replace(legacy, model_id="gpt-5.4"),
         replace(
             legacy,
             model_id="gpt-5.4-pro",
+            thinking_effort={"medium", "high", "xhigh"},
             prices=_prices(request=30.0, response=180.0, two_tier=True),
         ),
         replace(
@@ -190,12 +191,14 @@ def models() -> Mapping[str, ModelCapability]:
         replace(
             legacy,
             model_id="o1",
+            thinking_effort={"low", "medium", "high"},
             context=_context(request=200_000, response=100_000),
             prices=_prices(request=15.0, response=60.0, cache_read=7.5),
         ),
         replace(
             legacy,
             model_id="o3-mini",
+            thinking_effort={"low", "medium", "high"},
             context=_context(request=200_000, response=100_000),
             prices=_prices(request=1.1, response=4.4, cache_read=0.55),
         ),
@@ -246,51 +249,32 @@ def models() -> Mapping[str, ModelCapability]:
 
 
 def reasoning_effort(
-    effort: ThinkingEffort, *, model_id: str, chat: bool = False
-) -> str:
-    """Return the wire ``reasoning_effort`` an effort sends.
-
-    Two ladders: GPT-5.6 and GPT-6 take ``none`` and ``xhigh`` natively,
-    while everything earlier absorbs them into ``minimal`` and ``high``.
+    effort: ThinkingEffort, *, model_id: str
+) -> Literal["none", "low", "medium", "high", "xhigh", "max"]:
+    """Map a selected effort to the Responses vocabulary.
 
     Args:
-      effort: Selected effort level.
-      model_id: Base model id, which picks the ladder.
-      chat: Whether the request goes to Chat Completions.
+      effort: Selected catalog effort.
+      model_id: Base model id.
 
     Returns:
-      wire: Value the request body carries.
+      wire: Responses reasoning effort.
 
     """
-    if not _native_effort_ladder(model_id):
-        match effort:
-            case "none" | "min":
-                return "minimal"
-            case "xhigh" | "max":
-                return "high"
-            case _:
-                return effort
-    match effort:
-        case "none" | "min":
-            # Astra 400s on both ``none`` and ``minimal``, so its floor is
-            # ``low``. The capability withholds these levels, but this is a
-            # public function reachable without that check -- returning a
-            # value the wire rejects would make the guarantee positional.
-            return "low" if model_id == "gpt-6-astra" else "none"
-        case "max":
-            return "xhigh" if chat else "max"
-        case _:
-            return effort
+    if effort == "min":
+        return "none" if model_id.startswith("gpt-5.6") else "low"
+    if effort == "none" and model_id == "gpt-6-astra":
+        return "low"
+    return effort
 
 
 def api() -> ModelCapability:
     """Return what the Responses API adds on top of a model row.
 
-    One model, three ways in::
+    One model, two authentication modes::
 
         models()["gpt-5.6"] & api()          # API key: all four tiers
         models()["gpt-5.6"] & subscription() # Codex: priority only, OAuth
-        models()["gpt-5.6"] & chat()         # Chat Completions: same set
 
     Returns:
       capability: The API transport's restrictions.
@@ -307,11 +291,10 @@ def api() -> ModelCapability:
 def subscription() -> ModelCapability:
     """Return what Codex billing narrows a model row to.
 
-    One model, three ways in::
+    One model, two authentication modes::
 
         models()["gpt-5.6"] & api()          # API key: all four tiers
         models()["gpt-5.6"] & subscription() # Codex: priority only, OAuth
-        models()["gpt-5.6"] & chat()         # Chat Completions: same set
 
     Returns:
       capability: The subscription transport's restrictions.
@@ -327,42 +310,6 @@ def subscription() -> ModelCapability:
         service_tier={"auto", "priority"},
         account_auth=True,
     )
-
-
-def chat() -> ModelCapability:
-    """Return what Chat Completions narrows a model row to.
-
-    Removes nothing: only ``max`` differs, and that is a value remap (see
-    :func:`reasoning_effort`).
-
-    One model, three ways in::
-
-        models()["gpt-5.6"] & api()          # API key: all four tiers
-        models()["gpt-5.6"] & subscription() # Codex: priority only, OAuth
-        models()["gpt-5.6"] & chat()         # Chat Completions: same set
-
-    Returns:
-      capability: The Chat transport's restrictions.
-
-    """
-    # Every axis stated: ``&`` can only remove, and a defaulted axis is the
-    # narrow value, so an omitted one would strip the model's real capability.
-    return ModelCapability(
-        thinking_effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
-        thinking_budget={"none", "auto", "fixed"},
-        thinking_output={"none", "text", "redacted"},
-        service_tier={"auto", "default", "flex", "priority"},
-    )
-
-
-def _native_effort_ladder(model_id: str) -> bool:
-    """Whether the wire spells ``none``/``xhigh``/``max`` rather than remapping.
-
-    GPT-5.6 introduced the ladder and GPT-6 kept it: both take the literal
-    values, while every earlier generation absorbs them into ``minimal``
-    and ``high``.
-    """
-    return model_id.startswith("gpt-5.6") or model_id == "gpt-6-astra"
 
 
 def _one(*, request: int, response: int, gpt56_images: bool = False) -> ModelLimits:
@@ -442,10 +389,5 @@ def _tiers() -> frozenset[ServiceTier]:
 
 
 def _efforts() -> frozenset[ThinkingEffort]:
-    """Every effort a reasoning row accepts; the ladders differ only on the wire.
-
-    One set, not two: ``reasoning_effort`` remaps ``none``/``xhigh`` for the
-    pre-5.6 wire, so the SELECTABLE levels are identical and a second
-    frozenset only claimed a distinction the catalog does not have.
-    """
+    """GPT-5.6's effort ladder, including the ``min`` alias for ``none``."""
     return frozenset({"none", "min", "low", "medium", "high", "xhigh", "max"})

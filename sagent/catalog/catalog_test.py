@@ -95,16 +95,16 @@ def test_no_axis_is_empty(row: ModelCapability) -> None:
 
 
 @pytest.mark.parametrize("row", _ROWS)
-def test_a_row_that_can_think_can_be_asked_not_to(row: ModelCapability) -> None:
-    """Two exceptions, both vendor-enforced rather than stylistic.
-
-    Model Studio's ``-thinking`` ids reason unconditionally, and
-    ``gpt-6-astra`` 400s on both ``none`` and ``minimal`` (measured
-    2026-09-04) -- a row offering ``none`` there would let a caller
-    select a value the wire refuses.
-    """
-    if "none" not in row.thinking_effort:
-        assert row.model_id.endswith("-thinking-2507") or row.model_id == "gpt-6-astra"
+def test_only_reasoning_only_models_reject_none(row: ModelCapability) -> None:
+    """Keep vendor-enforced reasoning mandatory, and optional elsewhere."""
+    reasoning_only = row.model_id.endswith("-thinking-2507") or row.model_id in {
+        "gpt-6-astra",
+        "gpt-5.5-pro",
+        "gpt-5.4-pro",
+        "o1",
+        "o3-mini",
+    }
+    assert ("none" not in row.thinking_effort) == reasoning_only
 
 
 @pytest.mark.parametrize("row", _ROWS)

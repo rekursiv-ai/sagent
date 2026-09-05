@@ -24,6 +24,7 @@ import time
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.google.api import Google
 from sagent.providers.lib.oauth import credential_file_lock
+from sagent.providers.openai.api import OpenAI
 from sagent.providers.openai.sub import OpenAISubscription
 from sagent.tools.core import locked_file_write
 
@@ -103,6 +104,35 @@ def test_openai_subscription_sdk_is_not_shared_across_loops() -> None:
 
     assert _drive(work, runs=2) == []
     assert seen[0] is not seen[1]
+
+
+def test_openai_api_sdk_is_loop_local_and_provider_owned() -> None:
+    provider = OpenAI.from_key("test-key")
+    model = provider.model("gpt-4o")
+    sibling = provider.model("gpt-4o-mini")
+    clients: list[object] = []
+
+    async def work() -> None:
+        client = await provider.get_sdk()
+        try:
+            assert await provider.get_sdk() is client
+            assert client.max_retries == 0
+            clients.append(client)
+            await model.close()
+            assert not client.is_closed()
+            assert await provider.get_sdk() is client
+            await sibling.close()
+            assert not client.is_closed()
+        finally:
+            await provider.close_sdk()
+        assert client.is_closed()
+        replacement = await provider.get_sdk()
+        assert replacement is not client
+        await provider.close_sdk()
+        assert replacement.is_closed()
+
+    assert _drive(work, runs=2) == []
+    assert clients[0] is not clients[1]
 
 
 def test_google_client_survives_a_second_loop() -> None:
