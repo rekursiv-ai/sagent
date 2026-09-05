@@ -58,7 +58,6 @@ from sagent.lib.custom_json import (
     json_unfreeze,
 )
 from sagent.providers.lib.errors import (
-    ChatToolsUnsupportedError,
     error_status_code,
     is_context_overflow_text,
     is_request_too_large,
@@ -475,13 +474,6 @@ class OpenAICompatModel(ModelDefaults):
         if stream:
             body["stream"] = True
             body["stream_options"] = cast(MutableJSONValue, {"include_usage": True})
-        if request.tools and not openai_catalog.serves_chat_tools(self._wire_model_id):
-            # GPT-5.6's escape hatch does not exist for Astra: it rejects
-            # function tools on Chat Completions at EVERY effort, and also
-            # rejects ``reasoning_effort="none"`` outright, so there is no
-            # body this transport can send. Fail with the remediation
-            # rather than issue a request the server is certain to 400.
-            raise ChatToolsUnsupportedError(model_id=self._wire_model_id)
         if request.tools and self._wire_model_id.startswith("gpt-5.6"):
             # GPT-5.6 Chat Completions rejects function tools whenever
             # reasoning is enabled, including its default ``medium`` effort.
@@ -566,6 +558,7 @@ class OpenAICompatModel(ModelDefaults):
                 raise_if_request_too_large(r.status_code, err_body)
                 if is_context_overflow_text(err_body):
                     raise PromptTooLongError(err_body)
+                raise httpx2.HTTPStatusError(err_body, request=r.request, response=r)
             r.raise_for_status()
             self._last_usage = openai_usage(r.headers)
             return await consume_stream(

@@ -594,16 +594,18 @@ async def test_actual_request_tokens_falls_back_to_approx_for_unknown_model() ->
 @pytest.mark.asyncio
 async def test_actual_request_tokens_treats_special_token_text_as_ordinary() -> None:
     model = _tiktoken_model()
+    text = "ValueError for literal <|endoftext|> marker"
     request = ModelRequest(
         messages=[
             ToolResult(
                 call_id="read",
-                content="ValueError for literal <|endoftext|> marker",
+                content=text,
                 is_error=True,
             )
         ]
     )
-    assert await model.actual_request_tokens(request) > 0
+    expected = len(tiktoken.get_encoding("o200k_base").encode_ordinary(text))
+    assert await model.actual_request_tokens(request) == expected
 
 
 @pytest.mark.asyncio

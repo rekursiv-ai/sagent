@@ -17,7 +17,6 @@ import tiktoken
 
 from sagent.catalog import openai as openai_catalog
 from sagent.lib.custom_json import DictCodec, StrCodec
-from sagent.providers.lib.errors import ChatToolsUnsupportedError
 from sagent.providers.openai.api import OpenAI
 from sagent.types.capability import (
     ModelSettings,
@@ -500,15 +499,11 @@ def test_openai_gpt_56_chat_tools_force_none_effort(effort: ThinkingEffort) -> N
     assert body["reasoning_effort"] == "none"
 
 
-@pytest.mark.parametrize("effort", ["low", "max"])
-def test_openai_gpt_6_chat_tools_raise_rather_than_400(effort: ThinkingEffort) -> None:
-    """Astra has no tool-serving Chat Completions body at any effort.
-
-    5.6's escape hatch is ``reasoning_effort="none"``, which Astra also
-    rejects, so the request is unconditionally doomed. Sending it anyway
-    spends a round-trip to earn a 400 with no remediation; this fails
-    locally with the transport to switch to.
-    """
+@pytest.mark.parametrize(("effort", "wire_effort"), [("low", "low"), ("max", "xhigh")])
+def test_openai_gpt_6_chat_tools_reach_the_wire(
+    effort: ThinkingEffort, wire_effort: str
+) -> None:
+    """Let the provider decide whether Astra accepts Chat Completions tools."""
     tool = cast(
         Tool,
         SimpleNamespace(
@@ -519,27 +514,56 @@ def test_openai_gpt_6_chat_tools_raise_rather_than_400(effort: ThinkingEffort) -
     )
     model = OpenAI.from_key("k").model("gpt-6-astra")
     model._settings = ModelSettings(capability=model.capability, thinking_effort=effort)
-    with pytest.raises(ChatToolsUnsupportedError, match="gpt-6-astra"):
-        _ = model._build_body(
-            ModelRequest(messages=[UserMessage(text="x")], tools=[tool]),
-            stream=False,
-        )
+    body = model._build_body(
+        ModelRequest(messages=[UserMessage(text="x")], tools=[tool]),
+        stream=False,
+    )
+    assert body["reasoning_effort"] == wire_effort
+    assert body["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "List",
+                "description": "List files",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
 
 
-def test_openai_chat_tool_support_is_keyed_to_astra_not_the_generation() -> None:
-    """A future GPT-6 must not inherit a limit measured only on Astra.
+@pytest.mark.asyncio
+async def test_openai_gpt_6_chat_tools_attempt_surfaces_provider_error() -> None:
+    """Send Astra tools and preserve the provider's rejection text."""
+    requests: list[httpx2.Request] = []
 
-    The rejection was measured on ``gpt-6-astra`` alone, so keying it to
-    the ``gpt-6`` prefix would refuse tools locally for a later model
-    that serves them -- before any request proves it.
-    """
-    assert not openai_catalog.serves_chat_tools("gpt-6-astra")
-    assert openai_catalog.serves_chat_tools("gpt-6-vega")
-    assert openai_catalog.serves_chat_tools("gpt-5.6-sol")
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(400, text="tools temporarily unsupported")
+
+    tool = cast(
+        Tool,
+        SimpleNamespace(
+            name="List",
+            description="List files",
+            directive_schema={"type": "object", "properties": {}},
+        ),
+    )
+    model = OpenAI.from_key("k").model("gpt-6-astra")
+    model._client = httpx2.AsyncClient(transport=httpx2.MockTransport(handle))
+    try:
+        with pytest.raises(
+            httpx2.HTTPStatusError, match="tools temporarily unsupported"
+        ):
+            await model.stream(
+                ModelRequest(messages=[UserMessage(text="x")], tools=[tool])
+            )
+    finally:
+        await model.close()
+    assert len(requests) == 1
 
 
 def test_openai_gpt_6_without_tools_still_builds_a_body() -> None:
-    """Only the tools+Chat combination is refused, not the model."""
+    """Astra builds a normal Chat Completions body without tools."""
     model = OpenAI.from_key("k").model("gpt-6-astra")
     body = model._build_body(
         ModelRequest(messages=[UserMessage(text="x")]),
