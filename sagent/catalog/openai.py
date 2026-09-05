@@ -34,7 +34,6 @@ __all__ = [
     "chat",
     "models",
     "reasoning_effort",
-    "serves_chat_tools",
     "subscription",
 ]
 
@@ -93,8 +92,7 @@ def models() -> Mapping[str, ModelCapability]:
     rows = (
         # Measured against the live API 2026-09-04: ``reasoning.effort``
         # takes low..max but 400s on ``none`` and ``minimal``, so Astra is
-        # the one row that cannot be asked not to think. Chat Completions
-        # rejects function tools at every effort (:func:`serves_chat_tools`).
+        # the one row that cannot be asked not to think.
         # Every GPT-6 rule here was measured on this id alone, so each names
         # it exactly rather than the generation: a later GPT-6 whose contract
         # differs would otherwise inherit a limit nothing verified for it.
@@ -283,25 +281,6 @@ def reasoning_effort(
             return "xhigh" if chat else "max"
         case _:
             return effort
-
-
-def serves_chat_tools(model_id: str) -> bool:
-    """Whether the model accepts function tools on Chat Completions.
-
-    Only ``gpt-6-astra`` does not: it rejects them at every effort, and
-    also rejects the ``reasoning_effort="none"`` escape hatch GPT-5.6
-    uses, leaving no sendable body (measured 2026-09-04). Keyed to the
-    exact id rather than the ``gpt-6`` generation, since a later GPT-6
-    model would otherwise inherit a limit nothing measured for it.
-
-    Args:
-      model_id: Base model id, without option tags.
-
-    Returns:
-      serves: True when the Chat transport may send tools.
-
-    """
-    return model_id != "gpt-6-astra"
 
 
 def api() -> ModelCapability:

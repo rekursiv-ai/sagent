@@ -236,18 +236,6 @@ def raise_if_request_too_large(
         raise RequestTooLargeError(body) from cause
 
 
-class ChatToolsUnsupportedError(UserFacingError):
-    """Model serves tools on Responses only, never on Chat Completions."""
-
-    def __init__(self, *, model_id: str) -> None:
-        super().__init__(
-            f"{model_id} does not accept function tools on the Chat "
-            "Completions API at any reasoning effort. Use a subscription "
-            "(Responses) provider for this model, or switch models with "
-            "/model."
-        )
-
-
 class StreamingResponseNotReadError(UserFacingError):
     """Provider SDK hid a streaming HTTP error body before sagent saw it."""
 
