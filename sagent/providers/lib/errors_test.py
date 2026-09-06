@@ -187,6 +187,29 @@ def test_context_overflow_text_structured_body_canonical_code() -> None:
     assert is_context_overflow_text(body) is True
 
 
+def test_context_overflow_text_structured_per_item_string_cap() -> None:
+    body = json.dumps(
+        {
+            "error": {
+                "code": "string_above_max_length",
+                "type": "invalid_request_error",
+                "param": "input[388].output",
+                "message": "String too long. Expected maximum length 10485760.",
+            }
+        }
+    )
+    assert is_context_overflow_text(PER_ITEM_STRING_CAP_BODY) is True
+    assert is_context_overflow_text(body) is True
+    assert is_request_too_large(400, body) is False
+
+
+def test_context_overflow_text_unknown_code_overrides_overflow_phrase() -> None:
+    body = json.dumps(
+        {"error": {"code": "unknown_error", "message": "maximum context length"}}
+    )
+    assert is_context_overflow_text(body) is False
+
+
 def test_context_overflow_text_structured_body_unrelated_code() -> None:
     """Structured error with unrelated code must not classify as overflow."""
     body = json.dumps(
