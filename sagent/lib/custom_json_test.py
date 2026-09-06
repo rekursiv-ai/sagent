@@ -1056,23 +1056,31 @@ class _SpecialUnions:
 
 class TestDataclassCodec:
     def test_generated_classes_are_collectible(self) -> None:
-        cls = dataclasses.make_dataclass(
-            "Ephemeral",
-            [("value", int)],
-            frozen=True,
-            slots=True,
-            kw_only=True,
-        )
-        instance = cls(value=1)
-        assert (
-            DataclassCodec.from_json(cls, DataclassCodec.to_json(instance)) == instance
-        )
-        class_ref = weakref.ref(cls)
+        gc_enabled = gc.isenabled()
+        # Keep the ephemeral class young so collection never scans the whole heap.
+        gc.disable()
+        try:
+            cls = dataclasses.make_dataclass(
+                "Ephemeral",
+                [("value", int)],
+                frozen=True,
+                slots=True,
+                kw_only=True,
+            )
+            instance = cls(value=1)
+            assert (
+                DataclassCodec.from_json(cls, DataclassCodec.to_json(instance))
+                == instance
+            )
+            class_ref = weakref.ref(cls)
 
-        del instance, cls
-        gc.collect()
+            del instance, cls
+            gc.collect(0)
 
-        assert class_ref() is None
+            assert class_ref() is None
+        finally:
+            if gc_enabled:
+                gc.enable()
 
     def test_scalars_and_specials_round_trip(self) -> None:
         doc = _Doc(

@@ -41,6 +41,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import cast
 
+import tempfile
+
 import pytest
 
 
@@ -119,8 +121,10 @@ def isolate_user_dirs(
     # atomic write left no temp file behind, and a ``userdirs`` entry appearing
     # there fails 15 of them (``temp file leaked: ['userdirs']``). The XDG root
     # must be invisible to the directory under test.
-    root = tmp_path_factory.mktemp("userdirs")
-    assert isinstance(root, Path)
+    # Keep these roots out of numbered allocation's per-test sibling scans.
+    parent = tmp_path_factory.getbasetemp() / "userdirs"
+    parent.mkdir(mode=0o700, exist_ok=True)
+    root = Path(tempfile.mkdtemp(dir=parent))
     for variable, leaf in (
         ("XDG_CONFIG_HOME", "config"),
         ("XDG_DATA_HOME", "data"),
