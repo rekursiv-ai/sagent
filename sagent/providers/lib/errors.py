@@ -79,7 +79,9 @@ _GUARDED_CONTEXT_OVERFLOW_PHRASES: Final = (
 """Phrases needing a co-occurring marker: each appears benignly in
 tool-schema validation errors, where a bare match is a false positive."""
 
-_CONTEXT_OVERFLOW_CODES: Final = frozenset({"context_length_exceeded"})
+_CONTEXT_OVERFLOW_CODES: Final = frozenset(
+    {"context_length_exceeded", "string_above_max_length"}
+)
 """Vendor ``error.code`` values that name the condition outright."""
 
 PER_ITEM_STRING_CAP_BODY: Final = (
