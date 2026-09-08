@@ -1607,7 +1607,8 @@ def test_change_model_builds_the_provider_without_construction_options(
     del patched_build_provider
     a = _build_agent_with_spec()
     _ = a.change_model(model_id="claude-sonnet-4-6")
-    build_provider = cast(Mock, providers_module.build_provider)
+    build_provider = providers_module.build_provider
+    assert isinstance(build_provider, Mock)
     build_provider.assert_called_with("Anthropic", "api", account=None)
 
 
@@ -8703,18 +8704,25 @@ def test_tool_registry_keeps_detached_calls_however_old(
     registry_max = 8
     monkeypatch.setattr(agent_module, "_TOOL_REGISTRY_MAX", registry_max)
     a = _build_agent()
-    a.runtime.detached["old"] = cast(asyncio.Task[None], None)
-    a._tool_registry["old"] = ("Bash", 0.0)
-    for i in range(registry_max + 2):
-        a._track_tool_registry(
-            ModelResponseComplete(
-                message=AssistantMessage(
-                    text="",
-                    tool_calls=(ToolCall(id=f"c{i}", name="Echo", args={}),),
+    loop = asyncio.new_event_loop()
+    try:
+        task = loop.create_task(asyncio.sleep(0))
+        a.runtime.detached["old"] = task
+        a._tool_registry["old"] = ("Bash", 0.0)
+        for i in range(registry_max + 2):
+            a._track_tool_registry(
+                ModelResponseComplete(
+                    message=AssistantMessage(
+                        text="",
+                        tool_calls=(ToolCall(id=f"c{i}", name="Echo", args={}),),
+                    ),
                 ),
-            ),
-        )
-    assert a._tool_registry["old"] == ("Bash", 0.0)
+            )
+        assert a._tool_registry["old"] == ("Bash", 0.0)
+        _ = task.cancel()
+        loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+    finally:
+        loop.close()
 
 
 @pytest.mark.asyncio

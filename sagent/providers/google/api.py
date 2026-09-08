@@ -428,12 +428,12 @@ def _build_request(
                 pending_tool_parts.extend(parts)
                 _flush_tool_parts(contents, pending_tool_parts)
             else:
-                contents.append(cast(MutableJSON, {"role": "user", "parts": parts}))
+                contents.append({"role": "user", "parts": [*parts]})
         elif isinstance(entry, AssistantMessage):
             _flush_tool_parts(contents, pending_tool_parts)
             model_parts: list[MutableJSON] = []
             if entry.text:
-                text_part = cast(MutableJSON, {"text": entry.text})
+                text_part: MutableJSON = {"text": entry.text}
                 # Gemini 3.x requires the model's thought signature echoed back
                 # on its parts in subsequent requests, else the API rejects the
                 # continuation. Omitted when empty (older models / no thinking).
@@ -441,22 +441,18 @@ def _build_request(
                     text_part["thoughtSignature"] = entry.thought_signature
                 model_parts.append(text_part)
             for tc in entry.tool_calls:
-                fc_part = cast(
-                    MutableJSON,
-                    {
-                        "functionCall": {
-                            "name": tc.name,
-                            "args": dict(tc.args),
-                        },
+                fc_args: MutableJSON = json_unfreeze(tc.args)
+                fc_part: MutableJSON = {
+                    "functionCall": {
+                        "name": tc.name,
+                        "args": fc_args,
                     },
-                )
+                }
                 if tc.thought_signature:
                     fc_part["thoughtSignature"] = tc.thought_signature
                 model_parts.append(fc_part)
             if model_parts:
-                contents.append(
-                    cast(MutableJSON, {"role": "model", "parts": model_parts})
-                )
+                contents.append({"role": "model", "parts": [*model_parts]})
         else:
             # ToolResult: role=user with functionResponse part(s); image
             # attachments emit as inlineData siblings in the same user
@@ -489,13 +485,10 @@ def _build_request(
         gen_config["maxOutputTokens"] = request.max_response_tokens
     if thinking_config is not None:
         gen_config["thinkingConfig"] = cast(MutableJSONValue, thinking_config)
-    body: MutableJSON = cast(
-        MutableJSON,
-        {
-            "contents": contents,
-            "generationConfig": gen_config,
-        },
-    )
+    body: MutableJSON = {
+        "contents": [*contents],
+        "generationConfig": gen_config,
+    }
     if request.system:
         body["systemInstruction"] = cast(
             MutableJSONValue,

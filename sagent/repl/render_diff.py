@@ -293,7 +293,9 @@ def _word_diff_pair(
             chunk = "".join(a_words[j1:j2])
             parts.append(("+", chunk))
             changed += len(chunk)
-        elif tag == "replace":
+        else:
+            # ``get_opcodes`` emits exactly four tags; the three above are
+            # consumed, so this is ``replace``.
             r_chunk = "".join(r_words[i1:i2])
             a_chunk = "".join(a_words[j1:j2])
             parts.append(("-", r_chunk))

@@ -11,7 +11,7 @@ from typing import cast
 
 import json
 
-from sagent.lib.custom_json import MutableJSON
+from sagent.lib.custom_json import JSON, MutableJSON
 from sagent.providers.selfhosted.server import (
     SelfHostedModel,
     _attention_mask,
@@ -39,21 +39,22 @@ from sagent.types.tools import Tool
 
 
 def test_context_window_top_level_max_position() -> None:
-    config = cast(MutableJSON, {"max_position_embeddings": 8192})
+    config: MutableJSON = {"max_position_embeddings": 8192}
     assert _context_window(config, default=1024) == 8192
 
 
 def test_context_window_nested_text_config() -> None:
-    config = cast(MutableJSON, {"text_config": {"max_position_embeddings": 4096}})
+    config: MutableJSON = {"text_config": {"max_position_embeddings": 4096}}
     assert _context_window(config, default=1024) == 4096
 
 
 def test_context_window_falls_back_to_default() -> None:
-    assert _context_window(cast(MutableJSON, {}), default=2048) == 2048
+    empty: MutableJSON = {}
+    assert _context_window(empty, default=2048) == 2048
 
 
 def test_context_window_non_integer_top_level_falls_back() -> None:
-    config = cast(MutableJSON, {"max_position_embeddings": "weird"})
+    config: MutableJSON = {"max_position_embeddings": "weird"}
     assert _context_window(config, default=512) == 512
 
 
@@ -204,18 +205,34 @@ def test_inline_tool_preamble_no_tools_noop() -> None:
     assert msgs == [{"role": "user", "content": "hi"}]
 
 
+class _StubBash:
+    """Full ``Tool`` implementation; the preamble helpers take real tools."""
+
+    name: str = "Bash"
+    tool_id: str = "application/x-tool-bash"
+    description: str = "Run shell"
+    directive_schema: JSON = MappingProxyType({"type": "object"})
+    clearable_results: bool = True
+
+    def summary(self, args: Mapping[str, object]) -> str:
+        return f"Bash {args}"
+
+    def prompt(self) -> str | None:
+        return None
+
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        del args
+        return None
+
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
+        del args
+        return ToolResult(call_id="", content="")
+
+
 def test_inline_tool_preamble_no_system_prepends_one() -> None:
     msgs: list[MutableJSON] = [{"role": "user", "content": "hi"}]
-
-    class _StubTool:
-        name: str = "Bash"
-        description: str = "shell"
-        directive_schema: Mapping[str, object] = MappingProxyType({"type": "object"})
-
-    _inline_tool_preamble(
-        msgs,
-        cast(list[Tool], [_StubTool()]),
-    )
+    tools: list[Tool] = [_StubBash()]
+    _inline_tool_preamble(msgs, tools)
     assert msgs[0]["role"] == "system"
     assert "tool_call" in str(msgs[0]["content"])
 
@@ -225,25 +242,14 @@ def test_inline_tool_preamble_extends_existing_system_message() -> None:
         {"role": "system", "content": "existing system"},
         {"role": "user", "content": "hi"},
     ]
-
-    class _StubTool:
-        name: str = "Bash"
-        description: str = "shell"
-        directive_schema: Mapping[str, object] = MappingProxyType({"type": "object"})
-
-    _inline_tool_preamble(msgs, cast(list[Tool], [_StubTool()]))
+    tools: list[Tool] = [_StubBash()]
+    _inline_tool_preamble(msgs, tools)
     assert "existing system" in str(msgs[0]["content"])
     assert "tool_call" in str(msgs[0]["content"])
 
 
-class _StubBash:
-    name: str = "Bash"
-    description: str = "Run shell"
-    directive_schema: Mapping[str, object] = MappingProxyType({"type": "object"})
-
-
 def test_tool_schema_wraps_as_function() -> None:
-    schema = _tool_schema(cast(Tool, _StubBash()))
+    schema = _tool_schema(_StubBash())
     assert schema["type"] == "function"
     func = cast(MutableJSON, schema["function"])
     assert func["name"] == "Bash"
@@ -251,7 +257,8 @@ def test_tool_schema_wraps_as_function() -> None:
 
 
 def test_tool_preamble_contains_marker_and_tool_name() -> None:
-    out = _tool_preamble(cast(list[Tool], [_StubBash()]))
+    tools: list[Tool] = [_StubBash()]
+    out = _tool_preamble(tools)
     assert "<tool_call>" in out
     assert "Bash" in out
 

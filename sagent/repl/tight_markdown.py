@@ -180,7 +180,7 @@ class TightMarkdown(Markdown):
                 elif self_closing:
                     context.stack.pop()
                     text = token.content
-                    if text is not None:  # pyright: ignore[reportUnnecessaryComparison] -- vendored from Rich
+                    if text is not None:  # pyright: ignore[reportUnnecessaryComparison]  # ty: ignore[redundant-condition-strict] -- vendored from Rich
                         element.on_text(context, text)
                     should_render = not context.stack or (
                         context.stack

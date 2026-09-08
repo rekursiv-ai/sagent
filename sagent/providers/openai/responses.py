@@ -308,9 +308,7 @@ def _build_tool(tool: Tool) -> responses.FunctionToolParam:
         "type": "function",
         "name": tool.name,
         "description": tool.description,
-        "parameters": cast(
-            dict[str, object] | None, json_unfreeze(tool.directive_schema)
-        ),
+        "parameters": dict(json_unfreeze(tool.directive_schema)),
         "strict": None,
     }
 

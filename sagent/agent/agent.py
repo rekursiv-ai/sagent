@@ -1405,13 +1405,13 @@ class Agent:
                 first_idle.set()
 
         self.runtime.observers.append(_watch)
+        self.runtime.inbox.push_back(msg)
+        drive = asyncio.create_task(self.serve_forever())
+        # Expose the live loop task so a one-shot caller can await it to
+        # completion after it pushes ``shutdown`` -- the loop keeps
+        # running when this method returns.
+        self._drive_task = drive
         try:
-            self.runtime.inbox.push_back(msg)
-            drive = asyncio.create_task(self.serve_forever())
-            # Expose the live loop task so a one-shot caller can await it to
-            # completion after it pushes ``shutdown`` -- the loop keeps
-            # running when this method returns.
-            self._drive_task = drive
             drive.add_done_callback(
                 log_task_exception(logger, "drive_until_first_idle drive task crashed"),
             )
@@ -1436,14 +1436,9 @@ class Agent:
         finally:
             if _watch in self.runtime.observers:
                 self.runtime.observers.remove(_watch)
-            # Do NOT clear ``_run_active`` here. Unlike ``run``, this method
-            # returns while its ``serve_forever`` keeps running by design, so
-            # releasing the claim on return let a second ``run`` /
-            # ``drive_until_first_idle`` past the guard and put two drivers on
-            # one inbox -- each consuming events the other needed, and the
-            # first to exit pushing ``Quit`` into the other's loop. The loop
-            # releases the flag itself when it finally exits.
-            if self._drive_task is None or self._drive_task.done():
+            # A live loop keeps the guard armed; only a finished drive releases
+            # it, since the loop outlives this method by design.
+            if drive.done():
                 self._run_active = False
 
     # -- Internal helpers ---------------------------------------------

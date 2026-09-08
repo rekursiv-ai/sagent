@@ -1379,9 +1379,9 @@ async def test_persistent_spawn_session_root_dir_uses_label_path(
 
     task = _persistent_tasks.get("fix-tools")
     spawned = agent_registry.get("fix-tools")
+    assert not result.is_error
+    assert isinstance(spawned, Agent)
     try:
-        assert not result.is_error
-        assert isinstance(spawned, Agent)
         child_session_dir = spawned.session_dir
         assert child_session_dir is not None
         assert child_session_dir == tmp_path / "children" / "fix-tools"
@@ -1397,8 +1397,7 @@ async def test_persistent_spawn_session_root_dir_uses_label_path(
         ]
         assert lifecycle[-1]["session_dir"] == str(tmp_path / "children" / "fix-tools")
     finally:
-        if spawned is not None:
-            spawned.shutdown(force=True)
+        spawned.shutdown(force=True)
         if task is not None:
             _ = task.cancel()
             with suppress(asyncio.CancelledError):

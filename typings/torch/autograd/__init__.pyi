@@ -1,8 +1,10 @@
 from collections.abc import Sequence as Sequence
 from typing import (
+    Literal,
     Optional as Optional,
     Union as Union,
     cast as cast,
+    overload,
 )
 
 from torch import _vmap_internals as _vmap_internals
@@ -116,6 +118,20 @@ def backward(
     grad_variables: _TensorOrTensors | None = ...,
     inputs: _TensorOrTensorsOrGradEdge | None = ...,
 ) -> None: ...
+@overload
+def grad(
+    outputs: _TensorOrTensorsOrGradEdge,
+    inputs: _TensorOrTensorsOrGradEdge,
+    grad_outputs: _TensorOrTensors | None = ...,
+    retain_graph: bool | None = ...,
+    create_graph: bool = ...,
+    only_inputs: bool = ...,
+    *,
+    allow_unused: Literal[True],
+    is_grads_batched: bool = ...,
+    materialize_grads: Literal[False] = ...,
+) -> tuple[torch.Tensor | None, ...]: ...
+@overload
 def grad(
     outputs: _TensorOrTensorsOrGradEdge,
     inputs: _TensorOrTensorsOrGradEdge,

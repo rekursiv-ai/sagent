@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from anthropic._models import FinalRequestOptions
     from anthropic._streaming import AsyncStream
     from anthropic.lib.streaming import AsyncMessageStream
+    from anthropic.types.raw_message_stream_event import RawMessageStreamEvent
 
     import anthropic
 
@@ -52,7 +53,6 @@ else:
     AsyncStream = lazy_import("anthropic._streaming", "AsyncStream")
     image_lib = lazy_import("sagent.lib.image")
 
-from anthropic.types.raw_message_stream_event import RawMessageStreamEvent
 
 from sagent.catalog import anthropic as anthropic_catalog
 from sagent.lib import debug_log
@@ -95,7 +95,7 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-from sagent.types.tools import Tool
+from sagent.types.tools import Tool, ToolResultClearable
 
 
 logger = logging.getLogger(__name__)
@@ -196,7 +196,7 @@ def build_context_management(
     server_side_context_management: bool = False,
     trigger_tokens: int = 0,
     target_input_tokens: int = _DEFAULT_API_TARGET_INPUT_TOKENS,
-    tools: Sequence[Tool] = (),
+    tools: Sequence[ToolResultClearable] = (),
 ) -> dict[str, list[MutableJSON]] | None:
     """Build ``context_management`` body for the Anthropic API.
 
@@ -222,25 +222,24 @@ def build_context_management(
         )
         edits.append({"type": "clear_thinking_20251015", "keep": keep})
     if server_side_context_management and trigger_tokens > 0:
-        clearable = [t.name for t in tools if getattr(t, "clearable_results", False)]
-        unclearable = [
-            t.name for t in tools if not getattr(t, "clearable_results", False)
+        clearable: list[MutableJSONValue] = [
+            t.name for t in tools if t.clearable_results
+        ]
+        unclearable: list[MutableJSONValue] = [
+            t.name for t in tools if not t.clearable_results
         ]
         clear_at_least = max(trigger_tokens - target_input_tokens, 1_000)
         edits.append(
-            cast(
-                MutableJSON,
-                {
-                    "type": "clear_tool_uses_20250919",
-                    "trigger": {"type": "input_tokens", "value": trigger_tokens},
-                    "clear_at_least": {
-                        "type": "input_tokens",
-                        "value": clear_at_least,
-                    },
-                    "clear_tool_inputs": clearable,
-                    "exclude_tools": unclearable,
+            {
+                "type": "clear_tool_uses_20250919",
+                "trigger": {"type": "input_tokens", "value": trigger_tokens},
+                "clear_at_least": {
+                    "type": "input_tokens",
+                    "value": clear_at_least,
                 },
-            ),
+                "clear_tool_inputs": clearable,
+                "exclude_tools": unclearable,
+            },
         )
     return {"edits": edits} if edits else None
 
@@ -1054,13 +1053,16 @@ async def _raw_message_stream(
     if response.status_code >= 400:
         await _raise_anthropic_status_error(raw_sdk, response)
     _response_headers_var.set(response.headers)
-    return AsyncStream(
-        cast_to=cast(
-            type[RawMessageStreamEvent], anthropic.types.RawMessageStreamEvent
-        ),
+    # ``RawMessageStreamEvent`` is an ``Annotated`` discriminated-union alias, not
+    # a class, so it cannot satisfy the SDK's ``cast_to: type[_T]``. The SDK feeds
+    # its own streams the same alias (``_response._parse`` unwraps ``Annotated``
+    # before use), so narrowing this to one member class would break decoding.
+    stream: AsyncStream[RawMessageStreamEvent] = AsyncStream(  # pyright: ignore[reportUnknownVariableType] -- the Annotated `cast_to` leaves `_T` unsolved
+        cast_to=anthropic.types.RawMessageStreamEvent,  # ty: ignore[invalid-argument-type] -- SDK alias is Annotated[...], not type[_T]; unwrapped at runtime  # pyright: ignore[reportArgumentType] -- same
         response=response,
         client=sdk,
     )
+    return stream
 
 
 def _final_request_options(
@@ -1185,7 +1187,7 @@ def _build_messages(
             # Emitting a separate role=user message breaks Anthropic's
             # strict alternation and triggers HTTP 400.
             if pending_tool_results:
-                pending_tool_results.extend(cast(list[dict[str, object]], blocks))
+                pending_tool_results.extend(blocks)
                 _flush_tool_results(messages, pending_tool_results)
             elif blocks:
                 messages.append(
@@ -1223,9 +1225,9 @@ def _user_blocks(
     entry: AgentSendMessage | UserMessage,
     max_image_dim: int,
     max_image_bytes: int,
-) -> list[object]:
+) -> list[dict[str, object]]:
     """Build Anthropic content blocks from a UserMessage."""
-    blocks: list[object] = []
+    blocks: list[dict[str, object]] = []
     if entry.text:
         blocks.append({"type": "text", "text": entry.text})
     for att in entry.attachments:

@@ -1460,10 +1460,10 @@ class TestStrictEncode:
     @pytest.mark.parametrize(
         "doc",
         [
-            _StrictAnnotations(count=cast(int, "one")),
-            _StrictAnnotations(pair=cast(tuple[int, str], (1,))),
-            _StrictAnnotations(numbers=cast(list[int], ["one"])),
-            _StrictAnnotations(table=cast(dict[str, int], {"x": "one"})),
+            _StrictAnnotations(count="one"),  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType] -- negative test: proves the codec rejects a mistyped field
+            _StrictAnnotations(pair=(1,)),  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType] -- negative test: proves the codec rejects a mistyped field
+            _StrictAnnotations(numbers=["one"]),  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType] -- negative test: proves the codec rejects a mistyped field
+            _StrictAnnotations(table={"x": "one"}),  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType] -- negative test: proves the codec rejects a mistyped field
         ],
     )
     def test_rejects_values_that_do_not_match_annotations(
@@ -1473,7 +1473,7 @@ class TestStrictEncode:
             DataclassCodec.to_json(doc)
 
     def test_concrete_frozenset_rejects_set_value(self) -> None:
-        doc = _FrozenSetHolder(value=cast(frozenset[int], {1}))
+        doc = _FrozenSetHolder(value={1})  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType] -- negative test: proves the codec rejects a set where frozenset is declared
         with pytest.raises(TypeError):
             DataclassCodec.to_json(doc)
 
@@ -1751,9 +1751,8 @@ class TestNonStrMappingKeys:
     """
 
     def test_a_non_str_key_is_refused(self) -> None:
-        table = cast(Mapping[str, str], {1: "a"})
         with pytest.raises(TypeError):
-            DataclassCodec.to_json(_Keyed(table=table))
+            DataclassCodec.to_json(_Keyed(table={1: "a"}))  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType] -- negative test: proves the encoder refuses a non-str mapping key
 
     def test_str_keys_still_round_trip(self) -> None:
         doc = _Keyed(table={"k": "v"})
@@ -2755,16 +2754,12 @@ class TestIssue19672Contracts:
         assert decode_graph(encode_graph(reserved)) == reserved
 
     def test_plain_residual_rejects_runtime_non_string_keys(self) -> None:
-        source = cast(Mapping[str, object], {1: "value"})
-
         with pytest.raises(TypeError, match="key"):
-            residual(source)
+            residual({1: "value"})  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType] -- negative test: proves residual refuses a non-str key
 
     def test_stateful_residual_rejects_runtime_non_string_keys(self) -> None:
-        source = cast(Mapping[str, object], {1: "value"})
-
         with pytest.raises(TypeError, match="key"):
-            residual(source, fields={})
+            residual({1: "value"}, fields={})  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType] -- negative test: proves residual refuses a non-str key
 
     def test_plain_residual_escape_preserves_numeric_spelling(self) -> None:
         source = {

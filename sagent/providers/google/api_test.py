@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import cast
 
@@ -10,7 +11,7 @@ import logging
 import httpx2
 import pytest
 
-from sagent.lib.custom_json import MutableJSON, MutableJSONValue
+from sagent.lib.custom_json import JSON, MutableJSON, MutableJSONValue
 from sagent.providers.google.api import (
     Google,
     _build_request,
@@ -39,7 +40,6 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-from sagent.types.tools import Tool
 
 
 def test_strip_additional_properties_removes_top_level_key() -> None:
@@ -371,17 +371,15 @@ def test_google_build_response_cache_tokens_split_input_cost() -> None:
             }
         ),
     )
+    usage: MutableJSON = {
+        "promptTokenCount": 1000,
+        "candidatesTokenCount": 100,
+        "cachedContentTokenCount": 300,
+    }
     resp = _build_response(
         text="",
         tool_calls=[],
-        usage=cast(
-            MutableJSON,
-            {
-                "promptTokenCount": 1000,
-                "candidatesTokenCount": 100,
-                "cachedContentTokenCount": 300,
-            },
-        ),
+        usage=usage,
         finish_reason="STOP",
         model=model,
     )
@@ -699,10 +697,26 @@ class _StubTool:
     name: str = "Echo"
     tool_id: str = "application/x-tool-echo"
     description: str = "Echo"
-    directive_schema: dict[str, object] = {  # noqa: RUF012 -- test stub
+    directive_schema: JSON = {  # noqa: RUF012 -- test stub
         "type": "object",
         "additionalProperties": False,
     }
+    clearable_results: bool = False
+
+    def summary(self, args: Mapping[str, object]) -> str:
+        del args
+        return ""
+
+    def prompt(self) -> str | None:
+        return None
+
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        del args
+        return None
+
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
+        del args
+        return ToolResult(call_id="", content="")
 
 
 def test_build_request_tools_strip_additional_properties() -> None:
@@ -710,7 +724,7 @@ def test_build_request_tools_strip_additional_properties() -> None:
     tool = _StubTool()
     req = ModelRequest(
         messages=[UserMessage(text="hi")],
-        tools=cast(list[Tool], [tool]),
+        tools=[tool],
     )
     body = _wire(req)
     tools_section = cast(list[MutableJSON], body["tools"])

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import cast
-
 import pytest
 
 from sagent.catalog import anthropic as anthropic_catalog
@@ -173,14 +171,12 @@ def test_token_count_add_returns_not_implemented_for_non_token_count() -> None:
     and (if that also fails) raise a clear ``TypeError`` naming both
     operand types.
     """
-    other = cast(TokenCount, 1)
-    assert TokenCount().__add__(other) is NotImplemented
+    assert TokenCount().__add__(1) is NotImplemented  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType] -- negative test: proves a foreign operand defers instead of raising
 
 
 def test_token_count_sub_returns_not_implemented_for_non_token_count() -> None:
     """B15: ``__sub__`` similarly defers instead of raising ``AttributeError``."""
-    other = cast(TokenCount, "nope")
-    assert TokenCount().__sub__(other) is NotImplemented
+    assert TokenCount().__sub__("nope") is NotImplemented  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType] -- negative test: proves a foreign operand defers instead of raising
 
 
 # ---- ModelRecipe -----------------------------------------------------------

@@ -291,30 +291,26 @@ def test_dispatch_session_update_routes_text_and_thinking() -> None:
         elif isinstance(ev, ModelResponseThinking):
             thinking_chunks.append(ev.text)
 
+    message_chunk: MutableJSON = {
+        "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"text": "hello"},
+        }
+    }
+    thought_chunk: MutableJSON = {
+        "update": {
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"text": "thinking..."},
+        }
+    }
     _dispatch_session_update(
-        cast(
-            MutableJSON,
-            {
-                "update": {
-                    "sessionUpdate": "agent_message_chunk",
-                    "content": {"text": "hello"},
-                }
-            },
-        ),
+        message_chunk,
         text_parts,
         thinking_parts,
         _sink,
     )
     _dispatch_session_update(
-        cast(
-            MutableJSON,
-            {
-                "update": {
-                    "sessionUpdate": "agent_thought_chunk",
-                    "content": {"text": "thinking..."},
-                }
-            },
-        ),
+        thought_chunk,
         text_parts,
         thinking_parts,
         _sink,
@@ -329,11 +325,11 @@ def test_dispatch_session_update_ignores_unknown_kinds() -> None:
     """``tool_call_update`` and other kinds are dropped without side effects."""
     text_parts: list[str] = []
     thinking_parts: list[str] = []
+    unknown_update: MutableJSON = {
+        "update": {"sessionUpdate": "tool_call_update", "id": 1}
+    }
     _dispatch_session_update(
-        cast(
-            MutableJSON,
-            {"update": {"sessionUpdate": "tool_call_update", "id": 1}},
-        ),
+        unknown_update,
         text_parts,
         thinking_parts,
         None,
@@ -839,7 +835,7 @@ async def test_terminal_json_rpc_error_respawns_and_resets_state(
 
         async def read_json_line(self, *, skip_non_json: bool = False) -> MutableJSON:
             del skip_non_json
-            return cast(MutableJSON, {"id": 1, "error": {"message": "boom"}})
+            return {"id": 1, "error": {"message": "boom"}}
 
     class _HotSpare:
         active = cast(Subproc | None, object())

@@ -780,60 +780,57 @@ def _google_subprocess_env(tmpdir: Path) -> dict[str, str]:
     return env
 
 
-_GEMINI_SETTINGS: MutableJSON = cast(
-    MutableJSON,
-    {
-        "security": {"auth": {"selectedType": "oauth-personal"}},
-        "privacy": {"usageStatisticsEnabled": False},
-        "telemetry": {
-            "enabled": False,
-            "logPrompts": False,
-            "useCollector": False,
-        },
-        "general": {
-            "checkpointing": {"enabled": False},
-            "enableAutoUpdate": False,
-            "enableAutoUpdateNotification": False,
-            "enableNotifications": False,
-        },
-        "ui": {
-            "hideTips": True,
-            "hideBanner": True,
-            "hideContextSummary": True,
-            "hideSandboxStatus": True,
-            "hideModelInfo": True,
-            "showMemoryUsage": False,
-        },
-        "context": {
-            "loadMemoryFromIncludeDirectories": False,
-            "discoveryMaxDirs": 0,
-        },
-        "tools": {
-            "excludeTools": ["*"],
-            "useWriteTodos": False,
-            "toolSandboxing": False,
-            "blockGitExtensions": True,
-            "allowedExtensions": [],
-        },
-        "mcp": {"allowed": [], "excluded": ["*"]},
-        "advanced": {
-            "autoConfigureMemory": False,
-            "agentSessionNoninteractiveEnabled": False,
-            "agentSessionInteractiveEnabled": False,
-            "extensionManagement": False,
-            "extensionConfig": False,
-            "extensionRegistry": False,
-            "extensionReloading": False,
-            "jitContext": False,
-            "taskTracker": False,
-            "modelSteering": False,
-            "memoryV2": False,
-            "autoMemory": False,
-            "contextManagement": False,
-        },
-        "experimental": {"compressionThreshold": 1.0},
+_GEMINI_SETTINGS: MutableJSON = {
+    "security": {"auth": {"selectedType": "oauth-personal"}},
+    "privacy": {"usageStatisticsEnabled": False},
+    "telemetry": {
+        "enabled": False,
+        "logPrompts": False,
+        "useCollector": False,
     },
-)
+    "general": {
+        "checkpointing": {"enabled": False},
+        "enableAutoUpdate": False,
+        "enableAutoUpdateNotification": False,
+        "enableNotifications": False,
+    },
+    "ui": {
+        "hideTips": True,
+        "hideBanner": True,
+        "hideContextSummary": True,
+        "hideSandboxStatus": True,
+        "hideModelInfo": True,
+        "showMemoryUsage": False,
+    },
+    "context": {
+        "loadMemoryFromIncludeDirectories": False,
+        "discoveryMaxDirs": 0,
+    },
+    "tools": {
+        "excludeTools": ["*"],
+        "useWriteTodos": False,
+        "toolSandboxing": False,
+        "blockGitExtensions": True,
+        "allowedExtensions": [],
+    },
+    "mcp": {"allowed": [], "excluded": ["*"]},
+    "advanced": {
+        "autoConfigureMemory": False,
+        "agentSessionNoninteractiveEnabled": False,
+        "agentSessionInteractiveEnabled": False,
+        "extensionManagement": False,
+        "extensionConfig": False,
+        "extensionRegistry": False,
+        "extensionReloading": False,
+        "jitContext": False,
+        "taskTracker": False,
+        "modelSteering": False,
+        "memoryV2": False,
+        "autoMemory": False,
+        "contextManagement": False,
+    },
+    "experimental": {"compressionThreshold": 1.0},
+}
 
 
 async def _rpc_call(
@@ -892,7 +889,7 @@ def _user_prompt_blocks(
     """Build ACP ``[{type:text}|{type:image}]`` blocks for a ``UserMessage``."""
     blocks: list[MutableJSON] = []
     if entry.text:
-        blocks.append(cast(MutableJSON, {"type": "text", "text": entry.text}))
+        blocks.append({"type": "text", "text": entry.text})
     for att in entry.attachments:
         if not att.descriptor.startswith("image/"):
             continue
@@ -900,17 +897,14 @@ def _user_prompt_blocks(
             att.data, max_dim=max_image_dim, max_bytes=max_image_bytes
         )
         blocks.append(
-            cast(
-                MutableJSON,
-                {
-                    "type": "image",
-                    "data": base64.b64encode(raw).decode(),
-                    "mimeType": mime,
-                },
-            )
+            {
+                "type": "image",
+                "data": base64.b64encode(raw).decode(),
+                "mimeType": mime,
+            }
         )
     if not blocks:
-        blocks.append(cast(MutableJSON, {"type": "text", "text": ""}))
+        blocks.append({"type": "text", "text": ""})
     return blocks
 
 

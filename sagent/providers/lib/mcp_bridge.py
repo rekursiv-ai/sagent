@@ -409,10 +409,7 @@ class ToolsBridge:
                 mcp_types.Tool(
                     name=t.name,
                     description=t.description,
-                    input_schema=cast(
-                        dict[str, object],
-                        json_unfreeze(bg_augmented_schema(t.directive_schema)),
-                    ),
+                    input_schema=json_unfreeze(bg_augmented_schema(t.directive_schema)),
                 )
                 for t in self._tools.values()
             ]

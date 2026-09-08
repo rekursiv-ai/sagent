@@ -43,6 +43,7 @@ from sagent.lib.custom_json import (
     FloatCodec,
     IntCodec,
     MutableJSON,
+    MutableJSONValue,
     validate_json_schema,
 )
 from sagent.providers.anthropic.api import Anthropic
@@ -1893,34 +1894,33 @@ def _user_line(
         att for att in entry.attachments if att.descriptor.startswith("image/")
     ]
     if not image_attachments:
-        return cast(
-            MutableJSON,
-            {"type": "user", "message": {"role": "user", "content": entry.text}},
-        )
-    content: list[MutableJSON] = []
+        text_line: MutableJSON = {
+            "type": "user",
+            "message": {"role": "user", "content": entry.text},
+        }
+        return text_line
+    content: list[MutableJSONValue] = []
     for att in image_attachments:
         raw, mime = image_lib.resize(
             att.data, max_dim=max_image_dim, max_bytes=max_image_bytes
         )
         content.append(
-            cast(
-                MutableJSON,
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": mime,
-                        "data": base64.b64encode(raw).decode(),
-                    },
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime,
+                    "data": base64.b64encode(raw).decode(),
                 },
-            )
+            }
         )
     if entry.text:
         content.append({"type": "text", "text": entry.text})
-    return cast(
-        MutableJSON,
-        {"type": "user", "message": {"role": "user", "content": content}},
-    )
+    image_line: MutableJSON = {
+        "type": "user",
+        "message": {"role": "user", "content": content},
+    }
+    return image_line
 
 
 def _dispatch_stream_event(

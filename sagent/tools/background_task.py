@@ -237,19 +237,17 @@ class BackgroundTask:
                 ),
                 is_error=True,
             )
-        completed = False
         call_id = job.call_id or job.queue_id
-        try:
-            spliced = _find_history_result(agent, call_id)
-            if spliced is None:
-                spliced = await _await_detached(agent, call_id, job)
-            completed = True
-            return ToolResult(
-                call_id="", content=spliced.content, is_error=spliced.is_error
-            )
-        finally:
-            if completed:
-                agent.cancel_background(job_id)
+        spliced = _find_history_result(agent, call_id)
+        if spliced is None:
+            # No try/finally: only a job whose result was actually collected is
+            # cancelled, so a raise or cancellation above must leave it running
+            # for a later drain rather than reach the cancel below.
+            spliced = await _await_detached(agent, call_id, job)
+        agent.cancel_background(job_id)
+        return ToolResult(
+            call_id="", content=spliced.content, is_error=spliced.is_error
+        )
 
 
 def shutdown_persistent_subagent(agent: AgentLike, job: BackgroundTaskEntry) -> None:

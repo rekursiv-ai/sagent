@@ -64,6 +64,25 @@ class ToolResultPolicy:
         )
 
 
+class ToolResultClearable(Protocol):
+    """What a provider reads to decide whose RESULTS its server may drop.
+
+    Narrower than ``Tool`` on purpose: deciding which tool results the server
+    may clear needs a name and that one flag, not the ten members the agent
+    runtime consumes.
+    """
+
+    @property
+    def name(self) -> str:
+        """Human-readable tool name, e.g. ``"Bash"``."""
+        ...
+
+    @property
+    def clearable_results(self) -> bool:
+        """Whether server-side context management may drop this tool's results."""
+        ...
+
+
 @runtime_checkable
 class Tool(Protocol):
     """Tool interface for the wrapper layer.

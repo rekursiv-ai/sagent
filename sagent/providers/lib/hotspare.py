@@ -73,11 +73,15 @@ class HotSpare:
         """
         if self._closed:
             raise RuntimeError("HotSpare: pool is closed")
-        if self._active is None:
-            async with self._respawn_lock:
-                if self._active is None:
-                    self._active = await self._take_or_make_spare()
-            self._kick_warm()
+        # Fast path off a local: the attribute is re-read under the lock, so a
+        # coroutine that populated it while this one waited is observed there.
+        active = self._active
+        if active is not None:
+            return active
+        async with self._respawn_lock:
+            if self._active is None:
+                self._active = await self._take_or_make_spare()
+        self._kick_warm()
         return self._active
 
     async def respawn(self) -> Subproc:

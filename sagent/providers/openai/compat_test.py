@@ -173,14 +173,11 @@ def test_extract_usage_reports_full_input_and_cache_read_separately() -> None:
     split (input minus cache) happens later in ``consume_stream`` -- see
     :func:`test_consume_stream_input_tokens_exclude_cache_read`.
     """
-    usage = cast(
-        MutableJSON,
-        {
-            "prompt_tokens": 1000,
-            "completion_tokens": 100,
-            "prompt_tokens_details": {"cached_tokens": 400},
-        },
-    )
+    usage: MutableJSON = {
+        "prompt_tokens": 1000,
+        "completion_tokens": 100,
+        "prompt_tokens_details": {"cached_tokens": 400},
+    }
     input_tokens, output_tokens, cache_read, cache_write = _extract_usage(usage)
     assert input_tokens == 1000
     assert output_tokens == 100

@@ -55,7 +55,12 @@ import time
 import uuid
 
 from sagent.lib import token_count
-from sagent.lib.custom_json import MutableJSON, MutableJSONValue, json_unfreeze
+from sagent.lib.custom_json import (
+    DictCodec,
+    MutableJSON,
+    MutableJSONValue,
+    json_unfreeze,
+)
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.lib.stop_reason import normalize_stop_reason
@@ -910,17 +915,14 @@ def _build_chat_messages(request: ModelRequest) -> list[MutableJSON]:
             messages.append({"role": "user", "content": entry.text})
         elif isinstance(entry, AssistantMessage):
             tool_calls_hf: list[MutableJSON] = [
-                cast(
-                    MutableJSON,
-                    {
-                        "id": ids.map(tc.id),
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(dict(tc.args)),
-                        },
+                {
+                    "id": ids.map(tc.id),
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": json.dumps(dict(tc.args)),
                     },
-                )
+                }
                 for tc in entry.tool_calls
             ]
             asst_entry: MutableJSON = {
@@ -946,17 +948,15 @@ def _build_chat_messages(request: ModelRequest) -> list[MutableJSON]:
 
 def _tool_schema(tool: Tool) -> MutableJSON:
     """Wire-shape a ``Tool`` as the HF chat-template ``tools`` schema entry."""
-    return cast(
-        MutableJSON,
-        {
-            "type": "function",
-            "function": {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": json_unfreeze(tool.directive_schema),
-            },
+    schema: MutableJSON = {
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": json_unfreeze(tool.directive_schema),
         },
-    )
+    }
+    return schema
 
 
 def _tool_preamble(tools: list[Tool]) -> str:
@@ -1066,7 +1066,7 @@ def _parse_qwen_tool_call(raw: str) -> ToolCall | None:
     return ToolCall(
         id=str(uuid.uuid4())[:12],
         name=name,
-        args=cast(Mapping[str, object], cast(MutableJSON, raw_args)),
+        args=raw_args,
     )
 
 
@@ -1078,13 +1078,13 @@ def _parse_deepseek_tool_call(raw: str) -> ToolCall | None:
     if name_match is None or json_match is None:
         return None
     try:
-        args = json.loads(json_match.group(1))
+        parsed: object = json.loads(json_match.group(1))
     except json.JSONDecodeError:
         return None
-    if not isinstance(args, dict):
-        return None
+    # The regex already required a ``{...}`` body, and ``coerce`` takes
+    # ``object`` and validates, so no separate shape check is needed.
     return ToolCall(
         id=str(uuid.uuid4())[:12],
         name=name_match.group(1),
-        args=cast(Mapping[str, object], cast(MutableJSON, args)),
+        args=DictCodec.coerce(parsed),
     )

@@ -33,6 +33,7 @@ from sagent.types.tape import (
     MaskRange,
     ReferrableTapeEvent,
     TapeEvent,
+    TapeRecord,
     TapeRef,
 )
 
@@ -93,7 +94,7 @@ class _StubAgent:
     """Minimum surface ``replay_messages`` consumes."""
 
     history: list[TapeEvent] = field(default_factory=list)
-    tape: list[object] = field(default_factory=list)
+    tape: list[TapeRecord] = field(default_factory=list)
 
     @property
     def runtime(self) -> object:
@@ -110,7 +111,7 @@ class _StubAgent:
 def _agent(
     *,
     history: list[TapeEvent] | None = None,
-    tape: list[object] | None = None,
+    tape: list[TapeRecord] | None = None,
     tools_map: Mapping[str, _StubTool] | None = None,
     total_cost_usd: float = 0.0,
     model_recipe: _StubModelRecipe | None = None,
@@ -120,7 +121,7 @@ def _agent(
     service_tier: ServiceTier = "auto",
 ) -> Agent:
     """Build a ``_StubAgent`` typed as ``Agent`` for replay_messages."""
-    history_records = [
+    history_records: list[TapeRecord] = [
         ReferrableTapeEvent(ref=TapeRef(session_id="t", ordinal=i), event=entry)
         for i, entry in enumerate(history or [])
     ]
@@ -131,7 +132,7 @@ def _agent(
     settings.service_tier = service_tier
     stub = _StubAgent(
         history=list(history) if history else [],
-        tape=list(tape) if tape is not None else cast(list[object], history_records),
+        tape=list(tape) if tape is not None else history_records,
         tools_map=tools_map or {},
         cost_tracker=_StubCostTracker(spend=TokenCost(request=total_cost_usd)),
         model_recipe=model_recipe,

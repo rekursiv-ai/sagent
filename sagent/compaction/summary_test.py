@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Literal, cast, override
+from typing import cast, override
 
 import logging
 
@@ -1417,7 +1417,7 @@ def test_strip_attachments_drops_entry_with_empty_text_and_no_markers() -> None:
 def test_summary_compactor_rejects_invalid_direction() -> None:
     with pytest.raises(ValueError, match="direction"):
         _ = SummaryCompactor(
-            direction=cast(Literal["from", "up_to"], "sideways"),
+            direction="sideways",  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType] -- negative test: the off-Literal value IS what is under test
         )
 
 

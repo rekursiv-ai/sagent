@@ -129,8 +129,9 @@ def _split_id_bundle(
             # to a real list: str() here meant {"ids": [1]} was rejected while
             # the equivalent {"ids": "[1]"} silently became ["1"].
             members = cast(list[object], parsed)
-            if all(isinstance(x, str) for x in members):
-                return cast(list[str], members)
+            strings = [x for x in members if isinstance(x, str)]
+            if len(strings) == len(members):
+                return strings
             return [raw]
     # Split a comma/newline bundle only when every token looks like an id: a
     # lone DOI can legitimately contain a comma, so an ambiguous split is kept

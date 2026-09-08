@@ -1100,9 +1100,9 @@ def test_a_tool_call_without_an_id_or_name_is_dropped() -> None:
         "type": "assistant",
         "text": "hi",
         "tool_calls": [
-            {"id": "", "name": "Bash", "args": cast("Mapping[str, object]", {})},
-            {"id": "t1", "name": "", "args": cast("Mapping[str, object]", {})},
-            {"id": "t2", "name": "Bash", "args": cast("Mapping[str, object]", {})},
+            {"id": "", "name": "Bash", "args": _NO_ARGS},
+            {"id": "t1", "name": "", "args": _NO_ARGS},
+            {"id": "t2", "name": "Bash", "args": _NO_ARGS},
         ],
     }
     entry = _entry_from_json(record)
@@ -1200,8 +1200,8 @@ def test_one_malformed_record_does_not_abort_the_resume(tmp_path: Path) -> None:
             "type": "assistant",
             "text": "",
             "tool_calls": [
-                {"id": "t1", "name": "Bash", "args": cast("Mapping[str, object]", {})},
-                {"id": "t1", "name": "Bash", "args": cast("Mapping[str, object]", {})},
+                {"id": "t1", "name": "Bash", "args": _NO_ARGS},
+                {"id": "t1", "name": "Bash", "args": _NO_ARGS},
             ],
         },
         {
@@ -2338,6 +2338,10 @@ def test_session_meta_round_trip() -> None:
     assert back.status == "busy"
 
 
+_NO_ARGS: Mapping[str, object] = {}
+"""A tool call with no arguments; named so its value type is not re-stated."""
+
+
 def _write_jsonl(path: Path, *records: object) -> None:
     """Write each record as a JSON line."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2445,22 +2449,19 @@ def test_repair_dangling_tape_handles_legacy_consecutive_assistants(
             "type": "assistant",
             "text": "first",
         },
-        cast(
-            dict[str, object],
-            {
-                "kind": "history",
-                "ref": {"session_id": "abc", "ordinal": 2},
-                "type": "assistant",
-                "text": "second with orphan call",
-                "tool_calls": [
-                    {
-                        "id": "call_x",
-                        "name": "echo",
-                        "args": cast("Mapping[str, object]", {}),
-                    }
-                ],
-            },
-        ),
+        {
+            "kind": "history",
+            "ref": {"session_id": "abc", "ordinal": 2},
+            "type": "assistant",
+            "text": "second with orphan call",
+            "tool_calls": [
+                {
+                    "id": "call_x",
+                    "name": "echo",
+                    "args": _NO_ARGS,
+                }
+            ],
+        },
     )
     loaded = load_session(tmp_path)
     assert loaded is not None
@@ -2486,36 +2487,30 @@ def test_repair_dangling_tape_handles_legacy_duplicate_tool_call_id(
     _write_jsonl(
         session_file,
         {"kind": "meta", "session_id": "abc"},
-        cast(
-            dict[str, object],
-            {
-                "kind": "history",
-                "ref": {"session_id": "abc", "ordinal": 0},
-                "type": "assistant",
-                "tool_calls": [
-                    {
-                        "id": "t1",
-                        "name": "echo",
-                        "args": cast("Mapping[str, object]", {}),
-                    }
-                ],
-            },
-        ),
-        cast(
-            dict[str, object],
-            {
-                "kind": "history",
-                "ref": {"session_id": "abc", "ordinal": 1},
-                "type": "assistant",
-                "tool_calls": [
-                    {
-                        "id": "t1",
-                        "name": "echo",
-                        "args": cast("Mapping[str, object]", {}),
-                    }
-                ],
-            },
-        ),
+        {
+            "kind": "history",
+            "ref": {"session_id": "abc", "ordinal": 0},
+            "type": "assistant",
+            "tool_calls": [
+                {
+                    "id": "t1",
+                    "name": "echo",
+                    "args": _NO_ARGS,
+                }
+            ],
+        },
+        {
+            "kind": "history",
+            "ref": {"session_id": "abc", "ordinal": 1},
+            "type": "assistant",
+            "tool_calls": [
+                {
+                    "id": "t1",
+                    "name": "echo",
+                    "args": _NO_ARGS,
+                }
+            ],
+        },
     )
     loaded = load_session(tmp_path)
     assert loaded is not None
@@ -2585,7 +2580,7 @@ def test_load_session_drops_non_dict_tool_calls(tmp_path: Path) -> None:
     good_tc: dict[str, object] = {
         "id": "c1",
         "name": "echo",
-        "args": cast("Mapping[str, object]", {}),
+        "args": _NO_ARGS,
     }
     record: dict[str, object] = {
         "kind": "history",

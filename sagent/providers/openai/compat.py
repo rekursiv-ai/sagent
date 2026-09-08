@@ -377,18 +377,17 @@ class OpenAICompatModel(ModelDefaults):
 
     def _build_body(self, request: ModelRequest, *, stream: bool) -> MutableJSON:
         """Build the chat-completions request body."""
-        body: MutableJSON = cast(
-            MutableJSON,
-            {
-                "model": self._wire_model_id,
-                "messages": build_messages(
+        body: MutableJSON = {
+            "model": self._wire_model_id,
+            "messages": [
+                *build_messages(
                     request,
                     self.limits.max_image_edge_px,
                     self.limits.max_image_bytes,
-                ),
-                "temperature": request.temperature,
-            },
-        )
+                )
+            ],
+            "temperature": request.temperature,
+        }
         if request.max_response_tokens is not None:
             # OpenAI reasoning models (gpt-5 / o-series) reject ``max_tokens``
             # with a 400 and require ``max_completion_tokens``; the same model
@@ -622,7 +621,8 @@ def _build_user_message(
         )
     if entry.text:
         blocks.append({"type": "text", "text": entry.text})
-    return cast(MutableJSON, {"role": "user", "content": blocks})
+    image_message: MutableJSON = {"role": "user", "content": [*blocks]}
+    return image_message
 
 
 def _is_image_mime(descriptor: str) -> bool:

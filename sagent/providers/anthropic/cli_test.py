@@ -899,32 +899,28 @@ def test_build_model_response_normalizes_input_to_last_round() -> None:
     cumulative (it genuinely accumulates) and billing rides ``costUSD``
     (computed by the CLI from full cumulative usage) untouched.
     """
+    usage_event: MutableJSON = {
+        "type": "result",
+        "modelUsage": {
+            "claude-opus-4-6": {
+                "inputTokens": 5_600_000,  # cumulative across rounds
+                "outputTokens": 450,
+                "cacheCreationInputTokens": 90_000,
+                "cacheReadInputTokens": 5_400_000,
+                "costUSD": 1.25,
+            }
+        },
+    }
+    # Raw Anthropic API shape off the last ``message_start`` —
+    # snake_case, unlike the camelCase ``modelUsage`` rows above.
+    last_round_usage: MutableJSON = {
+        "input_tokens": 3,
+        "cache_creation_input_tokens": 1_200,
+        "cache_read_input_tokens": 96_000,
+    }
     response = _build_model_response(
-        usage_event=cast(
-            MutableJSON,
-            {
-                "type": "result",
-                "modelUsage": {
-                    "claude-opus-4-6": {
-                        "inputTokens": 5_600_000,  # cumulative across rounds
-                        "outputTokens": 450,
-                        "cacheCreationInputTokens": 90_000,
-                        "cacheReadInputTokens": 5_400_000,
-                        "costUSD": 1.25,
-                    }
-                },
-            },
-        ),
-        # Raw Anthropic API shape off the last ``message_start`` —
-        # snake_case, unlike the camelCase ``modelUsage`` rows above.
-        last_round_usage=cast(
-            MutableJSON,
-            {
-                "input_tokens": 3,
-                "cache_creation_input_tokens": 1_200,
-                "cache_read_input_tokens": 96_000,
-            },
-        ),
+        usage_event=usage_event,
+        last_round_usage=last_round_usage,
         text="done",
         thinking_parts=[],
         signature_parts=[],
@@ -941,19 +937,12 @@ def test_build_model_response_normalizes_input_to_last_round() -> None:
 def test_round_context_tokens_sums_cache_pools() -> None:
     """Context footprint = non-cached input + both cache pools; None → 0."""
     assert _round_context_tokens(None) == 0
-    assert (
-        _round_context_tokens(
-            cast(
-                MutableJSON,
-                {
-                    "input_tokens": 3,
-                    "cache_creation_input_tokens": 7,
-                    "cache_read_input_tokens": 90,
-                },
-            )
-        )
-        == 100
-    )
+    round_usage: MutableJSON = {
+        "input_tokens": 3,
+        "cache_creation_input_tokens": 7,
+        "cache_read_input_tokens": 90,
+    }
+    assert _round_context_tokens(round_usage) == 100
 
 
 @pytest.mark.asyncio
@@ -965,42 +954,37 @@ async def test_drain_captures_last_round_usage_for_context_anchor() -> None:
     """
 
     def _msg_start(input_tokens: int, cache_read: int) -> MutableJSON:
-        return cast(
-            MutableJSON,
-            {
-                "type": "stream_event",
-                "event": {
-                    "type": "message_start",
-                    "message": {
-                        "usage": {
-                            "input_tokens": input_tokens,
-                            "cache_creation_input_tokens": 0,
-                            "cache_read_input_tokens": cache_read,
-                        }
-                    },
-                },
-            },
-        )
-
-    events = [
-        _msg_start(50_000, 0),  # round 1: cold prompt
-        _msg_start(3, 96_000),  # round 2 (final): cached context
-        cast(
-            MutableJSON,
-            {
-                "type": "result",
-                "stop_reason": "end_turn",
-                "is_error": False,
-                "modelUsage": {
-                    "claude-haiku-4-5": {
-                        "inputTokens": 146_003,  # cumulative
-                        "outputTokens": 70,
-                        "cacheReadInputTokens": 96_000,
-                        "costUSD": 0.01,
+        return {
+            "type": "stream_event",
+            "event": {
+                "type": "message_start",
+                "message": {
+                    "usage": {
+                        "input_tokens": input_tokens,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": cache_read,
                     }
                 },
             },
-        ),
+        }
+
+    result_event: MutableJSON = {
+        "type": "result",
+        "stop_reason": "end_turn",
+        "is_error": False,
+        "modelUsage": {
+            "claude-haiku-4-5": {
+                "inputTokens": 146_003,  # cumulative
+                "outputTokens": 70,
+                "cacheReadInputTokens": 96_000,
+                "costUSD": 0.01,
+            }
+        },
+    }
+    events = [
+        _msg_start(50_000, 0),  # round 1: cold prompt
+        _msg_start(3, 96_000),  # round 2 (final): cached context
+        result_event,
     ]
 
     class _Proc:
@@ -1030,23 +1014,19 @@ async def test_drain_zero_round_preserves_prior_input_token_anchor() -> None:
     empty" and suppress a respawn the still-full context needs. The prior
     anchor must survive.
     """
-    events = [
-        cast(
-            MutableJSON,
-            {
-                "type": "result",
-                "stop_reason": "end_turn",
-                "is_error": False,
-                "modelUsage": {
-                    "claude-haiku-4-5": {
-                        "inputTokens": 0,
-                        "outputTokens": 0,
-                        "costUSD": 0.0,
-                    }
-                },
-            },
-        ),
-    ]
+    result_event: MutableJSON = {
+        "type": "result",
+        "stop_reason": "end_turn",
+        "is_error": False,
+        "modelUsage": {
+            "claude-haiku-4-5": {
+                "inputTokens": 0,
+                "outputTokens": 0,
+                "costUSD": 0.0,
+            }
+        },
+    }
+    events = [result_event]
 
     class _Proc:
         async def read_json_line(
@@ -1760,20 +1740,14 @@ def test_dispatch_stream_event_routes_text_and_thinking() -> None:
         elif isinstance(ev, ModelResponseThinking):
             thinking_chunks.append(ev.text)
 
-    text_event = cast(
-        MutableJSON,
-        {
-            "type": "content_block_delta",
-            "delta": {"type": "text_delta", "text": "hello"},
-        },
-    )
-    thinking_event = cast(
-        MutableJSON,
-        {
-            "type": "content_block_delta",
-            "delta": {"type": "thinking_delta", "thinking": "reflecting"},
-        },
-    )
+    text_event: MutableJSON = {
+        "type": "content_block_delta",
+        "delta": {"type": "text_delta", "text": "hello"},
+    }
+    thinking_event: MutableJSON = {
+        "type": "content_block_delta",
+        "delta": {"type": "thinking_delta", "thinking": "reflecting"},
+    }
     _dispatch_stream_event(
         text_event,
         text_parts,
@@ -1814,13 +1788,10 @@ def test_dispatch_stream_event_captures_signature_delta() -> None:
     thinking_parts: list[str] = []
     signature_parts: list[str] = []
     tool_use_blocks: dict[int, dict[str, object]] = {}
-    sig_event = cast(
-        MutableJSON,
-        {
-            "type": "content_block_delta",
-            "delta": {"type": "signature_delta", "signature": "abc123"},
-        },
-    )
+    sig_event: MutableJSON = {
+        "type": "content_block_delta",
+        "delta": {"type": "signature_delta", "signature": "abc123"},
+    }
     _dispatch_stream_event(
         sig_event,
         text_parts,
@@ -1844,20 +1815,18 @@ def test_dispatch_stream_event_publishes_rich_tool_label_at_stop() -> None:
     signature_parts: list[str] = []
     tool_use_blocks: dict[int, dict[str, object]] = {}
     # 1) start: registers tool_use at index 0 -- NO label published yet
+    start_event: MutableJSON = {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+            "type": "tool_use",
+            "id": "toolu_abc123",
+            "name": "Bash",
+            "input": {},
+        },
+    }
     _dispatch_stream_event(
-        cast(
-            MutableJSON,
-            {
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {
-                    "type": "tool_use",
-                    "id": "toolu_abc123",
-                    "name": "Bash",
-                    "input": {},
-                },
-            },
-        ),
+        start_event,
         text_parts,
         thinking_parts,
         signature_parts=signature_parts,
@@ -1867,15 +1836,13 @@ def test_dispatch_stream_event_publishes_rich_tool_label_at_stop() -> None:
     assert published == []  # nothing yet -- we wait for args
     # 2) deltas: stream the JSON in two chunks
     for partial in ('{"command":"ls', ' -la"}'):
+        delta_event: MutableJSON = {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": partial},
+        }
         _dispatch_stream_event(
-            cast(
-                MutableJSON,
-                {
-                    "type": "content_block_delta",
-                    "index": 0,
-                    "delta": {"type": "input_json_delta", "partial_json": partial},
-                },
-            ),
+            delta_event,
             text_parts,
             thinking_parts,
             signature_parts=signature_parts,
@@ -1884,11 +1851,9 @@ def test_dispatch_stream_event_publishes_rich_tool_label_at_stop() -> None:
         )
     assert published == []  # still nothing
     # 3) stop: now we publish the rich label
+    stop_event: MutableJSON = {"type": "content_block_stop", "index": 0}
     _dispatch_stream_event(
-        cast(
-            MutableJSON,
-            {"type": "content_block_stop", "index": 0},
-        ),
+        stop_event,
         text_parts,
         thinking_parts,
         signature_parts=signature_parts,
@@ -1907,15 +1872,13 @@ def test_dispatch_stream_event_no_label_for_text_block_start() -> None:
     """``content_block_start`` for ``text`` does NOT publish a ToolLabel."""
     published: list[RuntimeEvent] = []
     tool_use_blocks: dict[int, dict[str, object]] = {}
+    start_event: MutableJSON = {
+        "type": "content_block_start",
+        "index": 1,
+        "content_block": {"type": "text", "text": ""},
+    }
     _dispatch_stream_event(
-        cast(
-            MutableJSON,
-            {
-                "type": "content_block_start",
-                "index": 1,
-                "content_block": {"type": "text", "text": ""},
-            },
-        ),
+        start_event,
         [],
         [],
         signature_parts=[],
@@ -1923,8 +1886,9 @@ def test_dispatch_stream_event_no_label_for_text_block_start() -> None:
         publish=published.append,
     )
     # And a content_block_stop on the text block: no label.
+    stop_event: MutableJSON = {"type": "content_block_stop", "index": 1}
     _dispatch_stream_event(
-        cast(MutableJSON, {"type": "content_block_stop", "index": 1}),
+        stop_event,
         [],
         [],
         signature_parts=[],
@@ -1949,14 +1913,12 @@ def test_dispatch_stream_event_ignores_unknown_delta_types() -> None:
     thinking_parts: list[str] = []
     signature_parts: list[str] = []
     tool_use_blocks: dict[int, dict[str, object]] = {}
+    unknown_event: MutableJSON = {
+        "type": "content_block_delta",
+        "delta": {"type": "fake_future_delta", "payload": "x"},
+    }
     _dispatch_stream_event(
-        cast(
-            MutableJSON,
-            {
-                "type": "content_block_delta",
-                "delta": {"type": "fake_future_delta", "payload": "x"},
-            },
-        ),
+        unknown_event,
         text_parts,
         thinking_parts,
         signature_parts=signature_parts,
@@ -1970,27 +1932,24 @@ def test_dispatch_stream_event_ignores_unknown_delta_types() -> None:
 
 def test_build_model_response_sums_model_usage_rows() -> None:
     """Costs sum across all ``modelUsage`` rows (Sonnet + Haiku classifier)."""
-    usage_event = cast(
-        MutableJSON,
-        {
-            "type": "result",
-            "stop_reason": "end_turn",
-            "is_error": False,
-            "modelUsage": {
-                "claude-sonnet-4-6": {
-                    "inputTokens": 100,
-                    "outputTokens": 50,
-                    "costUSD": 0.001,
-                },
-                "claude-haiku-4-5": {
-                    "inputTokens": 200,
-                    "outputTokens": 10,
-                    "costUSD": 0.0002,
-                },
+    usage_event: MutableJSON = {
+        "type": "result",
+        "stop_reason": "end_turn",
+        "is_error": False,
+        "modelUsage": {
+            "claude-sonnet-4-6": {
+                "inputTokens": 100,
+                "outputTokens": 50,
+                "costUSD": 0.001,
             },
-            "session_id": "sid-x",
+            "claude-haiku-4-5": {
+                "inputTokens": 200,
+                "outputTokens": 10,
+                "costUSD": 0.0002,
+            },
         },
-    )
+        "session_id": "sid-x",
+    }
     response = _build_model_response(
         usage_event=usage_event,
         last_round_usage=None,
@@ -2021,15 +1980,12 @@ def test_build_model_response_sums_model_usage_rows() -> None:
 
 def test_build_model_response_falls_back_to_total_cost_usd() -> None:
     """``total_cost_usd`` is used when ``modelUsage`` is empty (older CLIs)."""
-    usage_event = cast(
-        MutableJSON,
-        {
-            "type": "result",
-            "stop_reason": "end_turn",
-            "modelUsage": {},
-            "total_cost_usd": 0.005,
-        },
-    )
+    usage_event: MutableJSON = {
+        "type": "result",
+        "stop_reason": "end_turn",
+        "modelUsage": {},
+        "total_cost_usd": 0.005,
+    }
     response = _build_model_response(
         usage_event=usage_event,
         last_round_usage=None,
@@ -2421,7 +2377,7 @@ async def test_exchange_turn_skips_assistant_replay() -> None:
 
         async def read_json_line(self, *, skip_non_json: bool = False) -> MutableJSON:
             del skip_non_json
-            return cast(MutableJSON, {"type": "result", "usage": {}})
+            return {"type": "result", "usage": {}}
 
     response = await model._exchange_turn(
         cast(Subproc, _Proc()),
@@ -2523,7 +2479,7 @@ async def test_terminal_is_error_respawns_and_resets_state(
 
         async def read_json_line(self, *, skip_non_json: bool = False) -> MutableJSON:
             del skip_non_json
-            return cast(MutableJSON, {"type": "result", "is_error": True})
+            return {"type": "result", "is_error": True}
 
     class _HotSpare:
         active = cast(Subproc | None, object())
@@ -2571,7 +2527,7 @@ async def test_exchange_turn_drains_each_user_like_entry() -> None:
             del skip_non_json
             assert self.pending
             self.pending = False
-            return cast(MutableJSON, {"type": "result", "usage": {}})
+            return {"type": "result", "usage": {}}
 
     proc = _Proc()
 
@@ -2608,13 +2564,10 @@ async def test_exchange_turn_replay_drain_does_not_update_input_tokens() -> None
             nonlocal drain_count
             drain_count += 1
             if drain_count == 1:
-                return cast(
-                    MutableJSON,
-                    {
-                        "type": "result",
-                        "usage": {"input_tokens": model.limits.max_request_tokens},
-                    },
-                )
+                return {
+                    "type": "result",
+                    "usage": {"input_tokens": model.limits.max_request_tokens},
+                }
             return None
 
     with pytest.raises(SubprocessTransportError, match="stdout closed"):

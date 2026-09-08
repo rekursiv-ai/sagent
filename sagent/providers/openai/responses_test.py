@@ -485,8 +485,8 @@ def test_build_tools_list_passthrough() -> None:
 
 
 def _items_as_list(req: ModelRequest) -> list[Mapping[str, object]]:
-    """Cast the Responses-API TypedDict union output to a uniform mapping list."""
-    return cast(list[Mapping[str, object]], _build_input(req))
+    """View the Responses-API TypedDict union output as a uniform mapping list."""
+    return list(_build_input(req))
 
 
 def test_build_input_user_message() -> None:

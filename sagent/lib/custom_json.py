@@ -642,7 +642,7 @@ def json_freeze(obj: object, *, allow_nan: bool = True) -> JSONValue:
 @overload
 def json_unfreeze(
     obj: Mapping[str, object], *, allow_nan: bool = True
-) -> MutableJSON: ...  # pragma: no cover
+) -> dict[str, MutableJSONValue]: ...  # pragma: no cover
 
 
 @overload
@@ -1028,8 +1028,8 @@ def residual(
 
     """
     checked: dict[str, JSONValue] = {}
-    for key, value in cast(Mapping[object, object], source).items():
-        if not isinstance(key, str):
+    for key, value in source.items():
+        if not isinstance(key, str):  # pyright: ignore[reportUnnecessaryIsInstance] -- runtime guard against untyped callers; custom_json_test.py asserts it fires
             raise TypeError(f"provider object key must be str, got {key!r}")
         checked[key] = _provider_json_value(key, value)
     if fields is None:

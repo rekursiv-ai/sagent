@@ -21,7 +21,6 @@ session:
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import cast
 
 from hypothesis import given, settings
 from hypothesis.strategies import (
@@ -317,7 +316,7 @@ def test_last_assistant_result_picks_most_recent_send(
     if not sends:
         return  # composite always produces at least one but defensive
     expected = sends[-1].args["content"]
-    typed_history = cast(list[ModelContextEvent], history)
+    typed_history: list[ModelContextEvent] = list(history)
     r = _last_assistant_result(typed_history)
     assert r.content == expected, (
         f"expected last AgentSend's content {expected!r}; got {r.content!r}"

@@ -1366,14 +1366,15 @@ def test_build_kwargs_includes_context_management_when_opted_in() -> None:
     assert any(e["type"] == "clear_tool_uses_20250919" for e in edits)
 
 
-def test_context_management_missing_clearable_results_defaults_unclearable() -> None:
-    class LegacyTool:
+def test_context_management_unclearable_tool_is_excluded() -> None:
+    class UnclearableTool:
         name = "Legacy"
+        clearable_results = False
 
     config = build_context_management(
         server_side_context_management=True,
         trigger_tokens=100_000,
-        tools=cast(Sequence[Tool], [LegacyTool()]),
+        tools=[UnclearableTool()],
     )
     assert config is not None
     edit = cast(Mapping[str, object], config["edits"][0])
