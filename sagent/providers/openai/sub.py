@@ -215,7 +215,7 @@ class OpenAISubscription(OpenAI):
     # ``+1m`` ids entirely: the base id is the only honest handle here. The
     # inherited ``OpenAI.DEFAULT_MODEL`` carries ``+1m``, so it is overridden
     # below to the base id to stay resolvable against this narrowed catalog.
-    DEFAULT_MODEL: ClassVar[str] = "gpt-5.6-sol"
+    DEFAULT_MODEL: ClassVar[str] = "gpt-6-astra"
 
     CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = MappingProxyType(
         {

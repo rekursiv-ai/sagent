@@ -357,8 +357,8 @@ def test_subscription_model_uses_default_when_unset() -> None:
 
 def test_subscription_default_model_is_openai_default_without_1m() -> None:
     """Sub default = the API default's base id (``+1m`` is not in the catalog)."""
-    assert OpenAISubscription.DEFAULT_MODEL == "gpt-5.6-sol"
-    assert OpenAI.DEFAULT_MODEL == "gpt-5.6-sol+1m"
+    assert OpenAISubscription.DEFAULT_MODEL == "gpt-6-astra"
+    assert OpenAI.DEFAULT_MODEL == "gpt-6-astra+1m"
     # The narrowed default must resolve against the narrowed catalog.
     assert OpenAISubscription.DEFAULT_MODEL in OpenAISubscription.CAPABILITIES
 
@@ -370,7 +370,7 @@ def test_subscription_default_utility_model_inherits_from_openai() -> None:
 
 def test_subscription_utility_model_uses_utility_default() -> None:
     m = _make_provider().utility_model()
-    assert m.capability.model_id == OpenAISubscription.DEFAULT_UTILITY_MODEL
+    assert m.capability.model_id == "gpt-5.6-luna"
 
 
 def test_subscription_model_clamps_against_wire_contract() -> None:

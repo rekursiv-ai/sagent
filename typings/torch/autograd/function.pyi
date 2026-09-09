@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import Any, Concatenate, Protocol, TypeVar
+from typing import Any, Concatenate, Protocol, TypeVar, overload
 from typing_extensions import ParamSpec, deprecated
 
 from torch import _C
@@ -47,6 +47,13 @@ class _HasStaticForward[**FP, FR](Protocol):
     @staticmethod
     def forward(*args: FP.args, **kwargs: FP.kwargs) -> FR: ...
 
+# The legacy convention, still supported by autograd: `forward` takes the ctx
+# as its first positional and `apply` does NOT pass one. Without this, every
+# argument at such a call site solves one position early.
+class _HasCtxForward[**CP, CR](Protocol):
+    @classmethod
+    def forward(cls, ctx: Any, /, *args: CP.args, **kwargs: CP.kwargs) -> CR: ...
+
 class _SingleLevelFunction(
     _C._FunctionBase, FunctionCtx, _HookMixin, metaclass=FunctionMeta
 ):
@@ -70,10 +77,21 @@ class _SingleLevelFunction(
     # returns whatever that does. A plain `-> Any` makes every call site Any,
     # which is what the repo's `cast("Tensor", X.apply(...))` wrappers existed
     # to undo.
+    # Ctx-first overload leads: a legacy `forward` also structurally satisfies
+    # the static protocol (with ctx bound to the first argument), so the
+    # narrower shape must be tried before the ctx-less one.
+    @overload
+    @classmethod
+    def apply[**CP, CR](
+        cls: type[_HasCtxForward[CP, CR]], *args: CP.args, **kwargs: CP.kwargs
+    ) -> CR: ...
+    @overload
     @classmethod
     def apply[**AP, AR](
         cls: type[_HasStaticForward[AP, AR]], *args: AP.args, **kwargs: AP.kwargs
     ) -> AR: ...
+    @classmethod
+    def apply(cls, *args: Any, **kwargs: Any) -> Any: ...
 
 class Function(_SingleLevelFunction):
     def __init__(self, *args, **kwargs) -> None: ...

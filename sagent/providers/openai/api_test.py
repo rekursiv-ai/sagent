@@ -95,6 +95,12 @@ def test_openai_default_model_known() -> None:
     assert m.tagged_model_id == OpenAI.DEFAULT_MODEL
 
 
+def test_openai_default_models_are_astra_and_luna() -> None:
+    """Astra for reasoning, Luna for utility (50x/42x cheaper per token)."""
+    assert OpenAI.DEFAULT_MODEL == "gpt-6-astra+1m"
+    assert OpenAI.DEFAULT_UTILITY_MODEL == "gpt-5.6-luna"
+
+
 def test_openai_known_model_returns_backend() -> None:
     p = OpenAI.from_key("k")
     m = p.model("gpt-4o")
@@ -199,7 +205,7 @@ def test_openai_default_model_opts_into_full_window() -> None:
     # API-key default is the ``+1m`` variant: full window out of the box.
     p = OpenAI.from_key("k")
     m = p.model()
-    assert m.tagged_model_id == "gpt-5.6-sol+1m"
+    assert m.tagged_model_id == "gpt-6-astra+1m"
     assert m.limits.max_request_tokens == 1_050_000
 
 
@@ -325,7 +331,7 @@ def test_openai_400k_model_has_no_plus1m(model_id: str) -> None:
 def test_openai_utility_model_default() -> None:
     p = OpenAI.from_key("k")
     m = p.utility_model()
-    assert m.capability.model_id == OpenAI.DEFAULT_UTILITY_MODEL
+    assert m.capability.model_id == "gpt-5.6-luna"
 
 
 @pytest.mark.parametrize(

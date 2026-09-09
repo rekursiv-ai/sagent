@@ -28,8 +28,8 @@ __all__ = ["OpenAI"]
 class OpenAI:
     """API-key authentication and loop-local OpenAI SDK ownership."""
 
-    DEFAULT_MODEL: ClassVar[str] = "gpt-5.6-sol+1m"
-    DEFAULT_UTILITY_MODEL: ClassVar[str] = "gpt-5.4-mini"
+    DEFAULT_MODEL: ClassVar[str] = "gpt-6-astra+1m"
+    DEFAULT_UTILITY_MODEL: ClassVar[str] = "gpt-5.6-luna"
     ENV_VAR: ClassVar[str] = "OPENAI_API_KEY"
     BASE_URL: ClassVar[str] = "https://api.openai.com/v1"
     CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = openai_catalog.models()

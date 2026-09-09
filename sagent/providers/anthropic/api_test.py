@@ -612,6 +612,19 @@ def test_anthropic_default_model_resolves() -> None:
     assert m.capability.model_id == Anthropic.DEFAULT_MODEL
 
 
+def test_anthropic_default_model_is_fable_5_1_untagged() -> None:
+    """Fable 5.1 is natively 1M, so the default carries no ``+1m`` tag.
+
+    ``context_betas`` withholds the unnecessary context beta for native 1M
+    models, regardless of an explicit context tag.
+    """
+    assert Anthropic.DEFAULT_MODEL == "claude-fable-5-1"
+    assert Anthropic.DEFAULT_UTILITY_MODEL == "claude-haiku-4-5"
+    p = Anthropic.from_key("k")
+    assert p.model().limits.max_request_tokens == 1_000_000
+    assert "context-1m-2025-08-07" not in context_betas(Anthropic.DEFAULT_MODEL)
+
+
 def test_anthropic_utility_model_uses_haiku() -> None:
     p = Anthropic.from_key("k")
     m = p.utility_model()
@@ -668,7 +681,6 @@ def test_anthropic_fable_5_1_one_million_alias() -> None:
 
 def test_anthropic_fable_model_profile() -> None:
     p = Anthropic.from_key("k")
-    assert Anthropic.DEFAULT_MODEL == "claude-opus-5"
     m = p.model("claude-fable-5")
     assert m.limits.max_request_tokens == 1_000_000
     assert m.limits.max_response_tokens == 128_000

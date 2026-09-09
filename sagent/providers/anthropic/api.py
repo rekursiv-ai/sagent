@@ -253,7 +253,9 @@ class Anthropic:
     """
 
     # Latest model we roll to when ``model_id`` is None. Bump on release.
-    DEFAULT_MODEL = "claude-opus-5"
+    # Bare id, no ``+1m``: fable-5-1 is in ``_DEFAULT_1M_MODELS``, so its
+    # window is already 1M without the context beta.
+    DEFAULT_MODEL = "claude-fable-5-1"
     DEFAULT_UTILITY_MODEL = "claude-haiku-4-5"
 
     # ``chars_per_token`` measured via ``messages.count_tokens`` on a 2.6M-char
