@@ -3916,7 +3916,7 @@ wheels = [
 [[package]]
 name = "wesearch"
 version = "0.1.11"
-source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#dae80cf89122b4af437747cb8f09480ce17e7667" }
+source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#d8d72ea544c0963f8a80eb0af6b58da53326790f" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "brotli" },

@@ -692,6 +692,16 @@ def json_unfreeze(obj: object, *, allow_nan: bool = True) -> MutableJSONValue:
     return _checked_json_scalar(obj, allow_nan=allow_nan)
 
 
+def _is_str_mapping(value: object) -> TypeGuard[Mapping[str, object]]:
+    """Narrow to a JSON object, keeping the parameters both checkers need.
+
+    A bare ``isinstance(value, Mapping)`` narrows to ``Mapping[Unknown,
+    Unknown]`` under basedpyright, and that Unknown propagates to every
+    later use of the same name.
+    """
+    return isinstance(value, Mapping)
+
+
 def _is_json_sequence(value: object) -> TypeGuard[Sequence[object]]:
     """Return whether ``value`` is a non-string JSON array shape."""
     return isinstance(value, Sequence) and not isinstance(
@@ -1509,8 +1519,11 @@ class _UnionCodec(Codec):
         )
         if len(members) == 1:
             return decode(members[0], raw)
-        if isinstance(raw, Mapping):
-            source = cast(Mapping[str, object], raw)
+        # `_is_str_mapping`, not a bare `isinstance` plus a cast: the bare
+        # form narrows to `Mapping[Unknown, Unknown]`, and that Unknown then
+        # rides out on `raw` itself at the fall-through below.
+        if _is_str_mapping(raw):
+            source = raw
             tag = source.get(_UNION_TAG)
             if isinstance(tag, str) and _VALUE_TAG in source:
                 matches = [
@@ -1535,8 +1548,7 @@ class _UnionCodec(Codec):
                 ]
                 if len(matches) == 1:
                     return decode(matches[0], source)
-        value = cast(object, raw)  # ty: ignore[redundant-cast] -- pyright retains Unknown while ty already sees object
-        return decode(_UnionCodec.select_member(annotation, value, wire=True), value)
+        return decode(_UnionCodec.select_member(annotation, raw, wire=True), raw)
 
 
 class _LiteralCodec(Codec):
