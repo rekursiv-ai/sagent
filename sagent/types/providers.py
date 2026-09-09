@@ -9,7 +9,7 @@ selected.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Literal, Protocol, cast, runtime_checkable
+from typing import Literal, Protocol, cast, runtime_checkable
 
 from sagent.types.capability import (
     ContextTag,
@@ -98,7 +98,7 @@ class Provider(Protocol):
         self,
         model_id: str | None = None,
         max_request_tokens: int | None = None,
-        **provider_options: Any,
+        **provider_options: object,
     ) -> Model:
         """Build a model backend.
 

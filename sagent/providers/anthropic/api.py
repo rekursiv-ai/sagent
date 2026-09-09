@@ -370,11 +370,17 @@ class Anthropic:
             redact_thinking=redact_thinking,
         )
 
-    def model(self, model_id: str | None = None) -> _AnthropicModel:
+    def model(
+        self, model_id: str | None = None, **provider_options: object
+    ) -> _AnthropicModel:
         """Create a model backend.
 
         Args:
           model_id: Catalog id with optional tags, or a role name.
+          provider_options: Transport-specific options, ignored here. Declared
+            because ``Provider.model`` declares them: a subclass whose
+            transport DOES take options (the CLI's MCP servers and timeouts)
+            is otherwise a narrower override of this method.
 
         Returns:
           model: Anthropic model backend.
@@ -385,6 +391,7 @@ class Anthropic:
               model does not offer.
 
         """
+        del provider_options
         mid = model_id if model_id is not None else "default"
         capability, settings = resolve(
             mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT

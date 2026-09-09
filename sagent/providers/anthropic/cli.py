@@ -509,7 +509,7 @@ class AnthropicCLI(Anthropic):
             )
 
     @override
-    def model(  # ty: ignore[invalid-method-override]  -- subclasses Anthropic for the shared model catalog + auth, but the CLI transport returns a different Model and accepts provider-specific options; both still satisfy the Provider protocol's ``model(..., **provider_options)`` shape
+    def model(  # ty: ignore[invalid-method-override] -- returns a SIBLING of Anthropic's model (both derive from ModelDefaults, neither from the other); subclassing Anthropic buys the shared catalog and auth, not its transport
         self,
         model_id: str | None = None,
         *,
@@ -517,6 +517,7 @@ class AnthropicCLI(Anthropic):
         session_id: str | None = None,
         subprocess_read_timeout_sec: float | None = None,
         mcp_connect_timeout_sec: float = 8.0,
+        **provider_options: object,
     ) -> _AnthropicCLIModel:
         """Build a CLI-backed model.
 
@@ -556,6 +557,8 @@ class AnthropicCLI(Anthropic):
             a pathologically slow connect before we give up. Only paid once,
             on a cold spawn's first turn -- warm subprocesses keep the
             connection and skip the wait entirely.
+          provider_options: Further transport options, ignored here. Declared
+            because ``Provider.model`` declares them.
 
         Returns:
           model: Backend wrapping a managed ``claude`` subprocess.
@@ -565,6 +568,7 @@ class AnthropicCLI(Anthropic):
               it carries a ``+fast`` tag (the CLI has no fast path).
 
         """
+        del provider_options
         mid = model_id if model_id is not None else "default"
         capability, settings = resolve(
             mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT
