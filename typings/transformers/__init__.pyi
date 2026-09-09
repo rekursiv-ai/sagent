@@ -296,7 +296,6 @@ from .tokenization_utils_base import (
     BatchEncoding as BatchEncoding,
     CharSpan as CharSpan,
     PreTrainedTokenizerBase as PreTrainedTokenizerBase,
-    SpecialTokensMixin as SpecialTokensMixin,
     TokenSpan as TokenSpan,
 )
 from .tokenization_utils_fast import PreTrainedTokenizerFast as PreTrainedTokenizerFast
