@@ -197,6 +197,7 @@ repos:
           (?x)^(
             typings/
             |(.*/)?third_party/
+            |docs/symbols\.md
           )
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
