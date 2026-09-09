@@ -40,7 +40,7 @@ def _write_skill(
 
 
 @pytest.fixture(autouse=True)
-def _isolate_user_skills() -> None:  # pyright: ignore[reportUnusedFunction] -- autouse fixture
+def isolate_user_skills() -> None:
     """Assert the autouse XDG isolation actually reaches skill discovery.
 
     Many devs have a populated user skills dir; tests must not see it, or

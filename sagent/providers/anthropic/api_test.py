@@ -25,6 +25,7 @@ from sagent.providers.anthropic.api import (
     _is_prompt_too_long_text,
     _parse_response,
     _raw_message_stream,
+    _RawMessage,
     _tool_result_block,
     _tool_use_block,
     build_context_management,
@@ -429,7 +430,7 @@ def _build_anthropic_message(
     cache_creation: int = 0,
     cache_read: int = 0,
     speed: str | None = None,
-) -> object:
+) -> _RawMessage:
     """Return a duck-typed object mimicking ``anthropic.types.Message``."""
     # Use the real anthropic SDK classes via the lazy-imported module so
     # ``isinstance`` checks inside ``_parse_response`` succeed.
@@ -455,12 +456,12 @@ def _build_anthropic_message(
     msg.stop_sequence = None
     msg.id = "msg_xyz"
     msg._request_id = "req_xyz"
-    return msg
+    return cast(_RawMessage, msg)
 
 
 def test_parse_response_text_only() -> None:
     raw = _build_anthropic_message(text="hi", input_tokens=5, output_tokens=2)
-    resp = _parse_response(raw, _free_model())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
+    resp = _parse_response(raw, _free_model())
     assert resp.message.text == "hi"
     assert resp.stop_reason == "model_finished"
     assert resp.tokens.request == 5
@@ -472,7 +473,7 @@ def test_parse_response_tool_call_extracted() -> None:
         tool_calls=(("toolu_xyz", "Bash", {"cmd": "ls"}),),
         stop_reason="tool_use",
     )
-    resp = _parse_response(raw, _free_model())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
+    resp = _parse_response(raw, _free_model())
     assert len(resp.message.tool_calls) == 1
     call = resp.message.tool_calls[0]
     assert call.id == "toolu_xyz"
@@ -500,7 +501,7 @@ def test_parse_response_drops_placeholder_tool_name() -> None:
         ),
         stop_reason="tool_use",
     )
-    resp = _parse_response(raw, _free_model())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
+    resp = _parse_response(raw, _free_model())
     assert [c.name for c in resp.message.tool_calls] == ["Bash"]
 
 
@@ -522,7 +523,7 @@ def test_parse_response_cache_tokens_split_correctly() -> None:
             }
         ),
     )
-    resp = _parse_response(raw, model)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
+    resp = _parse_response(raw, model)
     assert resp.tokens.cache_write == 200
     assert resp.tokens.cache_read == 400
     # input cost = 1000*1 + 200*4 + 400*0.5 = 2000 / 1M = 0.002.
@@ -533,7 +534,7 @@ def test_parse_response_cache_tokens_split_correctly() -> None:
 
 def test_parse_response_carries_message_and_request_ids() -> None:
     raw = _build_anthropic_message()
-    resp = _parse_response(raw, _free_model())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
+    resp = _parse_response(raw, _free_model())
     assert resp.message_id == "msg_xyz"
     assert resp.request_id == "req_xyz"
 
@@ -869,7 +870,7 @@ def test_parse_response_bills_fast_when_server_reports_fast() -> None:
     raw = _build_anthropic_message(
         text="x", input_tokens=1_000_000, output_tokens=1_000_000, speed="fast"
     )
-    resp = _parse_response(raw, _fast_model())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
+    resp = _parse_response(raw, _fast_model())
     assert (resp.spend.request + resp.spend.cache_write + resp.spend.cache_read) == 10.0
     assert resp.spend.response == 50.0
 
@@ -878,7 +879,7 @@ def test_parse_response_bills_standard_when_server_falls_back() -> None:
     raw = _build_anthropic_message(
         text="x", input_tokens=1_000_000, output_tokens=1_000_000, speed="standard"
     )
-    resp = _parse_response(raw, _fast_model())  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- duck-typed SDK mock
+    resp = _parse_response(raw, _fast_model())
     assert (resp.spend.request + resp.spend.cache_write + resp.spend.cache_read) == 5.0
     assert resp.spend.response == 25.0
 

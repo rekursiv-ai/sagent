@@ -1056,11 +1056,11 @@ def test_model_accepts_subprocess_read_timeout_kwarg() -> None:
         "claude-haiku-4-5",
         subprocess_read_timeout_sec=300.0,
     )
-    assert model._subprocess_read_timeout_sec == 300.0  # type: ignore[attr-defined]
+    assert model._subprocess_read_timeout_sec == 300.0
 
     # Default path: ``None`` defers to ``Subproc``'s own default.
     default_model = provider.model("claude-haiku-4-5")
-    assert default_model._subprocess_read_timeout_sec is None  # type: ignore[attr-defined]
+    assert default_model._subprocess_read_timeout_sec is None
 
 
 @pytest.mark.asyncio
@@ -1192,10 +1192,15 @@ async def test_session_persistent_advances_sent_index_per_entry_on_partial_failu
     async def _ensure() -> None:
         bridge_calls.append("ensure")
 
-    model._ensure_tools_bridge = _ensure  # ty: ignore[invalid-assignment]
-    model._sync_tools_bridge = lambda request, publish=None: bridge_calls.append(  # ty: ignore[invalid-assignment]
-        ("sync", request, publish)
-    )
+    monkeypatch.setattr(model, "_ensure_tools_bridge", _ensure)
+
+    def _sync(
+        request: ModelRequest,
+        publish: Callable[[RuntimeEvent], None] | None = None,
+    ) -> None:
+        bridge_calls.append(("sync", request, publish))
+
+    monkeypatch.setattr(model, "_sync_tools_bridge", _sync)
 
     fake_proc = MagicMock()
     fake_proc.close = AsyncMock()
@@ -1205,7 +1210,7 @@ async def test_session_persistent_advances_sent_index_per_entry_on_partial_failu
         del proc
         sent_entries.append(entry)
 
-    model._send_entry = _send_entry  # ty: ignore[invalid-assignment]
+    monkeypatch.setattr(model, "_send_entry", _send_entry)
 
     drain_calls = 0
 
@@ -1229,7 +1234,7 @@ async def test_session_persistent_advances_sent_index_per_entry_on_partial_failu
         # that prevented TL's STOP from being processed in production.
         raise SubprocessTransportError("simulated abort on entry 2")
 
-    model._drain_until_result = _drain  # ty: ignore[invalid-assignment]
+    monkeypatch.setattr(model, "_drain_until_result", _drain)
 
     # Three entries queued. _last_sent_index = 5 means request.messages
     # has 8 entries; entries 5, 6, 7 are the new user-like ones.
@@ -1286,7 +1291,7 @@ class _FakeBridge:
         has_tools: bool = False,
         will_list: bool = True,
     ) -> None:
-        self._pending = pending
+        self._pending: list[ToolResult] = pending
         self.url = "http://127.0.0.1:0/mcp"
         self.server_name = "sagent"
         self.drain_calls = 0
@@ -1296,8 +1301,9 @@ class _FakeBridge:
 
     def drain_detached_results(self) -> list[ToolResult]:
         self.drain_calls += 1
-        out, self._pending = self._pending, []
-        return cast(list[ToolResult], out)  # pyright: ignore[reportUnnecessaryCast] -- ty needs the cast; pyright resolves the type
+        out = self._pending
+        self._pending = []
+        return out
 
     def update_tools(self, tools: object) -> None:
         del tools
@@ -2319,7 +2325,9 @@ async def test_stream_same_system_after_first_acquire_does_not_respawn(
 
 
 @pytest.mark.asyncio
-async def test_stream_system_change_discards_warmed_old_system_spare() -> None:
+async def test_stream_system_change_discards_warmed_old_system_spare(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     provider = AnthropicCLI()
     model = provider.model("claude-haiku-4-5")
     spawned_systems: list[str] = []
@@ -2353,8 +2361,8 @@ async def test_stream_system_change_discards_warmed_old_system_spare() -> None:
         return ModelResponse(message=AssistantMessage(text="ok"))
 
     model._hot_spare = HotSpare(spawn_initialized)
-    model._send_entry = send_entry  # ty: ignore[invalid-assignment] -- test replaces method with same call shape bound as a plain function.
-    model._drain_until_result = drain_until_result  # ty: ignore[invalid-assignment] -- test replaces method with same call shape bound as a plain function.
+    monkeypatch.setattr(model, "_send_entry", send_entry)
+    monkeypatch.setattr(model, "_drain_until_result", drain_until_result)
 
     _ = await model.stream(ModelRequest(messages=[UserMessage(text="a")], system="A"))
     await warmed.wait()

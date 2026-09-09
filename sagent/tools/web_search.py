@@ -134,7 +134,7 @@ class WebSearch:
         # non-general category resolves it to SearXNG. Substituting a constant
         # here would hide that choice and reinstate the per-adapter override
         # this tool used to carry.
-        backend = cast("SearchBackends | None", params["backend"])
+        backend = cast(SearchBackends | None, params["backend"])
         transport = cast(Transport, params["transport"])
         categories = cast(SearxngCategory, params["categories"])
         try:

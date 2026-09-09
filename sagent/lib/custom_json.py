@@ -445,8 +445,8 @@ class _GraphEncoder:
         parts[1] = tuple(args)
         return tuple(parts)
 
-    @staticmethod
-    def _fresh_container(argument: object, *, held: AbstractSet[int]) -> object:
+    @classmethod
+    def _fresh_container(cls, argument: object, *, held: AbstractSet[int]) -> object:
         """Copy a reducer-built container, passing real graph objects through."""
         if id(argument) in held or not isinstance(argument, (list, dict, set)):
             return argument
@@ -454,8 +454,8 @@ class _GraphEncoder:
             cast(list[object] | dict[object, object] | set[object], argument)
         )
 
-    @staticmethod
-    def _held_objects(held: object) -> Iterator[object]:
+    @classmethod
+    def _held_objects(cls, held: object) -> Iterator[object]:
         """Yield objects ``held`` itself owns, as identity candidates."""
         # Aliased before narrowing: an ``isinstance`` narrow to a bare Mapping/
         # Sequence leaves a partially-unknown element type that the attribute

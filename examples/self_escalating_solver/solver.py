@@ -23,9 +23,9 @@ model id is injected, so it runs on Gemini or Anthropic unchanged.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Final, cast
+from typing import Any, Final
 
 import asyncio
 import re
@@ -252,10 +252,10 @@ def _build_timeline(
     return steps
 
 
-def _final_text(history: list[Any]) -> str:
+def _final_text(history: Sequence[object]) -> str:
     for m in reversed(history):
         if isinstance(m, AssistantMessage) and m.text:
-            return cast(str, m.text.strip())  # pyright: ignore[reportUnnecessaryCast] -- ty needs the cast; pyright resolves the type
+            return m.text.strip()
     return ""
 
 

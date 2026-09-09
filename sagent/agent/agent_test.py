@@ -1069,7 +1069,7 @@ async def test_has_pending_background_predicate_table() -> None:
             tool_name="x",
             queue_id="q",
             started=0.0,
-            kind=cast("Literal['tool', 'subagent', 'detached']", kind),
+            kind=cast(Literal["tool", "subagent", "detached"], kind),
             lifecycle="serviced",
             hidden=hidden,
             persistent_run_id="r" if kind == "subagent" else "",
@@ -8665,15 +8665,16 @@ async def test_serve_forever_rejects_a_concurrent_run() -> None:
 
 
 @pytest.mark.asyncio
-async def test_drive_until_first_idle_propagates_a_driver_crash() -> None:
+async def test_drive_until_first_idle_propagates_a_driver_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A crashed loop must not read as an empty successful result."""
     a = _build_agent()
 
     async def _boom() -> None:
         raise RuntimeError("boom")
 
-    # ty: ignore[invalid-assignment] -- stubbing the driver is the point
-    a.serve_forever = _boom
+    monkeypatch.setattr(a, "serve_forever", _boom)
     with pytest.raises(RuntimeError, match="boom"):
         _ = await a.drive_until_first_idle(UserMessage(text="hi"))
 

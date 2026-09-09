@@ -182,7 +182,7 @@ def _parse_model_spec(spec: str) -> _ModelSpec:
     return _ModelSpec(
         path_or_repo=path_or_repo,
         device=cast(str | None, options.get("device")),
-        dtype=cast("torch.dtype | None", options.get("dtype")),
+        dtype=cast(torch.dtype | None, options.get("dtype")),
         compile_model=cast(bool, options.get("compile_model", False)),
     )
 

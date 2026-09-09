@@ -225,7 +225,7 @@ def _redirects_stdout(node: Node) -> bool:
         return False
     return any(
         cast(str, getattr(r, "type", "")) in (">", ">>", ">&", ">|")
-        and cast("int | None", getattr(r, "input", None)) in (None, 1)
+        and cast(int | None, getattr(r, "input", None)) in (None, 1)
         for r in cast(list[object], redirects)
     )
 
@@ -454,7 +454,7 @@ def _value_flags_for(exe: str) -> frozenset[str]:
             }
         ),
     }
-    return cast(frozenset[str], vocabulary.get(exe, frozenset()))  # pyright: ignore[reportUnnecessaryCast] -- ty needs the cast; pyright resolves the type
+    return vocabulary.get(exe, frozenset[str]())
 
 
 def _value_flag_letters(exe: str) -> frozenset[str]:

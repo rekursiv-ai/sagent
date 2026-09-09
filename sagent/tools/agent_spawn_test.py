@@ -612,19 +612,19 @@ def test_inherit_factory_wins() -> None:
     parent = _make_parent()
     parent.max_attempts = 7
     t = AgentSpawn(max_attempts=3)
-    assert t._inherit("max_attempts", parent) == 3
+    assert t._inherit_max_attempts(parent) == 3
 
 
 def test_inherit_falls_through_to_parent() -> None:
     parent = _make_parent()
     parent.max_attempts = 7
     t = AgentSpawn()
-    assert t._inherit("max_attempts", parent) == 7
+    assert t._inherit_max_attempts(parent) == 7
 
 
 def test_inherit_no_parent() -> None:
     t = AgentSpawn()
-    assert t._inherit("max_attempts", None) is None
+    assert t._inherit_max_attempts(None) is None
 
 
 def test_resolve_model_rebuilds_fresh_transport_when_spec_matches() -> None:

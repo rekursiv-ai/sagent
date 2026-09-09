@@ -666,13 +666,13 @@ def _request_id(e: BaseException) -> str | None:
     """Best-effort request-id extractor for an anthropic error."""
     rid = getattr(e, "request_id", None)
     if rid:
-        return cast("str | None", rid)
+        return cast(str | None, rid)
     resp = getattr(e, "response", None)
     headers = getattr(resp, "headers", None)
     if headers is not None:
         try:
             return cast(
-                "str | None", headers.get("request-id") or headers.get("x-request-id")
+                str | None, headers.get("request-id") or headers.get("x-request-id")
             )
         except Exception:  # noqa: BLE001 -- best-effort, must not mask the original error
             return None
@@ -1409,9 +1409,39 @@ def _is_valid_tool_name(name: str) -> bool:
     return name.isidentifier()
 
 
-def _parse_response(
-    raw: anthropic.types.Message, model: _AnthropicModel
-) -> ModelResponse:
+class _Usage(Protocol):
+    """The usage fields ``_parse_response`` reads off a raw message."""
+
+    @property
+    def input_tokens(self) -> int: ...
+    @property
+    def output_tokens(self) -> int: ...
+
+
+class _RawMessage(Protocol):
+    """The raw-message surface ``_parse_response`` consumes.
+
+    Narrower than ``anthropic.types.Message`` on purpose: the SDK type
+    carries fields this function never touches, and declaring it forced
+    every test building a stand-in to suppress the argument type. Members
+    are read-only properties -- a bare attribute is read-WRITE and so
+    invariant, which the SDK's concrete `list`/`Literal` fields cannot
+    satisfy.
+    """
+
+    @property
+    def content(self) -> Sequence[object]: ...
+    @property
+    def usage(self) -> _Usage: ...
+    @property
+    def stop_reason(self) -> str | None: ...
+    @property
+    def stop_sequence(self) -> str | None: ...
+    @property
+    def id(self) -> str: ...
+
+
+def _parse_response(raw: _RawMessage, model: _AnthropicModel) -> ModelResponse:
     """Convert Anthropic Message to ModelResponse with AssistantMessage."""
     text_parts: list[str] = []
     tool_calls: list[ToolCall] = []

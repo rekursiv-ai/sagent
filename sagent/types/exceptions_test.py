@@ -145,12 +145,12 @@ class TestLogExceptionOrWarning:
     short.
     """
 
-    @staticmethod
-    def _raise_user_facing() -> None:
+    @classmethod
+    def _raise_user_facing(cls) -> None:
         raise AuthRefreshError("expired; run /login")
 
-    @staticmethod
-    def _raise_runtime() -> None:
+    @classmethod
+    def _raise_runtime(cls) -> None:
         raise RuntimeError("something broke")
 
     def test_user_facing_error_logs_at_warning_without_traceback(

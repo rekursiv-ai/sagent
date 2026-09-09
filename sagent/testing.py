@@ -23,6 +23,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
+import asyncio
 import itertools
 import time
 
@@ -50,7 +51,10 @@ from sagent.types.cost import (
     TokenPrice,
 )
 from sagent.types.model import (
+    Model,
+    ModelRecipe,
     ModelRequest,
+    ModelResponse,
     UsageSnapshot,
 )
 from sagent.types.runtime import (
@@ -234,6 +238,25 @@ def _new_runtime() -> agent_runtime.AgentRuntime:
     return agent_runtime.AgentRuntime(model=_NullModel())
 
 
+class _NullRichModel(MockModelCaps):
+    """Rich-``Model`` stand-in backing ``FakeAgent.model``.
+
+    ``MockModelCaps`` supplies every capability member; only ``stream``
+    is left to the concrete mock.
+    """
+
+    async def stream(
+        self,
+        request: ModelRequest,
+        publish: Callable[[RuntimeEvent], None] | None = None,
+    ) -> ModelResponse:
+        del request, publish
+        return ModelResponse(message=AssistantMessage(text=""))
+
+    async def buffer(self, request: ModelRequest) -> ModelResponse:
+        return await self.stream(request)
+
+
 @dataclass(slots=True, kw_only=True)
 class FakeAgent:
     """Stand-in ``AgentLike`` for unit tests."""
@@ -278,6 +301,12 @@ class FakeAgent:
 
     events: list[RuntimeEvent] = field(default_factory=list)
     """Every published event lands here for assertion."""
+
+    model: Model = field(default_factory=_NullRichModel)
+    """Rich provider model (mirrors ``Agent.model``)."""
+
+    model_recipe: ModelRecipe | None = None
+    """How ``model`` was built; ``None`` mirrors a directly-constructed agent."""
 
     def __post_init__(self) -> None:
         self.runtime.observers.append(self.events.append)
@@ -371,6 +400,33 @@ class FakeAgent:
         if force:
             self.kill_all_tools()
         self.runtime.inbox.push_back(Quit())
+
+    @property
+    def work(self) -> asyncio.Task[None] | None:
+        """Stub for ``AgentLike.work``; the runtime's foreground task."""
+        return self.runtime.model_call or self.runtime.compact_task
+
+    def change_model(
+        self,
+        *,
+        provider: str | None = None,
+        auth: str | None = None,
+        model_id: str | None = None,
+        account: str | None = None,
+    ) -> ModelRecipe:
+        """Stub for ``AgentLike.change_model``; records the resolved recipe."""
+        current = self.model_recipe
+        recipe = ModelRecipe(
+            provider=provider or (current.provider if current else "Mock"),
+            auth=auth or (current.auth if current else "env"),
+            model_id=model_id or (current.model_id if current else "mock-model"),
+            account=account or (current.account if current else None),
+        )
+        self.model_recipe = recipe
+        return recipe
+
+    async def relogin(self) -> None:
+        """Stub for ``AgentLike.relogin``; no credentials to refresh."""
 
     def events_of[T: RuntimeEvent](self, cls: type[T]) -> list[T]:
         """Return all captured events that are instances of ``cls``."""

@@ -18,7 +18,13 @@ from sagent.providers.google.api import (
     _build_response,
     _strip_additional_properties,
 )
-from sagent.types.capability import ModelCapability, ModelSettings
+from sagent.types.capability import (
+    ModelCapability,
+    ModelSettings,
+    ThinkingBudget,
+    ThinkingEffort,
+    ThinkingOutput,
+)
 from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
@@ -89,14 +95,24 @@ def _thinking_capability() -> ModelCapability:
     return Google.from_key("k").model("gemini-2.5-pro").capability
 
 
-def _settings(**choices: object) -> ModelSettings:
+def _settings(
+    *,
+    thinking_effort: ThinkingEffort = "none",
+    thinking_budget: ThinkingBudget = "none",
+    thinking_output: ThinkingOutput = "none",
+) -> ModelSettings:
     """Settings bound to the thinking-capable row.
 
     Bound rather than bare: every axis validates on assignment, so a
     default-capability object cannot hold the thinking selections these
     tests are about.
     """
-    return ModelSettings(capability=_thinking_capability(), **choices)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- kwargs forwarded to the dataclass
+    return ModelSettings(
+        capability=_thinking_capability(),
+        thinking_effort=thinking_effort,
+        thinking_budget=thinking_budget,
+        thinking_output=thinking_output,
+    )
 
 
 def _wire(request: ModelRequest, settings: ModelSettings | None = None) -> MutableJSON:

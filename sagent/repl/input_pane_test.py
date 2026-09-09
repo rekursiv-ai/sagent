@@ -7,6 +7,7 @@ from typing import cast
 from unittest.mock import MagicMock, patch
 
 import asyncio
+import sys
 
 from prompt_toolkit.formatted_text import FormattedText
 
@@ -51,6 +52,7 @@ from sagent.repl.slash import (
     Text as SlashText,
     Unknown as SlashUnknown,
 )
+from sagent.types.model import ModelRecipe
 from sagent.types.runtime import (
     AgentSendMessage,
     Clear,
@@ -60,6 +62,12 @@ from sagent.types.runtime import (
     UserDeferredMessage,
     UserMessage,
 )
+
+
+# `sys.modules`, not an import: `repl/__init__.py` re-exports a FUNCTION named
+# `run_repl`, which rebinds that attribute on the package, so both the
+# `from`-form and `import ... as` yield the function rather than the module.
+run_repl_mod = sys.modules["sagent.repl.run_repl"]
 
 
 class _StubInbox:
@@ -111,6 +119,39 @@ class _StubAgent:
 
     def cancel_background(self, job_id: str) -> None:
         self.background_registry.pop(job_id, None)
+
+    # The token-accounting half of `AgentLike`. Never exercised here, but a
+    # Protocol is checked whole and `_dispatch_target_control` narrows with
+    # `isinstance`.
+    max_request_bytes: int = 32 * 1024 * 1024
+    max_result_tokens: int = 50_000
+
+    def approx_text_tokens(self, text: str) -> int:
+        return len(text) // 4
+
+    # The `Controllable` half of the targeted-slash surface. Present because
+    # `_dispatch_target_control` refuses a sibling that cannot swap a model,
+    # and these tests drive `/model` and `/login` against this stub.
+    model: object = None
+    model_recipe: ModelRecipe | None = None
+
+    @property
+    def work(self) -> asyncio.Task[None] | None:
+        return None
+
+    def change_model(
+        self,
+        *,
+        provider: str | None = None,
+        auth: str | None = None,
+        model_id: str | None = None,
+        account: str | None = None,
+    ) -> ModelRecipe:
+        del provider, auth, model_id, account
+        raise NotImplementedError
+
+    async def relogin(self) -> None:
+        raise NotImplementedError
 
 
 def _agent() -> Agent:
@@ -543,10 +584,9 @@ async def test_dispatch_send_model_switch_routes_to_child() -> None:
     child = _persistent_agent()
     p = RecordingPrinter()
     agent_registry["fix-tools"] = child
-    _ = repl_input_mod._run_repl.do_switch_model  # type: ignore[attr-defined] -- trigger proxy import
     try:
         with patch.object(
-            repl_input_mod._run_repl,  # type: ignore[attr-defined] -- module-internal access by design
+            run_repl_mod,
             "do_switch_model",
         ) as mock:
             _ = await _dispatch(
@@ -591,9 +631,8 @@ async def test_dispatch_help_writes_help() -> None:
 async def test_dispatch_tasks_calls_run_repl_format_tasks() -> None:
     a = _agent()
     p = RecordingPrinter()
-    _ = repl_input_mod._run_repl.format_tasks  # type: ignore[attr-defined] -- trigger proxy import
     with patch.object(
-        repl_input_mod._run_repl,  # type: ignore[attr-defined] -- module-internal access by design
+        run_repl_mod,
         "format_tasks",
         return_value="tasks listing",
     ) as mock:
@@ -614,10 +653,8 @@ async def test_dispatch_unknown_writes_error() -> None:
 async def test_dispatch_model_switch_calls_run_repl() -> None:
     a = _agent()
     p = RecordingPrinter()
-    # Force resolution of the lazy module proxy so patching takes effect.
-    _ = repl_input_mod._run_repl.do_switch_model  # type: ignore[attr-defined] -- proxy attr access triggers import
     with patch.object(
-        repl_input_mod._run_repl,  # type: ignore[attr-defined] -- module-internal access by design
+        run_repl_mod,
         "do_switch_model",
     ) as mock:
         _ = await _dispatch(a, SlashModelSwitch(args="claude-opus-4-7"), p)
@@ -629,9 +666,8 @@ async def test_dispatch_model_switch_calls_run_repl() -> None:
 async def test_dispatch_login_calls_run_repl() -> None:
     a = _agent()
     p = RecordingPrinter()
-    _ = repl_input_mod._run_repl.do_login  # type: ignore[attr-defined] -- trigger proxy import
     with patch.object(
-        repl_input_mod._run_repl,  # type: ignore[attr-defined] -- module-internal access by design
+        run_repl_mod,
         "do_login",
     ) as mock:
         _ = await _dispatch(a, SlashLogin(), p)
@@ -643,9 +679,8 @@ async def test_dispatch_login_flushes_local_deferred_queue() -> None:
     a = _agent()
     stub = cast(_StubAgent, a)
     queues = InputQueues(deferred=QueuedInputBlock(text="retry after login"))
-    _ = repl_input_mod._run_repl.do_login  # type: ignore[attr-defined] -- trigger proxy import
     with patch.object(
-        repl_input_mod._run_repl,  # type: ignore[attr-defined] -- module-internal access by design
+        run_repl_mod,
         "do_login",
     ):
         _ = await _dispatch(a, SlashLogin(), None, queues=queues)

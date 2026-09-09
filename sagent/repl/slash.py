@@ -8,9 +8,53 @@ through the inbox.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Protocol
+
 import dataclasses
 
 from sagent.thinking import THINKING_COMMANDS
+
+
+if TYPE_CHECKING:
+    import asyncio
+
+    from sagent.types.model import Model, ModelRecipe
+
+
+class Controllable(Protocol):
+    """The agent surface the model/thinking/effort/login commands drive.
+
+    Separate from ``AgentLike``, which is the message-ROUTING surface tools
+    share: these members swap a model and re-authenticate a provider, which
+    no routing tool touches. Declaring them together forced every tool test
+    double to carry a model swapper it never calls.
+    """
+
+    model: Model
+    """The active rich provider model."""
+
+    model_recipe: ModelRecipe | None
+    """How the active model was built, when it was built from a spec."""
+
+    @property
+    def work(self) -> asyncio.Task[None] | None:
+        """The active foreground task (model call or compaction)."""
+        ...
+
+    def change_model(
+        self,
+        *,
+        provider: str | None = None,
+        auth: str | None = None,
+        model_id: str | None = None,
+        account: str | None = None,
+    ) -> ModelRecipe:
+        """Resolve, build, and queue a model swap."""
+        ...
+
+    async def relogin(self) -> None:
+        """Re-authenticate the current provider and hot-reload live creds."""
+        ...
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)

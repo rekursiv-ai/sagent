@@ -541,7 +541,9 @@ def test_should_respawn_skips_when_no_active() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_system_change_discards_warmed_old_system_spare() -> None:
+async def test_stream_system_change_discards_warmed_old_system_spare(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")
     assert isinstance(model, _GoogleCLIModel)
@@ -578,7 +580,7 @@ async def test_stream_system_change_discards_warmed_old_system_spare() -> None:
         used_systems.append(model._system_hash)
         return "STOP"
 
-    model._send_prompt = send_prompt  # ty: ignore[invalid-assignment] -- test replaces method with same call shape bound as a plain function.
+    monkeypatch.setattr(model, "_send_prompt", send_prompt)
     model._hot_spare = HotSpare(spawn_initialized)
 
     _ = await model.stream(ModelRequest(messages=[UserMessage(text="a")], system="A"))
@@ -591,7 +593,9 @@ async def test_stream_system_change_discards_warmed_old_system_spare() -> None:
 
 
 @pytest.mark.asyncio
-async def test_hot_spare_warmup_does_not_overwrite_active_session_id() -> None:
+async def test_hot_spare_warmup_does_not_overwrite_active_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")
     assert isinstance(model, _GoogleCLIModel)
@@ -635,7 +639,7 @@ async def test_hot_spare_warmup_does_not_overwrite_active_session_id() -> None:
         cast(_DummyProc, proc).session_ids.append(model._session_id)
         return "STOP"
 
-    model._send_prompt = send_prompt  # ty: ignore[invalid-assignment] -- test replaces method with same call shape bound as a plain function.
+    monkeypatch.setattr(model, "_send_prompt", send_prompt)
     model._hot_spare = HotSpare(spawn_initialized)
     proc = await model._hot_spare.acquire()
     await warmed.wait()
@@ -646,7 +650,9 @@ async def test_hot_spare_warmup_does_not_overwrite_active_session_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_exchange_turn_skips_assistant_replay() -> None:
+async def test_exchange_turn_skips_assistant_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Respawn replay sends only user-like entries to the CLI subprocess."""
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")
@@ -664,7 +670,7 @@ async def test_exchange_turn_skips_assistant_replay() -> None:
         prompts.append(prompt_blocks)
         return "STOP"
 
-    model._send_prompt = send_prompt  # ty: ignore[invalid-assignment] -- test replaces method with same call shape bound as a plain function.
+    monkeypatch.setattr(model, "_send_prompt", send_prompt)
     response = await model._exchange_turn(
         cast(Subproc, object()),
         ModelRequest(
@@ -785,7 +791,9 @@ async def test_respawn_resets_active_counters(monkeypatch: pytest.MonkeyPatch) -
 
 
 @pytest.mark.asyncio
-async def test_exchange_turn_returns_current_output_only() -> None:
+async def test_exchange_turn_returns_current_output_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")
     assert isinstance(model, _GoogleCLIModel)
@@ -809,7 +817,7 @@ async def test_exchange_turn_returns_current_output_only() -> None:
         if isinstance(ev, ModelResponsePartial):
             text_callbacks.append(ev.text)
 
-    model._send_prompt = send_prompt  # ty: ignore[invalid-assignment] -- test replaces method with same call shape bound as a plain function.
+    monkeypatch.setattr(model, "_send_prompt", send_prompt)
     response = await model._exchange_turn(
         cast(Subproc, object()),
         ModelRequest(messages=[UserMessage(text="first"), UserMessage(text="current")]),

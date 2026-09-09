@@ -414,9 +414,7 @@ class AgentSpawn:
         if tools_raw is None:
             tools = None
         elif isinstance(tools_raw, (list, tuple)):
-            tools = [
-                str(t) for t in cast("list[object] | tuple[object, ...]", tools_raw)
-            ]
+            tools = [str(t) for t in cast(list[object] | tuple[object, ...], tools_raw)]
         else:
             # Schema declares ``tools`` as an array; a string (or other
             # non-list) here previously silently became ``tools=None``
@@ -558,18 +556,7 @@ class AgentSpawn:
         child_max_rounds = (
             max_rounds if max_rounds is not None else self._max_tool_call_rounds
         )
-        init_kwargs: dict[str, object] = {
-            "model": child_model,
-            "model_recipe": child_spec,
-            "system": child_system,
-            "tools": child_tools,
-            "compactor": self._inherit("compactor", parent_agent),
-            "max_tool_call_rounds": child_max_rounds,
-            "session_dir": self._child_session_dir(parent_agent),
-        }
-        inherited_attempts = self._inherit("max_attempts", parent_agent)
-        if inherited_attempts is not None:
-            init_kwargs["max_attempts"] = inherited_attempts
+        inherited_attempts = self._inherit_max_attempts(parent_agent)
         settings = child_model.settings
         if parent_agent is not None:
             # ``adopt`` drops what the child's model does not offer, so a
@@ -589,7 +576,30 @@ class AgentSpawn:
             ]
         if "service_tier" in model_options:
             settings.service_tier = cast(ServiceTier, model_options["service_tier"])
-        return _get_agent_class()(**init_kwargs)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- dynamic kwargs from directive
+        agent_class = _get_agent_class()
+        # ``max_attempts`` is passed only when inherited: ``None`` is not its
+        # default, so forwarding it unconditionally would override the
+        # constructor's own value with a nonsense one.
+        if inherited_attempts is None:
+            return agent_class(
+                model=child_model,
+                model_recipe=child_spec,
+                system=child_system,
+                tools=child_tools,
+                compactor=self._inherit_compactor(parent_agent),
+                max_tool_call_rounds=child_max_rounds,
+                session_dir=self._child_session_dir(parent_agent),
+            )
+        return agent_class(
+            model=child_model,
+            model_recipe=child_spec,
+            system=child_system,
+            tools=child_tools,
+            compactor=self._inherit_compactor(parent_agent),
+            max_tool_call_rounds=child_max_rounds,
+            session_dir=self._child_session_dir(parent_agent),
+            max_attempts=inherited_attempts,
+        )
 
     async def _spawn_child(
         self,
@@ -906,21 +916,26 @@ class AgentSpawn:
             notify_on_asleep=notify_on_asleep,
         )
 
-    def _inherit(self, name: str, parent_agent: _Agent | None) -> object:
-        """Generic ``factory arg → parent → None`` fall-through.
+    def _inherit_compactor(self, parent_agent: _Agent | None) -> Compactor | None:
+        """``factory arg → parent → None`` fall-through for the compactor.
 
-        Used for the knobs that are NOT LLM-settable and NOT model
-        settings: ``compactor`` and ``max_attempts``. The factory stores
-        these as ``self._<name>`` (private); the parent exposes them as
-        ``<name>`` (public property). When every layer is ``None`` the
-        child uses ``Agent.__init__``'s default.
+        One accessor per knob rather than a ``getattr(self, f"_{name}")``
+        walk: the stringly-keyed form returns ``object``, which erased the
+        value type at the one call site that builds the child's kwargs.
         """
-        factory_val = getattr(self, f"_{name}")
-        if factory_val is not None:
-            return factory_val
+        if self._compactor is not None:
+            return self._compactor
         if parent_agent is None:
             return None
-        return getattr(parent_agent, name)
+        return parent_agent.compactor
+
+    def _inherit_max_attempts(self, parent_agent: _Agent | None) -> int | None:
+        """``factory arg → parent → None`` fall-through for the retry count."""
+        if self._max_attempts is not None:
+            return self._max_attempts
+        if parent_agent is None:
+            return None
+        return parent_agent.max_attempts
 
     def _resolve_system(
         self,

@@ -219,7 +219,7 @@ def decode_image_pil(
             _, _, crop_w, crop_h = crop_coords
             image.draft("RGB", (crop_w * 2, crop_h * 2))
 
-        image.load()  # pyright: ignore[reportUnknownMemberType]
+        image.load()  # pyright: ignore[reportUnknownMemberType] -- PIL's `core` is rebound to `DeferredError.new() -> Any` in its ImportError fallback, so `load`'s `core.PixelAccess | None` return resolves to Unknown
 
         if channels_format == "rgb":
             if image.mode == "RGBA":

@@ -22,6 +22,7 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
+from sagent.types.tools import Tool
 
 
 @dataclass(slots=True, kw_only=True)
@@ -58,13 +59,22 @@ class _StubTool:
     def prompt(self) -> str:
         return ""
 
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        del args
+        return None
+
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         del args
         return ToolResult(call_id="", content="")
 
 
-def _req(messages: list[ModelContextEvent], **kwargs: object) -> ModelRequest:
-    return ModelRequest(messages=messages, **kwargs)  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType] -- test helper
+def _req(
+    messages: list[ModelContextEvent],
+    *,
+    system: str | None = None,
+    tools: list[Tool] | None = None,
+) -> ModelRequest:
+    return ModelRequest(messages=messages, system=system, tools=tools)
 
 
 def test_user_message_text() -> None:

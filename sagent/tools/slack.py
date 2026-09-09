@@ -19,7 +19,7 @@ Supported operations:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Final
+from typing import Final, Protocol
 
 import asyncio
 import json
@@ -109,6 +109,28 @@ async def _slack_call(
             is_error=True,
         )
     return body
+
+
+class SlackSender(Protocol):
+    """The Slack surface the bin/ adapters and log flusher actually use.
+
+    Named so a test can supply a two-method double without also
+    implementing the whole tool (registry metadata, the directive schema,
+    and every read operation).
+    """
+
+    async def send(
+        self,
+        channel: str,
+        text: str,
+        thread_ts: str = ...,
+    ) -> str | ToolResult:
+        """Post a message to a Slack channel."""
+        ...
+
+    async def create_channel(self, channel_name: str) -> str | ToolResult:
+        """Create a Slack channel."""
+        ...
 
 
 class Slack:

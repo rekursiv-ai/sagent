@@ -80,8 +80,8 @@ class _OfflineEcho(MockModelCaps):
                 publish(ModelResponsePartial(word + " "))
         return await self._echo(request)
 
-    @staticmethod
-    def _last_user(request: ModelRequest) -> str:
+    @classmethod
+    def _last_user(cls, request: ModelRequest) -> str:
         """Return the text of the most recent ``UserMessage`` in ``request``."""
         for msg in reversed(request.messages):
             if isinstance(msg, UserMessage):

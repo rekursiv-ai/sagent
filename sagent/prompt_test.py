@@ -21,7 +21,7 @@ from sagent.prompt import (
 
 
 @pytest.fixture(autouse=True)
-def _stub_recipe_and_helpers() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction] -- pytest fixture consumed by name
+def stub_recipe_and_helpers() -> Iterator[None]:
     """Replace recipe + AGENTS.md + memory hooks with deterministic stubs.
 
     Without this, ``prompt.build_system`` reads filesystem assets and

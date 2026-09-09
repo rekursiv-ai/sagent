@@ -29,7 +29,7 @@ from sagent.tools.paper_details import (
 
 
 @pytest.fixture(autouse=True)
-def _clear_cache() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction] -- autouse fixture
+def clear_cache() -> Iterator[None]:
     """Clear the module result cache so a key is never pre-warmed by a sibling."""
     paper_details._cache.clear()
     yield

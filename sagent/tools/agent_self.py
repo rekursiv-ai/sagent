@@ -814,7 +814,7 @@ def _do_diagnostics(
     d: Mapping[str, object] | None = None,
 ) -> ToolResult:
     """Return current agent diagnostics."""
-    agent = cast("Agent | None", current_agent_var.get(None))
+    agent = cast(Agent | None, current_agent_var.get(None))
     spec = agent.model_recipe if agent is not None else None
     lines: list[str] = []
     if changes:

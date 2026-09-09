@@ -203,7 +203,7 @@ def test_a_tool_result_never_exceeds_the_token_budget(
     """
     tool, args = _oversized(tmp_path)[case]
     with with_fake_agent() as agent:
-        result = asyncio.run(cast("Tool", tool).run(args))
+        result = asyncio.run(cast(Tool, tool).run(args))
         budget = agent.max_result_tokens
         used = agent.approx_text_tokens(result.content)
     assert used <= budget, (

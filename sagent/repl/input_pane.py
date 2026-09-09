@@ -38,7 +38,14 @@ keybinding/observer that commits or restores them.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final, Protocol, assert_never, override
+from typing import (
+    TYPE_CHECKING,
+    Final,
+    Protocol,
+    assert_never,
+    override,
+    runtime_checkable,
+)
 
 import asyncio
 import dataclasses
@@ -49,15 +56,19 @@ import time
 
 from prompt_toolkit.formatted_text import FormattedText
 from rich.text import Text
-from wrapt import lazy_import
 
 from sagent.agent.background import BackgroundTaskEntry
-from sagent.agent.state import agent_label_var, agent_registry
+from sagent.agent.state import (
+    AgentLike,
+    agent_label_var,
+    agent_registry,
+)
 from sagent.repl.input_queues import InputQueues
 from sagent.repl.slash import (
     QUIT_WORDS,
     Clear as SlashClear,
     Compact as SlashCompact,
+    Controllable,
     Defer as SlashDefer,
     Effort as SlashEffort,
     Halt as SlashHalt,
@@ -100,16 +111,27 @@ from sagent.types.runtime import (
 
 # Cycle break: ``run_repl`` imports ``spawn_repl_pump`` from this module.
 # Lazy module proxy so the dispatch helpers (do_switch_model / do_login /
-# format_tasks) are reachable without re-introducing a top-level cycle.
-_run_repl = lazy_import("sagent.repl.run_repl")
-_render = lazy_import("sagent.repl.render")
+# format_tasks) are reachable without re-introducing a top-level cycle. The
+# TYPE_CHECKING arm names the real modules so their attributes resolve; the
+# proxy is a runtime-only device.
+if TYPE_CHECKING:
+    # `import ... as`, not `from ... import`: the package re-exports a
+    # FUNCTION named `run_repl`, so the `from`-form binds that instead of the
+    # module. isort rewrites the two-name form back into a `from`, so each
+    # alias stands alone.
+    import sagent.repl.render as render  # noqa: PLR0402 -- see above
+    import sagent.repl.run_repl as run_repl  # noqa: PLR0402
+else:
+    from wrapt import lazy_import
+
+    run_repl = lazy_import("sagent.repl.run_repl")
+    render = lazy_import("sagent.repl.render")
 
 if TYPE_CHECKING:
     from prompt_toolkit import PromptSession
     from rich.console import Console
 
     from sagent.agent.agent import Agent
-    from sagent.agent.state import AgentLike
     from sagent.repl.render import Printer
 
 logger = logging.getLogger(__name__)
@@ -258,6 +280,15 @@ def _dispatch_send(sender: Agent, action: SlashSend, printer: Printer | None) ->
     for label in targets:
         target = agent_registry[label]
         if action.content.startswith("/"):
+            # A registry sibling that routes but cannot swap a model is a
+            # real case (any AgentLike test double); say so rather than
+            # asserting the union holds.
+            if not isinstance(target, _TargetAgent):
+                if printer is not None:
+                    printer.write_tool_error(
+                        f"[/send {label}] target does not accept slash commands"
+                    )
+                continue
             _dispatch_target_control(target, action.content, printer, label=label)
         else:
             target.runtime.inbox.push_back(
@@ -267,8 +298,19 @@ def _dispatch_send(sender: Agent, action: SlashSend, printer: Printer | None) ->
                 printer.write_slash_block(f"[/send {label}] sent")
 
 
+@runtime_checkable
+class _TargetAgent(AgentLike, Controllable, Protocol):
+    """A registry sibling driven by the targeted slash commands.
+
+    These commands span both surfaces: ``/halt`` and ``/quit`` route through
+    ``AgentLike``, while ``/model`` and ``/effort`` swap the model through
+    ``Controllable``. The intersection lives here rather than being merged
+    into either, so a routing-only tool double stays routing-only.
+    """
+
+
 def _dispatch_target_control(
-    target: AgentLike,
+    target: _TargetAgent,
     body: str,
     printer: Printer | None,
     *,
@@ -282,13 +324,13 @@ def _dispatch_target_control(
     """
     action = parse_slash(body)
     if isinstance(action, SlashModelSwitch):
-        _run_repl.do_switch_model(target, action.args, printer)
+        run_repl.do_switch_model(target, action.args, printer)
         return
     if isinstance(action, SlashThinking):
-        _run_repl.do_switch_thinking(target, action.command, printer)
+        run_repl.do_switch_thinking(target, action.command, printer)
         return
     if isinstance(action, SlashEffort):
-        _run_repl.do_switch_effort(target, action.value, printer)
+        run_repl.do_switch_effort(target, action.value, printer)
         return
     if isinstance(action, SlashHalt):
         target.halt()
@@ -534,23 +576,23 @@ async def _dispatch(
                 note = f" ({args})" if args else ""
                 printer.write_slash_block(f"[/recompact] queued{note}")
         case SlashModelSwitch(args=args):
-            _run_repl.do_switch_model(agent, args, printer)
+            run_repl.do_switch_model(agent, args, printer)
         case SlashThinking(command=command):
-            _run_repl.do_switch_thinking(agent, command, printer)
+            run_repl.do_switch_thinking(agent, command, printer)
         case SlashEffort(value=value):
-            _run_repl.do_switch_effort(agent, value, printer)
+            run_repl.do_switch_effort(agent, value, printer)
         case SlashTool(spec=spec):
             _dispatch_tool(agent, spec, printer)
         case SlashLogin():
-            await _run_repl.do_login(agent, printer)
+            await run_repl.do_login(agent, printer)
             if queues is not None:
                 queues.commit_deferred_on_idle(agent)
         case SlashHelp():
             if printer is not None:
-                printer.write_line(_render.HELP_TEXT)
+                printer.write_line(render.HELP_TEXT)
         case SlashTasks():
             if printer is not None:
-                printer.write_line(_run_repl.format_tasks(agent))
+                printer.write_line(run_repl.format_tasks(agent))
         case SlashText(content=content):
             agent.runtime.inbox.push_back(UserMessage(text=content))
         case SlashDefer(content=content):

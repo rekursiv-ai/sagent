@@ -51,6 +51,7 @@ from sagent.repl.input_queues import InputQueues
 from sagent.repl.keybindings import NavState, build_key_bindings
 from sagent.repl.render import make_render_observer
 from sagent.repl.replay import replay_messages
+from sagent.repl.slash import Controllable
 from sagent.repl.status_pane import render_status_pane
 from sagent.thinking import (
     THINKING_COMMANDS,
@@ -319,7 +320,7 @@ def _commit_local_queues(
 
 
 def do_switch_model(
-    agent: Agent,
+    agent: Controllable,
     args: str,
     printer: Printer | None,
 ) -> None:
@@ -381,7 +382,9 @@ def do_switch_model(
     _write(printer, f"[/model] {label}{queued}")
 
 
-def do_switch_thinking(agent: Agent, command: str, printer: Printer | None) -> None:
+def do_switch_thinking(
+    agent: Controllable, command: str, printer: Printer | None
+) -> None:
     """Render a ``/thinking`` slash command against the model's settings.
 
     ``show`` / ``hide`` land on ``printer.show_thinking`` -- they change
@@ -413,7 +416,7 @@ def do_switch_thinking(agent: Agent, command: str, printer: Printer | None) -> N
     _write(printer, f"[/thinking] {describe_thinking(settings, show=shown)}")
 
 
-def do_switch_effort(agent: Agent, value: str, printer: Printer | None) -> None:
+def do_switch_effort(agent: Controllable, value: str, printer: Printer | None) -> None:
     """Render an ``/effort`` slash command against the model's settings.
 
     Bare ``/effort`` (empty ``value``) prints the current effort plus the
@@ -445,7 +448,7 @@ def do_switch_effort(agent: Agent, value: str, printer: Printer | None) -> None:
     _write(printer, f"[/effort] {settings.thinking_effort}")
 
 
-def _reachable_thinking_words(agent: Agent) -> tuple[str, ...]:
+def _reachable_thinking_words(agent: Controllable) -> tuple[str, ...]:
     """The ``/thinking`` words this model can actually honor.
 
     Each word is checked by applying it, because a word names one axis and
@@ -456,7 +459,7 @@ def _reachable_thinking_words(agent: Agent) -> tuple[str, ...]:
     return tuple(word for word in THINKING_COMMANDS if thinking_offered(word, settings))
 
 
-async def do_login(agent: Agent, printer: Printer | None) -> None:
+async def do_login(agent: Controllable, printer: Printer | None) -> None:
     """Render a ``/login`` slash command against :meth:`Agent.relogin`.
 
     Pure REPL adapter: delegates the re-auth flow to the Agent API,

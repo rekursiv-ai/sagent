@@ -96,17 +96,23 @@ class _SpySlack:
 
     def __init__(self) -> None:
         self.sent: list[tuple[str, str, str]] = []
-        # Pluggable mock for ``create_channel`` used in ``_resolve_router_log_channel``.
-        self.create_channel: AsyncMock = AsyncMock(return_value="id=C_DEFAULT")
+        # Swappable mock behind a real method: an instance ATTRIBUTE holding a
+        # callable does not satisfy a Protocol's method member.
+        self.channel_maker: AsyncMock = AsyncMock(return_value="id=C_DEFAULT")
 
     async def send(
         self,
         channel: str,
         text: str,
         thread_ts: str = "",
-    ) -> str:
+    ) -> str | ToolResult:
         self.sent.append((channel, text, thread_ts))
         return f"Sent. ts=1.0 channel={channel}"
+
+    async def create_channel(self, channel_name: str) -> str | ToolResult:
+        result = await self.channel_maker(channel_name)
+        assert isinstance(result, str | ToolResult)
+        return result
 
     @property
     def last_text(self) -> str:
@@ -135,7 +141,7 @@ def _make_adapter(
     adapter._router_log_channel = ""
     adapter._sent_messages = OrderedDict()
     spy = _SpySlack()
-    adapter._slack = spy  # ty: ignore[invalid-assignment]  # pyright: ignore[reportAttributeAccessIssue]  -- test spy duck-types Slack.send only
+    adapter._slack = spy
     return adapter, spy
 
 
@@ -963,7 +969,7 @@ class TestResolveRouterLogChannel:
     async def test_creates_when_missing(self) -> None:
         adapter, spy = _make_adapter()
         adapter._router_log_channel = "router-log"
-        spy.create_channel = AsyncMock(return_value="id=C_NEW")
+        spy.channel_maker = AsyncMock(return_value="id=C_NEW")
         with patch.object(
             SlackAdapter, "_find_channel", new=AsyncMock(return_value=None)
         ):
@@ -974,7 +980,7 @@ class TestResolveRouterLogChannel:
     async def test_create_returns_tool_result_clears_channel(self) -> None:
         adapter, spy = _make_adapter()
         adapter._router_log_channel = "router-log"
-        spy.create_channel = AsyncMock(
+        spy.channel_maker = AsyncMock(
             return_value=ToolResult(call_id="", content="forbidden", is_error=True),
         )
         with patch.object(
@@ -987,7 +993,7 @@ class TestResolveRouterLogChannel:
     async def test_create_unexpected_result_clears_channel(self) -> None:
         adapter, spy = _make_adapter()
         adapter._router_log_channel = "router-log"
-        spy.create_channel = AsyncMock(return_value="weird")
+        spy.channel_maker = AsyncMock(return_value="weird")
         with patch.object(
             SlackAdapter, "_find_channel", new=AsyncMock(return_value=None)
         ):
@@ -1233,7 +1239,7 @@ class TestFlushLog:
     @pytest.mark.anyio
     async def test_sends_single_chunk(self) -> None:
         spy = _SpySlack()
-        await _flush_log(["one", "two"], "C1", spy)  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType]  -- spy duck-types Slack
+        await _flush_log(["one", "two"], "C1", spy)
         assert len(spy.sent) == 1
         assert spy.sent[0][1] == "one\ntwo"
 
@@ -1241,14 +1247,14 @@ class TestFlushLog:
     async def test_splits_when_over_limit(self) -> None:
         spy = _SpySlack()
         big_line = "x" * 2000
-        await _flush_log([big_line, big_line, big_line], "C1", spy)  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType]  -- spy
+        await _flush_log([big_line, big_line, big_line], "C1", spy)
         # 3 × 2001 bytes > 3900 -> at least 2 sends.
         assert len(spy.sent) >= 2
 
     @pytest.mark.anyio
     async def test_empty_buffer_no_send(self) -> None:
         spy = _SpySlack()
-        await _flush_log([], "C1", spy)  # ty: ignore[invalid-argument-type]  # pyright: ignore[reportArgumentType]  -- spy
+        await _flush_log([], "C1", spy)
         assert spy.sent == []
 
 

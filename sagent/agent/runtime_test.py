@@ -2260,7 +2260,9 @@ async def test_run_model_error_returns_and_removes_observer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_raises_when_the_driver_crashes_before_signalling() -> None:
+async def test_run_raises_when_the_driver_crashes_before_signalling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A driver that dies without publishing must raise, not block forever.
 
     ``run`` waits on an event only an observer sets, so a ``run_forever`` that
@@ -2274,7 +2276,7 @@ async def test_run_raises_when_the_driver_crashes_before_signalling() -> None:
     async def _crash() -> None:
         raise RuntimeError("driver boom")
 
-    agent.run_forever = _crash  # ty: ignore[invalid-assignment] -- monkeypatch run_forever on the instance so the engine task dies before publishing
+    monkeypatch.setattr(agent, "run_forever", _crash)
 
     started = asyncio.get_running_loop().time()
     with pytest.raises(RuntimeError, match="driver boom"):
@@ -6658,7 +6660,9 @@ async def test_stop_tool_kill_carries_parent_id_to_synth_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runtime_run_reraises_engine_task_crash() -> None:
+async def test_runtime_run_reraises_engine_task_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """``AgentRuntime.run`` must re-raise crashes the engine task captured.
 
     Without re-raise, ``done.wait()`` returns when ``run_forever`` exits
@@ -6674,7 +6678,7 @@ async def test_runtime_run_reraises_engine_task_crash() -> None:
         agent.publish(ModelIdle())
         raise boom
 
-    agent.run_forever = run_forever_then_crash  # ty: ignore[invalid-assignment] -- monkeypatch run_forever on the instance so the engine task surfaces a crash for CR-060
+    monkeypatch.setattr(agent, "run_forever", run_forever_then_crash)
 
     with pytest.raises(RuntimeError, match="engine wedged"):
         _ = await agent.run(UserMessage(text="go"))
@@ -7608,7 +7612,9 @@ def test_sanitize_forged_arrivals_avoids_colliding_with_existing_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_gate_recovery_admits_clear_control_event() -> None:
+async def test_gate_recovery_admits_clear_control_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The unrepairable-context recovery gate must not strand ``Clear``.
 
     Regression for the ``Issue#294`` review: arming a bare ``AWAIT_USER`` after
@@ -7622,7 +7628,7 @@ async def test_gate_recovery_admits_clear_control_event() -> None:
     def _raise() -> None:
         raise InvalidContextError("unrepairable context")
 
-    agent._assert_alternation_invariant = _raise  # ty: ignore[invalid-assignment] -- monkeypatch the invariant check on the instance to force the unrepairable-context path
+    monkeypatch.setattr(agent, "_assert_alternation_invariant", _raise)
     collector = EventCollector()
     agent.observers.append(collector)
 
@@ -7643,7 +7649,9 @@ async def test_gate_recovery_admits_clear_control_event() -> None:
 
 
 @pytest.mark.asyncio
-async def test_gate_recovery_arms_before_publish_so_observer_clear_releases() -> None:
+async def test_gate_recovery_arms_before_publish_so_observer_clear_releases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Recovery must arm the gate before publishing, like the ``Clear`` arm.
 
     Publishing ``ModelResponseError`` before arming ``AWAIT_RECOVERY`` lets an
@@ -7658,7 +7666,7 @@ async def test_gate_recovery_arms_before_publish_so_observer_clear_releases() ->
     def _raise() -> None:
         raise InvalidContextError("unrepairable context")
 
-    agent._assert_alternation_invariant = _raise  # ty: ignore[invalid-assignment] -- monkeypatch the invariant check on the instance to force the unrepairable-context path
+    monkeypatch.setattr(agent, "_assert_alternation_invariant", _raise)
     collector = EventCollector()
 
     pushed = False
@@ -7786,7 +7794,9 @@ def test_sanitize_for_send_coalesces_assistants_after_dropping_dup() -> None:
 
 
 @pytest.mark.asyncio
-async def test_gate_failure_surfaces_model_response_error() -> None:
+async def test_gate_failure_surfaces_model_response_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """An unrepairable gate-context failure publishes a UI-visible error.
 
     The forward-delivery and sanitizer fixes make rescue total for every
@@ -7805,7 +7815,7 @@ async def test_gate_failure_surfaces_model_response_error() -> None:
 
     # Test mock: patch the bound method to simulate a future producer whose
     # context rescue cannot repair.
-    agent._assert_alternation_invariant = _raise  # ty: ignore[invalid-assignment] -- monkeypatch the invariant check on the instance to force the unrepairable-context path
+    monkeypatch.setattr(agent, "_assert_alternation_invariant", _raise)
 
     collector = EventCollector()
     agent.observers.append(collector)
