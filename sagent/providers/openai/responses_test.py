@@ -118,6 +118,24 @@ def _response_stream() -> bytes:
 
 @pytest.fixture
 def wire(monkeypatch: pytest.MonkeyPatch) -> _Wire:
+    return _patch_wire(monkeypatch)
+
+
+@pytest.fixture(scope="module")
+def openai_sdk_warm() -> None:
+    """Pay the SDK's per-process first-touch cost as module setup, not as a test.
+
+    ``import openai`` (~0.5s), the client's lazy ``.responses`` import (~0.3s),
+    and the first ``ResponseStreamEvent`` discriminated-union build (~0.4s) are
+    paid once per process. Without this fixture ``--durations`` bills all of it
+    to whichever SDK test happens to run first.
+    """
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _patch_wire(monkeypatch)
+        asyncio.run(_stream_once())
+
+
+def _patch_wire(monkeypatch: pytest.MonkeyPatch) -> _Wire:
     result = _Wire()
 
     async def send(
@@ -129,6 +147,17 @@ def wire(monkeypatch: pytest.MonkeyPatch) -> _Wire:
     return result
 
 
+async def _stream_once() -> None:
+    provider = OpenAI.from_key("test-key")
+    try:
+        await provider.model("gpt-4o").stream(
+            ModelRequest(messages=[UserMessage(text="hello")])
+        )
+    finally:
+        await provider.close_sdk()
+
+
+@pytest.mark.usefixtures("openai_sdk_warm")
 @pytest.mark.anyio
 @pytest.mark.parametrize("model_id", ["gpt-4o", "gpt-6-astra"])
 async def test_api_stream_uses_responses_with_supported_knobs(
@@ -177,6 +206,7 @@ async def test_api_stream_uses_responses_with_supported_knobs(
         assert body["include"] == ["reasoning.encrypted_content"]
 
 
+@pytest.mark.usefixtures("openai_sdk_warm")
 @pytest.mark.anyio
 async def test_api_responses_preserves_quota_headers(wire: _Wire) -> None:
     provider = OpenAI.from_key("test-key")
