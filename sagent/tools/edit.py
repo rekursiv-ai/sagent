@@ -90,13 +90,9 @@ class Edit:
     """
 
     name = "Edit"
-
     tool_id = "application/x-tool-edit"
-
     clearable_results = False
-
     description = load_tool_description("Edit")
-
     directive_schema = json_freeze(
         {
             "type": "object",

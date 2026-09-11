@@ -151,7 +151,6 @@ class _RenderedPrompt:
     """Tokenized chat-template output with optional attention mask."""
 
     input_ids: Tensor
-
     attention_mask: Tensor | None
 
 
@@ -160,11 +159,8 @@ class _ModelSpec:
     """Parsed ``path+option+option`` self-hosted model spec."""
 
     path_or_repo: str
-
     device: str | None
-
     dtype: torch.dtype | None
-
     compile_model: bool
 
 
@@ -243,9 +239,7 @@ class SelfHosted:
     """Self-hosted model provider backed by HuggingFace transformers."""
 
     DEFAULT_MODEL: ClassVar[str] = "Qwen/Qwen3.6-27B"
-
     DEFAULT_MAX_REQUEST_TOKENS: ClassVar[int] = 32_768
-
     DEFAULT_MAX_RESPONSE_TOKENS: ClassVar[int] = 4_096
 
     def __init__(
@@ -502,7 +496,6 @@ class _HfEstimator:
     """
 
     tokenizer: _Tokenizer
-
     image_fallback: SelfHostedModel
 
     def approx_text_tokens(self, text: str) -> int:

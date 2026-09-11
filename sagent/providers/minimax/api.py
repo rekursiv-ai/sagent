@@ -45,16 +45,12 @@ class MiniMax(OpenAICompat):
     """MiniMax provider (api.minimax.io)."""
 
     DEFAULT_MODEL: ClassVar[str] = "MiniMax-M2.7"
-
     # Cheapest row that keeps a comparable window: ``abab6.5s-chat`` undercuts
     # it further but is a prior generation. Without this, ``utility_model()``
     # falls back to the default and every summarizer call bills the full rate.
     DEFAULT_UTILITY_MODEL: ClassVar[str] = "MiniMax-Text-01"
-
     ENV_VAR: ClassVar[str] = "MINIMAX_API_KEY"
-
     BASE_URL: ClassVar[str] = "https://api.minimax.io/v1"
-
     # Model limits and pricing.
     # Source: https://platform.minimaxi.com/document/guides/chat-model/pro
     # Cross-ref: https://github.com/taylorwilsdon/llm-context-limits

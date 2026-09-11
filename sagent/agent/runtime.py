@@ -553,9 +553,7 @@ class _PendingCommit:
     """
 
     kind: Literal["pairing", "forward", "ride_along"]
-
     result: ToolResult | None = None
-
     user: UserMessage | None = None
 
 

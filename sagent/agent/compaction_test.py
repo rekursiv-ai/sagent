@@ -33,13 +33,9 @@ class _StubTool:
     """Tool stub satisfying the rich ``Tool`` protocol surface."""
 
     name: str = "Stub"
-
     tool_id: str = "application/x-tool-stub"
-
     description: str = "Stub tool."
-
     directive_schema: JSON = field(default_factory=lambda: {"type": "object"})
-
     clearable_results: bool = False
 
     def summary(self, args: Mapping[str, object]) -> str:

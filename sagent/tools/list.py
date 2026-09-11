@@ -47,13 +47,9 @@ class List:
     """List directory contents."""
 
     name = "List"
-
     tool_id = "application/x-tool-list"
-
     clearable_results = True
-
     description = load_tool_description("List")
-
     directive_schema = json_freeze(
         {
             "type": "object",

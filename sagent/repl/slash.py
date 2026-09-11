@@ -177,7 +177,6 @@ class Send:
     """
 
     target: str
-
     content: str
 
 

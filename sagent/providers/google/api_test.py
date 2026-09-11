@@ -722,16 +722,12 @@ async def test_google_stream_400_other_raises_value_error() -> None:
 
 class _StubTool:
     name: str = "Echo"
-
     tool_id: str = "application/x-tool-echo"
-
     description: str = "Echo"
-
     directive_schema: JSON = {  # noqa: RUF012 -- test stub
         "type": "object",
         "additionalProperties": False,
     }
-
     clearable_results: bool = False
 
     def summary(self, args: Mapping[str, object]) -> str:

@@ -32,11 +32,8 @@ class _EchoTool:
     """Minimal ``Tool`` stub used to exercise the MCP bridge."""
 
     name: str = "Echo"
-
     tool_id: str = "application/x-tool-echo"
-
     description: str = "Echo the supplied text"
-
     directive_schema: JSON = cast(
         JSON,
         {
@@ -67,7 +64,6 @@ class _StrictTool(_EchoTool):
     """Tool stub that records the exact args passed to ``run``."""
 
     name = "Strict"
-
     directive_schema: JSON = cast(
         JSON,
         {

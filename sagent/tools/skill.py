@@ -157,11 +157,8 @@ class Skill:
     """Tool: invoke a named skill by loading its full SKILL.md body."""
 
     name: str = "Skill"
-
     tool_id: str = "application/x-tool-skill"
-
     clearable_results: bool = False
-
     description: str = load_tool_description("Skill")
 
     def __init__(self, *, restore_after_compact: bool = False) -> None:

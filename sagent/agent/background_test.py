@@ -24,17 +24,12 @@ class _StubTool:
     """Minimal ``Tool`` whose schema and ``clearable_results`` are configurable."""
 
     name: str = "Stub"
-
     tool_id: str = "application/x-tool-stub"
-
     description: str = "stub tool"
-
     directive_schema: JSON = field(
         default_factory=lambda: json_freeze({"type": "object"}),
     )
-
     clearable_results: bool = False
-
     calls: list[Mapping[str, object]] = field(default_factory=list)
 
     def summary(self, args: Mapping[str, object]) -> str:

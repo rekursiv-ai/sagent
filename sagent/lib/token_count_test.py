@@ -30,7 +30,6 @@ class _TokenModel(MockModelCaps):
     """Trivial estimator: text length // 4, fixed image cost."""
 
     model_id: str = "tok"
-
     max_request_tokens: int = 100_000
 
     @override
@@ -44,13 +43,9 @@ class _StubTool:
     """Tool stub satisfying the rich ``Tool`` protocol surface."""
 
     name: str = "Stub"
-
     tool_id: str = "application/x-tool-stub"
-
     description: str = ""
-
     directive_schema: JSON = field(default_factory=lambda: {"type": "object"})
-
     clearable_results: bool = False
 
     def summary(self, args: Mapping[str, object]) -> str:

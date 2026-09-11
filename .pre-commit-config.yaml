@@ -186,42 +186,6 @@ repos:
 
   - repo: local
     hooks:
-      - id: codespell
-        name: codespell
-        language: system
-        stages: [pre-commit]
-        types_or: [python, markdown, jupyter, shell]
-        entry: uv --quiet run --frozen --group pre-commit codespell
-        args: [-w]
-        exclude: |
-          (?x)^(
-            typings/
-            |(.*/)?third_party/
-            |docs/symbols\.md
-          )
-
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.5
-    hooks:
-      # Exclusions defined in pyproject.toml.
-      #
-      # `require_serial: true` on both: ruff is rayon-parallel, so pre-commit's
-      # argv partitioning stacks cpu_count saturating processes on top. Cheap
-      # here (sub-second tree-wide), same defect `basedpyright` below documents.
-      - id: ruff-check
-        name: ruff-check
-        stages: [pre-commit]
-        require_serial: true
-        types_or: [python, pyi, jupyter]
-        args: [--fix]
-      - id: ruff-format
-        name: ruff-format
-        stages: [pre-commit]
-        require_serial: true
-        types_or: [python, pyi, jupyter]
-
-  - repo: local
-    hooks:
       # Single definition of `&worker-entry` anchor.
       #
       # It sizes $WORKERS, then runs the hook's command line from the single
@@ -294,6 +258,42 @@ repos:
             exec bash -c "$1" bash "${@:2}"
           ' bash
 
+      - id: codespell
+        name: codespell
+        language: system
+        stages: [pre-commit]
+        types_or: [python, markdown, jupyter, shell]
+        entry: uv --quiet run --frozen --group pre-commit codespell
+        args: [-w]
+        exclude: |
+          (?x)^(
+            typings/
+            |(.*/)?third_party/
+            |docs/symbols\.md
+          )
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.5
+    hooks:
+      # Exclusions defined in pyproject.toml.
+      #
+      # `require_serial: true` on both: ruff is rayon-parallel, so pre-commit's
+      # argv partitioning stacks cpu_count saturating processes on top. Cheap
+      # here (sub-second tree-wide), same defect `basedpyright` below documents.
+      - id: ruff-check
+        name: ruff-check
+        stages: [pre-commit]
+        require_serial: true
+        types_or: [python, pyi, jupyter]
+        args: [--fix]
+      - id: ruff-format
+        name: ruff-format
+        stages: [pre-commit]
+        require_serial: true
+        types_or: [python, pyi, jupyter]
+
+  - repo: local
+    hooks:
       # No official ty hook yet (https://github.com/astral-sh/ty/issues/269).
       # `require_serial: true` for the same reason as `basedpyright` below: ty
       # is rayon-parallel and saturates every core alone (17 threads measured
@@ -470,9 +470,10 @@ repos:
   # job cap while `basedpyright-global` answered the same question in 12.
   #
   # Every `*worker-entry` below resolves the anchor DEFINED on the pre-commit
-  # `basedpyright` hook, so reordering that hook past these is a YAML error, not
-  # a silent regression. `precommit_regex_test.py` asserts all six stay
-  # byte-identical, so pasting the wrapper in place of a reference fails.
+  # `worker-sizing` hook, which sits first among the local hooks because a YAML
+  # alias must follow its definition; moving that hook past any reference is a
+  # YAML error, not a silent regression. `precommit_regex_test.py` asserts every
+  # reference stays byte-identical, so pasting the wrapper in place of one fails.
   #
   # progress output. Every pytest tier here runs for minutes and used to emit a
   # single verdict line, which is also why the OOM that killed one looked like a

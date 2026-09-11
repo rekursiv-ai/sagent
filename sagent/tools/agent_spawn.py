@@ -292,11 +292,8 @@ class AgentSpawn:
     """
 
     name: str = "AgentSpawn"
-
     tool_id: str = "application/x-tool-agentspawn"
-
     description: str = load_tool_description("agentspawn")
-
     clearable_results: bool = False
 
     def __init__(

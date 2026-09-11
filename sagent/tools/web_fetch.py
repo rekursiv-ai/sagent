@@ -31,13 +31,9 @@ class WebFetch:
     """Fetch a web page and extract its main content as clean text."""
 
     name = "WebFetch"
-
     tool_id = "application/x-tool-webfetch"
-
     clearable_results = True
-
     description = load_tool_description("WebFetch")
-
     directive_schema = json_freeze(FetchBodyParamsSchema.json_schema())
 
     output: Annotated[Toggle, CLI_SETTABLE] = "off"

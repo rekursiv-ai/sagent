@@ -295,9 +295,7 @@ class ToolResultKind(Enum):
     """
 
     FINAL = "final"
-
     PENDING = "pending"
-
     CANCELLED = "cancelled"
 
 

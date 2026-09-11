@@ -53,11 +53,8 @@ class _StubModelRecipe:
     """Minimum ``ModelRecipe`` surface ``replay_messages`` consumes."""
 
     provider: str
-
     auth: str
-
     model_id: str
-
     account: str | None = None
 
 
@@ -97,7 +94,6 @@ class _StubAgent:
     """Minimum surface ``replay_messages`` consumes."""
 
     history: list[TapeEvent] = field(default_factory=list)
-
     tape: list[TapeRecord] = field(default_factory=list)
 
     @property
@@ -107,11 +103,8 @@ class _StubAgent:
     tools_map: Mapping[str, _StubTool] = field(
         default_factory=lambda: cast(Mapping[str, _StubTool], {}),
     )
-
     cost_tracker: _StubCostTracker = field(default_factory=_StubCostTracker_factory)
-
     model_recipe: _StubModelRecipe | None = None
-
     model: _StubModel = field(default_factory=_StubModel)
 
 
@@ -280,13 +273,9 @@ def test_replay_renders_a_body_the_live_pane_showed() -> None:
         # The whole knob set: ``row_spec`` narrows through the
         # ``Displayable`` protocol, so a partial stub reads as hidden.
         output: str = "on"
-
         output_head_rows: int = 2
-
         output_tail_rows: int = 2
-
         output_max_width: int = 0
-
         output_wrap: str = "wrap"
 
     history: list[TapeEvent] = [

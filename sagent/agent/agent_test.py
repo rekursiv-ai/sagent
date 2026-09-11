@@ -195,37 +195,21 @@ class StubModel:
     """Configurable model that yields scripted responses."""
 
     model_id: str = "stub-1"
-
     max_request_tokens: int = 100_000
-
     max_response_tokens: int = 1_024
-
     supports_thinking: bool = False
-
     valid_efforts: tuple[ThinkingEffort, ...] = ()
-
     supports_cache_control: bool = False
-
     valid_service_tiers: tuple[ServiceTier, ...] = ()
-
     supports_context_management: bool = False
-
     supports_persistent_retry: bool = False
-
     supports_account_auth: bool = False
-
     max_image_dim: int = 8_000
-
     max_image_bytes: int = 5 * 1024 * 1024
-
     max_request_bytes: int = 32 * 1024 * 1024
-
     chosen: ModelSettings | None = None
-
     responses: list[AssistantMessage] = field(default_factory=list)
-
     received: list[ModelRequest] = field(default_factory=list)
-
     usage: UsageSnapshot | None = None
 
     @property
@@ -372,17 +356,11 @@ class StubTool:
     """Minimal tool that records calls."""
 
     name: str = "Echo"
-
     tool_id: str = "application/x-tool-echo"
-
     description: str = "Echo tool."
-
     directive_schema: JSON = _STUB_SCHEMA
-
     clearable_results: bool = False
-
     response: str | None = None
-
     calls: list[Mapping[str, object]] = field(default_factory=list)
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -918,13 +896,9 @@ async def test_agent_run_waits_for_background_tool_result() -> None:
     @dataclass(kw_only=True, slots=True)
     class SlowEchoTool:
         name: str = "slow_echo"
-
         tool_id: str = "application/x-tool-slow-echo"
-
         description: str = "echoes after a brief async pause"
-
         directive_schema: JSON = _STUB_SCHEMA
-
         clearable_results: bool = False
 
         def summary(self, args: Mapping[str, object]) -> str:
@@ -1223,13 +1197,9 @@ async def test_background_result_lands_before_single_agent_idle() -> None:
     @dataclass(kw_only=True, slots=True)
     class SlowEchoTool:
         name: str = "slow_echo"
-
         tool_id: str = "application/x-tool-slow-echo"
-
         description: str = "echoes after a brief async pause"
-
         directive_schema: JSON = _STUB_SCHEMA
-
         clearable_results: bool = False
 
         def summary(self, args: Mapping[str, object]) -> str:
@@ -1548,7 +1518,6 @@ async def test_agent_shutdown_closes_active_model_once() -> None:
     @dataclass(slots=True, kw_only=True)
     class ClosableStubModel(StubModel):
         close_count: int = 0
-
         closed_event: asyncio.Event = field(default_factory=asyncio.Event)
 
         @override
@@ -3149,13 +3118,9 @@ async def test_run_bg_propagates_external_cancellation() -> None:
     @dataclass(kw_only=True, slots=True)
     class _BlockingTool:
         name: str = "blocker"
-
         tool_id: str = "application/x-tool-blocker"
-
         description: str = ""
-
         directive_schema: JSON = _STUB_SCHEMA
-
         clearable_results: bool = False
 
         def summary(self, args: Mapping[str, object]) -> str:
@@ -3700,7 +3665,6 @@ class _ThresholdCompactor:
     """
 
     compacted: bool = False
-
     _gate: SummaryCompactor = field(default_factory=SummaryCompactor)
 
     @property
@@ -3850,7 +3814,6 @@ class _TokenIdleByteTightModel(StubModel):
     """Token gate never fires; only the byte gate can trigger compaction."""
 
     max_request_bytes: int = 4 * 1024 * 1024
-
     max_image_bytes: int = 4 * 1024 * 1024
 
     @override
@@ -4586,7 +4549,6 @@ async def test_agent_compactor_scrunches_when_inner_output_still_oversized() -> 
     @dataclass(slots=True, kw_only=True)
     class _OverflowModel(StubModel):
         max_request_tokens: int = 1_000
-
         max_response_tokens: int = 100
 
         @override
@@ -4782,7 +4744,6 @@ async def test_agent_compactor_repairs_payload_after_scrunch() -> None:
     @dataclass(slots=True, kw_only=True)
     class _OverflowModel(StubModel):
         max_request_tokens: int = 1_000
-
         max_response_tokens: int = 100
 
         @override
@@ -4881,7 +4842,6 @@ async def test_agent_compactor_scrunch_uses_agent_budget_not_model_cap() -> None
     @dataclass(slots=True, kw_only=True)
     class _OverflowModel(StubModel):
         max_request_tokens: int = 1_000_000  # model cap is huge
-
         max_response_tokens: int = 100
 
         @override
@@ -4942,7 +4902,6 @@ async def test_agent_compactor_scrunch_target_subtracts_system_tool_overhead() -
     @dataclass(slots=True, kw_only=True)
     class _SystemCountingModel(StubModel):
         max_request_tokens: int = 1_000_000
-
         max_response_tokens: int = 100
 
         @override
@@ -5151,13 +5110,9 @@ class _OverflowModel:
     """Model that raises types.model.PromptTooLongError on the first N calls."""
 
     model_id: str = "ovf"
-
     max_request_tokens: int = 100_000
-
     max_response_tokens: int = 1_024
-
     overflow_count: int = 0
-
     call_index: int = 0
 
     @property
@@ -5249,41 +5204,23 @@ class _RawOverflowModel:
     """
 
     model_id: str = "raw"
-
     max_request_tokens: int = 100_000
-
     max_response_tokens: int = 1_024
-
     supports_streaming: bool = True
-
     supports_thinking: bool = False
-
     valid_thinking_states: tuple[str, ...] = ("off-hide",)
-
     supports_effort: bool = False
-
     valid_efforts: tuple[str, ...] = ()
-
     supports_cache_control: bool = False
-
     valid_service_tiers: tuple[str, ...] = ()
-
     valid_latency_modes: tuple[str, ...] = ()
-
     supports_context_management: bool = False
-
     supports_persistent_retry: bool = False
-
     supports_account_auth: bool = False
-
     max_image_dim: int = 8_000
-
     max_image_bytes: int = 5 * 1024 * 1024
-
     max_request_bytes: int = 32 * 1024 * 1024
-
     overflow_count: int = 0
-
     call_index: int = 0
 
     @property
@@ -5492,39 +5429,22 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
     @dataclass(slots=True, kw_only=True)
     class _RecordingModel:
         order_log: list[str]
-
         model_id: str = "rec"
-
         max_request_tokens: int = 100_000
-
         max_response_tokens: int = 1_024
-
         supports_streaming: bool = True
-
         supports_thinking: bool = False
-
         valid_thinking_states: tuple[str, ...] = ("off-hide",)
-
         supports_effort: bool = False
-
         valid_efforts: tuple[str, ...] = ()
-
         supports_cache_control: bool = False
-
         valid_service_tiers: tuple[str, ...] = ()
-
         valid_latency_modes: tuple[str, ...] = ()
-
         supports_context_management: bool = False
-
         supports_persistent_retry: bool = False
-
         supports_account_auth: bool = False
-
         max_image_dim: int = 8_000
-
         max_image_bytes: int = 5 * 1024 * 1024
-
         max_request_bytes: int = 32 * 1024 * 1024
 
         @property
@@ -6255,7 +6175,6 @@ class _ByteOverflowModel(StubModel):
     """
 
     overflow_count: int = 0
-
     call_index: int = 0
 
     @override
@@ -6502,9 +6421,7 @@ async def test_fresh_oversize_attachment_rejected_before_send() -> None:
     @dataclass(slots=True, kw_only=True)
     class _SmallByteModel(StubModel):
         max_request_bytes: int = 4 * 1024 * 1024
-
         max_image_bytes: int = 4 * 1024 * 1024
-
         call_index: int = 0
 
         @override
@@ -6548,9 +6465,7 @@ async def test_fresh_text_heavy_request_rejected_before_send() -> None:
     @dataclass(slots=True, kw_only=True)
     class _SmallByteModel(StubModel):
         max_request_bytes: int = 4 * 1024 * 1024
-
         max_image_bytes: int = 4 * 1024 * 1024
-
         call_index: int = 0
 
         @override
@@ -6594,9 +6509,7 @@ async def test_pre_send_guard_measures_materialized_not_raw_history() -> None:
     @dataclass(slots=True, kw_only=True)
     class _CapturingModel(StubModel):
         max_request_bytes: int = 1 * 1024 * 1024
-
         max_image_bytes: int = 1 * 1024 * 1024
-
         call_index: int = 0
 
         @override

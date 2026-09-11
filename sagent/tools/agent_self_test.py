@@ -41,11 +41,8 @@ class StubProviderModel(MockModelCaps):
     """Provider model that returns scripted responses on call."""
 
     model_id: str = "stub-1"
-
     max_request_tokens: int = 100_000
-
     responses: list[AssistantMessage] = field(default_factory=list)
-
     _idx: int = field(default=0, init=False)
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
@@ -838,7 +835,6 @@ async def test_model_swap_clears_all_capabilities_and_reports_each_unset() -> No
     @dataclass(slots=True, kw_only=True)
     class RichStubModel(StubProviderModel):
         supports_thinking: bool = True
-
         service_tiers: tuple[ServiceTier, ...] = ("priority",)
 
     agent = Agent(

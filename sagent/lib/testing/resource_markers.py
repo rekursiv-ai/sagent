@@ -18,27 +18,13 @@ class MarkedItem(Protocol):
     """
 
     def iter_markers(self, name: str | None = ...) -> Iterator[pytest.Mark]:
-        """Iterate over markers, optionally filtered by name.
-
-        Args:
-          name: Name.
-
-        Returns:
-          result: The Iterator[pytest.Mark].
-
-        """
+        """Iterate over markers, optionally filtered by name."""
         ...
 
     def add_marker(
         self, marker: str | pytest.MarkDecorator, *, append: bool = ...
     ) -> None:
-        """Add marker.
-
-        Args:
-          marker: Marker.
-          append: Append.
-
-        """
+        """Add marker."""
         ...
 
 
@@ -55,16 +41,7 @@ def resource_marker_family(
         "network",
     ),
 ) -> str:
-    """Return the selector family encoded by a resource marker prefix.
-
-    Args:
-      marker: Marker.
-      resource_families: Resource families.
-
-    Returns:
-      family: The str.
-
-    """
+    """Return the selector family encoded by a resource marker prefix."""
     family, separator, _specific = marker.partition("_")
     assert separator
     assert family in resource_families
@@ -76,13 +53,7 @@ def pytest_collection_modifyitems(
     config: pytest.Config,
     items: list[pytest.Item],
 ) -> None:
-    """Derive timeouts and skips from concrete resource markers.
-
-    Args:
-      config: Config.
-      items: Items.
-
-    """
+    """Derive timeouts and skips from concrete resource markers."""
     apply_resource_markers(
         items,
         resource_markers=registered_resource_markers(config),
@@ -105,11 +76,11 @@ def registered_resource_markers(
     """Return registered concrete resource markers from pytest config.
 
     Args:
-      config: Config.
-      resource_families: Resource families.
+      config: Pytest config with marker registry.
+      resource_families: Marker family names to filter by.
 
     Returns:
-      result: The tuple[str, ...].
+      result: Concrete marker names (e.g., "bench_throughput", "gpu_cuda").
 
     """
     configured = cast(list[str], config.getini("markers"))
@@ -180,11 +151,14 @@ def resource_marker_aliases(
     """Return legacy selector marks for a concrete resource marker.
 
     Args:
-      marker: Marker.
-      aliases: Aliases.
+      marker: Concrete resource marker name (e.g., "bench_throughput").
+      aliases: Mapping from markers to legacy skip/group names.
 
     Returns:
-      candidate_aliases: The tuple[str, ...].
+      candidate_aliases: Legacy marker names that should be added to the test.
+
+    Raises:
+      pytest.UsageError: marker is not in the aliases table.
 
     """
     for candidate, candidate_aliases in aliases:
@@ -230,17 +204,7 @@ def resource_marker_timeout(
         ("network_together", 4800),
     ),
 ) -> int:
-    """Return a marker's specific timeout, falling back to its category.
-
-    Args:
-      marker: Marker.
-      category_timeouts: Category timeouts.
-      specific_timeouts: Specific timeouts.
-
-    Returns:
-      result: The int.
-
-    """
+    """Return a marker's specific timeout, falling back to its category."""
     specific = dict(specific_timeouts)
     if marker in specific:
         return specific[marker]
@@ -275,11 +239,11 @@ def apply_resource_markers(
     """Apply virtual family markers, timeout budgets, and skip policy.
 
     Args:
-      items: Items.
-      resource_markers: Resource markers.
-      ci_skipped_marks: Ci skipped marks.
-      live_llm_marks: Live llm marks.
-      live_llm_env_var: Live llm env var.
+      items: Test items to mark up.
+      resource_markers: Registered concrete resource marker names.
+      ci_skipped_marks: Markers that skip in CI (not RUN_INTEGRATION=1).
+      live_llm_marks: Markers that skip unless RUN_REAL_LLM=1.
+      live_llm_env_var: Environment variable enabling live LLM tests.
 
     """
     known_resources = set(resource_markers)

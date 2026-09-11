@@ -83,11 +83,8 @@ class Advisor:
     """``Tool`` wrapper exposing an LLM as an advisor sub-agent."""
 
     name: str = "advisor"
-
     tool_id: str = "application/x-tool-advisor"
-
     clearable_results: bool = False
-
     description: str = (
         "Consult a more capable advisor model for guidance. The advisor"
         " has no tools and sees only the prompt you send. Typical"
@@ -96,7 +93,6 @@ class Advisor:
         " a non-obvious design decision. Include the situation, options"
         " considered, and the specific decision you need help with."
     )
-
     directive_schema: JSON = json_freeze(
         {
             "type": "object",

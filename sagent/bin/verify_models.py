@@ -54,7 +54,6 @@ class LiveLimits:
     """Token limits a live API reported for one model."""
 
     max_request_tokens: int
-
     max_response_tokens: int
 
 

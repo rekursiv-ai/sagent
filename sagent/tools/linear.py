@@ -133,13 +133,9 @@ class Linear:
     """
 
     name: str = "Linear"
-
     tool_id: str = "application/x-tool-linear"
-
     clearable_results: bool = False
-
     description: str = load_tool_description("Linear")
-
     directive_schema: JSON = json_freeze(
         {
             "type": "object",

@@ -109,15 +109,10 @@ class GoogleCLICredentials(TypedDict):
     """OAuth credentials from the Gemini CLI credentials file."""
 
     access_token: str
-
     refresh_token: str
-
     expiry_date: float
-
     project_id: NotRequired[str]
-
     scope: NotRequired[str]
-
     token_type: NotRequired[str]
 
 
@@ -232,11 +227,8 @@ class _GoogleCLIProcState:
     """ACP session state owned by one Gemini CLI subprocess."""
 
     proc: Subproc
-
     session_id: str
-
     tmpdir: Path
-
     system_hash: str
 
 

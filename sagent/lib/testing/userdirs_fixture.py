@@ -105,9 +105,9 @@ def isolate_user_dirs(
     exactly the per-platform layout ``userdirs`` exists to delete.
 
     Args:
-      request: Request.
-      tmp_path_factory: Tmp path factory.
-      monkeypatch: Monkeypatch.
+      request: Pytest request; checked for real_user_dirs marker.
+      tmp_path_factory: Factory for creating per-test tmp directories.
+      monkeypatch: Fixture for temporary environment modifications.
 
     Returns:
       root: The tmp directory the four XDG variables point at, or ``None``

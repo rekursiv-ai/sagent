@@ -87,17 +87,11 @@ class _ScriptedModel(MockModelCaps):
     """Model with a scripted response queue and optional fault injection."""
 
     model_id: str = "scripted"
-
     max_request_tokens: int = 100_000
-
     stream_responses: list[BaseException | ModelResponse] = field(default_factory=list)
-
     is_retryable_provider: bool = False
-
     is_overflow: bool = False
-
     _stream_idx: int = field(default=0, init=False)
-
     stream_calls: int = field(default=0, init=False)
 
     @override
@@ -372,7 +366,6 @@ def test_extract_retry_after_structured_ms_none_falls_through() -> None:
 
     class _CliRetryableError(Exception):
         retry_after_ms = None
-
         response = _FakeResponse(429, {"retry-after": "7"})
 
     assert extract_retry_after(_CliRetryableError()) == pytest.approx(7.0)
@@ -1438,7 +1431,6 @@ class _UnreadStreamingResponse:
     """
 
     status_code: ClassVar[int] = 429
-
     headers: ClassVar[dict[str, str]] = {"request-id": "req-1", "retry-after": "5"}
 
     @property
@@ -1738,7 +1730,6 @@ class _EntitlementError(Exception):
     """A 429 whose body says the account lacks an entitlement, not a quota."""
 
     status_code = 429
-
     body: ClassVar[Mapping[str, object]] = {
         "type": "error",
         "error": {
@@ -1776,7 +1767,6 @@ def test_ordinary_429_stays_rate_limited() -> None:
 
     class _ThrottledError(Exception):
         status_code = 429
-
         body: ClassVar[Mapping[str, object]] = {
             "type": "error",
             "error": {"type": "rate_limit_error", "message": "rate limit exceeded"},
@@ -1815,7 +1805,6 @@ def test_exhausted_quota_messages_are_fatal(message: str) -> None:
 
     class _ExhaustedError(Exception):
         status_code = 429
-
         body: ClassVar[Mapping[str, object]] = {
             "type": "error",
             "error": {"type": "rate_limit_error", "message": message},

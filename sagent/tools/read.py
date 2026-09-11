@@ -102,13 +102,9 @@ class Read:
     """Read file contents: text, image, PDF, and notebook."""
 
     name = "Read"
-
     tool_id = "application/x-tool-read"
-
     clearable_results = True
-
     description = load_tool_description("Read")
-
     directive_schema = json_freeze(
         {
             "type": "object",

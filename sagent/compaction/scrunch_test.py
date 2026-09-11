@@ -96,7 +96,6 @@ class _SizedCompactor:
     """
 
     summary_chars: int = 40
-
     calls: list[Sequence[ModelContextEvent]] = field(default_factory=list)
 
     async def compact(
@@ -271,7 +270,6 @@ def test_plan_scrunch_measures_tokens_via_model_not_chars() -> None:
     @dataclass(slots=True, kw_only=True)
     class _HalfModel(MockModelCaps):
         model_id: str = "half"
-
         max_request_tokens: int = 200_000
 
         @override

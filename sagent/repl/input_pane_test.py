@@ -90,19 +90,12 @@ class _StubAgent:
     """Minimal Agent surface for ``_dispatch``."""
 
     name: str = "AgentA"
-
     runtime: _StubRuntime = field(default_factory=_StubRuntime)
-
     halted: int = 0
-
     killed_all: int = 0
-
     killed: list[str] = field(default_factory=list)
-
     shutdown_calls: list[bool] = field(default_factory=list)
-
     background_registry: dict[str, BackgroundTaskEntry] = field(default_factory=dict)
-
     is_subagent: bool = False
 
     def halt(self) -> None:
@@ -131,7 +124,6 @@ class _StubAgent:
     # Protocol is checked whole and `_dispatch_target_control` narrows with
     # `isinstance`.
     max_request_bytes: int = 32 * 1024 * 1024
-
     max_result_tokens: int = 50_000
 
     def approx_text_tokens(self, text: str) -> int:
@@ -141,7 +133,6 @@ class _StubAgent:
     # `_dispatch_target_control` refuses a sibling that cannot swap a model,
     # and these tests drive `/model` and `/login` against this stub.
     model: object = None
-
     model_recipe: ModelRecipe | None = None
 
     @property
@@ -853,7 +844,6 @@ async def test_dispatch_halt_no_printer_swallows_unknown_agent() -> None:
 @dataclass(slots=True, kw_only=True)
 class _FakeRuntime:
     cohort: set[str] = field(default_factory=set)
-
     _mid_stream_queue: list[UserMessage | AgentSendMessage] = field(
         default_factory=list
     )
@@ -865,7 +855,6 @@ class _FakeRuntime:
 @dataclass(slots=True, kw_only=True)
 class _FakeAgent:
     work: object = None
-
     runtime: _FakeRuntime = field(default_factory=_FakeRuntime)
 
 

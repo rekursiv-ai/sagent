@@ -124,15 +124,10 @@ class _ScriptedModel(MockModelCaps):
     """Returns scripted responses from ``stream``; tracks call count."""
 
     model_id: str = "compact-model"
-
     max_request_tokens: int = 200_000
-
     stream_responses: list[BaseException | ModelResponse] = field(default_factory=list)
-
     received: list[ModelRequest] = field(default_factory=list)
-
     _stream_idx: int = field(default=0, init=False)
-
     stream_calls: int = field(default=0, init=False)
 
     async def stream(
@@ -1044,7 +1039,6 @@ class _OverrideAware(MockModelCaps):
     """Sanity check that ``MockModelCaps`` lets subclasses override fields."""
 
     model_id: str = "ov"
-
     max_request_tokens: int = 1_000
 
     @override

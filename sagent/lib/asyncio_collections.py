@@ -62,31 +62,21 @@ class Deque[T]:
         return iter(tuple(self._dq))
 
     def empty(self) -> bool:
-        """Return whether the queue is empty.
-
-        Returns:
-          result: The bool.
-
-        """
+        """Return whether the queue is empty."""
         return not self._dq
 
     def full(self) -> bool:
-        """Return whether the queue is full.
-
-        Returns:
-          result: The bool.
-
-        """
+        """Return whether the queue is full."""
         return self._capacity is not None and len(self._dq) >= self._capacity
 
     def put(self, item: T) -> bool:
         """Append at the right (back). Returns ``False`` if at capacity.
 
         Args:
-          item: Item.
+          item: Value to append.
 
         Returns:
-          result: The bool.
+          result: True on success; False if queue is at capacity.
 
         """
         if self._capacity is not None and len(self._dq) >= self._capacity:
@@ -100,10 +90,10 @@ class Deque[T]:
         """Append at the left (front) for urgent / halt-style delivery.
 
         Args:
-          item: Item.
+          item: Value to prepend (delivered ahead of enqueued items).
 
         Returns:
-          result: The bool.
+          result: True on success; False if queue is at capacity.
 
         """
         if self._capacity is not None and len(self._dq) >= self._capacity:
@@ -138,7 +128,7 @@ class Deque[T]:
         """Pop from the left (front), awaiting until an item is available.
 
         Returns:
-          item: The T.
+          item: Item from the front of the queue.
 
         """
         while not self._dq:
@@ -150,24 +140,14 @@ class Deque[T]:
         return item
 
     async def get_all(self) -> list[T]:
-        """Wait for at least one item, then drain everything available.
-
-        Returns:
-          result: The list[T].
-
-        """
+        """Wait for at least one item, then drain everything available."""
         while not self._dq:
             self._not_empty.clear()
             await self._not_empty.wait()
         return self.drain()
 
     def drain(self) -> list[T]:
-        """Pop all items in FIFO order. Non-blocking.
-
-        Returns:
-          out: The list[T].
-
-        """
+        """Pop all items in FIFO order. Non-blocking."""
         out = list(self._dq)
         self._dq.clear()
         self._empty.set()

@@ -142,11 +142,8 @@ class RunPython:
     """Run a numpy/scipy script in a fresh subprocess, with `check` predefined."""
 
     name: str = "run_python"
-
     tool_id: str = "application/x-tool-runpython"
-
     clearable_results: bool = True
-
     description: str = (
         "Run a COMPLETE, self-contained Python script in a fresh subprocess. numpy "
         "and scipy are available, and a grader function check(samples) is already "

@@ -49,10 +49,10 @@ def get_mime(data: bytes) -> str | None:
     """Detect image MIME type from bytes. Returns None if unrecognized.
 
     Args:
-      data: Data.
+      data: Raw image bytes to identify.
 
     Returns:
-      result: The str | None.
+      result: MIME type string (e.g., "image/jpeg"), or None if not recognized.
 
     """
     try:
@@ -70,10 +70,10 @@ def get_dimensions(image_bytes: bytes) -> tuple[int, int] | None:
     TIFF IFD, SVG viewBox) without pixel decode.
 
     Args:
-      image_bytes: Image bytes.
+      image_bytes: Raw image bytes to measure.
 
     Returns:
-      dimensions: (height, width) or None if unsupported/malformed.
+      dimensions: (width, height) tuple, or None if format unsupported/malformed.
 
     """
     w, h = imagesize.get(BytesIO(image_bytes))

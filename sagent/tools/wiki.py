@@ -185,13 +185,9 @@ class Wiki:
     """Tool: structural primitives for an LLM wiki."""
 
     name: str = "Wiki"
-
     tool_id: str = "application/x-tool-wiki"
-
     clearable_results: bool = False
-
     description: str = load_tool_description("Wiki")
-
     directive_schema: JSON = json_freeze(
         {
             "type": "object",

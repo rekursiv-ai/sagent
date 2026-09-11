@@ -156,7 +156,6 @@ class DecodeCapabilities:
     """Capabilities required by tags that import or execute Python code."""
 
     resolve: Callable[[str], object] | None = None
-
     apply_reduce: bool = False
 
 
@@ -285,10 +284,10 @@ class _GraphEncoder:
         emits ``{"py/id": n}`` instead of recursing forever.
 
         Args:
-          value: Value.
+          value: Object to track; must outlive all encoding using this index.
 
         Returns:
-          index: The int.
+          index: The zero-based encounter index for this value.
 
         """
         index = len(self._seen)
@@ -302,10 +301,10 @@ class _GraphEncoder:
         """Return the custom hook registered for ``value``.
 
         Args:
-          value: Value.
+          value: Object whose type is looked up in the hook registry.
 
         Returns:
-          result: The tuple[Callable[..., object], Callable[..., object]] | None.
+          result: Tuple of (encode_hook, decode_hook) or None if unregistered.
 
         """
         return self._hooks.get(type(value))
@@ -314,11 +313,11 @@ class _GraphEncoder:
         """Return one memoized custom-hook result for ``value``.
 
         Args:
-          value: Value.
-          encode_hook: Encode hook.
+          value: Object to encode; identity tracks cache entries.
+          encode_hook: Callable that produces the JSON-safe result.
 
         Returns:
-          payload: The object.
+          payload: Cached or freshly computed result of calling encode_hook.
 
         """
         identity = id(value)
@@ -333,7 +332,7 @@ class _GraphEncoder:
         """Return the deferred call recipe owned by ``value``.
 
         Args:
-          value: Value.
+          value: Object implementing ``__custom_json_inline__`` or None.
 
         Returns:
           inline: The InlineRecipe | None.
@@ -361,10 +360,10 @@ class _GraphEncoder:
         from the joined form, so decode needs no matching special case.
 
         Args:
-          value: Value.
+          value: Object to reduce; identity tracks cache entries.
 
         Returns:
-          reduced: The object.
+          reduced: Canonical pickle recipe tuple or a sentinel if reduction fails.
 
         """
         identity = id(value)
@@ -392,25 +391,17 @@ class _GraphEncoder:
         return reduced
 
     def encode_items(self, values: Iterable[object]) -> list[object]:
-        """Encode graph children in encounter order.
-
-        Args:
-          values: Values.
-
-        Returns:
-          result: The list[object].
-
-        """
+        """Encode graph children in encounter order."""
         return [self.encode(value) for value in values]
 
     def order_key(self, value: object) -> tuple[str, str]:
         """Return deterministic runtime and encoded keys without consuming identity.
 
         Args:
-          value: Value.
+          value: Object to inspect; encoding is rolled back after inspection.
 
         Returns:
-          result: The tuple[str, str].
+          result: Tuple of (repr(value), sorted_json_representation).
 
         """
         checkpoint = self.checkpoint()
@@ -421,35 +412,16 @@ class _GraphEncoder:
         return repr(value), json.dumps(encoded, sort_keys=True, separators=(",", ":"))
 
     def encode_typed(self, value: object, annotation: object) -> JSONValue:
-        """Adapt graph recursion to the codec callback signature.
-
-        Args:
-          value: Value.
-          annotation: Annotation.
-
-        Returns:
-          result: The JSONValue.
-
-        """
+        """Adapt graph recursion to the codec callback signature."""
         del annotation
         return cast(JSONValue, self.encode(value))
 
     def checkpoint(self) -> tuple[dict[int, int], int]:
-        """Snapshot identity state before a fallible codec attempt.
-
-        Returns:
-          result: The tuple[dict[int, int], int].
-
-        """
+        """Snapshot identity state before a fallible codec attempt."""
         return dict(self._seen), len(self._alive)
 
     def rollback(self, checkpoint: tuple[dict[int, int], int]) -> None:
-        """Restore identity state after a codec declines a value.
-
-        Args:
-          checkpoint: Checkpoint.
-
-        """
+        """Restore identity state after a codec declines a value."""
         self._seen, alive_len = checkpoint
         del self._alive[alive_len:]
 
@@ -524,15 +496,7 @@ class _GraphDecoder:
         self._built: list[object] = []
 
     def resolve(self, path: str) -> object:
-        """Resolve an import path through the granted capability.
-
-        Args:
-          path: Path.
-
-        Returns:
-          result: The object.
-
-        """
+        """Resolve an import path through the granted capability."""
         resolve = self._capabilities.resolve
         if resolve is None:
             raise TypeError(f"{path!r} requires import resolution capability")
@@ -541,15 +505,7 @@ class _GraphDecoder:
     def hook_for(
         self, target: type
     ) -> tuple[Callable[..., object], Callable[..., object]]:
-        """Return the custom hook registered for ``target``.
-
-        Args:
-          target: Target.
-
-        Returns:
-          hook: The tuple[Callable[..., object], Callable[..., object]].
-
-        """
+        """Return the custom hook registered for ``target``."""
         hook = self._hooks.get(target)
         if hook is None:
             raise TypeError(f"hook {_annotation_id(target)!r} is not registered")
@@ -563,46 +519,21 @@ class _GraphDecoder:
             raise TypeError("py/reduce requires apply_reduce capability")
 
     def register(self, value: object) -> None:
-        """Append one completed or mutable graph node to encounter order.
-
-        Args:
-          value: Value.
-
-        """
+        """Append one completed or mutable graph node to encounter order."""
         self._built.append(value)
 
     def reserve(self) -> int:
-        """Reserve an encounter slot for a built-then-mutated object.
-
-        Returns:
-          index: The int.
-
-        """
+        """Reserve an encounter slot for a built-then-mutated object."""
         index = len(self._built)
         self._built.append(None)
         return index
 
     def fill(self, index: int, value: object) -> None:
-        """Fill a previously reserved encounter slot.
-
-        Args:
-          index: Index.
-          value: Value.
-
-        """
+        """Fill a previously reserved encounter slot."""
         self._built[index] = value
 
     def decode_typed(self, annotation: object, raw: object) -> object:
-        """Adapt graph recursion to the codec callback signature.
-
-        Args:
-          annotation: Annotation.
-          raw: Raw.
-
-        Returns:
-          result: The object.
-
-        """
+        """Adapt graph recursion to the codec callback signature."""
         del annotation
         return self.decode(raw)
 
@@ -788,11 +719,11 @@ def same_json_value(value: object, member: object) -> bool:
     """Whether two JSON values are recursively equal by JSON type.
 
     Args:
-      value: Value.
-      member: Member.
+      value: The first JSON value to compare.
+      member: The second JSON value to compare.
 
     Returns:
-      result: The bool.
+      result: True if both values are recursively equal by JSON type.
 
     """
     if isinstance(value, bool) != isinstance(member, bool):
@@ -973,21 +904,11 @@ class Codec(Protocol):
     """Encode and decode one Python or annotation-defined capability."""
 
     tag: ClassVar[str | None] = None
-
     holds: ClassVar[bool] = False
 
     @classmethod
     def is_encodable(cls, value: object, annotation: object) -> bool:
-        """Return whether this codec owns encoding for the value and annotation.
-
-        Args:
-          value: Value.
-          annotation: Annotation.
-
-        Returns:
-          result: The bool.
-
-        """
+        """Return whether this codec owns encoding for the value and annotation."""
         del cls, value, annotation
         return False
 
@@ -995,17 +916,7 @@ class Codec(Protocol):
     def coercion_failure[T](
         cls, value: object, target: type[T], default: T | None
     ) -> T:
-        """Return a typed fallback or raise when coercion has none.
-
-        Args:
-          value: Value.
-          target: Target.
-          default: Default.
-
-        Returns:
-          default: The T.
-
-        """
+        """Return a typed fallback or raise when coercion has none."""
         del cls
         if default is not None:
             return default
@@ -1013,33 +924,13 @@ class Codec(Protocol):
 
     @classmethod
     def encode(cls, value: object, annotation: object, *, encode: _Encode) -> JSONValue:
-        """Encode one value through this capability.
-
-        Args:
-          value: Value.
-          annotation: Annotation.
-          encode: Encode.
-
-        Returns:
-          result: The JSONValue.
-
-        """
+        """Encode one value through this capability."""
         del cls, value, annotation, encode
         raise NotImplementedError
 
     @classmethod
     def decode(cls, raw: object, annotation: object, *, decode: _Decode) -> object:
-        """Decode one value through this capability.
-
-        Args:
-          raw: Raw.
-          annotation: Annotation.
-          decode: Decode.
-
-        Returns:
-          result: The object.
-
-        """
+        """Decode one value through this capability."""
         del cls, raw, annotation, decode
         raise NotImplementedError
 
@@ -1070,31 +961,13 @@ class _GraphEncodingCodec(Protocol):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
-        """Return whether this codec owns graph encoding for ``value``.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The bool.
-
-        """
+        """Return whether this codec owns graph encoding for ``value``."""
         del cls, value, graph
         return False
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
-        """Encode one value through graph traversal.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Encode one value through graph traversal."""
         del cls, value, graph
         raise NotImplementedError
 
@@ -1185,15 +1058,7 @@ class DataclassCodec(Codec):
 
     @classmethod
     def settable_fields(cls, target: type) -> frozenset[str]:
-        """Return names accepted by a dataclass's generated initializer.
-
-        Args:
-          target: Target.
-
-        Returns:
-          result: The frozenset[str].
-
-        """
+        """Return names accepted by a dataclass's generated initializer."""
         del cls
         assert is_dataclass(target)
         return frozenset(field.name for field in fields(target) if field.init)
@@ -1203,10 +1068,10 @@ class DataclassCodec(Codec):
         """Encode a dataclass instance to a tagged JSON object.
 
         Args:
-          obj: Obj.
+          obj: Dataclass instance to encode; must not be a type itself.
 
         Returns:
-          result: The JSON.
+          result: Dict with TYPE_TAG key and encoded init field values.
 
         """
         if not is_dataclass(obj) or isinstance(obj, type):
@@ -1227,11 +1092,11 @@ class DataclassCodec(Codec):
         """Rebuild a dataclass of type ``target`` from a JSON object.
 
         Args:
-          target: Target.
-          data: Data.
+          target: Dataclass type to construct.
+          data: JSON object with field names as keys; unknown fields raise.
 
         Returns:
-          result: The T.
+          result: Reconstructed instance of the target type.
 
         """
         hints = get_type_hints(target)
@@ -1277,31 +1142,13 @@ class DataclassCodec(Codec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
-        """Return whether this codec owns graph encoding for ``value``.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The bool.
-
-        """
+        """Return whether this codec owns graph encoding for ``value``."""
         del cls, graph
         return is_dataclass(value) and not isinstance(value, type)
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
-        """Encode one value through graph traversal.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Encode one value through graph traversal."""
         del cls
         return _GraphObjectCodec.encode_graph(value, graph)
 
@@ -1316,11 +1163,11 @@ class _ArrayCodec(Codec, Protocol):
         """Return one annotation for each positional element.
 
         Args:
-          annotation: Annotation.
-          count: Count.
+          annotation: Resolved tuple annotation, e.g. tuple[int, str, float].
+          count: Expected element count; returns (None,) * count if mismatch.
 
         Returns:
-          result: The tuple[object, ...].
+          result: Tuple of element annotations, one per position.
 
         """
         del cls
@@ -1342,17 +1189,7 @@ class _ArrayCodec(Codec, Protocol):
         *,
         encode: _Encode,
     ) -> list[JSONValue]:
-        """Encode elements against their positional annotations.
-
-        Args:
-          value: Value.
-          annotation: Annotation.
-          encode: Encode.
-
-        Returns:
-          result: The list[JSONValue].
-
-        """
+        """Encode elements against their positional annotations."""
         items = list(value)
         hints = cls.element_annotations(annotation, count=len(items))
         return [encode(item, hint) for item, hint in zip(items, hints, strict=True)]
@@ -1369,13 +1206,13 @@ class _ArrayCodec(Codec, Protocol):
         """Decode a JSON array against its positional annotations.
 
         Args:
-          raw: Raw.
-          annotation: Annotation.
-          materialize: Materialize.
-          decode: Decode.
+          raw: JSON array to decode; TypeError raised if not a list.
+          annotation: Tuple type hint, used to infer element types.
+          materialize: Callable converting list to the final container type.
+          decode: Graph decoder to apply to each element.
 
         Returns:
-          result: The object.
+          result: Materialized container with decoded elements.
 
         """
         if not isinstance(raw, list):
@@ -1405,10 +1242,10 @@ class _ImportCodec:
         ``ValueError`` naming neither the tag nor the fault.
 
         Args:
-          node: Node.
+          node: JSON object containing the tag key with a 2-element list value.
 
         Returns:
-          result: The tuple[object, object].
+          result: Tuple of (path, body) from the tag's envelope.
 
         """
         tag = cast(str, cls.tag)
@@ -1423,10 +1260,10 @@ class _ImportCodec:
         """Return a verified dotted import path for a class or function.
 
         Args:
-          value: Value.
+          value: Module-level callable or class with a qualname lacking "<locals>".
 
         Returns:
-          result: The str.
+          result: Dotted import path suitable for resolve_import().
 
         """
         if not isinstance(value, _Named):
@@ -1449,11 +1286,11 @@ class _ImportCodec:
         """Return ``path`` after proving it resolves to ``value``.
 
         Args:
-          path: Path.
-          value: Value.
+          path: Dotted import path to verify.
+          value: Object that path must resolve to; raises TypeError if mismatch.
 
         Returns:
-          path: The str.
+          path: The same path, verified to import as the value.
 
         """
         del cls
@@ -1553,8 +1390,8 @@ class _ReduceCodec(_ImportCodec):
         """Apply pickle reduce state to a reconstructed value.
 
         Args:
-          value: Value.
-          state: State.
+          value: Reconstructed object to populate via __setstate__ or direct slot/dict update.
+          state: State tuple or dict from __reduce_ex__; mutates value in place.
 
         """
         del cls
@@ -1583,16 +1420,7 @@ class _GraphDecodingCodec(Protocol):
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
-        """Decode one value through graph traversal.
-
-        Args:
-          node: Node.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Decode one value through graph traversal."""
         del cls, node, graph
         raise NotImplementedError
 
@@ -1637,10 +1465,10 @@ class _UntypedCodec(Codec):
         """Return whether an annotation requests hintless JSON handling.
 
         Args:
-          annotation: Annotation.
+          annotation: Type hint to check.
 
         Returns:
-          result: The bool.
+          result: True if annotation is None, JSONValue, object, or a TypeVar.
 
         """
         del cls
@@ -1681,10 +1509,10 @@ class _UnionCodec(Codec):
         """Return whether an annotation resolves to either union spelling.
 
         Args:
-          annotation: Annotation.
+          annotation: Type hint to check.
 
         Returns:
-          result: The bool.
+          result: True if annotation is X | Y (UnionType) or Union[X, Y] (typing).
 
         """
         del cls
@@ -1699,10 +1527,10 @@ class _UnionCodec(Codec):
         """Flatten a union's recursively aliased members.
 
         Args:
-          annotation: Annotation.
+          annotation: Union or union-like annotation to decompose.
 
         Returns:
-          result: The tuple[object, ...].
+          result: All concrete member types, with nested unions flattened.
 
         """
         resolved = _resolve_alias(annotation)
@@ -1719,16 +1547,7 @@ class _UnionCodec(Codec):
 
     @classmethod
     def member_tag(cls, members: Sequence[object], member: object) -> str:
-        """Return the tag uniquely naming one union member.
-
-        Args:
-          members: Members.
-          member: Member.
-
-        Returns:
-          tag: The str.
-
-        """
+        """Return the tag uniquely naming one union member."""
         del cls
         tag = _annotation_id(member)
         if sum(_annotation_id(other) == tag for other in members) < 2:
@@ -1740,10 +1559,10 @@ class _UnionCodec(Codec):
         """Return whether ``value`` is an empty JSON-like container.
 
         Args:
-          value: Value.
+          value: Object to check.
 
         Returns:
-          result: The bool.
+          result: True if value is an empty list, dict, set, or similar container.
 
         """
         del cls
@@ -1767,13 +1586,13 @@ class _UnionCodec(Codec):
         """Return whether an annotation describes a runtime or wire value.
 
         Args:
-          annotation: Annotation.
-          value: Value.
-          wire: Wire.
-          exact: Exact.
+          annotation: Type hint to check against.
+          value: Runtime or wire value to test.
+          wire: If True, check against wire representation; else runtime type.
+          exact: If True, disallow coercible matches; else allow conversions.
 
         Returns:
-          result: The bool.
+          result: True if value matches the annotation under the given rules.
 
         """
         resolved = _resolve_alias(annotation)
@@ -1854,13 +1673,13 @@ class _UnionCodec(Codec):
         """Select one union member without exposing matching scores.
 
         Args:
-          annotation: Annotation.
-          value: Value.
-          wire: Wire.
-          allow_ambiguous_empty: Allow ambiguous empty.
+          annotation: Union type hint with multiple possible members.
+          value: Runtime or wire value to match against the union.
+          wire: If True, match against wire types; else runtime types.
+          allow_ambiguous_empty: If True, return any match for empty containers.
 
         Returns:
-          result: The object.
+          result: The selected concrete member type; raises if no match or ambiguous.
 
         """
         members = tuple(m for m in cls.members(annotation) if m is not type(None))
@@ -1944,11 +1763,11 @@ class _UnionCodec(Codec):
         -- their paths collide, and only the positional tag separates them.
 
         Args:
-          members: Members.
-          member: Member.
+          members: All union members to check for tag collisions.
+          member: The member to test for self-discriminating behavior.
 
         Returns:
-          result: The bool.
+          result: True if member is a dataclass whose tag matches its py/object.
 
         """
         del cls
@@ -2034,10 +1853,10 @@ class NullCodec(Codec):
         """Return whether an annotation permits ``None``.
 
         Args:
-          annotation: Annotation.
+          annotation: Type hint to check.
 
         Returns:
-          result: The bool.
+          result: True if annotation is None, object, type(None), union with None, or TypeVar.
 
         """
         ann = _resolve_alias(annotation)
@@ -2077,46 +1896,19 @@ class NullCodec(Codec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
-        """Return whether this codec owns graph encoding for ``value``.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The bool.
-
-        """
+        """Return whether this codec owns graph encoding for ``value``."""
         del cls, graph
         return value is None
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
-        """Encode one value through graph traversal.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Encode one value through graph traversal."""
         del cls, value, graph
         return None
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
-        """Decode one value through graph traversal.
-
-        Args:
-          node: Node.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Decode one value through graph traversal."""
         return cls.decode(node, None, decode=graph.decode_typed)
 
 
@@ -2153,11 +1945,11 @@ class BoolCodec(Codec):
         """Coerce a common JSON-like boolean or use a typed fallback.
 
         Args:
-          value: Value.
-          default: Default.
+          value: JSON value to coerce; accepts bool, int, float, str.
+          default: Returned if coercion fails; None raises coercion_failure.
 
         Returns:
-          value: The bool.
+          value: Coerced or default boolean.
 
         """
         del cls
@@ -2175,46 +1967,19 @@ class BoolCodec(Codec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
-        """Return whether this codec owns graph encoding for ``value``.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The bool.
-
-        """
+        """Return whether this codec owns graph encoding for ``value``."""
         del cls, graph
         return type(value) is bool
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
-        """Encode one value through graph traversal.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Encode one value through graph traversal."""
         del cls, graph
         return cast(bool, value)
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
-        """Decode one value through graph traversal.
-
-        Args:
-          node: Node.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Decode one value through graph traversal."""
         return cls.decode(node, None, decode=graph.decode_typed)
 
 
@@ -2262,11 +2027,11 @@ class IntCodec(Codec):
         """Coerce a JSON value to int or use a typed fallback.
 
         Args:
-          value: Value.
-          default: Default.
+          value: JSON value to coerce; accepts int, finite float, or numeric string.
+          default: Returned if coercion fails; None raises coercion_failure.
 
         Returns:
-          value: The int.
+          value: Coerced or default integer; bools are rejected.
 
         """
         del cls
@@ -2287,46 +2052,19 @@ class IntCodec(Codec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
-        """Return whether this codec owns graph encoding for ``value``.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The bool.
-
-        """
+        """Return whether this codec owns graph encoding for ``value``."""
         del cls, graph
         return type(value) is int
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
-        """Encode one value through graph traversal.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Encode one value through graph traversal."""
         del cls, graph
         return cast(int, value)
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
-        """Decode one value through graph traversal.
-
-        Args:
-          node: Node.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Decode one value through graph traversal."""
         return cls.decode(node, None, decode=graph.decode_typed)
 
 
@@ -2371,11 +2109,11 @@ class FloatCodec(Codec):
         """Coerce a JSON numeric value to float or use a typed fallback.
 
         Args:
-          value: Value.
-          default: Default.
+          value: JSON value to coerce; accepts int, float, or numeric string.
+          default: Returned if coercion fails; None raises coercion_failure.
 
         Returns:
-          value: The float.
+          value: Coerced or default float; bools are rejected.
 
         """
         del cls
@@ -2394,45 +2132,18 @@ class FloatCodec(Codec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
-        """Return whether this codec owns graph encoding for ``value``.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The bool.
-
-        """
+        """Return whether this codec owns graph encoding for ``value``."""
         del cls, graph
         return type(value) is float
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
-        """Encode one value through graph traversal.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Encode one value through graph traversal."""
         return cls.encode(value, float, encode=graph.encode_typed)
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
-        """Decode one value through graph traversal.
-
-        Args:
-          node: Node.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Decode one value through graph traversal."""
         # Aliased before narrowing: a bare ``Mapping`` narrow leaves a
         # partially-unknown key type the payload helper would inherit.
         tagged: object = node
@@ -2472,16 +2183,7 @@ class StrCodec(Codec):
 
     @classmethod
     def coerce(cls, value: object, default: str | None = "") -> str:
-        """Return a string value or use a typed fallback.
-
-        Args:
-          value: Value.
-          default: Default.
-
-        Returns:
-          value: The str.
-
-        """
+        """Return a string value or use a typed fallback."""
         del cls
         if isinstance(value, str):
             return value
@@ -2489,46 +2191,19 @@ class StrCodec(Codec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
-        """Return whether this codec owns graph encoding for ``value``.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The bool.
-
-        """
+        """Return whether this codec owns graph encoding for ``value``."""
         del cls, graph
         return type(value) is str
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
-        """Encode one value through graph traversal.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Encode one value through graph traversal."""
         del cls, graph
         return cast(str, value)
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
-        """Decode one value through graph traversal.
-
-        Args:
-          node: Node.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Decode one value through graph traversal."""
         return cls.decode(node, None, decode=graph.decode_typed)
 
 
@@ -2568,45 +2243,18 @@ class BytesCodec(Codec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
-        """Return whether this codec owns graph encoding for ``value``.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The bool.
-
-        """
+        """Return whether this codec owns graph encoding for ``value``."""
         del cls, graph
         return type(value) is bytes
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
-        """Encode one value through graph traversal.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Encode one value through graph traversal."""
         return cls.encode(value, bytes, encode=graph.encode_typed)
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
-        """Decode one value through graph traversal.
-
-        Args:
-          node: Node.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Decode one value through graph traversal."""
         payload = _tagged_scalar_payload(node, cast(str, cls.tag))
         return cls.decode(payload, bytes, decode=graph.decode_typed)
 
@@ -2643,45 +2291,18 @@ class PathCodec(Codec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
-        """Return whether this codec owns graph encoding for ``value``.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The bool.
-
-        """
+        """Return whether this codec owns graph encoding for ``value``."""
         del graph
         return cls.is_encodable(value, None)
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
-        """Encode one value through graph traversal.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Encode one value through graph traversal."""
         return cls.encode(value, None, encode=graph.encode_typed)
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
-        """Decode one value through graph traversal.
-
-        Args:
-          node: Node.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Decode one value through graph traversal."""
         payload = _tagged_scalar_payload(node, cast(str, cls.tag))
         return cls.decode(payload, None, decode=graph.decode_typed)
 
@@ -2721,45 +2342,18 @@ class UuidCodec(Codec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
-        """Return whether this codec owns graph encoding for ``value``.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The bool.
-
-        """
+        """Return whether this codec owns graph encoding for ``value``."""
         del graph
         return cls.is_encodable(value, None)
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
-        """Encode one value through graph traversal.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Encode one value through graph traversal."""
         return cls.encode(value, None, encode=graph.encode_typed)
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
-        """Decode one value through graph traversal.
-
-        Args:
-          node: Node.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Decode one value through graph traversal."""
         payload = _tagged_scalar_payload(node, cast(str, cls.tag))
         return cls.decode(payload, None, decode=graph.decode_typed)
 
@@ -2803,8 +2397,8 @@ class DatetimeCodec(Codec):
         "absent" is the only honest fallback.
 
         Args:
-          value: Value.
-          default: Default.
+          value: JSON value to coerce; accepts datetime or ISO format string.
+          default: Returned if coercion fails or value is not a valid format.
 
         Returns:
           result: The datetime | None.
@@ -2854,45 +2448,18 @@ class DatetimeCodec(Codec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
-        """Return whether this codec owns graph encoding for ``value``.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The bool.
-
-        """
+        """Return whether this codec owns graph encoding for ``value``."""
         del graph
         return cls.is_encodable(value, None)
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
-        """Encode one value through graph traversal.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Encode one value through graph traversal."""
         return cls.encode(value, None, encode=graph.encode_typed)
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
-        """Decode one value through graph traversal.
-
-        Args:
-          node: Node.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Decode one value through graph traversal."""
         payload = _tagged_scalar_payload(node, cast(str, cls.tag))
         return cls.decode(payload, None, decode=graph.decode_typed)
 
@@ -2954,12 +2521,12 @@ class ListCodec(_ArrayCodec):
         "absent", not "abort". Pass ``default=None`` to raise instead.
 
         Args:
-          value: Value.
-          item: Item.
-          default: Default.
+          value: JSON value to coerce; must be a list or default is returned.
+          item: Type to coerce each element to; defaults to object.
+          default: Returned if coercion fails; None raises TypeError.
 
         Returns:
-          result: The list[T].
+          result: List with coerced elements, preserving order and removing invalids.
 
         """
         del cls
@@ -2981,10 +2548,10 @@ class ListCodec(_ArrayCodec):
         """Narrow an array to nonempty string-keyed mappings.
 
         Args:
-          value: Value.
+          value: JSON array to filter.
 
         Returns:
-          result: The list[dict[str, object]].
+          result: Dicts with string keys, filtering out empty or non-dict items.
 
         """
         result: list[dict[str, object]] = []
@@ -3000,31 +2567,13 @@ class ListCodec(_ArrayCodec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
-        """Return whether this codec owns graph encoding for ``value``.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The bool.
-
-        """
+        """Return whether this codec owns graph encoding for ``value``."""
         del cls, graph
         return type(value) is list
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
-        """Encode one value through graph traversal.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Encode one value through graph traversal."""
         del cls
         items = cast(list[object], value)
         graph.register(items)
@@ -3035,11 +2584,11 @@ class ListCodec(_ArrayCodec):
         """Decode one value through graph traversal.
 
         Args:
-          node: Node.
-          graph: Graph.
+          node: JSON list to unpack recursively; the literal parse tree node.
+          graph: Decoder state with memoization and codec registry.
 
         Returns:
-          result: The object.
+          result: Decoded Python object with cycles replaced by memoized references.
 
         """
         if not isinstance(node, list):
@@ -3054,7 +2603,6 @@ class TupleCodec(_ArrayCodec):
     """Encode and decode tagged tuples."""
 
     tag: ClassVar[str | None] = "py/tuple"
-
     holds: ClassVar[bool] = True
 
     @classmethod
@@ -3062,10 +2610,10 @@ class TupleCodec(_ArrayCodec):
         """Return the element count required by a fixed tuple annotation.
 
         Args:
-          annotation: Annotation.
+          annotation: Type hint to inspect.
 
         Returns:
-          result: The int | None.
+          result: Element count for fixed-length tuple, or None if variadic or non-tuple.
 
         """
         del cls
@@ -3103,45 +2651,18 @@ class TupleCodec(_ArrayCodec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
-        """Return whether this codec owns graph encoding for ``value``.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The bool.
-
-        """
+        """Return whether this codec owns graph encoding for ``value``."""
         del cls, graph
         return _is_plain_tuple(value)
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
-        """Encode one value through graph traversal.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Encode one value through graph traversal."""
         return cls.encode(value, tuple, encode=graph.encode_typed)
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
-        """Decode one value through graph traversal.
-
-        Args:
-          node: Node.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Decode one value through graph traversal."""
         source = cast(Mapping[str, object], node)
         return cls.decode(source[cast(str, cls.tag)], tuple, decode=graph.decode_typed)
 
@@ -3150,7 +2671,6 @@ class SetCodec(_ArrayCodec):
     """Encode and decode tagged mutable sets."""
 
     tag: ClassVar[str | None] = "py/set"
-
     holds: ClassVar[bool] = True
 
     @classmethod
@@ -3180,31 +2700,13 @@ class SetCodec(_ArrayCodec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
-        """Return whether this codec owns graph encoding for ``value``.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The bool.
-
-        """
+        """Return whether this codec owns graph encoding for ``value``."""
         del cls, graph
         return type(value) is set
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
-        """Encode one value through graph traversal.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The object.
-
-        """
+        """Encode one value through graph traversal."""
         graph.register(value)
         members = sorted(cast(AbstractSet[object], value), key=graph.order_key)
         return {cast(str, cls.tag): graph.encode_items(members)}
@@ -3214,11 +2716,11 @@ class SetCodec(_ArrayCodec):
         """Decode one value through graph traversal.
 
         Args:
-          node: Node.
-          graph: Graph.
+          node: JSON object with tag key pointing to array of values.
+          graph: Decoder managing identity and back-references.
 
         Returns:
-          result: The object.
+          result: Decoded set registered with graph for cycle detection.
 
         """
         source = cast(Mapping[str, object], node)
@@ -3258,10 +2760,10 @@ class MappingCodec(Codec):
         """Normalize mapping keys to distinct strings or reject a collision.
 
         Args:
-          value: Value.
+          value: Mapping to normalize; TypeError raised on duplicate string keys.
 
         Returns:
-          result: The list[tuple[str, object]].
+          result: List of (str_key, value) pairs in iteration order.
 
         """
         del cls
@@ -3277,15 +2779,7 @@ class MappingCodec(Codec):
 
     @classmethod
     def key(cls, value: object) -> str:
-        """Return a string mapping key, rejecting every other type.
-
-        Args:
-          value: Value.
-
-        Returns:
-          value: The str.
-
-        """
+        """Return a string mapping key, rejecting every other type."""
         del cls
         if isinstance(value, str):
             return value
@@ -3293,15 +2787,7 @@ class MappingCodec(Codec):
 
     @classmethod
     def value_annotation(cls, annotation: object) -> object:
-        """Return a mapping's value annotation, or ``None`` when unknown.
-
-        Args:
-          annotation: Annotation.
-
-        Returns:
-          result: The object.
-
-        """
+        """Return a mapping's value annotation, or ``None`` when unknown."""
         del cls
         args = get_args(_strip_optional(_resolve_alias(annotation)))
         return args[1] if len(args) == 2 else None
@@ -3358,16 +2844,7 @@ class MappingCodec(Codec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
-        """Return whether this codec owns graph encoding for ``value``.
-
-        Args:
-          value: Value.
-          graph: Graph.
-
-        Returns:
-          result: The bool.
-
-        """
+        """Return whether this codec owns graph encoding for ``value``."""
         del cls, graph
         return isinstance(value, Mapping)
 
@@ -3376,11 +2853,11 @@ class MappingCodec(Codec):
         """Encode one value through graph traversal.
 
         Args:
-          value: Value.
-          graph: Graph.
+          value: Mapping to encode.
+          graph: Encoder managing identity and back-references.
 
         Returns:
-          result: The object.
+          result: JSON dict with reserved keys escaped if needed.
 
         """
         mapping = cast(Mapping[object, object], value)
@@ -3398,16 +2875,7 @@ class MappingCodec(Codec):
 
     @classmethod
     def graph_key(cls, key: object, graph: _GraphEncoder) -> str:
-        """Encode a mapping key using the graph wire dialect.
-
-        Args:
-          key: Key.
-          graph: Graph.
-
-        Returns:
-          key: The str.
-
-        """
+        """Encode a mapping key using the graph wire dialect."""
         del cls
         if isinstance(key, str) and not _is_reserved_key(key):
             return key
@@ -3418,11 +2886,11 @@ class MappingCodec(Codec):
         """Decode one value through graph traversal.
 
         Args:
-          node: Node.
-          graph: Graph.
+          node: JSON dict where keys starting with "json://" contain encoded non-string keys.
+          graph: Decoder managing identity and back-references.
 
         Returns:
-          result: The object.
+          result: Decoded dict registered with graph for cycle detection.
 
         """
         if not isinstance(node, dict):
@@ -3483,12 +2951,12 @@ class DictCodec(MappingCodec):
         "absent", not "abort". Pass ``default=None`` to raise instead.
 
         Args:
-          value: Value.
-          item: Item.
-          default: Default.
+          value: JSON value to coerce; must be a mapping or default is returned.
+          item: Type to coerce each value to; defaults to object.
+          default: Returned if coercion fails; None raises TypeError.
 
         Returns:
-          result: The dict[str, T].
+          result: Dict with coerced values, filtering out failed coercions.
 
         """
         del cls
@@ -3780,10 +3248,10 @@ class _GraphObjectCodec(_ImportCodec):
         """Yield stable state attributes excluding serialization bookkeeping.
 
         Args:
-          value: Value.
+          value: Object to inspect for __slots__ or __dict__ attributes.
 
         Yields:
-          item: Each yielded value.
+          name: Attribute names from __slots__ in MRO order, excluding internal fields.
 
         """
         del cls
@@ -3812,10 +3280,10 @@ class _GraphObjectCodec(_ImportCodec):
         """Return whether ``target`` declares ``_finalized`` in its MRO.
 
         Args:
-          target: Target.
+          target: Class to inspect.
 
         Returns:
-          result: The bool.
+          result: True if _finalized appears in any base's __slots__.
 
         """
         del cls
@@ -3973,7 +3441,6 @@ class _Named(Protocol):
     """A class or function: carries both ``__module__`` and ``__qualname__``."""
 
     __module__: str
-
     __qualname__: str
 
 

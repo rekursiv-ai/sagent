@@ -40,7 +40,7 @@ def cache_ttls() -> frozenset[float]:
     "do not cache" is not a selection this vendor offers.
 
     Returns:
-      result: The frozenset[float].
+      ttls: The two cache control lifetimes (300s and 3600s).
 
     """
     return frozenset({300.0, 3600.0})

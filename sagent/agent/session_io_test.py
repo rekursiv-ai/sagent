@@ -90,9 +90,7 @@ class _RuntimeModel:
 @dataclass(slots=True, kw_only=True)
 class _NoopModel(MockModelCaps):
     model_id: str = "noop"
-
     max_request_tokens: int = 100_000
-
     max_response_tokens: int = 1_024
 
     @override

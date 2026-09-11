@@ -127,13 +127,9 @@ class Grep:
     """Search file contents with regex patterns."""
 
     name = "Grep"
-
     tool_id = "application/x-tool-grep"
-
     clearable_results = True
-
     description = load_tool_description("Grep")
-
     directive_schema = json_freeze(
         {
             "type": "object",

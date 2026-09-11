@@ -1382,7 +1382,6 @@ def test_build_kwargs_includes_context_management_when_opted_in() -> None:
 def test_context_management_unclearable_tool_is_excluded() -> None:
     class UnclearableTool:
         name = "Legacy"
-
         clearable_results = False
 
     config = build_context_management(

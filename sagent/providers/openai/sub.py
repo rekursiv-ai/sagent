@@ -232,13 +232,9 @@ class OpenAISubscription(OpenAI):
         """OAuth credentials for an OpenAI ChatGPT subscription."""
 
         access_token: str
-
         refresh_token: str
-
         account_id: str
-
         expires_at: float
-
         id_token: NotRequired[str]
 
     def __init__(

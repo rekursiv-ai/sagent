@@ -464,11 +464,8 @@ def _stub_limits(request: int) -> ModelLimits:
 
 class _DummyProvider(OpenAICompat):
     DEFAULT_MODEL: ClassVar[str] = "stub-1"
-
     ENV_VAR: ClassVar[str] = "DUMMY_PROV_KEY"
-
     BASE_URL: ClassVar[str] = "https://stub.test/v1"
-
     CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = MappingProxyType(
         {
             "stub-1": ModelCapability(

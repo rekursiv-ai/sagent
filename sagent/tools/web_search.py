@@ -34,9 +34,7 @@ class WebSearch:
     """Search the web using a configurable backend."""
 
     name = "WebSearch"
-
     tool_id = "application/x-tool-websearch"
-
     clearable_results = True
 
     @property

@@ -106,13 +106,9 @@ def test_max_width_overrides_the_caller_width() -> None:
 def test_row_spec_reads_flat_attributes() -> None:
     class _Tool:
         output = "on"
-
         output_head_rows = 2
-
         output_tail_rows = 3
-
         output_max_width = 40
-
         output_wrap = "chop"
 
     assert row_spec(_Tool()).output == OutputSpec(
@@ -134,19 +130,12 @@ def test_command_knobs_bound_the_input_row() -> None:
 
     class _Tool:
         output = "on"
-
         output_head_rows = 2
-
         output_tail_rows = 2
-
         output_max_width = 0
-
         output_wrap = "wrap"
-
         command_head_rows = 3
-
         command_tail_rows = 1
-
         command_lang = "bash"
 
     display = row_spec(_Tool())
@@ -161,13 +150,9 @@ def test_command_is_unbounded_without_command_knobs() -> None:
 
     class _Tool:
         output = "on"
-
         output_head_rows = 2
-
         output_tail_rows = 2
-
         output_max_width = 0
-
         output_wrap = "wrap"
 
     assert row_spec(_Tool()).command == OutputSpec(show=True, unbounded=True)
