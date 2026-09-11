@@ -21,9 +21,13 @@ class CharacterCount:
     """Count characters in a string."""
 
     name = "CharacterCount"
+
     tool_id = "application/x-tool-character-count"
+
     clearable_results = True
+
     description = "Count Unicode code points in a string."
+
     directive_schema = json_freeze(
         {
             "type": "object",

@@ -64,10 +64,15 @@ class OutputSpec:
     """
 
     show: bool = False
+
     head_rows: int = 0
+
     tail_rows: int = 0
+
     max_width: int = 0
+
     wrap: Wrap = "wrap"
+
     unbounded: bool = False
 
     def __post_init__(self) -> None:
@@ -108,7 +113,9 @@ class ToolDisplay:
     """
 
     command: OutputSpec = OutputSpec(show=True, unbounded=True)
+
     output: OutputSpec = OutputSpec()
+
     command_lang: str = ""
 
 
@@ -122,9 +129,13 @@ class Displayable(Protocol):
     """
 
     output: Toggle
+
     output_head_rows: int
+
     output_tail_rows: int
+
     output_max_width: int
+
     output_wrap: Wrap
 
 
@@ -133,7 +144,9 @@ class CommandDisplayable(Protocol):
     """A tool whose ``⎿`` input row is multi-line source worth bounding."""
 
     command_head_rows: int
+
     command_tail_rows: int
+
     command_lang: str
 
 

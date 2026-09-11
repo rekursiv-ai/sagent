@@ -117,6 +117,7 @@ class ScrunchResult:
     """
 
     splices: tuple[ContextSplice, ...]
+
     view: tuple[ModelContextEvent, ...]
 
 

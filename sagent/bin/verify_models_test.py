@@ -63,7 +63,8 @@ class _Client:
     async def __aexit__(self, *_: object) -> None:
         return None
 
-    async def get(self, _url: str, **_kw: object) -> _Response:
+    async def get(self, url: str, **_kw: object) -> _Response:
+        del url
         return self._responses.pop(0)
 
 
@@ -289,9 +290,10 @@ class TestMain:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
 
         async def fake_fetch_anthropic(
-            _key: str,
-            _ids: list[str],
+            key: str,
+            ids: list[str],
         ) -> dict[str, verify_models.LiveLimits]:
+            del key, ids
             return {}
 
         monkeypatch.setattr(verify_models, "fetch_anthropic", fake_fetch_anthropic)

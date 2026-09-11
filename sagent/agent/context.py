@@ -325,7 +325,9 @@ class _OrderedRefs:
     """
 
     _next: dict[TapeRef | None, TapeRef | None] = field(default_factory=dict)
+
     _prev: dict[TapeRef | None, TapeRef | None] = field(default_factory=dict)
+
     _present: set[TapeRef] = field(default_factory=set)
 
     def __post_init__(self) -> None:

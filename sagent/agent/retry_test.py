@@ -87,11 +87,17 @@ class _ScriptedModel(MockModelCaps):
     """Model with a scripted response queue and optional fault injection."""
 
     model_id: str = "scripted"
+
     max_request_tokens: int = 100_000
+
     stream_responses: list[BaseException | ModelResponse] = field(default_factory=list)
+
     is_retryable_provider: bool = False
+
     is_overflow: bool = False
+
     _stream_idx: int = field(default=0, init=False)
+
     stream_calls: int = field(default=0, init=False)
 
     @override
@@ -132,8 +138,8 @@ def _resp(text: str = "ok") -> ModelResponse:
     return ModelResponse(message=AssistantMessage(text=text))
 
 
-def _silent(_arg: object) -> None:
-    return None
+def _silent(arg: object) -> None:
+    del arg
 
 
 def _collect_text(chunks: list[str]) -> Callable[[RuntimeEvent], None]:
@@ -366,6 +372,7 @@ def test_extract_retry_after_structured_ms_none_falls_through() -> None:
 
     class _CliRetryableError(Exception):
         retry_after_ms = None
+
         response = _FakeResponse(429, {"retry-after": "7"})
 
     assert extract_retry_after(_CliRetryableError()) == pytest.approx(7.0)
@@ -1431,6 +1438,7 @@ class _UnreadStreamingResponse:
     """
 
     status_code: ClassVar[int] = 429
+
     headers: ClassVar[dict[str, str]] = {"request-id": "req-1", "retry-after": "5"}
 
     @property
@@ -1620,8 +1628,8 @@ async def test_send_with_retry_does_not_emit_banner_into_on_text(
     chunks: list[str] = []
     suspensions: list[float] = []
 
-    async def fake_sleep(_d: float) -> None:
-        return None
+    async def fake_sleep(d: float) -> None:
+        del d
 
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
 
@@ -1663,8 +1671,8 @@ async def test_send_with_retry_silent_on_short_transient_retry(
     suspensions: list[float] = []
     notes: list[str] = []
 
-    async def fake_sleep(_d: float) -> None:
-        return None
+    async def fake_sleep(d: float) -> None:
+        del d
 
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
 
@@ -1726,16 +1734,11 @@ def test_one_body_reader_symbol() -> None:
     )
 
 
-if __name__ == "__main__":
-    from sagent.lib.testing.main import test_main
-
-    test_main(__file__)
-
-
 class _EntitlementError(Exception):
     """A 429 whose body says the account lacks an entitlement, not a quota."""
 
     status_code = 429
+
     body: ClassVar[Mapping[str, object]] = {
         "type": "error",
         "error": {
@@ -1773,6 +1776,7 @@ def test_ordinary_429_stays_rate_limited() -> None:
 
     class _ThrottledError(Exception):
         status_code = 429
+
         body: ClassVar[Mapping[str, object]] = {
             "type": "error",
             "error": {"type": "rate_limit_error", "message": "rate limit exceeded"},
@@ -1811,9 +1815,16 @@ def test_exhausted_quota_messages_are_fatal(message: str) -> None:
 
     class _ExhaustedError(Exception):
         status_code = 429
+
         body: ClassVar[Mapping[str, object]] = {
             "type": "error",
             "error": {"type": "rate_limit_error", "message": message},
         }
 
     assert is_rate_limited(_ExhaustedError()) is False
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing.main import test_main
+
+    test_main(__file__)

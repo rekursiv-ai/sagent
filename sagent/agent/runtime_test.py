@@ -122,8 +122,11 @@ class StubTool:
     """Tool that returns a canned response after an optional delay."""
 
     _name: str = "echo"
+
     response: str = "ok"
+
     delay_sec: float = 0.0
+
     call_count: int = field(default=0, init=False)
 
     @property
@@ -147,6 +150,7 @@ class FailingTool:
     """Tool that raises."""
 
     _name: str = "fail"
+
     error: str = "boom"
 
     @property
@@ -167,8 +171,11 @@ class ScriptedModel:
     """Model that returns a sequence of scripted responses."""
 
     responses: list[AssistantMessage] = field(default_factory=list)
+
     _call_idx: int = field(default=0, init=False)
+
     delay_sec: float = 0.0
+
     fail_on_call: int | None = None
 
     async def stream(
@@ -439,7 +446,8 @@ async def test_before_tool_spawn_user_detaches_tools_before_cohort_start() -> No
     )
     urgent = [UserMessage(text="urgent")]
 
-    def _before_tool_spawn(_msg: AssistantMessage) -> UserMessage | None:
+    def _before_tool_spawn(msg: AssistantMessage) -> UserMessage | None:
+        del msg
         return urgent.pop() if urgent else None
 
     agent.before_tool_spawn = _before_tool_spawn
@@ -613,6 +621,7 @@ async def test_halt_cancels_model_waits_for_user() -> None:
     @dataclass(kw_only=True, slots=True)
     class BlockingModel:
         responses: list[AssistantMessage] = field(default_factory=list)
+
         _i: int = field(default=0, init=False)
 
         async def stream(
@@ -675,6 +684,7 @@ async def test_halt_with_pending_midstream_input_resumes_without_fresh_input() -
     @dataclass(kw_only=True, slots=True)
     class BlockingModel:
         responses: list[AssistantMessage] = field(default_factory=list)
+
         _i: int = field(default=0, init=False)
 
         async def stream(
@@ -2129,6 +2139,7 @@ async def test_self_pinging_tool_does_not_orphan_tool_use() -> None:
         """Tool that pushes a ``UserMessage`` to its host inbox + returns ok."""
 
         _name: str = "self_ping"
+
         runtime: agent_runtime.AgentRuntime | None = None
 
         @property
@@ -2958,6 +2969,7 @@ async def test_no_cohort_complete_on_halt() -> None:
     @dataclass(kw_only=True, slots=True)
     class BlockingModel2:
         responses: list[AssistantMessage] = field(default_factory=list)
+
         _i: int = field(default=0, init=False)
 
         async def stream(
@@ -3798,6 +3810,7 @@ async def test_compact_cancels_running_model_call() -> None:
     @dataclass(kw_only=True, slots=True)
     class _BlockingModel:
         responses: list[AssistantMessage] = field(default_factory=list)
+
         _i: int = field(default=0, init=False)
 
         async def stream(
@@ -4199,6 +4212,7 @@ async def test_tool_result_partial_published() -> None:
     @dataclass(kw_only=True, slots=True)
     class _StreamingTool:
         _name: str = "stream"
+
         published: list[ToolResultPartial] = field(default_factory=list)
 
         @property
@@ -4387,6 +4401,7 @@ async def test_user_message_mid_stream_fires_followup_round() -> None:
     @dataclass(kw_only=True, slots=True)
     class MidStreamModel:
         call_histories: list[list[ModelContextEvent]] = field(default_factory=list)
+
         _i: int = field(default=0, init=False)
 
         async def stream(
@@ -4459,7 +4474,9 @@ class _LifecycleModel:
     """
 
     stream_started: asyncio.Event
+
     release_stream: asyncio.Event
+
     _i: int = field(default=0, init=False)
 
     async def stream(
@@ -5249,6 +5266,7 @@ async def test_user_messages_mid_stream_coalesce_into_one_followup() -> None:
     @dataclass(kw_only=True, slots=True)
     class MidStreamModel:
         call_histories: list[list[ModelContextEvent]] = field(default_factory=list)
+
         _i: int = field(default=0, init=False)
 
         async def stream(
@@ -5353,6 +5371,7 @@ async def test_user_message_mid_stream_detaches_new_tools_to_background() -> Non
     @dataclass(kw_only=True, slots=True)
     class MidStreamModel:
         call_histories: list[list[ModelContextEvent]] = field(default_factory=list)
+
         _i: int = field(default=0, init=False)
 
         async def stream(
@@ -5441,6 +5460,7 @@ async def test_user_queued_message_mid_stream_fires_followup_round() -> None:
     @dataclass(kw_only=True, slots=True)
     class MidStreamModel:
         call_histories: list[list[ModelContextEvent]] = field(default_factory=list)
+
         _i: int = field(default=0, init=False)
 
         async def stream(
@@ -5537,6 +5557,7 @@ async def test_user_queued_message_waits_for_model_idle_not_cohort_complete() ->
     @dataclass(kw_only=True, slots=True)
     class ThreeRoundModel:
         call_histories: list[list[ModelContextEvent]] = field(default_factory=list)
+
         _i: int = field(default=0, init=False)
 
         async def stream(
@@ -5621,6 +5642,7 @@ async def test_halt_then_immediate_user_message_fires_followup_round() -> None:
     @dataclass(kw_only=True, slots=True)
     class HaltableModel:
         call_histories: list[list[ModelContextEvent]] = field(default_factory=list)
+
         _i: int = field(default=0, init=False)
 
         async def stream(
@@ -6747,6 +6769,7 @@ async def test_same_file_rew_run_sequentially_others_parallel() -> None:
     @dataclass(kw_only=True, slots=True)
     class TracingTool:
         _name: str
+
         groups: bool
 
         @property

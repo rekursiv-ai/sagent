@@ -46,6 +46,7 @@ class _ListInbox:
     """
 
     items: list[object] = field(default_factory=list)
+
     gate_armed: bool = False
 
     def push_back(self, item: object) -> None:
@@ -97,7 +98,9 @@ class _FakeAgent:
     """Minimal stand-in for ``Agent``; wraps a REAL runtime for predicates."""
 
     work: object = None
+
     runtime: agent_runtime.AgentRuntime = field(default_factory=_make_runtime)
+
     halt_calls: int = 0
 
     def halt(self) -> None:

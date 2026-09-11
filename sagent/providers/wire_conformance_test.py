@@ -65,6 +65,7 @@ class _CatalogProvider(Protocol):
     """
 
     CAPABILITIES: ClassVar[Mapping[str, ModelCapability]]
+
     TRANSPORT: ClassVar[ModelCapability]
 
     @property

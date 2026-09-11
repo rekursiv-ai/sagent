@@ -25,9 +25,13 @@ class LocalOpenAI(OpenAICompat):
     """Provider for a chat-completions-compatible local server."""
 
     DEFAULT_MODEL = os.environ.get("LOCAL_OPENAI_MODEL", "local-model")
+
     DEFAULT_UTILITY_MODEL = DEFAULT_MODEL
+
     ENV_VAR = "LOCAL_OPENAI_API_KEY"
+
     BASE_URL = os.environ.get("LOCAL_OPENAI_BASE_URL", "http://localhost:8000/v1")
+
     CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = MappingProxyType(
         {
             DEFAULT_MODEL: ModelCapability(

@@ -124,3 +124,9 @@ def _resolves(catalog: PriceCatalog, key: PriceCatalogProduct) -> bool:
     except KeyError:
         return False
     return True
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing.main import test_main
+
+    test_main(__file__)

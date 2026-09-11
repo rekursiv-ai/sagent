@@ -54,6 +54,7 @@ class _PersistentChild(FakeAgent):
 
 class _StubModel(MockModelCaps):
     model_id: str = "stub"
+
     max_request_tokens: int = 100_000
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
@@ -90,9 +91,13 @@ class _RecordingAgent(Agent):
 
 class _DummyInner:
     name: str = "Dummy"
+
     tool_id: str = "application/x-tool-dummy"
+
     description: str = "dummy"
+
     clearable_results: bool = False
+
     directive_schema = json_freeze(
         {
             "type": "object",
@@ -151,9 +156,13 @@ def test_aware_schema_without_properties_injects_background_fields() -> None:
 
     class NoProps:
         name: str = "NP"
+
         tool_id: str = "application/x-tool-np"
+
         description: str = ""
+
         clearable_results: bool = False
+
         directive_schema = json_freeze({"type": "object"})
 
         def summary(self, args: Mapping[str, object]) -> str:

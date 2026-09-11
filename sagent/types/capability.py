@@ -369,12 +369,12 @@ def _reject_unoffered(capability: ModelCapability, name: str, value: object) -> 
 
 
 def _ladder[T](alias: object) -> tuple[T, ...]:
-    """The Literal's members, in declaration order -- least committing first."""
+    """Return the Literal's members, in declaration order -- least committing first."""
     return cast(tuple[T, ...], get_args(cast(TypeAliasType, alias).__value__))
 
 
 def _lowest[T](name: str, offered: Collection[T], ladder: Sequence[T]) -> T:
-    """The first rung of ``ladder`` that ``offered`` contains."""
+    """Return the first rung of ``ladder`` that ``offered`` contains."""
     for rung in ladder:
         if rung in offered:
             return rung

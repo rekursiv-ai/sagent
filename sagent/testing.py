@@ -90,11 +90,17 @@ class MockModelCaps:
     """
 
     model_id: str = "mock-model"
+
     max_request_tokens: int = 200_000
+
     max_response_tokens: int = 8_192
+
     supports_persistent_retry: bool = False
+
     supports_thinking: bool = False
+
     valid_efforts: tuple[ThinkingEffort, ...] = ()
+
     service_tiers: tuple[ServiceTier, ...] = ()
 
     @property

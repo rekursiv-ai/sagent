@@ -107,29 +107,50 @@ class PersistentAgentRecord:
     """Parent-side lifecycle record for one persistent subagent run."""
 
     label: str
+
     run_id: str
+
     session_dir: str
+
     state: PersistentAgentState
+
     provider: str
+
     auth: str
+
     account: str | None
+
     model_id: str
+
     tools: tuple[str, ...]
+
     system: str
+
     notify_on_asleep: bool
+
     max_tool_call_rounds: int | None = None
+
     max_request_tokens: int | None = None
+
     max_response_tokens: int | None = None
+
     thinking_budget: str = "none"
+
     thinking_output: str = "none"
+
     show_thinking: bool = True
+
     effort: str = "none"
+
     # 300s, not 0: the wire spells this as a label, and a model that caches
     # at all has no "off" -- 0.0 still shipped a ``5m`` breakpoint while the
     # record claimed no caching. Matches ``_cache_ttl_sec``'s read default.
     cache_ttl_sec: float = 300.0
+
     service_tier: str = "auto"
+
     max_budget_usd: float | None = None
+
     persistent_retry: bool = False
 
 

@@ -446,7 +446,8 @@ async def test_read_pdf_partial_truncation_does_not_depend_on_recount(
 
     # If _read_pdf re-counts pages, this would force a false "complete".
     # Use "1-" (last=None) -- the case that previously triggered the recount.
-    def _no_count(_p: Path) -> int | None:
+    def _no_count(p: Path) -> int | None:
+        del p
         return None
 
     monkeypatch.setattr("sagent.tools.read.get_pdf_page_count", _no_count)

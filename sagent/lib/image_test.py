@@ -65,7 +65,7 @@ class TestParseCrop:
         assert _parse_crop((0, 0, 200, 200), 100, 100) is None
 
     def test_center_crop_landscape(self) -> None:
-        # target 1:2 aspect on 100x100 square → crop to 50x100
+        # Target 1:2 aspect on 100x100 square → crop to 50x100.
         crop = _parse_crop((50, 100), 100, 100)
         assert crop == (0, 25, 100, 50)
 
@@ -139,9 +139,9 @@ class TestDecodeJpegTurbojpeg:
     def test_bgr_to_rgb(self) -> None:
         mock_turbo = MagicMock()
         bgr = np.zeros((2, 2, 3), dtype=np.uint8)
-        bgr[:, :, 0] = 10  # B
-        bgr[:, :, 1] = 20  # G
-        bgr[:, :, 2] = 30  # R
+        bgr[:, :, 0] = 10  # B.
+        bgr[:, :, 1] = 20  # G.
+        bgr[:, :, 2] = 30  # R.
         mock_turbo.decode.return_value = bgr
         arr = decode_jpeg_turbojpeg(b"fake", mock_turbo, 2, 2)
         assert arr is not None
@@ -183,7 +183,7 @@ class TestDecodeWebpLibwebp:
         with patch("sagent.lib.image.webp") as mock_webp:
             mock_webp.lib.WebPInitDecoderConfig.return_value = True
             mock_webp.lib.VP8_STATUS_OK = 0
-            mock_webp.lib.WebPDecode.return_value = 1  # non-OK
+            mock_webp.lib.WebPDecode.return_value = 1  # non-OK.
             mock_webp.lib.MODE_RGB = 0
             assert decode_webp_libwebp(b"x", 10, 10) is None
 
@@ -196,7 +196,7 @@ class TestDecodeWebpLibwebp:
             mock_webp.lib.WebPInitDecoderConfig.return_value = True
             mock_webp.lib.VP8_STATUS_OK = 0
             mock_webp.lib.MODE_RGB = 0
-            mock_webp.lib.WebPDecode.return_value = 0  # OK
+            mock_webp.lib.WebPDecode.return_value = 0  # OK.
             config.output.u.RGBA.size = len(rgb_bytes)
             mock_webp.ffi.buffer.return_value = rgb_bytes
             arr = decode_webp_libwebp(b"x", 10, 10)
@@ -257,7 +257,7 @@ class TestDecodeImagePil:
     def test_jpeg_crop_triggers_draft_mode(self) -> None:
         # JPEG + crop path exercises PIL's draft mode (decode at reduced
         # DCT resolution). PIL may draft to a smaller size, scaling the
-        # crop accordingly — shape is smaller than the logical crop size.
+        # crop accordingly -- shape is smaller than the logical crop size.
         data = _jpeg_bytes(size=(200, 200), color=(80, 120, 200))
         arr = decode_image_pil(data, 200, 200, crop=(0, 0, 50, 50))
         assert arr is not None
@@ -265,7 +265,7 @@ class TestDecodeImagePil:
         assert arr.ndim == 3
         assert arr.shape[2] == 3
         assert arr.shape[0] == arr.shape[1]
-        assert arr.shape[0] <= 50  # never larger than requested crop
+        assert arr.shape[0] <= 50  # never larger than requested crop.
 
     def test_rgba_output_from_grayscale(self) -> None:
         # Grayscale → RGBA path: non-RGBA input + channels_format="rgba".
@@ -374,21 +374,22 @@ class TestResizeImage:
         """
         data = _png_bytes(size=(16, 16))
         out, _ = resize(data, max_dim=0, max_bytes=0)
-        assert out == data  # untouched: no dim cap, no byte cap
+        assert out == data  # untouched: no dim cap, no byte cap.
 
     def test_max_dim_zero_means_no_dim_cap(self) -> None:
         """``max_dim=0`` disables dimension-shrinking (0 = unlimited)."""
         data = _png_bytes(size=(4000, 16))
         out, _ = resize(data, max_dim=0, max_bytes=0)
-        assert max(Image.open(BytesIO(out)).size) == 4000  # not downscaled
+        assert max(Image.open(BytesIO(out)).size) == 4000  # not downscaled.
 
     def test_oversized_jpeg_input_is_quality_ramped(self) -> None:
-        """An already-JPEG input over ``max_bytes`` (but under ``max_dim``)
-        must be quality-ramped down, not returned unchanged.
+        """An already-JPEG input over ``max_bytes``.
 
-        The byte cap is meaningless if a JPEG that only exceeds the byte
-        limit skips the shrink path. A noisy high-quality JPEG re-encodes
-        smaller at lower quality.
+        But under ``max_dim``) must be quality-ramped down, not returned unchanged.
+
+                The byte cap is meaningless if a JPEG that only exceeds the byte
+                limit skips the shrink path. A noisy high-quality JPEG re-encodes
+                smaller at lower quality.
         """
         rng = np.random.default_rng(7)
         pixels = rng.integers(0, 256, size=(200, 200, 3), dtype=np.uint8)
@@ -438,3 +439,9 @@ class TestDecodeWebpReal:
 def test_webp_init_failure(mock_webp: MagicMock) -> None:
     mock_webp.lib.WebPInitDecoderConfig.return_value = False
     assert decode_webp_libwebp(b"x", 10, 10) is None
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing.main import test_main
+
+    test_main(__file__)

@@ -20,7 +20,9 @@ class WorldTool:
     """Perceive + act in the maze. Bound to the caller via its agent label."""
 
     name: str = "world"
+
     tool_id: str = "application/x-tool-maze-world"
+
     clearable_results: bool = True
 
     def __init__(self, engine: Engine) -> None:
@@ -121,7 +123,9 @@ class CommsTool:
     """
 
     name: str = "comms"
+
     tool_id: str = "application/x-tool-maze-comms"
+
     clearable_results: bool = False
 
     def __init__(
@@ -255,7 +259,9 @@ class SpawnTool:
     """
 
     name: str = "spawn"
+
     tool_id: str = "application/x-tool-maze-spawn"
+
     clearable_results: bool = False
 
     def __init__(

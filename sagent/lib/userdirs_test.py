@@ -11,7 +11,8 @@ from sagent.lib.userdirs import cache_dir, config_dir, data_dir, state_dir
 
 @pytest.fixture
 def home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    def _home(_cls: type[Path]) -> Path:
+    def _home(cls: type[Path]) -> Path:
+        del cls
         return tmp_path
 
     monkeypatch.setattr(Path, "home", classmethod(_home))

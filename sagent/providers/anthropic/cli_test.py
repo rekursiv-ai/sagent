@@ -83,23 +83,27 @@ def _write_creds(tmp_path: Path) -> Path:
     return path
 
 
-def _which_claude_stub(_name: str) -> str | None:
+def _which_claude_stub(name: str) -> str | None:
     """Pretend ``claude`` is installed (monkeypatched ``shutil.which``)."""
+    del name
     return "/usr/bin/claude"
 
 
-def _auth_status_unknown(_binary: str) -> bool | None:
+def _auth_status_unknown(binary: str) -> bool | None:
     """Pretend the installed CLI predates the native status command."""
+    del binary
     return None
 
 
-def _auth_status_logged_in(_binary: str) -> bool | None:
+def _auth_status_logged_in(binary: str) -> bool | None:
     """Pretend the native CLI reports an active login."""
+    del binary
     return True
 
 
-def _auth_status_logged_out(_binary: str) -> bool | None:
+def _auth_status_logged_out(binary: str) -> bool | None:
     """Pretend the native CLI reports no active login."""
+    del binary
     return False
 
 
@@ -319,7 +323,8 @@ def test_login_runs_native_claudeai_flow_with_scrubbed_env(
         captured["env"] = kwargs["env"]
         return MagicMock(returncode=0)
 
-    def fake_which(_name: str) -> str:
+    def fake_which(name: str) -> str:
+        del name
         return "/opt/homebrew/bin/claude"
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "secret-test-key")
@@ -357,7 +362,8 @@ def test_login_rejects_named_anthropic_account() -> None:
 def test_login_reports_native_cli_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_which(_name: str) -> str:
+    def fake_which(name: str) -> str:
+        del name
         return "/opt/homebrew/bin/claude"
 
     def fake_run(*_args: object, **_kwargs: object) -> object:

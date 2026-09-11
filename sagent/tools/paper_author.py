@@ -81,9 +81,13 @@ class PaperAuthor:
     """Author search / metadata / papers via the Semantic Scholar API."""
 
     name: str = "PaperAuthor"
+
     tool_id: str = "application/x-tool-paperauthor"
+
     clearable_results: bool = True
+
     description: str = load_tool_description("PaperAuthor")
+
     directive_schema: JSON = json_freeze(
         {
             "type": "object",

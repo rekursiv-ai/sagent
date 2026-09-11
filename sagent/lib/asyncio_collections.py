@@ -39,6 +39,12 @@ class Deque[T]:
 
     @property
     def capacity(self) -> int | None:
+        """Capacity.
+
+        Returns:
+          result: The int | None.
+
+        """
         return self._capacity
 
     def __len__(self) -> int:
@@ -56,13 +62,33 @@ class Deque[T]:
         return iter(tuple(self._dq))
 
     def empty(self) -> bool:
+        """Return whether the queue is empty.
+
+        Returns:
+          result: The bool.
+
+        """
         return not self._dq
 
     def full(self) -> bool:
+        """Return whether the queue is full.
+
+        Returns:
+          result: The bool.
+
+        """
         return self._capacity is not None and len(self._dq) >= self._capacity
 
     def put(self, item: T) -> bool:
-        """Append at the right (back). Returns ``False`` if at capacity."""
+        """Append at the right (back). Returns ``False`` if at capacity.
+
+        Args:
+          item: Item.
+
+        Returns:
+          result: The bool.
+
+        """
         if self._capacity is not None and len(self._dq) >= self._capacity:
             return False
         self._dq.append(item)
@@ -71,7 +97,15 @@ class Deque[T]:
         return True
 
     def put_left(self, item: T) -> bool:
-        """Append at the left (front) for urgent / halt-style delivery."""
+        """Append at the left (front) for urgent / halt-style delivery.
+
+        Args:
+          item: Item.
+
+        Returns:
+          result: The bool.
+
+        """
         if self._capacity is not None and len(self._dq) >= self._capacity:
             return False
         self._dq.appendleft(item)
@@ -80,18 +114,33 @@ class Deque[T]:
         return True
 
     def peek_tail(self) -> T | None:
-        """Return the most recently appended item without removing it."""
+        """Return the most recently appended item without removing it.
+
+        Returns:
+          result: The T | None.
+
+        """
         return self._dq[-1] if self._dq else None
 
     def pop_tail(self) -> T | None:
-        """Remove and return the most recently appended item."""
+        """Remove and return the most recently appended item.
+
+        Returns:
+          item: The T | None.
+
+        """
         item = self._dq.pop() if self._dq else None
         if not self._dq:
             self._empty.set()
         return item
 
     async def get(self) -> T:
-        """Pop from the left (front), awaiting until an item is available."""
+        """Pop from the left (front), awaiting until an item is available.
+
+        Returns:
+          item: The T.
+
+        """
         while not self._dq:
             self._not_empty.clear()
             await self._not_empty.wait()
@@ -101,14 +150,24 @@ class Deque[T]:
         return item
 
     async def get_all(self) -> list[T]:
-        """Wait for at least one item, then drain everything available."""
+        """Wait for at least one item, then drain everything available.
+
+        Returns:
+          result: The list[T].
+
+        """
         while not self._dq:
             self._not_empty.clear()
             await self._not_empty.wait()
         return self.drain()
 
     def drain(self) -> list[T]:
-        """Pop all items in FIFO order. Non-blocking."""
+        """Pop all items in FIFO order. Non-blocking.
+
+        Returns:
+          out: The list[T].
+
+        """
         out = list(self._dq)
         self._dq.clear()
         self._empty.set()

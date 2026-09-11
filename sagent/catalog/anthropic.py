@@ -34,10 +34,14 @@ __all__ = ["api", "cache_ttls", "chars_per_token", "cli", "models", "subscriptio
 
 
 def cache_ttls() -> frozenset[float]:
-    """The two lifetimes ``cache_control`` spells, in seconds.
+    """Return the two lifetimes ``cache_control`` spells, in seconds.
 
     No ``0``: these transports write a breakpoint on every request, so
     "do not cache" is not a selection this vendor offers.
+
+    Returns:
+      result: The frozenset[float].
+
     """
     return frozenset({300.0, 3600.0})
 
@@ -281,6 +285,10 @@ def _limits(
     return MappingProxyType(context)
 
 
+# Cache rates are multiples of the BASE INPUT price, so they ride every other modifier:
+# "Prompt caching multipliers apply on top of fast mode pricing"
+# (https://docs.anthropic.com/en/docs/about-claude/pricing). Leaving them unmultiplied
+# on the fast row under-billed cached fast requests by half.
 def _prices(
     *,
     request: float,
@@ -288,25 +296,7 @@ def _prices(
     fast_multiple: float = 0.0,
     cache_read_multiple: float = 0.1,
 ) -> PriceCatalog:
-    """USD per million tokens, plus the priority row when the model has one.
-
-    Cache rates are multiples of the BASE INPUT price, so they ride every
-    other modifier: "Prompt caching multipliers apply on top of fast mode
-    pricing" (https://docs.anthropic.com/en/docs/about-claude/pricing).
-    Leaving them unmultiplied on the fast row under-billed cached fast
-    requests by half.
-
-    Args:
-      request: Base input price per Mtok.
-      response: Output price per Mtok.
-      fast_multiple: Fast-mode surcharge, or 0 when the model has none.
-      cache_read_multiple: Cache-hit multiple of base input. The 5-series
-        Fable/Mythos ids bill 0.025x; every other model bills 0.1x.
-
-    Returns:
-      prices: Standard row, plus the priority row when fast mode exists.
-
-    """
+    """USD per million tokens, plus the priority row when the model has one."""
     rows = {
         PriceCatalogProduct(): TokenPrice(
             request=request,

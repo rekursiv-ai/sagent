@@ -78,7 +78,9 @@ class _NonLinearModel(MockModelCaps):
     """
 
     model_id: str = "nonlinear"
+
     max_request_tokens: int = 200_000
+
     received_texts: list[str] = field(default_factory=list)
 
     @override

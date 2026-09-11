@@ -145,7 +145,8 @@ def test_login_manual_advertises_localhost_redirect_uri(
     }
     captured: dict[str, object] = {}
 
-    def _post(_url: str, *, data: dict[str, str], **_kw: object) -> MagicMock:
+    def _post(url: str, *, data: dict[str, str], **_kw: object) -> MagicMock:
+        del url
         captured["redirect_uri"] = data["redirect_uri"]
         return token_resp
 

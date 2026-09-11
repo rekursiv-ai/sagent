@@ -61,9 +61,13 @@ class AgentSend:
     """Tool: send a text message to another live agent."""
 
     name: str = "AgentSend"
+
     tool_id: str = "application/x-tool-agentsend"
+
     clearable_results: bool = False
+
     description: str = load_tool_description("agentsend")
+
     directive_schema: JSON = json_freeze(
         {
             "type": "object",

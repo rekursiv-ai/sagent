@@ -63,8 +63,11 @@ class StopKind(Enum):
     """Which surface a navigation stop's value came from."""
 
     INPUT = auto()
+
     QUEUE = auto()
+
     DEFERRED = auto()
+
     HISTORY = auto()
 
 
@@ -88,9 +91,13 @@ class Stop:
     """
 
     kind: StopKind
+
     loaded: str
+
     current: str
+
     attachments: tuple[BytesMessage, ...] = ()
+
     consumed: bool = False
 
 
@@ -106,6 +113,7 @@ class NavState:
     """
 
     cursor: int = 0
+
     stops: list[Stop] = field(default_factory=list)
 
     def active(self) -> bool:

@@ -264,3 +264,9 @@ def test_file_write_lock_excludes_across_loops(tmp_path: Path) -> None:
     for thread in workers:
         thread.join()
     assert peak == 1
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing.main import test_main
+
+    test_main(__file__)

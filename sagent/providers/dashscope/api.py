@@ -114,14 +114,18 @@ class DashScope(OpenAICompat):
     """DashScope (Alibaba) provider."""
 
     DEFAULT_MODEL: ClassVar[str] = "qwen3.6-plus"
+
     # Same generation and reasoning ladder as the default at 1/11th the cost;
     # without it ``utility_model()`` falls back to the default and every
     # summarizer call bills the expensive row.
     DEFAULT_UTILITY_MODEL: ClassVar[str] = "qwen3.6-flash"
+
     ENV_VAR: ClassVar[str] = "DASHSCOPE_API_KEY"
+
     # International endpoint. For mainland China use
     # dashscope.aliyuncs.com via the ``base_url=`` override.
     BASE_URL: ClassVar[str] = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+
     # Model limits and pricing.
     # Source: https://help.aliyun.com/zh/model-studio/developer-reference/
     # Cross-ref: https://github.com/taylorwilsdon/llm-context-limits

@@ -303,6 +303,7 @@ async def test_run_foreground_timeout(
 
     class _FakeProc:
         returncode: int | None = None
+
         pid: int = 99_999
 
         async def communicate(self) -> tuple[bytes, bytes]:

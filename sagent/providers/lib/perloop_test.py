@@ -232,9 +232,16 @@ def test_concurrent_first_access_is_safe() -> None:
         finally:
             loop.close()
 
-    def run(_index: int) -> None:
+    def run(index: int) -> None:
+        del index
         worker()
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(run, range(8)))
     assert len(seen) == 8
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing.main import test_main
+
+    test_main(__file__)

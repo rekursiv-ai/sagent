@@ -30,9 +30,13 @@ class LlamaCpp(OpenAICompat):
     """OpenAI-compatible provider backed by a managed llama-server process."""
 
     DEFAULT_MODEL: ClassVar[str] = "qwen3.6-27b-12gb"
+
     DEFAULT_UTILITY_MODEL: ClassVar[str] = "qwen3.6-27b-12gb"
+
     ENV_VAR: ClassVar[str] = "LLAMA_CPP_API_KEY"
+
     BASE_URL: ClassVar[str] = "http://127.0.0.1:8081/v1"
+
     CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = llamacpp_catalog.models()
     """Per-model capability; transport limits live on ``TRANSPORT``."""
 

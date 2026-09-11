@@ -26,8 +26,11 @@ class StubProviderModel(MockModelCaps):
     """Configurable provider-side ``Model`` that returns scripted text."""
 
     model_id: str = "stub-advisor"
+
     max_request_tokens: int = 100_000
+
     received: list[ModelRequest] = field(default_factory=list)
+
     text: str = "advice"
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:

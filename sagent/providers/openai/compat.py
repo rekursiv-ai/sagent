@@ -97,8 +97,11 @@ class OpenAICompat:
     """Base provider for OpenAI chat-completions compatible endpoints."""
 
     DEFAULT_MODEL: ClassVar[str] = ""
+
     DEFAULT_UTILITY_MODEL: ClassVar[str] = ""
+
     ENV_VAR: ClassVar[str] = ""
+
     BASE_URL: ClassVar[str] = ""
 
     CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = MappingProxyType[

@@ -29,10 +29,15 @@ class OpenAI:
     """API-key authentication and loop-local OpenAI SDK ownership."""
 
     DEFAULT_MODEL: ClassVar[str] = "gpt-6-astra+1m"
+
     DEFAULT_UTILITY_MODEL: ClassVar[str] = "gpt-5.6-luna"
+
     ENV_VAR: ClassVar[str] = "OPENAI_API_KEY"
+
     BASE_URL: ClassVar[str] = "https://api.openai.com/v1"
+
     CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = openai_catalog.models()
+
     TRANSPORT: ClassVar[ModelCapability] = openai_catalog.api()
 
     def __init__(self, *, api_key: str, base_url: str | None = None) -> None:

@@ -22,6 +22,7 @@ from sagent.types.model import AgentSettings
 @dataclass(slots=True, kw_only=True)
 class _FakeCostTracker:
     total: TokenCount = field(default_factory=TokenCount)
+
     spend: TokenCost = field(default_factory=TokenCost)
 
 
@@ -33,10 +34,15 @@ class _FakeInbox:
 @dataclass(slots=True, kw_only=True)
 class _FakeRuntime:
     model_call: object = None
+
     compact_task: object = None
+
     running_tools: dict[str, object] = field(default_factory=dict)
+
     cohort: set[str] = field(default_factory=set)
+
     inbox: _FakeInbox = field(default_factory=_FakeInbox)
+
     service_suspended_until: float | None = None
 
 
@@ -53,9 +59,13 @@ class _FakeAgent:
     """Minimal stand-in for ``Agent`` matching only the surface the status pane reads."""
 
     activity: ActivityTracker = field(default_factory=ActivityTracker)
+
     cost_tracker: _FakeCostTracker = field(default_factory=_FakeCostTracker)
+
     runtime: _FakeRuntime = field(default_factory=_FakeRuntime)
+
     model: _FakeModel = field(default_factory=_FakeModel)
+
     budget: AgentSettings = field(
         default_factory=lambda: AgentSettings(
             max_request_tokens=200_000,
@@ -383,7 +393,9 @@ def test_real_agent_cost_tracker_is_compatible() -> None:
 
     class _Dummy:
         activity = ActivityTracker(elapsed_seconds=2.0)
+
         cost_tracker = CostTracker()
+
         budget = AgentSettings(
             max_request_tokens=1000,
             max_response_tokens=100,

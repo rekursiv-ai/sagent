@@ -53,7 +53,9 @@ class PaperSearch:
     """Text search over scholarly literature."""
 
     name: str = "PaperSearch"
+
     tool_id: str = "application/x-tool-papersearch"
+
     clearable_results: bool = True
 
     @property

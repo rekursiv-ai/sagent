@@ -61,6 +61,7 @@ from sagent.types.runtime import (
 @dataclass(slots=True, kw_only=True)
 class _Wire:
     requests: list[dict[str, object]] = field(default_factory=list)
+
     paths: list[str] = field(default_factory=list)
 
     async def send(self, request: httpx2.Request) -> httpx2.Response:
@@ -139,8 +140,9 @@ def _patch_wire(monkeypatch: pytest.MonkeyPatch) -> _Wire:
     result = _Wire()
 
     async def send(
-        _client: httpx2.AsyncClient, request: httpx2.Request, **_kwargs: object
+        client: httpx2.AsyncClient, request: httpx2.Request, **_kwargs: object
     ) -> httpx2.Response:
+        del client
         return await result.send(request)
 
     monkeypatch.setattr(httpx2.AsyncClient, "send", send)
@@ -296,9 +298,13 @@ def _priced_model() -> _OpenAIResponsesModel:
 
 class _StubTool:
     name: str = "Bash"
+
     tool_id: str = "application/x-tool-bash"
+
     description: str = "Run shell commands"
+
     directive_schema: Mapping[str, JSONValue] = MappingProxyType({"type": "object"})
+
     clearable_results: bool = False
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -422,7 +428,9 @@ class _ResponseErrorEvent:
     """Small stand-in for OpenAI's stream error event."""
 
     code: str = "rate_limit"
+
     message: str = "too many requests"
+
     param: str = "input"
 
 
@@ -437,12 +445,15 @@ class _FailedResponse:
     """Small stand-in for a failed OpenAI response payload."""
 
     id: str = "resp_failed"
+
     status: str = "failed"
+
     error = type(
         "Error",
         (),
         {"code": "server_error", "message": "backend failed"},
     )()
+
     incomplete_details = None
 
 
@@ -457,7 +468,9 @@ class _IncompleteResponse:
     """Small stand-in for an incomplete OpenAI response payload."""
 
     id: str = "resp_incomplete"
+
     status: str = "incomplete"
+
     error = None
 
     def __init__(self, reason: str) -> None:
@@ -1077,7 +1090,9 @@ class TestStreamIdleTimeout:
 
 class _VerifyTool(_StubTool):
     name = "verify"
+
     description = "Verify the computed integer n."
+
     directive_schema = MappingProxyType(
         {
             "type": "object",

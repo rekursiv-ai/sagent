@@ -121,3 +121,9 @@ def test_vault_needs_all_plates() -> None:
     assert not w.vault_open()  # only one plate pressed
     _nav(w, "b", (4, 1))  # plate 2
     assert w.vault_open()  # both pressed simultaneously
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing.main import test_main
+
+    test_main(__file__)

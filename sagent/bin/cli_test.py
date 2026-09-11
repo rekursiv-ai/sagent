@@ -132,8 +132,11 @@ class _ChildStubModel(MockModelCaps):
     """Minimal rich-model stand-in for ``_build_persistent_child`` tests."""
 
     model_id: str = "claude-opus-4-8"
+
     max_request_tokens: int = 100_000
+
     max_response_tokens: int = 1_024
+
     supports_thinking: bool = True
 
 

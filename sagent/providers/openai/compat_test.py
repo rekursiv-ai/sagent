@@ -464,8 +464,11 @@ def _stub_limits(request: int) -> ModelLimits:
 
 class _DummyProvider(OpenAICompat):
     DEFAULT_MODEL: ClassVar[str] = "stub-1"
+
     ENV_VAR: ClassVar[str] = "DUMMY_PROV_KEY"
+
     BASE_URL: ClassVar[str] = "https://stub.test/v1"
+
     CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = MappingProxyType(
         {
             "stub-1": ModelCapability(
@@ -628,7 +631,8 @@ def _make_provider_with_mock(
 
 @pytest.mark.asyncio
 async def test_stream_unrelated_400_propagates_as_http_error() -> None:
-    def handle(_request: httpx2.Request) -> httpx2.Response:
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        del request
         return httpx2.Response(400, text="malformed body")
 
     transport = httpx2.MockTransport(handle)
@@ -646,7 +650,8 @@ async def test_stream_parses_sse_via_mock_transport() -> None:
         b"data: [DONE]\n\n"
     )
 
-    def handle(_request: httpx2.Request) -> httpx2.Response:
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        del request
         return httpx2.Response(
             200,
             content=sse_body,
@@ -690,7 +695,8 @@ async def test_stream_4xx_context_overflow_raises_prompt_too_long(
     window helps) rather than routing to byte-overflow recovery.
     """
 
-    def handle(_request: httpx2.Request) -> httpx2.Response:
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        del request
         return httpx2.Response(status_code, text=message)
 
     transport = httpx2.MockTransport(handle)
@@ -707,7 +713,8 @@ async def test_stream_413_byte_body_raises_request_too_large() -> None:
     recovery (shed attachment bytes), not token-overflow recovery.
     """
 
-    def handle(_request: httpx2.Request) -> httpx2.Response:
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        del request
         return httpx2.Response(413, text="Request entity too large")
 
     transport = httpx2.MockTransport(handle)
@@ -720,7 +727,8 @@ async def test_stream_413_byte_body_raises_request_too_large() -> None:
 async def test_stream_500_with_overflow_keyword_is_http_error_not_overflow() -> None:
     """5xx server errors are infrastructure, never overflow (stream path)."""
 
-    def handle(_request: httpx2.Request) -> httpx2.Response:
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        del request
         return httpx2.Response(500, text="internal error: too long traceback")
 
     transport = httpx2.MockTransport(handle)

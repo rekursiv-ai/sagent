@@ -32,6 +32,7 @@ class QueuedInputBlock:
     """One staged user-input message (the entire content of one pane)."""
 
     text: str
+
     attachments: tuple[BytesMessage, ...] = ()
 
 
@@ -46,6 +47,7 @@ class InputQueues:
     """
 
     queue: QueuedInputBlock | None = None
+
     deferred: QueuedInputBlock | None = None
 
     def has_any(self) -> bool:

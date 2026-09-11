@@ -339,17 +339,29 @@ class AnthropicCLICredentials(TypedDict):
     """OAuth credentials from the Claude CLI credentials file."""
 
     access_token: str
+
     refresh_token: str
+
     expires_at: float
+
     scopes: NotRequired[list[str]]
+
     subscription_type: NotRequired[str | None]
+
     rate_limit_tier: NotRequired[str | None]
+
     account_uuid: NotRequired[str | None]
+
     email: NotRequired[str | None]
+
     organization_uuid: NotRequired[str | None]
+
     billing_type: NotRequired[str | None]
+
     account_created_at: NotRequired[str | None]
+
     subscription_created_at: NotRequired[str | None]
+
     has_extra_usage_enabled: NotRequired[bool | None]
 
 

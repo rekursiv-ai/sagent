@@ -145,11 +145,17 @@ class Invocation:
     """
 
     exe: str
+
     args: tuple[str, ...]
+
     cwd: str = ""
+
     piped_into: Invocation | None = None
+
     piped_from: Invocation | None = None
+
     env_prefix: Mapping[str, str] = types.MappingProxyType({})
+
     captures_stdout: bool = False
 
     def downstream(self) -> Iterator[Invocation]:

@@ -28,20 +28,27 @@ class Lock(TypedDict):
     """A paired-plate lock: both tiles must be pressed together to open it."""
 
     plates: list[tuple[int, int]]
+
     open: bool
 
 
 class PlateInfo(TypedDict):
     letter: str
+
     a: tuple[int, int]
+
     b: tuple[int, int]
 
 
 class SpawnMeta(TypedDict):
     locks: int
+
     decoys: int
+
     hall_col: int
+
     seed_spawn: tuple[int, int]
+
     plates: list[PlateInfo]
 
 
@@ -63,9 +70,13 @@ class Item:
     """A pickup sitting on a tile or carried by an agent."""
 
     name: str
+
     kind: Literal["diamond", "junk", "treasure"]
+
     xy: tuple[int, int] | None  # None when held / collected
+
     holder: str | None = None
+
     collected: bool = False  # treasures: banked, not carried
 
 
@@ -74,13 +85,21 @@ class Agent:
     """One body in the maze, driven by external macro-intents."""
 
     id: str
+
     x: int
+
     y: int
+
     inventory: list[str] = field(default_factory=list)
+
     target: tuple[int, int] | None = None
+
     alive: bool = True
+
     extracted: bool = False
+
     presses_left: int = PRESS_CHARGES
+
     armed_until: int = -1  # plate-press stays counted while tick <= armed_until
 
     @property

@@ -107,6 +107,8 @@ __all__ = [
 # ``float`` intentionally includes IEEE-754 NaN and signed infinities; see the
 # module contract above.
 type JSONScalar = str | int | float | bool | None
+
+
 # The scalar union is inlined here rather than referencing ``JSONScalar`` by
 # name. ty 0.0.52 panics ("too many cycle iterations" in
 # PEP695TypeAliasType::raw_value_type_) when a self-recursive PEP-695 alias
@@ -116,7 +118,10 @@ type JSONScalar = str | int | float | bool | None
 type JSONValue = (
     str | int | float | bool | Sequence[JSONValue] | Mapping[str, JSONValue] | None
 )
+
+
 type JSON = Mapping[str, JSONValue]
+
 
 # Scalar union inlined (not ``JSONScalar``) for the same ty 0.0.52 panic; see
 # the JSONValue note above.
@@ -129,52 +134,21 @@ type MutableJSONValue = (
     | MutableMapping[str, MutableJSONValue]
     | None
 )
+
+
 type MutableJSON = MutableMapping[str, MutableJSONValue]
-
-
-# The wire format uses jsonpickle's fixed ``py/*`` tag strings inline
-# (https://jsonpickle.github.io); ``py/hook``/``py/inline``/``py/float`` are
-# local extensions. They are protocol constants, not tunables.
-
-
-def _is_reserved_key(key: str) -> bool:
-    """True if ``key`` would masquerade as a wire tag (``py/...`` or ``json://...``)."""
-    return key.startswith(("py/", "json://"))
-
-
-def _is_plain_tuple(value: object) -> TypeGuard[tuple[object, ...]]:
-    """Return whether ``value`` is a bare tuple rather than a subclass."""
-    return type(value) is tuple
 
 
 type GraphHooks = Mapping[
     type,
     tuple[Callable[..., object], Callable[..., object]],
 ]
+
+
 type InlineRecipe = tuple[object, Sequence[object], Mapping[str, object]]
 
+
 _OBJECT_TAG: Final = "py/object"
-
-
-@runtime_checkable
-class _CustomJsonInline(Protocol):
-    """Value that owns both halves of its deferred-call graph recipe.
-
-    Both methods are required: decoding allocates the class without running
-    ``__init__`` (so a cycle can reference it before its children exist), then
-    hands the recipe back for the class to populate itself. A value supplying
-    only the encode half is not inline-encodable and takes the reduce path,
-    rather than decoding into an object this module populated by guesswork.
-    """
-
-    def __custom_json_inline__(self) -> InlineRecipe: ...
-
-    def __custom_json_inline_init__(
-        self,
-        func: object,
-        args: Sequence[object],
-        kwargs: Mapping[str, object],
-    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -182,6 +156,7 @@ class DecodeCapabilities:
     """Capabilities required by tags that import or execute Python code."""
 
     resolve: Callable[[str], object] | None = None
+
     apply_reduce: bool = False
 
 
@@ -230,21 +205,6 @@ def decode_graph(
     return _GraphDecoder(
         hooks or {}, capabilities=capabilities or DecodeCapabilities()
     ).decode(tree)
-
-
-@runtime_checkable
-class _Named(Protocol):
-    """A class or function: carries both ``__module__`` and ``__qualname__``."""
-
-    __module__: str
-    __qualname__: str
-
-
-@runtime_checkable
-class _Callable(Protocol):
-    """A dynamically decoded callable with an erased signature."""
-
-    def __call__(self, *args: object) -> object: ...
 
 
 def resolve_import(path: str) -> object:
@@ -323,6 +283,13 @@ class _GraphEncoder:
         Registering first is what makes cycles terminate: a back-reference
         reached while encoding children finds ``value`` already numbered and
         emits ``{"py/id": n}`` instead of recursing forever.
+
+        Args:
+          value: Value.
+
+        Returns:
+          index: The int.
+
         """
         index = len(self._seen)
         self._seen[id(value)] = index
@@ -332,11 +299,28 @@ class _GraphEncoder:
     def hook_for(
         self, value: object
     ) -> tuple[Callable[..., object], Callable[..., object]] | None:
-        """Return the custom hook registered for ``value``."""
+        """Return the custom hook registered for ``value``.
+
+        Args:
+          value: Value.
+
+        Returns:
+          result: The tuple[Callable[..., object], Callable[..., object]] | None.
+
+        """
         return self._hooks.get(type(value))
 
     def hook_payload(self, value: object, encode_hook: Callable[..., object]) -> object:
-        """Return one memoized custom-hook result for ``value``."""
+        """Return one memoized custom-hook result for ``value``.
+
+        Args:
+          value: Value.
+          encode_hook: Encode hook.
+
+        Returns:
+          payload: The object.
+
+        """
         identity = id(value)
         cached = self._hook_cache.get(identity)
         if cached is not None and cached[0] is value:
@@ -346,7 +330,15 @@ class _GraphEncoder:
         return payload
 
     def inline_for(self, value: object) -> InlineRecipe | None:
-        """Return the deferred call recipe owned by ``value``."""
+        """Return the deferred call recipe owned by ``value``.
+
+        Args:
+          value: Value.
+
+        Returns:
+          inline: The InlineRecipe | None.
+
+        """
         identity = id(value)
         cached = self._inline_cache.get(identity)
         if cached is not None and cached[0] is value:
@@ -367,6 +359,13 @@ class _GraphEncoder:
         string, so the raw recipe would write a different wire per interpreter
         -- and this format is durable across both. Every version reconstructs
         from the joined form, so decode needs no matching special case.
+
+        Args:
+          value: Value.
+
+        Returns:
+          reduced: The object.
+
         """
         identity = id(value)
         cached = self._reduce_cache.get(identity)
@@ -393,11 +392,27 @@ class _GraphEncoder:
         return reduced
 
     def encode_items(self, values: Iterable[object]) -> list[object]:
-        """Encode graph children in encounter order."""
+        """Encode graph children in encounter order.
+
+        Args:
+          values: Values.
+
+        Returns:
+          result: The list[object].
+
+        """
         return [self.encode(value) for value in values]
 
     def order_key(self, value: object) -> tuple[str, str]:
-        """Return deterministic runtime and encoded keys without consuming identity."""
+        """Return deterministic runtime and encoded keys without consuming identity.
+
+        Args:
+          value: Value.
+
+        Returns:
+          result: The tuple[str, str].
+
+        """
         checkpoint = self.checkpoint()
         try:
             encoded = self.encode(value)
@@ -406,29 +421,45 @@ class _GraphEncoder:
         return repr(value), json.dumps(encoded, sort_keys=True, separators=(",", ":"))
 
     def encode_typed(self, value: object, annotation: object) -> JSONValue:
-        """Adapt graph recursion to the codec callback signature."""
+        """Adapt graph recursion to the codec callback signature.
+
+        Args:
+          value: Value.
+          annotation: Annotation.
+
+        Returns:
+          result: The JSONValue.
+
+        """
         del annotation
         return cast(JSONValue, self.encode(value))
 
     def checkpoint(self) -> tuple[dict[int, int], int]:
-        """Snapshot identity state before a fallible codec attempt."""
+        """Snapshot identity state before a fallible codec attempt.
+
+        Returns:
+          result: The tuple[dict[int, int], int].
+
+        """
         return dict(self._seen), len(self._alive)
 
     def rollback(self, checkpoint: tuple[dict[int, int], int]) -> None:
-        """Restore identity state after a codec declines a value."""
+        """Restore identity state after a codec declines a value.
+
+        Args:
+          checkpoint: Checkpoint.
+
+        """
         self._seen, alive_len = checkpoint
         del self._alive[alive_len:]
 
+    # A by-value (atomic) reduce is re-encoded on every encounter, so the containers its
+    # reducer allocates must not carry graph identity across encounters -- a ``py/id``
+    # to one would reference a node the decoder is still filling. Containers the value
+    # itself holds are real graph objects and keep their identity.
     @classmethod
     def _fresh_cached_reduce(cls, value: object, reduced: object) -> object:
-        """Give a replayed by-value recipe fresh reducer-built arg containers.
-
-        A by-value (atomic) reduce is re-encoded on every encounter, so the
-        containers its reducer allocates must not carry graph identity across
-        encounters -- a ``py/id`` to one would reference a node the decoder is
-        still filling. Containers the value itself holds are real graph objects
-        and keep their identity.
-        """
+        """Give a replayed by-value recipe fresh reducer-built arg containers."""
         original: object = reduced
         if not isinstance(reduced, tuple):
             return original
@@ -493,7 +524,15 @@ class _GraphDecoder:
         self._built: list[object] = []
 
     def resolve(self, path: str) -> object:
-        """Resolve an import path through the granted capability."""
+        """Resolve an import path through the granted capability.
+
+        Args:
+          path: Path.
+
+        Returns:
+          result: The object.
+
+        """
         resolve = self._capabilities.resolve
         if resolve is None:
             raise TypeError(f"{path!r} requires import resolution capability")
@@ -502,7 +541,15 @@ class _GraphDecoder:
     def hook_for(
         self, target: type
     ) -> tuple[Callable[..., object], Callable[..., object]]:
-        """Return the custom hook registered for ``target``."""
+        """Return the custom hook registered for ``target``.
+
+        Args:
+          target: Target.
+
+        Returns:
+          hook: The tuple[Callable[..., object], Callable[..., object]].
+
+        """
         hook = self._hooks.get(target)
         if hook is None:
             raise TypeError(f"hook {_annotation_id(target)!r} is not registered")
@@ -516,21 +563,46 @@ class _GraphDecoder:
             raise TypeError("py/reduce requires apply_reduce capability")
 
     def register(self, value: object) -> None:
-        """Append one completed or mutable graph node to encounter order."""
+        """Append one completed or mutable graph node to encounter order.
+
+        Args:
+          value: Value.
+
+        """
         self._built.append(value)
 
     def reserve(self) -> int:
-        """Reserve an encounter slot for a built-then-mutated object."""
+        """Reserve an encounter slot for a built-then-mutated object.
+
+        Returns:
+          index: The int.
+
+        """
         index = len(self._built)
         self._built.append(None)
         return index
 
     def fill(self, index: int, value: object) -> None:
-        """Fill a previously reserved encounter slot."""
+        """Fill a previously reserved encounter slot.
+
+        Args:
+          index: Index.
+          value: Value.
+
+        """
         self._built[index] = value
 
     def decode_typed(self, annotation: object, raw: object) -> object:
-        """Adapt graph recursion to the codec callback signature."""
+        """Adapt graph recursion to the codec callback signature.
+
+        Args:
+          annotation: Annotation.
+          raw: Raw.
+
+        Returns:
+          result: The object.
+
+        """
         del annotation
         return self.decode(raw)
 
@@ -562,18 +634,6 @@ class _GraphDecoder:
         return MappingCodec.decode_graph(node, self)
 
 
-def _tagged_scalar_payload(node: object, tag: str) -> str:
-    """Return a scalar tag's string payload without coercion."""
-    assert isinstance(node, Mapping)
-    source = cast(Mapping[str, object], node)
-    if len(source) != 1:
-        raise TypeError(f"invalid {tag} envelope: {node!r}")
-    payload = source[tag]
-    if not isinstance(payload, str):
-        raise TypeError(f"invalid {tag} payload: {payload!r}")
-    return payload
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Invalid:
     """A JSON object stated a field that did not match its target type."""
@@ -582,6 +642,7 @@ class Invalid:
 
 
 type FieldState[T] = Absent | T | Invalid | None
+
 
 _FIELD_STATE_TAG: Final = "$__custom_json_fields__"
 
@@ -692,34 +753,6 @@ def json_unfreeze(obj: object, *, allow_nan: bool = True) -> MutableJSONValue:
     return _checked_json_scalar(obj, allow_nan=allow_nan)
 
 
-def _is_str_mapping(value: object) -> TypeGuard[Mapping[str, object]]:
-    """Narrow to a JSON object, keeping the parameters both checkers need.
-
-    A bare ``isinstance(value, Mapping)`` narrows to ``Mapping[Unknown,
-    Unknown]`` under basedpyright, and that Unknown propagates to every
-    later use of the same name.
-    """
-    return isinstance(value, Mapping)
-
-
-def _is_json_sequence(value: object) -> TypeGuard[Sequence[object]]:
-    """Return whether ``value`` is a non-string JSON array shape."""
-    return isinstance(value, Sequence) and not isinstance(
-        value, (str, bytes, bytearray)
-    )
-
-
-def _checked_json_scalar(obj: object, *, allow_nan: bool) -> JSONScalar:
-    """Return a JSON scalar under the selected non-finite policy."""
-    if obj is None or isinstance(obj, (str, bool, int)):
-        return obj
-    if isinstance(obj, float):
-        if allow_nan or math.isfinite(obj):
-            return obj
-        raise TypeError("non-finite float requires allow_nan=True")
-    raise TypeError(f"cannot represent {type(obj).__name__} as JSON")
-
-
 def validate_json_schema(schema: object, value: object) -> list[str]:
     """Return JSON Schema subset validation issue strings.
 
@@ -751,98 +784,17 @@ def validate_json_schema(schema: object, value: object) -> list[str]:
     return _validate_json_schema(schema, value, "")
 
 
-def _validate_json_schema(schema: object, value: object, path: str) -> list[str]:
-    """Return recursive JSON Schema validation issue strings."""
-    if not isinstance(schema, Mapping):
-        return []
-    schema_map = cast(Mapping[str, object], schema)
-    schema_type = schema_map.get("type")
-    value_obj: object = value
-    issues = _validate_json_schema_type(schema_type, value_obj, path)
-    if issues:
-        return issues
-    # Recursion keys off the value's actual shape, not a single declared
-    # ``type``, so a union type (e.g. ``["array", "string"]``) still walks
-    # object/array children when the value is one.
-    if isinstance(value, Mapping):
-        issues.extend(
-            _validate_json_object(schema_map, cast(Mapping[str, object], value), path)
-        )
-    if _is_json_sequence(value_obj):
-        items = schema_map.get("items")
-        value_items = value_obj
-        issues.extend(
-            issue
-            for idx, item in enumerate(value_items)
-            for issue in _validate_json_schema(items, item, f"{path}[{idx}]")
-        )
-    issues.extend(_validate_json_enum(schema_map.get("enum"), value_obj, path))
-    issues.extend(_validate_json_range(schema_map, value_obj, path))
-    return issues
-
-
-def _validate_json_schema_type(
-    schema_type: object, value: object, path: str
-) -> list[str]:
-    """Return JSON Schema type validation issues.
-
-    ``type`` may be a single name (``"string"``) or a list of names
-    (``["array", "string"]``, standard JSON Schema): the value matches when
-    it satisfies any listed type.
-    """
-    if isinstance(schema_type, str):
-        names = [schema_type]
-    elif isinstance(schema_type, (list, tuple)):
-        names = [t for t in cast(Sequence[object], schema_type) if isinstance(t, str)]
-    else:
-        return []
-    if not names or any(_matches_json_schema_type(t, value) for t in names):
-        return []
-    expected = names[0] if len(names) == 1 else " or ".join(names)
-    return [f"Parameter `{path or '<root>'}` must be {expected}."]
-
-
-def _matches_json_schema_type(schema_type: str, value: object) -> bool:
-    """Return whether ``value`` matches a JSON Schema type name."""
-    if schema_type == "object":
-        return isinstance(value, Mapping)
-    if schema_type == "array":
-        return _is_json_sequence(value)
-    if schema_type == "string":
-        return isinstance(value, str)
-    if schema_type == "integer":
-        return (isinstance(value, int) and not isinstance(value, bool)) or (
-            isinstance(value, float) and value.is_integer()
-        )
-    if schema_type == "number":
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
-    if schema_type == "boolean":
-        return isinstance(value, bool)
-    if schema_type == "null":
-        return value is None
-    return True
-
-
-def _validate_json_enum(enum: object, value: object, path: str) -> list[str]:
-    """Return JSON Schema enum validation issues."""
-    if not isinstance(enum, (list, tuple)):
-        return []
-    enum_values = cast(Sequence[object], enum)
-    # ``in`` compares by ``==``, and ``True == 1`` in Python -- so a boolean
-    # satisfied a numeric enum and vice versa. JSON Schema types them apart, as
-    # the type check in this module already does.
-    if any(same_json_value(value, member) for member in enum_values):
-        return []
-    return [
-        (
-            f"Parameter `{path or '<root>'}` must be one of "
-            f"{_json_enum_values(enum_values)}."
-        )
-    ]
-
-
 def same_json_value(value: object, member: object) -> bool:
-    """Whether two JSON values are recursively equal by JSON type."""
+    """Whether two JSON values are recursively equal by JSON type.
+
+    Args:
+      value: Value.
+      member: Member.
+
+    Returns:
+      result: The bool.
+
+    """
     if isinstance(value, bool) != isinstance(member, bool):
         return False
     if (
@@ -873,86 +825,6 @@ def same_json_value(value: object, member: object) -> bool:
     return value == member
 
 
-def _validate_json_range(
-    schema: Mapping[str, object], value: object, path: str
-) -> list[str]:
-    """Return numeric range validation issues."""
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return []
-    issues: list[str] = []
-    minimum = schema.get("minimum")
-    if isinstance(minimum, (int, float)) and (
-        (isinstance(value, float) and math.isnan(value)) or value < minimum
-    ):
-        issues.append(f"Parameter `{path or '<root>'}` must be >= {minimum}.")
-    maximum = schema.get("maximum")
-    if isinstance(maximum, (int, float)) and (
-        (isinstance(value, float) and math.isnan(value)) or value > maximum
-    ):
-        issues.append(f"Parameter `{path or '<root>'}` must be <= {maximum}.")
-    return issues
-
-
-def _validate_json_object(
-    schema: Mapping[str, object],
-    args: Mapping[str, object],
-    path: str,
-) -> list[str]:
-    """Return object-schema validation issue strings."""
-    required = _schema_strings(schema.get("required"))
-    props_raw = schema.get("properties")
-    props: Mapping[str, object] = (
-        cast(Mapping[str, object], props_raw) if isinstance(props_raw, Mapping) else {}
-    )
-    issues = [
-        f"The required parameter `{f'{path}.{key}' if path else key}` is missing."
-        for key in required
-        if key not in args
-    ]
-    additional_properties_raw = schema.get("additionalProperties")
-    additional_properties: Mapping[str, object] | None = None
-    if isinstance(additional_properties_raw, Mapping):
-        additional_properties = cast(Mapping[str, object], additional_properties_raw)
-    if additional_properties_raw is False:
-        issues.extend(
-            f"Unexpected parameter `{f'{path}.{key}' if path else key}`."
-            for key in args
-            if key not in props
-        )
-    for key, item in args.items():
-        child_schema = props.get(key)
-        if child_schema is not None:
-            issues.extend(
-                _validate_json_schema(
-                    child_schema,
-                    item,
-                    f"{path}.{key}" if path else key,
-                )
-            )
-        elif additional_properties is not None:
-            issues.extend(
-                _validate_json_schema(
-                    additional_properties,
-                    item,
-                    f"{path}.{key}" if path else key,
-                )
-            )
-    return issues
-
-
-def _schema_strings(value: object) -> list[str]:
-    """Return string items from a schema list field."""
-    if not isinstance(value, (list, tuple)):
-        return []
-    items = cast(Sequence[object], value)
-    return [item for item in items if isinstance(item, str)]
-
-
-def _json_enum_values(enum: Sequence[object]) -> str:
-    """Return a compact display string for enum values."""
-    return ", ".join(repr(item) for item in enum)
-
-
 def take[T](source: Mapping[str, object], key: str, target: type[T]) -> FieldState[T]:
     """Read one field without collapsing absence, null, or malformed data.
 
@@ -975,44 +847,6 @@ def take[T](source: Mapping[str, object], key: str, target: type[T]) -> FieldSta
     if value is None:
         return Invalid(raw=checked)
     return value
-
-
-def _provider_json_value(key: str, value: object) -> JSONValue:
-    """Validate one provider field and name it in failures."""
-    try:
-        json_freeze(value)
-    except TypeError as exc:
-        raise TypeError(f"field {key!r}: {exc}") from exc
-    return cast(JSONValue, value)
-
-
-def _replay_envelope(stored: Mapping[str, object]) -> dict[str, object] | None:
-    """Return a valid internal replay envelope, if present."""
-    raw = stored.get(_FIELD_STATE_TAG)
-    if not isinstance(raw, Mapping):
-        return None
-    envelope = {
-        key: value
-        for key, value in cast(Mapping[object, object], raw).items()
-        if isinstance(key, str)
-    }
-    if IntCodec.coerce(envelope.get("version"), 0) != 1:
-        return None
-    if not isinstance(envelope.get("order"), list):
-        return None
-    states = envelope.get("states")
-    if not isinstance(states, Mapping):
-        return None
-    if any(
-        not isinstance(key, str) or label not in ("null", "value")
-        for key, label in cast(Mapping[object, object], states).items()
-    ):
-        return None
-    if not isinstance(envelope.get("residual"), Mapping):
-        return None
-    if "raw" in envelope and not isinstance(envelope["raw"], Mapping):
-        return None
-    return envelope
 
 
 def residual(
@@ -1086,11 +920,6 @@ def residual(
     }
 
 
-def _respelled(value: JSONValue) -> bool:
-    """Whether a round trip could write this value a different way."""
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
 def replay(
     stored: Mapping[str, object], values: Mapping[str, object]
 ) -> dict[str, object]:
@@ -1134,27 +963,9 @@ def replay(
     return result
 
 
-# -- Dataclass <-> JSON codec -------------------------------------------------
-#
-# A generic, type-hint-driven codec for frozen dataclasses of value types
-# (the shape used for things stored whole in a JSONB column). It handles
-# nested dataclasses, tuples/lists, dicts, and the scalar special-cases JSON
-# cannot represent natively: ``bytes`` (base64), ``Path`` / ``UUID`` (str),
-# ``datetime`` (ISO 8601), and ``Enum`` (its value).
-#
-# Every encoded dataclass carries a ``"py/object"`` tag (its dotted import
-# path) so a union-typed field decodes without guessing which member it is.
-# Decode is driven by the *resolved* type hints (``get_type_hints``), never by
-# importing what the document names, so a stored document cannot make this
-# module import anything.
-#
-# The tag vocabulary follows jsonpickle's ``py/*`` conventions
-# (https://jsonpickle.github.io), so a document is legible to anyone who knows
-# them. ``py/datetime`` is this codec's own: jsonpickle reaches a datetime
-# through ``py/reduce`` and renders the instant as opaque base64, which is
-# unreadable in the database column these documents live in.
-
 type _Encode = Callable[[object, object], JSONValue]
+
+
 type _Decode = Callable[[object, object], object]
 
 
@@ -1162,11 +973,21 @@ class Codec(Protocol):
     """Encode and decode one Python or annotation-defined capability."""
 
     tag: ClassVar[str | None] = None
+
     holds: ClassVar[bool] = False
 
     @classmethod
     def is_encodable(cls, value: object, annotation: object) -> bool:
-        """Return whether this codec owns encoding for the value and annotation."""
+        """Return whether this codec owns encoding for the value and annotation.
+
+        Args:
+          value: Value.
+          annotation: Annotation.
+
+        Returns:
+          result: The bool.
+
+        """
         del cls, value, annotation
         return False
 
@@ -1174,7 +995,17 @@ class Codec(Protocol):
     def coercion_failure[T](
         cls, value: object, target: type[T], default: T | None
     ) -> T:
-        """Return a typed fallback or raise when coercion has none."""
+        """Return a typed fallback or raise when coercion has none.
+
+        Args:
+          value: Value.
+          target: Target.
+          default: Default.
+
+        Returns:
+          default: The T.
+
+        """
         del cls
         if default is not None:
             return default
@@ -1182,15 +1013,56 @@ class Codec(Protocol):
 
     @classmethod
     def encode(cls, value: object, annotation: object, *, encode: _Encode) -> JSONValue:
-        """Encode one value through this capability."""
+        """Encode one value through this capability.
+
+        Args:
+          value: Value.
+          annotation: Annotation.
+          encode: Encode.
+
+        Returns:
+          result: The JSONValue.
+
+        """
         del cls, value, annotation, encode
         raise NotImplementedError
 
     @classmethod
     def decode(cls, raw: object, annotation: object, *, decode: _Decode) -> object:
-        """Decode one value through this capability."""
+        """Decode one value through this capability.
+
+        Args:
+          raw: Raw.
+          annotation: Annotation.
+          decode: Decode.
+
+        Returns:
+          result: The object.
+
+        """
         del cls, raw, annotation, decode
         raise NotImplementedError
+
+
+@runtime_checkable
+class _CustomJsonInline(Protocol):
+    """Value that owns both halves of its deferred-call graph recipe.
+
+    Both methods are required: decoding allocates the class without running
+    ``__init__`` (so a cycle can reference it before its children exist), then
+    hands the recipe back for the class to populate itself. A value supplying
+    only the encode half is not inline-encodable and takes the reduce path,
+    rather than decoding into an object this module populated by guesswork.
+    """
+
+    def __custom_json_inline__(self) -> InlineRecipe: ...
+
+    def __custom_json_inline_init__(
+        self,
+        func: object,
+        args: Sequence[object],
+        kwargs: Mapping[str, object],
+    ) -> None: ...
 
 
 class _GraphEncodingCodec(Protocol):
@@ -1198,15 +1070,510 @@ class _GraphEncodingCodec(Protocol):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
-        """Return whether this codec owns graph encoding for ``value``."""
+        """Return whether this codec owns graph encoding for ``value``.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The bool.
+
+        """
         del cls, value, graph
         return False
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
-        """Encode one value through graph traversal."""
+        """Encode one value through graph traversal.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         del cls, value, graph
         raise NotImplementedError
+
+
+def _checked_json_scalar(obj: object, *, allow_nan: bool) -> JSONScalar:
+    """Return a JSON scalar under the selected non-finite policy."""
+    if obj is None or isinstance(obj, (str, bool, int)):
+        return obj
+    if isinstance(obj, float):
+        if allow_nan or math.isfinite(obj):
+            return obj
+        raise TypeError("non-finite float requires allow_nan=True")
+    raise TypeError(f"cannot represent {type(obj).__name__} as JSON")
+
+
+def _is_plain_tuple(value: object) -> TypeGuard[tuple[object, ...]]:
+    """Return whether ``value`` is a bare tuple rather than a subclass."""
+    return type(value) is tuple
+
+
+def _decode_without_annotation(annotation: object, raw: object) -> object:
+    """Adapt hintless decoding to the recursive decoder signature."""
+    del annotation
+    return _decode_untyped(raw)
+
+
+# The survivor is alias-resolved: ``Alias | None`` where ``Alias`` is itself a union
+# reduced to the bare alias object, which is not a ``UnionType``, so the union branch
+# below never ran and the value fell through.
+def _strip_optional(annotation: object) -> object:
+    """Reduce ``T | None`` to ``T`` for decode dispatch; leave others alone."""
+    if _UnionCodec.is_annotation(annotation):
+        non_none = [a for a in _UnionCodec.members(annotation) if a is not type(None)]
+        if len(non_none) == 1:
+            return _resolve_alias(non_none[0])
+    return annotation
+
+
+class EnumCodec(Codec):
+    """Encode and decode enum members through their values."""
+
+    @classmethod
+    @override
+    def is_encodable(cls, value: object, annotation: object) -> bool:
+        """Return whether ``value`` is an enum member."""
+        del cls, annotation
+        return isinstance(value, Enum)
+
+    @classmethod
+    @override
+    def encode(cls, value: object, annotation: object, *, encode: _Encode) -> JSONValue:
+        """Encode an enum member's value recursively."""
+        del cls, annotation
+        return encode(cast(Enum, value).value, None)
+
+    @classmethod
+    @override
+    def decode(cls, raw: object, annotation: object, *, decode: _Decode) -> object:
+        """Decode an enum member through its annotated class."""
+        del decode
+        if not isinstance(annotation, type) or not issubclass(annotation, Enum):
+            raise TypeError(f"cannot decode {raw!r} as {annotation}")
+        if isinstance(raw, annotation):
+            return raw
+        matches = [
+            member for member in annotation if cls._same_value(raw, member.value)
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        raise TypeError(f"cannot decode {raw!r} as {annotation.__name__}")
+
+    @classmethod
+    def _same_value(cls, raw: object, member: object) -> bool:
+        """Return whether a wire value identifies an enum member value."""
+        del cls
+        if type(raw) is type(member) and raw == member:
+            return True
+        if not isinstance(raw, Mapping) and not _is_json_sequence(raw):
+            return same_json_value(raw, _encode(member))
+        return same_json_value(
+            _decode_untyped(cast(object, raw)),
+            _decode_untyped(_encode(member)),
+        )
+
+
+class DataclassCodec(Codec):
+    """Encode and decode dataclass instances."""
+
+    @classmethod
+    def settable_fields(cls, target: type) -> frozenset[str]:
+        """Return names accepted by a dataclass's generated initializer.
+
+        Args:
+          target: Target.
+
+        Returns:
+          result: The frozenset[str].
+
+        """
+        del cls
+        assert is_dataclass(target)
+        return frozenset(field.name for field in fields(target) if field.init)
+
+    @classmethod
+    def to_json(cls, obj: object) -> JSON:
+        """Encode a dataclass instance to a tagged JSON object.
+
+        Args:
+          obj: Obj.
+
+        Returns:
+          result: The JSON.
+
+        """
+        if not is_dataclass(obj) or isinstance(obj, type):
+            raise TypeError(
+                f"DataclassCodec.to_json expects a dataclass instance, got {obj!r}"
+            )
+        hints = get_type_hints(type(obj))
+        result: dict[str, JSONValue] = {TYPE_TAG: _annotation_id(type(obj))}
+        for field in fields(obj):
+            if field.init:
+                result[field.name] = _encode(
+                    getattr(obj, field.name), hints.get(field.name)
+                )
+        return result
+
+    @classmethod
+    def from_json[T](cls, target: type[T], data: Mapping[str, object]) -> T:
+        """Rebuild a dataclass of type ``target`` from a JSON object.
+
+        Args:
+          target: Target.
+          data: Data.
+
+        Returns:
+          result: The T.
+
+        """
+        hints = get_type_hints(target)
+        settable = cls.settable_fields(target)
+        unknown = sorted(key for key in data if key != TYPE_TAG and key not in settable)
+        if unknown:
+            raise SchemaError(
+                f"{target.__name__}: unknown field(s) {unknown}; "
+                f"valid: {sorted(settable)}"
+            )
+        return target(
+            **{
+                name: decode(hints.get(name), raw)
+                for name, raw in data.items()
+                if name != TYPE_TAG
+            }
+        )
+
+    @classmethod
+    @override
+    def is_encodable(cls, value: object, annotation: object) -> bool:
+        """Return whether ``value`` is a dataclass instance."""
+        del cls, annotation
+        return is_dataclass(value) and not isinstance(value, type)
+
+    @classmethod
+    @override
+    def encode(cls, value: object, annotation: object, *, encode: _Encode) -> JSONValue:
+        """Encode a dataclass through its resolved field annotations."""
+        del annotation, encode
+        return cls.to_json(value)
+
+    @classmethod
+    @override
+    def decode(cls, raw: object, annotation: object, *, decode: _Decode) -> object:
+        """Decode a dataclass through its annotated class."""
+        del decode
+        if not isinstance(annotation, type) or not is_dataclass(annotation):
+            raise TypeError(f"cannot decode {raw!r} as {annotation}")
+        if not isinstance(raw, Mapping):
+            raise TypeError(f"expected object for {annotation.__name__}, got {raw!r}")
+        return cls.from_json(annotation, cast(Mapping[str, object], raw))
+
+    @classmethod
+    def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
+        """Return whether this codec owns graph encoding for ``value``.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The bool.
+
+        """
+        del cls, graph
+        return is_dataclass(value) and not isinstance(value, type)
+
+    @classmethod
+    def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
+        """Encode one value through graph traversal.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
+        del cls
+        return _GraphObjectCodec.encode_graph(value, graph)
+
+
+class _ArrayCodec(Codec, Protocol):
+    """Share traversal for codecs represented as JSON arrays."""
+
+    @classmethod
+    def element_annotations(
+        cls, annotation: object, *, count: int
+    ) -> tuple[object, ...]:
+        """Return one annotation for each positional element.
+
+        Args:
+          annotation: Annotation.
+          count: Count.
+
+        Returns:
+          result: The tuple[object, ...].
+
+        """
+        del cls
+        ann = _strip_optional(_resolve_alias(annotation))
+        args = get_args(ann)
+        if not args:
+            return (None,) * count
+        if len(args) == 2 and args[1] is Ellipsis:
+            return (args[0],) * count
+        if get_origin(ann) is tuple:
+            return args if len(args) == count else (None,) * count
+        return (args[0],) * count
+
+    @classmethod
+    def encode_items(
+        cls,
+        value: Iterable[object],
+        annotation: object,
+        *,
+        encode: _Encode,
+    ) -> list[JSONValue]:
+        """Encode elements against their positional annotations.
+
+        Args:
+          value: Value.
+          annotation: Annotation.
+          encode: Encode.
+
+        Returns:
+          result: The list[JSONValue].
+
+        """
+        items = list(value)
+        hints = cls.element_annotations(annotation, count=len(items))
+        return [encode(item, hint) for item, hint in zip(items, hints, strict=True)]
+
+    @classmethod
+    def decode_items(
+        cls,
+        raw: object,
+        annotation: object,
+        *,
+        materialize: Callable[[list[object]], object],
+        decode: _Decode,
+    ) -> object:
+        """Decode a JSON array against its positional annotations.
+
+        Args:
+          raw: Raw.
+          annotation: Annotation.
+          materialize: Materialize.
+          decode: Decode.
+
+        Returns:
+          result: The object.
+
+        """
+        if not isinstance(raw, list):
+            raise TypeError(f"cannot decode {raw!r} as {annotation}")
+        items = cast(list[object], raw)
+        arity = TupleCodec.fixed_arity(annotation)
+        if arity is not None and arity != len(items):
+            raise TypeError(
+                f"cannot decode {raw!r} as {annotation}: expected {arity} items"
+            )
+        hints = cls.element_annotations(annotation, count=len(items))
+        return materialize(
+            [decode(hint, item) for item, hint in zip(items, hints, strict=True)]
+        )
+
+
+class _ImportCodec:
+    """Own import-reference wire paths used by graph codecs."""
+
+    tag: ClassVar[str | None] = None
+
+    @classmethod
+    def pair(cls, node: Mapping[str, object]) -> tuple[object, object]:
+        """Return a two-element tag envelope's path and payload.
+
+        Destructuring first would surface corrupt input as an unpack
+        ``ValueError`` naming neither the tag nor the fault.
+
+        Args:
+          node: Node.
+
+        Returns:
+          result: The tuple[object, object].
+
+        """
+        tag = cast(str, cls.tag)
+        payload = node[tag]
+        if not isinstance(payload, list) or len(cast(list[object], payload)) != 2:
+            raise TypeError(f"invalid {tag} envelope: {payload!r}")
+        path, body = cast(list[object], payload)
+        return path, body
+
+    @classmethod
+    def path(cls, value: object) -> str:
+        """Return a verified dotted import path for a class or function.
+
+        Args:
+          value: Value.
+
+        Returns:
+          result: The str.
+
+        """
+        if not isinstance(value, _Named):
+            raise TypeError(
+                f"Cannot serialize {value!r}: it has no importable path "
+                "(module-level __qualname__). Local/lambda callables and local "
+                "classes/subclasses cannot be deserialized.",
+            )
+        named: _Named = value
+        if "<locals>" in named.__qualname__:
+            raise TypeError(
+                f"Cannot serialize {value!r}: it has no importable path "
+                "(module-level __qualname__). Local/lambda callables and local "
+                "classes/subclasses cannot be deserialized.",
+            )
+        return cls.verified(f"{named.__module__}.{named.__qualname__}", value)
+
+    @classmethod
+    def verified(cls, path: str, value: object) -> str:
+        """Return ``path`` after proving it resolves to ``value``.
+
+        Args:
+          path: Path.
+          value: Value.
+
+        Returns:
+          path: The str.
+
+        """
+        del cls
+        try:
+            resolved = resolve_import(path)
+        except (AttributeError, ImportError) as error:
+            raise TypeError(
+                f"Cannot serialize {value!r}: import path {path!r} does not "
+                "resolve to the same object.",
+            ) from error
+        if resolved is not value:
+            raise TypeError(
+                f"Cannot serialize {value!r}: import path {path!r} does not "
+                "resolve to the same object.",
+            )
+        return path
+
+
+class _ReduceCodec(_ImportCodec):
+    """Own pickle reduce recipes while traversal owns identity transactions."""
+
+    tag: ClassVar[str | None] = "py/reduce"
+
+    @classmethod
+    def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
+        del cls, graph
+        return hasattr(value, "__reduce_ex__")
+
+    @classmethod
+    def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
+        reduced = graph.reduce_for(value)
+        if reduced is _GRAPH_DECLINED:
+            return _GRAPH_DECLINED
+        if isinstance(reduced, str):
+            return {
+                cast(str, _TypeCodec.tag): cls.verified(
+                    f"{type(value).__module__}.{reduced}", value
+                )
+            }
+        if not isinstance(reduced, tuple):
+            return _GRAPH_DECLINED
+        parts = list(cast(tuple[object, ...], reduced))
+        if len(parts) < 2 or len(parts) > 5 or not callable(parts[0]):
+            return _GRAPH_DECLINED
+        if not isinstance(parts[1], tuple):
+            return _GRAPH_DECLINED
+        if len(parts) >= 4 and parts[3] is not None:
+            parts[3] = list(cast(Sequence[object], parts[3]))
+        if len(parts) >= 5 and parts[4] is not None:
+            parts[4] = list(cast(Sequence[tuple[object, object]], parts[4]))
+        mutable = any(part is not None for part in parts[2:])
+        checkpoint = graph.checkpoint()
+        try:
+            if mutable:
+                graph.register(value)
+            elements = graph.encode_items(parts)
+        except TypeError:
+            graph.rollback(checkpoint)
+            return _GRAPH_DECLINED
+        while len(elements) > 2 and elements[-1] is None:
+            elements.pop()
+        return {cast(str, cls.tag): elements}
+
+    @classmethod
+    def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
+        source = cast(Mapping[str, object], node)
+        elements = cast(list[object], source[cast(str, cls.tag)])
+        if len(elements) < 2 or len(elements) > 5:
+            raise TypeError("py/reduce requires two to five elements")
+        mutable = any(element is not None for element in elements[2:])
+        index = graph.reserve() if mutable else -1
+        func = graph.decode(elements[0])
+        if not isinstance(func, _Callable):
+            raise TypeError(f"reduce target is not callable: {func!r}")
+        args = cast(tuple[object, ...], graph.decode(elements[1]))
+        value = func(*args)
+        if mutable:
+            graph.fill(index, value)
+        if len(elements) > 2 and elements[2] is not None:
+            cls.apply_state(value, graph.decode(elements[2]))
+        if len(elements) > 3 and elements[3] is not None:
+            extend = getattr(value, "extend", None)
+            if not callable(extend):
+                raise TypeError(f"reduce target cannot accept list items: {value!r}")
+            extend(cast(Iterable[object], graph.decode(elements[3])))
+        if len(elements) > 4 and elements[4] is not None:
+            setitem = getattr(value, "__setitem__", None)
+            if not callable(setitem):
+                raise TypeError(f"reduce target cannot accept dict items: {value!r}")
+            pairs = cast(Iterable[tuple[object, object]], graph.decode(elements[4]))
+            for key, member in pairs:
+                setitem(key, member)
+        return value
+
+    @classmethod
+    def apply_state(cls, value: object, state: object) -> None:
+        """Apply pickle reduce state to a reconstructed value.
+
+        Args:
+          value: Value.
+          state: State.
+
+        """
+        del cls
+        setstate = getattr(value, "__setstate__", None)
+        if setstate is not None:
+            setstate(state)
+            return
+        dict_state: object = state
+        slots_state: object = None
+        if isinstance(state, tuple):
+            pair = cast(tuple[object, ...], state)
+            if len(pair) == 2:
+                dict_state, slots_state = pair
+        if isinstance(dict_state, dict):
+            for key, member in cast(dict[str, object], dict_state).items():
+                object.__setattr__(value, key, member)
+        if isinstance(slots_state, dict):
+            for key, member in cast(dict[str, object], slots_state).items():
+                object.__setattr__(value, key, member)
 
 
 class _GraphDecodingCodec(Protocol):
@@ -1216,7 +1583,16 @@ class _GraphDecodingCodec(Protocol):
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
-        """Decode one value through graph traversal."""
+        """Decode one value through graph traversal.
+
+        Args:
+          node: Node.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         del cls, node, graph
         raise NotImplementedError
 
@@ -1258,7 +1634,15 @@ class _UntypedCodec(Codec):
 
     @classmethod
     def is_annotation(cls, annotation: object) -> bool:
-        """Return whether an annotation requests hintless JSON handling."""
+        """Return whether an annotation requests hintless JSON handling.
+
+        Args:
+          annotation: Annotation.
+
+        Returns:
+          result: The bool.
+
+        """
         del cls
         return (
             annotation is None
@@ -1294,7 +1678,15 @@ class _UnionCodec(Codec):
 
     @classmethod
     def is_annotation(cls, annotation: object) -> bool:
-        """Return whether an annotation resolves to either union spelling."""
+        """Return whether an annotation resolves to either union spelling.
+
+        Args:
+          annotation: Annotation.
+
+        Returns:
+          result: The bool.
+
+        """
         del cls
         resolved = _resolve_alias(annotation)
         return isinstance(resolved, UnionType) or get_origin(resolved) in (
@@ -1304,7 +1696,15 @@ class _UnionCodec(Codec):
 
     @classmethod
     def members(cls, annotation: object) -> tuple[object, ...]:
-        """Flatten a union's recursively aliased members."""
+        """Flatten a union's recursively aliased members.
+
+        Args:
+          annotation: Annotation.
+
+        Returns:
+          result: The tuple[object, ...].
+
+        """
         resolved = _resolve_alias(annotation)
         if not cls.is_annotation(resolved):
             return (resolved,)
@@ -1319,7 +1719,16 @@ class _UnionCodec(Codec):
 
     @classmethod
     def member_tag(cls, members: Sequence[object], member: object) -> str:
-        """Return the tag uniquely naming one union member."""
+        """Return the tag uniquely naming one union member.
+
+        Args:
+          members: Members.
+          member: Member.
+
+        Returns:
+          tag: The str.
+
+        """
         del cls
         tag = _annotation_id(member)
         if sum(_annotation_id(other) == tag for other in members) < 2:
@@ -1328,7 +1737,15 @@ class _UnionCodec(Codec):
 
     @classmethod
     def is_empty_container(cls, value: object) -> bool:
-        """Return whether ``value`` is an empty JSON-like container."""
+        """Return whether ``value`` is an empty JSON-like container.
+
+        Args:
+          value: Value.
+
+        Returns:
+          result: The bool.
+
+        """
         del cls
         if _is_json_sequence(value):
             return len(value) == 0
@@ -1347,7 +1764,18 @@ class _UnionCodec(Codec):
         wire: bool = False,
         exact: bool = False,
     ) -> bool:
-        """Return whether an annotation describes a runtime or wire value."""
+        """Return whether an annotation describes a runtime or wire value.
+
+        Args:
+          annotation: Annotation.
+          value: Value.
+          wire: Wire.
+          exact: Exact.
+
+        Returns:
+          result: The bool.
+
+        """
         resolved = _resolve_alias(annotation)
         origin = get_origin(resolved)
         if cls.is_annotation(resolved):
@@ -1423,7 +1851,18 @@ class _UnionCodec(Codec):
         wire: bool,
         allow_ambiguous_empty: bool = False,
     ) -> object:
-        """Select one union member without exposing matching scores."""
+        """Select one union member without exposing matching scores.
+
+        Args:
+          annotation: Annotation.
+          value: Value.
+          wire: Wire.
+          allow_ambiguous_empty: Allow ambiguous empty.
+
+        Returns:
+          result: The object.
+
+        """
         members = tuple(m for m in cls.members(annotation) if m is not type(None))
         literal_matches = [
             member
@@ -1503,6 +1942,14 @@ class _UnionCodec(Codec):
         envelope was 15% of the document's excess over its source and every
         record paid it. Two same-named classes in one union are the exception
         -- their paths collide, and only the positional tag separates them.
+
+        Args:
+          members: Members.
+          member: Member.
+
+        Returns:
+          result: The bool.
+
         """
         del cls
         if not isinstance(member, type) or not is_dataclass(member):
@@ -1584,7 +2031,15 @@ class NullCodec(Codec):
 
     @classmethod
     def is_admitted(cls, annotation: object) -> bool:
-        """Return whether an annotation permits ``None``."""
+        """Return whether an annotation permits ``None``.
+
+        Args:
+          annotation: Annotation.
+
+        Returns:
+          result: The bool.
+
+        """
         ann = _resolve_alias(annotation)
         if (
             ann is None
@@ -1622,16 +2077,46 @@ class NullCodec(Codec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
+        """Return whether this codec owns graph encoding for ``value``.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The bool.
+
+        """
         del cls, graph
         return value is None
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
+        """Encode one value through graph traversal.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         del cls, value, graph
         return None
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
+        """Decode one value through graph traversal.
+
+        Args:
+          node: Node.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         return cls.decode(node, None, decode=graph.decode_typed)
 
 
@@ -1665,7 +2150,16 @@ class BoolCodec(Codec):
 
     @classmethod
     def coerce(cls, value: object, default: bool | None = False) -> bool:
-        """Coerce a common JSON-like boolean or use a typed fallback."""
+        """Coerce a common JSON-like boolean or use a typed fallback.
+
+        Args:
+          value: Value.
+          default: Default.
+
+        Returns:
+          value: The bool.
+
+        """
         del cls
         if isinstance(value, bool):
             return value
@@ -1681,16 +2175,46 @@ class BoolCodec(Codec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
+        """Return whether this codec owns graph encoding for ``value``.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The bool.
+
+        """
         del cls, graph
         return type(value) is bool
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
+        """Encode one value through graph traversal.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         del cls, graph
         return cast(bool, value)
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
+        """Decode one value through graph traversal.
+
+        Args:
+          node: Node.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         return cls.decode(node, None, decode=graph.decode_typed)
 
 
@@ -1735,7 +2259,16 @@ class IntCodec(Codec):
 
     @classmethod
     def coerce(cls, value: object, default: int | None = 0) -> int:
-        """Coerce a JSON value to int or use a typed fallback."""
+        """Coerce a JSON value to int or use a typed fallback.
+
+        Args:
+          value: Value.
+          default: Default.
+
+        Returns:
+          value: The int.
+
+        """
         del cls
         if isinstance(value, bool):
             return Codec.coercion_failure(value, int, default)
@@ -1754,16 +2287,46 @@ class IntCodec(Codec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
+        """Return whether this codec owns graph encoding for ``value``.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The bool.
+
+        """
         del cls, graph
         return type(value) is int
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
+        """Encode one value through graph traversal.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         del cls, graph
         return cast(int, value)
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
+        """Decode one value through graph traversal.
+
+        Args:
+          node: Node.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         return cls.decode(node, None, decode=graph.decode_typed)
 
 
@@ -1805,7 +2368,16 @@ class FloatCodec(Codec):
 
     @classmethod
     def coerce(cls, value: object, default: float | None = 0.0) -> float:
-        """Coerce a JSON numeric value to float or use a typed fallback."""
+        """Coerce a JSON numeric value to float or use a typed fallback.
+
+        Args:
+          value: Value.
+          default: Default.
+
+        Returns:
+          value: The float.
+
+        """
         del cls
         if isinstance(value, bool):
             return Codec.coercion_failure(value, float, default)
@@ -1822,15 +2394,45 @@ class FloatCodec(Codec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
+        """Return whether this codec owns graph encoding for ``value``.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The bool.
+
+        """
         del cls, graph
         return type(value) is float
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
+        """Encode one value through graph traversal.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         return cls.encode(value, float, encode=graph.encode_typed)
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
+        """Decode one value through graph traversal.
+
+        Args:
+          node: Node.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         # Aliased before narrowing: a bare ``Mapping`` narrow leaves a
         # partially-unknown key type the payload helper would inherit.
         tagged: object = node
@@ -1870,7 +2472,16 @@ class StrCodec(Codec):
 
     @classmethod
     def coerce(cls, value: object, default: str | None = "") -> str:
-        """Return a string value or use a typed fallback."""
+        """Return a string value or use a typed fallback.
+
+        Args:
+          value: Value.
+          default: Default.
+
+        Returns:
+          value: The str.
+
+        """
         del cls
         if isinstance(value, str):
             return value
@@ -1878,16 +2489,46 @@ class StrCodec(Codec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
+        """Return whether this codec owns graph encoding for ``value``.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The bool.
+
+        """
         del cls, graph
         return type(value) is str
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
+        """Encode one value through graph traversal.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         del cls, graph
         return cast(str, value)
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
+        """Decode one value through graph traversal.
+
+        Args:
+          node: Node.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         return cls.decode(node, None, decode=graph.decode_typed)
 
 
@@ -1927,15 +2568,45 @@ class BytesCodec(Codec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
+        """Return whether this codec owns graph encoding for ``value``.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The bool.
+
+        """
         del cls, graph
         return type(value) is bytes
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
+        """Encode one value through graph traversal.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         return cls.encode(value, bytes, encode=graph.encode_typed)
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
+        """Decode one value through graph traversal.
+
+        Args:
+          node: Node.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         payload = _tagged_scalar_payload(node, cast(str, cls.tag))
         return cls.decode(payload, bytes, decode=graph.decode_typed)
 
@@ -1972,15 +2643,45 @@ class PathCodec(Codec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
+        """Return whether this codec owns graph encoding for ``value``.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The bool.
+
+        """
         del graph
         return cls.is_encodable(value, None)
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
+        """Encode one value through graph traversal.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         return cls.encode(value, None, encode=graph.encode_typed)
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
+        """Decode one value through graph traversal.
+
+        Args:
+          node: Node.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         payload = _tagged_scalar_payload(node, cast(str, cls.tag))
         return cls.decode(payload, None, decode=graph.decode_typed)
 
@@ -2020,15 +2721,45 @@ class UuidCodec(Codec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
+        """Return whether this codec owns graph encoding for ``value``.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The bool.
+
+        """
         del graph
         return cls.is_encodable(value, None)
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
+        """Encode one value through graph traversal.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         return cls.encode(value, None, encode=graph.encode_typed)
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
+        """Decode one value through graph traversal.
+
+        Args:
+          node: Node.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         payload = _tagged_scalar_payload(node, cast(str, cls.tag))
         return cls.decode(payload, None, decode=graph.decode_typed)
 
@@ -2070,6 +2801,14 @@ class DatetimeCodec(Codec):
         ``None`` is a VALUE here, not the raise sentinel the other codecs use:
         a datetime has no empty instance to stand in for a missing one, so
         "absent" is the only honest fallback.
+
+        Args:
+          value: Value.
+          default: Default.
+
+        Returns:
+          result: The datetime | None.
+
         """
         del cls
         if isinstance(value, datetime):
@@ -2115,201 +2854,47 @@ class DatetimeCodec(Codec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
+        """Return whether this codec owns graph encoding for ``value``.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The bool.
+
+        """
         del graph
         return cls.is_encodable(value, None)
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
+        """Encode one value through graph traversal.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         return cls.encode(value, None, encode=graph.encode_typed)
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
+        """Decode one value through graph traversal.
+
+        Args:
+          node: Node.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         payload = _tagged_scalar_payload(node, cast(str, cls.tag))
         return cls.decode(payload, None, decode=graph.decode_typed)
-
-
-class DataclassCodec(Codec):
-    """Encode and decode dataclass instances."""
-
-    @classmethod
-    def settable_fields(cls, target: type) -> frozenset[str]:
-        """Return names accepted by a dataclass's generated initializer."""
-        del cls
-        assert is_dataclass(target)
-        return frozenset(field.name for field in fields(target) if field.init)
-
-    @classmethod
-    def to_json(cls, obj: object) -> JSON:
-        """Encode a dataclass instance to a tagged JSON object."""
-        if not is_dataclass(obj) or isinstance(obj, type):
-            raise TypeError(
-                f"DataclassCodec.to_json expects a dataclass instance, got {obj!r}"
-            )
-        hints = get_type_hints(type(obj))
-        result: dict[str, JSONValue] = {TYPE_TAG: _annotation_id(type(obj))}
-        for field in fields(obj):
-            if field.init:
-                result[field.name] = _encode(
-                    getattr(obj, field.name), hints.get(field.name)
-                )
-        return result
-
-    @classmethod
-    def from_json[T](cls, target: type[T], data: Mapping[str, object]) -> T:
-        """Rebuild a dataclass of type ``target`` from a JSON object."""
-        hints = get_type_hints(target)
-        settable = cls.settable_fields(target)
-        unknown = sorted(key for key in data if key != TYPE_TAG and key not in settable)
-        if unknown:
-            raise SchemaError(
-                f"{target.__name__}: unknown field(s) {unknown}; "
-                f"valid: {sorted(settable)}"
-            )
-        return target(
-            **{
-                name: decode(hints.get(name), raw)
-                for name, raw in data.items()
-                if name != TYPE_TAG
-            }
-        )
-
-    @classmethod
-    @override
-    def is_encodable(cls, value: object, annotation: object) -> bool:
-        """Return whether ``value`` is a dataclass instance."""
-        del cls, annotation
-        return is_dataclass(value) and not isinstance(value, type)
-
-    @classmethod
-    @override
-    def encode(cls, value: object, annotation: object, *, encode: _Encode) -> JSONValue:
-        """Encode a dataclass through its resolved field annotations."""
-        del annotation, encode
-        return cls.to_json(value)
-
-    @classmethod
-    @override
-    def decode(cls, raw: object, annotation: object, *, decode: _Decode) -> object:
-        """Decode a dataclass through its annotated class."""
-        del decode
-        if not isinstance(annotation, type) or not is_dataclass(annotation):
-            raise TypeError(f"cannot decode {raw!r} as {annotation}")
-        if not isinstance(raw, Mapping):
-            raise TypeError(f"expected object for {annotation.__name__}, got {raw!r}")
-        return cls.from_json(annotation, cast(Mapping[str, object], raw))
-
-    @classmethod
-    def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
-        del cls, graph
-        return is_dataclass(value) and not isinstance(value, type)
-
-    @classmethod
-    def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
-        del cls
-        return _GraphObjectCodec.encode_graph(value, graph)
-
-
-class EnumCodec(Codec):
-    """Encode and decode enum members through their values."""
-
-    @classmethod
-    @override
-    def is_encodable(cls, value: object, annotation: object) -> bool:
-        """Return whether ``value`` is an enum member."""
-        del cls, annotation
-        return isinstance(value, Enum)
-
-    @classmethod
-    @override
-    def encode(cls, value: object, annotation: object, *, encode: _Encode) -> JSONValue:
-        """Encode an enum member's value recursively."""
-        del cls, annotation
-        return encode(cast(Enum, value).value, None)
-
-    @classmethod
-    @override
-    def decode(cls, raw: object, annotation: object, *, decode: _Decode) -> object:
-        """Decode an enum member through its annotated class."""
-        del decode
-        if not isinstance(annotation, type) or not issubclass(annotation, Enum):
-            raise TypeError(f"cannot decode {raw!r} as {annotation}")
-        if isinstance(raw, annotation):
-            return raw
-        matches = [
-            member for member in annotation if cls._same_value(raw, member.value)
-        ]
-        if len(matches) == 1:
-            return matches[0]
-        raise TypeError(f"cannot decode {raw!r} as {annotation.__name__}")
-
-    @classmethod
-    def _same_value(cls, raw: object, member: object) -> bool:
-        """Return whether a wire value identifies an enum member value."""
-        del cls
-        if type(raw) is type(member) and raw == member:
-            return True
-        if not isinstance(raw, Mapping) and not _is_json_sequence(raw):
-            return same_json_value(raw, _encode(member))
-        return same_json_value(
-            _decode_untyped(cast(object, raw)),
-            _decode_untyped(_encode(member)),
-        )
-
-
-class _ArrayCodec(Codec, Protocol):
-    """Share traversal for codecs represented as JSON arrays."""
-
-    @classmethod
-    def element_annotations(
-        cls, annotation: object, *, count: int
-    ) -> tuple[object, ...]:
-        """Return one annotation for each positional element."""
-        del cls
-        ann = _strip_optional(_resolve_alias(annotation))
-        args = get_args(ann)
-        if not args:
-            return (None,) * count
-        if len(args) == 2 and args[1] is Ellipsis:
-            return (args[0],) * count
-        if get_origin(ann) is tuple:
-            return args if len(args) == count else (None,) * count
-        return (args[0],) * count
-
-    @classmethod
-    def encode_items(
-        cls,
-        value: Iterable[object],
-        annotation: object,
-        *,
-        encode: _Encode,
-    ) -> list[JSONValue]:
-        """Encode elements against their positional annotations."""
-        items = list(value)
-        hints = cls.element_annotations(annotation, count=len(items))
-        return [encode(item, hint) for item, hint in zip(items, hints, strict=True)]
-
-    @classmethod
-    def decode_items(
-        cls,
-        raw: object,
-        annotation: object,
-        *,
-        materialize: Callable[[list[object]], object],
-        decode: _Decode,
-    ) -> object:
-        """Decode a JSON array against its positional annotations."""
-        if not isinstance(raw, list):
-            raise TypeError(f"cannot decode {raw!r} as {annotation}")
-        items = cast(list[object], raw)
-        arity = TupleCodec.fixed_arity(annotation)
-        if arity is not None and arity != len(items):
-            raise TypeError(
-                f"cannot decode {raw!r} as {annotation}: expected {arity} items"
-            )
-        hints = cls.element_annotations(annotation, count=len(items))
-        return materialize(
-            [decode(hint, item) for item, hint in zip(items, hints, strict=True)]
-        )
 
 
 class ListCodec(_ArrayCodec):
@@ -2367,6 +2952,15 @@ class ListCodec(_ArrayCodec):
         An empty list is the default fallback, matching the scalar codecs:
         reading untyped JSON is the common case and a non-array there means
         "absent", not "abort". Pass ``default=None`` to raise instead.
+
+        Args:
+          value: Value.
+          item: Item.
+          default: Default.
+
+        Returns:
+          result: The list[T].
+
         """
         del cls
         if not isinstance(value, list):
@@ -2384,7 +2978,15 @@ class ListCodec(_ArrayCodec):
 
     @classmethod
     def mappings(cls, value: object) -> list[dict[str, object]]:
-        """Narrow an array to nonempty string-keyed mappings."""
+        """Narrow an array to nonempty string-keyed mappings.
+
+        Args:
+          value: Value.
+
+        Returns:
+          result: The list[dict[str, object]].
+
+        """
         result: list[dict[str, object]] = []
         for item in cls.coerce(value):
             if not isinstance(item, Mapping):
@@ -2398,11 +3000,31 @@ class ListCodec(_ArrayCodec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
+        """Return whether this codec owns graph encoding for ``value``.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The bool.
+
+        """
         del cls, graph
         return type(value) is list
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
+        """Encode one value through graph traversal.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         del cls
         items = cast(list[object], value)
         graph.register(items)
@@ -2410,6 +3032,16 @@ class ListCodec(_ArrayCodec):
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
+        """Decode one value through graph traversal.
+
+        Args:
+          node: Node.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         if not isinstance(node, list):
             raise TypeError(f"Unexpected JSON node: {type(node)!r}")
         result: list[object] = []
@@ -2422,11 +3054,20 @@ class TupleCodec(_ArrayCodec):
     """Encode and decode tagged tuples."""
 
     tag: ClassVar[str | None] = "py/tuple"
+
     holds: ClassVar[bool] = True
 
     @classmethod
     def fixed_arity(cls, annotation: object) -> int | None:
-        """Return the element count required by a fixed tuple annotation."""
+        """Return the element count required by a fixed tuple annotation.
+
+        Args:
+          annotation: Annotation.
+
+        Returns:
+          result: The int | None.
+
+        """
         del cls
         ann = _strip_optional(_resolve_alias(annotation))
         if get_origin(ann) is not tuple:
@@ -2462,15 +3103,45 @@ class TupleCodec(_ArrayCodec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
+        """Return whether this codec owns graph encoding for ``value``.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The bool.
+
+        """
         del cls, graph
         return _is_plain_tuple(value)
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
+        """Encode one value through graph traversal.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         return cls.encode(value, tuple, encode=graph.encode_typed)
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
+        """Decode one value through graph traversal.
+
+        Args:
+          node: Node.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         source = cast(Mapping[str, object], node)
         return cls.decode(source[cast(str, cls.tag)], tuple, decode=graph.decode_typed)
 
@@ -2479,6 +3150,7 @@ class SetCodec(_ArrayCodec):
     """Encode and decode tagged mutable sets."""
 
     tag: ClassVar[str | None] = "py/set"
+
     holds: ClassVar[bool] = True
 
     @classmethod
@@ -2508,17 +3180,47 @@ class SetCodec(_ArrayCodec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
+        """Return whether this codec owns graph encoding for ``value``.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The bool.
+
+        """
         del cls, graph
         return type(value) is set
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
+        """Encode one value through graph traversal.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         graph.register(value)
         members = sorted(cast(AbstractSet[object], value), key=graph.order_key)
         return {cast(str, cls.tag): graph.encode_items(members)}
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
+        """Decode one value through graph traversal.
+
+        Args:
+          node: Node.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         source = cast(Mapping[str, object], node)
         result: set[object] = set()
         graph.register(result)
@@ -2553,7 +3255,15 @@ class MappingCodec(Codec):
     def normalized_items(
         cls, value: Mapping[object, object]
     ) -> list[tuple[str, object]]:
-        """Normalize mapping keys to distinct strings or reject a collision."""
+        """Normalize mapping keys to distinct strings or reject a collision.
+
+        Args:
+          value: Value.
+
+        Returns:
+          result: The list[tuple[str, object]].
+
+        """
         del cls
         result: list[tuple[str, object]] = []
         seen: set[str] = set()
@@ -2567,7 +3277,15 @@ class MappingCodec(Codec):
 
     @classmethod
     def key(cls, value: object) -> str:
-        """Return a string mapping key, rejecting every other type."""
+        """Return a string mapping key, rejecting every other type.
+
+        Args:
+          value: Value.
+
+        Returns:
+          value: The str.
+
+        """
         del cls
         if isinstance(value, str):
             return value
@@ -2575,7 +3293,15 @@ class MappingCodec(Codec):
 
     @classmethod
     def value_annotation(cls, annotation: object) -> object:
-        """Return a mapping's value annotation, or ``None`` when unknown."""
+        """Return a mapping's value annotation, or ``None`` when unknown.
+
+        Args:
+          annotation: Annotation.
+
+        Returns:
+          result: The object.
+
+        """
         del cls
         args = get_args(_strip_optional(_resolve_alias(annotation)))
         return args[1] if len(args) == 2 else None
@@ -2632,11 +3358,31 @@ class MappingCodec(Codec):
 
     @classmethod
     def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
+        """Return whether this codec owns graph encoding for ``value``.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The bool.
+
+        """
         del cls, graph
         return isinstance(value, Mapping)
 
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
+        """Encode one value through graph traversal.
+
+        Args:
+          value: Value.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         mapping = cast(Mapping[object, object], value)
         items = list(mapping.items())
         str_keyed = all(isinstance(key, str) for key, _ in items)
@@ -2652,7 +3398,16 @@ class MappingCodec(Codec):
 
     @classmethod
     def graph_key(cls, key: object, graph: _GraphEncoder) -> str:
-        """Encode a mapping key using the graph wire dialect."""
+        """Encode a mapping key using the graph wire dialect.
+
+        Args:
+          key: Key.
+          graph: Graph.
+
+        Returns:
+          key: The str.
+
+        """
         del cls
         if isinstance(key, str) and not _is_reserved_key(key):
             return key
@@ -2660,6 +3415,16 @@ class MappingCodec(Codec):
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
+        """Decode one value through graph traversal.
+
+        Args:
+          node: Node.
+          graph: Graph.
+
+        Returns:
+          result: The object.
+
+        """
         if not isinstance(node, dict):
             raise TypeError(f"Unexpected JSON node: {type(node)!r}")
         result: dict[object, object] = {}
@@ -2716,6 +3481,15 @@ class DictCodec(MappingCodec):
         An empty dict is the default fallback, matching the scalar codecs:
         reading untyped JSON is the common case and a non-object there means
         "absent", not "abort". Pass ``default=None`` to raise instead.
+
+        Args:
+          value: Value.
+          item: Item.
+          default: Default.
+
+        Returns:
+          result: The dict[str, T].
+
         """
         del cls
         if not isinstance(value, Mapping):
@@ -2818,62 +3592,6 @@ class MutableSetCodec(SetCodec):
         """Return whether ``value`` is a mutable set."""
         del cls, annotation
         return isinstance(value, MutableSet)
-
-
-class _ImportCodec:
-    """Own import-reference wire paths used by graph codecs."""
-
-    tag: ClassVar[str | None] = None
-
-    @classmethod
-    def pair(cls, node: Mapping[str, object]) -> tuple[object, object]:
-        """Return a two-element tag envelope's path and payload.
-
-        Destructuring first would surface corrupt input as an unpack
-        ``ValueError`` naming neither the tag nor the fault.
-        """
-        tag = cast(str, cls.tag)
-        payload = node[tag]
-        if not isinstance(payload, list) or len(cast(list[object], payload)) != 2:
-            raise TypeError(f"invalid {tag} envelope: {payload!r}")
-        path, body = cast(list[object], payload)
-        return path, body
-
-    @classmethod
-    def path(cls, value: object) -> str:
-        """Return a verified dotted import path for a class or function."""
-        if not isinstance(value, _Named):
-            raise TypeError(
-                f"Cannot serialize {value!r}: it has no importable path "
-                "(module-level __qualname__). Local/lambda callables and local "
-                "classes/subclasses cannot be deserialized.",
-            )
-        named: _Named = value
-        if "<locals>" in named.__qualname__:
-            raise TypeError(
-                f"Cannot serialize {value!r}: it has no importable path "
-                "(module-level __qualname__). Local/lambda callables and local "
-                "classes/subclasses cannot be deserialized.",
-            )
-        return cls.verified(f"{named.__module__}.{named.__qualname__}", value)
-
-    @classmethod
-    def verified(cls, path: str, value: object) -> str:
-        """Return ``path`` after proving it resolves to ``value``."""
-        del cls
-        try:
-            resolved = resolve_import(path)
-        except (AttributeError, ImportError) as error:
-            raise TypeError(
-                f"Cannot serialize {value!r}: import path {path!r} does not "
-                "resolve to the same object.",
-            ) from error
-        if resolved is not value:
-            raise TypeError(
-                f"Cannot serialize {value!r}: import path {path!r} does not "
-                "resolve to the same object.",
-            )
-        return path
 
 
 class _TypeCodec(_ImportCodec):
@@ -3016,104 +3734,6 @@ class _InlineCodec(_ImportCodec):
         return value
 
 
-class _ReduceCodec(_ImportCodec):
-    """Own pickle reduce recipes while traversal owns identity transactions."""
-
-    tag: ClassVar[str | None] = "py/reduce"
-
-    @classmethod
-    def is_graph_encodable(cls, value: object, graph: _GraphEncoder) -> bool:
-        del cls, graph
-        return hasattr(value, "__reduce_ex__")
-
-    @classmethod
-    def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
-        reduced = graph.reduce_for(value)
-        if reduced is _GRAPH_DECLINED:
-            return _GRAPH_DECLINED
-        if isinstance(reduced, str):
-            return {
-                cast(str, _TypeCodec.tag): cls.verified(
-                    f"{type(value).__module__}.{reduced}", value
-                )
-            }
-        if not isinstance(reduced, tuple):
-            return _GRAPH_DECLINED
-        parts = list(cast(tuple[object, ...], reduced))
-        if not (2 <= len(parts) <= 5) or not callable(parts[0]):
-            return _GRAPH_DECLINED
-        if not isinstance(parts[1], tuple):
-            return _GRAPH_DECLINED
-        if len(parts) >= 4 and parts[3] is not None:
-            parts[3] = list(cast(Sequence[object], parts[3]))
-        if len(parts) >= 5 and parts[4] is not None:
-            parts[4] = list(cast(Sequence[tuple[object, object]], parts[4]))
-        mutable = any(part is not None for part in parts[2:])
-        checkpoint = graph.checkpoint()
-        try:
-            if mutable:
-                graph.register(value)
-            elements = graph.encode_items(parts)
-        except TypeError:
-            graph.rollback(checkpoint)
-            return _GRAPH_DECLINED
-        while len(elements) > 2 and elements[-1] is None:
-            elements.pop()
-        return {cast(str, cls.tag): elements}
-
-    @classmethod
-    def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
-        source = cast(Mapping[str, object], node)
-        elements = cast(list[object], source[cast(str, cls.tag)])
-        if not 2 <= len(elements) <= 5:
-            raise TypeError("py/reduce requires two to five elements")
-        mutable = any(element is not None for element in elements[2:])
-        index = graph.reserve() if mutable else -1
-        func = graph.decode(elements[0])
-        if not isinstance(func, _Callable):
-            raise TypeError(f"reduce target is not callable: {func!r}")
-        args = cast(tuple[object, ...], graph.decode(elements[1]))
-        value = func(*args)
-        if mutable:
-            graph.fill(index, value)
-        if len(elements) > 2 and elements[2] is not None:
-            cls.apply_state(value, graph.decode(elements[2]))
-        if len(elements) > 3 and elements[3] is not None:
-            extend = getattr(value, "extend", None)
-            if not callable(extend):
-                raise TypeError(f"reduce target cannot accept list items: {value!r}")
-            extend(cast(Iterable[object], graph.decode(elements[3])))
-        if len(elements) > 4 and elements[4] is not None:
-            setitem = getattr(value, "__setitem__", None)
-            if not callable(setitem):
-                raise TypeError(f"reduce target cannot accept dict items: {value!r}")
-            pairs = cast(Iterable[tuple[object, object]], graph.decode(elements[4]))
-            for key, member in pairs:
-                setitem(key, member)
-        return value
-
-    @classmethod
-    def apply_state(cls, value: object, state: object) -> None:
-        """Apply pickle reduce state to a reconstructed value."""
-        del cls
-        setstate = getattr(value, "__setstate__", None)
-        if setstate is not None:
-            setstate(state)
-            return
-        dict_state: object = state
-        slots_state: object = None
-        if isinstance(state, tuple):
-            pair = cast(tuple[object, ...], state)
-            if len(pair) == 2:
-                dict_state, slots_state = pair
-        if isinstance(dict_state, dict):
-            for key, member in cast(dict[str, object], dict_state).items():
-                object.__setattr__(value, key, member)
-        if isinstance(slots_state, dict):
-            for key, member in cast(dict[str, object], slots_state).items():
-                object.__setattr__(value, key, member)
-
-
 class _GraphObjectCodec(_ImportCodec):
     """Own runtime-state object envelopes for graph serialization."""
 
@@ -3157,7 +3777,15 @@ class _GraphObjectCodec(_ImportCodec):
 
     @classmethod
     def attribute_names(cls, value: object) -> Iterable[str]:
-        """Yield stable state attributes excluding serialization bookkeeping."""
+        """Yield stable state attributes excluding serialization bookkeeping.
+
+        Args:
+          value: Value.
+
+        Yields:
+          item: Each yielded value.
+
+        """
         del cls
         skipped = frozenset(("__weakref__", "__dict__", "_finalized"))
         seen: set[str] = set()
@@ -3181,7 +3809,15 @@ class _GraphObjectCodec(_ImportCodec):
 
     @classmethod
     def has_finalized_slot(cls, target: type) -> bool:
-        """Return whether ``target`` declares ``_finalized`` in its MRO."""
+        """Return whether ``target`` declares ``_finalized`` in its MRO.
+
+        Args:
+          target: Target.
+
+        Returns:
+          result: The bool.
+
+        """
         del cls
         for base in target.__mro__:
             slots = getattr(base, "__slots__", ())
@@ -3217,209 +3853,41 @@ class _MappingProxyCodec:
 
 
 _GRAPH_DECLINED: Final = object()
+
+
 _REFERENCE_TAG: Final = "py/id"
 
-_GRAPH_CODECS: Final[tuple[type[_GraphEncodingCodec], ...]] = (
-    NullCodec,
-    BoolCodec,
-    IntCodec,
-    StrCodec,
-    FloatCodec,
-    BytesCodec,
-    PathCodec,
-    UuidCodec,
-    DatetimeCodec,
-    _TypeCodec,
-    _HookCodec,
-    _InlineCodec,
-    _FunctionCodec,
-    TupleCodec,
-    ListCodec,
-    SetCodec,
-    DictCodec,
-    DataclassCodec,
-    _ReduceCodec,
-    _GraphObjectCodec,
-    _MappingProxyCodec,
-    MappingCodec,
-    SequenceCodec,
-    AbstractSetCodec,
-)
-_GRAPH_NATIVE_CODECS: Final[Mapping[type, type[_GraphDecodingCodec]]] = (
-    MappingProxyType(
-        {
-            type(None): NullCodec,
-            bool: BoolCodec,
-            int: IntCodec,
-            float: FloatCodec,
-            str: StrCodec,
-            list: ListCodec,
-        }
-    )
-)
-_GRAPH_TAG_CODECS: Final[tuple[type[_GraphDecodingCodec], ...]] = (
-    _TypeCodec,
-    _FunctionCodec,
-    TupleCodec,
-    SetCodec,
-    BytesCodec,
-    FloatCodec,
-    PathCodec,
-    UuidCodec,
-    DatetimeCodec,
-    _ReduceCodec,
-    _HookCodec,
-    _InlineCodec,
-    _GraphObjectCodec,
-)
-_GRAPH_RESOLVE_TAGS: Final[frozenset[str]] = frozenset(
-    cast(str, codec.tag)
-    for codec in (
-        _TypeCodec,
-        _FunctionCodec,
-        _ReduceCodec,
-        _HookCodec,
-        _InlineCodec,
-        _GraphObjectCodec,
-    )
-)
 
-_RUNTIME_CODECS: Final[tuple[type[Codec], ...]] = (
-    DataclassCodec,
-    EnumCodec,
-    NullCodec,
-    BoolCodec,
-    IntCodec,
-    FloatCodec,
-    StrCodec,
-    BytesCodec,
-    PathCodec,
-    UuidCodec,
-    DatetimeCodec,
-    TupleCodec,
-    SetCodec,
-    FrozenSetCodec,
-    ListCodec,
-    DictCodec,
-    MappingCodec,
-    MutableMappingCodec,
-    SequenceCodec,
-    MutableSequenceCodec,
-    AbstractSetCodec,
-    MutableSetCodec,
-)
-_CODECS: Final[tuple[type[Codec], ...]] = (
-    _UntypedCodec,
-    _UnionCodec,
-    _LiteralCodec,
-    *_RUNTIME_CODECS,
-)
-
-# Structural tags need annotation context and therefore belong to their
-# annotation codecs rather than one runtime type.
-TYPE_TAG: Final = _OBJECT_TAG
-"""Public: names the class an encoded dataclass is.
-
-Exported because a caller that inspects an encoded body -- to check which
-member it holds before decoding -- must read the tag from here rather than
-restate the literal, which is how two consumers silently kept ``__type__``
-after it was renamed.
-"""
-
-_UNION_TAG: Final = "py/union"
-_VALUE_TAG: Final = "py/value"
-_RAW_OBJECT_TAG: Final = "py/raw"
-
-_BY_TAG: Final[Mapping[str, type[Codec]]] = MappingProxyType(
-    {
-        **{codec.tag: codec for codec in _RUNTIME_CODECS if codec.tag is not None},
-        cast(str, SetCodec.tag): FrozenSetCodec,
-    }
-)
-_TAGS: Final[frozenset[str]] = frozenset(
-    {*_BY_TAG, TYPE_TAG, _UNION_TAG, _VALUE_TAG, _RAW_OBJECT_TAG}
-)
-
-
-def _codec_for_encoding(value: object, annotation: object) -> type[Codec] | None:
-    """Return the first codec claiming an encoding operation."""
-    for codec in _CODECS:
-        if codec.is_encodable(value, annotation):
-            return codec
-    return None
-
-
-def _runtime_codec_for(value: object) -> type[Codec] | None:
-    """Return the runtime codec owning an unannotated value."""
-    for codec in _RUNTIME_CODECS:
-        if codec.is_encodable(value, None):
-            return codec
-    return None
-
-
-_BY_ANNOTATION: Final[Mapping[object, type[Codec]]] = MappingProxyType(
-    {
-        type(None): NullCodec,
-        bool: BoolCodec,
-        int: IntCodec,
-        float: FloatCodec,
-        str: StrCodec,
-        bytes: BytesCodec,
-        Path: PathCodec,
-        UUID: UuidCodec,
-        datetime: DatetimeCodec,
-        list: ListCodec,
-        tuple: TupleCodec,
-        set: SetCodec,
-        frozenset: FrozenSetCodec,
-        Sequence: SequenceCodec,
-        MutableSequence: MutableSequenceCodec,
-        AbstractSet: AbstractSetCodec,
-        MutableSet: MutableSetCodec,
-        dict: DictCodec,
-        Mapping: MappingCodec,
-        MutableMapping: MutableMappingCodec,
-    }
-)
-
-
-def _type_codec_for_resolved_annotation(resolved: object) -> type[Codec] | None:
-    """Return the runtime codec owning an already-resolved annotation."""
-    if isinstance(resolved, type) and is_dataclass(resolved):
-        return DataclassCodec
-    if isinstance(resolved, type) and issubclass(resolved, Enum):
-        return EnumCodec
-    origin = cast(object | None, get_origin(resolved))
-    for candidate, codec in _BY_ANNOTATION.items():
-        if (origin is not None and origin is candidate) or (
-            origin is None and resolved is candidate
-        ):
-            return codec
-    return None
-
-
-def _codec_for_decoding(
-    annotation: object,
-) -> tuple[type[Codec] | None, object]:
-    """Return the codec and resolved target annotation."""
-    resolved = _strip_optional(_resolve_alias(annotation))
-    if _UntypedCodec.is_annotation(annotation):
-        return _UntypedCodec, resolved
-    if _UnionCodec.is_annotation(resolved):
-        return _UnionCodec, resolved
-    if get_origin(resolved) is Literal:
-        return _LiteralCodec, resolved
-    return _type_codec_for_resolved_annotation(resolved), resolved
-
-
-class SchemaError(ValueError):
-    """Decoded JSON does not match the target dataclass's schema.
-
-    A ``ValueError`` so existing ``except ValueError`` callers keep working,
-    but named so a boundary can catch it specifically. The API maps it to
-    422: a stray key in a client-supplied body is a malformed request, and a
-    bare ``ValueError`` matched no registered handler, making it a 500.
-    """
+def _decode_untyped(raw: object, annotation: object = None) -> object:
+    """Decode JSON-native data and self-describing type tags."""
+    del annotation
+    if isinstance(raw, Mapping):
+        source = cast(Mapping[object, object], raw)
+        tagged = _unwrapped(cast(Mapping[str, object], raw), _decode_without_annotation)
+        if tagged is not None:
+            return tagged
+        if len(source) == 1 and _RAW_OBJECT_TAG in source:
+            entries = source[_RAW_OBJECT_TAG]
+            if not _is_json_sequence(entries):
+                raise TypeError(f"cannot decode {raw!r} as an untyped JSON object")
+            result: dict[str, object] = {}
+            for entry in entries:
+                if not _is_json_sequence(entry) or len(entry) != 2:
+                    raise TypeError(f"cannot decode {raw!r} as an untyped JSON object")
+                key, value = entry
+                if not isinstance(key, str):
+                    raise TypeError(f"cannot decode {raw!r} as an untyped JSON object")
+                result[key] = _decode_untyped(value)
+            return result
+        result = {}
+        for key, value in source.items():
+            if not isinstance(key, str):
+                raise TypeError(f"cannot decode mapping key {key!r} as str")
+            result[key] = _decode_untyped(value)
+        return result
+    if _is_json_sequence(raw):
+        return [_decode_untyped(value) for value in raw]
+    return _checked_json_scalar(raw, allow_nan=True)
 
 
 def _annotation_id(annotation: object, seen: set[int] | None = None) -> str:
@@ -3455,17 +3923,36 @@ def _annotation_id(annotation: object, seen: set[int] | None = None) -> str:
         seen.remove(identity)
 
 
-def _validate_encode_value(value: object, annotation: object) -> None:
-    """Reject a value that cannot decode under its declared annotation."""
-    if annotation is None or annotation is object or isinstance(annotation, TypeVar):
-        return
-    if value is None:
-        if NullCodec.is_admitted(annotation):
-            return
-        raise TypeError(f"cannot encode None as {annotation}")
-    resolved = _strip_optional(_resolve_alias(annotation))
-    if not _UnionCodec.matches_annotation(resolved, value):
-        raise TypeError(f"cannot encode {value!r} as {annotation}")
+class SchemaError(ValueError):
+    """Decoded JSON does not match the target dataclass's schema.
+
+    A ``ValueError`` so existing ``except ValueError`` callers keep working,
+    but named so a boundary can catch it specifically. The API maps it to
+    422: a stray key in a client-supplied body is a malformed request, and a
+    bare ``ValueError`` matched no registered handler, making it a 500.
+    """
+
+
+def _encode(value: object, annotation: object = None) -> JSONValue:
+    _validate_encode_value(value, annotation)
+    return _encode_with(
+        _codec_for_encoding(value, annotation),
+        value,
+        annotation,
+        encode=_encode,
+    )
+
+
+def _tagged_scalar_payload(node: object, tag: str) -> str:
+    """Return a scalar tag's string payload without coercion."""
+    assert isinstance(node, Mapping)
+    source = cast(Mapping[str, object], node)
+    if len(source) != 1:
+        raise TypeError(f"invalid {tag} envelope: {node!r}")
+    payload = source[tag]
+    if not isinstance(payload, str):
+        raise TypeError(f"invalid {tag} payload: {payload!r}")
+    return payload
 
 
 def _encode_with(
@@ -3481,81 +3968,69 @@ def _encode_with(
     return codec.encode(value, annotation, encode=encode)
 
 
+@runtime_checkable
+class _Named(Protocol):
+    """A class or function: carries both ``__module__`` and ``__qualname__``."""
+
+    __module__: str
+
+    __qualname__: str
+
+
 def _encode_untyped(value: object, annotation: object = None) -> JSONValue:
     """Encode a value through its runtime type capability."""
     del annotation
     return _encode_with(_runtime_codec_for(value), value, None, encode=_encode_untyped)
 
 
-def _encode(value: object, annotation: object = None) -> JSONValue:
-    _validate_encode_value(value, annotation)
-    return _encode_with(
-        _codec_for_encoding(value, annotation),
-        value,
-        annotation,
-        encode=_encode,
-    )
+def _codec_for_encoding(value: object, annotation: object) -> type[Codec] | None:
+    """Return the first codec claiming an encoding operation."""
+    for codec in _CODECS:
+        if codec.is_encodable(value, annotation):
+            return codec
+    return None
 
 
-def encode_value(value: object, annotation: object = None) -> JSONValue:
-    """Encode one value to JSON, tagging what JSON cannot express natively.
-
-    Safe scalar and container tags let :func:`decode` reconstruct values without
-    an annotation. Import-requiring dataclasses still need their annotation, or
-    :func:`decode_graph` with an explicit import capability. JSON-native data
-    stays untagged so the common document remains readable.
-
-    Args:
-      value: The value to encode.
-      annotation: Optional declared type, used to narrow ambiguous unions and
-        to reject a value its own hint forbids.
-
-    Returns:
-      encoded: A JSON-encodable tree.
-
-    Raises:
-      TypeError: ``value`` has no JSON representation.
-
-    """
-    return _encode(value, annotation)
+def _resolve_alias(annotation: object) -> object:
+    """Unwrap a PEP-695 alias chain to its underlying type."""
+    resolved = annotation
+    seen: set[int] = set()
+    while (identity := id(resolved)) not in seen:
+        seen.add(identity)
+        value = getattr(resolved, "__value__", None)
+        if value is None:
+            break
+        resolved = value
+    return resolved
 
 
-def _decode_without_annotation(annotation: object, raw: object) -> object:
-    """Adapt hintless decoding to the recursive decoder signature."""
-    del annotation
-    return _decode_untyped(raw)
+@runtime_checkable
+class _Callable(Protocol):
+    """A dynamically decoded callable with an erased signature."""
+
+    def __call__(self, *args: object) -> object: ...
 
 
-def _decode_untyped(raw: object, annotation: object = None) -> object:
-    """Decode JSON-native data and self-describing type tags."""
-    del annotation
-    if isinstance(raw, Mapping):
-        source = cast(Mapping[object, object], raw)
-        tagged = _unwrapped(cast(Mapping[str, object], raw), _decode_without_annotation)
-        if tagged is not None:
-            return tagged
-        if len(source) == 1 and _RAW_OBJECT_TAG in source:
-            entries = source[_RAW_OBJECT_TAG]
-            if not _is_json_sequence(entries):
-                raise TypeError(f"cannot decode {raw!r} as an untyped JSON object")
-            result: dict[str, object] = {}
-            for entry in entries:
-                if not _is_json_sequence(entry) or len(entry) != 2:
-                    raise TypeError(f"cannot decode {raw!r} as an untyped JSON object")
-                key, value = entry
-                if not isinstance(key, str):
-                    raise TypeError(f"cannot decode {raw!r} as an untyped JSON object")
-                result[key] = _decode_untyped(value)
-            return result
-        result = {}
-        for key, value in source.items():
-            if not isinstance(key, str):
-                raise TypeError(f"cannot decode mapping key {key!r} as str")
-            result[key] = _decode_untyped(value)
-        return result
-    if _is_json_sequence(raw):
-        return [_decode_untyped(value) for value in raw]
-    return _checked_json_scalar(raw, allow_nan=True)
+def _unwrapped(
+    envelope: Mapping[str, object], each: _Decode | None = None
+) -> object | None:
+    """Return a tagged value's contents, or ``None`` when untagged."""
+    if len(envelope) != 1:
+        return None
+    codec = _BY_TAG.get(next(iter(envelope)))
+    if codec is None or codec.tag is None:
+        return None
+    payload = envelope[codec.tag]
+    if each is None and codec.holds:
+        return ListCodec.coerce(payload)
+    return codec.decode(payload, None, decode=each or _decode_without_annotation)
+
+
+# A bare ``isinstance(value, Mapping)`` narrows to ``Mapping[Unknown, Unknown]`` under
+# basedpyright, and that Unknown propagates to every later use of the same name.
+def _is_str_mapping(value: object) -> TypeGuard[Mapping[str, object]]:
+    """Narrow to a JSON object, keeping the parameters both checkers need."""
+    return isinstance(value, Mapping)
 
 
 def decode(annotation: object, raw: object) -> object:
@@ -3600,43 +4075,464 @@ def decode(annotation: object, raw: object) -> object:
     return codec.decode(value, ann, decode=decode)
 
 
-def _unwrapped(
-    envelope: Mapping[str, object], each: _Decode | None = None
-) -> object | None:
-    """Return a tagged value's contents, or ``None`` when untagged."""
-    if len(envelope) != 1:
-        return None
-    codec = _BY_TAG.get(next(iter(envelope)))
-    if codec is None or codec.tag is None:
-        return None
-    payload = envelope[codec.tag]
-    if each is None and codec.holds:
-        return ListCodec.coerce(payload)
-    return codec.decode(payload, None, decode=each or _decode_without_annotation)
+def _is_json_sequence(value: object) -> TypeGuard[Sequence[object]]:
+    """Return whether ``value`` is a non-string JSON array shape."""
+    return isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    )
 
 
-def _resolve_alias(annotation: object) -> object:
-    """Unwrap a PEP-695 alias chain to its underlying type."""
-    resolved = annotation
-    seen: set[int] = set()
-    while (identity := id(resolved)) not in seen:
-        seen.add(identity)
-        value = getattr(resolved, "__value__", None)
-        if value is None:
-            break
-        resolved = value
-    return resolved
+# ``py/...`` or ``json://...``.
+def _is_reserved_key(key: str) -> bool:
+    """Report whether ``key`` would masquerade as a wire tag."""
+    return key.startswith(("py/", "json://"))
 
 
-def _strip_optional(annotation: object) -> object:
-    """Reduce ``T | None`` to ``T`` for decode dispatch; leave others alone.
+def _validate_encode_value(value: object, annotation: object) -> None:
+    """Reject a value that cannot decode under its declared annotation."""
+    if annotation is None or annotation is object or isinstance(annotation, TypeVar):
+        return
+    if value is None:
+        if NullCodec.is_admitted(annotation):
+            return
+        raise TypeError(f"cannot encode None as {annotation}")
+    resolved = _strip_optional(_resolve_alias(annotation))
+    if not _UnionCodec.matches_annotation(resolved, value):
+        raise TypeError(f"cannot encode {value!r} as {annotation}")
 
-    The survivor is alias-resolved: ``Alias | None`` where ``Alias`` is itself
-    a union reduced to the bare alias object, which is not a ``UnionType``, so
-    the union branch below never ran and the value fell through.
+
+_GRAPH_CODECS: Final[tuple[type[_GraphEncodingCodec], ...]] = (
+    NullCodec,
+    BoolCodec,
+    IntCodec,
+    StrCodec,
+    FloatCodec,
+    BytesCodec,
+    PathCodec,
+    UuidCodec,
+    DatetimeCodec,
+    _TypeCodec,
+    _HookCodec,
+    _InlineCodec,
+    _FunctionCodec,
+    TupleCodec,
+    ListCodec,
+    SetCodec,
+    DictCodec,
+    DataclassCodec,
+    _ReduceCodec,
+    _GraphObjectCodec,
+    _MappingProxyCodec,
+    MappingCodec,
+    SequenceCodec,
+    AbstractSetCodec,
+)
+
+
+_GRAPH_NATIVE_CODECS: Final[Mapping[type, type[_GraphDecodingCodec]]] = (
+    MappingProxyType(
+        {
+            type(None): NullCodec,
+            bool: BoolCodec,
+            int: IntCodec,
+            float: FloatCodec,
+            str: StrCodec,
+            list: ListCodec,
+        }
+    )
+)
+
+
+_GRAPH_TAG_CODECS: Final[tuple[type[_GraphDecodingCodec], ...]] = (
+    _TypeCodec,
+    _FunctionCodec,
+    TupleCodec,
+    SetCodec,
+    BytesCodec,
+    FloatCodec,
+    PathCodec,
+    UuidCodec,
+    DatetimeCodec,
+    _ReduceCodec,
+    _HookCodec,
+    _InlineCodec,
+    _GraphObjectCodec,
+)
+
+
+_GRAPH_RESOLVE_TAGS: Final[frozenset[str]] = frozenset(
+    cast(str, codec.tag)
+    for codec in (
+        _TypeCodec,
+        _FunctionCodec,
+        _ReduceCodec,
+        _HookCodec,
+        _InlineCodec,
+        _GraphObjectCodec,
+    )
+)
+
+
+_RUNTIME_CODECS: Final[tuple[type[Codec], ...]] = (
+    DataclassCodec,
+    EnumCodec,
+    NullCodec,
+    BoolCodec,
+    IntCodec,
+    FloatCodec,
+    StrCodec,
+    BytesCodec,
+    PathCodec,
+    UuidCodec,
+    DatetimeCodec,
+    TupleCodec,
+    SetCodec,
+    FrozenSetCodec,
+    ListCodec,
+    DictCodec,
+    MappingCodec,
+    MutableMappingCodec,
+    SequenceCodec,
+    MutableSequenceCodec,
+    AbstractSetCodec,
+    MutableSetCodec,
+)
+
+
+_CODECS: Final[tuple[type[Codec], ...]] = (
+    _UntypedCodec,
+    _UnionCodec,
+    _LiteralCodec,
+    *_RUNTIME_CODECS,
+)
+
+
+# Structural tags need annotation context and therefore belong to their
+# annotation codecs rather than one runtime type.
+TYPE_TAG: Final = _OBJECT_TAG
+"""Public: names the class an encoded dataclass is.
+
+Exported because a caller that inspects an encoded body -- to check which
+member it holds before decoding -- must read the tag from here rather than
+restate the literal, which is how two consumers silently kept ``__type__``
+after it was renamed.
+"""
+
+
+_UNION_TAG: Final = "py/union"
+
+
+_VALUE_TAG: Final = "py/value"
+
+
+_RAW_OBJECT_TAG: Final = "py/raw"
+
+
+_BY_TAG: Final[Mapping[str, type[Codec]]] = MappingProxyType(
+    {
+        **{codec.tag: codec for codec in _RUNTIME_CODECS if codec.tag is not None},
+        cast(str, SetCodec.tag): FrozenSetCodec,
+    }
+)
+
+
+_TAGS: Final[frozenset[str]] = frozenset(
+    {*_BY_TAG, TYPE_TAG, _UNION_TAG, _VALUE_TAG, _RAW_OBJECT_TAG}
+)
+
+
+_BY_ANNOTATION: Final[Mapping[object, type[Codec]]] = MappingProxyType(
+    {
+        type(None): NullCodec,
+        bool: BoolCodec,
+        int: IntCodec,
+        float: FloatCodec,
+        str: StrCodec,
+        bytes: BytesCodec,
+        Path: PathCodec,
+        UUID: UuidCodec,
+        datetime: DatetimeCodec,
+        list: ListCodec,
+        tuple: TupleCodec,
+        set: SetCodec,
+        frozenset: FrozenSetCodec,
+        Sequence: SequenceCodec,
+        MutableSequence: MutableSequenceCodec,
+        AbstractSet: AbstractSetCodec,
+        MutableSet: MutableSetCodec,
+        dict: DictCodec,
+        Mapping: MappingCodec,
+        MutableMapping: MutableMappingCodec,
+    }
+)
+
+
+def encode_value(value: object, annotation: object = None) -> JSONValue:
+    """Encode one value to JSON, tagging what JSON cannot express natively.
+
+    Safe scalar and container tags let :func:`decode` reconstruct values without
+    an annotation. Import-requiring dataclasses still need their annotation, or
+    :func:`decode_graph` with an explicit import capability. JSON-native data
+    stays untagged so the common document remains readable.
+
+    Args:
+      value: The value to encode.
+      annotation: Optional declared type, used to narrow ambiguous unions and
+        to reject a value its own hint forbids.
+
+    Returns:
+      encoded: A JSON-encodable tree.
+
+    Raises:
+      TypeError: ``value`` has no JSON representation.
+
     """
-    if _UnionCodec.is_annotation(annotation):
-        non_none = [a for a in _UnionCodec.members(annotation) if a is not type(None)]
-        if len(non_none) == 1:
-            return _resolve_alias(non_none[0])
-    return annotation
+    return _encode(value, annotation)
+
+
+def _validate_json_schema(schema: object, value: object, path: str) -> list[str]:
+    """Return recursive JSON Schema validation issue strings."""
+    if not isinstance(schema, Mapping):
+        return []
+    schema_map = cast(Mapping[str, object], schema)
+    schema_type = schema_map.get("type")
+    value_obj: object = value
+    issues = _validate_json_schema_type(schema_type, value_obj, path)
+    if issues:
+        return issues
+    # Recursion keys off the value's actual shape, not a single declared
+    # ``type``, so a union type (e.g. ``["array", "string"]``) still walks
+    # object/array children when the value is one.
+    if isinstance(value, Mapping):
+        issues.extend(
+            _validate_json_object(schema_map, cast(Mapping[str, object], value), path)
+        )
+    if _is_json_sequence(value_obj):
+        items = schema_map.get("items")
+        value_items = value_obj
+        issues.extend(
+            issue
+            for idx, item in enumerate(value_items)
+            for issue in _validate_json_schema(items, item, f"{path}[{idx}]")
+        )
+    issues.extend(_validate_json_enum(schema_map.get("enum"), value_obj, path))
+    issues.extend(_validate_json_range(schema_map, value_obj, path))
+    return issues
+
+
+# ``type`` may be a single name (``"string"``) or a list of names (``["array",
+# "string"]``, standard JSON Schema): the value matches when it satisfies any listed
+# type.
+def _validate_json_schema_type(
+    schema_type: object, value: object, path: str
+) -> list[str]:
+    """Return JSON Schema type validation issues."""
+    if isinstance(schema_type, str):
+        names = [schema_type]
+    elif isinstance(schema_type, (list, tuple)):
+        names = [t for t in cast(Sequence[object], schema_type) if isinstance(t, str)]
+    else:
+        return []
+    if not names or any(_matches_json_schema_type(t, value) for t in names):
+        return []
+    expected = names[0] if len(names) == 1 else " or ".join(names)
+    return [f"Parameter `{path or '<root>'}` must be {expected}."]
+
+
+def _matches_json_schema_type(schema_type: str, value: object) -> bool:
+    """Return whether ``value`` matches a JSON Schema type name."""
+    if schema_type == "object":
+        return isinstance(value, Mapping)
+    if schema_type == "array":
+        return _is_json_sequence(value)
+    if schema_type == "string":
+        return isinstance(value, str)
+    if schema_type == "integer":
+        return (isinstance(value, int) and not isinstance(value, bool)) or (
+            isinstance(value, float) and value.is_integer()
+        )
+    if schema_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if schema_type == "boolean":
+        return isinstance(value, bool)
+    if schema_type == "null":
+        return value is None
+    return True
+
+
+def _validate_json_enum(enum: object, value: object, path: str) -> list[str]:
+    """Return JSON Schema enum validation issues."""
+    if not isinstance(enum, (list, tuple)):
+        return []
+    enum_values = cast(Sequence[object], enum)
+    # ``in`` compares by ``==``, and ``True == 1`` in Python -- so a boolean
+    # satisfied a numeric enum and vice versa. JSON Schema types them apart, as
+    # the type check in this module already does.
+    if any(same_json_value(value, member) for member in enum_values):
+        return []
+    return [
+        (
+            f"Parameter `{path or '<root>'}` must be one of "
+            f"{_json_enum_values(enum_values)}."
+        )
+    ]
+
+
+def _validate_json_range(
+    schema: Mapping[str, object], value: object, path: str
+) -> list[str]:
+    """Return numeric range validation issues."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return []
+    issues: list[str] = []
+    minimum = schema.get("minimum")
+    if isinstance(minimum, (int, float)) and (
+        (isinstance(value, float) and math.isnan(value)) or value < minimum
+    ):
+        issues.append(f"Parameter `{path or '<root>'}` must be >= {minimum}.")
+    maximum = schema.get("maximum")
+    if isinstance(maximum, (int, float)) and (
+        (isinstance(value, float) and math.isnan(value)) or value > maximum
+    ):
+        issues.append(f"Parameter `{path or '<root>'}` must be <= {maximum}.")
+    return issues
+
+
+def _validate_json_object(
+    schema: Mapping[str, object],
+    args: Mapping[str, object],
+    path: str,
+) -> list[str]:
+    """Return object-schema validation issue strings."""
+    required = _schema_strings(schema.get("required"))
+    props_raw = schema.get("properties")
+    props: Mapping[str, object] = (
+        cast(Mapping[str, object], props_raw) if isinstance(props_raw, Mapping) else {}
+    )
+    issues = [
+        f"The required parameter `{f'{path}.{key}' if path else key}` is missing."
+        for key in required
+        if key not in args
+    ]
+    additional_properties_raw = schema.get("additionalProperties")
+    additional_properties: Mapping[str, object] | None = None
+    if isinstance(additional_properties_raw, Mapping):
+        additional_properties = cast(Mapping[str, object], additional_properties_raw)
+    if additional_properties_raw is False:
+        issues.extend(
+            f"Unexpected parameter `{f'{path}.{key}' if path else key}`."
+            for key in args
+            if key not in props
+        )
+    for key, item in args.items():
+        child_schema = props.get(key)
+        if child_schema is not None:
+            issues.extend(
+                _validate_json_schema(
+                    child_schema,
+                    item,
+                    f"{path}.{key}" if path else key,
+                )
+            )
+        elif additional_properties is not None:
+            issues.extend(
+                _validate_json_schema(
+                    additional_properties,
+                    item,
+                    f"{path}.{key}" if path else key,
+                )
+            )
+    return issues
+
+
+def _schema_strings(value: object) -> list[str]:
+    """Return string items from a schema list field."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    items = cast(Sequence[object], value)
+    return [item for item in items if isinstance(item, str)]
+
+
+def _json_enum_values(enum: Sequence[object]) -> str:
+    """Return a compact display string for enum values."""
+    return ", ".join(repr(item) for item in enum)
+
+
+def _provider_json_value(key: str, value: object) -> JSONValue:
+    """Validate one provider field and name it in failures."""
+    try:
+        json_freeze(value)
+    except TypeError as exc:
+        raise TypeError(f"field {key!r}: {exc}") from exc
+    return cast(JSONValue, value)
+
+
+def _replay_envelope(stored: Mapping[str, object]) -> dict[str, object] | None:
+    """Return a valid internal replay envelope, if present."""
+    raw = stored.get(_FIELD_STATE_TAG)
+    if not isinstance(raw, Mapping):
+        return None
+    envelope = {
+        key: value
+        for key, value in cast(Mapping[object, object], raw).items()
+        if isinstance(key, str)
+    }
+    if IntCodec.coerce(envelope.get("version"), 0) != 1:
+        return None
+    if not isinstance(envelope.get("order"), list):
+        return None
+    states = envelope.get("states")
+    if not isinstance(states, Mapping):
+        return None
+    if any(
+        not isinstance(key, str) or label not in ("null", "value")
+        for key, label in cast(Mapping[object, object], states).items()
+    ):
+        return None
+    if not isinstance(envelope.get("residual"), Mapping):
+        return None
+    if "raw" in envelope and not isinstance(envelope["raw"], Mapping):
+        return None
+    return envelope
+
+
+def _respelled(value: JSONValue) -> bool:
+    """Whether a round trip could write this value a different way."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _runtime_codec_for(value: object) -> type[Codec] | None:
+    """Return the runtime codec owning an unannotated value."""
+    for codec in _RUNTIME_CODECS:
+        if codec.is_encodable(value, None):
+            return codec
+    return None
+
+
+def _type_codec_for_resolved_annotation(resolved: object) -> type[Codec] | None:
+    """Return the runtime codec owning an already-resolved annotation."""
+    if isinstance(resolved, type) and is_dataclass(resolved):
+        return DataclassCodec
+    if isinstance(resolved, type) and issubclass(resolved, Enum):
+        return EnumCodec
+    origin = cast(object | None, get_origin(resolved))
+    for candidate, codec in _BY_ANNOTATION.items():
+        if (origin is not None and origin is candidate) or (
+            origin is None and resolved is candidate
+        ):
+            return codec
+    return None
+
+
+def _codec_for_decoding(
+    annotation: object,
+) -> tuple[type[Codec] | None, object]:
+    """Return the codec and resolved target annotation."""
+    resolved = _strip_optional(_resolve_alias(annotation))
+    if _UntypedCodec.is_annotation(annotation):
+        return _UntypedCodec, resolved
+    if _UnionCodec.is_annotation(resolved):
+        return _UnionCodec, resolved
+    if get_origin(resolved) is Literal:
+        return _LiteralCodec, resolved
+    return _type_codec_for_resolved_annotation(resolved), resolved

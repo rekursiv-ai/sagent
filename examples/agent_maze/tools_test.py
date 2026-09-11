@@ -175,7 +175,8 @@ def test_spawn_blocked_at_capacity() -> None:
     eng.add_agent("a0", (7, 1))
     tok = agent_label_var.set("a0")
 
-    def fake(_parent: str, _xy: tuple[int, int]) -> str:
+    def fake(parent: str, xy: tuple[int, int]) -> str:
+        del parent, xy
         return "a1"
 
     try:
@@ -186,3 +187,9 @@ def test_spawn_blocked_at_capacity() -> None:
     finally:
         agent_label_var.reset(tok)
         _clear(["a0"])
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing.main import test_main
+
+    test_main(__file__)

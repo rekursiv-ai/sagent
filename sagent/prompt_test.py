@@ -41,7 +41,8 @@ def stub_recipe_and_helpers() -> Iterator[None]:
             return sections
         return {}
 
-    def fake_recipe_list(_section: str, _key: str) -> list[str]:
+    def fake_recipe_list(section: str, key: str) -> list[str]:
+        del section, key
         return []
 
     def fake_read_asset(path: object) -> str:
@@ -286,7 +287,8 @@ def test_include_memory_vs_recipe_sections(
 ) -> None:
     """`include_memory` is an AND-gate with the recipe ``sections`` list."""
 
-    def fake_recipe_list(_section: str, _key: str) -> list[str]:
+    def fake_recipe_list(section: str, key: str) -> list[str]:
+        del section, key
         return sections or []
 
     monkeypatch.setattr("sagent.prompt.recipe_list", fake_recipe_list)

@@ -45,6 +45,7 @@ class _OfflineEcho(MockModelCaps):
     max_image_dim: int = 2000
 
     model_id: str = "offline-echo"
+
     max_request_tokens: int = 100_000
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:

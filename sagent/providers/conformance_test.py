@@ -266,3 +266,9 @@ def test_provider_protocol_members_are_callable() -> None:
     """Sanity: the Provider contract exposes the expected factory surface."""
     assert "model" in _PROVIDER_MEMBERS
     assert "utility_model" in _PROVIDER_MEMBERS
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing.main import test_main
+
+    test_main(__file__)

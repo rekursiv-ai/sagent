@@ -113,3 +113,9 @@ def test_frozen_after_solve_drops_post_win_actions() -> None:
     eng.press("a0", "a1")
     assert eng.t == t_at_win  # frozen: no further ticks
     assert len(eng.events) == n_events  # frozen: no further events
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing.main import test_main
+
+    test_main(__file__)

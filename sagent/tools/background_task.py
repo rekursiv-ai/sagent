@@ -57,9 +57,13 @@ class BackgroundTask:
     """Tool: list, cancel, or foreground background tasks."""
 
     name: str = "BackgroundTask"
+
     tool_id: str = "application/x-tool-backgroundtask"
+
     clearable_results: bool = False
+
     description: str = load_tool_description("BackgroundTask")
+
     directive_schema: JSON = json_freeze(
         {
             "type": "object",

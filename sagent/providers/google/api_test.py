@@ -223,7 +223,8 @@ async def test_google_stream_parses_text_tool_call_and_finish_reason() -> None:
         b'"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}\n\n'
     )
 
-    def handle(_request: httpx2.Request) -> httpx2.Response:
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        del request
         return httpx2.Response(
             200,
             content=sse_body,
@@ -261,7 +262,8 @@ async def test_google_stream_routes_thought_parts_to_thinking() -> None:
         if isinstance(ev, ModelResponseThinking):
             thinking_chunks.append(ev.text)
 
-    def handle(_request: httpx2.Request) -> httpx2.Response:
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        del request
         return httpx2.Response(
             200,
             content=sse_body,
@@ -292,7 +294,8 @@ async def test_google_stream_logs_and_skips_malformed_json_chunk(
         b'data: {"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}\n\n'
     )
 
-    def handle(_request: httpx2.Request) -> httpx2.Response:
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        del request
         return httpx2.Response(
             200,
             content=sse_body,
@@ -316,7 +319,8 @@ async def test_google_stream_logs_and_skips_malformed_json_chunk(
 async def test_google_stream_eof_without_finish_reason_raises_interrupted() -> None:
     sse_body = b'data: {"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}\n\n'
 
-    def handle(_request: httpx2.Request) -> httpx2.Response:
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        del request
         return httpx2.Response(
             200,
             content=sse_body,
@@ -336,7 +340,8 @@ async def test_google_stream_eof_without_finish_reason_raises_interrupted() -> N
 async def test_google_stream_raises_when_all_json_chunks_are_malformed() -> None:
     sse_body = b"data: {not-json}\n\ndata: also-not-json\n\n"
 
-    def handle(_request: httpx2.Request) -> httpx2.Response:
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        del request
         return httpx2.Response(
             200,
             content=sse_body,
@@ -359,7 +364,8 @@ async def test_google_stream_max_tokens_finish_reason() -> None:
         b'"finishReason":"MAX_TOKENS"}]}\n\n'
     )
 
-    def handle(_request: httpx2.Request) -> httpx2.Response:
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        del request
         return httpx2.Response(
             200,
             content=sse_body,
@@ -594,7 +600,8 @@ async def test_google_stream_413_token_body_raises_prompt_too_long() -> None:
     window helps) rather than routing to byte-overflow recovery.
     """
 
-    def handle(_request: httpx2.Request) -> httpx2.Response:
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        del request
         return httpx2.Response(413, text="Input too large for model context.")
 
     transport = httpx2.MockTransport(handle)
@@ -613,7 +620,8 @@ async def test_google_stream_413_byte_body_raises_request_too_large() -> None:
     byte-overflow recovery (shed attachment bytes), not token-overflow.
     """
 
-    def handle(_request: httpx2.Request) -> httpx2.Response:
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        del request
         return httpx2.Response(413, text="Request entity too large.")
 
     transport = httpx2.MockTransport(handle)
@@ -628,7 +636,8 @@ async def test_google_stream_413_byte_body_raises_request_too_large() -> None:
 async def test_google_stream_400_exceeds_maximum_normalizes() -> None:
     """The ``exceeds the maximum`` substring is the canonical Gemini overflow phrase."""
 
-    def handle(_request: httpx2.Request) -> httpx2.Response:
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        del request
         return httpx2.Response(
             400, text="The input token count exceeds the maximum allowed."
         )
@@ -665,7 +674,8 @@ async def test_google_stream_500_with_overflow_keyword_is_http_error_not_overflo
 ):
     """Stream 5xx with overflow keywords propagates as HTTPStatusError."""
 
-    def handle(_request: httpx2.Request) -> httpx2.Response:
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        del request
         return httpx2.Response(500, text="internal error: too long traceback")
 
     transport = httpx2.MockTransport(handle)
@@ -698,7 +708,8 @@ async def test_google_actual_request_tokens_hits_count_tokens_endpoint() -> None
 
 @pytest.mark.asyncio
 async def test_google_stream_400_other_raises_value_error() -> None:
-    def handle(_request: httpx2.Request) -> httpx2.Response:
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        del request
         return httpx2.Response(400, text="malformed request body")
 
     transport = httpx2.MockTransport(handle)
@@ -711,12 +722,16 @@ async def test_google_stream_400_other_raises_value_error() -> None:
 
 class _StubTool:
     name: str = "Echo"
+
     tool_id: str = "application/x-tool-echo"
+
     description: str = "Echo"
+
     directive_schema: JSON = {  # noqa: RUF012 -- test stub
         "type": "object",
         "additionalProperties": False,
     }
+
     clearable_results: bool = False
 
     def summary(self, args: Mapping[str, object]) -> str:

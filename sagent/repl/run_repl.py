@@ -619,9 +619,13 @@ class _ParsedModelArgs:
     """
 
     provider: str | None = None
+
     auth: str | None = None
+
     account: str | None = None
+
     account_set: bool = False
+
     model_id: str | None = None
 
 

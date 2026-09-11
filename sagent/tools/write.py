@@ -32,9 +32,13 @@ class Write:
     """Create or overwrite files."""
 
     name = "Write"
+
     tool_id = "application/x-tool-write"
+
     clearable_results = False
+
     description = load_tool_description("Write")
+
     directive_schema = json_freeze(
         {
             "type": "object",

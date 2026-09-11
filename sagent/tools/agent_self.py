@@ -70,9 +70,13 @@ class AgentSelf:
     """Tool: patch the current agent state."""
 
     name: str = "AgentSelf"
+
     tool_id: str = "application/x-tool-agentself"
+
     clearable_results: bool = False
+
     description: str = load_tool_description("agentself")
+
     directive_schema: JSON = json_freeze(
         {
             "type": "object",

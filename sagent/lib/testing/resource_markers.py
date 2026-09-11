@@ -17,11 +17,29 @@ class MarkedItem(Protocol):
     caller holding anything marker-shaped satisfies it.
     """
 
-    def iter_markers(self, name: str | None = ...) -> Iterator[pytest.Mark]: ...
+    def iter_markers(self, name: str | None = ...) -> Iterator[pytest.Mark]:
+        """Iterate over markers, optionally filtered by name.
+
+        Args:
+          name: Name.
+
+        Returns:
+          result: The Iterator[pytest.Mark].
+
+        """
+        ...
 
     def add_marker(
         self, marker: str | pytest.MarkDecorator, *, append: bool = ...
-    ) -> None: ...
+    ) -> None:
+        """Add marker.
+
+        Args:
+          marker: Marker.
+          append: Append.
+
+        """
+        ...
 
 
 def resource_marker_family(
@@ -37,7 +55,16 @@ def resource_marker_family(
         "network",
     ),
 ) -> str:
-    """Return the selector family encoded by a resource marker prefix."""
+    """Return the selector family encoded by a resource marker prefix.
+
+    Args:
+      marker: Marker.
+      resource_families: Resource families.
+
+    Returns:
+      family: The str.
+
+    """
     family, separator, _specific = marker.partition("_")
     assert separator
     assert family in resource_families
@@ -49,7 +76,13 @@ def pytest_collection_modifyitems(
     config: pytest.Config,
     items: list[pytest.Item],
 ) -> None:
-    """Derive timeouts and skips from concrete resource markers."""
+    """Derive timeouts and skips from concrete resource markers.
+
+    Args:
+      config: Config.
+      items: Items.
+
+    """
     apply_resource_markers(
         items,
         resource_markers=registered_resource_markers(config),
@@ -69,7 +102,16 @@ def registered_resource_markers(
         "network",
     ),
 ) -> tuple[str, ...]:
-    """Return registered concrete resource markers from pytest config."""
+    """Return registered concrete resource markers from pytest config.
+
+    Args:
+      config: Config.
+      resource_families: Resource families.
+
+    Returns:
+      result: The tuple[str, ...].
+
+    """
     configured = cast(list[str], config.getini("markers"))
     marker_names = tuple(marker.partition(":")[0] for marker in configured)
     return tuple(
@@ -135,7 +177,16 @@ def resource_marker_aliases(
         ("network_wandb", ("integration",)),
     ),
 ) -> tuple[str, ...]:
-    """Return legacy selector marks for a concrete resource marker."""
+    """Return legacy selector marks for a concrete resource marker.
+
+    Args:
+      marker: Marker.
+      aliases: Aliases.
+
+    Returns:
+      candidate_aliases: The tuple[str, ...].
+
+    """
     for candidate, candidate_aliases in aliases:
         if marker == candidate:
             return candidate_aliases
@@ -179,7 +230,17 @@ def resource_marker_timeout(
         ("network_together", 4800),
     ),
 ) -> int:
-    """Return a marker's specific timeout, falling back to its category."""
+    """Return a marker's specific timeout, falling back to its category.
+
+    Args:
+      marker: Marker.
+      category_timeouts: Category timeouts.
+      specific_timeouts: Specific timeouts.
+
+    Returns:
+      result: The int.
+
+    """
     specific = dict(specific_timeouts)
     if marker in specific:
         return specific[marker]
@@ -211,7 +272,16 @@ def apply_resource_markers(
     live_llm_marks: tuple[str, ...] = ("cli_claude", "cli_codex", "real_llm"),
     live_llm_env_var: str = "RUN_REAL_LLM",
 ) -> None:
-    """Apply virtual family markers, timeout budgets, and skip policy."""
+    """Apply virtual family markers, timeout budgets, and skip policy.
+
+    Args:
+      items: Items.
+      resource_markers: Resource markers.
+      ci_skipped_marks: Ci skipped marks.
+      live_llm_marks: Live llm marks.
+      live_llm_env_var: Live llm env var.
+
+    """
     known_resources = set(resource_markers)
     for item in items:
         # One marker walk per item: ``get_closest_marker`` re-walks the whole

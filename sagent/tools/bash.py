@@ -156,9 +156,13 @@ class Bash:
     # Without the annotation these stay plain class attributes, excluded
     # from the constructor and unshadowable.
     name = "Bash"
+
     tool_id = "application/x-tool-bash"
+
     description = _render_bash_description(load_tool_description("Bash"))
+
     clearable_results = True
+
     directive_schema = json_freeze(
         {
             "type": "object",
@@ -193,13 +197,21 @@ class Bash:
     )
 
     peers: Sequence[object] = ()
+
     command_head_rows: Annotated[int, CLI_SETTABLE] = 3
+
     command_tail_rows: Annotated[int, CLI_SETTABLE] = 1
+
     command_lang: Annotated[str, CLI_SETTABLE] = "bash"
+
     output: Annotated[Toggle, CLI_SETTABLE] = "on"
+
     output_head_rows: Annotated[int, CLI_SETTABLE] = 2
+
     output_tail_rows: Annotated[int, CLI_SETTABLE] = 2
+
     output_max_width: Annotated[int, CLI_SETTABLE] = 0
+
     output_wrap: Annotated[Wrap, CLI_SETTABLE] = "wrap"
 
     def summary(self, args: Mapping[str, object]) -> str:

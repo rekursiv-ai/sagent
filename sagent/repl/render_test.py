@@ -891,12 +891,6 @@ def test_tool_result_content_is_width_chopped() -> None:
     assert printer.tool_outputs == ["abc\u2026"]
 
 
-if __name__ == "__main__":
-    from sagent.lib.testing.main import test_main
-
-    test_main(__file__)
-
-
 def test_service_suspended_surfaces_the_provider_message() -> None:
     """The provider's explanation must reach the banner.
 
@@ -943,3 +937,9 @@ def test_service_suspended_truncates_a_long_provider_message() -> None:
     assert len(text) < 200
     assert "resumes in 7s" in text
     assert text.endswith("]")
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing.main import test_main
+
+    test_main(__file__)

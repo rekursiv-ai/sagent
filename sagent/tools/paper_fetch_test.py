@@ -267,8 +267,9 @@ def test_run_multi_joined_output_order(tmp_path: Path) -> None:
     sources = {"1234.11111": "arxiv", "10.1234/bb": "open_access"}
 
     def fake_download(
-        _kind: str, canonical: str, *, oa_url: str | None, oa_looked_up: bool
+        kind: str, canonical: str, *, oa_url: str | None, oa_looked_up: bool
     ) -> tuple[bytes, str]:
+        del kind
         del oa_url, oa_looked_up
         return _FAKE_PDF, sources[canonical]
 
@@ -295,8 +296,9 @@ def test_run_multi_error_if_any_id_fails(tmp_path: Path) -> None:
     err = NotFoundError("No source returned a PDF for doi:10.1234/bb.")
 
     def fake_download(
-        _kind: str, canonical: str, *, oa_url: str | None, oa_looked_up: bool
+        kind: str, canonical: str, *, oa_url: str | None, oa_looked_up: bool
     ) -> tuple[bytes, str]:
+        del kind
         del oa_url, oa_looked_up
         if canonical == "10.1234/bb":
             raise err

@@ -72,8 +72,11 @@ class StubProviderModel(MockModelCaps):
     """Scripted provider model. Always returns one response then `done`."""
 
     model_id: str = "stub"
+
     max_request_tokens: int = 100_000
+
     responses: list[AssistantMessage] = field(default_factory=list)
+
     _idx: int = field(default=0, init=False)
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
@@ -728,6 +731,7 @@ class _ThinkingEffortModel(StubProviderModel):
     """Stub model advertising thinking and graded effort."""
 
     supports_thinking: bool = True
+
     valid_efforts: tuple[ThinkingEffort, ...] = ("low", "high")
 
 

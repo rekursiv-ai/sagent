@@ -1556,8 +1556,9 @@ class TestFlushLogSplitting:
         sent: list[str] = []
 
         async def _capture(
-            _self: Slack, channel: str, text: str, thread_ts: str = ""
+            self: Slack, channel: str, text: str, thread_ts: str = ""
         ) -> str:
+            del self
             del channel, thread_ts
             sent.append(text)
             return "ok"

@@ -54,6 +54,7 @@ class LiveLimits:
     """Token limits a live API reported for one model."""
 
     max_request_tokens: int
+
     max_response_tokens: int
 
 
@@ -340,7 +341,7 @@ async def _run() -> int:
 
 
 def main() -> int:
-    """The main function. Return the process exit code."""
+    """Run the program; return the process exit code."""
     return asyncio.run(_run())
 
 

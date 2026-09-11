@@ -209,9 +209,13 @@ class _StubBash:
     """Full ``Tool`` implementation; the preamble helpers take real tools."""
 
     name: str = "Bash"
+
     tool_id: str = "application/x-tool-bash"
+
     description: str = "Run shell"
+
     directive_schema: JSON = MappingProxyType({"type": "object"})
+
     clearable_results: bool = True
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -356,7 +360,9 @@ class _StubProvider:
     """Minimal provider stand-in to exercise ``SelfHostedModel`` properties."""
 
     hosted_max_request_tokens: int = 1234
+
     hosted_model_id: str = "stub/qwen"
+
     hosted_max_response_tokens: int = 567
 
     @property

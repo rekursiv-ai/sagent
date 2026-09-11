@@ -246,3 +246,9 @@ def test_concurrent_extract_does_not_corrupt_heap(tmp_path: Path) -> None:
 
     assert not errors, errors
     assert len(results) == len(paths) * 4
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing.main import test_main
+
+    test_main(__file__)

@@ -60,3 +60,9 @@ async def test_gpt_56_subscription_turn(model_id: str, effort: ThinkingEffort) -
     finally:
         await model.close()
     assert response.message.text.strip() == "OK"
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing.main import test_main
+
+    test_main(__file__)

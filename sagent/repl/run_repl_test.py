@@ -149,7 +149,8 @@ def test_install_input_queue_committer_preserves_existing_before_tool_spawn_hook
 ):
     original_error = ModelResponseError(RuntimeError("too many tool rounds"))
 
-    def _original(_message: AssistantMessage) -> RuntimeEvent | None:
+    def _original(message: AssistantMessage) -> RuntimeEvent | None:
+        del message
         return original_error
 
     agent = _QueueAgent()
@@ -194,7 +195,8 @@ def test_install_input_queue_committer_composes_later_before_tool_spawn_hook() -
     _ = install_input_queue_committer(_as_queue_agent(agent), queues)
     later_error = ModelResponseError(RuntimeError("later hook"))
 
-    def _later(_message: AssistantMessage) -> RuntimeEvent | None:
+    def _later(message: AssistantMessage) -> RuntimeEvent | None:
+        del message
         return later_error
 
     agent.runtime.before_tool_spawn = _later
@@ -258,7 +260,8 @@ def test_install_input_queue_committer_uninstall_preserves_later_hook() -> None:
     uninstall = install_input_queue_committer(_as_queue_agent(agent), queues)
     later_error = ModelResponseError(RuntimeError("later owner"))
 
-    def _later_hook(_message: AssistantMessage) -> RuntimeEvent | None:
+    def _later_hook(message: AssistantMessage) -> RuntimeEvent | None:
+        del message
         return later_error
 
     agent.runtime.before_tool_spawn = _later_hook
@@ -386,8 +389,11 @@ def test_provider_switch_preserves_current_model_when_new_provider_knows_it() ->
 @dataclass(slots=True, kw_only=True)
 class _FakeModel:
     model_id: str = "claude-opus-4-7"
+
     supports_thinking: bool = True
+
     supports_redaction: bool = True
+
     valid_efforts: tuple[ThinkingEffort, ...] = (
         "low",
         "medium",
@@ -395,6 +401,7 @@ class _FakeModel:
         "xhigh",
         "max",
     )
+
     _provider: object | None = None
 
     @property
@@ -445,10 +452,15 @@ class _FakeInbox:
 @dataclass(slots=True, kw_only=True)
 class _FakeRuntime:
     inbox: _FakeInbox = field(default_factory=_FakeInbox)
+
     model_call: object = None
+
     compact_task: object = None
+
     cohort: set[str] = field(default_factory=set)
+
     running_tools: tuple[object, ...] = ()
+
     service_suspended_until: float | None = None
 
 
@@ -460,21 +472,31 @@ class _RuntimeHolder:
 @dataclass(slots=True, kw_only=True)
 class _FakeAgent:
     model: _FakeModel = field(default_factory=_FakeModel)
+
     model_recipe: ModelRecipe | None = field(
         default_factory=lambda: ModelRecipe(
             provider="Anthropic", auth="api", model_id="claude-opus-4-7"
         ),
     )
+
     runtime: _FakeRuntime = field(default_factory=_FakeRuntime)
+
     work: object = None
+
     swap_calls: list[tuple[_FakeModel, ModelRecipe | None]] = field(
         default_factory=list
     )
+
     change_model_calls: list[dict[str, object]] = field(default_factory=list)
+
     change_model_result: ModelRecipe | None = None
+
     change_model_side_effect: BaseException | None = None
+
     relogin_calls: int = 0
+
     relogin_side_effect: BaseException | None = None
+
     background: dict[str, BackgroundTaskEntry] = field(default_factory=dict)
 
     # No thinking / effort / tier fields: every knob is the MODEL's, so a
@@ -531,7 +553,9 @@ def _as_agent(a: _FakeAgent) -> Agent:
 @dataclass(slots=True, kw_only=True)
 class _QueueRuntime:
     inbox: _FakeInbox = field(default_factory=_FakeInbox)
+
     before_tool_spawn: Callable[[AssistantMessage], RuntimeEvent | None] | None = None
+
     observers: list[Callable[[RuntimeEvent], None]] = field(default_factory=list)
 
 
@@ -905,10 +929,15 @@ async def test_run_repl_invokes_replay_messages(
     @dataclass(slots=True, kw_only=True)
     class _Holder:
         runtime: agent_runtime.AgentRuntime
+
         show_thinking: bool = False
+
         name: str = "test"
+
         status: str | None = None
+
         session_dir: object | None = None
+
         background: dict[str, BackgroundTaskEntry] = field(default_factory=dict)
 
         async def serve_forever(self) -> None:
@@ -929,14 +958,16 @@ async def test_run_repl_invokes_replay_messages(
 
     calls: list[object] = []
 
-    def _recording_replay(agent: object, _printer: object) -> None:
+    def _recording_replay(agent: object, printer: object) -> None:
+        del printer
         calls.append(agent)
 
     fake_pump: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
 
     def _stub_spawn(
-        _agent: object, _source: object, **_kwargs: object
+        agent: object, source: object, **_kwargs: object
     ) -> asyncio.Task[None]:
+        del agent, source
         return fake_pump
 
     run_repl_mod = sys.modules["sagent.repl.run_repl"]
@@ -976,10 +1007,15 @@ async def test_run_repl_unwinds_observers_and_before_tool_spawn(
     @dataclass(slots=True, kw_only=True)
     class _Holder:
         runtime: agent_runtime.AgentRuntime
+
         show_thinking: bool = False
+
         name: str = "test"
+
         status: str | None = None
+
         session_dir: object | None = None
+
         background: dict[str, BackgroundTaskEntry] = field(default_factory=dict)
 
         async def serve_forever(self) -> None:
@@ -1003,20 +1039,22 @@ async def test_run_repl_unwinds_observers_and_before_tool_spawn(
     def _stub_session(*_args: object, **_kwargs: object) -> MagicMock:
         return MagicMock()
 
-    def _stub_history(_path: object) -> MagicMock:
+    def _stub_history(path: object) -> MagicMock:
+        del path
         return MagicMock()
 
     def _stub_input_source(*_args: object, **_kwargs: object) -> MagicMock:
         return MagicMock()
 
-    def _stub_replay(_agent: object, _printer: object) -> None:
-        return None
+    def _stub_replay(agent: object, printer: object) -> None:
+        del agent, printer
 
     fake_pump: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
 
     def _stub_spawn(
-        _agent: object, _source: object, **_kwargs: object
+        agent: object, source: object, **_kwargs: object
     ) -> asyncio.Task[None]:
+        del agent, source
         return fake_pump
 
     run_repl_mod = sys.modules["sagent.repl.run_repl"]
@@ -1059,10 +1097,15 @@ async def test_run_repl_unwinds_when_setup_raises_after_install(
     @dataclass(slots=True, kw_only=True)
     class _Holder:
         runtime: agent_runtime.AgentRuntime
+
         show_thinking: bool = False
+
         name: str = "test"
+
         status: str | None = None
+
         session_dir: object | None = None
+
         background: dict[str, BackgroundTaskEntry] = field(default_factory=dict)
 
         async def serve_forever(self) -> None:
@@ -1081,14 +1124,16 @@ async def test_run_repl_unwinds_when_setup_raises_after_install(
     def _stub_mock(*_args: object, **_kwargs: object) -> MagicMock:
         return MagicMock()
 
-    def _raising_replay(_agent: object, _printer: object) -> None:
+    def _raising_replay(agent: object, printer: object) -> None:
+        del agent, printer
         raise RuntimeError("corrupt tape")
 
     fake_pump: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
 
     def _stub_spawn(
-        _agent: object, _source: object, **_kwargs: object
+        agent: object, source: object, **_kwargs: object
     ) -> asyncio.Task[None]:
+        del agent, source
         return fake_pump
 
     run_repl_mod = sys.modules["sagent.repl.run_repl"]
@@ -1110,9 +1155,9 @@ async def test_run_repl_unwinds_when_setup_raises_after_install(
     )
 
 
-def _noop_replay(_agent: object, _printer: object) -> None:
+def _noop_replay(agent: object, printer: object) -> None:
     """Stand-in for ``replay_messages`` in run_repl teardown tests."""
-    return
+    del agent, printer
 
 
 @pytest.mark.asyncio
@@ -1135,10 +1180,15 @@ async def test_run_repl_unwinds_when_teardown_step_raises(
     @dataclass(slots=True, kw_only=True)
     class _Holder:
         runtime: agent_runtime.AgentRuntime
+
         show_thinking: bool = False
+
         name: str = "test"
+
         status: str | None = None
+
         session_dir: object | None = None
+
         background: dict[str, BackgroundTaskEntry] = field(default_factory=dict)
 
         async def serve_forever(self) -> None:
@@ -1161,8 +1211,9 @@ async def test_run_repl_unwinds_when_teardown_step_raises(
     fake_pump: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
 
     def _stub_spawn(
-        _agent: object, _source: object, **_kwargs: object
+        agent: object, source: object, **_kwargs: object
     ) -> asyncio.Task[None]:
+        del agent, source
         return fake_pump
 
     run_repl_mod = sys.modules["sagent.repl.run_repl"]
@@ -1202,10 +1253,15 @@ async def test_run_repl_creates_history_parent_directory(
     @dataclass(slots=True, kw_only=True)
     class _Holder:
         runtime: agent_runtime.AgentRuntime
+
         show_thinking: bool = False
+
         name: str = "test"
+
         status: str | None = None
+
         session_dir: object | None = None
+
         background: dict[str, BackgroundTaskEntry] = field(default_factory=dict)
 
         async def serve_forever(self) -> None:
@@ -1224,14 +1280,15 @@ async def test_run_repl_creates_history_parent_directory(
     def _stub_mock(*_args: object, **_kwargs: object) -> MagicMock:
         return MagicMock()
 
-    def _stub_replay(_agent: object, _printer: object) -> None:
-        return None
+    def _stub_replay(agent: object, printer: object) -> None:
+        del agent, printer
 
     fake_pump: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
 
     def _stub_spawn(
-        _agent: object, _source: object, **_kwargs: object
+        agent: object, source: object, **_kwargs: object
     ) -> asyncio.Task[None]:
+        del agent, source
         return fake_pump
 
     run_repl_mod = sys.modules["sagent.repl.run_repl"]
@@ -1450,6 +1507,7 @@ class _ScriptedModel:
     """Returns successive scripted assistant messages, one per call."""
 
     messages: list[AssistantMessage]
+
     _index: int = 0
 
     async def stream(
@@ -1469,6 +1527,7 @@ class _SlowTool:
     """A tool that blocks long enough to still be running at detach time."""
 
     name: str = "echo"
+
     call_count: int = 0
 
     async def run(self, args: Mapping[str, object]) -> ToolResult:
@@ -1492,7 +1551,9 @@ class _GatedTool:
     """
 
     release: asyncio.Event
+
     name: str = "echo"
+
     started: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def run(self, args: Mapping[str, object]) -> ToolResult:
@@ -1511,7 +1572,9 @@ class _GatedModel:
     """Streams once it is released; lets a test hold the runtime mid-stream."""
 
     release: asyncio.Event
+
     text: str = "answered"
+
     started: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def stream(
@@ -1531,6 +1594,7 @@ class _GatedCompactor:
     """Blocks compaction until released; holds the runtime mid-compaction."""
 
     release: asyncio.Event
+
     started: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def compact(
@@ -2161,6 +2225,7 @@ async def test_repl_commit_during_cohort_preempts_tools_to_background() -> None:
     @dataclass(kw_only=True, slots=True)
     class _TwoRoundModel:
         call_histories: list[list[ModelContextEvent]] = field(default_factory=list)
+
         _i: int = field(default=0, init=False)
 
         async def stream(

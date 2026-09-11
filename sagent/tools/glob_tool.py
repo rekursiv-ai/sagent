@@ -68,9 +68,13 @@ class Glob:
     """
 
     name = "Glob"
+
     tool_id = "application/x-tool-glob"
+
     clearable_results = True
+
     description = load_tool_description("Glob")
+
     directive_schema = json_freeze(
         {
             "type": "object",
