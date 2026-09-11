@@ -69,7 +69,7 @@ __all__ = (
 
 logger = logging.getLogger(__name__)
 
-_ASSETS_DIR = Path(__file__).parent.parent / "assets"
+_CWD: Final = Path(__file__).resolve().parent
 _NOW_PLACEHOLDER: Final = "{{NOW}}"
 _DEFAULT_RECIPE: Final = "sagent"
 _RE_INCLUDE = re.compile(r"\{\{include:\s*(.+?)\}\}")
@@ -93,7 +93,9 @@ def resolve_recipe(name_or_path: str) -> Path:
     """
     looks_like_path = "/" in name_or_path or name_or_path.endswith((".yaml", ".yml"))
     base = (
-        Path(name_or_path) if looks_like_path else _ASSETS_DIR / f"{name_or_path}.yaml"
+        Path(name_or_path)
+        if looks_like_path
+        else _CWD.parent / "assets" / f"{name_or_path}.yaml"
     )
     return base.expanduser().resolve()
 
@@ -115,7 +117,9 @@ def _load_recipe() -> dict[str, object]:
     global _recipe_cache  # noqa: PLW0603 -- module-level cache
     if _recipe_cache is not None:
         return _recipe_cache
-    recipe_path = _recipe_path_override or (_ASSETS_DIR / f"{_DEFAULT_RECIPE}.yaml")
+    recipe_path = _recipe_path_override or (
+        _CWD.parent / "assets" / f"{_DEFAULT_RECIPE}.yaml"
+    )
     loaded = yaml.safe_load(recipe_path.read_text(encoding="utf-8"))
     _recipe_cache = cast(dict[str, object], loaded) if isinstance(loaded, dict) else {}
     return _recipe_cache
@@ -145,7 +149,7 @@ _MAX_ASSET_DEPTH = 8  # config-globals: ignore -- include-recursion depth dial
 
 def _read_asset(path: str | Path, *, visited: set[str], depth: int) -> str:
     """Recursive worker for :func:`read_asset` with cycle/depth guards."""
-    p = _ASSETS_DIR / path if isinstance(path, str) else path
+    p = _CWD.parent / "assets" / path if isinstance(path, str) else path
     try:
         resolved = p.resolve()
     except OSError:

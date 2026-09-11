@@ -17,6 +17,7 @@ the World is a reactive feedback service on a logical clock. Engine + mechanic l
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 
 import argparse
 import asyncio
@@ -29,14 +30,14 @@ import webbrowser
 from examples.agent_maze.capture import capture
 
 
-HERE = Path(__file__).parent
+_CWD: Final = Path(__file__).resolve().parent
 PORT = 8001  # config-globals: ignore -- serve port, meant to be overridden
 
 
 def serve(port: int = PORT, host: str = "127.0.0.1") -> None:
     """Serve web/ and open the replay (prints an ssh -L line for remote viewing)."""
     handler = functools.partial(
-        http.server.SimpleHTTPRequestHandler, directory=str(HERE / "web")
+        http.server.SimpleHTTPRequestHandler, directory=str(_CWD / "web")
     )
     httpd = http.server.HTTPServer((host, port), handler)
     url = f"http://localhost:{port}/index.html"
@@ -74,7 +75,7 @@ def main() -> None:
 
     if args.live:
         asyncio.run(capture(num_locks=args.locks, k=args.k))
-    elif not (HERE / "web" / "data.js").exists():
+    elif not (_CWD / "web" / "data.js").exists():
         print("no web/data.js yet — run with --live to capture one.")  # noqa: T201
         return
 

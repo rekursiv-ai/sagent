@@ -9,7 +9,7 @@ clean run per cell; metrics are computed per arm from the event log.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import json
 
@@ -21,7 +21,7 @@ from sagent.providers import Anthropic
 from sagent.types.model import Model
 
 
-HERE = Path(__file__).parent
+_CWD: Final = Path(__file__).resolve().parent
 MODEL = "claude-sonnet-4-6"  # config-globals: ignore -- model choice, user retunes
 
 
@@ -152,7 +152,7 @@ async def capture(
             )
         data["modes"][label] = arms
     if write:
-        out = HERE / "web" / "data.js"
+        out = _CWD / "web" / "data.js"
         out.parent.mkdir(exist_ok=True)
         out.write_text("window.MAZE = " + json.dumps(data) + ";\n", encoding="utf-8")
         print(f"wrote {out}")  # noqa: T201
