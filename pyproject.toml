@@ -219,16 +219,16 @@ markers = [
 ]
 addopts = "-m 'not ci_smoke and not cuda and not integration and not performance and not cluster and not slow' --durations=20 --dist=worksteal"
 timeout = 60
-# "error" = treat all warnings as errors (same as -werror).
-# using filterwarnings instead of addopts so we can add exceptions.
+# "error" = treat all warnings as errors (same as -Werror).
+# Using filterwarnings instead of addopts so we can add exceptions.
 filterwarnings = [
     "error",
     "ignore::pytest.PytestUnraisableExceptionWarning",  # async subprocess cleanup after event loop closes
     "ignore:Can.t initialize NVML:UserWarning",  # Optional torch runtimes may lack GPU drivers.
     "ignore:CUDA initialization. Unexpected error from cudaGetDeviceCount:UserWarning",  # GPU present but unusable (e.g. under -n parallel workers); CPU-only tests probe CUDA during backward and torch warns benignly.
     "ignore:Using .httpx. with .starlette.testclient. is deprecated:starlette.exceptions.StarletteDeprecationWarning",
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",  # starlette 1.6.0 issue.
     "ignore:'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16:DeprecationWarning:zendriver.core.connection",
-    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
 ]
 norecursedirs = [
     "*.egg-info",
