@@ -26,11 +26,15 @@ class EomtForUniversalSegmentationOutput(ModelOutput):
     patch_offsets: list[torch.Tensor] | None = ...
 
 def sample_point(
-    input_features: torch.Tensor, point_coordinates: torch.Tensor, add_dim=..., **kwargs
+    input_features: torch.Tensor,
+    point_coordinates: torch.Tensor,
+    add_dim=...,
+    **kwargs,
 ) -> torch.Tensor: ...
 def pair_wise_dice_loss(inputs: Tensor, labels: Tensor) -> Tensor: ...
 def pair_wise_sigmoid_cross_entropy_loss(
-    inputs: torch.Tensor, labels: torch.Tensor
+    inputs: torch.Tensor,
+    labels: torch.Tensor,
 ) -> torch.Tensor: ...
 
 class EomtHungarianMatcher(nn.Module):
@@ -52,7 +56,9 @@ class EomtHungarianMatcher(nn.Module):
 
 def dice_loss(inputs: Tensor, labels: Tensor, num_masks: int) -> Tensor: ...
 def sigmoid_cross_entropy_loss(
-    inputs: torch.Tensor, labels: torch.Tensor, num_masks: int
+    inputs: torch.Tensor,
+    labels: torch.Tensor,
+    num_masks: int,
 ) -> torch.Tensor: ...
 
 class EomtLoss(nn.Module):
@@ -89,7 +95,9 @@ class EomtLoss(nn.Module):
     ) -> dict[str, torch.Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> dict[str, torch.Tensor]: ...
     def get_num_masks(
-        self, class_labels: torch.Tensor, device: torch.device
+        self,
+        class_labels: torch.Tensor,
+        device: torch.device,
     ) -> torch.Tensor: ...
 
 class EomtPatchEmbeddings(nn.Module):
@@ -123,7 +131,9 @@ class EomtAttention(nn.Module):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class EomtLayerScale(nn.Module):
@@ -132,7 +142,9 @@ class EomtLayerScale(nn.Module):
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class EomtDropPath(nn.Module):
@@ -154,7 +166,9 @@ class EomtSwiGLUFFN(nn.Module):
 class EomtLayer(GradientCheckpointingLayer):
     def __init__(self, config: EomtConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, head_mask: torch.Tensor | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        head_mask: torch.Tensor | None = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 

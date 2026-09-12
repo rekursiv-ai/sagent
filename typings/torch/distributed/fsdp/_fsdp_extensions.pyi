@@ -10,11 +10,14 @@ import torch.distributed as dist
 class FSDPExtensions(ABC):
     @abstractmethod
     def pre_flatten_transform(
-        self, tensor: torch.Tensor
+        self,
+        tensor: torch.Tensor,
     ) -> tuple[torch.Tensor, Any | None]: ...
     @abstractmethod
     def post_unflatten_transform(
-        self, tensor: torch.Tensor, param_extension: Any
+        self,
+        tensor: torch.Tensor,
+        param_extension: Any,
     ) -> torch.Tensor: ...
     @abstractmethod
     def chunk_tensor(
@@ -28,15 +31,21 @@ class FSDPExtensions(ABC):
     ) -> torch.Tensor: ...
     @abstractmethod
     def chunk_dtensor(
-        self, tensor: torch.Tensor, rank: int, device_mesh: DeviceMesh
+        self,
+        tensor: torch.Tensor,
+        rank: int,
+        device_mesh: DeviceMesh,
     ) -> torch.Tensor: ...
     @abstractmethod
     def pre_load_state_dict_transform(
-        self, tensor: torch.Tensor
+        self,
+        tensor: torch.Tensor,
     ) -> tuple[torch.Tensor, list[Shard]]: ...
     @abstractmethod
     def all_gather_dtensor(
-        self, tensor: DTensor, parent_mesh: DeviceMesh | None
+        self,
+        tensor: DTensor,
+        parent_mesh: DeviceMesh | None,
     ) -> torch.Tensor: ...
 
 _extensions: FSDPExtensions | None = ...

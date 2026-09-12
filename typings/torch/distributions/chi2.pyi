@@ -7,7 +7,9 @@ __all__ = ["Chi2"]
 
 class Chi2(Gamma):
     def __init__(
-        self, df: Tensor | float, validate_args: bool | None = ...
+        self,
+        df: Tensor | float,
+        validate_args: bool | None = ...,
     ) -> None: ...
     def expand(self, batch_shape, _instance=...) -> Self: ...
     @property

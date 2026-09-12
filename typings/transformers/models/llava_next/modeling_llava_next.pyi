@@ -17,7 +17,9 @@ from ...utils import TransformersKwargs, auto_docstring, can_return_tuple
 logger = ...
 
 def get_anyres_image_grid_shape(
-    image_size, grid_pinpoints, patch_size
+    image_size,
+    grid_pinpoints,
+    patch_size,
 ):  # -> tuple[Any, Any]:
     ...
 def image_size_to_num_patches(image_size, grid_pinpoints, patch_size: int):  # -> int:

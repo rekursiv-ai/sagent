@@ -34,89 +34,6 @@ from sagent.tools.core import load_tool_description
 from sagent.types.runtime import ToolResult
 
 
-async def _gql(
-    query: str,
-    variables: MutableJSON,
-    api_key: str,
-    *,
-    timeout_sec: float = 30.0,
-) -> MutableJSON | ToolResult:
-    """Execute a GraphQL request against Linear's API.
-
-    Args:
-      query: GraphQL query / mutation text.
-      variables: Variable bindings for the query.
-      api_key: Linear personal API key (``lin_api_...``).
-      timeout_sec: Per-request HTTP timeout.
-
-    Returns:
-      data: Parsed ``data`` block on success, or a ``ToolResult`` error.
-
-    """
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": api_key,
-    }
-    try:
-        raw = await asyncio.to_thread(
-            fetch,
-            url="https://api.linear.app/graphql",
-            request=RequestParams(
-                content=ContentParams(
-                    method="POST",
-                    json={"query": query, "variables": variables},
-                    headers=headers,
-                ),
-                retry=RetryParams(timeout_sec=timeout_sec),
-            ),
-        )
-    except FetchError as e:
-        return ToolResult(
-            call_id="",
-            content=(f"Linear API HTTP {e.status}: {e.body.decode(errors='replace')}"),
-            is_error=True,
-        )
-    body = DictCodec.coerce(json.loads(raw[0]))
-    if errors := body.get("errors"):
-        return ToolResult(
-            call_id="",
-            content=f"Linear GraphQL errors: {errors}",
-            is_error=True,
-        )
-    data = body.get("data")
-    if not isinstance(data, dict):
-        return ToolResult(
-            call_id="",
-            content="Linear GraphQL returned no data",
-            is_error=True,
-        )
-    return cast(MutableJSON, data)
-
-
-async def _team_id(team_key: str, api_key: str) -> str | ToolResult:
-    """Look up the opaque team id for a Linear team key (e.g. ``ENG``)."""
-    data = await _gql(
-        """
-query TeamByKey($key: String!) { teams(filter: { key: { eq: $key } }) { nodes { id } } }
-""",
-        variables={"key": team_key},
-        api_key=api_key,
-    )
-    if isinstance(data, ToolResult):
-        return data
-    teams = cast(
-        list[MutableJSON],
-        cast(MutableJSON, data.get("teams") or {}).get("nodes") or [],
-    )
-    if not teams:
-        return ToolResult(
-            call_id="",
-            content=f"No team with key {team_key!r}",
-            is_error=True,
-        )
-    return str(teams[0]["id"])
-
-
 _OPERATIONS: Final = (
     "list_issues",
     "get_issue",
@@ -154,7 +71,7 @@ class Linear:
                 "limit": {"type": "integer", "minimum": 1},
             },
             "required": ["operation"],
-        }
+        },
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -514,3 +431,75 @@ def _render_issue(issue: MutableJSON) -> str:
             user = cast(MutableJSON, c.get("user") or {}).get("name") or "?"
             parts.append(f"- {user} @ {c.get('createdAt')}: {c.get('body')}")
     return "\n".join(parts)
+
+
+async def _gql(
+    query: str,
+    variables: MutableJSON,
+    api_key: str,
+    *,
+    timeout_sec: float = 30.0,
+) -> MutableJSON | ToolResult:
+    """Execute a GraphQL request against Linear's API."""
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": api_key,
+    }
+    try:
+        raw = await asyncio.to_thread(
+            fetch,
+            url="https://api.linear.app/graphql",
+            request=RequestParams(
+                content=ContentParams(
+                    method="POST",
+                    json={"query": query, "variables": variables},
+                    headers=headers,
+                ),
+                retry=RetryParams(timeout_sec=timeout_sec),
+            ),
+        )
+    except FetchError as e:
+        return ToolResult(
+            call_id="",
+            content=(f"Linear API HTTP {e.status}: {e.body.decode(errors='replace')}"),
+            is_error=True,
+        )
+    body = DictCodec.coerce(json.loads(raw[0]))
+    if errors := body.get("errors"):
+        return ToolResult(
+            call_id="",
+            content=f"Linear GraphQL errors: {errors}",
+            is_error=True,
+        )
+    data = body.get("data")
+    if not isinstance(data, dict):
+        return ToolResult(
+            call_id="",
+            content="Linear GraphQL returned no data",
+            is_error=True,
+        )
+    return cast(MutableJSON, data)
+
+
+async def _team_id(team_key: str, api_key: str) -> str | ToolResult:
+    """Look up the opaque team id for a Linear team key (e.g. ``ENG``)."""
+    data = await _gql(
+        """
+query TeamByKey($key: String!) { teams(filter: { key: { eq: $key } }) { nodes { id } } }
+""",
+        variables={"key": team_key},
+        api_key=api_key,
+    )
+    if isinstance(data, ToolResult):
+        return data
+    teams = cast(
+        list[MutableJSON],
+        cast(MutableJSON, data.get("teams") or {}).get("nodes") or [],
+    )
+    if not teams:
+        return ToolResult(
+            call_id="",
+            content=f"No team with key {team_key!r}",
+            is_error=True,
+        )
+    return str(teams[0]["id"])

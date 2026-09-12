@@ -37,7 +37,9 @@ from ...utils import TensorType, TransformersKwargs, auto_docstring, can_return_
 logger = ...
 
 def sequential_experts_gemm(
-    token_states, expert_weights, tokens_per_expert
+    token_states,
+    expert_weights,
+    tokens_per_expert,
 ):  # -> Tensor:
     ...
 
@@ -79,7 +81,9 @@ class AriaCrossAttention(nn.Module):
 class AriaProjector(nn.Module):
     def __init__(self, config: AriaConfig) -> None: ...
     def forward(
-        self, key_value_states: torch.Tensor, attn_mask: torch.Tensor | None = ...
+        self,
+        key_value_states: torch.Tensor,
+        attn_mask: torch.Tensor | None = ...,
     ):  # -> Any:
         ...
 
@@ -137,7 +141,10 @@ class AriaImageProcessor(BaseImageProcessor):
         input_data_format: ChannelDimension,
     ) -> list[np.ndarray]: ...
     def get_number_of_image_patches(
-        self, height: int, width: int, images_kwargs=...
+        self,
+        height: int,
+        width: int,
+        images_kwargs=...,
     ):  # -> Literal[1]:
         ...
 
@@ -244,7 +251,9 @@ class AriaModel(LlavaModel):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple | AriaModelOutputWithPast: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | AriaModelOutputWithPast: ...
 
 @auto_docstring(custom_intro=...)

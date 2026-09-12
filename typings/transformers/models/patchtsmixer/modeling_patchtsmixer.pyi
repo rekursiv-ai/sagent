@@ -78,7 +78,9 @@ class PatchTSMixerAttention(nn.Module):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class PatchMixerBlock(nn.Module):
@@ -98,7 +100,9 @@ class PatchTSMixerLayer(nn.Module):
 class PatchTSMixerBlock(nn.Module):
     def __init__(self, config: PatchTSMixerConfig) -> None: ...
     def forward(
-        self, hidden_state, output_hidden_states: bool = ...
+        self,
+        hidden_state,
+        output_hidden_states: bool = ...,
     ):  # -> tuple[Any, list[Any]] | tuple[Any, None]:
         ...
 
@@ -153,28 +157,40 @@ class PatchTSMixerMasking(nn.Module):
 class PatchTSMixerStdScaler(nn.Module):
     def __init__(self, config: PatchTSMixerConfig) -> None: ...
     def forward(
-        self, data: torch.Tensor, observed_indicator: torch.Tensor
+        self,
+        data: torch.Tensor,
+        observed_indicator: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 class PatchTSMixerMeanScaler(nn.Module):
     def __init__(self, config: PatchTSMixerConfig) -> None: ...
     def forward(
-        self, data: torch.Tensor, observed_indicator: torch.Tensor
+        self,
+        data: torch.Tensor,
+        observed_indicator: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 class PatchTSMixerNOPScaler(nn.Module):
     def __init__(self, config: PatchTSMixerConfig) -> None: ...
     def forward(
-        self, data: torch.Tensor, observed_indicator: torch.Tensor | None = ...
+        self,
+        data: torch.Tensor,
+        observed_indicator: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 @dataclass
@@ -226,7 +242,7 @@ class PatchTSMixerForPreTrainingOutput(ModelOutput):
 @auto_docstring(
     custom_intro="""
     `PatchTSMixer` for mask pretraining.
-    """
+    """,
 )
 class PatchTSMixerForPretraining(PatchTSMixerPreTrainedModel):
     def __init__(self, config: PatchTSMixerConfig) -> None: ...
@@ -261,10 +277,13 @@ class SamplePatchTSMixerRegressionOutput(ModelOutput):
     sequences: torch.FloatTensor | None = ...
 
 def nll(
-    input: torch.distributions.Distribution, target: torch.Tensor
+    input: torch.distributions.Distribution,
+    target: torch.Tensor,
 ) -> torch.Tensor: ...
 def weighted_average(
-    input_tensor: torch.Tensor, weights: torch.Tensor | None = ..., dim=...
+    input_tensor: torch.Tensor,
+    weights: torch.Tensor | None = ...,
+    dim=...,
 ) -> torch.Tensor: ...
 
 class PatchTSMixerForPrediction(PatchTSMixerPreTrainedModel):
@@ -281,7 +300,9 @@ class PatchTSMixerForPrediction(PatchTSMixerPreTrainedModel):
     ) -> PatchTSMixerForPredictionOutput: ...
     @torch.no_grad()
     def generate(
-        self, past_values: torch.Tensor, observed_mask: torch.Tensor | None = ...
+        self,
+        past_values: torch.Tensor,
+        observed_mask: torch.Tensor | None = ...,
     ) -> SamplePatchTSMixerPredictionOutput: ...
 
 @dataclass
@@ -314,10 +335,16 @@ class PatchTSMixerForRegressionOutput(ModelOutput):
 
 class InjectScalerStatistics4D(nn.Module):
     def __init__(
-        self, d_model: int, num_patches: int, expansion: int = ...
+        self,
+        d_model: int,
+        num_patches: int,
+        expansion: int = ...,
     ) -> None: ...
     def forward(
-        self, inputs: torch.Tensor, loc: torch.Tensor, scale: torch.Tensor
+        self,
+        inputs: torch.Tensor,
+        loc: torch.Tensor,
+        scale: torch.Tensor,
     ):  # -> Tensor:
         ...
 
@@ -335,7 +362,8 @@ class PatchTSMixerForRegression(PatchTSMixerPreTrainedModel):
     ) -> PatchTSMixerForRegressionOutput: ...
     @torch.no_grad()
     def generate(
-        self, past_values: torch.Tensor
+        self,
+        past_values: torch.Tensor,
     ) -> SamplePatchTSMixerRegressionOutput: ...
 
 __all__ = [

@@ -129,7 +129,9 @@ class ChatTemplateLoadKwargs(TypedDict, total=False):
     load_audio_from_video: bool | None = ...
 
 class ProcessorChatTemplateKwargs(
-    ChatTemplateLoadKwargs, TokenizerChatTemplateKwargs, total=False
+    ChatTemplateLoadKwargs,
+    TokenizerChatTemplateKwargs,
+    total=False,
 ):
     tokenize: bool | None = ...
     return_dict: bool | None = ...
@@ -173,13 +175,17 @@ class ProcessorMixin(PushToHubMixin):
     ):  # -> BatchFeature:
         ...
     def check_argument_for_proper_class(
-        self, argument_name, argument
+        self,
+        argument_name,
+        argument,
     ):  # -> tuple[Any, ...] | Any:
         ...
     def to_dict(self, legacy_serialization=...) -> dict[str, Any]: ...
     def to_json_string(self, legacy_serialization=...) -> str: ...
     def to_json_file(
-        self, json_file_path: str | os.PathLike, legacy_serialization=...
+        self,
+        json_file_path: str | os.PathLike,
+        legacy_serialization=...,
     ):  # -> None:
         ...
     def __repr__(self):  # -> str:
@@ -194,11 +200,16 @@ class ProcessorMixin(PushToHubMixin):
         ...
     @classmethod
     def get_processor_dict(
-        cls, pretrained_model_name_or_path: str | os.PathLike, **kwargs
+        cls,
+        pretrained_model_name_or_path: str | os.PathLike,
+        **kwargs,
     ) -> tuple[dict[str, Any], dict[str, Any]]: ...
     @classmethod
     def from_args_and_dict(
-        cls, args, processor_dict: dict[str, Any], **kwargs
+        cls,
+        args,
+        processor_dict: dict[str, Any],
+        **kwargs,
     ):  # -> tuple[Self, dict[Any, Any]] | Self:
         ...
     @classmethod
@@ -225,7 +236,8 @@ class ProcessorMixin(PushToHubMixin):
         ...
     @staticmethod
     def validate_init_kwargs(
-        processor_config, valid_kwargs
+        processor_config,
+        valid_kwargs,
     ):  # -> tuple[dict[Any, Any], dict[Any, Any]]:
         ...
     @deprecate_kwarg("video_fps", version="4.58", new_name="fps")
@@ -241,5 +253,8 @@ class ProcessorMixin(PushToHubMixin):
         **kwargs: Unpack[AllKwargsForChatTemplate],
     ) -> str: ...
     def post_process_image_text_to_text(
-        self, generated_outputs, skip_special_tokens=..., **kwargs
+        self,
+        generated_outputs,
+        skip_special_tokens=...,
+        **kwargs,
     ): ...

@@ -6,7 +6,12 @@ from slack_sdk.models.blocks import Block, ButtonStyles, ConfirmObject, Option
 
 class Action(JsonObject):
     def __init__(
-        self, *, text: str, subtype: str, name: str | None = ..., url: str | None = ...
+        self,
+        *,
+        text: str,
+        subtype: str,
+        name: str | None = ...,
+        url: str | None = ...,
     ) -> None: ...
     @JsonValidator("name or url attribute is required")
     def name_or_url_present(self) -> bool: ...
@@ -41,7 +46,11 @@ class AbstractActionSelector(Action, metaclass=ABCMeta):
     @abstractmethod
     def data_source(self) -> str: ...
     def __init__(
-        self, *, name: str, text: str, selected_option: Option | None = ...
+        self,
+        *,
+        name: str,
+        text: str,
+        selected_option: Option | None = ...,
     ) -> None: ...
     @EnumValidator("data_source", DataSourceTypes)
     def data_source_valid(self) -> bool: ...
@@ -49,17 +58,26 @@ class AbstractActionSelector(Action, metaclass=ABCMeta):
 
 class ActionUserSelector(AbstractActionSelector):
     def __init__(
-        self, name: str, text: str, selected_user: Option | None = ...
+        self,
+        name: str,
+        text: str,
+        selected_user: Option | None = ...,
     ) -> None: ...
 
 class ActionChannelSelector(AbstractActionSelector):
     def __init__(
-        self, name: str, text: str, selected_channel: Option | None = ...
+        self,
+        name: str,
+        text: str,
+        selected_channel: Option | None = ...,
     ) -> None: ...
 
 class ActionConversationSelector(AbstractActionSelector):
     def __init__(
-        self, name: str, text: str, selected_conversation: Option | None = ...
+        self,
+        name: str,
+        text: str,
+        selected_conversation: Option | None = ...,
     ) -> None: ...
 
 class ActionExternalSelector(AbstractActionSelector):
@@ -78,7 +96,11 @@ SeededColors = ...
 
 class AttachmentField(JsonObject):
     def __init__(
-        self, *, title: str | None = ..., value: str | None = ..., short: bool = ...
+        self,
+        *,
+        title: str | None = ...,
+        value: str | None = ...,
+        short: bool = ...,
     ) -> None: ...
 
 class Attachment(JsonObject):

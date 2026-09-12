@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Final
+from typing import TYPE_CHECKING, Annotated, Final
 
 import logging
 import os
@@ -24,7 +24,6 @@ from sagent.tools.core import (
 from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
     Invocation,
-    Node,
     bounding_sink,
     cwd_is_known,
     operands,
@@ -36,6 +35,10 @@ from sagent.tools.lib.bash import (
 )
 from sagent.tools.tool_spec import CLI_SETTABLE
 from sagent.types.runtime import ToolResult
+
+
+if TYPE_CHECKING:
+    from bashlex.ast import node as BashlexNode  # noqa: N812 -- type alias
 
 
 logger = logging.getLogger(__name__)
@@ -59,8 +62,6 @@ _TYPE_GLOBS: Final[dict[str, list[str]]] = {
     "sh": ["*.sh", "*.bash"],
 }
 
-# Try ripgrep first, fall back to Python.
-_RG_PATH = shutil.which("rg")
 
 # Short grep flags whose semantics we know how to express via the
 # Grep tool's schema. Bundled forms (``-rln``) are split char-by-char
@@ -68,13 +69,13 @@ _RG_PATH = shutil.which("rg")
 _GREP_TRANSLATABLE_FLAGS: frozenset[str] = frozenset(
     {
         "-r",
-        "-R",  # recursive (Grep tool is recursive by default)
+        "-R",  # Recursive (Grep tool is recursive by default)
         "-l",  # -> output_mode="files_with_matches"
         "-c",  # -> output_mode="count"
-        "-n",  # → -n
-        "-i",  # → -i
-        "-E",  # extended regex (ripgrep's default is close enough)
-        "-P",  # PCRE2 → Grep's pcre=True
+        "-n",  # → -n.
+        "-i",  # → -i.
+        "-E",  # Extended regex (ripgrep's default is close enough)
+        "-P",  # PCRE2 → Grep's pcre=True.
         # Output-format flags we translate lossily: Grep tool always
         # shows filenames in content mode, so ``-h`` (no filenames)
         # loses info but the nudge is still useful. ``-H`` and ``-s``
@@ -82,7 +83,7 @@ _GREP_TRANSLATABLE_FLAGS: frozenset[str] = frozenset(
         "-h",
         "-H",
         "-s",
-    }
+    },
 )
 
 # Short flags that consume the next token as their value.
@@ -218,7 +219,7 @@ class Grep:
                 },
             },
             "required": ["pattern"],
-        }
+        },
     )
 
     output: Annotated[Toggle, CLI_SETTABLE] = "off"
@@ -332,7 +333,7 @@ class Grep:
         keep_last: int = 0,
         offset: int = 0,
         multiline: bool = False,
-        **kwargs: object,  # Non-identifier params: -B, -A, -C, -i, glob, type
+        **kwargs: object,  # Non-identifier params: -B, -A, -C, -i, glob, type.
     ) -> str | ToolResult:
         """Dispatch the grep search to ripgrep or the Python fallback."""
         if output_mode not in _OUTPUT_MODES:
@@ -379,7 +380,7 @@ class Grep:
                 content=f"no such file or directory: {path}",
                 is_error=True,
             )
-        if _RG_PATH:
+        if _rg_path():
             return _grep_rg(
                 pattern=pattern,
                 path=path,
@@ -415,7 +416,7 @@ class Grep:
             offset=offset,
         )
 
-    def bash_match(self, trees: Sequence[Node]) -> str | None:
+    def bash_match(self, trees: Sequence[BashlexNode]) -> str | None:
         """Emit a tool-use nudge for a replaceable grep shape.
 
         Detection is :func:`replaceable`; this decides only which
@@ -444,7 +445,10 @@ class Grep:
 
 
 def _kw_str(
-    kwargs: dict[str, object], key: str, *fallbacks: str, default: str = ""
+    kwargs: dict[str, object],
+    key: str,
+    *fallbacks: str,
+    default: str = "",
 ) -> str:
     """Coerce the first non-None kwargs entry among aliases to a string."""
     for k in (key, *fallbacks):
@@ -454,17 +458,17 @@ def _kw_str(
     return default
 
 
+# Unparseable values fall back to ``default`` rather than raising: ``Tool.run`` must not
+# raise, and the schema gate already rejects non-integers on the production path. This
+# keeps a direct ``_run`` caller (tests, internal reuse) from escaping the tool envelope
+# -- the same defense-in-depth ``Read._check_minimum`` provides.
 def _kw_int(
-    kwargs: dict[str, object], key: str, *fallbacks: str, default: int = 0
+    kwargs: dict[str, object],
+    key: str,
+    *fallbacks: str,
+    default: int = 0,
 ) -> int:
-    """Coerce the first non-None kwargs entry among aliases to an int.
-
-    Unparseable values fall back to ``default`` rather than raising:
-    ``Tool.run`` must not raise, and the schema gate already rejects
-    non-integers on the production path. This keeps a direct ``_run``
-    caller (tests, internal reuse) from escaping the tool envelope --
-    the same defense-in-depth ``Read._check_minimum`` provides.
-    """
+    """Coerce the first non-None kwargs entry among aliases to an int."""
     for k in (key, *fallbacks):
         v = kwargs.get(k)
         if v is None:
@@ -483,7 +487,10 @@ def _kw_int(
 
 
 def _kw_bool(
-    kwargs: dict[str, object], key: str, *fallbacks: str, default: bool = False
+    kwargs: dict[str, object],
+    key: str,
+    *fallbacks: str,
+    default: bool = False,
 ) -> bool:
     """Coerce the first non-None kwargs entry among aliases to a bool."""
     for k in (key, *fallbacks):
@@ -493,20 +500,16 @@ def _kw_bool(
     return default
 
 
+# Translation runs AFTER detection and may fail freely: an untranslated flag costs the
+# caller a worked example, not the nudge. Gating detection on it instead made every flag
+# outside :data:`_GREP_TRANSLATABLE_FLAGS` -- most of grep's ~80 -- silent.
+#
+# The translated args come from the SEARCH, which is not always ``inv``: an ``xargs``
+# payload carries the search behind the wrapper, and a stdin-fed search's path sits on
+# the producer feeding it. Translating ``inv.args`` blindly rendered ``xargs grep pat``
+# as ``pattern='grep' path='pat'``.
 def _nudge_for(inv: Invocation) -> str:
-    """Render the nudge, with concrete Grep arguments when translatable.
-
-    Translation runs AFTER detection and may fail freely: an untranslated
-    flag costs the caller a worked example, not the nudge. Gating
-    detection on it instead made every flag outside
-    :data:`_GREP_TRANSLATABLE_FLAGS` -- most of grep's ~80 -- silent.
-
-    The translated args come from the SEARCH, which is not always
-    ``inv``: an ``xargs`` payload carries the search behind the wrapper,
-    and a stdin-fed search's path sits on the producer feeding it.
-    Translating ``inv.args`` blindly rendered ``xargs grep pat`` as
-    ``pattern='grep' path='pat'``.
-    """
+    """Render the nudge, with concrete Grep arguments when translatable."""
     args = _search_args(inv)
     fields = _translate_grep_args(args, cwd=inv.cwd) if args is not None else ""
     if fields:
@@ -515,12 +518,10 @@ def _nudge_for(inv: Invocation) -> str:
     return f"{_NUDGE} Replaces: `{render_command(inv)}`.{call}"
 
 
+# Returns ``None`` when the operand cannot be recovered, so the caller drops the worked
+# example rather than inventing one.
 def _search_args(inv: Invocation) -> tuple[str, ...] | None:
-    """Argv of the SEARCH itself, with its path operand resolved.
-
-    Returns ``None`` when the operand cannot be recovered, so the caller
-    drops the worked example rather than inventing one.
-    """
+    """Argv of the SEARCH itself, with its path operand resolved."""
     if inv.exe == "xargs":
         payload = _strip_xargs_prefix(inv.args)
         source = inv.piped_from
@@ -554,12 +555,10 @@ def _search_args(inv: Invocation) -> tuple[str, ...] | None:
     return (*inv.args, paths[0])
 
 
+# ``sed -n '1,50p' f`` puts the script in operand position, so a producer's path cannot
+# be recovered by counting operands alone.
 def _is_sed_script(arg: str) -> bool:
-    """Whether ``arg`` is a bare ``sed`` script rather than a path.
-
-    ``sed -n '1,50p' f`` puts the script in operand position, so a
-    producer's path cannot be recovered by counting operands alone.
-    """
+    """Whether ``arg`` is a bare ``sed`` script rather than a path."""
     return bool(_SED_SCRIPT.fullmatch(arg))
 
 
@@ -568,18 +567,15 @@ def _is_sed_script(arg: str) -> bool:
 _SED_SCRIPT: Final = re.compile(r"\d+(,(\d+|\$))?[a-z]|s/.*/.*/[a-z]*")
 
 
+# ``_sink_blocks`` accepts ``| wc -l`` precisely because Grep expresses it as
+# ``output_mode="count"``; omitting it advertises a different search than the one
+# replaced.
+#
+# Notably ABSENT: ``| grep -v X``. Measured on a file whose line reads ``ERROR DEBUG
+# b``: the pipeline drops that line, while ``exclude='DEBUG'`` returns it -- ``exclude``
+# is a PATH glob passed to ``rg --glob !PAT``, not a line filter.
 def _sink_fields(inv: Invocation) -> str:
-    """Render the downstream stages ``replaceable`` folded into this call.
-
-    ``_sink_blocks`` accepts ``| wc -l`` precisely because Grep expresses
-    it as ``output_mode="count"``; omitting it advertises a different
-    search than the one replaced.
-
-    Notably ABSENT: ``| grep -v X``. Measured on a file whose line reads
-    ``ERROR DEBUG b``: the pipeline drops that line, while
-    ``exclude='DEBUG'`` returns it -- ``exclude`` is a PATH glob passed
-    to ``rg --glob !PAT``, not a line filter.
-    """
+    """Render the downstream stages ``replaceable`` folded into this call."""
     fields = "".join(
         ' output_mode="count"'
         for sink in inv.downstream()
@@ -598,13 +594,11 @@ def _sink_fields(inv: Invocation) -> str:
     return fields
 
 
+# ``cwd`` is the enclosing ``cd`` prefix. Grep resolves a relative ``path`` against the
+# AGENT's cwd, not the shell's, so dropping it searches a different tree than the
+# command being replaced.
 def _translate_grep_args(args: tuple[str, ...], *, cwd: str = "") -> str:
-    """Render ``args`` as Grep tool keywords, or ``""`` when unsupported.
-
-    ``cwd`` is the enclosing ``cd`` prefix. Grep resolves a relative
-    ``path`` against the AGENT's cwd, not the shell's, so dropping it
-    searches a different tree than the command being replaced.
-    """
+    """Render ``args`` as Grep tool keywords, or ``""`` when unsupported."""
     fields: list[str] = []
     positional: list[str] = []
     patterns: list[str] = []
@@ -633,7 +627,7 @@ def _translate_grep_args(args: tuple[str, ...], *, cwd: str = "") -> str:
                     return ""
                 value = args[i + 1]
             fields.append(
-                f"glob={value!r}" if name == "--include" else f"exclude={value!r}"
+                f"glob={value!r}" if name == "--include" else f"exclude={value!r}",
             )
             i += 1 if eq else 2
             continue
@@ -680,13 +674,11 @@ def _translate_grep_args(args: tuple[str, ...], *, cwd: str = "") -> str:
     return " ".join([head, *fields])
 
 
+# ``xargs`` runs an arbitrary command, so this shape is recognised by its payload rather
+# than by :func:`replaceable`: the operand lives on the ``find`` half, which only
+# enumerates what to search.
 def _xargs_searches_files(inv: Invocation) -> bool:
-    """Whether ``find … | xargs grep …`` is one Grep call.
-
-    ``xargs`` runs an arbitrary command, so this shape is recognised by
-    its payload rather than by :func:`replaceable`: the operand lives on
-    the ``find`` half, which only enumerates what to search.
-    """
+    """Whether ``find … | xargs grep …`` is one Grep call."""
     if any(d.captures_stdout for d in inv.downstream()):
         return False
     grep_args = _strip_xargs_prefix(inv.args)
@@ -704,17 +696,15 @@ def _xargs_searches_files(inv: Invocation) -> bool:
 # Simple xargs flags we know how to ignore (data-plumbing only, no
 # effect on what ``grep`` sees beyond NUL-separated stdin).
 _XARGS_PLUMBING_FLAGS: frozenset[str] = frozenset(
-    {"-0", "--null", "-r", "--no-run-if-empty"}
+    {"-0", "--null", "-r", "--no-run-if-empty"},
 )
 
 
+# Bails on any xargs option outside our plumbing allowlist (``-I``, ``-n``, ``-P``, etc.
+# change how the search is invoked per-file, which doesn't round-trip to a single Grep
+# tool call).
 def _strip_xargs_prefix(args: tuple[str, ...]) -> tuple[str, ...] | None:
-    """Return the search-command tail of ``xargs [-0|-r …] {grep,rg} …``.
-
-    Bails on any xargs option outside our plumbing allowlist (``-I``,
-    ``-n``, ``-P``, etc. change how the search is invoked per-file,
-    which doesn't round-trip to a single Grep tool call).
-    """
+    """Return the search-command tail of ``xargs [-0|-r …] {grep,rg} …``."""
     i = 0
     while i < len(args):
         a = args[i]
@@ -729,13 +719,11 @@ def _strip_xargs_prefix(args: tuple[str, ...]) -> tuple[str, ...] | None:
     return None
 
 
+# Accepts ``find [PATH] [-type f|d] [-name|-iname GLOB] [-print|-print0]``. Whitelist-
+# only: any predicate outside the branches below bails. Extracted values are discarded -
+# the nudge is a fixed string.
 def _parse_find_for_grep(args: tuple[str, ...]) -> bool:
-    """Validate that ``args`` is a ``find`` shape we understand.
-
-    Accepts ``find [PATH] [-type f|d] [-name|-iname GLOB] [-print|-print0]``.
-    Whitelist-only: any predicate outside the branches below bails.
-    Extracted values are discarded - the nudge is a fixed string.
-    """
+    """Validate that ``args`` is a ``find`` shape we understand."""
     seen_path = False
     i = 0
     while i < len(args):
@@ -769,33 +757,19 @@ def _parse_find_for_grep(args: tuple[str, ...]) -> bool:
     return True
 
 
+# The single place either backend slices. Both produce one entry per line for every
+# ``output_mode``, so slicing here means ``offset`` and ``keep_first`` mean the same
+# thing in ripgrep and in the fallback -- and in ``content``, ``count``, and
+# ``files_with_matches`` alike. Slicing inside the accumulator instead let the unit
+# differ per mode (content lines vs. per-file counts vs. context separators).
+#
+# ``offset`` applies with context lines too. Both backends used to zero it and prepend
+# an "offset ignored" notice, which left the reply both ignoring the knob AND telling
+# the reader to pass it -- a resume note that cannot be followed. Slicing rendered lines
+# is agnostic to how they were produced, so context rows page like any others; a group
+# separator inside the window is simply one more entry.
 def _paginate(text: str, *, keep_first: int, keep_last: int, offset: int) -> str:
-    """Apply the pagination knobs to already-rendered output.
-
-    The single place either backend slices. Both produce one entry per
-    line for every ``output_mode``, so slicing here means ``offset`` and
-    ``keep_first`` mean the same thing in ripgrep and in the fallback --
-    and in ``content``, ``count``, and ``files_with_matches`` alike.
-    Slicing inside the accumulator instead let the unit differ per mode
-    (content lines vs. per-file counts vs. context separators).
-
-    ``offset`` applies with context lines too. Both backends used to zero
-    it and prepend an "offset ignored" notice, which left the reply both
-    ignoring the knob AND telling the reader to pass it -- a resume note
-    that cannot be followed. Slicing rendered lines is agnostic to how
-    they were produced, so context rows page like any others; a group
-    separator inside the window is simply one more entry.
-
-    Args:
-      text: Rendered output, one entry per line.
-      keep_first: Keep only the leading N entries; ``0`` is unlimited.
-      keep_last: Keep only the trailing N entries; takes precedence.
-      offset: Skip N leading entries before ``keep_first``.
-
-    Returns:
-      paginated: The selected entries, or ``(no matches)`` when empty.
-
-    """
+    """Apply the pagination knobs to already-rendered output."""
     if not text or text == "(no matches)":
         return text or "(no matches)"
     lines = text.split("\n")
@@ -926,9 +900,10 @@ def _build_rg_cmd(
     multiline: bool,
 ) -> list[str]:
     """Build the ripgrep argv."""
-    assert _RG_PATH is not None
+    rg_path = _rg_path()
+    assert rg_path is not None
     cmd = [
-        _RG_PATH,
+        rg_path,
         "--no-heading",
         "--hidden",
         # Deterministic order. ripgrep's default parallel walk emits files
@@ -1061,13 +1036,11 @@ class _GrepState:
                 self._append_content_line(filepath, j, lines[j])
             self.matches.append("--")
 
+    # One group per match repeated the shared lines: two matches a line apart printed
+    # the overlap twice, so a caller counting occurrences in the output counted them
+    # twice. ripgrep merges instead.
     def _context_groups(self, hits: list[int], total: int) -> list[tuple[int, int]]:
-        """Merge each match's context window with its overlapping neighbours.
-
-        One group per match repeated the shared lines: two matches a line
-        apart printed the overlap twice, so a caller counting occurrences
-        in the output counted them twice. ripgrep merges instead.
-        """
+        """Merge each match's context window with its overlapping neighbours."""
         groups: list[tuple[int, int]] = []
         for i in hits:
             start = max(0, i - self.context_before)
@@ -1212,14 +1185,12 @@ def _collect_files(
     return files
 
 
+# ``Path.match`` has no brace syntax, so the ``"*.{ts,tsx}"`` the schema advertises
+# matched NOTHING in this backend while ripgrep matched both extensions. One group is
+# enough for the documented shape; a glob with several is passed through and simply
+# matches literally, as before.
 def _expand_braces(glob: str) -> list[str]:
-    """Expand one ``{a,b}`` alternation into separate globs.
-
-    ``Path.match`` has no brace syntax, so the ``"*.{ts,tsx}"`` the schema
-    advertises matched NOTHING in this backend while ripgrep matched both
-    extensions. One group is enough for the documented shape; a glob with
-    several is passed through and simply matches literally, as before.
-    """
+    """Expand one ``{a,b}`` alternation into separate globs."""
     before, brace, rest = glob.partition("{")
     body, close, after = rest.partition("}")
     if not brace or not close or "{" in after:
@@ -1234,16 +1205,13 @@ def _path_matches(path: str, globs: Sequence[str], exclude: str) -> bool:
     return any(rel.match(glob) for glob in globs)
 
 
+# Each tuple is ``(name, coerced, raw)``: when the caller supplied ``raw`` (anything but
+# ``None``) but the coerced int is negative, surface a tool error instead of letting it
+# index from the end of a result slice downstream.
 def _check_nonnegative(
     *fields: tuple[str, int, object],
 ) -> ToolResult | None:
-    """Reject schema-violating negative knobs at the tool entrypoint.
-
-    Each tuple is ``(name, coerced, raw)``: when the caller supplied
-    ``raw`` (anything but ``None``) but the coerced int is negative,
-    surface a tool error instead of letting it index from the end of
-    a result slice downstream.
-    """
+    """Reject schema-violating negative knobs at the tool entrypoint."""
     for name, coerced, raw in fields:
         if raw is None:
             continue
@@ -1254,3 +1222,8 @@ def _check_nonnegative(
                 is_error=True,
             )
     return None
+
+
+def _rg_path() -> str | None:
+    """Return the ripgrep executable path, if installed."""
+    return shutil.which("rg")

@@ -17,7 +17,7 @@ logger = ...
 @auto_docstring(
     custom_intro="""
     Output type of [`SegGptEncoderOutput`].
-    """
+    """,
 )
 class SegGptEncoderOutput(ModelOutput):
     last_hidden_state: torch.FloatTensor
@@ -53,7 +53,10 @@ class SegGptEmbeddings(nn.Module):
 class SegGptAttention(nn.Module):
     def __init__(self, config) -> None: ...
     def get_rel_pos(
-        self, q_size: int, k_size: int, rel_pos: torch.Tensor
+        self,
+        q_size: int,
+        k_size: int,
+        rel_pos: torch.Tensor,
     ) -> torch.Tensor: ...
     def add_decomposed_rel_pos(
         self,
@@ -65,7 +68,9 @@ class SegGptAttention(nn.Module):
         k_size: tuple[int, int],
     ) -> torch.Tensor: ...
     def forward(
-        self, hidden_states: torch.Tensor, output_attentions=...
+        self,
+        hidden_states: torch.Tensor,
+        output_attentions=...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -75,7 +80,9 @@ class SegGptMlp(nn.Module):
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class SegGptDropPath(nn.Module):
@@ -94,7 +101,9 @@ class SegGptLayer(GradientCheckpointingLayer):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
 
 class SegGptEncoder(nn.Module):
@@ -111,7 +120,12 @@ class SegGptEncoder(nn.Module):
 
 class SegGptLayerNorm(nn.LayerNorm):
     def __init__(
-        self, normalized_shape, *, eps=..., data_format=..., **kwargs
+        self,
+        normalized_shape,
+        *,
+        eps=...,
+        data_format=...,
+        **kwargs,
     ) -> None: ...
     def forward(self, features: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -155,7 +169,9 @@ class SegGptModel(SegGptPreTrainedModel):
 
 def patchify(tensor: torch.Tensor, patch_size: int) -> torch.Tensor: ...
 def unpatchify(
-    tensor: torch.Tensor, patch_height: int, patch_width: int
+    tensor: torch.Tensor,
+    patch_height: int,
+    patch_width: int,
 ) -> torch.Tensor: ...
 
 class SegGptLoss(nn.Module):

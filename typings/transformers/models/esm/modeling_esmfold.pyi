@@ -45,7 +45,8 @@ def is_fp16_enabled(device_type):  # -> bool:
 def is_deepspeed_initialized():  # -> Literal[False]:
     ...
 def collate_dense_tensors(
-    samples: list[torch.Tensor], pad_v: float = ...
+    samples: list[torch.Tensor],
+    pad_v: float = ...,
 ) -> torch.Tensor: ...
 def flatten_final_dims(t: torch.Tensor, no_dims: int):  # -> Tensor:
     ...
@@ -154,7 +155,12 @@ class EsmFoldResidueMLP(nn.Module):
 class EsmFoldTriangularSelfAttentionBlock(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, sequence_state, pairwise_state, mask=..., chunk_size=..., **__kwargs
+        self,
+        sequence_state,
+        pairwise_state,
+        mask=...,
+        chunk_size=...,
+        **__kwargs,
     ):  # -> tuple[Any, Any]:
         ...
 
@@ -181,10 +187,14 @@ class EsmFoldAngleResnetBlock(nn.Module):
 class EsmFoldAngleResnet(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, s: torch.Tensor, s_initial: torch.Tensor
+        self,
+        s: torch.Tensor,
+        s_initial: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class EsmFoldInvariantPointAttention(nn.Module):
@@ -204,7 +214,9 @@ class EsmFoldBackboneUpdate(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(self, s: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class EsmFoldStructureModuleTransitionLayer(nn.Module):
@@ -219,7 +231,11 @@ class EsmFoldStructureModuleTransition(nn.Module):
 class EsmFoldStructureModule(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, evoformer_output_dict, aatype, mask=..., _offload_inference=...
+        self,
+        evoformer_output_dict,
+        aatype,
+        mask=...,
+        _offload_inference=...,
     ):  # -> dict[Any, Any]:
         ...
     def torsion_angles_to_frames(self, r, alpha, f):  # -> Rigid:
@@ -232,7 +248,13 @@ class EsmFoldingTrunk(nn.Module):
     def set_chunk_size(self, chunk_size):  # -> None:
         ...
     def forward(
-        self, seq_feats, pair_feats, true_aa, residx, mask, no_recycles
+        self,
+        seq_feats,
+        pair_feats,
+        true_aa,
+        residx,
+        mask,
+        no_recycles,
     ):  # -> Any:
         ...
     @staticmethod
@@ -259,13 +281,16 @@ class EsmForProteinFolding(EsmPreTrainedModel):
     ) -> EsmForProteinFoldingOutput: ...
     def af2_idx_to_esm_idx(self, aa, mask): ...
     def compute_language_model_representations(
-        self, esmaa: torch.Tensor
+        self,
+        esmaa: torch.Tensor,
     ) -> torch.Tensor: ...
     def bert_mask(self, aa, esmaa, mask, pattern):  # -> tuple[Any, Any, Any]:
         ...
     @torch.no_grad()
     def infer(
-        self, seqs: str | list[str], position_ids=...
+        self,
+        seqs: str | list[str],
+        position_ids=...,
     ):  # -> EsmForProteinFoldingOutput:
         ...
     @staticmethod

@@ -14,7 +14,10 @@ class EetqHfQuantizer(HfQuantizer):
         ...
     def update_dtype(self, dtype: torch.dtype) -> torch.dtype: ...
     def param_needs_quantization(
-        self, model: PreTrainedModel, param_name: str, **kwargs
+        self,
+        model: PreTrainedModel,
+        param_name: str,
+        **kwargs,
     ) -> bool: ...
     def create_quantized_param(
         self,

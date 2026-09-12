@@ -16,7 +16,7 @@ logger = ...
 @auto_docstring(
     custom_intro="""
     Base class for DepthPro's outputs.
-    """
+    """,
 )
 class DepthProOutput(ModelOutput):
     last_hidden_state: torch.FloatTensor | None = ...
@@ -34,11 +34,15 @@ class DepthProDepthEstimatorOutput(ModelOutput):
     attentions: tuple[torch.FloatTensor, ...] | None = ...
 
 def split_to_patches(
-    pixel_values: torch.Tensor, patch_size: int, overlap_ratio: float
+    pixel_values: torch.Tensor,
+    patch_size: int,
+    overlap_ratio: float,
 ) -> torch.Tensor: ...
 def reshape_features(hidden_states: torch.Tensor) -> torch.Tensor: ...
 def merge_patches(
-    patches: torch.Tensor, batch_size: int, padding: int
+    patches: torch.Tensor,
+    batch_size: int,
+    padding: int,
 ) -> torch.Tensor: ...
 def reconstruct_feature_maps(
     hidden_state: torch.Tensor,
@@ -50,7 +54,9 @@ def reconstruct_feature_maps(
 class DepthProPatchEncoder(nn.Module):
     def __init__(self, config: DepthProConfig) -> None: ...
     def forward(
-        self, pixel_values: torch.Tensor, head_mask: torch.Tensor | None = ...
+        self,
+        pixel_values: torch.Tensor,
+        head_mask: torch.Tensor | None = ...,
     ) -> list[torch.Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> list[torch.Tensor]: ...
 
@@ -140,7 +146,9 @@ class DepthProPreActResidualLayer(nn.Module):
 class DepthProFeatureFusionLayer(nn.Module):
     def __init__(self, config: DepthProConfig, use_deconv: bool = ...) -> None: ...
     def forward(
-        self, hidden_state: torch.Tensor, residual: torch.Tensor | None = ...
+        self,
+        hidden_state: torch.Tensor,
+        residual: torch.Tensor | None = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -152,7 +160,9 @@ class DepthProFeatureFusionStage(nn.Module):
 class DepthProFovEncoder(nn.Module):
     def __init__(self, config: DepthProConfig) -> None: ...
     def forward(
-        self, pixel_values: torch.Tensor, head_mask: torch.Tensor | None = ...
+        self,
+        pixel_values: torch.Tensor,
+        head_mask: torch.Tensor | None = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 

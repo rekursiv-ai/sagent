@@ -29,7 +29,7 @@ def _make_pdf(tmp_path: Path, n_pages: int = 1) -> Path:
     doc = pdfium.PdfDocument.new()
     try:
         for _ in range(n_pages):
-            doc.new_page(72, 72)  # 1x1 inch
+            doc.new_page(72, 72)  # 1x1 inch.
         out = tmp_path / "x.pdf"
         doc.save(str(out))
     finally:
@@ -89,7 +89,7 @@ def test_get_pdf_page_count_non_pdf(tmp_path: Path) -> None:
 
 def test_get_pdf_page_count_corrupt(tmp_path: Path) -> None:
     f = tmp_path / "x.pdf"
-    f.write_bytes(b"%PDF-1.4\n%EOF\n")  # valid magic, no structure
+    f.write_bytes(b"%PDF-1.4\n%EOF\n")  # Valid magic, no structure.
     assert get_pdf_page_count(f) is None
 
 
@@ -99,7 +99,7 @@ def test_extract_all_pages(tmp_path: Path) -> None:
     assert len(pages) == 3
     assert total == 3
     for jpeg in pages:
-        assert jpeg.startswith(b"\xff\xd8\xff")  # JPEG SOI
+        assert jpeg.startswith(b"\xff\xd8\xff")  # JPEG SOI.
 
 
 def test_extract_returns_total_page_count(tmp_path: Path) -> None:
@@ -149,7 +149,7 @@ def test_extract_returns_partial_pages_within_byte_budget(tmp_path: Path) -> Non
     # Budget fits 2 pages but not 3.
     pages, total = extract_pdf_pages(f, max_total_bytes=int(per_page * 2.5))
     assert 1 <= len(pages) < 5, f"expected a partial prefix, got {len(pages)}"
-    assert total == 5  # full count still reported for the continuation hint
+    assert total == 5  # Full count still reported for the continuation hint.
 
 
 def test_extract_first_page_over_budget_raises(tmp_path: Path) -> None:
@@ -161,7 +161,7 @@ def test_extract_first_page_over_budget_raises(tmp_path: Path) -> None:
     """
     f = _make_pdf(tmp_path, 3)
     with pytest.raises(PdfError, match=r"byte budget"):
-        extract_pdf_pages(f, max_total_bytes=1)  # first page alone busts
+        extract_pdf_pages(f, max_total_bytes=1)  # First page alone busts.
 
 
 def test_extract_within_byte_budget_returns_all_pages(tmp_path: Path) -> None:

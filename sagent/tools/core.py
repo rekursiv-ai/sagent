@@ -112,19 +112,6 @@ def set_recipe(name_or_path: str) -> None:
     _recipe_cache = None
 
 
-def _load_recipe() -> dict[str, object]:
-    """Load and cache the active recipe.yaml."""
-    global _recipe_cache  # noqa: PLW0603 -- module-level cache
-    if _recipe_cache is not None:
-        return _recipe_cache
-    recipe_path = _recipe_path_override or (
-        _CWD.parent / "assets" / f"{_DEFAULT_RECIPE}.yaml"
-    )
-    loaded = yaml.safe_load(recipe_path.read_text(encoding="utf-8"))
-    _recipe_cache = cast(dict[str, object], loaded) if isinstance(loaded, dict) else {}
-    return _recipe_cache
-
-
 def read_asset(path: str | Path) -> str:
     """Read an asset file, expanding ``{{include: path}}`` directives.
 
@@ -145,33 +132,6 @@ def read_asset(path: str | Path) -> str:
 
 
 _MAX_ASSET_DEPTH = 8  # config-globals: ignore -- include-recursion depth dial
-
-
-def _read_asset(path: str | Path, *, visited: set[str], depth: int) -> str:
-    """Recursive worker for :func:`read_asset` with cycle/depth guards."""
-    p = _CWD.parent / "assets" / path if isinstance(path, str) else path
-    try:
-        resolved = p.resolve()
-    except OSError:
-        return f"[include: unreadable path {p}]"
-    key = str(resolved)
-    if key in visited:
-        return f"[include: cycle on {p}]"
-    if depth >= _MAX_ASSET_DEPTH:
-        return f"[include: depth cap reached at {p}]"
-    visited.add(key)
-    text = resolved.read_text(encoding="utf-8")
-
-    def _replace(m: re.Match[str]) -> str:
-        return _read_asset(m.group(1).strip(), visited=visited, depth=depth + 1)
-
-    try:
-        return _RE_INCLUDE.sub(_replace, text)
-    finally:
-        # Discard on the way out: ``visited`` tracks the ANCESTOR chain, so
-        # a cycle is a file including itself. Keeping every file ever seen
-        # would report the second of two sibling includes as a cycle.
-        visited.discard(key)
 
 
 def recipe_dict(key: str) -> dict[str, str]:
@@ -239,7 +199,9 @@ def load_tool_description(name: str) -> str:
     key = name.lower()
     if key not in by_lower:
         logger.error(
-            "Tool %r not in recipe %s", name, _recipe_path_override or _DEFAULT_RECIPE
+            "Tool %r not in recipe %s",
+            name,
+            _recipe_path_override or _DEFAULT_RECIPE,
         )
         return _MISSING_TOOL_DESCRIPTION
     try:
@@ -255,43 +217,6 @@ def load_tool_description(name: str) -> str:
     if _NOW_PLACEHOLDER in text:
         text = text.replace(_NOW_PLACEHOLDER, _now_bucket())
     return text
-
-
-def _now_bucket(now: time.struct_time | None = None) -> str:
-    """Locale-formatted weekday, date, and 6-hour bucket range.
-
-    Honors ``$LC_TIME``. Buckets at 00/06/12/18 keep cross-process prompt
-    caches warm: at most four invalidations per day.
-    """
-    _ensure_locale_time()
-    t = now if now is not None else time.localtime()
-    lo = (t.tm_hour // 6) * 6
-
-    def fmt(h: int) -> str:
-        b = time.struct_time(
-            (
-                t.tm_year,
-                t.tm_mon,
-                t.tm_mday,
-                h % 24,
-                0,
-                0,
-                t.tm_wday,
-                t.tm_yday,
-                t.tm_isdst,
-            )
-        )
-        return re.sub(r":00(?=\D|$)", "", time.strftime("%X", b), count=1)
-
-    return f"{time.strftime('%a, %x', t)}, {fmt(lo)} - {fmt(lo + 6)}"
-
-
-@functools.cache
-def _ensure_locale_time() -> None:
-    try:
-        locale.setlocale(locale.LC_TIME, "")
-    except locale.Error:
-        locale.setlocale(locale.LC_TIME, "C")
 
 
 def result_token_budget(*, fallback: int = 50_000) -> int:
@@ -372,30 +297,27 @@ def bound_by_tokens(units: Iterable[str], *, budget: int) -> tuple[str, int]:
     return body, len(out)
 
 
+# Characters are the only handle left once a unit cannot be split, so the cut is made
+# there and then VERIFIED in tokens: a chars-per-token estimate is exactly the guess
+# this module exists to remove, and a minified line is far denser than any average.
 def _slice_to_budget(unit: str, *, budget: int) -> str:
-    """Cut one unsplittable unit down to ``budget``, saying that it cut.
-
-    Characters are the only handle left once a unit cannot be split, so
-    the cut is made there and then VERIFIED in tokens: a chars-per-token
-    estimate is exactly the guess this module exists to remove, and a
-    minified line is far denser than any average.
-    """
-
-    def rendered(chars: int) -> str:
-        return (
-            f"{unit[:chars]}\n"
-            f"... (truncated mid-line, {len(unit) - chars:,} chars omitted)"
-        )
-
+    """Cut one unsplittable unit down to ``budget``, saying that it cut."""
     ratio = max(1, len(unit) // max(1, approx_tokens(unit)))
     cut = max(1, budget * ratio)
     # Measure the RENDERED result, notice included: the notice is part of
     # what ships, so sizing only the prefix leaves the reply one notice
     # over budget -- the same append-after-counting mistake this module
     # exists to prevent.
-    while cut > 1 and approx_tokens(rendered(cut)) > budget:
+    while cut > 1 and approx_tokens(_render_truncated_unit(unit, cut)) > budget:
         cut //= 2
-    return rendered(cut)
+    return _render_truncated_unit(unit, cut)
+
+
+def _render_truncated_unit(unit: str, chars: int) -> str:
+    """Render a character-truncated unit with its omission notice."""
+    return (
+        f"{unit[:chars]}\n... (truncated mid-line, {len(unit) - chars:,} chars omitted)"
+    )
 
 
 _TYPE_MAP: dict[type[object], str] = {
@@ -529,9 +451,9 @@ def provider_not_allowed_result(
         when no parent context exists (e.g. cold-start tests).
 
     Returns:
-      result: A ``ToolResult`` with ``is_error=True`` and a
-      retry-hint suggesting either the parent provider or one of the
-      allowed names.
+      result: A ``ToolResult`` with ``is_error=True``.
+      retry_hint: Text suggesting either the parent provider or one of the
+          allowed names.
 
     """
     hint = (
@@ -960,3 +882,83 @@ def changed_files_context() -> str:
             f" line numbers):\n{snippet}",
         )
     return "<system-reminder>\n" + "\n".join(parts) + "\n</system-reminder>"
+
+
+def _load_recipe() -> dict[str, object]:
+    """Load and cache the active recipe.yaml."""
+    global _recipe_cache  # noqa: PLW0603 -- module-level cache
+    if _recipe_cache is not None:
+        return _recipe_cache
+    recipe_path = _recipe_path_override or (
+        _CWD.parent / "assets" / f"{_DEFAULT_RECIPE}.yaml"
+    )
+    loaded = yaml.safe_load(recipe_path.read_text(encoding="utf-8"))
+    _recipe_cache = cast(dict[str, object], loaded) if isinstance(loaded, dict) else {}
+    return _recipe_cache
+
+
+def _read_asset(path: str | Path, *, visited: set[str], depth: int) -> str:
+    """Recursive worker for :func:`read_asset` with cycle/depth guards."""
+    p = _CWD.parent / "assets" / path if isinstance(path, str) else path
+    try:
+        resolved = p.resolve()
+    except OSError:
+        return f"[include: unreadable path {p}]"
+    key = str(resolved)
+    if key in visited:
+        return f"[include: cycle on {p}]"
+    if depth >= _MAX_ASSET_DEPTH:
+        return f"[include: depth cap reached at {p}]"
+    visited.add(key)
+    text = resolved.read_text(encoding="utf-8")
+
+    def _replace(m: re.Match[str]) -> str:
+        return _read_asset(m.group(1).strip(), visited=visited, depth=depth + 1)
+
+    try:
+        return _RE_INCLUDE.sub(_replace, text)
+    finally:
+        # Discard on the way out: ``visited`` tracks the ANCESTOR chain, so
+        # a cycle is a file including itself. Keeping every file ever seen
+        # would report the second of two sibling includes as a cycle.
+        visited.discard(key)
+
+
+# Honors ``$LC_TIME``. Buckets at 00/06/12/18 keep cross-process prompt caches warm: at
+# most four invalidations per day.
+def _now_bucket(now: time.struct_time | None = None) -> str:
+    """Locale-formatted weekday, date, and 6-hour bucket range."""
+    _ensure_locale_time()
+    t = now if now is not None else time.localtime()
+    lo = (t.tm_hour // 6) * 6
+
+    return (
+        f"{time.strftime('%a, %x', t)}, "
+        f"{_format_bucket_time(t, lo)} - {_format_bucket_time(t, lo + 6)}"
+    )
+
+
+def _format_bucket_time(t: time.struct_time, hour: int) -> str:
+    """Format one six-hour bucket boundary."""
+    b = time.struct_time(
+        (
+            t.tm_year,
+            t.tm_mon,
+            t.tm_mday,
+            hour % 24,
+            0,
+            0,
+            t.tm_wday,
+            t.tm_yday,
+            t.tm_isdst,
+        ),
+    )
+    return re.sub(r":00(?=\D|$)", "", time.strftime("%X", b), count=1)
+
+
+@functools.cache
+def _ensure_locale_time() -> None:
+    try:
+        locale.setlocale(locale.LC_TIME, "")
+    except locale.Error:
+        locale.setlocale(locale.LC_TIME, "C")

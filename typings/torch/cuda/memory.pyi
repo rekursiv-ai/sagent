@@ -86,14 +86,19 @@ class _CUDAAllocator:
 
 class CUDAPluggableAllocator(_CUDAAllocator):
     def __init__(
-        self, path_to_so_file: str, alloc_fn_name: str, free_fn_name: str
+        self,
+        path_to_so_file: str,
+        alloc_fn_name: str,
+        free_fn_name: str,
     ) -> None: ...
 
 def change_current_allocator(allocator: _CUDAAllocator) -> None: ...
 
 class MemPool(_MemPool):
     def __init__(
-        self, allocator: _cuda_CUDAAllocator | None = ..., use_on_oom: bool = ...
+        self,
+        allocator: _cuda_CUDAAllocator | None = ...,
+        use_on_oom: bool = ...,
     ) -> None: ...
     @property
     def id(self) -> tuple[int, int]: ...

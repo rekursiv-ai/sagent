@@ -21,7 +21,9 @@ class SwiftFormerPatchEmbedding(nn.Module):
         ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class SwiftFormerDropPath(nn.Module):
@@ -55,7 +57,10 @@ class SwiftFormerLocalRepresentation(nn.Module):
 
 class SwiftFormerEncoderBlock(nn.Module):
     def __init__(
-        self, config: SwiftFormerConfig, dim: int, drop_path: float = ...
+        self,
+        config: SwiftFormerConfig,
+        dim: int,
+        drop_path: float = ...,
     ) -> None: ...
     def forward(self, x):  # -> Any:
         ...
@@ -74,7 +79,9 @@ class SwiftFormerEncoder(nn.Module):
         return_dict: bool | None = ...,
     ) -> tuple | BaseModelOutputWithNoAttention: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithNoAttention: ...
 
 @auto_docstring

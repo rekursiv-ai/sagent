@@ -6,10 +6,14 @@ aten = ...
 logger = ...
 
 def is_same_size_handler(
-    op_call: torch._ops.OpOverload, args: tuple[object, ...], kwargs: dict[str, object]
+    op_call: torch._ops.OpOverload,
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
 ) -> bool: ...
 def found_inf_reduce_handler(
-    op_call: torch._ops.OpOverload, args: tuple[object, ...], kwargs: dict[str, object]
+    op_call: torch._ops.OpOverload,
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
 ) -> None: ...
 
 class OpDispatcher:

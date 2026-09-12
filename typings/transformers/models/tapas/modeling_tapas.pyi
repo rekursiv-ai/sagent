@@ -34,14 +34,20 @@ class TableQuestionAnsweringOutput(ModelOutput):
     attentions: tuple[torch.FloatTensor] | None = ...
 
 def load_tf_weights_in_tapas(
-    model, config, tf_checkpoint_path
+    model,
+    config,
+    tf_checkpoint_path,
 ):  # -> TapasForSequenceClassification | TapasModel | TapasForMaskedLM:
     ...
 
 class TapasEmbeddings(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, input_ids=..., token_type_ids=..., position_ids=..., inputs_embeds=...
+        self,
+        input_ids=...,
+        token_type_ids=...,
+        position_ids=...,
+        inputs_embeds=...,
     ):  # -> Any:
         ...
 
@@ -63,7 +69,9 @@ class TapasSelfAttention(nn.Module):
 class TapasSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -91,7 +99,9 @@ class TapasIntermediate(nn.Module):
 class TapasOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 

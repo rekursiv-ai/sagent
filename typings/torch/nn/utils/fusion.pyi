@@ -12,7 +12,9 @@ ConvT = TypeVar("ConvT", bound=torch.nn.modules.conv._ConvNd)
 LinearT = TypeVar("LinearT", bound=torch.nn.Linear)
 
 def fuse_conv_bn_eval(
-    conv: ConvT, bn: torch.nn.modules.batchnorm._BatchNorm, transpose: bool = ...
+    conv: ConvT,
+    bn: torch.nn.modules.batchnorm._BatchNorm,
+    transpose: bool = ...,
 ) -> ConvT: ...
 def fuse_conv_bn_weights(
     conv_w: torch.Tensor,
@@ -25,7 +27,8 @@ def fuse_conv_bn_weights(
     transpose: bool = ...,
 ) -> tuple[torch.nn.Parameter, torch.nn.Parameter]: ...
 def fuse_linear_bn_eval(
-    linear: LinearT, bn: torch.nn.modules.batchnorm._BatchNorm
+    linear: LinearT,
+    bn: torch.nn.modules.batchnorm._BatchNorm,
 ) -> LinearT: ...
 def fuse_linear_bn_weights(
     linear_w: torch.Tensor,

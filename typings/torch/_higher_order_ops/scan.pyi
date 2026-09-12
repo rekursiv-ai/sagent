@@ -13,13 +13,19 @@ import torch.utils._pytree as pytree
 aten = ...
 
 def wrap_combine_fn_flat(
-    *args, combine_fn, spec_init, spec_xs, num_init_leaves, num_inp_leaves
+    *args,
+    combine_fn,
+    spec_init,
+    spec_xs,
+    num_init_leaves,
+    num_inp_leaves,
 ): ...
 def stack_y(y: torch.Tensor, scan_length: int) -> torch.Tensor: ...
 def call_operator(operator, *args) -> list[Any]: ...
 def scan(
     combine_fn: Callable[
-        [pytree.PyTree, pytree.PyTree], tuple[pytree.PyTree, pytree.PyTree]
+        [pytree.PyTree, pytree.PyTree],
+        tuple[pytree.PyTree, pytree.PyTree],
     ],
     init: pytree.PyTree,
     xs: pytree.PyTree,
@@ -36,7 +42,11 @@ class ScanOp(HigherOrderOperator):
 scan_op = ...
 
 def generic_scan(
-    operator, init, xs, dim=..., additional_inputs=...
+    operator,
+    init,
+    xs,
+    dim=...,
+    additional_inputs=...,
 ) -> tuple[Any, list[Any]] | list[Any | Tensor | None]: ...
 def trace_scan(
     proxy_mode,
@@ -48,7 +58,10 @@ def trace_scan(
 ) -> tuple[Any | Tensor, ...]: ...
 @scan_op.py_impl(DispatchKey.CompositeExplicitAutograd)
 def scan_op_dense(
-    combine_fn, init, xs, additional_inputs
+    combine_fn,
+    init,
+    xs,
+    additional_inputs,
 ) -> tuple[Any, list[Any]] | list[Any | Tensor | None]: ...
 
 class ScanAutogradOp(torch.autograd.Function):
@@ -68,11 +81,19 @@ class ScanAutogradOp(torch.autograd.Function):
 def scan_autograd(combine_fn, init, xs, additional_inputs) -> tuple[Any, ...]: ...
 @scan_op.py_impl(ProxyTorchDispatchMode)
 def scan_proxy_mode(
-    mode, combine_fn, init, xs, additional_inputs
+    mode,
+    combine_fn,
+    init,
+    xs,
+    additional_inputs,
 ) -> tuple[Any | Tensor, ...]: ...
 @scan_op.py_impl(FakeTensorMode)
 def scan_fake_tensor_mode(
-    mode, combine_fn, init, xs, additional_inputs
+    mode,
+    combine_fn,
+    init,
+    xs,
+    additional_inputs,
 ) -> tuple[Any | Tensor, ...]: ...
 @scan_op.py_functionalize_impl
 def scan_functionalize(ctx, combine_fn, init, xs, additional_inputs): ...

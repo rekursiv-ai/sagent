@@ -156,7 +156,9 @@ class PerceiverEncoder(nn.Module):
         return_dict: bool | None = ...,
     ) -> tuple | BaseModelOutputWithCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithCrossAttentions: ...
 
 @auto_docstring
@@ -315,7 +317,11 @@ def build_position_encoding(
 class PerceiverAbstractDecoder(nn.Module, metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def decoder_query(
-        self, inputs, modality_sizes=..., inputs_without_pos=..., subsampled_points=...
+        self,
+        inputs,
+        modality_sizes=...,
+        inputs_without_pos=...,
+        subsampled_points=...,
     ): ...
     @property
     @abc.abstractmethod
@@ -326,7 +332,11 @@ class PerceiverAbstractDecoder(nn.Module, metaclass=abc.ABCMeta):
 class PerceiverProjectionDecoder(PerceiverAbstractDecoder):
     def __init__(self, config) -> None: ...
     def decoder_query(
-        self, inputs, modality_sizes=..., inputs_without_pos=..., subsampled_points=...
+        self,
+        inputs,
+        modality_sizes=...,
+        inputs_without_pos=...,
+        subsampled_points=...,
     ):  # -> None:
         ...
     def forward(
@@ -359,7 +369,11 @@ class PerceiverBasicDecoder(PerceiverAbstractDecoder):
     @property
     def num_query_channels(self) -> int: ...
     def decoder_query(
-        self, inputs, modality_sizes=..., inputs_without_pos=..., subsampled_points=...
+        self,
+        inputs,
+        modality_sizes=...,
+        inputs_without_pos=...,
+        subsampled_points=...,
     ):  # -> Tensor | Any:
         ...
     def forward(
@@ -376,7 +390,11 @@ class PerceiverClassificationDecoder(PerceiverAbstractDecoder):
     @property
     def num_query_channels(self) -> int: ...
     def decoder_query(
-        self, inputs, modality_sizes=..., inputs_without_pos=..., subsampled_points=...
+        self,
+        inputs,
+        modality_sizes=...,
+        inputs_without_pos=...,
+        subsampled_points=...,
     ):  # -> Tensor | Any:
         ...
     def forward(
@@ -400,7 +418,11 @@ class PerceiverOpticalFlowDecoder(PerceiverAbstractDecoder):
     @property
     def num_query_channels(self) -> int: ...
     def decoder_query(
-        self, inputs, modality_sizes=..., inputs_without_pos=..., subsampled_points=...
+        self,
+        inputs,
+        modality_sizes=...,
+        inputs_without_pos=...,
+        subsampled_points=...,
     ): ...
     def forward(
         self,
@@ -422,7 +444,11 @@ class PerceiverBasicVideoAutoencodingDecoder(PerceiverAbstractDecoder):
     @property
     def num_query_channels(self) -> int: ...
     def decoder_query(
-        self, inputs, modality_sizes=..., inputs_without_pos=..., subsampled_points=...
+        self,
+        inputs,
+        modality_sizes=...,
+        inputs_without_pos=...,
+        subsampled_points=...,
     ):  # -> Tensor | Any:
         ...
     def forward(
@@ -434,7 +460,8 @@ class PerceiverBasicVideoAutoencodingDecoder(PerceiverAbstractDecoder):
     def __call__(self, *args: Any, **kwargs: Any) -> PerceiverDecoderOutput: ...
 
 def restructure(
-    modality_sizes: ModalitySizeType, inputs: torch.Tensor
+    modality_sizes: ModalitySizeType,
+    inputs: torch.Tensor,
 ) -> Mapping[str, torch.Tensor]: ...
 
 class PerceiverMultimodalDecoder(PerceiverAbstractDecoder):
@@ -451,7 +478,11 @@ class PerceiverMultimodalDecoder(PerceiverAbstractDecoder):
     @property
     def num_query_channels(self) -> int: ...
     def decoder_query(
-        self, inputs, modality_sizes, inputs_without_pos=..., subsampled_points=...
+        self,
+        inputs,
+        modality_sizes,
+        inputs_without_pos=...,
+        subsampled_points=...,
     ):  # -> Tensor:
         ...
     def forward(
@@ -464,7 +495,9 @@ class PerceiverMultimodalDecoder(PerceiverAbstractDecoder):
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 def space_to_depth(
-    frames: torch.Tensor, temporal_block_size: int = ..., spatial_block_size: int = ...
+    frames: torch.Tensor,
+    temporal_block_size: int = ...,
+    spatial_block_size: int = ...,
 ) -> torch.Tensor: ...
 
 class Conv2dSamePadding(nn.Conv2d):
@@ -484,7 +517,11 @@ class Conv2DDownsample(nn.Module):
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 def generate_fourier_features(
-    pos, num_bands, max_resolution=..., concat_pos=..., sine_only=...
+    pos,
+    num_bands,
+    max_resolution=...,
+    concat_pos=...,
+    sine_only=...,
 ):  # -> Tensor:
     ...
 def build_linear_positions(index_dims, output_range=...):  # -> Tensor:
@@ -505,7 +542,10 @@ class PerceiverTrainablePositionEncoding(PerceiverAbstractPositionEncoding):
     def num_dimensions(self) -> int: ...
     def output_size(self, *args, **kwargs) -> int: ...
     def interpolate_pos_encoding(
-        self, position_embeddings: torch.Tensor, height: int, width: int
+        self,
+        position_embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
         self,
@@ -517,7 +557,11 @@ class PerceiverTrainablePositionEncoding(PerceiverAbstractPositionEncoding):
 
 class PerceiverFourierPositionEncoding(PerceiverAbstractPositionEncoding):
     def __init__(
-        self, num_bands, max_resolution, concat_pos=..., sine_only=...
+        self,
+        num_bands,
+        max_resolution,
+        concat_pos=...,
+        sine_only=...,
     ) -> None: ...
     @property
     def num_dimensions(self) -> int: ...
@@ -552,13 +596,17 @@ class PerceiverTextPreprocessor(AbstractPreprocessor):
 class PerceiverEmbeddingDecoder(nn.Module):
     def __init__(self, config: PerceiverConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, embedding_layer: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        embedding_layer: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class PerceiverMultimodalPostprocessor(nn.Module):
     def __init__(
-        self, modalities: Mapping[str, PostprocessorType], input_is_dict: bool = ...
+        self,
+        modalities: Mapping[str, PostprocessorType],
+        input_is_dict: bool = ...,
     ) -> None: ...
     def forward(
         self,
@@ -571,13 +619,19 @@ class PerceiverMultimodalPostprocessor(nn.Module):
 class PerceiverClassificationPostprocessor(nn.Module):
     def __init__(self, config: PerceiverConfig, in_channels: int) -> None: ...
     def forward(
-        self, inputs, pos: torch.Tensor | None = ..., modality_sizes=...
+        self,
+        inputs,
+        pos: torch.Tensor | None = ...,
+        modality_sizes=...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class PerceiverAudioPostprocessor(nn.Module):
     def __init__(
-        self, config: PerceiverConfig, in_channels: int, postproc_type: str = ...
+        self,
+        config: PerceiverConfig,
+        in_channels: int,
+        postproc_type: str = ...,
     ) -> None: ...
     def forward(
         self,

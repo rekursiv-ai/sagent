@@ -153,7 +153,11 @@ class FlaxWav2Vec2GumbelVectorQuantizer(nn.Module):
     def setup(self):  # -> None:
         ...
     def __call__(
-        self, hidden_states, mask_time_indices=..., deterministic=..., temperature=...
+        self,
+        hidden_states,
+        mask_time_indices=...,
+        deterministic=...,
+        temperature=...,
     ):  # -> tuple[Any, Array]:
         ...
 
@@ -193,7 +197,10 @@ class FlaxWav2Vec2PreTrainedModel(FlaxPreTrainedModel):
         **kwargs,
     ) -> None: ...
     def init_weights(
-        self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...
+        self,
+        rng: jax.random.PRNGKey,
+        input_shape: tuple,
+        params: FrozenDict = ...,
     ) -> FrozenDict: ...
     @add_start_docstrings_to_model_forward(WAV2VEC2_INPUTS_DOCSTRING)
     def __call__(

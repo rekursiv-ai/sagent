@@ -41,7 +41,9 @@ class InstructBlipProcessor(ProcessorMixin):
         ...
     @classmethod
     def from_pretrained(
-        cls, pretrained_model_name_or_path, **kwargs
+        cls,
+        pretrained_model_name_or_path,
+        **kwargs,
     ):  # -> InstructBlipProcessor:
         ...
 

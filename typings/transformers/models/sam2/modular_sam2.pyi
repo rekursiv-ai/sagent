@@ -97,10 +97,13 @@ class Sam2SinePositionEmbedding(MaskFormerSinePositionEmbedding): ...
 class Sam2VisionNeck(nn.Module):
     def __init__(self, config: Sam2VisionConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
     ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]: ...
 
 def do_pool(x: torch.Tensor, query_stride: int | None = ...) -> torch.Tensor: ...
@@ -139,7 +142,9 @@ class Sam2MultiScaleBlock(GradientCheckpointingLayer):
         total_block_idx: int,
     ) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, **kwargs: Unpack[TransformersKwargs]
+        self,
+        hidden_states: torch.Tensor,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> torch.FloatTensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
@@ -208,12 +213,16 @@ class Sam2Attention(nn.Module):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class Sam2TwoWayAttentionBlock(SamTwoWayAttentionBlock, GradientCheckpointingLayer):
     def __init__(
-        self, config: Sam2MaskDecoderConfig, skip_first_layer_pe: bool = ...
+        self,
+        config: Sam2MaskDecoderConfig,
+        skip_first_layer_pe: bool = ...,
     ) -> None: ...
 
 class Sam2TwoWayTransformer(SamTwoWayTransformer): ...
@@ -234,7 +243,9 @@ class Sam2MaskDecoder(SamMaskDecoder):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 @auto_docstring(custom_intro=...)
@@ -244,10 +255,14 @@ class Sam2Model(SamModel):
     def get_image_wide_positional_embeddings(self) -> torch.Tensor: ...
     @torch.no_grad()
     def get_image_embeddings(
-        self, pixel_values: torch.FloatTensor, **kwargs: Unpack[TransformersKwargs]
+        self,
+        pixel_values: torch.FloatTensor,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> list[torch.Tensor]: ...
     def get_image_features(
-        self, pixel_values: torch.FloatTensor, **kwargs: Unpack[TransformersKwargs]
+        self,
+        pixel_values: torch.FloatTensor,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[
         list[torch.Tensor],
         list[torch.Tensor],

@@ -8,7 +8,11 @@ logger = ...
 
 class SequenceFeatureExtractor(FeatureExtractionMixin):
     def __init__(
-        self, feature_size: int, sampling_rate: int, padding_value: float, **kwargs
+        self,
+        feature_size: int,
+        sampling_rate: int,
+        padding_value: float,
+        **kwargs,
     ) -> None: ...
     def pad(
         self,

@@ -18,7 +18,11 @@ def generate_single_level_function(interpreter, autograd_function) -> type[_]: .
 NO_OUT_DIMS = ...
 
 def wrap_outputs_maintaining_identity(
-    outputs, unwrapped_inputs, orig_inputs, wrap_fn, out_dims=...
+    outputs,
+    unwrapped_inputs,
+    orig_inputs,
+    wrap_fn,
+    out_dims=...,
 ) -> PyTree: ...
 
 class VmapInfo(NamedTuple):
@@ -29,21 +33,36 @@ def has_overridden_vmap_rule(autograd_function) -> bool: ...
 def validate_vmap_returns_tuple_of_two_elements(result) -> None: ...
 @custom_function_call.py_impl(TransformType.Vmap)
 def custom_function_call_vmap(
-    interpreter, autograd_function, *operands, **kwargs
+    interpreter,
+    autograd_function,
+    *operands,
+    **kwargs,
 ) -> tuple[Any, ...] | Any | None: ...
 def custom_function_call_vmap_helper(
-    interpreter, vmap_function, op, *operands, **kwargs
+    interpreter,
+    vmap_function,
+    op,
+    *operands,
+    **kwargs,
 ) -> None: ...
 def unpack_outputs(outputs) -> tuple[Any, tuple[Any, ...] | Any]: ...
 def custom_function_call_vmap_generate_rule(
-    interpreter, autograd_function, *operands
+    interpreter,
+    autograd_function,
+    *operands,
 ) -> tuple[Any, ...]: ...
 @custom_function_call.py_impl(TransformType.Functionalize)
 def custom_function_call_functionalize(
-    interpreter, autograd_function, generate_vmap_rule, *operands
+    interpreter,
+    autograd_function,
+    generate_vmap_rule,
+    *operands,
 ): ...
 def vmapify_autograd_function(
-    autograd_function, in_dims, batch_size, randomness
+    autograd_function,
+    in_dims,
+    batch_size,
+    randomness,
 ) -> type[_]: ...
 def get_tangents_in_dims(input_dims, tangents) -> PyTree: ...
 
@@ -78,7 +97,8 @@ def reductify_leaf(
     target_shape_without_bdim_to_reduce_to=...,
 ) -> None: ...
 def autograd_function_forward_rewritten(
-    original_forward, original_setup_context
+    original_forward,
+    original_setup_context,
 ) -> Callable[..., Any]: ...
 
 class AutogradFunctionApply(HigherOrderOperator):

@@ -49,10 +49,10 @@ def anthropic_usage(headers: Mapping[str, str]) -> UsageSnapshot | None:
     windows: list[UsageWindow] = []
     for window in ("5h", "7d"):
         util = _finite_float(
-            headers.get(f"anthropic-ratelimit-unified-{window}-utilization")
+            headers.get(f"anthropic-ratelimit-unified-{window}-utilization"),
         )
         reset = _finite_float(
-            headers.get(f"anthropic-ratelimit-unified-{window}-reset")
+            headers.get(f"anthropic-ratelimit-unified-{window}-reset"),
         )
         status = headers.get(f"anthropic-ratelimit-unified-{window}-status")
         if util is None and reset is None and status is None and not omnibus_blocked:
@@ -66,7 +66,7 @@ def anthropic_usage(headers: Mapping[str, str]) -> UsageSnapshot | None:
                 utilization=None if util is None else max(0.0, min(1.0, util)),
                 resets_at=reset,
                 blocked=omnibus_blocked or window_blocked,
-            )
+            ),
         )
     if not windows:
         return None
@@ -105,7 +105,7 @@ def openai_usage(headers: Mapping[str, str]) -> UsageSnapshot | None:
                 utilization=util,
                 resets_at=None if delay is None else time.time() + delay,
                 blocked=remaining is not None and remaining <= 0,
-            )
+            ),
         )
     if not windows:
         return None
@@ -133,12 +133,10 @@ def _finite_float(raw: str | None) -> float | None:
 _DURATION_SEGMENT = re.compile(r"(\d+(?:\.\d+)?)(ms|[dhms])")
 
 
+# Returns the duration as seconds-from-now (a delta); the caller converts it to a wall-
+# clock epoch. A bare ``"0"`` (reset is now) yields ``0.0``.
 def _openai_reset_seconds(raw: str | None) -> float | None:
-    """Parse an OpenAI reset duration (e.g. ``"6m0s"``, ``"500ms"``) to seconds.
-
-    Returns the duration as seconds-from-now (a delta); the caller converts it
-    to a wall-clock epoch. A bare ``"0"`` (reset is now) yields ``0.0``.
-    """
+    """Parse an OpenAI reset duration (e.g. ``"6m0s"``, ``"500ms"``) to seconds."""
     if raw is None:
         return None
     text = raw.strip().lower()

@@ -6,7 +6,9 @@ import torch
 
 class KernelInputs:
     def __init__(
-        self, input_nodes: list[Any], scalars: dict[str, float | int] | None = ...
+        self,
+        input_nodes: list[Any],
+        scalars: dict[str, float | int] | None = ...,
     ) -> None: ...
     def nodes(self, reorder: Sequence[int] | None = ...) -> list[Any]: ...
     @property

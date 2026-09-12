@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from sagent.catalog import anthropic as anthropic_catalog
+from sagent.catalog import anthropic
 from sagent.types.capability import (
     ContextTag,
     ModelCapability,
@@ -54,7 +54,7 @@ def test_from_limits_takes_limits_not_a_model() -> None:
     """``swap_model`` sizes a candidate window before that model exists."""
     limits = _limits(request=1_000_000, response=128_000)
     assert AgentSettings.from_limits(limits).buffer_tokens == default_buffer_tokens(
-        1_000_000
+        1_000_000,
     )
 
 
@@ -290,13 +290,14 @@ def test_no_latency_tag_survives() -> None:
     ],
 )
 def test_only_documented_models_offer_the_priority_tier(
-    model_id: str, priority: bool
+    model_id: str,
+    priority: bool,
 ) -> None:
     """Fast mode is Opus 5 and Opus 4.8 only.
 
     https://code.claude.com/docs/en/fast-mode
     """
-    row = anthropic_catalog.models()[model_id]
+    row = anthropic.models()[model_id]
     assert ("priority" in row.service_tier) is priority
 
 
@@ -311,7 +312,7 @@ def test_only_documented_models_offer_the_priority_tier(
 )
 def test_chars_per_token_is_provider_internal(model_id: str, divisor: float) -> None:
     """A divisor is not a capability: nothing SELECTS one."""
-    assert anthropic_catalog.chars_per_token(model_id) == divisor
+    assert anthropic.chars_per_token(model_id) == divisor
     assert "chars_per_token" not in ModelCapability.__dataclass_fields__
 
 

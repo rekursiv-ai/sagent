@@ -35,19 +35,37 @@ def dropout(g: jit_utils.GraphContext, input, p, train) -> Value: ...
 @_onnx_symbolic("aten::native_dropout")
 @symbolic_helper.parse_args("v", "f", "b")
 def native_dropout(
-    g: jit_utils.GraphContext, input, p, train
+    g: jit_utils.GraphContext,
+    input,
+    p,
+    train,
 ) -> tuple[Value, Value | None]: ...
 @_onnx_symbolic("aten::nll_loss")
 def nll_loss(
-    g: jit_utils.GraphContext, self, target, weight, reduction, ignore_index
+    g: jit_utils.GraphContext,
+    self,
+    target,
+    weight,
+    reduction,
+    ignore_index,
 ): ...
 @_onnx_symbolic("aten::nll_loss2d")
 def nll_loss2d(
-    g: jit_utils.GraphContext, self, target, weight, reduction, ignore_index
+    g: jit_utils.GraphContext,
+    self,
+    target,
+    weight,
+    reduction,
+    ignore_index,
 ): ...
 @_onnx_symbolic("aten::nll_loss_nd")
 def nll_loss_nd(
-    g: jit_utils.GraphContext, self, target, weight, reduction, ignore_index
+    g: jit_utils.GraphContext,
+    self,
+    target,
+    weight,
+    reduction,
+    ignore_index,
 ): ...
 @_onnx_symbolic("aten::cross_entropy_loss")
 def cross_entropy_loss(
@@ -62,19 +80,30 @@ def cross_entropy_loss(
 @_onnx_symbolic("aten::binary_cross_entropy_with_logits")
 @symbolic_helper.parse_args("v", "v", "v", "v", "i")
 def binary_cross_entropy_with_logits(
-    g: jit_utils.GraphContext, input, target, weight, pos_weight, reduction
+    g: jit_utils.GraphContext,
+    input,
+    target,
+    weight,
+    pos_weight,
+    reduction,
 ): ...
 @_onnx_symbolic("aten::celu")
 def celu(g: jit_utils.GraphContext, self, alpha): ...
 @_onnx_symbolic("aten::argmax")
 @symbolic_helper.parse_args("v", "v", "b")
 def argmax(
-    g: jit_utils.GraphContext, input: torch._C.Value, dim: torch._C.Value, keepdim: bool
+    g: jit_utils.GraphContext,
+    input: torch._C.Value,
+    dim: torch._C.Value,
+    keepdim: bool,
 ): ...
 @_onnx_symbolic("aten::argmin")
 @symbolic_helper.parse_args("v", "v", "b")
 def argmin(
-    g: jit_utils.GraphContext, input: torch._C.Value, dim: torch._C.Value, keepdim: bool
+    g: jit_utils.GraphContext,
+    input: torch._C.Value,
+    dim: torch._C.Value,
+    keepdim: bool,
 ): ...
 @_onnx_symbolic("aten::pow")
 def pow(g: jit_utils.GraphContext, self, exponent): ...

@@ -26,7 +26,16 @@ Node = torch.fx.Node
 type Region = list[Node]
 type IdenticalNodes = list[Node]
 type GlobalStateKey = tuple[
-    bool, bool, int, bool, bool, torch.dtype, bool, bool, bool, bool
+    bool,
+    bool,
+    int,
+    bool,
+    bool,
+    torch.dtype,
+    bool,
+    bool,
+    bool,
+    bool,
 ]
 log = ...
 graph_expansion_log = ...
@@ -63,7 +72,9 @@ class GraphRegionTracker:
 
 class RegionWrapper:
     def __init__(
-        self, region: Region, node_to_recursive_ancestors: dict[Node, set[Node]]
+        self,
+        region: Region,
+        node_to_recursive_ancestors: dict[Node, set[Node]],
     ) -> None: ...
     def next_candidate(self) -> Node | None: ...
     def will_inclusion_create_cycle(self, node: Node) -> bool: ...

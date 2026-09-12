@@ -49,7 +49,11 @@ class Kosmos2_5VisionConfig(PretrainedConfig):
 
 class Kosmos2_5Config(PretrainedConfig):
     def __init__(
-        self, text_config=..., vision_config=..., latent_query_num=..., **kwargs
+        self,
+        text_config=...,
+        vision_config=...,
+        latent_query_num=...,
+        **kwargs,
     ) -> None: ...
 
 __all__ = ["Kosmos2_5Config"]

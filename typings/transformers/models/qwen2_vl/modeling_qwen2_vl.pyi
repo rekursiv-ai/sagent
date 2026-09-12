@@ -54,11 +54,19 @@ class Qwen2VLRotaryEmbedding(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_multimodal_rotary_pos_emb(
-    q, k, cos, sin, mrope_section, unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    mrope_section,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def apply_rotary_pos_emb_vision(
-    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class VisionRotaryEmbedding(nn.Module):
@@ -80,7 +88,10 @@ class PatchEmbed(nn.Module):
 
 class PatchMerger(nn.Module):
     def __init__(
-        self, dim: int, context_dim: int, spatial_merge_size: int = ...
+        self,
+        dim: int,
+        context_dim: int,
+        spatial_merge_size: int = ...,
     ) -> None: ...
     def forward(self, x: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -134,7 +145,9 @@ class Qwen2MLP(nn.Module):
 
 class Qwen2VLAttention(nn.Module):
     def __init__(
-        self, config: Qwen2VLTextConfig, layer_idx: int | None = ...
+        self,
+        config: Qwen2VLTextConfig,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -165,7 +178,8 @@ class Qwen2VLDecoderLayer(GradientCheckpointingLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring
@@ -191,7 +205,10 @@ class Qwen2VisionTransformerPretrainedModel(Qwen2VLPreTrainedModel):
         ...
     @auto_docstring
     def forward(
-        self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, **kwargs
+        self,
+        hidden_states: torch.Tensor,
+        grid_thw: torch.Tensor,
+        **kwargs,
     ) -> torch.Tensor: ...
 
 @auto_docstring

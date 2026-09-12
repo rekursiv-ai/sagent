@@ -50,7 +50,9 @@ class VoxtralAttention(nn.Module):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class VoxtralEncoderLayer(GradientCheckpointingLayer):
@@ -90,7 +92,10 @@ class VoxtralEncoder(VoxtralPreTrainedModel):
         ...
     @check_model_inputs
     def forward(
-        self, input_features, attention_mask=..., **kwargs: Unpack[TransformersKwargs]
+        self,
+        input_features,
+        attention_mask=...,
+        **kwargs: Unpack[TransformersKwargs],
     ):  # -> BaseModelOutput:
         ...
 

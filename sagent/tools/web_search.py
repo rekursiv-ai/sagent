@@ -53,7 +53,8 @@ class WebSearch:
             **SearchParamsSchema.json_schema(),
             "properties": {
                 **cast(
-                    dict[str, object], SearchParamsSchema.json_schema()["properties"]
+                    dict[str, object],
+                    SearchParamsSchema.json_schema()["properties"],
                 ),
                 "allowed_domains": {
                     "type": "array",
@@ -66,7 +67,7 @@ class WebSearch:
                     "description": "Exclude results from these domains.",
                 },
             },
-        }
+        },
     )
 
     output: Annotated[Toggle, CLI_SETTABLE] = "off"
@@ -188,25 +189,15 @@ class WebSearch:
 _HOSTNAME_RE = re.compile(r"^(?:\*\.)?[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::\d+)?$")
 
 
+# Only tokens matching a bare-hostname shape are accepted; a non-hostname value
+# (containing whitespace or query operators) is REJECTED rather than spliced in, so a
+# domain filter cannot inject extra query syntax.
 def _build_query(
     query: str,
     allowed_domains: object,
     blocked_domains: object,
 ) -> str:
-    """Return *query* with ``site:`` / ``-site:`` filters for valid domains.
-
-    Only tokens matching a bare-hostname shape are accepted; a non-hostname
-    value (containing whitespace or query operators) is REJECTED rather than
-    spliced in, so a domain filter cannot inject extra query syntax.
-
-    Raises:
-      TypeError: When a filter argument is not a list.
-      ValueError: When a list member is not a hostname. Dropping
-        the bad value instead would run an UNRESTRICTED search while the caller
-        believed it was scoped -- failing open on the one argument whose whole
-        purpose is to restrict.
-
-    """
+    """Return *query* with ``site:`` / ``-site:`` filters for valid domains."""
     return (
         query
         + _site_filters(allowed_domains, name="allowed_domains", prefix="site:")
@@ -220,7 +211,7 @@ def _site_filters(domains: object, *, name: str, prefix: str) -> str:
         return ""
     if not isinstance(domains, (list, tuple)):
         raise TypeError(
-            f"{name!r} must be a list of hostnames, got {type(domains).__name__}."
+            f"{name!r} must be a list of hostnames, got {type(domains).__name__}.",
         )
     terms = ""
     # Iterated as `object`, not cast to a value type: the cast asserted a

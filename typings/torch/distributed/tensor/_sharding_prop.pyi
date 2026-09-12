@@ -34,9 +34,11 @@ class ShardingPropagator:
         schema_info: RuntimeSchemaInfo | None = ...,
     ) -> None: ...
     def propagate_tensor_meta(
-        self, op_schema: OpSchema
+        self,
+        op_schema: OpSchema,
     ) -> TensorMeta | Sequence[TensorMeta | None] | None: ...
     def propagate(self, op_info: OpInfo) -> None: ...
     def propagate_op_sharding_non_cached(
-        self, op_schema: OpSchema
+        self,
+        op_schema: OpSchema,
     ) -> OutputSharding: ...

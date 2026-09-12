@@ -105,15 +105,28 @@ class IndexPropagation(DefaultHandler):
     ) -> IndexPropVar: ...
     @overload
     def fallback(
-        self, name: str, args: Sequence[Any], kwargs: dict[str, Any]
+        self,
+        name: str,
+        args: Sequence[Any],
+        kwargs: dict[str, Any],
     ) -> IndexPropResult: ...
     def fallback(
-        self, name: str, args: Sequence[Any], kwargs: dict[str, Any]
+        self,
+        name: str,
+        args: Sequence[Any],
+        kwargs: dict[str, Any],
     ) -> IndexPropResult: ...
     def propagate_sympy(
-        self, name: str, args: Sequence[Any], kwargs: dict[str, Any]
+        self,
+        name: str,
+        args: Sequence[Any],
+        kwargs: dict[str, Any],
     ) -> IndexPropResult: ...
     def statically_true(self, e) -> bool: ...
     def indirect_indexing(
-        self, index: Any | IndexPropVar, size: Any, check: bool = ..., wrap_neg=...
+        self,
+        index: Any | IndexPropVar,
+        size: Any,
+        check: bool = ...,
+        wrap_neg=...,
     ) -> Any: ...

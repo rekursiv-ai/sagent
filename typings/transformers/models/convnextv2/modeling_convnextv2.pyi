@@ -20,7 +20,9 @@ from ...utils.generic import can_return_tuple
 logger = ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class ConvNextV2DropPath(nn.Module):
@@ -36,7 +38,12 @@ class ConvNextV2GRN(nn.Module):
 
 class ConvNextV2LayerNorm(nn.LayerNorm):
     def __init__(
-        self, normalized_shape, *, eps=..., data_format=..., **kwargs
+        self,
+        normalized_shape,
+        *,
+        eps=...,
+        data_format=...,
+        **kwargs,
     ) -> None: ...
     def forward(self, features: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -68,7 +75,9 @@ class ConvNextV2Stage(nn.Module):
 class ConvNextV2Encoder(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, output_hidden_states: bool | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        output_hidden_states: bool | None = ...,
     ) -> BaseModelOutputWithNoAttention: ...
     def __call__(self, *args: Any, **kwargs: Any) -> BaseModelOutputWithNoAttention: ...
 
@@ -109,7 +118,9 @@ class ConvNextV2Backbone(ConvNextV2PreTrainedModel, BackboneMixin):
     @can_return_tuple
     @auto_docstring
     def forward(
-        self, pixel_values: torch.Tensor, output_hidden_states: bool | None = ...
+        self,
+        pixel_values: torch.Tensor,
+        output_hidden_states: bool | None = ...,
     ) -> BackboneOutput: ...
 
 __all__ = [

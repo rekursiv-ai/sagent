@@ -32,27 +32,45 @@ class Interpreter:
     def run_node(self, n: Node) -> Any: ...
     @compatibility(is_backward_compatible=True)
     def placeholder(
-        self, target: Target, args: tuple[Argument, ...], kwargs: dict[str, Any]
+        self,
+        target: Target,
+        args: tuple[Argument, ...],
+        kwargs: dict[str, Any],
     ) -> Any: ...
     @compatibility(is_backward_compatible=True)
     def get_attr(
-        self, target: Target, args: tuple[Argument, ...], kwargs: dict[str, Any]
+        self,
+        target: Target,
+        args: tuple[Argument, ...],
+        kwargs: dict[str, Any],
     ) -> Any: ...
     @compatibility(is_backward_compatible=True)
     def call_function(
-        self, target: Target, args: tuple[Argument, ...], kwargs: dict[str, Any]
+        self,
+        target: Target,
+        args: tuple[Argument, ...],
+        kwargs: dict[str, Any],
     ) -> Any: ...
     @compatibility(is_backward_compatible=True)
     def call_method(
-        self, target: Target, args: tuple[Argument, ...], kwargs: dict[str, Any]
+        self,
+        target: Target,
+        args: tuple[Argument, ...],
+        kwargs: dict[str, Any],
     ) -> Any: ...
     @compatibility(is_backward_compatible=True)
     def call_module(
-        self, target: Target, args: tuple[Argument, ...], kwargs: dict[str, Any]
+        self,
+        target: Target,
+        args: tuple[Argument, ...],
+        kwargs: dict[str, Any],
     ) -> Any: ...
     @compatibility(is_backward_compatible=True)
     def output(
-        self, target: Target, args: tuple[Argument, ...], kwargs: dict[str, Any]
+        self,
+        target: Target,
+        args: tuple[Argument, ...],
+        kwargs: dict[str, Any],
     ) -> Any: ...
     @compatibility(is_backward_compatible=True)
     def fetch_attr(self, target: str) -> Module | Any: ...
@@ -67,19 +85,31 @@ class Transformer(Interpreter):
     def __init__(self, module) -> None: ...
     @compatibility(is_backward_compatible=True)
     def placeholder(
-        self, target: Target, args: tuple[Argument, ...], kwargs: dict[str, Any]
+        self,
+        target: Target,
+        args: tuple[Argument, ...],
+        kwargs: dict[str, Any],
     ) -> Proxy: ...
     @compatibility(is_backward_compatible=True)
     def get_attr(
-        self, target: Target, args: tuple[Argument, ...], kwargs: dict[str, Any]
+        self,
+        target: Target,
+        args: tuple[Argument, ...],
+        kwargs: dict[str, Any],
     ) -> Proxy: ...
     @compatibility(is_backward_compatible=True)
     def call_module(
-        self, target: Target, args: tuple[Argument, ...], kwargs: dict[str, Any]
+        self,
+        target: Target,
+        args: tuple[Argument, ...],
+        kwargs: dict[str, Any],
     ) -> Any: ...
     @compatibility(is_backward_compatible=True)
     def call_function(
-        self, target: Target, args: tuple[Argument, ...], kwargs: dict[str, Any]
+        self,
+        target: Target,
+        args: tuple[Argument, ...],
+        kwargs: dict[str, Any],
     ) -> Any: ...
     @compatibility(is_backward_compatible=True)
     def transform(self) -> GraphModule: ...

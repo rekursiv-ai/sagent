@@ -58,7 +58,9 @@ class MegatronBertSelfAttention(nn.Module):
 class MegatronBertSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, residual: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -86,7 +88,9 @@ class MegatronBertIntermediate(nn.Module):
 class MegatronBertOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -124,7 +128,9 @@ class MegatronBertEncoder(nn.Module):
         cache_position: torch.Tensor | None = ...,
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
 
 class MegatronBertPooler(nn.Module):
@@ -277,7 +283,10 @@ class MegatronBertForMaskedLM(MegatronBertPreTrainedModel):
         return_dict: bool | None = ...,
     ) -> tuple | MaskedLMOutput: ...
     def prepare_inputs_for_generation(
-        self, input_ids, attention_mask=..., **model_kwargs
+        self,
+        input_ids,
+        attention_mask=...,
+        **model_kwargs,
     ):  # -> dict[str, Tensor | Any]:
         ...
 

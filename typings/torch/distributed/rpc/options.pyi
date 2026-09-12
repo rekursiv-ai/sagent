@@ -23,6 +23,8 @@ class TensorPipeRpcBackendOptions(_TensorPipeRpcBackendOptionsBase):
         _channels: list | None = ...,
     ) -> None: ...
     def set_device_map(
-        self, to: str, device_map: dict[DeviceType, DeviceType]
+        self,
+        to: str,
+        device_map: dict[DeviceType, DeviceType],
     ) -> None: ...
     def set_devices(self, devices: list[DeviceType]) -> None: ...

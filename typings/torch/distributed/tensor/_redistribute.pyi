@@ -36,5 +36,6 @@ class Redistribute(torch.autograd.Function):
     ) -> DTensor: ...
     @staticmethod
     def backward(
-        ctx, grad_output: dtensor.DTensor
+        ctx,
+        grad_output: dtensor.DTensor,
     ) -> tuple[DTensor, None, None, None, None, None]: ...

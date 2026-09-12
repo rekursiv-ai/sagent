@@ -89,13 +89,11 @@ def test_the_effort_predicate_agrees_with_every_row(model_id: str) -> None:
     assert model._is_effort_model(model_id) is offers_effort
 
 
+# Not defaulted to ``"none"``: a ``-thinking`` row withholds that value, so forcing it
+# would make the helper unusable on exactly the rows whose thinking behaviour these
+# tests cover.
 def _model(model_id: str, effort: ThinkingEffort | None = None) -> _DashScopeModel:
-    """Return a model with ``effort`` selected, or its own narrowest when omitted.
-
-    Not defaulted to ``"none"``: a ``-thinking`` row withholds that value,
-    so forcing it would make the helper unusable on exactly the rows whose
-    thinking behaviour these tests cover.
-    """
+    """Return a model with ``effort`` selected, or its own narrowest when omitted."""
     m = cast(_DashScopeModel, DashScope.from_key("k").model(model_id))
     if effort is not None:
         m._settings = ModelSettings(capability=m.capability, thinking_effort=effort)
@@ -124,7 +122,8 @@ def test_dashscope_transform_body_none_effort_means_disabled() -> None:
     # ``none`` is the catalog's zero budget; Qwen spells it as a toggle, so no
     # ``thinking_budget`` accompanies it.
     out = _model("qwen3-32b")._transform_body(
-        {"reasoning_effort": "minimal"}, ModelRequest(messages=[])
+        {"reasoning_effort": "minimal"},
+        ModelRequest(messages=[]),
     )
     assert out["enable_thinking"] is False
     assert "thinking_budget" not in out

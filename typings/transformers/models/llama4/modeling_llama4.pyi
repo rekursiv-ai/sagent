@@ -69,7 +69,9 @@ class Llama4TextRotaryEmbedding(nn.Module):
         ...
 
 def apply_rotary_emb(
-    xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    freqs_cis: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
 def eager_attention_forward(
@@ -122,7 +124,8 @@ class Llama4TextDecoderLayer(GradientCheckpointingLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring
@@ -211,7 +214,9 @@ class Llama4VisionPixelShuffleMLP(nn.Module):
 def reshape_for_broadcast(freqs_ci: torch.Tensor, query: torch.Tensor):  # -> Tensor:
     ...
 def vision_apply_rotary_emb(
-    query: torch.Tensor, key: torch.Tensor, freqs_ci: torch.Tensor
+    query: torch.Tensor,
+    key: torch.Tensor,
+    freqs_ci: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class Llama4VisionAttention(nn.Module):
@@ -225,7 +230,9 @@ class Llama4VisionAttention(nn.Module):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class Llama4VisionMLP(nn.Module):
@@ -283,7 +290,9 @@ class Llama4VisionModel(Llama4PreTrainedModel):
         return_dict: bool | None = ...,
     ) -> BaseModelOutput | tuple[torch.Tensor, ...]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> BaseModelOutput | tuple[torch.Tensor, ...]: ...
 
 class Llama4ForConditionalGeneration(Llama4PreTrainedModel, GenerationMixin):

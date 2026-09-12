@@ -45,7 +45,18 @@ from sagent.lib.userdirs import data_dir
 
 logger = logging.getLogger(__name__)
 
-_GROUP_AND_OTHER = 0o077
+_GROUP_AND_OTHER: Final = 0o077
+
+# Pre-convention, sagent's home was the hardcoded ``~/.sagent`` (before it
+# followed OS data-dir conventions). For most users that was a real directory.
+# However, some users may have instead symlinked ``~/.sagent -> ~/.claude`` so
+# sagent's data landed intermixed in the Claude CLI's tree. Migration must
+# therefore handle BOTH: a real ``~/.sagent`` is the common case; the
+# ``~/.claude`` squat is the symlink case. ``~/.claude`` is also where the
+# symlink resolves to, so the two are disambiguated by whether ``~/.sagent`` is
+# a real dir or a symlink.
+_LEGACY_SAGENT_HOME = Path.home() / ".sagent"  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)  # house-lint: ignore[xdg-literal] -- the pre-XDG sagent home being migrated FROM, not our layout.
+_LEGACY_CLAUDE_HOME = Path.home() / ".claude"  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)  # house-lint: ignore[xdg-literal] -- vendor CLI's fixed home path, not ours (AGENTS.md rule 3)
 """Permission bits that expose a path beyond its owner."""
 
 
@@ -75,64 +86,6 @@ def restrict_path(path: Path, mode: int) -> None:
         # A transcript on a filesystem without POSIX modes (or owned by another
         # user) must not take the session down; persistence matters more.
         logger.warning("could not restrict permissions on %s: %s", path, exc)
-
-
-# Pre-convention, sagent's home was the hardcoded ``~/.sagent`` (before it
-# followed OS data-dir conventions). For most users that was a real directory.
-# However, some users may have instead symlinked ``~/.sagent -> ~/.claude`` so
-# sagent's data landed intermixed in the Claude CLI's tree. Migration must
-# therefore handle BOTH: a real ``~/.sagent`` is the common case; the
-# ``~/.claude`` squat is the symlink case. ``~/.claude`` is also where the
-# symlink resolves to, so the two are disambiguated by whether ``~/.sagent`` is
-# a real dir or a symlink.
-_LEGACY_SAGENT_HOME = Path.home() / ".sagent"  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)
-_LEGACY_CLAUDE_HOME = Path.home() / ".claude"  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)
-
-
-def _copy_tree_merge(src: Path, dst: Path) -> None:
-    """Recursively copy ``src`` into ``dst``, skipping existing files.
-
-    Skip-if-exists is applied per *file*, not per directory: an existing
-    destination file is never overwritten (idempotent, non-destructive), but an
-    existing destination *directory* is recursed into and merged. Recursing
-    rather than skipping is load-bearing -- the destination ``projects/`` dir is
-    created the moment any new session runs, so a per-directory skip would
-    orphan every not-yet-copied project beneath it.
-
-    Symlinks are NOT followed: a symlinked directory is recreated as a symlink
-    rather than recursed into. Following them would dereference a link into a fat
-    duplicate copy and -- worse -- a cycle (``a/loop -> a``) would recurse until
-    ``RecursionError``. The walk uses ``is_symlink()`` before ``is_dir()`` so the
-    link itself, not its (possibly self-referential) target, is what's copied.
-
-    Migrated content is re-restricted, never inherited. ``copy2`` carries the
-    source mode across and ``mkdir`` takes the umask, so a legacy tree written
-    before the owner-only rule republished whole transcripts at ``0644`` under
-    ``0755`` directories -- migration silently undoing the confidentiality that
-    new sessions are given.
-    """
-    dst.mkdir(parents=True, exist_ok=True)
-    restrict_path(dst, 0o700)
-    for child in src.iterdir():
-        target = dst / child.name
-        if child.is_symlink():
-            if target.exists() or target.is_symlink():
-                continue
-            with contextlib.suppress(OSError):
-                target.symlink_to(child.readlink())
-        elif child.is_dir():
-            # Merge into an existing dir rather than skipping it wholesale.
-            _copy_tree_merge(child, target)
-        elif not target.exists():
-            # Per item, not per migration: one unreadable file must not strand
-            # every session that has not been copied yet. The caller's single
-            # catch is a backstop for the walk itself, not a per-file policy.
-            try:
-                _ = shutil.copy2(child, target)
-            except OSError as exc:
-                logger.warning("skipping unreadable %s: %s", child, exc)
-            else:
-                restrict_path(target, 0o600)
 
 
 def migrate_legacy_home() -> None:
@@ -175,90 +128,8 @@ def migrate_legacy_home() -> None:
             _migrate_legacy_projects()
             _migrate_legacy_papers()
             _bridge_shared_dirs()
-    except (OSError, RecursionError) as exc:  # never block startup on migration
+    except (OSError, RecursionError) as exc:  # Never block startup on migration.
         logger.warning("legacy sagent migration incomplete: %s", exc)
-
-
-def _migrate_real_sagent_home() -> None:
-    """Copy a real legacy ``~/.sagent`` into the XDG home (the common case).
-
-    The legacy dir IS sagent's own tree, so its contents (projects, papers,
-    memory, etc.) copy verbatim. Skip when the XDG home is the legacy path
-    itself OR a descendant of it (e.g. ``XDG_DATA_HOME=~/.sagent`` makes the home
-    ``~/.sagent/sagent``): copying a directory into its own subtree would walk
-    the just-created destination and recurse unboundedly.
-    """
-    legacy = _LEGACY_SAGENT_HOME.resolve()
-    home = (data_dir() / "rekursiv-ai" / "sagent").resolve()
-    if home == legacy or legacy in home.parents:
-        return
-    _copy_tree_merge(_LEGACY_SAGENT_HOME, data_dir() / "rekursiv-ai" / "sagent")
-    logger.info(
-        "migrated legacy sagent home %s -> %s",
-        _LEGACY_SAGENT_HOME,
-        data_dir() / "rekursiv-ai" / "sagent",
-    )
-
-
-def _migrate_legacy_projects() -> None:
-    """Copy sagent-authored project dirs from the Claude tree, verbatim."""
-    src_root = _LEGACY_CLAUDE_HOME / "projects"
-    if not src_root.is_dir():
-        return
-    for proj in src_root.iterdir():
-        if not proj.is_dir():
-            continue
-        # Sagent sessions live in ``<hex>/`` subdirs holding session.jsonl;
-        # a project dir with none is pure Claude CLI -- skip it.
-        sess_dirs = [
-            c for c in proj.iterdir() if c.is_dir() and (c / "session.jsonl").exists()
-        ]
-        if not sess_dirs:
-            continue
-        dst = (data_dir() / "rekursiv-ai" / "sagent" / "projects") / proj.name
-        copied = False
-        for sd in sess_dirs:
-            tgt = dst / sd.name
-            if not tgt.exists():
-                _copy_tree_merge(sd, tgt)
-                copied = True
-        mem = proj / "memory"
-        if mem.is_dir():
-            _copy_tree_merge(mem, dst / "memory")
-        # Log the copy, not the destination's existence: migration runs on
-        # every startup, so keying on ``dst.is_dir()`` reports a migration
-        # forever after the one run that actually performed it.
-        if copied:
-            logger.info("migrated legacy sessions %s -> %s", proj, dst)
-
-
-def _migrate_legacy_papers() -> None:
-    """Copy the sagent papers cache out of the Claude tree."""
-    src = _LEGACY_CLAUDE_HOME / "papers"
-    if src.is_dir():
-        _copy_tree_merge(src, data_dir() / "rekursiv-ai" / "sagent" / "papers")
-
-
-def _bridge_shared_dirs() -> None:
-    """Symlink shared-authoring dirs back to Claude when they exist there.
-
-    Only acts when the Claude subdir exists and the sagent side is absent, so an
-    established sagent dir is never shadowed and a re-run is a no-op. Today only
-    ``skills`` qualifies, and only if the user has authored Claude skills.
-    """
-    # Only ``skills`` is bridged today; papers/memory are sagent-owned and
-    # get copied, not symlinked.
-    for name in ("skills",):
-        claude_dir = _LEGACY_CLAUDE_HOME / name
-        sagent_path = data_dir() / "rekursiv-ai" / "sagent" / name
-        if not claude_dir.is_dir() or sagent_path.exists() or sagent_path.is_symlink():
-            continue
-        try:
-            sagent_path.parent.mkdir(parents=True, exist_ok=True)
-            sagent_path.symlink_to(claude_dir, target_is_directory=True)
-            logger.info("bridged shared dir %s -> %s", sagent_path, claude_dir)
-        except OSError as exc:
-            logger.warning("could not bridge shared dir %s: %s", sagent_path, exc)
 
 
 # ``/`` -> ``_``; alphanumerics pass through; EVERY other character --
@@ -270,13 +141,10 @@ def _bridge_shared_dirs() -> None:
 _SLUG_ESCAPE_RE = re.compile(r"[^a-zA-Z0-9/]")
 
 
+# Short-lived but real sessions landed under it, so it stays in the fallback chain even
+# though its ambiguity is exactly what the current encoding fixes.
 def _slug_rule_ambiguous_escape(path: str) -> str:
-    """Pre-prefix-free scheme: ``-`` and ``_`` passed through unescaped.
-
-    Short-lived but real sessions landed under it, so it stays in the
-    fallback chain even though its ambiguity is exactly what the current
-    encoding fixes.
-    """
+    """Pre-prefix-free scheme: ``-`` and ``_`` passed through unescaped."""
     return re.sub(
         r"[^a-zA-Z0-9/_-]",
         lambda m: f"-{m.group().encode('utf-8').hex()}-",
@@ -333,43 +201,12 @@ def cwd_slug(cwd: str | Path, *, max_slug_len: int = 200) -> str:
     """
     s = str(Path(cwd).resolve())
     sanitized = _SLUG_ESCAPE_RE.sub(
-        lambda m: f"-{m.group().encode('utf-8').hex()}-", s
+        lambda m: f"-{m.group().encode('utf-8').hex()}-",
+        s,
     ).replace("/", "_")
     if len(sanitized) <= max_slug_len:
         return sanitized
     return f"{sanitized[:max_slug_len]}-{_slug_hash(s):x}"
-
-
-def _slug_hash(text: str) -> int:
-    """Stable FNV-1a fold; ``hash()`` is salted per process."""
-    h = 0xCBF29CE484222325
-    for ch in text.encode():
-        h = ((h ^ ch) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
-    return h
-
-
-def _prior_cwd_slugs(cwd: str | Path, *, max_slug_len: int = 200) -> tuple[str, ...]:
-    """Return ``cwd``'s slugs under every superseded scheme, newest first.
-
-    Read paths consult these after the current slug so a slug-rule change
-    never strands sessions already on disk. Truncation mirrors
-    :func:`cwd_slug` because the old schemes shared its hash suffix.
-    """
-    s = str(Path(cwd).resolve())
-    # A path drawn entirely from ``[A-Za-z0-9/]`` has nothing to escape,
-    # so an older rule can reproduce the CURRENT slug byte-for-byte.
-    # Excluding it keeps the contract ("superseded schemes") honest for
-    # every caller, not just the one that happens to filter.
-    seen = {cwd_slug(cwd, max_slug_len=max_slug_len)}
-    out: list[str] = []
-    for rule in _PRIOR_SLUG_RULES:
-        slug = rule(s)
-        if len(slug) > max_slug_len:
-            slug = f"{slug[:max_slug_len]}-{_slug_hash(s):x}"
-        if slug not in seen:
-            seen.add(slug)
-            out.append(slug)
-    return tuple(out)
 
 
 def project_dir(cwd: str | Path, *, projects_dir: Path | None = None) -> Path:
@@ -396,7 +233,9 @@ def project_dir(cwd: str | Path, *, projects_dir: Path | None = None) -> Path:
 
 
 def project_dirs(
-    cwd: str | Path, *, projects_dir: Path | None = None
+    cwd: str | Path,
+    *,
+    projects_dir: Path | None = None,
 ) -> tuple[Path, ...]:
     """Return every project directory holding ``cwd``'s sessions.
 
@@ -444,88 +283,6 @@ def new_session_dir(cwd: str | Path, *, projects_dir: Path | None = None) -> Pat
     # create the current slug. So derive the write path directly here.
     root = projects_dir or (data_dir() / "rekursiv-ai" / "sagent" / "projects")
     return _fresh_session_dir(root / cwd_slug(cwd))
-
-
-def _fresh_session_dir(parent: Path, *, attempts: int = 8) -> Path:
-    """Create and return a session directory that did not already exist.
-
-    The id is a truncated uuid, so a collision is possible -- and
-    ``exist_ok=True`` turned one into a silently SHARED session, two
-    conversations appending to one transcript. ``exist_ok=False`` makes the
-    collision visible so a fresh id can be minted.
-
-    Args:
-      parent: Directory the session dir is created under.
-      attempts: Re-mints before falling back to a full uuid. Bounded rather
-          than unbounded: at 12 hex characters a real collision is
-          vanishingly rare, so repeated failure means the id is not random
-          (a seeded or patched source) and looping would hang.
-
-    Returns:
-      path: The newly created, previously nonexistent session directory.
-
-    Raises:
-      FileExistsError: Every candidate, including the full-uuid fallback,
-          was already taken.
-
-    """
-    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    restrict_path(parent, 0o700)
-    for _ in range(attempts):
-        candidate = parent / uuid.uuid4().hex[:12]
-        try:
-            candidate.mkdir(mode=0o700)
-        except FileExistsError:
-            logger.warning("session id %s already exists; re-minting.", candidate.name)
-            continue
-        return candidate
-    # A bare ``mkdir`` here too. ``exist_ok=True`` made the last-resort branch
-    # hand back whatever was already there -- the shared-session bug this
-    # function exists to prevent, in the one path reached only when collisions
-    # are already happening. Raising is right: a full uuid colliding means the
-    # id source is not random, and returning a live session is worse than
-    # failing.
-    full = parent / uuid.uuid4().hex
-    full.mkdir(mode=0o700)
-    return full
-
-
-def _safe_scope(scope: str) -> str:
-    """Validate that ``scope`` cannot escape its parent directory.
-
-    Slack thread ids and similar caller-supplied keys land here
-    unchanged; an attacker controlling that key must not be able to
-    write outside the configured projects root via path-traversal
-    segments (``..``), absolute paths, NUL bytes, or empty names.
-    Nested scopes (``a/b``) are permitted; only absolute paths,
-    backslashes, and traversal segments are rejected.
-
-    Args:
-      scope: Caller-supplied scope identifier.
-
-    Returns:
-      scope: The validated scope, unchanged.
-
-    Raises:
-      ValueError: When ``scope`` is absolute, contains a backslash, or
-          holds a traversal segment.
-
-    """
-    if not scope:
-        raise ValueError("scope cannot be empty.")
-    if "\x00" in scope:
-        raise ValueError("scope cannot contain NUL bytes.")
-    # ``C:/x`` is drive-qualified and therefore absolute on Windows, where the
-    # project supports platform-specific user directories -- so a leading-``/``
-    # test alone let a caller-supplied key escape the projects root there.
-    if scope.startswith("/") or "\\" in scope or ":" in scope.split("/", 1)[0]:
-        raise ValueError(
-            f"scope must be a relative path without backslashes: {scope!r}"
-        )
-    parts = scope.split("/")
-    if any(p in ("", ".", "..") for p in parts):
-        raise ValueError(f"scope must not contain traversal segments: {scope!r}")
-    return scope
 
 
 def session_dir_for_scope(scope: str, base: Path | None = None) -> Path:
@@ -609,102 +366,6 @@ class SessionInfo:
     """True when the head scan aborted mid-file; counts above are partial."""
 
 
-def _iter_jsonl(lines: Iterable[str]) -> Iterator[MutableJSON]:
-    """Yield one JSON dict per line, logging malformed and non-dict entries."""
-    for raw in lines:
-        line = raw.strip()
-        if not line:
-            continue
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            logger.warning("Skipping malformed JSONL line: %r", line[:120])
-            continue
-        # ``DictCodec.coerce`` narrows without a cast, but maps a non-object to an
-        # empty dict -- indistinguishable from ``{}`` on the wire. Compare
-        # against the parsed value to keep the non-dict warning honest.
-        record = DictCodec.coerce(parsed)
-        if record or parsed == {}:
-            yield json_unfreeze(record)
-        else:
-            logger.warning("Skipping non-dict JSONL record: %r", line[:120])
-
-
-def _is_user_text_message(rec: MutableJSON) -> bool:
-    """Detect a user-history record (``kind=history, type=user``)."""
-    return (
-        rec.get("kind") == "history"
-        and rec.get("type") == "user"
-        and isinstance(rec.get("text"), str)
-    )
-
-
-def _peek_session(session_dir: Path) -> SessionInfo | None:
-    """Read minimal metadata from a session.jsonl (head-only).
-
-    Returns None if the session file is missing or corrupt. Scans
-    the file to pull the first user prompt and message count without
-    loading everything into memory.
-    """
-    session_file = session_dir / "session.jsonl"
-    if not session_file.exists():
-        return None
-    try:
-        mtime = session_file.stat().st_mtime
-    except OSError:
-        return None
-    status = ""
-    first_user_msg = ""
-    message_count = 0
-    model_id = ""
-    session_id = session_dir.name
-    corrupt = False
-    # Stream line-by-line: a multi-megabyte ``session.jsonl`` from a
-    # long-running thread shouldn't force a whole-file load into
-    # memory just to pull the title + count.
-    try:
-        with session_file.open(encoding="utf-8") as f:
-            for line in f:
-                # Parse every record. A cheaper gate on the line's leading
-                # bytes made this agree with one writer's current spacing and
-                # key order, so valid JSONL from any other writer was skipped
-                # and reported as a healthy empty session. Parsing costs ~17s
-                # across a 6.13 GB corpus, against ~54s for the whole-corpus
-                # scan this replaced.
-                rec = next(_iter_jsonl((line,)), None)
-                if rec is None:
-                    if not line.strip():
-                        continue
-                    # A record did not parse, so the counts below are partial.
-                    # Say so: the picker renders this count, and a damaged
-                    # session that reads as healthy is a confidently wrong one.
-                    corrupt = True
-                    continue
-                kind = rec.get("kind")
-                if kind == "history":
-                    message_count += 1
-                    if not first_user_msg and _is_user_text_message(rec):
-                        first_user_msg = str(rec["text"])
-                elif kind == "meta":
-                    model_id = str(rec.get("model_id", ""))
-                    session_id = str(rec.get("session_id", session_id))
-                    status = str(rec.get("status") or rec.get("title") or "")
-    except (OSError, UnicodeDecodeError):
-        # Surface corruption on whatever we managed to read rather than
-        # silently dropping or returning partial counts as if complete.
-        logger.warning("Aborted mid-file while peeking %s", session_file)
-        corrupt = True
-    return SessionInfo(
-        path=session_dir,
-        session_id=session_id,
-        mtime=mtime,
-        status=status or first_user_msg,
-        message_count=message_count,
-        model_id=model_id,
-        corrupt=corrupt,
-    )
-
-
 def list_sessions(
     cwd: str | Path,
     *,
@@ -739,23 +400,10 @@ def list_sessions(
     return _peek_session_candidates(candidates, limit=limit)
 
 
-def _peek_session_candidates(
-    candidates: list[tuple[float, Path]], *, limit: int | None
-) -> list[SessionInfo]:
-    """Build newest-first metadata until ``limit`` sessions succeed."""
-    candidates.sort(key=lambda pair: pair[0], reverse=True)
-    out: list[SessionInfo] = []
-    for _mtime, session_dir in candidates:
-        if limit is not None and len(out) >= limit:
-            break
-        info = _peek_session(session_dir)
-        if info is not None:
-            out.append(info)
-    return out
-
-
 def find_session_dirs_by_prefix(
-    prefix: str, *, projects_dir: Path | None = None
+    prefix: str,
+    *,
+    projects_dir: Path | None = None,
 ) -> list[Path]:
     """Return every session directory whose NAME starts with ``prefix``.
 
@@ -793,7 +441,9 @@ def find_session_dirs_by_prefix(
 
 
 def list_all_sessions(
-    *, projects_dir: Path | None = None, limit: int | None = None
+    *,
+    projects_dir: Path | None = None,
+    limit: int | None = None,
 ) -> list[SessionInfo]:
     """List sessions across all projects, newest first.
 
@@ -836,7 +486,9 @@ def list_all_sessions(
 
 
 def latest_session(
-    cwd: str | Path, *, projects_dir: Path | None = None
+    cwd: str | Path,
+    *,
+    projects_dir: Path | None = None,
 ) -> SessionInfo | None:
     """Return the most recently modified session under ``cwd``.
 
@@ -871,24 +523,6 @@ def latest_session(
         if info is not None:
             return info
     return None
-
-
-def _format_relative_time(ts: float) -> str:
-    """Format ``ts`` as a short relative time (``2h ago``)."""
-    delta = max(0.0, time.time() - ts)
-    if delta < 60:
-        return f"{int(delta)}s ago"
-    if delta < 3600:
-        return f"{int(delta // 60)}m ago"
-    if delta < 86_400:
-        return f"{int(delta // 3600)}h ago"
-    return f"{int(delta // 86_400)}d ago"
-
-
-def _truncate(text: str, n: int) -> str:
-    """Trim ``text`` to ``n`` chars, ellipsized, single-line."""
-    t = text.replace("\n", " ").strip()
-    return t if len(t) <= n else t[: n - 1] + "…"
 
 
 DEFAULT_PICK_CAP: Final = 20
@@ -957,3 +591,331 @@ def pick_session(
         if 0 <= idx < len(visible):
             return visible[idx]
         return None
+
+
+# Skip-if-exists is applied per *file*, not per directory: an existing destination file
+# is never overwritten (idempotent, non-destructive), but an existing destination
+# *directory* is recursed into and merged. Recursing rather than skipping is load-
+# bearing -- the destination ``projects/`` dir is created the moment any new session
+# runs, so a per-directory skip would orphan every not-yet-copied project beneath it.
+#
+# Symlinks are NOT followed: a symlinked directory is recreated as a symlink rather than
+# recursed into. Following them would dereference a link into a fat duplicate copy and
+# -- worse -- a cycle (``a/loop -> a``) would recurse until ``RecursionError``. The walk
+# uses ``is_symlink()`` before ``is_dir()`` so the link itself, not its (possibly self-
+# referential) target, is what's copied.
+#
+# Migrated content is re-restricted, never inherited. ``copy2`` carries the source mode
+# across and ``mkdir`` takes the umask, so a legacy tree written before the owner-only
+# rule republished whole transcripts at ``0644`` under ``0755`` directories -- migration
+# silently undoing the confidentiality that new sessions are given.
+def _copy_tree_merge(src: Path, dst: Path) -> None:
+    """Recursively copy ``src`` into ``dst``, skipping existing files."""
+    dst.mkdir(parents=True, exist_ok=True)
+    restrict_path(dst, 0o700)
+    for child in src.iterdir():
+        target = dst / child.name
+        if child.is_symlink():
+            if target.exists() or target.is_symlink():
+                continue
+            with contextlib.suppress(OSError):
+                target.symlink_to(child.readlink())
+        elif child.is_dir():
+            # Merge into an existing dir rather than skipping it wholesale.
+            _copy_tree_merge(child, target)
+        elif not target.exists():
+            # Per item, not per migration: one unreadable file must not strand
+            # every session that has not been copied yet. The caller's single
+            # catch is a backstop for the walk itself, not a per-file policy.
+            try:
+                _ = shutil.copy2(child, target)
+            except OSError as exc:
+                logger.warning("skipping unreadable %s: %s", child, exc)
+            else:
+                restrict_path(target, 0o600)
+
+
+# The legacy dir IS sagent's own tree, so its contents (projects, papers, memory, etc.)
+# copy verbatim. Skip when the XDG home is the legacy path itself OR a descendant of it
+# (e.g. ``XDG_DATA_HOME=~/.sagent`` makes the home ``~/.sagent/sagent``): copying a
+# directory into its own subtree would walk the just-created destination and recurse
+# unboundedly.
+def _migrate_real_sagent_home() -> None:
+    """Copy a real legacy ``~/.sagent`` into the XDG home (the common case)."""
+    legacy = _LEGACY_SAGENT_HOME.resolve()
+    home = (data_dir() / "rekursiv-ai" / "sagent").resolve()
+    if home == legacy or legacy in home.parents:
+        return
+    _copy_tree_merge(_LEGACY_SAGENT_HOME, data_dir() / "rekursiv-ai" / "sagent")
+    logger.info(
+        "migrated legacy sagent home %s -> %s",
+        _LEGACY_SAGENT_HOME,
+        data_dir() / "rekursiv-ai" / "sagent",
+    )
+
+
+def _migrate_legacy_projects() -> None:
+    """Copy sagent-authored project dirs from the Claude tree, verbatim."""
+    src_root = _LEGACY_CLAUDE_HOME / "projects"
+    if not src_root.is_dir():
+        return
+    for proj in src_root.iterdir():
+        if not proj.is_dir():
+            continue
+        # Sagent sessions live in ``<hex>/`` subdirs holding session.jsonl;
+        # a project dir with none is pure Claude CLI -- skip it.
+        sess_dirs = [
+            c for c in proj.iterdir() if c.is_dir() and (c / "session.jsonl").exists()
+        ]
+        if not sess_dirs:
+            continue
+        dst = (data_dir() / "rekursiv-ai" / "sagent" / "projects") / proj.name
+        copied = False
+        for sd in sess_dirs:
+            tgt = dst / sd.name
+            if not tgt.exists():
+                _copy_tree_merge(sd, tgt)
+                copied = True
+        mem = proj / "memory"
+        if mem.is_dir():
+            _copy_tree_merge(mem, dst / "memory")
+        # Log the copy, not the destination's existence: migration runs on
+        # every startup, so keying on ``dst.is_dir()`` reports a migration
+        # forever after the one run that actually performed it.
+        if copied:
+            logger.info("migrated legacy sessions %s -> %s", proj, dst)
+
+
+def _migrate_legacy_papers() -> None:
+    """Copy the sagent papers cache out of the Claude tree."""
+    src = _LEGACY_CLAUDE_HOME / "papers"
+    if src.is_dir():
+        _copy_tree_merge(src, data_dir() / "rekursiv-ai" / "sagent" / "papers")
+
+
+# Only acts when the Claude subdir exists and the sagent side is absent, so an
+# established sagent dir is never shadowed and a re-run is a no-op. Today only
+# ``skills`` qualifies, and only if the user has authored Claude skills.
+def _bridge_shared_dirs() -> None:
+    """Symlink shared-authoring dirs back to Claude when they exist there."""
+    # Only ``skills`` is bridged today; papers/memory are sagent-owned and
+    # get copied, not symlinked.
+    for name in ("skills",):
+        claude_dir = _LEGACY_CLAUDE_HOME / name
+        sagent_path = data_dir() / "rekursiv-ai" / "sagent" / name
+        if not claude_dir.is_dir() or sagent_path.exists() or sagent_path.is_symlink():
+            continue
+        try:
+            sagent_path.parent.mkdir(parents=True, exist_ok=True)
+            sagent_path.symlink_to(claude_dir, target_is_directory=True)
+            logger.info("bridged shared dir %s -> %s", sagent_path, claude_dir)
+        except OSError as exc:
+            logger.warning("could not bridge shared dir %s: %s", sagent_path, exc)
+
+
+def _slug_hash(text: str) -> int:
+    """Stable FNV-1a fold; ``hash()`` is salted per process."""
+    h = 0xCBF29CE484222325
+    for ch in text.encode():
+        h = ((h ^ ch) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+# Read paths consult these after the current slug so a slug-rule change never strands
+# sessions already on disk. Truncation mirrors :func:`cwd_slug` because the old schemes
+# shared its hash suffix.
+def _prior_cwd_slugs(cwd: str | Path, *, max_slug_len: int = 200) -> tuple[str, ...]:
+    """Return ``cwd``'s slugs under every superseded scheme, newest first."""
+    s = str(Path(cwd).resolve())
+    # A path drawn entirely from ``[A-Za-z0-9/]`` has nothing to escape,
+    # so an older rule can reproduce the CURRENT slug byte-for-byte.
+    # Excluding it keeps the contract ("superseded schemes") honest for
+    # every caller, not just the one that happens to filter.
+    seen = {cwd_slug(cwd, max_slug_len=max_slug_len)}
+    out: list[str] = []
+    for rule in _PRIOR_SLUG_RULES:
+        slug = rule(s)
+        if len(slug) > max_slug_len:
+            slug = f"{slug[:max_slug_len]}-{_slug_hash(s):x}"
+        if slug not in seen:
+            seen.add(slug)
+            out.append(slug)
+    return tuple(out)
+
+
+# The id is a truncated uuid, so a collision is possible -- and ``exist_ok=True`` turned
+# one into a silently SHARED session, two conversations appending to one transcript.
+# ``exist_ok=False`` makes the collision visible so a fresh id can be minted.
+def _fresh_session_dir(parent: Path, *, attempts: int = 8) -> Path:
+    """Create and return a session directory that did not already exist."""
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    restrict_path(parent, 0o700)
+    for _ in range(attempts):
+        candidate = parent / uuid.uuid4().hex[:12]
+        try:
+            candidate.mkdir(mode=0o700)
+        except FileExistsError:
+            logger.warning("session id %s already exists; re-minting.", candidate.name)
+            continue
+        return candidate
+    # A bare ``mkdir`` here too. ``exist_ok=True`` made the last-resort branch
+    # hand back whatever was already there -- the shared-session bug this
+    # function exists to prevent, in the one path reached only when collisions
+    # are already happening. Raising is right: a full uuid colliding means the
+    # id source is not random, and returning a live session is worse than
+    # failing.
+    full = parent / uuid.uuid4().hex
+    full.mkdir(mode=0o700)
+    return full
+
+
+# Slack thread ids and similar caller-supplied keys land here unchanged; an attacker
+# controlling that key must not be able to write outside the configured projects root
+# via path-traversal segments (``..``), absolute paths, NUL bytes, or empty names.
+# Nested scopes (``a/b``) are permitted; only absolute paths, backslashes, and traversal
+# segments are rejected.
+def _safe_scope(scope: str) -> str:
+    """Validate that ``scope`` cannot escape its parent directory."""
+    if not scope:
+        raise ValueError("scope cannot be empty.")
+    if "\x00" in scope:
+        raise ValueError("scope cannot contain NUL bytes.")
+    # ``C:/x`` is drive-qualified and therefore absolute on Windows, where the
+    # project supports platform-specific user directories -- so a leading-``/``
+    # test alone let a caller-supplied key escape the projects root there.
+    if scope.startswith("/") or "\\" in scope or ":" in scope.split("/", 1)[0]:
+        raise ValueError(
+            f"scope must be a relative path without backslashes: {scope!r}",
+        )
+    parts = scope.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        raise ValueError(f"scope must not contain traversal segments: {scope!r}")
+    return scope
+
+
+def _iter_jsonl(lines: Iterable[str]) -> Iterator[MutableJSON]:
+    """Yield one JSON dict per line, logging malformed and non-dict entries."""
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            logger.warning("Skipping malformed JSONL line: %r", line[:120])
+            continue
+        # ``DictCodec.coerce`` narrows without a cast, but maps a non-object to an
+        # empty dict -- indistinguishable from ``{}`` on the wire. Compare
+        # against the parsed value to keep the non-dict warning honest.
+        record = DictCodec.coerce(parsed)
+        if record or parsed == {}:
+            yield json_unfreeze(record)
+        else:
+            logger.warning("Skipping non-dict JSONL record: %r", line[:120])
+
+
+def _is_user_text_message(rec: MutableJSON) -> bool:
+    """Detect a user-history record (``kind=history, type=user``)."""
+    return (
+        rec.get("kind") == "history"
+        and rec.get("type") == "user"
+        and isinstance(rec.get("text"), str)
+    )
+
+
+# Returns None if the session file is missing or corrupt. Scans the file to pull the
+# first user prompt and message count without loading everything into memory.
+def _peek_session(session_dir: Path) -> SessionInfo | None:
+    """Read minimal metadata from a session.jsonl (head-only)."""
+    session_file = session_dir / "session.jsonl"
+    if not session_file.exists():
+        return None
+    try:
+        mtime = session_file.stat().st_mtime
+    except OSError:
+        return None
+    status = ""
+    first_user_msg = ""
+    message_count = 0
+    model_id = ""
+    session_id = session_dir.name
+    corrupt = False
+    # Stream line-by-line: a multi-megabyte ``session.jsonl`` from a
+    # long-running thread shouldn't force a whole-file load into
+    # memory just to pull the title + count.
+    try:
+        with session_file.open(encoding="utf-8") as f:
+            for line in f:
+                # Parse every record. A cheaper gate on the line's leading
+                # bytes made this agree with one writer's current spacing and
+                # key order, so valid JSONL from any other writer was skipped
+                # and reported as a healthy empty session. Parsing costs ~17s
+                # across a 6.13 GB corpus, against ~54s for the whole-corpus
+                # scan this replaced.
+                rec = next(_iter_jsonl((line,)), None)
+                if rec is None:
+                    if not line.strip():
+                        continue
+                    # A record did not parse, so the counts below are partial.
+                    # Say so: the picker renders this count, and a damaged
+                    # session that reads as healthy is a confidently wrong one.
+                    corrupt = True
+                    continue
+                kind = rec.get("kind")
+                if kind == "history":
+                    message_count += 1
+                    if not first_user_msg and _is_user_text_message(rec):
+                        first_user_msg = str(rec["text"])
+                elif kind == "meta":
+                    model_id = str(rec.get("model_id", ""))
+                    session_id = str(rec.get("session_id", session_id))
+                    status = str(rec.get("status") or rec.get("title") or "")
+    except (OSError, UnicodeDecodeError):
+        # Surface corruption on whatever we managed to read rather than
+        # silently dropping or returning partial counts as if complete.
+        logger.warning("Aborted mid-file while peeking %s", session_file)
+        corrupt = True
+    return SessionInfo(
+        path=session_dir,
+        session_id=session_id,
+        mtime=mtime,
+        status=status or first_user_msg,
+        message_count=message_count,
+        model_id=model_id,
+        corrupt=corrupt,
+    )
+
+
+def _peek_session_candidates(
+    candidates: list[tuple[float, Path]],
+    *,
+    limit: int | None,
+) -> list[SessionInfo]:
+    """Build newest-first metadata until ``limit`` sessions succeed."""
+    candidates.sort(key=lambda pair: pair[0], reverse=True)
+    out: list[SessionInfo] = []
+    for _mtime, session_dir in candidates:
+        if limit is not None and len(out) >= limit:
+            break
+        info = _peek_session(session_dir)
+        if info is not None:
+            out.append(info)
+    return out
+
+
+def _format_relative_time(ts: float) -> str:
+    """Format ``ts`` as a short relative time (``2h ago``)."""
+    delta = max(0.0, time.time() - ts)
+    if delta < 60:
+        return f"{int(delta)}s ago"
+    if delta < 3600:
+        return f"{int(delta // 60)}m ago"
+    if delta < 86_400:
+        return f"{int(delta // 3600)}h ago"
+    return f"{int(delta // 86_400)}d ago"
+
+
+def _truncate(text: str, n: int) -> str:
+    """Trim ``text`` to ``n`` chars, ellipsized, single-line."""
+    t = text.replace("\n", " ").strip()
+    return t if len(t) <= n else t[: n - 1] + "…"

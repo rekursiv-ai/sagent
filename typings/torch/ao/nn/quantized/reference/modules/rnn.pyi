@@ -58,12 +58,17 @@ class LSTMCell(RNNCellBase):
         weight_qparams_dict: dict[str, Any] | None = ...,
     ) -> None: ...
     def forward(
-        self, input: Tensor, hx: tuple[Tensor, Tensor] | None = ...
+        self,
+        input: Tensor,
+        hx: tuple[Tensor, Tensor] | None = ...,
     ) -> tuple[Tensor, Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> tuple[Tensor, Tensor]: ...
     @classmethod
     def from_float(
-        cls, mod, weight_qparams_dict, use_precomputed_fake_quant=...
+        cls,
+        mod,
+        weight_qparams_dict,
+        use_precomputed_fake_quant=...,
     ) -> Self: ...
 
 class GRUCell(RNNCellBase):
@@ -101,24 +106,35 @@ class RNNBase(nn.RNNBase):
 class LSTM(RNNBase):
     def __init__(self, *args, **kwargs) -> None: ...
     def permute_hidden(
-        self, hx: tuple[Tensor, Tensor], permutation: Tensor | None
+        self,
+        hx: tuple[Tensor, Tensor],
+        permutation: Tensor | None,
     ) -> tuple[Tensor, Tensor]: ...
     def get_expected_cell_size(
-        self, input: Tensor, batch_sizes: Tensor | None
+        self,
+        input: Tensor,
+        batch_sizes: Tensor | None,
     ) -> tuple[int, int, int]: ...
     def check_forward_args(
-        self, input: Tensor, hidden: tuple[Tensor, Tensor], batch_sizes: Tensor | None
+        self,
+        input: Tensor,
+        hidden: tuple[Tensor, Tensor],
+        batch_sizes: Tensor | None,
     ) -> None: ...
     def get_quantized_weight_bias_dict(self) -> dict[Any, Any]: ...
     def get_flat_weights(self) -> list[Any]: ...
     def forward(
-        self, input, hx=...
+        self,
+        input,
+        hx=...,
     ) -> (
         tuple[PackedSequence, tuple[Tensor, Tensor]]
         | tuple[Tensor, tuple[Tensor, Tensor]]
     ): ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> (
         tuple[PackedSequence, tuple[Tensor, Tensor]]
         | tuple[Tensor, tuple[Tensor, Tensor]]
@@ -131,10 +147,14 @@ class GRU(RNNBase):
     def get_quantized_weight_bias_dict(self) -> dict[Any, Any]: ...
     def get_flat_weights(self) -> list[Any]: ...
     def forward(
-        self, input, hx=...
+        self,
+        input,
+        hx=...,
     ) -> tuple[PackedSequence, Tensor] | tuple[Tensor, Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[PackedSequence, Tensor] | tuple[Tensor, Tensor]: ...
     @classmethod
     def from_float(cls, mod, weight_qparams_dict) -> Self: ...

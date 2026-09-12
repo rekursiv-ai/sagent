@@ -28,7 +28,9 @@ if TYPE_CHECKING:
 def _policy(*, count: int, max_tokens: int, budget_tokens: int) -> ReattachPolicy:
     """Re-attach caps for one case."""
     return ReattachPolicy(
-        count=count, max_tokens=max_tokens, budget_tokens=budget_tokens
+        count=count,
+        max_tokens=max_tokens,
+        budget_tokens=budget_tokens,
     )
 
 

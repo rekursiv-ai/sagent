@@ -290,7 +290,10 @@ class TrainingArguments:
     ):  # -> Self:
         ...
     def set_testing(
-        self, batch_size: int = ..., loss_only: bool = ..., jit_mode: bool = ...
+        self,
+        batch_size: int = ...,
+        loss_only: bool = ...,
+        jit_mode: bool = ...,
     ):  # -> Self:
         ...
     def set_save(

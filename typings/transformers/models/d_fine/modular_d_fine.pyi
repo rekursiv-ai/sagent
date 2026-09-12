@@ -106,7 +106,9 @@ class DFineConfig(PretrainedConfig):
         ...
     @classmethod
     def from_backbone_configs(
-        cls, backbone_config: PretrainedConfig, **kwargs
+        cls,
+        backbone_config: PretrainedConfig,
+        **kwargs,
     ):  # -> Self:
         ...
 
@@ -122,13 +124,17 @@ class DFineMultiscaleDeformableAttention(nn.Module):
         spatial_shapes_list=...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class DFineGate(nn.Module):
     def __init__(self, d_model: int) -> None: ...
     def forward(
-        self, second_residual: torch.Tensor, hidden_states: torch.Tensor
+        self,
+        second_residual: torch.Tensor,
+        hidden_states: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -152,7 +158,9 @@ class DFinePreTrainedModel(RTDetrPreTrainedModel): ...
 class DFineIntegral(nn.Module):
     def __init__(self, config: DFineConfig) -> None: ...
     def forward(
-        self, pred_corners: torch.Tensor, project: torch.Tensor
+        self,
+        pred_corners: torch.Tensor,
+        project: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -185,7 +193,9 @@ class DFineForObjectDetection(RTDetrForObjectDetection, DFinePreTrainedModel):
         ...
 
 def weighting_function(
-    max_num_bins: int, up: torch.Tensor, reg_scale: int
+    max_num_bins: int,
+    up: torch.Tensor,
+    reg_scale: int,
 ) -> torch.Tensor: ...
 
 class DFineMLPPredictionHead(RTDetrMLPPredictionHead): ...
@@ -207,7 +217,9 @@ class DFineMLP(nn.Module):
 class DFineLQE(nn.Module):
     def __init__(self, config: DFineConfig) -> None: ...
     def forward(
-        self, scores: torch.Tensor, pred_corners: torch.Tensor
+        self,
+        scores: torch.Tensor,
+        pred_corners: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -226,7 +238,10 @@ class DFineConvNormLayer(RTDetrConvNormLayer):
 
 class DFineRepVggBlock(RTDetrRepVggBlock):
     def __init__(
-        self, config: DFineConfig, in_channels: int, out_channels: int
+        self,
+        config: DFineConfig,
+        in_channels: int,
+        out_channels: int,
     ) -> None: ...
 
 class DFineCSPRepLayer(nn.Module):
@@ -243,7 +258,10 @@ class DFineCSPRepLayer(nn.Module):
 
 class DFineRepNCSPELAN4(nn.Module):
     def __init__(
-        self, config: DFineConfig, act: str = ..., numb_blocks: int = ...
+        self,
+        config: DFineConfig,
+        act: str = ...,
+        numb_blocks: int = ...,
     ) -> None: ...
     def forward(self, input_features: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...

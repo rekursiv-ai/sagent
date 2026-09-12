@@ -9,10 +9,18 @@ tensor_parallel_params = ...
 def recursive_print(name, val, spaces=...):  # -> None:
     ...
 def megatron_to_transformers_fix_query_key_value_ordering(
-    param, checkpoint_version, num_splits, num_heads, hidden_size
+    param,
+    checkpoint_version,
+    num_splits,
+    num_heads,
+    hidden_size,
 ): ...
 def transformers_to_megatron_fix_query_key_value_ordering(
-    param, checkpoint_version, num_splits, num_heads, hidden_size
+    param,
+    checkpoint_version,
+    num_splits,
+    num_heads,
+    hidden_size,
 ): ...
 def merge_transformers_sharded_states(path, num_checkpoints):  # -> dict[Any, Any]:
     ...

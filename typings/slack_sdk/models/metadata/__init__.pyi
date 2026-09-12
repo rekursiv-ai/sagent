@@ -4,7 +4,10 @@ from slack_sdk.models.basic_objects import EnumValidator, JsonObject
 
 class Metadata(JsonObject):
     def __init__(
-        self, event_type: str, event_payload: dict[str, Any], **kwargs
+        self,
+        event_type: str,
+        event_payload: dict[str, Any],
+        **kwargs,
     ) -> None: ...
 
 EntityType = ...
@@ -18,7 +21,10 @@ class FileEntitySlackFile(JsonObject):
 
 class EntityIconSlackFile(JsonObject):
     def __init__(
-        self, id: str | None = ..., url: str | None = ..., **kwargs
+        self,
+        id: str | None = ...,
+        url: str | None = ...,
+        **kwargs,
     ) -> None: ...
 
 class EntityIconField(JsonObject):
@@ -52,7 +58,10 @@ class EntityEditNumberConfig(JsonObject):
 
 class EntityEditTextConfig(JsonObject):
     def __init__(
-        self, min_length: int | None = ..., max_length: int | None = ..., **kwargs
+        self,
+        min_length: int | None = ...,
+        max_length: int | None = ...,
+        **kwargs,
     ) -> None: ...
 
 class EntityEditSupport(JsonObject):
@@ -164,7 +173,11 @@ class EntityImageField(JsonObject):
 
 class EntityBooleanCheckboxField(JsonObject):
     def __init__(
-        self, type: str, text: str, description: str | None, **kwargs
+        self,
+        type: str,
+        text: str,
+        description: str | None,
+        **kwargs,
     ) -> None: ...
 
 class EntityBooleanTextField(JsonObject):
@@ -283,7 +296,10 @@ class ContentItemEntityFields(JsonObject):
 
 class EntityActionProcessingState(JsonObject):
     def __init__(
-        self, enabled: bool, interstitial_text: str | None = ..., **kwargs
+        self,
+        enabled: bool,
+        interstitial_text: str | None = ...,
+        **kwargs,
     ) -> None: ...
 
 class EntityActionButton(JsonObject):
@@ -301,7 +317,10 @@ class EntityActionButton(JsonObject):
 
 class EntityTitle(JsonObject):
     def __init__(
-        self, text: str, edit: dict[str, Any] | EntityEditSupport | None = ..., **kwargs
+        self,
+        text: str,
+        edit: dict[str, Any] | EntityEditSupport | None = ...,
+        **kwargs,
     ) -> None: ...
 
 class EntityAttributes(JsonObject):
@@ -347,7 +366,8 @@ class EntityPayload(JsonObject):
     @entity_attributes.setter
     def entity_attributes(self, value: dict[str, Any] | EntityAttributes) -> None: ...
     def get_object_attribute(
-        self, key: str
+        self,
+        key: str,
     ) -> dict[str, Any] | EntityAttributes | Any | None: ...
 
 class EntityMetadata(JsonObject):

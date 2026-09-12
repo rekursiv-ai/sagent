@@ -59,7 +59,8 @@ def init_device_mesh(
     *,
     mesh_dim_names: tuple[str, ...] | None = ...,
     backend_override: dict[
-        int | str, str | C10dBackend.Options | tuple[str, C10dBackend.Options]
+        int | str,
+        str | C10dBackend.Options | tuple[str, C10dBackend.Options],
     ]
     | None = ...,
 ) -> DeviceMesh: ...

@@ -55,40 +55,58 @@ class AutoformerFeatureEmbedder(nn.Module):
 class AutoformerStdScaler(nn.Module):
     def __init__(self, config: AutoformerConfig) -> None: ...
     def forward(
-        self, data: torch.Tensor, observed_indicator: torch.Tensor
+        self,
+        data: torch.Tensor,
+        observed_indicator: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 class AutoformerMeanScaler(nn.Module):
     def __init__(self, config: AutoformerConfig) -> None: ...
     def forward(
-        self, data: torch.Tensor, observed_indicator: torch.Tensor
+        self,
+        data: torch.Tensor,
+        observed_indicator: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 class AutoformerNOPScaler(nn.Module):
     def __init__(self, config: AutoformerConfig) -> None: ...
     def forward(
-        self, data: torch.Tensor, observed_indicator: torch.Tensor | None = ...
+        self,
+        data: torch.Tensor,
+        observed_indicator: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 def weighted_average(
-    input_tensor: torch.Tensor, weights: torch.Tensor | None = ..., dim=...
+    input_tensor: torch.Tensor,
+    weights: torch.Tensor | None = ...,
+    dim=...,
 ) -> torch.Tensor: ...
 def nll(
-    input: torch.distributions.Distribution, target: torch.Tensor
+    input: torch.distributions.Distribution,
+    target: torch.Tensor,
 ) -> torch.Tensor: ...
 
 class AutoformerSinusoidalPositionalEmbedding(nn.Embedding):
     def __init__(
-        self, num_positions: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_positions: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ) -> None: ...
     @torch.no_grad()
     def forward(
@@ -146,7 +164,9 @@ class AutoformerEncoderLayer(GradientCheckpointingLayer):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
 
 class AutoformerDecoderLayer(GradientCheckpointingLayer):
@@ -165,7 +185,8 @@ class AutoformerDecoderLayer(GradientCheckpointingLayer):
         use_cache: bool | None = ...,
         cache_position: torch.Tensor | None = ...,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring
@@ -207,14 +228,19 @@ class AutoformerDecoder(AutoformerPreTrainedModel):
         cache_position: torch.Tensor | None = ...,
     ) -> tuple | AutoFormerDecoderOutput: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | AutoFormerDecoderOutput: ...
 
 @auto_docstring
 class AutoformerModel(AutoformerPreTrainedModel):
     def __init__(self, config: AutoformerConfig) -> None: ...
     def get_lagged_subsequences(
-        self, sequence: torch.Tensor, subsequences_length: int, shift: int = ...
+        self,
+        sequence: torch.Tensor,
+        subsequences_length: int,
+        shift: int = ...,
     ) -> torch.Tensor: ...
     def create_network_inputs(
         self,
@@ -226,7 +252,11 @@ class AutoformerModel(AutoformerPreTrainedModel):
         future_values: torch.Tensor | None = ...,
         future_time_features: torch.Tensor | None = ...,
     ) -> tuple[
-        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
     ]: ...
     def get_encoder(self):  # -> AutoformerEncoder:
         ...
@@ -264,7 +294,11 @@ class AutoformerForPrediction(AutoformerPreTrainedModel):
         ...
     @torch.jit.ignore
     def output_distribution(
-        self, params, loc=..., scale=..., trailing_n=...
+        self,
+        params,
+        loc=...,
+        scale=...,
+        trailing_n=...,
     ) -> torch.distributions.Distribution: ...
     @auto_docstring
     def forward(

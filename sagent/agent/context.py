@@ -14,7 +14,7 @@ The resolver applies edits with "undelete" semantics: a splice's
 masking effects are conditional on the splice being alive. A splice is
 alive iff its own ``ref`` is not in any other alive splice's ``mask``.
 When a splice gets masked (its record absorbed by a later splice), its
-masking effects lapse — positions it had cleared resurface.
+masking effects lapse -- positions it had cleared resurface.
 
 Concretely, three passes:
 
@@ -31,7 +31,7 @@ Concretely, three passes:
 
 The final view is the concatenation of segments in the maintained
 order. The film-reel metaphor: cutting out the cut undoes both the
-cut's tape-in AND the deleted-content removal — both effects lapse
+cut's tape-in AND the deleted-content removal -- both effects lapse
 when the cut record itself is masked.
 """
 
@@ -119,7 +119,8 @@ def alive_splices(tape: Sequence[TapeRecord]) -> set[TapeRef]:
 
 
 def masked_refs_by_alive(
-    tape: Sequence[TapeRecord], alive: set[TapeRef]
+    tape: Sequence[TapeRecord],
+    alive: set[TapeRef],
 ) -> set[TapeRef]:
     """Return tape refs covered by any alive splice's ``mask``.
 
@@ -294,7 +295,10 @@ class _MaskIndex:
 
     @classmethod
     def _add_interval(
-        cls, intervals: list[tuple[int, int]], start: int, stop: int
+        cls,
+        intervals: list[tuple[int, int]],
+        start: int,
+        stop: int,
     ) -> None:
         idx = bisect.bisect_left(intervals, (start, stop))
         if idx > 0 and intervals[idx - 1][1] + 1 >= start:

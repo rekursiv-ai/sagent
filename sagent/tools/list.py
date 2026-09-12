@@ -93,7 +93,7 @@ class List:
                 },
             },
             "required": ["path"],
-        }
+        },
     )
 
     output: Annotated[Toggle, CLI_SETTABLE] = "off"
@@ -204,13 +204,17 @@ class List:
             return ToolResult(call_id="", content=f"Not found: {path}", is_error=True)
         if not p.is_dir():
             return ToolResult(
-                call_id="", content=f"Not a directory: {path}", is_error=True
+                call_id="",
+                content=f"Not a directory: {path}",
+                is_error=True,
             )
         try:
             entries = list(p.iterdir())
         except OSError as err:
             return ToolResult(
-                call_id="", content=f"Error reading {path}: {err}", is_error=True
+                call_id="",
+                content=f"Error reading {path}: {err}",
+                is_error=True,
             )
         if not show_hidden:
             entries = [e for e in entries if not e.name.startswith(".")]
@@ -293,22 +297,22 @@ class _LsParse:
     """The single directory operand; ``"."`` when omitted."""
 
 
+# One parse decides everything: ``_parse_ls`` already rejects several roots and unknown
+# flags, so deriving the path separately handed back a call that same parse had refused
+# -- ``ls a b`` suggested only ``a``, and ``ls -I '*.pyc' /src`` named the ignore-glob
+# as the directory.
+#
+# ``tail`` becomes ``keep_last``, not a flipped sort. Measured in a directory of
+# ``f1``..``f5``: ``ls | tail -n 3`` prints ``f3 f4 f5``, while ``sort='name_desc'
+# max_results=3`` returns ``f5 f4 f3`` -- the same entries in the opposite order.
 def _ls_call(
-    args: tuple[str, ...], *, cwd: str, max_results: int | None, keep_last: bool
+    args: tuple[str, ...],
+    *,
+    cwd: str,
+    max_results: int | None,
+    keep_last: bool,
 ) -> str:
-    """Render a concrete List call for ``ls`` args, or ``""``.
-
-    One parse decides everything: ``_parse_ls`` already rejects several
-    roots and unknown flags, so deriving the path separately handed back
-    a call that same parse had refused -- ``ls a b`` suggested only
-    ``a``, and ``ls -I '*.pyc' /src`` named the ignore-glob as the
-    directory.
-
-    ``tail`` becomes ``keep_last``, not a flipped sort. Measured in a
-    directory of ``f1``..``f5``: ``ls | tail -n 3`` prints ``f3 f4 f5``,
-    while ``sort='name_desc' max_results=3`` returns ``f5 f4 f3`` -- the
-    same entries in the opposite order.
-    """
+    """Render a concrete List call for ``ls`` args, or ``""``."""
     parsed = _parse_ls(args)
     if parsed is None:
         return ""
@@ -321,7 +325,7 @@ def _ls_call(
     pieces = [f"path={target!r}", *_ls_fields(parsed)]
     if max_results is not None:
         pieces.append(
-            f"keep_last={max_results}" if keep_last else f"max_results={max_results}"
+            f"keep_last={max_results}" if keep_last else f"max_results={max_results}",
         )
     return f" Try: List {' '.join(pieces)}"
 

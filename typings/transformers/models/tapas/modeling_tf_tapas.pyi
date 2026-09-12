@@ -81,7 +81,10 @@ class TFTapasSelfAttention(keras.layers.Layer):
 class TFTapasSelfOutput(keras.layers.Layer):
     def __init__(self, config: TapasConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -112,7 +115,10 @@ class TFTapasIntermediate(keras.layers.Layer):
 class TFTapasOutput(keras.layers.Layer):
     def __init__(self, config: TapasConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -166,7 +172,10 @@ class TFTapasPredictionHeadTransform(keras.layers.Layer):
 
 class TFTapasLMPredictionHead(keras.layers.Layer):
     def __init__(
-        self, config: TapasConfig, input_embeddings: keras.layers.Layer, **kwargs
+        self,
+        config: TapasConfig,
+        input_embeddings: keras.layers.Layer,
+        **kwargs,
     ) -> None: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -180,7 +189,10 @@ class TFTapasLMPredictionHead(keras.layers.Layer):
 
 class TFTapasMLMHead(keras.layers.Layer):
     def __init__(
-        self, config: TapasConfig, input_embeddings: keras.layers.Layer, **kwargs
+        self,
+        config: TapasConfig,
+        input_embeddings: keras.layers.Layer,
+        **kwargs,
     ) -> None: ...
     def call(self, sequence_output: tf.Tensor) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -190,7 +202,10 @@ class TFTapasMLMHead(keras.layers.Layer):
 class TFTapasMainLayer(keras.layers.Layer):
     config_class = TapasConfig
     def __init__(
-        self, config: TapasConfig, add_pooling_layer: bool = ..., **kwargs
+        self,
+        config: TapasConfig,
+        add_pooling_layer: bool = ...,
+        **kwargs,
     ) -> None: ...
     def get_input_embeddings(self) -> keras.layers.Layer: ...
     def set_input_embeddings(self, value: tf.Variable):  # -> None:
@@ -230,10 +245,11 @@ class TFTapasModel(TFTapasPreTrainedModel):
     def __init__(self, config: TapasConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        TAPAS_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        TAPAS_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFBaseModelOutputWithPooling, config_class=_CONFIG_FOR_DOC
+        output_type=TFBaseModelOutputWithPooling,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -257,10 +273,11 @@ class TFTapasForMaskedLM(TFTapasPreTrainedModel, TFMaskedLanguageModelingLoss):
     def get_lm_head(self) -> keras.layers.Layer: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        TAPAS_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        TAPAS_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFMaskedLMOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFMaskedLMOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -286,7 +303,11 @@ class TFTapasComputeTokenLogits(keras.layers.Layer):
 class TFTapasComputeColumnLogits(keras.layers.Layer):
     def __init__(self, config: TapasConfig, **kwargs) -> None: ...
     def call(
-        self, sequence_output, cell_index, cell_mask, allow_empty_column_selection
+        self,
+        sequence_output,
+        cell_index,
+        cell_mask,
+        allow_empty_column_selection,
     ) -> tf.Tensor: ...
 
 @add_start_docstrings(
@@ -297,10 +318,11 @@ class TFTapasForQuestionAnswering(TFTapasPreTrainedModel):
     def __init__(self, config: TapasConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        TAPAS_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        TAPAS_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFTableQuestionAnsweringOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFTableQuestionAnsweringOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -329,15 +351,17 @@ class TFTapasForQuestionAnswering(TFTapasPreTrainedModel):
     TAPAS_START_DOCSTRING,
 )
 class TFTapasForSequenceClassification(
-    TFTapasPreTrainedModel, TFSequenceClassificationLoss
+    TFTapasPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config: TapasConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        TAPAS_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        TAPAS_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFSequenceClassifierOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFSequenceClassifierOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,

@@ -21,7 +21,10 @@ def reduce(
     outputs: Sequence[torch.Tensor] | None = ...,
 ) -> None: ...
 def broadcast(
-    inputs: Sequence[torch.Tensor], root: int = ..., streams=..., comms=...
+    inputs: Sequence[torch.Tensor],
+    root: int = ...,
+    streams=...,
+    comms=...,
 ) -> None: ...
 def all_gather(
     inputs: Sequence[torch.Tensor],

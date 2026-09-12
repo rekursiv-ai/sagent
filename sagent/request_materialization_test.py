@@ -88,14 +88,14 @@ def test_truncating_the_newest_result_does_not_evict_older_turns() -> None:
     200 KB: 6 results and 12 messages became 1 result and 3 messages.
     """
     messages: list[ToolResult | AssistantMessage | UserMessage] = [
-        UserMessage(text="the original task")
+        UserMessage(text="the original task"),
     ]
     for i in range(6):
         messages.append(
             AssistantMessage(
                 text=f"reasoning-{i}",
                 tool_calls=(ToolCall(id=f"c{i}", name="Read", args={}),),
-            )
+            ),
         )
         messages.append(ToolResult(call_id=f"c{i}", content="x" * 200_000))
 
@@ -128,14 +128,14 @@ def test_no_over_budget_result_degrades_to_the_bare_tag() -> None:
     passed whole. Size did not decide it; position did.
     """
     messages: list[ToolResult | AssistantMessage | UserMessage] = [
-        UserMessage(text="read the tree")
+        UserMessage(text="read the tree"),
     ]
     for i in range(21):
         messages.append(
-            AssistantMessage(tool_calls=(ToolCall(id=f"c{i}", name="Read", args={}),))
+            AssistantMessage(tool_calls=(ToolCall(id=f"c{i}", name="Read", args={}),)),
         )
         messages.append(
-            ToolResult(call_id=f"c{i}", content=f"FILE{i}\n" + "x" * 60_000)
+            ToolResult(call_id=f"c{i}", content=f"FILE{i}\n" + "x" * 60_000),
         )
 
     materialized = materialize_messages(messages, tool_result_budget_tokens=25_000)
@@ -159,11 +159,11 @@ def test_no_over_budget_result_degrades_to_the_bare_tag() -> None:
 def test_shedding_stays_within_budget_at_batch_scale() -> None:
     """The floor must not be bought by blowing the budget it defends."""
     messages: list[ToolResult | AssistantMessage | UserMessage] = [
-        UserMessage(text="read the tree")
+        UserMessage(text="read the tree"),
     ]
     for i in range(21):
         messages.append(
-            AssistantMessage(tool_calls=(ToolCall(id=f"c{i}", name="Read", args={}),))
+            AssistantMessage(tool_calls=(ToolCall(id=f"c{i}", name="Read", args={}),)),
         )
         messages.append(ToolResult(call_id=f"c{i}", content="x" * 60_000))
 
@@ -521,7 +521,7 @@ def test_defer_user_accumulates_pending_across_assistant_turns() -> None:
             AssistantMessage(tool_calls=(ToolCall(id="t2", name="Bash", args={}),)),
             ToolResult(call_id="t2", content="b"),
             ToolResult(call_id="t1", content="a"),
-        ]
+        ],
     )
     # The AgentSend must not appear until BOTH t1 and t2 are closed: it lands
     # after the last ToolResult, not between the two open pairs.
@@ -594,7 +594,7 @@ def test_agent_send_label_not_suppressed_by_body_mention() -> None:
     literally") was passed through unlabelled, losing attribution.
     """
     out = materialize_messages(
-        [AgentSendMessage(source="bob", text="please write [from bob]: literally")]
+        [AgentSendMessage(source="bob", text="please write [from bob]: literally")],
     )
 
     first = out[0]
@@ -616,7 +616,7 @@ def test_cross_source_agent_send_merge_keeps_attribution_in_text() -> None:
         [
             AgentSendMessage(source="alice", text="from alice"),
             AgentSendMessage(source="bob", text="from bob"),
-        ]
+        ],
     )
     validate_context(out)
     assert len(out) == 1
@@ -637,7 +637,7 @@ def test_user_with_agent_send_merge_does_not_re_attribute_user_text() -> None:
         [
             UserMessage(text="user said"),
             AgentSendMessage(source="alice", text="alice said"),
-        ]
+        ],
     )
     validate_context(out)
     assert len(out) == 1

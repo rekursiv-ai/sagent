@@ -37,7 +37,7 @@ import shutil
 import subprocess
 import tempfile
 
-from sagent.catalog import anthropic as anthropic_catalog
+from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import (
     JSON,
     FloatCodec,
@@ -88,21 +88,22 @@ from sagent.types.runtime import (
 )
 from sagent.types.tape import TapeEvent
 
+import sagent.catalog.anthropic
+
 
 if TYPE_CHECKING:
+    from sagent.lib import image
     from sagent.types.tools import Tool
-
-    import sagent.lib.image as image_lib
 else:
     from wrapt import lazy_import
 
-    image_lib = lazy_import("sagent.lib.image")
+    image = lazy_import("sagent.lib.image")
 
 
 logger = logging.getLogger(__name__)
 
 
-_CREDS_PATH = Path.home() / ".claude" / ".credentials.json"  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)
+_CREDS_PATH = Path.home() / ".claude" / ".credentials.json"  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)  # house-lint: ignore[xdg-literal] -- vendor CLI's fixed home path, not ours (AGENTS.md rule 3)
 _AUTH_STATUS_TIMEOUT_SEC = (
     5.0  # config-globals: ignore -- retunable auth-status probe timeout
 )
@@ -171,16 +172,14 @@ _CREDENTIALS_SCHEMA: Final[JSON] = {
 }
 
 
+# Current Claude Code stores credentials in the macOS Keychain, so the historical
+# ``~/.claude/.credentials.json`` file is not an authoritative login check there.
+# ``None`` means the installed CLI predates ``claude auth status --json`` or did not
+# identify its auth method; callers may then fall back to the legacy file check.
+# Console/API/cloud auth returns ``False`` because ``AnthropicCLI`` is the subscription
+# provider.
 def _claude_auth_status(binary: str) -> bool | None:
-    """Return whether the native CLI has a Claude.ai subscription login.
-
-    Current Claude Code stores credentials in the macOS Keychain, so the
-    historical ``~/.claude/.credentials.json`` file is not an authoritative
-    login check there. ``None`` means the installed CLI predates
-    ``claude auth status --json`` or did not identify its auth method; callers
-    may then fall back to the legacy file check. Console/API/cloud auth returns
-    ``False`` because ``AnthropicCLI`` is the subscription provider.
-    """
+    """Return whether the native CLI has a Claude.ai subscription login."""
     env = {
         key: value
         for key, value in os.environ.items()
@@ -270,42 +269,34 @@ class AnthropicCLIRetryableError(SubprocessTransportError):
         self.event = event
 
 
+# Validated against ~60 ``is_error`` events captured on 2026-06-03/04 from the live
+# multi-agent server. The retryable shapes share two attributes: (a) claude's session
+# JSONL on disk remains consistent (the next ``--resume`` will pick up cleanly), and (b)
+# re-running the same request usually succeeds without operator intervention.
+#
+# Retryable shapes:
+#
+# * ``terminal_reason == "aborted_streaming"``: dominant pattern, often paired with
+# ``stop_reason == "tool_use"`` and an ``[ede_diagnostic]`` entry in ``errors``.
+# **Historically read as "Anthropic-side mid-stream cut"; the dominant cause is actually
+# our own preempt SIGINT** (see :class:`AnthropicCLIRetryableError` for the diagnosis).
+# 0-input-token instances are unambiguous preempt kills (the API never saw the request).
+# * ``errors`` contains an ``[ede_diagnostic]`` line: same surface shape, occasionally
+# reported with ``terminal_reason == "completed"`` when the SIGINT raced the natural
+# stop.
+#
+# NOT retryable:
+#
+# * ``terminal_reason == "blocking_limit"``: context overflow. The next attempt would
+# hit the same wall; operator must clear the session. Surfacing as a hard error gets the
+# runtime to publish ``ModelResponseError`` so the operator sees ``status=hung``. *
+# ``api_error_status`` in non-429 4xx: client-side issue, retry won't help.
+#
+# The classification doesn't depend on root cause: retryable shapes recover cleanly via
+# ``--resume`` regardless of whether the abort came from upstream or from our own
+# SIGINT. Only the framing in docs/logs matters for future debugging.
 def _is_event_retryable(event: Mapping[str, object]) -> bool:
-    """Classify a CLI ``result`` event as transient.
-
-    Validated against ~60 ``is_error`` events captured on 2026-06-03/04
-    from the live multi-agent server. The retryable shapes share two
-    attributes: (a) claude's session JSONL on disk remains consistent
-    (the next ``--resume`` will pick up cleanly), and (b) re-running
-    the same request usually succeeds without operator intervention.
-
-    Retryable shapes:
-
-    * ``terminal_reason == "aborted_streaming"``: dominant pattern,
-      often paired with ``stop_reason == "tool_use"`` and an
-      ``[ede_diagnostic]`` entry in ``errors``. **Historically read as
-      "Anthropic-side mid-stream cut"; the dominant cause is actually
-      our own preempt SIGINT** (see :class:`AnthropicCLIRetryableError`
-      for the diagnosis). 0-input-token instances are unambiguous
-      preempt kills (the API never saw the request).
-    * ``errors`` contains an ``[ede_diagnostic]`` line: same surface
-      shape, occasionally reported with ``terminal_reason ==
-      "completed"`` when the SIGINT raced the natural stop.
-
-    NOT retryable:
-
-    * ``terminal_reason == "blocking_limit"``: context overflow. The
-      next attempt would hit the same wall; operator must clear the
-      session. Surfacing as a hard error gets the runtime to publish
-      ``ModelResponseError`` so the operator sees ``status=hung``.
-    * ``api_error_status`` in non-429 4xx: client-side issue, retry
-      won't help.
-
-    The classification doesn't depend on root cause: retryable shapes
-    recover cleanly via ``--resume`` regardless of whether the abort
-    came from upstream or from our own SIGINT. Only the framing in
-    docs/logs matters for future debugging.
-    """
+    """Classify a CLI ``result`` event as transient."""
     terminal_reason = event.get("terminal_reason")
     if terminal_reason == "aborted_streaming":
         return True
@@ -319,15 +310,12 @@ def _is_event_retryable(event: Mapping[str, object]) -> bool:
     return False
 
 
+# The CLI sometimes embeds ``retry_after_ms`` / ``retry_delay_ms`` keys in the result
+# envelope (mirroring the underlying API ``retry-after`` header). When present we
+# forward it to the retry layer so backoff respects the server's hint; when absent
+# ``send_with_retry`` falls back to its standard exponential schedule.
 def _extract_retry_after_ms(event: Mapping[str, object]) -> float | None:
-    """Pull a millisecond retry hint out of the CLI ``result`` event.
-
-    The CLI sometimes embeds ``retry_after_ms`` / ``retry_delay_ms``
-    keys in the result envelope (mirroring the underlying API
-    ``retry-after`` header). When present we forward it to the retry
-    layer so backoff respects the server's hint; when absent
-    ``send_with_retry`` falls back to its standard exponential schedule.
-    """
+    """Pull a millisecond retry hint out of the CLI ``result`` event."""
     for key in ("retry_after_ms", "retry_delay_ms"):
         val = event.get(key)
         if isinstance(val, (int, float)) and val >= 0:
@@ -364,7 +352,7 @@ class AnthropicCLI(Anthropic):
     the CLI emits on the terminal ``result`` event.
     """
 
-    TRANSPORT: ClassVar[ModelCapability] = anthropic_catalog.cli()
+    TRANSPORT: ClassVar[ModelCapability] = sagent.catalog.anthropic.cli()
     """The subprocess exposes no effort, latency, cache, or redaction knob."""
 
     supported_options: ClassVar[frozenset[str]] = frozenset[str]()
@@ -571,7 +559,10 @@ class AnthropicCLI(Anthropic):
         del provider_options
         mid = model_id if model_id is not None else "default"
         capability, settings = resolve(
-            mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT
+            mid,
+            models=self.CAPABILITIES,
+            roles=self.ROLES,
+            transport=self.TRANSPORT,
         )
         return _AnthropicCLIModel(
             provider=self,
@@ -769,26 +760,21 @@ class _AnthropicCLIModel(ModelDefaults):
         """What this instance chose."""
         return self._settings
 
+    # Called from ``stream``'s ``CancelledError`` handler: when the runtime cancels the
+    # in-flight model-call task (peer/operator preempt), ``CancelledError`` propagates
+    # into the awaiting ``stream``; we translate it into a subprocess SIGINT so the
+    # opaque CLI tool loop actually stops, then re-raise so the runtime's standard
+    # cancellation path (``_stream_and_post`` -> ``ModelResponseCancelled``) runs. The
+    # full CLI tool loop runs in-process inside the subprocess, so the runtime cannot
+    # ``Detach``/``Kill`` individual tool calls; SIGINT is the only mid-turn
+    # cancellation surface.
+    #
+    # Returns True if a live subprocess was signalled, False otherwise (idle, never
+    # started, already closed). Non-blocking. Partial assistant text + usage telemetry
+    # for the cancelled turn are lost -- intentional, the caller is preempting precisely
+    # because that work is no longer wanted.
     def _interrupt_active_proc(self) -> bool:
-        """SIGINT the active CLI subprocess to abort the current turn.
-
-        Called from ``stream``'s ``CancelledError`` handler: when the
-        runtime cancels the in-flight model-call task (peer/operator
-        preempt), ``CancelledError`` propagates into the awaiting
-        ``stream``; we translate it into a subprocess SIGINT so the
-        opaque CLI tool loop actually stops, then re-raise so the
-        runtime's standard cancellation path (``_stream_and_post`` ->
-        ``ModelResponseCancelled``) runs. The full CLI tool loop runs
-        in-process inside the subprocess, so the runtime cannot
-        ``Detach``/``Kill`` individual tool calls; SIGINT is the only
-        mid-turn cancellation surface.
-
-        Returns True if a live subprocess was signalled, False otherwise
-        (idle, never started, already closed). Non-blocking. Partial
-        assistant text + usage telemetry for the cancelled turn are lost
-        -- intentional, the caller is preempting precisely because that
-        work is no longer wanted.
-        """
+        """SIGINT the active CLI subprocess to abort the current turn."""
         if self._hot_spare is not None:
             active = self._hot_spare.active
             if active is None:
@@ -804,13 +790,14 @@ class _AnthropicCLIModel(ModelDefaults):
     def approx_text_tokens(self, text: str) -> int:
         """Local estimate via ``chars_per_token``."""
         return int(
-            len(text) / anthropic_catalog.chars_per_token(self.capability.model_id)
+            len(text)
+            / sagent.catalog.anthropic.chars_per_token(self.capability.model_id),
         )
 
     @override
     def approx_image_tokens(self, data: bytes) -> int:
         """Local estimate from image dimensions (``width*height/750``)."""
-        dims = image_lib.get_dimensions(data)
+        dims = image.get_dimensions(data)
         return dims[0] * dims[1] // 750 if dims is not None else 0
 
     def is_context_overflow(self, error: Exception) -> bool:
@@ -898,7 +885,7 @@ class _AnthropicCLIModel(ModelDefaults):
         try:
             if self._session_id is not None:
                 return await self._stream_session_persistent(request, publish)
-            assert self._hot_spare is not None  # stateless path
+            assert self._hot_spare is not None  # Stateless path.
             # Stash the request's tools so the spawn factory
             # (``_spawn_initialized``) can populate the bridge BEFORE it
             # launches ``claude`` -- the CLI issues ``ListToolsRequest``
@@ -944,27 +931,23 @@ class _AnthropicCLIModel(ModelDefaults):
             if self._tools_bridge is not None:
                 self._tools_bridge.set_publish(None)
 
+    # Spawn-on-demand (no HotSpare) because pre-warming a spare with ``--resume <same-
+    # uuid>`` would race against the active subprocess updating the session file (see
+    # ``/tmp/resume_probe/`` test A from 2026-06-02: concurrent ``--resume`` produces a
+    # branched conversation tree).
+    #
+    # Only the newest user-like entries are written to stdin -- ``claude`` already has
+    # the rest in its session file. ``_last_sent_index`` is the cumulative count of
+    # messages we've delivered to ``claude`` across this session_id, NOT a per-
+    # subprocess counter -- so it's preserved across transport-error respawns. On the
+    # first turn we use ``--session-id``; on every subsequent turn (including respawns)
+    # we use ``--resume``.
     async def _stream_session_persistent(
         self,
         request: ModelRequest,
         publish: Callable[[RuntimeEvent], None] | None,
     ) -> ModelResponse:
-        """Drive one turn through a ``--session-id`` / ``--resume`` subprocess.
-
-        Spawn-on-demand (no HotSpare) because pre-warming a spare with
-        ``--resume <same-uuid>`` would race against the active
-        subprocess updating the session file (see
-        ``/tmp/resume_probe/`` test A from 2026-06-02: concurrent
-        ``--resume`` produces a branched conversation tree).
-
-        Only the newest user-like entries are written to stdin --
-        ``claude`` already has the rest in its session file.
-        ``_last_sent_index`` is the cumulative count of messages we've
-        delivered to ``claude`` across this session_id, NOT a per-
-        subprocess counter -- so it's preserved across transport-error
-        respawns. On the first turn we use ``--session-id``; on every
-        subsequent turn (including respawns) we use ``--resume``.
-        """
+        """Drive one turn through a ``--session-id`` / ``--resume`` subprocess."""
         # ``agent.clear()`` (driven by ``/api/restart``, ``Clear`` event,
         # or context-overflow recovery) wipes ``runtime.context().messages``
         # but doesn't reach into the provider's ``_last_sent_index`` /
@@ -1042,7 +1025,7 @@ class _AnthropicCLIModel(ModelDefaults):
                 # on 2026-06-03 around 14:30, when each retry re-wrote
                 # the earliest pending entry AND failed to reach the
                 # later entries that contained TL's STOP directives).
-                assert rel_idx is not None  # only the trailing entry may be synthetic
+                assert rel_idx is not None  # Only the trailing entry may be synthetic.
                 self._last_sent_index = base + rel_idx + 1
                 _ = await self._drain_until_result(
                     proc,
@@ -1111,7 +1094,7 @@ class _AnthropicCLIModel(ModelDefaults):
 
     def _should_respawn(self, request: ModelRequest) -> bool:
         """Inspect the trigger list (§1.4) for this request."""
-        assert self._hot_spare is not None  # caller is the stateless path
+        assert self._hot_spare is not None  # Caller is the stateless path.
         if self._hot_spare.active is None:
             return False
         history = request.messages
@@ -1131,41 +1114,34 @@ class _AnthropicCLIModel(ModelDefaults):
             max_request_tokens=self.limits.max_request_tokens,
         )
 
+    # ``publish`` is the runtime sink for this turn; the bridge emits a ``ToolLabel``
+    # through it for each tool call routed through the subprocess. Passed afresh every
+    # turn so a stale runtime publisher never lingers on the long-lived bridge.
     def _sync_tools_bridge(
         self,
         request: ModelRequest,
         publish: Callable[[RuntimeEvent], None] | None = None,
     ) -> None:
-        """Refresh the MCP bridge's tool registry and runtime event sink.
-
-        ``publish`` is the runtime sink for this turn; the bridge emits a
-        ``ToolLabel`` through it for each tool call routed through the
-        subprocess. Passed afresh every turn so a stale runtime publisher
-        never lingers on the long-lived bridge.
-        """
+        """Refresh the MCP bridge's tool registry and runtime event sink."""
         if self._tools_bridge is not None:
             self._tools_bridge.update_tools(list(request.tools or []))
             self._tools_bridge.set_publish(publish)
 
+    # The bridge runs background tool calls (those the model requested with
+    # ``background``/``delay``) as tasks in this Model's loop and hands back finished
+    # results here. We fold them into a single user-side message so the next ``claude
+    # --print`` turn delivers the results the model was promised. ``None`` when nothing
+    # is pending. This is the Model side of the bridge's internal cohort: detached tool
+    # results come back as ordinary turn input.
+    #
+    # ``drain_detached_results`` is a destructive read, so the folded text is held in
+    # ``_pending_detached_text`` until the turn that delivers it completes successfully
+    # (cleared in the ``else`` branch of the stream paths). If that turn's final drain
+    # fails and ``send_with_retry`` re-invokes ``stream``, this returns the SAME
+    # buffered entry rather than ``None`` -- otherwise the results, no longer in
+    # ``_bg_done``, would vanish (the model was promised them).
     def _detached_delivery_entry(self) -> UserMessage | None:
-        """Drain the bridge's completed detached tool runs into one entry.
-
-        The bridge runs background tool calls (those the model requested
-        with ``background``/``delay``) as tasks in this Model's loop and
-        hands back finished results here. We fold them into a single
-        user-side message so the next ``claude --print`` turn delivers
-        the results the model was promised. ``None`` when nothing is
-        pending. This is the Model side of the bridge's internal cohort:
-        detached tool results come back as ordinary turn input.
-
-        ``drain_detached_results`` is a destructive read, so the folded
-        text is held in ``_pending_detached_text`` until the turn that
-        delivers it completes successfully (cleared in the ``else`` branch
-        of the stream paths). If that turn's final drain fails and
-        ``send_with_retry`` re-invokes ``stream``, this returns the SAME
-        buffered entry rather than ``None`` -- otherwise the results, no
-        longer in ``_bg_done``, would vanish (the model was promised them).
-        """
+        """Drain the bridge's completed detached tool runs into one entry."""
         if self._pending_detached_text is None:
             if self._tools_bridge is None:
                 return None
@@ -1179,19 +1155,15 @@ class _AnthropicCLIModel(ModelDefaults):
             )
         return UserMessage(text=self._pending_detached_text)
 
+    # The bridge MUST exist before the first ``claude --print`` subprocess starts -- the
+    # CLI does ``ListToolsRequest`` against the bridge URL soon after launch, and an
+    # empty bridge produces an empty tool catalog (which then makes opus emit tool calls
+    # as plain text). In the stateless path this is implicit because the HotSpare's
+    # first spawn calls ``_spawn_initialized`` which creates the bridge; in session-
+    # persistent mode we must hoist the bridge creation out so the spawn argv can use a
+    # real ``--mcp-config`` URL.
     async def _ensure_tools_bridge(self) -> None:
-        """Lazily create the MCP bridge (without spawning the CLI).
-
-        The bridge MUST exist before the first ``claude --print``
-        subprocess starts -- the CLI does ``ListToolsRequest`` against
-        the bridge URL soon after launch, and an empty bridge produces
-        an empty tool catalog (which then makes opus emit tool calls
-        as plain text). In the stateless path this is implicit because
-        the HotSpare's first spawn calls ``_spawn_initialized`` which
-        creates the bridge; in session-persistent mode we must hoist
-        the bridge creation out so the spawn argv can use a real
-        ``--mcp-config`` URL.
-        """
+        """Lazily create the MCP bridge (without spawning the CLI)."""
         if self._tools_bridge is None:
             self._tools_bridge = ToolsBridge(tools=[])
             await self._tools_bridge.start()
@@ -1221,26 +1193,28 @@ class _AnthropicCLIModel(ModelDefaults):
         for entry in user_like_entries[:-1]:
             await self._send_entry(proc, entry)
             _ = await self._drain_until_result(
-                proc, publish=None, update_input_tokens=False
+                proc,
+                publish=None,
+                update_input_tokens=False,
             )
         if not user_like_entries:
             return await self._drain_until_result(proc, publish)
         await self._send_entry(proc, user_like_entries[-1])
         return await self._drain_until_result(proc, publish)
 
+    # Gated on ``proc`` having fetched the bridge catalog (instant after the first
+    # fetch): a cold subprocess's first user line must not race ahead of claude's still-
+    # connecting MCP client, or the model sees no tools and answers "no tools have been
+    # provided".
     async def _send_entry(self, proc: Subproc, entry: TapeEvent) -> None:
-        """Write one history entry to stdin.
-
-        Gated on ``proc`` having fetched the bridge catalog (instant after
-        the first fetch): a cold subprocess's first user line must not
-        race ahead of claude's still-connecting MCP client, or the model
-        sees no tools and answers "no tools have been provided".
-        """
+        """Write one history entry to stdin."""
         await self._await_mcp_listed(proc)
         line = json.dumps(
             _serialize_for_stdin(
-                entry, self.limits.max_image_edge_px, self.limits.max_image_bytes
-            )
+                entry,
+                self.limits.max_image_edge_px,
+                self.limits.max_image_bytes,
+            ),
         )
         await proc.write_line(line)
 
@@ -1292,7 +1266,7 @@ class _AnthropicCLIModel(ModelDefaults):
             event = await proc.read_json_line(skip_non_json=False)
             if event is None:
                 raise SubprocessTransportError(
-                    "AnthropicCLI: subprocess stdout closed before result"
+                    "AnthropicCLI: subprocess stdout closed before result",
                 )
             kind = event.get("type")
             if kind == "result":
@@ -1318,7 +1292,7 @@ class _AnthropicCLIModel(ModelDefaults):
                             event=cast(Mapping[str, object], event),
                         )
                     raise SubprocessTransportError(
-                        f"AnthropicCLI: result is_error: {event}"
+                        f"AnthropicCLI: result is_error: {event}",
                     )
                 break
             if kind == "stream_event":
@@ -1466,32 +1440,28 @@ class _AnthropicCLIModel(ModelDefaults):
         self._warming_proc = None
         return proc
 
+    # The CLI connects to MCP servers asynchronously after launch and does NOT block its
+    # first turn on that handshake; a cold subprocess that generates before the
+    # ``sagent`` server flips from ``pending`` to ``connected`` sees an empty catalog
+    # and answers "no tools have been provided" (live 2026-06-16). Called before the
+    # first user line is written, so the connect overlaps no extra latency; instant
+    # after the first fetch (the per-proc baseline is already exceeded).
+    #
+    # No-op when the bridge has no tools. When tools ARE expected but the catalog is not
+    # fetched within ``_mcp_connect_timeout_sec``, raise
+    # :class:`SubprocessTransportError` rather than silently feeding the turn a tool-
+    # less context: a degraded "no tools have been provided" answer is worse than a
+    # respawn. The standard transport-failure path (HotSpare respawn in stateless mode,
+    # in-place ``--resume`` retry in session mode) then re-attempts the connect on a
+    # fresh subprocess.
     async def _await_mcp_listed(self, proc: Subproc) -> None:
-        """Wait for ``proc`` to fetch the bridge's tool catalog.
-
-        The CLI connects to MCP servers asynchronously after launch and
-        does NOT block its first turn on that handshake; a cold
-        subprocess that generates before the ``sagent`` server flips from
-        ``pending`` to ``connected`` sees an empty catalog and answers "no
-        tools have been provided" (live 2026-06-16). Called before the
-        first user line is written, so the connect overlaps no extra
-        latency; instant after the first fetch (the per-proc baseline is
-        already exceeded).
-
-        No-op when the bridge has no tools. When tools ARE expected but
-        the catalog is not fetched within ``_mcp_connect_timeout_sec``,
-        raise :class:`SubprocessTransportError` rather than silently
-        feeding the turn a tool-less context: a degraded "no tools have
-        been provided" answer is worse than a respawn. The standard
-        transport-failure path (HotSpare respawn in stateless mode,
-        in-place ``--resume`` retry in session mode) then re-attempts the
-        connect on a fresh subprocess.
-        """
+        """Wait for ``proc`` to fetch the bridge's tool catalog."""
         if self._tools_bridge is None or not self._tools_bridge.has_tools:
             return
         baseline = self._mcp_baseline_by_proc.get(id(proc), 0)
         listed = await self._tools_bridge.wait_listed(
-            baseline, self._mcp_connect_timeout_sec
+            baseline,
+            self._mcp_connect_timeout_sec,
         )
         if not listed:
             raise SubprocessTransportError(
@@ -1515,21 +1485,16 @@ class _AnthropicCLIModel(ModelDefaults):
         self._pending_detached_text = None
         self._reset_delta_state()
 
+    # Wipes the cumulative-sent counter, marks the session as uninitialised (next spawn
+    # will use ``--session-id`` again), DELETES the on-disk session JSONL so the next
+    # ``--session-id <same-uuid>`` call doesn't error with "Session ID is already in
+    # use", and drops any buffered detached result -- the cleared context no longer
+    # knows the tool calls it answered, so re-injecting it would be a phantom result.
+    #
+    # Called from :meth:`_stream_session_persistent` when it detects ``_last_sent_index
+    # > len(request.messages)``, which is the post-``Clear`` shape.
     def _reset_for_clear(self) -> None:
-        """Reset session-persistent state after ``agent.clear()``.
-
-        Wipes the cumulative-sent counter, marks the session as
-        uninitialised (next spawn will use ``--session-id`` again),
-        DELETES the on-disk session JSONL so the next
-        ``--session-id <same-uuid>`` call doesn't error with
-        "Session ID is already in use", and drops any buffered detached
-        result -- the cleared context no longer knows the tool calls it
-        answered, so re-injecting it would be a phantom result.
-
-        Called from :meth:`_stream_session_persistent` when it
-        detects ``_last_sent_index > len(request.messages)``, which
-        is the post-``Clear`` shape.
-        """
+        """Reset session-persistent state after ``agent.clear()``."""
         # The detached buffer is context state, cleared regardless of session
         # mode (the early-return below only gates the session-file teardown).
         self._pending_detached_text = None
@@ -1539,17 +1504,13 @@ class _AnthropicCLIModel(ModelDefaults):
         self._session_initialized = False
         self._delete_session_jsonl(reason="agent.clear()")
 
+    # The on-disk file is a pure cache the provider rebuilds from the request; a stale
+    # copy (left by a prior process, or invalidated by ``agent.clear()``) must be
+    # removed so the next ``--session-id <same-uuid>`` spawn doesn't error with "Session
+    # ID is already in use". Called at construction (drop any prior process's file -- we
+    # rebuild from the rehydrated tape) and from ``_reset_for_clear``.
     def _delete_session_jsonl(self, *, reason: str) -> None:
-        """Delete the on-disk session JSONL for this uuid, if present.
-
-        The on-disk file is a pure cache the provider rebuilds from the
-        request; a stale copy (left by a prior process, or invalidated
-        by ``agent.clear()``) must be removed so the next
-        ``--session-id <same-uuid>`` spawn doesn't error with "Session
-        ID is already in use". Called at construction (drop any prior
-        process's file -- we rebuild from the rehydrated tape) and from
-        ``_reset_for_clear``.
-        """
+        """Delete the on-disk session JSONL for this uuid, if present."""
         if self._session_id is None:
             return
         path = self._session_jsonl_path()
@@ -1569,15 +1530,12 @@ class _AnthropicCLIModel(ModelDefaults):
                 exc,
             )
 
+    # ``None`` in stateless mode. Resolves HOME the way the spawn does (per-account
+    # tmpdir, else the operator's real HOME honoring ``CLAUDE_CONFIG_DIR``) and the cwd
+    # the way claude encodes it (canonicalized, non-alnum -> ``-``), so the path the
+    # provider computes is the path claude reads/writes.
     def _session_jsonl_path(self) -> Path | None:
-        """On-disk session-file path for this uuid under the spawn cwd.
-
-        ``None`` in stateless mode. Resolves HOME the way the spawn does
-        (per-account tmpdir, else the operator's real HOME honoring
-        ``CLAUDE_CONFIG_DIR``) and the cwd the way claude encodes it
-        (canonicalized, non-alnum -> ``-``), so the path the provider
-        computes is the path claude reads/writes.
-        """
+        """On-disk session-file path for this uuid under the spawn cwd."""
         if self._session_id is None:
             return None
         try:
@@ -1586,12 +1544,10 @@ class _AnthropicCLIModel(ModelDefaults):
             return None
         return _session_jsonl_path(self._session_id, cwd=cwd, home=self._claude_home())
 
+    # Per-account mode pins a hermetic tmpdir; single-account mode inherits the
+    # operator's real HOME.
     def _claude_home(self) -> Path:
-        """Resolve the HOME the ``claude`` subprocess uses.
-
-        Per-account mode pins a hermetic tmpdir; single-account mode
-        inherits the operator's real HOME.
-        """
+        """Resolve the HOME the ``claude`` subprocess uses."""
         return self._persistent_tmpdir or _real_home()
 
     def _reset_delta_state(self) -> None:
@@ -1642,11 +1598,13 @@ def _parse_cli_credentials(raw: MutableJSON) -> AnthropicCLICredentials:
         creds["account_created_at"] = cast(str | None, oauth["accountCreatedAt"])
     if "subscriptionCreatedAt" in oauth:
         creds["subscription_created_at"] = cast(
-            str | None, oauth["subscriptionCreatedAt"]
+            str | None,
+            oauth["subscriptionCreatedAt"],
         )
     if "hasExtraUsageEnabled" in oauth:
         creds["has_extra_usage_enabled"] = cast(
-            bool | None, oauth["hasExtraUsageEnabled"]
+            bool | None,
+            oauth["hasExtraUsageEnabled"],
         )
     return creds
 
@@ -1667,33 +1625,29 @@ def _load_cli_credentials_file(path: Path) -> AnthropicCLICredentials | None:
     return _parse_cli_credentials(raw)
 
 
+# Honors ``CLAUDE_CONFIG_DIR`` the way the CLI does: when set, claude stores
+# ``projects/`` under it rather than ``$HOME/.claude``. We return a path such that
+# ``<return>/.claude/projects`` equals claude's projects root in both cases.
 def _real_home() -> Path:
-    """Return HOME that claude uses when sagent doesn't override it.
-
-    Honors ``CLAUDE_CONFIG_DIR`` the way the CLI does: when set, claude
-    stores ``projects/`` under it rather than ``$HOME/.claude``. We
-    return a path such that ``<return>/.claude/projects`` equals claude's
-    projects root in both cases.
-    """
+    """Return HOME that claude uses when sagent doesn't override it."""
     config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
     if config_dir:
-        # claude treats CLAUDE_CONFIG_DIR as the ``.claude`` dir itself;
-        # return its parent so the shared ``/.claude/projects`` suffix
+        # Claude treats CLAUDE_CONFIG_DIR as the ``.claude`` dir itself;
+        # Return its parent so the shared ``/.claude/projects`` suffix
         # in ``_session_jsonl_path`` resolves correctly.
-        return Path(config_dir).expanduser().parent
-    return Path(os.environ.get("HOME", "~")).expanduser()
+        return Path(config_dir).parent
+    return Path(
+        os.environ.get("HOME", "~"),
+    ).expanduser()  # house-lint: ignore[xdg-literal] -- HOME as the claude CLI itself reads it, not our layout (AGENTS.md rule 3)
 
 
+# Mirrors the CLI's encoding so the path sagent computes is the path claude
+# reads/writes: the cwd is canonicalized (symlinks resolved -- e.g. macOS ``/tmp`` ->
+# ``/private/tmp``) and every non-``[A-Za-z0-9-]`` character becomes ``-``. Must stay
+# cwd-aware: claude indexes sessions per encoded-cwd project dir and ``--resume`` cannot
+# see a session recorded under a different cwd.
 def _session_jsonl_path(session_id: str, *, cwd: Path, home: Path) -> Path:
-    """On-disk session-file path claude uses for ``(session_id, cwd)``.
-
-    Mirrors the CLI's encoding so the path sagent computes is the path
-    claude reads/writes: the cwd is canonicalized (symlinks resolved --
-    e.g. macOS ``/tmp`` -> ``/private/tmp``) and every non-``[A-Za-z0-9-]``
-    character becomes ``-``. Must stay cwd-aware: claude indexes sessions
-    per encoded-cwd project dir and ``--resume`` cannot see a session
-    recorded under a different cwd.
-    """
+    """On-disk session-file path claude uses for ``(session_id, cwd)``."""
     try:
         resolved = cwd.resolve()
     except OSError:
@@ -1710,36 +1664,31 @@ def _populate_anthropic_tmpdir(tmpdir: Path, account: str | None) -> None:
     if _load_cli_credentials_file(source) is None:
         raise ValueError(f"Invalid credentials file: {source}")
     target = dot_claude / _CREDS_PATH.name
-    shutil.copyfile(source, target)
-    target.chmod(0o600)
+    atomic_write_bytes(target, source.read_bytes(), file_mode=0o600)
 
 
+# When ``persist_session=True`` we keep ``CLAUDE_CODE_SKIP_PROMPT_HISTORY`` unset --
+# that env var (verified by bisect 2026-06-02) causes the CLI to skip writing its
+# session JSONL even when ``--session-id`` / ``--resume`` are passed, which makes
+# session-persistence mode silently no-op and the next ``--resume`` fails with "No
+# conversation found".
+#
+# When ``tmpdir is None`` we don't override ``HOME`` -- the subprocess inherits the
+# operator's real HOME so Claude finds macOS Keychain auth, project session JSONLs, and
+# native-tool config. This is the default-account path in both stateless and persistent
+# modes. Named accounts use ``tmpdir`` because the CLI has no credential-file override.
+#
+# Auto-compact is always disabled: sagent owns history in both modes (stateless re-feeds
+# it each turn; session mode rebuilds the on-disk file from the tape on the first turn
+# and feeds deltas thereafter). Claude's auto-compact would write a
+# ``system/compact_boundary`` to a file sagent overwrites next turn, so sagent's own
+# ``SummaryCompactor`` is the sole compaction authority.
 def _anthropic_subprocess_env(
     tmpdir: Path | None,
     *,
     persist_session: bool = False,
 ) -> dict[str, str]:
-    """Build the ``claude`` subprocess env with native or isolated auth.
-
-    When ``persist_session=True`` we keep ``CLAUDE_CODE_SKIP_PROMPT_HISTORY``
-    unset -- that env var (verified by bisect 2026-06-02) causes the CLI
-    to skip writing its session JSONL even when ``--session-id`` /
-    ``--resume`` are passed, which makes session-persistence mode silently
-    no-op and the next ``--resume`` fails with "No conversation found".
-
-    When ``tmpdir is None`` we don't override ``HOME`` -- the subprocess
-    inherits the operator's real HOME so Claude finds macOS Keychain auth,
-    project session JSONLs, and native-tool config. This is the default-account
-    path in both stateless and persistent modes. Named accounts use ``tmpdir``
-    because the CLI has no credential-file override.
-
-    Auto-compact is always disabled: sagent owns history in both modes
-    (stateless re-feeds it each turn; session mode rebuilds the on-disk
-    file from the tape on the first turn and feeds deltas thereafter).
-    Claude's auto-compact would write a ``system/compact_boundary`` to a
-    file sagent overwrites next turn, so sagent's own ``SummaryCompactor``
-    is the sole compaction authority.
-    """
+    """Build the ``claude`` subprocess env with native or isolated auth."""
     env = {
         key: value
         for key, value in os.environ.items()
@@ -1762,13 +1711,24 @@ def _anthropic_subprocess_env(
             "CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP": "1",
             "CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS": "1",
             "DISABLE_AUTO_COMPACT": "1",
-        }
+        },
     )
     if not persist_session:
         env["CLAUDE_CODE_SKIP_PROMPT_HISTORY"] = "1"
     return env
 
 
+# When ``session_id`` is ``None`` (default), passes ``--no-session-persistence`` -- the
+# historical behaviour. Otherwise passes ``--session-id <uuid>``
+# (``resume_existing=False``) or ``--resume <uuid>`` (``resume_existing=True``).
+# Misusing this (``--session-id`` on an existing session, ``--resume`` on a nonexistent
+# one) makes ``claude`` exit non-zero before consuming stdin, which sagent surfaces as
+# ``SubprocessTransportError``.
+#
+# ``extra_mcp_servers``, when provided, is merged into the ``mcpServers`` block of the
+# JSON written to ``--mcp-config``. Use this to register stdio/HTTP MCP servers
+# alongside sagent's own in-process tool bridge. Caller is responsible for ensuring the
+# keys don't collide with ``bridge_server_name``; sagent's bridge wins on conflict.
 def _build_anthropic_argv(
     *,
     model_id: str,
@@ -1779,23 +1739,7 @@ def _build_anthropic_argv(
     session_id: str | None = None,
     resume_existing: bool = False,
 ) -> list[str]:
-    """Assemble the ``claude --print --input-format stream-json ...`` argv.
-
-    When ``session_id`` is ``None`` (default), passes
-    ``--no-session-persistence`` -- the historical behaviour. Otherwise
-    passes ``--session-id <uuid>`` (``resume_existing=False``) or
-    ``--resume <uuid>`` (``resume_existing=True``). Misusing this
-    (``--session-id`` on an existing session, ``--resume`` on a
-    nonexistent one) makes ``claude`` exit non-zero before consuming
-    stdin, which sagent surfaces as ``SubprocessTransportError``.
-
-    ``extra_mcp_servers``, when provided, is merged into the
-    ``mcpServers`` block of the JSON written to ``--mcp-config``. Use
-    this to register stdio/HTTP MCP servers alongside sagent's own
-    in-process tool bridge. Caller is responsible for ensuring the
-    keys don't collide with ``bridge_server_name``; sagent's bridge
-    wins on conflict.
-    """
+    """Assemble the ``claude --print --input-format stream-json ...`` argv."""
     servers: dict[str, dict[str, object]] = {
         bridge_server_name: {"type": "http", "url": bridge_url},
     }
@@ -1838,7 +1782,7 @@ def _build_anthropic_argv(
             "--mcp-config",
             mcp_config,
             "--strict-mcp-config",
-        ]
+        ],
     )
     # Never pass ``--tools ""``: the CLI reads empty-string as "ALLOW NO
     # TOOLS, including MCP ones" -- bisect probe 2026-06-03 found:
@@ -1859,7 +1803,7 @@ def _build_anthropic_argv(
             "--disable-slash-commands",
             "--permission-mode",
             "bypassPermissions",
-        ]
+        ],
     )
     # Defensively deny the Claude-Teams / Agent-SDK ``SendMessage``
     # built-in. Per the CLI source it is gated behind
@@ -1877,7 +1821,9 @@ def _build_anthropic_argv(
 
 
 def _serialize_for_stdin(
-    entry: TapeEvent, max_image_dim: int, max_image_bytes: int
+    entry: TapeEvent,
+    max_image_dim: int,
+    max_image_bytes: int,
 ) -> MutableJSON:
     """Translate a non-assistant ``TapeEvent`` into the CLI's user-line shape."""
     if isinstance(entry, (AgentSendMessage, UserMessage)):
@@ -1907,8 +1853,10 @@ def _user_line(
         return text_line
     content: list[MutableJSONValue] = []
     for att in image_attachments:
-        raw, mime = image_lib.resize(
-            att.data, max_dim=max_image_dim, max_bytes=max_image_bytes
+        raw, mime = image.resize(
+            att.data,
+            max_dim=max_image_dim,
+            max_bytes=max_image_bytes,
         )
         content.append(
             {
@@ -1918,7 +1866,7 @@ def _user_line(
                     "media_type": mime,
                     "data": base64.b64encode(raw).decode(),
                 },
-            }
+            },
         )
     if entry.text:
         content.append({"type": "text", "text": entry.text})
@@ -1929,6 +1877,15 @@ def _user_line(
     return image_line
 
 
+# Text deltas publish ``ModelResponsePartial``; thinking deltas publish
+# ``ModelResponseThinking``. Also accumulates ``tool_use`` content blocks across their
+# start / streamed ``input_json_delta`` chunks / stop events, and emits one
+# ``ToolLabel`` per tool call at block-stop with ``name`` plus a short rendering of the
+# JSON args (e.g. ``Bash ls -la`` or ``Read foo.py``) so the trace panel surfaces what
+# tools the model is invoking. Covers both bridge-mounted tools (Bash, Read, ...) and
+# external-MCP tools (``mcp__sagent_chat__sagent_send``, ...) uniformly -- in stateless
+# mode the bridge ALSO publishes labels for its own tools, so bridge-mounted tools get
+# logged twice; the trace renderer treats each ToolLabel as a separate event.
 def _dispatch_stream_event(
     event: MutableJSON,
     text_parts: list[str],
@@ -1938,21 +1895,7 @@ def _dispatch_stream_event(
     tool_use_blocks: dict[int, dict[str, object]],
     publish: Callable[[RuntimeEvent], None] | None,
 ) -> None:
-    """Route one stream_event payload to the runtime ``publish`` sink.
-
-    Text deltas publish ``ModelResponsePartial``; thinking deltas
-    publish ``ModelResponseThinking``. Also accumulates ``tool_use``
-    content blocks across their start / streamed ``input_json_delta``
-    chunks / stop events, and emits one ``ToolLabel`` per tool call at
-    block-stop with ``name`` plus a short rendering of the JSON args
-    (e.g. ``Bash ls -la`` or ``Read foo.py``) so the trace panel
-    surfaces what tools the model is invoking. Covers both
-    bridge-mounted tools (Bash, Read, ...) and external-MCP tools
-    (``mcp__sagent_chat__sagent_send``, ...) uniformly -- in stateless
-    mode the bridge ALSO publishes labels for its own tools, so
-    bridge-mounted tools get logged twice; the trace renderer treats
-    each ToolLabel as a separate event.
-    """
+    """Route one stream_event payload to the runtime ``publish`` sink."""
     event_type = event.get("type")
     if event_type == "content_block_start":
         idx = int(cast(int, event.get("index") or 0))
@@ -2018,27 +1961,25 @@ def _dispatch_stream_event(
                 publish(ToolLabel(call_id=tool_id, text=label_text))
             except Exception:
                 logger.debug(
-                    "failed to publish ToolLabel for %r", tool_name, exc_info=True
+                    "failed to publish ToolLabel for %r",
+                    tool_name,
+                    exc_info=True,
                 )
         return
 
 
+# Best-effort: if the JSON is incomplete (streaming aborted mid-flight) or unparseable,
+# falls back to the raw form. Common args (``command``, ``file_path``, ``pattern``,
+# ``query``, ``to``, ``content``) get a friendly rendering; unknown tools fall back to
+# the raw arg dict.
+#
+# Known-arg branches return the value whole -- the renderer
+# (``console_pane.write_tool_label``) owns wrapping and the line cap. The unknown-tool
+# fallback keeps its per-value clamp: an arbitrary arg dict can carry a multi-megabyte
+# blob (the CLI's own stdout line limit is 16 MiB for exactly this reason), and unlike
+# the named args it is not a value the operator asked to see.
 def _render_tool_args(raw_json: str) -> str:
-    """Render tool input JSON as a short label suffix.
-
-    Best-effort: if the JSON is incomplete (streaming aborted mid-flight)
-    or unparseable, falls back to the raw form. Common args
-    (``command``, ``file_path``, ``pattern``, ``query``, ``to``,
-    ``content``) get a friendly rendering; unknown tools fall back to
-    the raw arg dict.
-
-    Known-arg branches return the value whole -- the renderer
-    (``console_pane.write_tool_label``) owns wrapping and the line cap.
-    The unknown-tool fallback keeps its per-value clamp: an arbitrary
-    arg dict can carry a multi-megabyte blob (the CLI's own stdout line
-    limit is 16 MiB for exactly this reason), and unlike the named args
-    it is not a value the operator asked to see.
-    """
+    """Render tool input JSON as a short label suffix."""
     if not raw_json:
         return ""
     try:
@@ -2058,19 +1999,15 @@ def _render_tool_args(raw_json: str) -> str:
     return ", ".join(f"{k}={str(v)[:40]!r}" for k, v in list(arg_map.items())[:3])
 
 
+# ``round_usage`` is the raw Anthropic API ``usage`` object off a ``message_start``
+# stream event (snake_case keys -- unlike the camelCase rows in the CLI's terminal
+# ``result.modelUsage``). The sum of non-cached input plus both cache pools is the full
+# prompt size the server counted for that request -- the same number the direct-API
+# provider's per-request usage reports. Returns 0 when no round was observed (defensive;
+# a successful drain always sees at least one ``message_start``), which downstream
+# consumers treat as "unknown -- estimate instead".
 def _round_context_tokens(round_usage: MutableJSON | None) -> int:
-    """Cache-inclusive input footprint of one internal round's request.
-
-    ``round_usage`` is the raw Anthropic API ``usage`` object off a
-    ``message_start`` stream event (snake_case keys -- unlike the
-    camelCase rows in the CLI's terminal ``result.modelUsage``). The
-    sum of non-cached input plus both cache pools is the full prompt
-    size the server counted for that request -- the same number the
-    direct-API provider's per-request usage reports. Returns 0 when no
-    round was observed (defensive; a successful drain always sees at
-    least one ``message_start``), which downstream consumers treat as
-    "unknown -- estimate instead".
-    """
+    """Cache-inclusive input footprint of one internal round's request."""
     if round_usage is None:
         return 0
     return (
@@ -2080,6 +2017,21 @@ def _round_context_tokens(round_usage: MutableJSON | None) -> int:
     )
 
 
+# One ``claude --print`` turn is N internal API rounds, so the terminal ``result``
+# event's usage is CUMULATIVE across rounds while the ``Model`` contract (and every
+# direct-API provider) reports per-request numbers. Mixing the two poisons context-size
+# consumers: the Agent's proactive compaction gate anchors on ``tokens.request +
+# cache_*`` as "how full is the window" and a 69-round turn summing to 5.6M against a
+# 200k window trips it spuriously (live 2026-06-09). Normalization at this boundary:
+#
+# - **input side** (``input_tokens``, ``cache_creation_tokens``, ``cache_read_tokens``):
+# the LAST round's request usage -- the true context footprint, matching direct-API
+# semantics. Zeros when no round was observed (consumers fall back to estimates). -
+# **output side** (``output_tokens``): cumulative across rounds -- output genuinely
+# accumulates (every internal round's generation was produced and billed). -
+# **billing**: unaffected -- ``total_cost`` sums ``modelUsage.costUSD``, which the CLI
+# computes from the full cumulative usage, so under-reporting cumulative input *tokens*
+# here loses no cost fidelity.
 def _build_model_response(
     *,
     usage_event: MutableJSON,
@@ -2090,29 +2042,7 @@ def _build_model_response(
     stop_reason: str | None,
     fallback_message_id: str,
 ) -> ModelResponse:
-    """Assemble a ``ModelResponse`` with normalized token semantics.
-
-    One ``claude --print`` turn is N internal API rounds, so the
-    terminal ``result`` event's usage is CUMULATIVE across rounds while
-    the ``Model`` contract (and every direct-API provider) reports
-    per-request numbers. Mixing the two poisons context-size consumers:
-    the Agent's proactive compaction gate anchors on
-    ``tokens.request + cache_*`` as "how full is the window" and a
-    69-round turn summing to 5.6M against a 200k window trips it
-    spuriously (live 2026-06-09). Normalization at this boundary:
-
-    - **input side** (``input_tokens``, ``cache_creation_tokens``,
-      ``cache_read_tokens``): the LAST round's request usage -- the
-      true context footprint, matching direct-API semantics. Zeros
-      when no round was observed (consumers fall back to estimates).
-    - **output side** (``output_tokens``): cumulative across rounds --
-      output genuinely accumulates (every internal round's generation
-      was produced and billed).
-    - **billing**: unaffected -- ``total_cost`` sums
-      ``modelUsage.costUSD``, which the CLI computes from the full
-      cumulative usage, so under-reporting cumulative input *tokens*
-      here loses no cost fidelity.
-    """
+    """Assemble a ``ModelResponse`` with normalized token semantics."""
     model_usage = cast(MutableJSON, usage_event.get("modelUsage") or {})
     output_tokens = 0
     total_cost = 0.0
@@ -2135,7 +2065,7 @@ def _build_model_response(
             # silently indistinguishable from the former.
             logger.debug(
                 "no cost signal in result event (modelUsage and total_cost_usd"
-                " both absent); reporting total_cost=0.0"
+                " both absent); reporting total_cost=0.0",
             )
     input_tokens = 0
     cache_creation = 0
@@ -2143,7 +2073,8 @@ def _build_model_response(
     if last_round_usage is not None:
         input_tokens = IntCodec.coerce(last_round_usage.get("input_tokens"), 0)
         cache_creation = IntCodec.coerce(
-            last_round_usage.get("cache_creation_input_tokens"), 0
+            last_round_usage.get("cache_creation_input_tokens"),
+            0,
         )
         cache_read = IntCodec.coerce(last_round_usage.get("cache_read_input_tokens"), 0)
     # Build the single thinking block from the accumulated body + signature.

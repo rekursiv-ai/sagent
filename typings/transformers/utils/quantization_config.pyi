@@ -47,7 +47,10 @@ class QuantizationConfigMixin:
     quant_method: QuantizationMethod
     @classmethod
     def from_dict(
-        cls, config_dict, return_unused_kwargs=..., **kwargs
+        cls,
+        config_dict,
+        return_unused_kwargs=...,
+        **kwargs,
     ):  # -> tuple[Self, dict[str, Any]] | Self:
         ...
     def to_json_file(self, json_file_path: str | os.PathLike):  # -> None:
@@ -79,7 +82,10 @@ class AutoRoundConfig(QuantizationConfigMixin):
         ...
     @classmethod
     def from_dict(
-        cls, config_dict, return_unused_kwargs=..., **kwargs
+        cls,
+        config_dict,
+        return_unused_kwargs=...,
+        **kwargs,
     ):  # -> tuple[Self, dict[str, Any]] | Self:
         ...
 
@@ -271,7 +277,10 @@ class QuantoConfig(QuantizationConfigMixin):
 @dataclass
 class EetqConfig(QuantizationConfigMixin):
     def __init__(
-        self, weights: str = ..., modules_to_not_convert: list | None = ..., **kwargs
+        self,
+        weights: str = ...,
+        modules_to_not_convert: list | None = ...,
+        **kwargs,
     ) -> None: ...
     def post_init(self):  # -> None:
         ...
@@ -294,7 +303,10 @@ class CompressedTensorsConfig(QuantizationConfigMixin):
         ...
     @classmethod
     def from_dict(
-        cls, config_dict, return_unused_kwargs=..., **kwargs
+        cls,
+        config_dict,
+        return_unused_kwargs=...,
+        **kwargs,
     ):  # -> tuple[Self, dict[str, Any]] | Self:
         ...
     def to_dict(self) -> dict[str, Any]: ...

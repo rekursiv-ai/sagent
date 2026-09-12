@@ -68,7 +68,9 @@ class NezhaSelfAttention(nn.Module):
 class NezhaSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -96,7 +98,9 @@ class NezhaIntermediate(nn.Module):
 class NezhaOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -132,7 +136,9 @@ class NezhaEncoder(nn.Module):
         return_dict: bool | None = ...,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
 
 class NezhaPooler(nn.Module):
@@ -193,7 +199,7 @@ class NezhaModel(NezhaPreTrainedModel):
     def set_input_embeddings(self, value):  # -> None:
         ...
     @add_start_docstrings_to_model_forward(
-        NEZHA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        NEZHA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -228,10 +234,11 @@ class NezhaForPreTraining(NezhaPreTrainedModel):
     def set_output_embeddings(self, new_embeddings):  # -> None:
         ...
     @add_start_docstrings_to_model_forward(
-        NEZHA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        NEZHA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=NezhaForPreTrainingOutput, config_class=_CONFIG_FOR_DOC
+        output_type=NezhaForPreTrainingOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,
@@ -256,7 +263,7 @@ class NezhaForMaskedLM(NezhaPreTrainedModel):
     def set_output_embeddings(self, new_embeddings):  # -> None:
         ...
     @add_start_docstrings_to_model_forward(
-        NEZHA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        NEZHA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -278,7 +285,10 @@ class NezhaForMaskedLM(NezhaPreTrainedModel):
         return_dict: bool | None = ...,
     ) -> tuple[torch.Tensor] | MaskedLMOutput: ...
     def prepare_inputs_for_generation(
-        self, input_ids, attention_mask=..., **model_kwargs
+        self,
+        input_ids,
+        attention_mask=...,
+        **model_kwargs,
     ):  # -> dict[str, Tensor | Any]:
         ...
 
@@ -289,10 +299,11 @@ class NezhaForMaskedLM(NezhaPreTrainedModel):
 class NezhaForNextSentencePrediction(NezhaPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(
-        NEZHA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        NEZHA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=NextSentencePredictorOutput, config_class=_CONFIG_FOR_DOC
+        output_type=NextSentencePredictorOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,
@@ -315,7 +326,7 @@ class NezhaForNextSentencePrediction(NezhaPreTrainedModel):
 class NezhaForSequenceClassification(NezhaPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(
-        NEZHA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        NEZHA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -342,7 +353,7 @@ class NezhaForSequenceClassification(NezhaPreTrainedModel):
 class NezhaForMultipleChoice(NezhaPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(
-        NEZHA_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        NEZHA_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -369,7 +380,7 @@ class NezhaForMultipleChoice(NezhaPreTrainedModel):
 class NezhaForTokenClassification(NezhaPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(
-        NEZHA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        NEZHA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -396,7 +407,7 @@ class NezhaForTokenClassification(NezhaPreTrainedModel):
 class NezhaForQuestionAnswering(NezhaPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(
-        NEZHA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        NEZHA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,

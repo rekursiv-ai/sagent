@@ -21,9 +21,18 @@ class SyncBatchNorm(Function):
     ) -> Tensor: ...
     @staticmethod
     def backward(
-        self, grad_output
+        self,
+        grad_output,
     ) -> tuple[
-        Tensor | None, Tensor | None, Tensor | None, None, None, None, None, None, None
+        Tensor | None,
+        Tensor | None,
+        Tensor | None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
     ]: ...
 
 class CrossMapLRN2d(Function):

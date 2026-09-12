@@ -58,6 +58,13 @@ def error_result(e: PaperError) -> ToolResult:
     carries its own actionable message, so re-wording by class here would
     duplicate what the library said, and drift from it. This exists to keep the
     ``ToolResult`` shape in one place, not to discriminate.
+
+    Args:
+      e: Paper error to map.
+
+    Returns:
+      result: Error-shaped tool result.
+
     """
     return ToolResult(call_id="", content=str(e), is_error=True)
 
@@ -91,6 +98,14 @@ def parse_optional_ids(
     A bare string is coerced to a single-element list. Absence yields ``[]``
     (the caller decides whether that is allowed). Size is not pre-checked -- the
     backend rejects an oversized batch with its own error.
+
+    Args:
+      args: Tool argument mapping.
+      looks_like_id: Predicate identifying valid identifier spellings.
+
+    Returns:
+      ids: Parsed identifiers, or an error result.
+
     """
     raw_ids = args.get("ids")
     if raw_ids is None:
@@ -114,8 +129,98 @@ def parse_optional_ids(
     return [x.strip() for x in expanded if x.strip()]
 
 
+def resolve_id_args(
+    args: Mapping[str, object],
+    *,
+    looks_like_id: Callable[[str], bool] = looks_like_paper_id,
+) -> list[str] | ToolResult:
+    """Resolve a required, non-empty ``ids`` list.
+
+    Args:
+      args: Tool argument mapping.
+      looks_like_id: Predicate identifying valid identifier spellings.
+
+    Returns:
+      ids: Parsed non-empty identifiers, or an error result.
+
+    """
+    if "ids" not in args:
+        return ToolResult(call_id="", content="'ids' is required.", is_error=True)
+    ids = parse_optional_ids(args, looks_like_id=looks_like_id)
+    if isinstance(ids, ToolResult):
+        return ids
+    if not ids:
+        return ToolResult(call_id="", content="'ids' is empty.", is_error=True)
+    return ids
+
+
+def normalize_id_arg(raw: str) -> tuple[IdType, str] | ToolResult:
+    """``normalize_id`` adapted to return a ``ToolResult`` error for tools."""
+    try:
+        return normalize_id(raw)
+    except InvalidIdError as e:
+        return ToolResult(call_id="", content=str(e), is_error=True)
+
+
+def validate_limit(limit: int | None) -> int | ToolResult | None:
+    """Reject a non-positive ``limit``; pass ``None`` and positives through."""
+    if limit is not None and limit < 1:
+        return ToolResult(
+            call_id="",
+            content="'limit' must be a positive integer.",
+            is_error=True,
+        )
+    return limit
+
+
+def validate_year_range(
+    year_from: int | None,
+    year_to: int | None,
+) -> ToolResult | None:
+    """Reject an inverted year range; ``None`` when the bounds are coherent.
+
+    Args:
+      year_from: Inclusive lower year bound.
+      year_to: Inclusive upper year bound.
+
+    Returns:
+      error: Validation error, or ``None`` when coherent.
+
+    """
+    if year_from is not None and year_to is not None and year_from > year_to:
+        return ToolResult(
+            call_id="",
+            content=(
+                f"'year_from' ({year_from}) must not exceed 'year_to' ({year_to})."
+            ),
+            is_error=True,
+        )
+    return None
+
+
+def validate_abstract_chars(cap: int | None) -> int | ToolResult | None:
+    """Reject a non-positive ``abstract_chars``; pass ``None`` and positives.
+
+    Args:
+      cap: Maximum abstract length, or ``None`` for no limit.
+
+    Returns:
+      value: Valid cap, validation error, or ``None``.
+
+    """
+    if cap is not None and cap < 1:
+        return ToolResult(
+            call_id="",
+            content="'abstract_chars' must be a positive integer.",
+            is_error=True,
+        )
+    return cap
+
+
 def _split_id_bundle(
-    raw: str, *, looks_like_id: Callable[[str], bool] = looks_like_paper_id
+    raw: str,
+    *,
+    looks_like_id: Callable[[str], bool] = looks_like_paper_id,
 ) -> list[str]:
     """Recover a list of ids from a single string argument."""
     s = raw.strip()
@@ -140,62 +245,3 @@ def _split_id_bundle(
     if len(tokens) > 1 and all(looks_like_id(t) for t in tokens):
         return cast(list[str], tokens)
     return [raw]
-
-
-def resolve_id_args(
-    args: Mapping[str, object],
-    *,
-    looks_like_id: Callable[[str], bool] = looks_like_paper_id,
-) -> list[str] | ToolResult:
-    """Resolve a required, non-empty ``ids`` list."""
-    if "ids" not in args:
-        return ToolResult(call_id="", content="'ids' is required.", is_error=True)
-    ids = parse_optional_ids(args, looks_like_id=looks_like_id)
-    if isinstance(ids, ToolResult):
-        return ids
-    if not ids:
-        return ToolResult(call_id="", content="'ids' is empty.", is_error=True)
-    return ids
-
-
-def normalize_id_arg(raw: str) -> tuple[IdType, str] | ToolResult:
-    """``normalize_id`` adapted to return a ``ToolResult`` error for tools."""
-    try:
-        return normalize_id(raw)
-    except InvalidIdError as e:
-        return ToolResult(call_id="", content=str(e), is_error=True)
-
-
-def validate_limit(limit: int | None) -> int | ToolResult | None:
-    """Reject a non-positive ``limit``; pass ``None`` and positives through."""
-    if limit is not None and limit < 1:
-        return ToolResult(
-            call_id="", content="'limit' must be a positive integer.", is_error=True
-        )
-    return limit
-
-
-def validate_year_range(
-    year_from: int | None, year_to: int | None
-) -> ToolResult | None:
-    """Reject an inverted year range; ``None`` when the bounds are coherent."""
-    if year_from is not None and year_to is not None and year_from > year_to:
-        return ToolResult(
-            call_id="",
-            content=(
-                f"'year_from' ({year_from}) must not exceed 'year_to' ({year_to})."
-            ),
-            is_error=True,
-        )
-    return None
-
-
-def validate_abstract_chars(cap: int | None) -> int | ToolResult | None:
-    """Reject a non-positive ``abstract_chars``; pass ``None`` and positives."""
-    if cap is not None and cap < 1:
-        return ToolResult(
-            call_id="",
-            content="'abstract_chars' must be a positive integer.",
-            is_error=True,
-        )
-    return cap

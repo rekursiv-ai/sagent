@@ -47,7 +47,11 @@ class MCTCTSelfAttention(nn.Module):
     def relative_position_embedding_rotate(self, scores):  # -> Tensor:
         ...
     def forward(
-        self, hidden_states, attention_mask=..., head_mask=..., output_attentions=...
+        self,
+        hidden_states,
+        attention_mask=...,
+        head_mask=...,
+        output_attentions=...,
     ):  # -> tuple[Tensor, Any] | tuple[Tensor]:
         ...
 
@@ -65,7 +69,11 @@ class MCTCTAttention(nn.Module):
     def prune_heads(self, heads):  # -> None:
         ...
     def forward(
-        self, hidden_states, attention_mask=..., head_mask=..., output_attentions=...
+        self,
+        hidden_states,
+        attention_mask=...,
+        head_mask=...,
+        output_attentions=...,
     ):  # -> Any:
         ...
 
@@ -81,7 +89,11 @@ class MCTCTOutput(nn.Module):
 class MCTCTLayer(GradientCheckpointingLayer):
     def __init__(self, config: MCTCTConfig) -> None: ...
     def forward(
-        self, hidden_states, attention_mask=..., head_mask=..., output_attentions=...
+        self,
+        hidden_states,
+        attention_mask=...,
+        head_mask=...,
+        output_attentions=...,
     ):  # -> Any:
         ...
     def feed_forward_chunk(self, attention_output):  # -> Any:
@@ -116,7 +128,7 @@ class MCTCTEncoder(MCTCTPreTrainedModel):
 class MCTCTModel(MCTCTPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(
-        MCTCT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MCTCT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,

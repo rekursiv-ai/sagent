@@ -6,7 +6,8 @@ import functools
 from torch._C._jit_tree_views import SourceRangeFactory
 
 def get_source_lines_and_file(
-    obj: Any, error_msg: str | None = ...
+    obj: Any,
+    error_msg: str | None = ...,
 ) -> tuple[list[str], int, str | None]: ...
 def normalize_source_lines(sourcelines: list[str]) -> list[str]: ...
 

@@ -55,7 +55,10 @@ class Sam2VideoInferenceSession:
     def remove_point_inputs(self, obj_idx: int, frame_idx: int):  # -> None:
         ...
     def add_mask_inputs(
-        self, obj_idx: int, frame_idx: int, inputs: torch.Tensor
+        self,
+        obj_idx: int,
+        frame_idx: int,
+        inputs: torch.Tensor,
     ):  # -> None:
         ...
     def remove_mask_inputs(self, obj_idx: int, frame_idx: int):  # -> None:
@@ -78,7 +81,9 @@ class Sam2VideoInferenceSession:
     ):  # -> Tensor | None:
         ...
     def add_new_frame(
-        self, pixel_values: torch.Tensor, frame_idx: int | None = ...
+        self,
+        pixel_values: torch.Tensor,
+        frame_idx: int | None = ...,
     ) -> int: ...
     def get_frame(self, frame_idx: int) -> torch.Tensor: ...
     def reset_tracking_data(self):  # -> None:
@@ -88,7 +93,12 @@ class Sam2VideoInferenceSession:
 
 class Sam2VideoLayerNorm(nn.LayerNorm):
     def __init__(
-        self, normalized_shape, *, eps=..., data_format=..., **kwargs
+        self,
+        normalized_shape,
+        *,
+        eps=...,
+        data_format=...,
+        **kwargs,
     ) -> None: ...
     def forward(self, features: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -133,12 +143,16 @@ class Sam2VideoAttention(nn.Module):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class Sam2VideoTwoWayAttentionBlock(nn.Module):
     def __init__(
-        self, config: Sam2VideoMaskDecoderConfig, skip_first_layer_pe: bool = ...
+        self,
+        config: Sam2VideoMaskDecoderConfig,
+        skip_first_layer_pe: bool = ...,
     ) -> None: ...
     def forward(
         self,
@@ -210,7 +224,10 @@ def apply_rotary_pos_emb_2d(
 
 class Sam2VideoRoPEAttention(nn.Module):
     def __init__(
-        self, config: Sam2VideoConfig, kv_in_dim: int | None = ..., rope_k_repeat=...
+        self,
+        config: Sam2VideoConfig,
+        kv_in_dim: int | None = ...,
+        rope_k_repeat=...,
     ) -> None: ...
     def forward(
         self,
@@ -258,7 +275,10 @@ class Sam2VideoMemoryFuser(nn.Module):
 
 class Sam2VideoMaskDownSamplerLayer(nn.Module):
     def __init__(
-        self, config: Sam2VideoConfig, in_channels: int, out_channels: int
+        self,
+        config: Sam2VideoConfig,
+        in_channels: int,
+        out_channels: int,
     ) -> None: ...
     def forward(self, x): ...
 
@@ -270,10 +290,14 @@ class Sam2VideoMaskDownSampler(nn.Module):
 class Sam2VideoMemoryEncoder(nn.Module):
     def __init__(self, config: Sam2VideoConfig) -> None: ...
     def forward(
-        self, vision_features: torch.Tensor, masks: torch.Tensor
+        self,
+        vision_features: torch.Tensor,
+        masks: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 @dataclass
@@ -305,7 +329,9 @@ class Sam2VideoPromptEncoder(nn.Module):
         input_masks: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class Sam2VideoTwoWayTransformer(nn.Module):
@@ -336,7 +362,9 @@ class Sam2VideoMaskDecoder(nn.Module):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 NO_OBJ_SCORE = ...
@@ -356,7 +384,9 @@ class Sam2VideoModel(Sam2VideoPreTrainedModel):
     def get_image_wide_positional_embeddings(self) -> torch.Tensor: ...
     @torch.no_grad()
     def get_image_embeddings(
-        self, pixel_values: torch.FloatTensor, **kwargs: Unpack[TransformersKwargs]
+        self,
+        pixel_values: torch.FloatTensor,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> list[torch.Tensor]: ...
     @torch.no_grad()
     def get_prompt_embeddings(
@@ -376,7 +406,9 @@ class Sam2VideoModel(Sam2VideoPreTrainedModel):
         reverse: bool = ...,
     ) -> Sam2VideoSegmentationOutput: ...
     def get_image_features(
-        self, pixel_values: torch.FloatTensor, **kwargs: Unpack[TransformersKwargs]
+        self,
+        pixel_values: torch.FloatTensor,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[
         list[torch.Tensor],
         list[torch.Tensor],

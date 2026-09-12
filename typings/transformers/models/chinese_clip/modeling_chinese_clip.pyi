@@ -57,10 +57,15 @@ class ChineseCLIPTextEmbeddings(nn.Module):
 class ChineseCLIPVisionEmbeddings(nn.Module):
     def __init__(self, config: ChineseCLIPVisionConfig) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
-        self, pixel_values: torch.FloatTensor, interpolate_pos_encoding=...
+        self,
+        pixel_values: torch.FloatTensor,
+        interpolate_pos_encoding=...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -92,7 +97,9 @@ class ChineseCLIPTextSelfAttention(nn.Module):
 class ChineseCLIPTextSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -119,7 +126,9 @@ class ChineseCLIPVisionAttention(nn.Module):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class ChineseCLIPTextIntermediate(nn.Module):
@@ -130,7 +139,9 @@ class ChineseCLIPTextIntermediate(nn.Module):
 class ChineseCLIPTextOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -156,7 +167,9 @@ class ChineseCLIPTextLayer(GradientCheckpointingLayer):
 class ChineseCLIPVisionLayer(GradientCheckpointingLayer):
     def __init__(self, config: ChineseCLIPConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, output_attentions: bool | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        output_attentions: bool | None = ...,
     ) -> tuple[torch.FloatTensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> tuple[torch.FloatTensor]: ...
 
@@ -270,7 +283,9 @@ class ChineseCLIPModel(ChineseCLIPPreTrainedModel):
     @filter_out_non_signature_kwargs()
     @auto_docstring
     def get_image_features(
-        self, pixel_values: torch.FloatTensor, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values: torch.FloatTensor,
+        interpolate_pos_encoding: bool = ...,
     ) -> torch.FloatTensor: ...
     @can_return_tuple
     @auto_docstring

@@ -24,7 +24,10 @@ class AsyncInstallationStore:
         is_enterprise_install: bool | None = ...,
     ) -> Installation | None: ...
     async def async_delete_bot(
-        self, *, enterprise_id: str | None, team_id: str | None
+        self,
+        *,
+        enterprise_id: str | None,
+        team_id: str | None,
     ) -> None: ...
     async def async_delete_installation(
         self,
@@ -34,5 +37,8 @@ class AsyncInstallationStore:
         user_id: str | None = ...,
     ) -> None: ...
     async def async_delete_all(
-        self, *, enterprise_id: str | None, team_id: str | None
+        self,
+        *,
+        enterprise_id: str | None,
+        team_id: str | None,
     ) -> None: ...

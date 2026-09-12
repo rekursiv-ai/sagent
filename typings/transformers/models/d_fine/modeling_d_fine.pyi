@@ -31,22 +31,32 @@ class DFineMultiscaleDeformableAttention(nn.Module):
         spatial_shapes_list=...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class DFineGate(nn.Module):
     def __init__(self, d_model: int) -> None: ...
     def forward(
-        self, second_residual: torch.Tensor, hidden_states: torch.Tensor
+        self,
+        second_residual: torch.Tensor,
+        hidden_states: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class DFineMultiheadAttention(nn.Module):
     def __init__(
-        self, embed_dim: int, num_heads: int, dropout: float = ..., bias: bool = ...
+        self,
+        embed_dim: int,
+        num_heads: int,
+        dropout: float = ...,
+        bias: bool = ...,
     ) -> None: ...
     def with_pos_embed(
-        self, tensor: torch.Tensor, position_embeddings: Tensor | None
+        self,
+        tensor: torch.Tensor,
+        position_embeddings: Tensor | None,
     ):  # -> Tensor:
         ...
     def forward(
@@ -57,7 +67,9 @@ class DFineMultiheadAttention(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class DFineDecoderLayer(nn.Module):
@@ -85,7 +97,9 @@ class DFinePreTrainedModel(PreTrainedModel):
 class DFineIntegral(nn.Module):
     def __init__(self, config: DFineConfig) -> None: ...
     def forward(
-        self, pred_corners: torch.Tensor, project: torch.Tensor
+        self,
+        pred_corners: torch.Tensor,
+        project: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -105,7 +119,9 @@ class DFineDecoderOutput(ModelOutput):
 def inverse_sigmoid(x, eps=...):  # -> Tensor:
     ...
 def weighting_function(
-    max_num_bins: int, up: torch.Tensor, reg_scale: int
+    max_num_bins: int,
+    up: torch.Tensor,
+    reg_scale: int,
 ) -> torch.Tensor: ...
 def distance2bbox(points, distance: torch.Tensor, reg_scale: float) -> torch.Tensor: ...
 
@@ -159,7 +175,9 @@ def replace_batch_norm(model):  # -> None:
 class DFineConvEncoder(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, pixel_values: torch.Tensor, pixel_mask: torch.Tensor
+        self,
+        pixel_values: torch.Tensor,
+        pixel_mask: torch.Tensor,
     ):  # -> list[Any]:
         ...
 
@@ -185,7 +203,11 @@ class DFineModel(DFinePreTrainedModel):
         ...
     @compile_compatible_method_lru_cache(maxsize=32)
     def generate_anchors(
-        self, spatial_shapes=..., grid_size=..., device=..., dtype=...
+        self,
+        spatial_shapes=...,
+        grid_size=...,
+        device=...,
+        dtype=...,
     ):  # -> tuple[Tensor, Tensor]:
         ...
     @auto_docstring
@@ -269,7 +291,9 @@ class DFineMLP(nn.Module):
 class DFineLQE(nn.Module):
     def __init__(self, config: DFineConfig) -> None: ...
     def forward(
-        self, scores: torch.Tensor, pred_corners: torch.Tensor
+        self,
+        scores: torch.Tensor,
+        pred_corners: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -290,7 +314,10 @@ class DFineConvNormLayer(nn.Module):
 
 class DFineRepVggBlock(nn.Module):
     def __init__(
-        self, config: DFineConfig, in_channels: int, out_channels: int
+        self,
+        config: DFineConfig,
+        in_channels: int,
+        out_channels: int,
     ) -> None: ...
     def forward(self, x):  # -> Any:
         ...
@@ -309,7 +336,10 @@ class DFineCSPRepLayer(nn.Module):
 
 class DFineRepNCSPELAN4(nn.Module):
     def __init__(
-        self, config: DFineConfig, act: str = ..., numb_blocks: int = ...
+        self,
+        config: DFineConfig,
+        act: str = ...,
+        numb_blocks: int = ...,
     ) -> None: ...
     def forward(self, input_features: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -334,7 +364,11 @@ class DFineEncoderLayer(nn.Module):
 class DFineEncoder(nn.Module):
     def __init__(self, config: DFineConfig) -> None: ...
     def forward(
-        self, src, src_mask=..., pos_embed=..., output_attentions: bool = ...
+        self,
+        src,
+        src_mask=...,
+        pos_embed=...,
+        output_attentions: bool = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -342,7 +376,12 @@ class DFineHybridEncoder(nn.Module):
     def __init__(self, config: DFineConfig) -> None: ...
     @staticmethod
     def build_2d_sincos_position_embedding(
-        width, height, embed_dim=..., temperature=..., device=..., dtype=...
+        width,
+        height,
+        embed_dim=...,
+        temperature=...,
+        device=...,
+        dtype=...,
     ):  # -> Tensor:
         ...
     def forward(

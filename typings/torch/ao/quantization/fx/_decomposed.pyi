@@ -29,7 +29,9 @@ def quantize_per_tensor_meta(
     dtype: torch.dtype,
 ) -> torch.Tensor: ...
 @impl(
-    quantized_decomposed_lib, "quantize_per_tensor.tensor", "CompositeExplicitAutograd"
+    quantized_decomposed_lib,
+    "quantize_per_tensor.tensor",
+    "CompositeExplicitAutograd",
 )
 def quantize_per_tensor_tensor(
     input: torch.Tensor,
@@ -49,7 +51,9 @@ def quantize_per_tensor_tensor_meta(
     dtype: torch.dtype,
 ) -> torch.Tensor: ...
 @impl(
-    quantized_decomposed_lib, "quantize_per_tensor.tensor2", "CompositeExplicitAutograd"
+    quantized_decomposed_lib,
+    "quantize_per_tensor.tensor2",
+    "CompositeExplicitAutograd",
 )
 def quantize_per_tensor_tensor2(
     input: torch.Tensor,
@@ -144,7 +148,11 @@ def dequantize_per_tensor_tensor2_meta(
 ) -> torch.Tensor: ...
 @impl(quantized_decomposed_lib, "choose_qparams.tensor", "CompositeExplicitAutograd")
 def choose_qparams_tensor(
-    input: torch.Tensor, qmin: int, qmax: int, eps: float, dtype: torch.dtype
+    input: torch.Tensor,
+    qmin: int,
+    qmax: int,
+    eps: float,
+    dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 @impl(
     quantized_decomposed_lib,
@@ -152,15 +160,27 @@ def choose_qparams_tensor(
     "CompositeExplicitAutograd",
 )
 def choose_qparams_symmetric_tensor(
-    input: torch.Tensor, qmin: int, qmax: int, eps: float, dtype: torch.dtype
+    input: torch.Tensor,
+    qmin: int,
+    qmax: int,
+    eps: float,
+    dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 @impl(quantized_decomposed_lib, "choose_qparams.tensor", "Meta")
 def choose_qparams_tensor_meta(
-    input: torch.Tensor, quant_min: int, quant_max: int, eps: float, dtype: torch.dtype
+    input: torch.Tensor,
+    quant_min: int,
+    quant_max: int,
+    eps: float,
+    dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 @impl(quantized_decomposed_lib, "choose_qparams_symmetric.tensor", "Meta")
 def choose_qparams_symmetric_tensor_meta(
-    input: torch.Tensor, quant_min: int, quant_max: int, eps: float, dtype: torch.dtype
+    input: torch.Tensor,
+    quant_min: int,
+    quant_max: int,
+    eps: float,
+    dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 @impl(quantized_decomposed_lib, "quantize_per_channel", "CompositeExplicitAutograd")
 def quantize_per_channel(
@@ -208,11 +228,13 @@ def dequantize_per_channel_meta(
 ) -> torch.Tensor: ...
 @impl(quantized_decomposed_lib, "choose_qparams_per_token", "CompositeExplicitAutograd")
 def choose_qparams_per_token(
-    input: torch.Tensor, dtype: torch.dtype
+    input: torch.Tensor,
+    dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 @impl(quantized_decomposed_lib, "choose_qparams_per_token", "Meta")
 def choose_qparams_per_token_meta(
-    input: torch.Tensor, dtype: torch.dtype
+    input: torch.Tensor,
+    dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 @impl(
     quantized_decomposed_lib,
@@ -220,11 +242,13 @@ def choose_qparams_per_token_meta(
     "CompositeExplicitAutograd",
 )
 def choose_qparams_per_token_asymmetric(
-    input: torch.Tensor, dtype: torch.dtype
+    input: torch.Tensor,
+    dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 @impl(quantized_decomposed_lib, "choose_qparams_per_token_asymmetric", "Meta")
 def choose_qparams_per_token_asymmetric_meta(
-    input: torch.Tensor, dtype: torch.dtype
+    input: torch.Tensor,
+    dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 @impl(quantized_decomposed_lib, "quantize_per_token", "CompositeExplicitAutograd")
 def quantize_per_token(
@@ -265,7 +289,9 @@ def dequantize_per_token_meta(
     output_dtype: torch.dtype = ...,
 ) -> Tensor: ...
 @impl(
-    quantized_decomposed_lib, "quantize_per_channel_group", "CompositeExplicitAutograd"
+    quantized_decomposed_lib,
+    "quantize_per_channel_group",
+    "CompositeExplicitAutograd",
 )
 def quantize_per_channel_group(
     input: torch.Tensor,
@@ -305,7 +331,13 @@ def dequantize_per_channel_group(
 class FakeQuantPerChannel(torch.autograd.Function):
     @staticmethod
     def forward(
-        ctx, input, scales, zero_points, axis, quant_min, quant_max
+        ctx,
+        input,
+        scales,
+        zero_points,
+        axis,
+        quant_min,
+        quant_max,
     ) -> Tensor: ...
     @staticmethod
     def backward(ctx, gy) -> tuple[Any, None, None, None, None, None]: ...
@@ -336,5 +368,6 @@ def fake_quant_per_channel_meta(
 def convert_element_type(input: torch.Tensor, dtype: torch.dtype) -> torch.Tensor: ...
 @impl(quantized_decomposed_lib, "convert_element_type.no_fuse", "Meta")
 def convert_element_type_meta(
-    input: torch.Tensor, dtype: torch.dtype
+    input: torch.Tensor,
+    dtype: torch.dtype,
 ) -> torch.Tensor: ...

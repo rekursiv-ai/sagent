@@ -46,7 +46,12 @@ def eager_attention_forward(
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Tensor, Tensor]:
     ...
 
@@ -96,7 +101,9 @@ class MoonshineEncoderLayer(GradientCheckpointingLayer):
 
 class MoonshineDecoderLayer(GradientCheckpointingLayer):
     def __init__(
-        self, config: MoonshineConfig, layer_idx: int | None = ...
+        self,
+        config: MoonshineConfig,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -114,7 +121,8 @@ class MoonshineDecoderLayer(GradientCheckpointingLayer):
         encoder_position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring
@@ -192,7 +200,9 @@ class MoonshineModel(MoonshinePreTrainedModel):
     ) -> Seq2SeqModelOutput: ...
 
 def shift_tokens_right(
-    input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: torch.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ):  # -> Tensor:
     ...
 

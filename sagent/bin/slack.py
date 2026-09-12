@@ -75,6 +75,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 import httpx2
 
 from sagent.agent import Agent
+from sagent.agent.runtime import AgentRuntime
 from sagent.agent.state import agent_registry
 from sagent.bin.cli import (
     DEFAULT_TOOLS,
@@ -99,6 +100,9 @@ from sagent.types.runtime import (
 )
 
 
+_CWD: Final = Path(__file__).resolve().parent
+
+
 if TYPE_CHECKING:
     from slack_sdk.socket_mode.async_client import AsyncBaseSocketModeClient
     from slack_sdk.socket_mode.request import SocketModeRequest
@@ -115,91 +119,6 @@ _SENT_MESSAGE_CACHE: Final = 512
 _AGENT_TOOL_NAMES = [
     name for name in DEFAULT_TOOLS if name not in ("AgentSpawn", "AgentSend")
 ]
-
-
-def _extract_event(payload: MutableJSON | None) -> MutableJSON | None:
-    """Pull the inner ``event`` dict from a Socket Mode envelope."""
-    if not isinstance(payload, dict):
-        return None
-    ev = payload.get("event")
-    if not isinstance(ev, dict):
-        return None
-    return cast(MutableJSON, ev)
-
-
-def _strip_mention(text: str, self_user_id: str) -> str:
-    """Remove the bot's ``<@U...>`` mention from text."""
-    if not self_user_id:
-        return text.strip()
-    return text.replace(f"<@{self_user_id}>", "").strip()
-
-
-def _extract_agent_mention(text: str) -> str | None:
-    """Return the agent label that ``text`` opens with, or ``None``."""
-    for word in text.split():
-        clean = word.rstrip(",:;.!?")
-        if not clean:
-            break
-        if clean in agent_registry:
-            return clean
-        lower = clean.lower()
-        for label in agent_registry:
-            if label.lower() == lower:
-                return label
-        break
-    return None
-
-
-def _manifest_path(session_dir: Path) -> Path:
-    """Return the manifest.json path inside a session directory."""
-    return session_dir / "manifest.json"
-
-
-def _new_session_dir(root: Path) -> Path:
-    """Create a timestamped session directory under ``root``."""
-    name = _time.strftime("%Y%m%d_%H%M%S")
-    d = root / name
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _latest_session_dir(root: Path) -> Path | None:
-    """Return the most recently modified session directory under ``root``."""
-    if not root.is_dir():
-        return None
-    candidates = sorted(
-        (d for d in root.iterdir() if d.is_dir() and (d / "manifest.json").exists()),
-        key=lambda d: d.stat().st_mtime,
-        reverse=True,
-    )
-    return candidates[0] if candidates else None
-
-
-def _save_manifest(
-    session_dir: Path,
-    agents: dict[str, dict[str, str]],
-) -> None:
-    """Persist ``{label: {persona, system}}`` to ``manifest.json``."""
-    session_dir.mkdir(parents=True, exist_ok=True)
-    _ = _manifest_path(session_dir).write_text(
-        json.dumps(agents, indent=2),
-        encoding="utf-8",
-    )
-
-
-def _load_manifest(session_dir: Path) -> dict[str, dict[str, str]]:
-    """Load ``{label: {persona, system}}`` from ``manifest.json``."""
-    path = _manifest_path(session_dir)
-    if not path.exists():
-        return {}
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    result: dict[str, dict[str, str]] = {}
-    for k, v in raw.items():
-        if isinstance(v, str):
-            result[k] = {"persona": v, "system": ""}
-        else:
-            result[k] = dict(v)
-    return result
 
 
 def load_persona(persona_dir: Path, persona_name: str) -> str:
@@ -220,29 +139,6 @@ def load_persona(persona_dir: Path, persona_name: str) -> str:
     if default.exists():
         return default.read_text(encoding="utf-8")
     return f"You are {persona_name}."
-
-
-def _list_personas(persona_dir: Path) -> list[str]:
-    """List available persona names (stems of ``.md`` files)."""
-    if not persona_dir.is_dir():
-        return []
-    return sorted(p.stem for p in persona_dir.glob("*.md"))
-
-
-class _AgentSlack(Slack):
-    """Slack tool that advertises active peer agents in its prompt."""
-
-    @override
-    def prompt(self) -> str:
-        """Return tool-prompt text listing peer agents this one can @-mention."""
-        others = sorted(k for k in agent_registry if k != self._username)
-        if not others:
-            return ""
-        names = ", ".join(others)
-        return (
-            f"Active agents you can message by @-mentioning at the start"
-            f" of your Slack message: {names}"
-        )
 
 
 class SlackAdapter:
@@ -320,7 +216,7 @@ class SlackAdapter:
                 profile.get("display_name")
                 or user_obj.get("real_name")
                 or user_obj.get("name")
-                or user_id
+                or user_id,
             )
             self._user_names[user_id] = name
         except (KeyError, AttributeError, OSError, SlackApiError):
@@ -370,7 +266,9 @@ class SlackAdapter:
         if result.startswith("id="):
             self._router_log_channel = result[3:]
             logger.info(
-                "Created router log channel: #%s (%s)", name, self._router_log_channel
+                "Created router log channel: #%s (%s)",
+                name,
+                self._router_log_channel,
             )
         else:
             self._router_log_channel = ""
@@ -425,7 +323,7 @@ class SlackAdapter:
             if username in agent_registry:
                 sender_agent = username
             else:
-                return  # foreign bot
+                return  # Foreign bot.
         elif subtype is not None:
             return
 
@@ -671,20 +569,10 @@ class SlackAdapter:
 
         log_queue: asyncio.Queue[str | None] = asyncio.Queue()
 
-        async def _run_child(c: Agent = child) -> None:
-            try:
-                fwd = _make_log_forwarder(log_queue)
-                c.runtime.observers.append(fwd)
-                try:
-                    await c.serve_forever()
-                finally:
-                    if fwd in c.runtime.observers:
-                        c.runtime.observers.remove(fwd)
-                    log_queue.put_nowait(None)
-            finally:
-                _ = agent_registry.pop(c.name, None)
-
-        for coro in (_run_child(), log_tap(log_queue, label, self)):
+        for coro in (
+            _run_child(child, log_queue),
+            log_tap(log_queue, label, self),
+        ):
             task = asyncio.create_task(coro)
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
@@ -797,111 +685,10 @@ class SlackAdapter:
         return None
 
 
-def _extract_channel_from_text(text: str) -> str:
-    """Return the ``channel=<id>`` token value from ``text``, or ``""``."""
-    for part in text.split():
-        if part.startswith("channel="):
-            return part[8:].rstrip("]")
-    return ""
-
-
 # Buffered characters that trigger a flush mid-session. Roughly one
 # Slack message, so a live agent's log channel stays current instead of
 # filling only when the agent exits.
 _LOG_FLUSH_CHARS: Final = 3_500
-
-
-async def _flush_log(
-    buffer: list[str],
-    channel_id: str,
-    slack: SlackSender,
-    *,
-    msg_limit: int = 3900,
-) -> None:
-    """Flush buffered log lines to Slack, splitting to fit ``msg_limit``.
-
-    Splits at line boundaries where it can and WITHIN a line when it
-    must: one rendered tool result can exceed the whole per-message
-    limit on its own, and appending it whole made Slack reject the send
-    rather than deliver a shortened one.
-    """
-    chunk: list[str] = []
-    chunk_len = 0
-    for line in buffer:
-        for piece in _split_line(line, msg_limit):
-            piece_len = len(piece) + 1  # +1 for newline join
-            if chunk and chunk_len + piece_len > msg_limit:
-                _ = await slack.send(channel_id, "\n".join(chunk))
-                chunk = []
-                chunk_len = 0
-            chunk.append(piece)
-            chunk_len += piece_len
-    if chunk:
-        _ = await slack.send(channel_id, "\n".join(chunk))
-
-
-def _split_line(line: str, msg_limit: int) -> list[str]:
-    """Break one line into pieces that each fit within ``msg_limit``."""
-    if len(line) < msg_limit:
-        return [line]
-    return [line[i : i + msg_limit - 1] for i in range(0, len(line), msg_limit - 1)]
-
-
-def _make_log_forwarder(
-    queue: asyncio.Queue[str | None],
-) -> Callable[[RuntimeEvent], None]:
-    """Build an observer that renders ``RuntimeEvent`` payloads to log lines."""
-
-    def _fwd(ev: RuntimeEvent) -> None:
-        rendered = _render_event(ev)
-        if rendered is not None:
-            queue.put_nowait(rendered)
-
-    return _fwd
-
-
-def _render_event(event: RuntimeEvent) -> str | None:
-    """Convert a ``RuntimeEvent`` to a log-friendly line, or ``None`` to skip."""
-    if isinstance(event, UserMessage):
-        text = event.text.strip()
-        return f"━━ input ━━\n{text}" if text else None
-
-    if isinstance(event, AssistantMessage):
-        text = event.text.strip()
-        return text or None
-
-    if isinstance(event, ModelResponseThinking):
-        text = event.text.strip()
-        if not text:
-            return None
-        return f"💭 {text}"
-
-    if isinstance(event, ToolLabel):
-        return f"  {event.text.strip()}"
-
-    if isinstance(event, ToolResult):
-        if event.is_error:
-            return f"  ✗ {event.content.strip()}"
-        lines: list[str] = []
-        if event.diff.strip():
-            lines.append(f"```diff\n{event.diff.strip()}\n```")
-        if event.hint.strip():
-            lines.append(f"  hint: {event.hint.strip()}")
-        if event.summary.strip():
-            lines.append(f"  → {event.summary.strip()}")
-        if not lines and event.content.strip():
-            # No length clamp: ``_flush_log`` chunks the buffer at line
-            # boundaries under Slack's per-message limit, so an oversize
-            # body is split across messages rather than lost.
-            lines.append(f"  → {event.content.strip()}")
-        return "\n".join(lines) if lines else None
-
-    if isinstance(event, ModelResponseError):
-        return f"✗ {type(event.exception).__name__}: {event.exception}"
-
-    # Streaming chunks (ModelResponsePartial) are intentionally skipped --
-    # the final AssistantMessage carries the full text and avoids log spam.
-    return None
 
 
 class LogChannelAdapter(Protocol):
@@ -997,7 +784,7 @@ def parse_slack_args(
     )
     _ = parser.add_argument(
         "--persona-dir",
-        default=str(Path(__file__).resolve().parent.parent / "assets" / "slack"),
+        default=str(_CWD.parent / "assets" / "slack"),
         help="Directory of persona .md files.",
     )
     _ = parser.add_argument(
@@ -1030,6 +817,237 @@ def parse_slack_args(
         help="Resume agents from a previous session.",
     )
     return parse_agent_args(parser, argv)
+
+
+def main() -> int:
+    """Parse args, run the Slack service, and return the process exit code.
+
+    Returns:
+      exit_code: Process exit status after the service stops.
+
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    parser = argparse.ArgumentParser(
+        description=(__doc__ or "").split("\n", 2)[2],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    args, remaining = parse_slack_args(parser)
+    if remaining:
+        parser.error(f"unrecognized arguments: {' '.join(remaining)}")
+    try:
+        asyncio.run(_run(args))
+    except KeyboardInterrupt:
+        _ = sys.stderr.write("\n[interrupted]\n")
+    return 0
+
+
+def _extract_event(payload: MutableJSON | None) -> MutableJSON | None:
+    """Pull the inner ``event`` dict from a Socket Mode envelope."""
+    if not isinstance(payload, dict):
+        return None
+    ev = payload.get("event")
+    if not isinstance(ev, dict):
+        return None
+    return cast(MutableJSON, ev)
+
+
+def _strip_mention(text: str, self_user_id: str) -> str:
+    """Remove the bot's ``<@U...>`` mention from text."""
+    if not self_user_id:
+        return text.strip()
+    return text.replace(f"<@{self_user_id}>", "").strip()
+
+
+def _extract_agent_mention(text: str) -> str | None:
+    """Return the agent label that ``text`` opens with, or ``None``."""
+    for word in text.split():
+        clean = word.rstrip(",:;.!?")
+        if not clean:
+            break
+        if clean in agent_registry:
+            return clean
+        lower = clean.lower()
+        for label in agent_registry:
+            if label.lower() == lower:
+                return label
+        break
+    return None
+
+
+def _manifest_path(session_dir: Path) -> Path:
+    """Return the manifest.json path inside a session directory."""
+    return session_dir / "manifest.json"
+
+
+def _new_session_dir(root: Path) -> Path:
+    """Create a timestamped session directory under ``root``."""
+    name = _time.strftime("%Y%m%d_%H%M%S")
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _latest_session_dir(root: Path) -> Path | None:
+    """Return the most recently modified session directory under ``root``."""
+    if not root.is_dir():
+        return None
+    candidates = sorted(
+        (d for d in root.iterdir() if d.is_dir() and (d / "manifest.json").exists()),
+        key=lambda d: d.stat().st_mtime,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def _save_manifest(
+    session_dir: Path,
+    agents: dict[str, dict[str, str]],
+) -> None:
+    """Persist ``{label: {persona, system}}`` to ``manifest.json``."""
+    session_dir.mkdir(parents=True, exist_ok=True)
+    _ = _manifest_path(session_dir).write_text(
+        json.dumps(agents, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _load_manifest(session_dir: Path) -> dict[str, dict[str, str]]:
+    """Load ``{label: {persona, system}}`` from ``manifest.json``."""
+    path = _manifest_path(session_dir)
+    if not path.exists():
+        return {}
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    result: dict[str, dict[str, str]] = {}
+    for k, v in raw.items():
+        if isinstance(v, str):
+            result[k] = {"persona": v, "system": ""}
+        else:
+            result[k] = dict(v)
+    return result
+
+
+def _list_personas(persona_dir: Path) -> list[str]:
+    """List available persona names (stems of ``.md`` files)."""
+    if not persona_dir.is_dir():
+        return []
+    return sorted(p.stem for p in persona_dir.glob("*.md"))
+
+
+class _AgentSlack(Slack):
+    """Slack tool that advertises active peer agents in its prompt."""
+
+    @override
+    def prompt(self) -> str:
+        """Return tool-prompt text listing peer agents this one can @-mention."""
+        others = sorted(k for k in agent_registry if k != self._username)
+        if not others:
+            return ""
+        names = ", ".join(others)
+        return (
+            f"Active agents you can message by @-mentioning at the start"
+            f" of your Slack message: {names}"
+        )
+
+
+def _extract_channel_from_text(text: str) -> str:
+    """Return the ``channel=<id>`` token value from ``text``, or ``""``."""
+    for part in text.split():
+        if part.startswith("channel="):
+            return part[8:].rstrip("]")
+    return ""
+
+
+# Splits at line boundaries where it can and WITHIN a line when it must: one rendered
+# tool result can exceed the whole per-message limit on its own, and appending it whole
+# made Slack reject the send rather than deliver a shortened one.
+async def _flush_log(
+    buffer: list[str],
+    channel_id: str,
+    slack: SlackSender,
+    *,
+    msg_limit: int = 3900,
+) -> None:
+    """Flush buffered log lines to Slack, splitting to fit ``msg_limit``."""
+    chunk: list[str] = []
+    chunk_len = 0
+    for line in buffer:
+        for piece in _split_line(line, msg_limit):
+            piece_len = len(piece) + 1  # +1 for newline join.
+            if chunk and chunk_len + piece_len > msg_limit:
+                _ = await slack.send(channel_id, "\n".join(chunk))
+                chunk = []
+                chunk_len = 0
+            chunk.append(piece)
+            chunk_len += piece_len
+    if chunk:
+        _ = await slack.send(channel_id, "\n".join(chunk))
+
+
+def _split_line(line: str, msg_limit: int) -> list[str]:
+    """Break one line into pieces that each fit within ``msg_limit``."""
+    if len(line) < msg_limit:
+        return [line]
+    return [line[i : i + msg_limit - 1] for i in range(0, len(line), msg_limit - 1)]
+
+
+def _make_log_forwarder(
+    queue: asyncio.Queue[str | None],
+) -> Callable[[RuntimeEvent], None]:
+    """Build an observer that renders ``RuntimeEvent`` payloads to log lines."""
+
+    def _fwd(ev: RuntimeEvent) -> None:
+        rendered = _render_event(ev)
+        if rendered is not None:
+            queue.put_nowait(rendered)
+
+    return _fwd
+
+
+def _render_event(event: RuntimeEvent) -> str | None:
+    """Convert a ``RuntimeEvent`` to a log-friendly line, or ``None`` to skip."""
+    if isinstance(event, UserMessage):
+        text = event.text.strip()
+        return f"━━ input ━━\n{text}" if text else None
+
+    if isinstance(event, AssistantMessage):
+        text = event.text.strip()
+        return text or None
+
+    if isinstance(event, ModelResponseThinking):
+        text = event.text.strip()
+        if not text:
+            return None
+        return f"💭 {text}"
+
+    if isinstance(event, ToolLabel):
+        return f"  {event.text.strip()}"
+
+    if isinstance(event, ToolResult):
+        if event.is_error:
+            return f"  ✗ {event.content.strip()}"
+        lines: list[str] = []
+        if event.diff.strip():
+            lines.append(f"```diff\n{event.diff.strip()}\n```")
+        if event.hint.strip():
+            lines.append(f"  hint: {event.hint.strip()}")
+        if event.summary.strip():
+            lines.append(f"  → {event.summary.strip()}")
+        if not lines and event.content.strip():
+            # No length clamp: ``_flush_log`` chunks the buffer at line
+            # boundaries under Slack's per-message limit, so an oversize
+            # body is split across messages rather than lost.
+            lines.append(f"  → {event.content.strip()}")
+        return "\n".join(lines) if lines else None
+
+    if isinstance(event, ModelResponseError):
+        return f"✗ {type(event.exception).__name__}: {event.exception}"
+
+    # Streaming chunks (ModelResponsePartial) are intentionally skipped --
+    # the final AssistantMessage carries the full text and avoids log spam.
+    return None
 
 
 def _resolve_tokens(args: argparse.Namespace) -> tuple[str, str]:
@@ -1129,24 +1147,30 @@ async def _run(args: argparse.Namespace) -> None:
     logger.info("Shutdown complete")
 
 
-def main() -> int:
-    """Parse args, run the Slack service, and return the process exit code."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
-    parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    args, remaining = parse_slack_args(parser)
-    if remaining:
-        parser.error(f"unrecognized arguments: {' '.join(remaining)}")
+class _ChildAgent(Protocol):
+    """Minimal child-agent surface required by the lifecycle task."""
+
+    name: str
+    runtime: AgentRuntime
+
+    async def serve_forever(self) -> None: ...
+
+
+async def _run_child(
+    child: _ChildAgent,
+    log_queue: asyncio.Queue[str | None],
+) -> None:
     try:
-        asyncio.run(_run(args))
-    except KeyboardInterrupt:
-        _ = sys.stderr.write("\n[interrupted]\n")
-    return 0
+        fwd = _make_log_forwarder(log_queue)
+        child.runtime.observers.append(fwd)
+        try:
+            await child.serve_forever()
+        finally:
+            if fwd in child.runtime.observers:
+                child.runtime.observers.remove(fwd)
+            log_queue.put_nowait(None)
+    finally:
+        _ = agent_registry.pop(child.name, None)
 
 
 if __name__ == "__main__":

@@ -50,7 +50,9 @@ def replace_batch_norm(model):  # -> None:
 class TableTransformerConvEncoder(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, pixel_values: torch.Tensor, pixel_mask: torch.Tensor
+        self,
+        pixel_values: torch.Tensor,
+        pixel_mask: torch.Tensor,
     ):  # -> list[Any]:
         ...
 
@@ -61,7 +63,11 @@ class TableTransformerConvModel(nn.Module):
 
 class TableTransformerSinePositionEmbedding(nn.Module):
     def __init__(
-        self, embedding_dim=..., temperature=..., normalize=..., scale=...
+        self,
+        embedding_dim=...,
+        temperature=...,
+        normalize=...,
+        scale=...,
     ) -> None: ...
     def forward(self, pixel_values, pixel_mask):  # -> Tensor:
         ...
@@ -78,10 +84,16 @@ def build_position_encoding(
 
 class TableTransformerAttention(nn.Module):
     def __init__(
-        self, embed_dim: int, num_heads: int, dropout: float = ..., bias: bool = ...
+        self,
+        embed_dim: int,
+        num_heads: int,
+        dropout: float = ...,
+        bias: bool = ...,
     ) -> None: ...
     def with_pos_embed(
-        self, tensor: torch.Tensor, object_queries: Tensor | None
+        self,
+        tensor: torch.Tensor,
+        object_queries: Tensor | None,
     ):  # -> Tensor:
         ...
     def forward(
@@ -94,7 +106,9 @@ class TableTransformerAttention(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class TableTransformerEncoderLayer(nn.Module):

@@ -179,7 +179,7 @@ def test_build_chat_messages_assistant_with_tool_call_remaps_id() -> None:
     assert tcs[0]["id"] == "call_0"
     assert cast(MutableJSON, tcs[0]["function"])["name"] == "Bash"
     assert cast(MutableJSON, tcs[0]["function"])["arguments"] == json.dumps(
-        {"cmd": "ls"}
+        {"cmd": "ls"},
     )
 
 

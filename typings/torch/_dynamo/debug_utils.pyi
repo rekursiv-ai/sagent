@@ -78,10 +78,13 @@ def same_two_models(
 ) -> bool: ...
 def cast_dtype_args_to_fp64(model: torch.fx.GraphModule) -> torch.fx.GraphModule: ...
 def cast_to(
-    dtype: torch.dtype, model: torch.fx.GraphModule, inputs: list[Any]
+    dtype: torch.dtype,
+    model: torch.fx.GraphModule,
+    inputs: list[Any],
 ) -> tuple[torch.fx.GraphModule, list[Any]]: ...
 def cast_to_fp64(
-    model: torch.fx.GraphModule, inputs: list[Any]
+    model: torch.fx.GraphModule,
+    inputs: list[Any],
 ) -> tuple[torch.fx.GraphModule, list[Any]]: ...
 def backend_accuracy_fails(
     gm: torch.fx.GraphModule,
@@ -114,7 +117,10 @@ class NopInputReader:
 
 class InputReader:
     def __init__(
-        self, save_dir: str | None = ..., *, pbar: tqdm | None = ...
+        self,
+        save_dir: str | None = ...,
+        *,
+        pbar: tqdm | None = ...,
     ) -> None: ...
     def storage(
         self,

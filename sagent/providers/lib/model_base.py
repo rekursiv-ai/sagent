@@ -85,7 +85,8 @@ class ModelDefaults(_Transport, Protocol):
         # input pools stay disjoint for billing.
         prompt = tokens.request + tokens.cache_write + tokens.cache_read
         product = PriceCatalogProduct(
-            service_tier=self.settings.service_tier, min_request_tokens=prompt
+            service_tier=self.settings.service_tier,
+            min_request_tokens=prompt,
         )
         return self.capability.prices[product] * tokens
 
@@ -108,19 +109,33 @@ class ModelDefaults(_Transport, Protocol):
     async def buffer(self, request: ModelRequest) -> ModelResponse:
         """Non-streaming send: ``stream`` with no publisher.
 
+        Args:
+          request: Request to send without a publisher.
+
+        Returns:
+          response: Complete provider response.
+
         Routed through ``stream`` rather than a vendor's non-streaming
         endpoint on purpose: those carry a fixed client timeout that
         large compaction prompts exceed, while the streaming path uses
         an idle-based one.
+
         """
         return await self.stream(request, None)
 
     def is_retryable_provider_error(self, error: Exception) -> bool:
         """Whether the provider treats ``error`` as transient.
 
+        Args:
+          error: Provider exception to classify.
+
+        Returns:
+          retryable: Whether retrying the error is appropriate.
+
         ``False`` unless the transport can recognize its own transient
         failures: misclassifying a fatal error as retryable burns the
         whole retry budget on a request that can never succeed.
+
         """
         del error
         return False

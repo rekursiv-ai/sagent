@@ -112,7 +112,10 @@ class Sam2VideoInferenceSession:
     def remove_point_inputs(self, obj_idx: int, frame_idx: int):  # -> None:
         ...
     def add_mask_inputs(
-        self, obj_idx: int, frame_idx: int, inputs: torch.Tensor
+        self,
+        obj_idx: int,
+        frame_idx: int,
+        inputs: torch.Tensor,
     ):  # -> None:
         ...
     def remove_mask_inputs(self, obj_idx: int, frame_idx: int):  # -> None:
@@ -135,7 +138,9 @@ class Sam2VideoInferenceSession:
     ):  # -> Tensor | None:
         ...
     def add_new_frame(
-        self, pixel_values: torch.Tensor, frame_idx: int | None = ...
+        self,
+        pixel_values: torch.Tensor,
+        frame_idx: int | None = ...,
     ) -> int: ...
     def get_frame(self, frame_idx: int) -> torch.Tensor: ...
     def reset_tracking_data(self):  # -> None:
@@ -244,7 +249,10 @@ def apply_rotary_pos_emb_2d(
 
 class Sam2VideoRoPEAttention(nn.Module):
     def __init__(
-        self, config: Sam2VideoConfig, kv_in_dim: int | None = ..., rope_k_repeat=...
+        self,
+        config: Sam2VideoConfig,
+        kv_in_dim: int | None = ...,
+        rope_k_repeat=...,
     ) -> None: ...
     def forward(
         self,
@@ -292,7 +300,10 @@ class Sam2VideoMemoryFuser(nn.Module):
 
 class Sam2VideoMaskDownSamplerLayer(nn.Module):
     def __init__(
-        self, config: Sam2VideoConfig, in_channels: int, out_channels: int
+        self,
+        config: Sam2VideoConfig,
+        in_channels: int,
+        out_channels: int,
     ) -> None: ...
     def forward(self, x): ...
 
@@ -304,10 +315,14 @@ class Sam2VideoMaskDownSampler(nn.Module):
 class Sam2VideoMemoryEncoder(nn.Module):
     def __init__(self, config: Sam2VideoConfig) -> None: ...
     def forward(
-        self, vision_features: torch.Tensor, masks: torch.Tensor
+        self,
+        vision_features: torch.Tensor,
+        masks: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 NO_OBJ_SCORE = ...

@@ -32,7 +32,8 @@ class DebugPrinterManager:
         kernel_type=...,
     ) -> None: ...
     def codegen_model_inputs_value_print(
-        self, input_args_to_print: list[str]
+        self,
+        input_args_to_print: list[str],
     ) -> None: ...
     def codegen_intermediate_tensor_value_save(
         self,

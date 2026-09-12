@@ -29,11 +29,13 @@ type PartitionType = list[BaseSchedulerNode]
 _T = TypeVar("_T")
 _P = ParamSpec("_P")
 _custom_should_partition_fns: weakref.WeakKeyDictionary[
-    torch._ops.OpOverload, Callable[..., bool]
+    torch._ops.OpOverload,
+    Callable[..., bool],
 ] = ...
 
 def register_should_partition_rule(
-    op: torch._ops.OpOverload, func: Callable[..., bool]
+    op: torch._ops.OpOverload,
+    func: Callable[..., bool],
 ) -> None: ...
 
 @dataclasses.dataclass
@@ -72,14 +74,18 @@ class BaseSchedulerNode:
     def debug_str_short(self) -> str: ...
     def log_details(self) -> None: ...
     def reorder_loops_by_dep_pair(
-        self, self_dep: MemoryDep, other_dep: MemoryDep
+        self,
+        self_dep: MemoryDep,
+        other_dep: MemoryDep,
     ) -> bool: ...
     def update_mutated_names(self, renames: dict[str, str]) -> None: ...
     def add_fake_dep(self, dep: Dep) -> None: ...
     def has_aliasing_or_mutation(self) -> bool: ...
     def set_read_writes(self, rw: dependencies.ReadWrites) -> None: ...
     def set_last_usage(
-        self, future_used_buffers: OrderedSet[str], mutation_real_name: dict[str, str]
+        self,
+        future_used_buffers: OrderedSet[str],
+        mutation_real_name: dict[str, str],
     ) -> None: ...
     def mark_run(self) -> None: ...
     def used_buffer_names(self) -> OrderedSet[str]: ...
@@ -87,7 +93,8 @@ class BaseSchedulerNode:
     def prune_deps(self) -> None: ...
     def prune_weak_deps(self) -> None: ...
     def prune_redundant_deps(
-        self, name_to_fused_node: dict[str, BaseSchedulerNode]
+        self,
+        name_to_fused_node: dict[str, BaseSchedulerNode],
     ) -> None: ...
     def get_name(self) -> str: ...
     def get_first_name(self) -> str: ...
@@ -114,7 +121,9 @@ class BaseSchedulerNode:
     def has_side_effects(self) -> bool: ...
     def decide_inplace_update(self) -> None: ...
     def codegen_originating_info(
-        self, buffer: IndentedBuffer, only_once: bool = ...
+        self,
+        buffer: IndentedBuffer,
+        only_once: bool = ...,
     ) -> None: ...
     @cache_on_self
     def get_read_write_buffers_sizes(self) -> int: ...
@@ -123,10 +132,14 @@ class BaseSchedulerNode:
     @cache_on_self
     def get_write_buffer_sizes(self) -> int: ...
     def get_read_write_buffers_sizes_impl(
-        self, include_reads: bool, include_writes: bool
+        self,
+        include_reads: bool,
+        include_writes: bool,
     ) -> int: ...
     def get_read_write_buffer_accesses(
-        self, include_reads: bool, include_writes: bool
+        self,
+        include_reads: bool,
+        include_writes: bool,
     ) -> dict[str, int]: ...
     @cache_on_self
     def estimate_flops(self) -> int | None: ...
@@ -173,7 +186,9 @@ class SchedulerNode(BaseSchedulerNode):
     _sizes: tuple[Sequence[sympy.Expr], ...]
     _body: LoopBody
     def __init__(
-        self, scheduler: Scheduler, node: ir.ComputedBuffer | ir.TemplateBuffer
+        self,
+        scheduler: Scheduler,
+        node: ir.ComputedBuffer | ir.TemplateBuffer,
     ) -> None: ...
     def recompute_size_and_body(
         self,
@@ -181,15 +196,21 @@ class SchedulerNode(BaseSchedulerNode):
         recompute_sizes_body_func: Callable[..., Any] | None = ...,
     ) -> None: ...
     def refresh_dependencies(
-        self, normalize: bool, need_clear_tiling_cache: bool
+        self,
+        normalize: bool,
+        need_clear_tiling_cache: bool,
     ) -> None: ...
     def apply_new_loop_order(self, new_order: Sequence[int]) -> None: ...
     def expand_dimension_for_pointwise_node(
-        self, dimension: int, new_range: int
+        self,
+        dimension: int,
+        new_range: int,
     ) -> None: ...
     def merge_loops(self) -> None: ...
     def reorder_loops_by_dep_pair(
-        self, self_dep: MemoryDep, other_dep: MemoryDep
+        self,
+        self_dep: MemoryDep,
+        other_dep: MemoryDep,
     ) -> bool: ...
     def debug_str_extra(self) -> str: ...
     def get_ranges(self) -> Sequence[Sequence[sympy.Expr]]: ...
@@ -199,11 +220,13 @@ class SchedulerNode(BaseSchedulerNode):
     def get_template_node(self) -> ir.TemplateBuffer | None: ...
     def run(self, *index_vars: Sequence[sympy.Expr]) -> None: ...
     def ranges_from_index_vars(
-        self, index_vars: Sequence[Sequence[sympy.Expr]]
+        self,
+        index_vars: Sequence[Sequence[sympy.Expr]],
     ) -> dict[sympy.Expr, sympy.Expr]: ...
     def codegen(self, index_vars: Sequence[Sequence[sympy.Expr]]) -> None: ...
     def pointwise_or_reduction_read_writes(
-        self, pointwise: bool = ...
+        self,
+        pointwise: bool = ...,
     ) -> dependencies.ReadWrites: ...
     @cache_on_self
     def pointwise_read_writes(self) -> dependencies.ReadWrites: ...
@@ -226,15 +249,21 @@ class FusedSchedulerNode(BaseSchedulerNode):
     snodes: list[BaseSchedulerNode]
     @classmethod
     def fuse(
-        cls, node1: BaseSchedulerNode, node2: BaseSchedulerNode
+        cls,
+        node1: BaseSchedulerNode,
+        node2: BaseSchedulerNode,
     ) -> FusedSchedulerNode: ...
     @cache_on_self
     def estimate_flops(self) -> int | None: ...
     def reorder_loops_by_dep_pair(
-        self, self_dep: MemoryDep, other_dep: MemoryDep
+        self,
+        self_dep: MemoryDep,
+        other_dep: MemoryDep,
     ) -> bool: ...
     def __init__(
-        self, scheduler: Scheduler, snodes: list[BaseSchedulerNode]
+        self,
+        scheduler: Scheduler,
+        snodes: list[BaseSchedulerNode],
     ) -> None: ...
     @cache_on_self
     def get_name(self) -> str: ...
@@ -245,7 +274,9 @@ class FusedSchedulerNode(BaseSchedulerNode):
     def debug_str_extra(self) -> str: ...
     def debug_str_short(self) -> str: ...
     def set_last_usage(
-        self, future_used_buffers: OrderedSet[str], mutation_real_name: dict[str, str]
+        self,
+        future_used_buffers: OrderedSet[str],
+        mutation_real_name: dict[str, str],
     ) -> None: ...
     @cache_on_self
     def used_buffer_names(self) -> OrderedSet[str]: ...
@@ -272,18 +303,24 @@ class FusedSchedulerNode(BaseSchedulerNode):
 
 class ForeachKernelSchedulerNode(FusedSchedulerNode):
     def get_consumer_subnode_for(
-        self, producer: BaseSchedulerNode
+        self,
+        producer: BaseSchedulerNode,
     ) -> BaseSchedulerNode | None: ...
     def get_producer_subnode_for(
-        self, consumer: BaseSchedulerNode
+        self,
+        consumer: BaseSchedulerNode,
     ) -> BaseSchedulerNode | None: ...
     @classmethod
     def can_fuse(
-        cls, producer: BaseSchedulerNode, consumer: BaseSchedulerNode
+        cls,
+        producer: BaseSchedulerNode,
+        consumer: BaseSchedulerNode,
     ) -> bool: ...
     @classmethod
     def fuse(
-        cls, producer: BaseSchedulerNode, consumer: BaseSchedulerNode
+        cls,
+        producer: BaseSchedulerNode,
+        consumer: BaseSchedulerNode,
     ) -> ForeachKernelSchedulerNode: ...
     def __init__(
         self,
@@ -296,11 +333,13 @@ class ForeachKernelSchedulerNode(FusedSchedulerNode):
     ) -> None: ...
     @classmethod
     def combinable_nodes(
-        cls, nodes: list[BaseSchedulerNode]
+        cls,
+        nodes: list[BaseSchedulerNode],
     ) -> list[BaseSchedulerNode]: ...
 
     group_algorithm_for_combo_kernels: Callable[
-        [Scheduler], list[list[BaseSchedulerNode]]
+        [Scheduler],
+        list[list[BaseSchedulerNode]],
     ] = ...
     @staticmethod
     def set_group_algorithm_for_combo_kernels(
@@ -317,7 +356,8 @@ class ForeachKernelSchedulerNode(FusedSchedulerNode):
     def get_nodes(self) -> Sequence[BaseSchedulerNode]: ...
     def get_first_name(self) -> str: ...
     def prune_redundant_deps(
-        self, name_to_fused_node: dict[str, BaseSchedulerNode]
+        self,
+        name_to_fused_node: dict[str, BaseSchedulerNode],
     ) -> None: ...
 
 class GroupedSchedulerNode(BaseSchedulerNode):
@@ -343,7 +383,9 @@ class GroupedSchedulerNode(BaseSchedulerNode):
     def get_nodes(self) -> Sequence[BaseSchedulerNode]: ...
     @classmethod
     def can_fuse(
-        cls, producer: BaseSchedulerNode, consumer: BaseSchedulerNode
+        cls,
+        producer: BaseSchedulerNode,
+        consumer: BaseSchedulerNode,
     ) -> bool: ...
 
 def pick_loop_order(
@@ -381,14 +423,16 @@ class Scheduler:
     def insert_memory_check_nodes(self) -> None: ...
     def dead_node_elimination(self) -> None: ...
     def topological_sort_schedule(
-        self, nodes: list[BaseSchedulerNode]
+        self,
+        nodes: list[BaseSchedulerNode],
     ) -> list[BaseSchedulerNode]: ...
     def compute_ancestors(self) -> None: ...
     def merge_loops(self) -> None: ...
     def fuse_nodes(self, nodes: list[BaseSchedulerNode]) -> list[BaseSchedulerNode]: ...
     def process_grouped_nodes(self) -> None: ...
     def benchmark_fused_nodes(
-        self, nodes: Sequence[BaseSchedulerNode]
+        self,
+        nodes: Sequence[BaseSchedulerNode],
     ) -> tuple[float, str]: ...
     def generate_kernel_code_from_nodes(
         self,
@@ -397,32 +441,47 @@ class Scheduler:
         hint_override: int | None = ...,
     ) -> str: ...
     def benchmark_codegened_module(
-        self, module: ModuleType, device: torch.device
+        self,
+        module: ModuleType,
+        device: torch.device,
     ) -> tuple[float, str]: ...
     def finalize_multi_template_buffers(self) -> None: ...
     def speedup_by_fusion(
-        self, node1: BaseSchedulerNode, node2: BaseSchedulerNode
+        self,
+        node1: BaseSchedulerNode,
+        node2: BaseSchedulerNode,
     ) -> bool | Callable[[], bool]: ...
     def get_fused_node(self, node: BaseSchedulerNode) -> BaseSchedulerNode: ...
     def fuse_nodes_once(
-        self, nodes: list[BaseSchedulerNode]
+        self,
+        nodes: list[BaseSchedulerNode],
     ) -> list[BaseSchedulerNode]: ...
     def create_combo_kernel_nodes(self, num_ck_nodes: int | None = ...) -> None: ...
     def prune_redundant_deps(self, nodes: list[BaseSchedulerNode]) -> None: ...
     def get_possible_fusions(
-        self, nodes: list[BaseSchedulerNode]
+        self,
+        nodes: list[BaseSchedulerNode],
     ) -> list[tuple[BaseSchedulerNode, BaseSchedulerNode]]: ...
     def will_fusion_create_cycle(
-        self, node1: BaseSchedulerNode, node2: BaseSchedulerNode
+        self,
+        node1: BaseSchedulerNode,
+        node2: BaseSchedulerNode,
     ) -> bool: ...
     def can_fusion_increase_peak_memory(
-        self, node1: BaseSchedulerNode, node2: BaseSchedulerNode
+        self,
+        node1: BaseSchedulerNode,
+        node2: BaseSchedulerNode,
     ) -> bool: ...
     def fusion_accumulate_large_reads(
-        self, node1: BaseSchedulerNode, node2: BaseSchedulerNode, threshold: int
+        self,
+        node1: BaseSchedulerNode,
+        node2: BaseSchedulerNode,
+        threshold: int,
     ) -> bool: ...
     def are_long_distant_nodes(
-        self, node1: BaseSchedulerNode, node2: BaseSchedulerNode
+        self,
+        node1: BaseSchedulerNode,
+        node2: BaseSchedulerNode,
     ) -> bool: ...
     def decide_fusion_fail_reason(
         self,
@@ -431,7 +490,9 @@ class Scheduler:
         common_buf_names: tuple[str] | OrderedSet[str],
     ) -> str: ...
     def shared_data_after_reordering_loop(
-        self, node1: BaseSchedulerNode, node2: BaseSchedulerNode
+        self,
+        node1: BaseSchedulerNode,
+        node2: BaseSchedulerNode,
     ) -> int: ...
     def unfusable_node(self, node: BaseSchedulerNode) -> bool: ...
     def check_prologue_fusion_heuristics_fusable(
@@ -441,46 +502,63 @@ class Scheduler:
         why: WhyNoFuse,
     ) -> bool: ...
     def get_expand_dim_for_pointwise_nodes(
-        self, node1: BaseSchedulerNode, node2: BaseSchedulerNode
+        self,
+        node1: BaseSchedulerNode,
+        node2: BaseSchedulerNode,
     ) -> tuple[int, SchedulerNode, sympy.Expr] | None: ...
     def can_fuse(self, node1: BaseSchedulerNode, node2: BaseSchedulerNode) -> bool: ...
     def can_fuse_vertical(
-        self, node1: BaseSchedulerNode, node2: BaseSchedulerNode
+        self,
+        node1: BaseSchedulerNode,
+        node2: BaseSchedulerNode,
     ) -> bool: ...
     def fusable_weak_dep(
-        self, weak_dep: WeakDep, node1: BaseSchedulerNode, node2: BaseSchedulerNode
+        self,
+        weak_dep: WeakDep,
+        node1: BaseSchedulerNode,
+        node2: BaseSchedulerNode,
     ) -> bool: ...
     def fusable_read_and_write(self, read: Dep, write: MemoryDep) -> bool: ...
     def dep_size_hint(self, dep: Dep) -> int: ...
     def score_fusion_memory(
-        self, node1: BaseSchedulerNode, node2: BaseSchedulerNode
+        self,
+        node1: BaseSchedulerNode,
+        node2: BaseSchedulerNode,
     ) -> int: ...
     def get_possible_fusions_with_highest_priority(
-        self, possible_fusions: list[tuple[BaseSchedulerNode, BaseSchedulerNode]]
+        self,
+        possible_fusions: list[tuple[BaseSchedulerNode, BaseSchedulerNode]],
     ) -> list[tuple[BaseSchedulerNode, BaseSchedulerNode]]: ...
     def score_fusion_key(
-        self, nodes: tuple[BaseSchedulerNode, BaseSchedulerNode]
+        self,
+        nodes: tuple[BaseSchedulerNode, BaseSchedulerNode],
     ) -> Any: ...
     def compute_last_usage(self) -> None: ...
     def free_buffers(self) -> None: ...
     def flush(self) -> None: ...
     def codegen_extern_call(
-        self, scheduler_node: ExternKernelSchedulerNode
+        self,
+        scheduler_node: ExternKernelSchedulerNode,
     ) -> None: ...
     def create_backend(self, device: torch.device) -> BaseScheduling: ...
     def get_backend(self, device: torch.device | None) -> BaseScheduling: ...
     def enter_context(self, node: BaseSchedulerNode) -> None: ...
     def can_buffer_be_removed_through_fusion(
-        self, name: str, fused_node_names: OrderedSet[str]
+        self,
+        name: str,
+        fused_node_names: OrderedSet[str],
     ) -> bool: ...
     def should_partition(
-        self, node: BaseSchedulerNode, should_log: bool = ...
+        self,
+        node: BaseSchedulerNode,
+        should_log: bool = ...,
     ) -> bool: ...
     def get_name_to_nodes(
         self,
     ) -> dict[str, ir.IRNode | ir.TorchBindObject | sympy.Expr]: ...
     def compute_graph_partition_maps(
-        self, signatures: list[GraphPartitionSignature]
+        self,
+        signatures: list[GraphPartitionSignature],
     ) -> None: ...
     def get_graph_partition_symbol_inputs(
         self,
@@ -488,32 +566,43 @@ class Scheduler:
         input_nodes: dict[str, ir.IRNode | ir.TorchBindObject | sympy.Expr],
     ) -> OrderedSet[sympy.Symbol]: ...
     def get_graph_partition_signature(
-        self, partitions: list[PartitionType], skip_cudagraphs: list[bool]
+        self,
+        partitions: list[PartitionType],
+        skip_cudagraphs: list[bool],
     ) -> list[GraphPartitionSignature]: ...
     def clean_removed_buffer_from_partition_signatures(
-        self, signature: GraphPartitionSignature
+        self,
+        signature: GraphPartitionSignature,
     ) -> GraphPartitionSignature: ...
     def reorder_for_minimizing_partition(
-        self, nodes: list[BaseSchedulerNode]
+        self,
+        nodes: list[BaseSchedulerNode],
     ) -> list[BaseSchedulerNode]: ...
     def maybe_reorder_for_minimizing_partition(
-        self, nodes: list[BaseSchedulerNode]
+        self,
+        nodes: list[BaseSchedulerNode],
     ) -> list[BaseSchedulerNode]: ...
     def reorder_for_partition_with_simple_dependency(
-        self, nodes: list[BaseSchedulerNode]
+        self,
+        nodes: list[BaseSchedulerNode],
     ) -> list[BaseSchedulerNode]: ...
     def graph_partition(
         self,
     ) -> tuple[list[PartitionType], list[GraphPartitionSignature]]: ...
     def codegen(self) -> None: ...
     def use_default_device_context(
-        self, partitions: list[PartitionType], signatures: list[GraphPartitionSignature]
+        self,
+        partitions: list[PartitionType],
+        signatures: list[GraphPartitionSignature],
     ) -> contextlib.AbstractContextManager[None]: ...
     def update_graph_partition_default_device(
-        self, partitions: list[PartitionType], signatures: list[GraphPartitionSignature]
+        self,
+        partitions: list[PartitionType],
+        signatures: list[GraphPartitionSignature],
     ) -> None: ...
     def benchmark_combo_kernel(
-        self, node_list: Sequence[BaseSchedulerNode]
+        self,
+        node_list: Sequence[BaseSchedulerNode],
     ) -> tuple[float, float, list[str | None]]: ...
     def speedup_by_combo_kernel(self, nodes: list[BaseSchedulerNode]) -> bool: ...
     def get_buffer_layout(self, buf_name: str) -> ir.Layout: ...
@@ -523,22 +612,32 @@ class BaseScheduling:
     def __init__(self, scheduler: Scheduler | None) -> None: ...
     def free_buffers_in_scheduler(self) -> None: ...
     def get_backend_features(
-        self, device: torch.device
+        self,
+        device: torch.device,
     ) -> OrderedSet[BackendFeature]: ...
     def can_fuse_vertical(
-        self, node1: BaseSchedulerNode, node2: BaseSchedulerNode
+        self,
+        node1: BaseSchedulerNode,
+        node2: BaseSchedulerNode,
     ) -> bool: ...
     def can_fuse_horizontal(
-        self, node1: BaseSchedulerNode, node2: BaseSchedulerNode
+        self,
+        node1: BaseSchedulerNode,
+        node2: BaseSchedulerNode,
     ) -> bool: ...
     def can_fuse_multi_outputs_template(
-        self, node1: BaseSchedulerNode, node2: BaseSchedulerNode
+        self,
+        node1: BaseSchedulerNode,
+        node2: BaseSchedulerNode,
     ) -> bool: ...
     def fuse(
-        self, node1: BaseSchedulerNode, node2: BaseSchedulerNode
+        self,
+        node1: BaseSchedulerNode,
+        node2: BaseSchedulerNode,
     ) -> FusedSchedulerNode: ...
     def group_fn(
-        self, sizes: Sequence[Sequence[sympy.Expr]]
+        self,
+        sizes: Sequence[Sequence[sympy.Expr]],
     ) -> tuple[tuple[sympy.Expr, ...], ...]: ...
     def codegen_template(
         self,
@@ -557,12 +656,16 @@ class BaseScheduling:
     def ready_to_flush(self) -> bool: ...
     def flush(self) -> None: ...
     def benchmark_fused_nodes(
-        self, nodes: Sequence[BaseSchedulerNode]
+        self,
+        nodes: Sequence[BaseSchedulerNode],
     ) -> tuple[float, str]: ...
     def benchmark_codegened_module(self, module: ModuleType) -> tuple[float, str]: ...
     def get_fusion_pair_priority(
-        self, node1: BaseSchedulerNode, node2: BaseSchedulerNode
+        self,
+        node1: BaseSchedulerNode,
+        node2: BaseSchedulerNode,
     ) -> int: ...
     def benchmark_combo_kernel(
-        self, node_list: Sequence[BaseSchedulerNode]
+        self,
+        node_list: Sequence[BaseSchedulerNode],
     ) -> tuple[float, float, list[str | None]]: ...

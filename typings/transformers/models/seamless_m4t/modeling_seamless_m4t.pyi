@@ -33,10 +33,14 @@ class SeamlessM4TGenerationOutput(ModelOutput):
     unit_sequences: tuple[torch.FloatTensor] | None = ...
 
 def create_position_ids_from_input_ids(
-    input_ids, padding_idx, past_key_values_length=...
+    input_ids,
+    padding_idx,
+    past_key_values_length=...,
 ): ...
 def shift_tokens_right(
-    input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: torch.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ):  # -> Tensor:
     ...
 def format_speech_generation_kwargs(
@@ -89,7 +93,9 @@ class SeamlessM4TConformerSelfAttention(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class SeamlessM4TConformerEncoderLayer(GradientCheckpointingLayer):
@@ -144,15 +150,23 @@ class SeamlessM4TScaledWordEmbedding(nn.Embedding):
 
 class SeamlessM4TSinusoidalPositionalEmbedding(nn.Module):
     def __init__(
-        self, num_positions: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_positions: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ) -> None: ...
     def make_weights(
-        self, num_embeddings: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ):  # -> None:
         ...
     @staticmethod
     def get_embedding(
-        num_embeddings: int, embedding_dim: int, padding_idx: int | None = ...
+        num_embeddings: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ):  # -> Tensor:
         ...
     @torch.no_grad()
@@ -164,7 +178,9 @@ class SeamlessM4TSinusoidalPositionalEmbedding(nn.Module):
     ):  # -> Tensor | Any:
         ...
     def create_position_ids_from_inputs_embeds(
-        self, inputs_embeds, past_key_values_length
+        self,
+        inputs_embeds,
+        past_key_values_length,
     ): ...
 
 class SeamlessM4TAttention(nn.Module):
@@ -257,7 +273,9 @@ class SeamlessM4TSpeechEncoder(SeamlessM4TPreTrainedModel):
         **kwargs,
     ) -> tuple | Wav2Vec2BaseModelOutput: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | Wav2Vec2BaseModelOutput: ...
 
 @auto_docstring(custom_intro=...)
@@ -283,7 +301,9 @@ class SeamlessM4TEncoder(SeamlessM4TPreTrainedModel):
 @auto_docstring(custom_intro=...)
 class SeamlessM4TDecoder(SeamlessM4TPreTrainedModel):
     def __init__(
-        self, config: SeamlessM4TConfig, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: SeamlessM4TConfig,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     @auto_docstring
     def forward(
@@ -325,12 +345,15 @@ class SeamlessM4TTextToUnitModel(SeamlessM4TPreTrainedModel):
         cache_position: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor] | Seq2SeqModelOutput: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | Seq2SeqModelOutput: ...
 
 @auto_docstring(custom_intro=...)
 class SeamlessM4TTextToUnitForConditionalGeneration(
-    SeamlessM4TPreTrainedModel, GenerationMixin
+    SeamlessM4TPreTrainedModel,
+    GenerationMixin,
 ):
     _keys_to_ignore_on_load_missing = ...
     _tied_weights_keys = ...
@@ -370,7 +393,11 @@ class SeamlessM4TTextToUnitForConditionalGeneration(
 
 class HifiGanResidualBlock(nn.Module):
     def __init__(
-        self, channels, kernel_size=..., dilation=..., leaky_relu_slope=...
+        self,
+        channels,
+        kernel_size=...,
+        dilation=...,
+        leaky_relu_slope=...,
     ) -> None: ...
     def get_padding(self, kernel_size, dilation=...): ...
     def apply_weight_norm(self):  # -> None:
@@ -396,7 +423,10 @@ class SeamlessM4TCodeHifiGan(PreTrainedModel):
     _no_split_modules = ...
     def __init__(self, config) -> None: ...
     def forward(
-        self, input_ids: torch.LongTensor, spkr_id: torch.Tensor, lang_id: torch.Tensor
+        self,
+        input_ids: torch.LongTensor,
+        spkr_id: torch.Tensor,
+        lang_id: torch.Tensor,
     ) -> tuple[torch.Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> tuple[torch.Tensor]: ...
     def apply_weight_norm(self):  # -> None:

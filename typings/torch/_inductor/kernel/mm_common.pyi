@@ -11,13 +11,24 @@ log = ...
 def mm_grid(m, n, meta, *, cdiv) -> tuple[Any, Literal[1], Literal[1]]: ...
 @SymbolicGridFn
 def persistent_mm_grid(
-    M: int, N: int, meta: dict[str, Any], *, cdiv, min
+    M: int,
+    N: int,
+    meta: dict[str, Any],
+    *,
+    cdiv,
+    min,
 ) -> tuple[Any, Literal[1], Literal[1]]: ...
 @SymbolicGridFn
 def persistent_grouped_mm_grid(*args) -> tuple[Any, Literal[1], Literal[1]]: ...
 def acc_type(dtype) -> str: ...
 def mm_args(
-    mat1, mat2, *others, layout=..., out_dtype=..., use_4x2_dim=..., mat2_transposed=...
+    mat1,
+    mat2,
+    *others,
+    layout=...,
+    out_dtype=...,
+    use_4x2_dim=...,
+    mat2_transposed=...,
 ) -> list[
     Any | Expr | FixedLayout | list[Any | list[Any]] | list[Any | list[Any | list[Any]]]
 ]: ...

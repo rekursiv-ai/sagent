@@ -11,15 +11,22 @@ class CompiledArtifact:
     _compiled_fn: Callable[..., Any]
     _artifacts: tuple[bytes, CacheInfo] | None
     def __init__(
-        self, compiled_fn: Callable[..., Any], artifacts: tuple[bytes, CacheInfo] | None
+        self,
+        compiled_fn: Callable[..., Any],
+        artifacts: tuple[bytes, CacheInfo] | None,
     ) -> None: ...
     def __call__(self, *args: Any) -> Any: ...
     def save(
-        self, *, path: str, format: Literal["binary", "unpacked"] = ...
+        self,
+        *,
+        path: str,
+        format: Literal["binary", "unpacked"] = ...,
     ) -> None: ...
     @staticmethod
     def load(
-        *, path: str, format: Literal["binary", "unpacked"] = ...
+        *,
+        path: str,
+        format: Literal["binary", "unpacked"] = ...,
     ) -> CompiledArtifact: ...
 
 def standalone_compile(

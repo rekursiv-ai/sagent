@@ -14,8 +14,6 @@ Pass ``base_url=`` to ``from_env`` / ``from_key`` to point any of
 them at a localhost inference server.
 """
 
-from typing import Literal, cast, get_args
-
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.anthropic.cli import AnthropicCLI
 from sagent.providers.dashscope.api import DashScope
@@ -28,6 +26,8 @@ from sagent.providers.openai.api import OpenAI
 from sagent.providers.openai.compat import OpenAICompat
 from sagent.providers.openai.sub import OpenAISubscription
 from sagent.providers.providers import (
+    PROVIDER_NAMES,
+    ProviderName,
     build_provider,
     default_auth_for_provider,
     infer_provider,
@@ -37,25 +37,6 @@ from sagent.providers.selfhosted.server import (
     SelfHostedModel,
 )
 
-
-ProviderName = Literal[
-    "Anthropic",
-    "AnthropicCLI",
-    "DashScope",
-    "Google",
-    "GoogleCLI",
-    "LlamaCpp",
-    "MiniMax",
-    "Moonshot",
-    "OpenAI",
-    "OpenAICompat",
-    "OpenAISubscription",
-    "SelfHosted",
-]
-
-PROVIDER_NAMES: tuple[ProviderName, ...] = cast(
-    tuple[ProviderName, ...], get_args(ProviderName)
-)
 
 __all__ = [
     "PROVIDER_NAMES",

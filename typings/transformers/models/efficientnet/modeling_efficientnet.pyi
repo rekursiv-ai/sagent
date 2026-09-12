@@ -19,7 +19,8 @@ logger = ...
 def round_filters(config: EfficientNetConfig, num_channels: int):  # -> int:
     ...
 def correct_pad(
-    kernel_size: int | tuple, adjust: bool = ...
+    kernel_size: int | tuple,
+    adjust: bool = ...,
 ):  # -> tuple[Any, Any, Any, Any]:
     ...
 
@@ -43,7 +44,11 @@ class EfficientNetDepthwiseConv2d(nn.Conv2d):
 
 class EfficientNetExpansionLayer(nn.Module):
     def __init__(
-        self, config: EfficientNetConfig, in_dim: int, out_dim: int, stride: int
+        self,
+        config: EfficientNetConfig,
+        in_dim: int,
+        out_dim: int,
+        stride: int,
     ) -> None: ...
     def forward(self, hidden_states: torch.FloatTensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -82,7 +87,9 @@ class EfficientNetFinalBlockLayer(nn.Module):
         id_skip: bool,
     ) -> None: ...
     def forward(
-        self, embeddings: torch.FloatTensor, hidden_states: torch.FloatTensor
+        self,
+        embeddings: torch.FloatTensor,
+        hidden_states: torch.FloatTensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 

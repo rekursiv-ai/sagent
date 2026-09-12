@@ -148,7 +148,9 @@ class _OpenAIResponsesModel(ModelDefaults):
 
         """
         return token_count.approx_image_tokens(
-            data, model_id=self._wire_model_id, max_edge=self.limits.max_image_edge_px
+            data,
+            model_id=self._wire_model_id,
+            max_edge=self.limits.max_image_edge_px,
         )
 
     def is_context_overflow(self, error: Exception) -> bool:
@@ -201,7 +203,8 @@ class _OpenAIResponsesModel(ModelDefaults):
         if self.settings.thinking_effort == "none":
             return None
         return reasoning_effort(
-            self.settings.thinking_effort, model_id=self.capability.model_id
+            self.settings.thinking_effort,
+            model_id=self.capability.model_id,
         )
 
     def _build_kwargs(self, request: ModelRequest) -> ResponseCreateParamsStreaming:
@@ -265,7 +268,7 @@ class _OpenAIResponsesModel(ModelDefaults):
         )
         try:
             raw = await sdk.responses.with_raw_response.create(
-                **self._build_kwargs(request)
+                **self._build_kwargs(request),
             )
             self._last_usage = openai_usage(raw.headers)
             events = raw.parse(to=openai.AsyncStream[responses.ResponseStreamEvent])
@@ -319,20 +322,7 @@ def _build_input(
     max_image_dim: int = 0,
     max_image_bytes: int = 0,
 ) -> responses.ResponseInputParam:
-    """Convert history entries to Responses API input items.
-
-    Args:
-      request: Fully-built model request.
-      max_image_dim: Maximum image dimension (pixels); larger inputs are
-          resized before encoding. ``0`` (the default) means no cap; the
-          live caller passes the model profile's ``max_image_dim``.
-      max_image_bytes: Maximum image size in bytes after resize. ``0`` (the
-          default) means no cap.
-
-    Returns:
-      items: Responses API input items in send order.
-
-    """
+    """Convert history entries to Responses API input items."""
     ids = IdRemapper("fc_")
     items: responses.ResponseInputParam = []
     for entry in request.messages:
@@ -349,7 +339,7 @@ def _build_input(
                     ids,
                     max_image_dim=max_image_dim,
                     max_image_bytes=max_image_bytes,
-                )
+                ),
             )
     return items
 
@@ -380,7 +370,7 @@ def _build_user_item(
                 "type": "input_image",
                 "detail": "auto",
                 "image_url": f"data:{mime};base64,{b64}",
-            }
+            },
         )
     return {"role": "user", "content": blocks}
 
@@ -398,7 +388,8 @@ def _build_assistant_items(
     """Expand an AssistantMessage into assistant + function_call items."""
     for block in entry.thinking_blocks:
         if block.get("type") == "reasoning" and isinstance(
-            block.get("encrypted_content"), str
+            block.get("encrypted_content"),
+            str,
         ):
             # OpenAI documents replaying the reasoning output item verbatim in
             # stateless mode. Copy the opaque mapping so persisted session data
@@ -416,7 +407,7 @@ def _build_assistant_items(
                 "name": tc.name,
                 "arguments": json.dumps(dict(tc.args)),
                 "status": "completed",
-            }
+            },
         )
 
 
@@ -441,14 +432,16 @@ def _build_tool_result_item(
         for attachment in entry.attachments:
             if _is_image_attachment(attachment):
                 raw, mime = resize(
-                    attachment.data, max_dim=max_image_dim, max_bytes=max_image_bytes
+                    attachment.data,
+                    max_dim=max_image_dim,
+                    max_bytes=max_image_bytes,
                 )
                 parts.append(
                     {
                         "type": "input_image",
                         "detail": "auto",
                         "image_url": f"data:{mime};base64,{base64.b64encode(raw).decode()}",
-                    }
+                    },
                 )
             else:
                 logger.warning(
@@ -620,7 +613,7 @@ async def _consume_stream(
                                 id=tc_id,
                                 name=tc_name,
                                 args=args,
-                            )
+                            ),
                         )
                     elif item.type == "reasoning":
                         reasoning_item = item.to_dict(exclude_none=True)
@@ -771,14 +764,12 @@ def _build_stream_response(
     )
 
 
+# Runs in a ``finally`` / cleanup context, so a failure HERE must never replace the
+# error that triggered the close (e.g. a ``UserFacingError`` from a
+# ``ResponseFailedEvent``). A broken pipe on ``aclose`` would otherwise surface to the
+# user instead of the real cause -- swallow and log it.
 async def _close_stream(stream: object) -> None:
-    """Close a Responses stream after timeout, cancellation, or stream error.
-
-    Runs in a ``finally`` / cleanup context, so a failure HERE must never
-    replace the error that triggered the close (e.g. a ``UserFacingError`` from a
-    ``ResponseFailedEvent``). A broken pipe on ``aclose`` would otherwise surface
-    to the user instead of the real cause -- swallow and log it.
-    """
+    """Close a Responses stream after timeout, cancellation, or stream error."""
     close = getattr(stream, "aclose", None)
     if close is None:
         close = getattr(stream, "close", None)

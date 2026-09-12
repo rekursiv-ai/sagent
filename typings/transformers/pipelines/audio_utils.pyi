@@ -20,6 +20,9 @@ def ffmpeg_microphone_live(
 ):  # -> Generator[dict[str, bytes | tuple[int, Literal[0]] | bool] | dict[str, bytes | tuple[int, int]], Any, None]:
     ...
 def chunk_bytes_iter(
-    iterator, chunk_len: int, stride: tuple[int, int], stream: bool = ...
+    iterator,
+    chunk_len: int,
+    stride: tuple[int, int],
+    stream: bool = ...,
 ):  # -> Generator[dict[str, Any | tuple[int, Literal[0]] | bool] | dict[str, Any | tuple[int, int]] | dict[str, Any | bytes | tuple[int, int]], Any, None]:
     ...

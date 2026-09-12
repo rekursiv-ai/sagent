@@ -128,6 +128,9 @@ def _empty_headers() -> dict[str, str]:
 def reset_id_counter(start: int) -> None:
     """Advance the ``SessionMessage`` id counter to ``start`` (forward-only).
 
+    Args:
+      start: Minimum next identifier to emit.
+
     Concurrent resumes share the same process-global counter; rewinding
     it backwards (e.g. resume B sets the counter to 51 while resume A
     has already minted ids up to 100) creates collision between later
@@ -139,6 +142,7 @@ def reset_id_counter(start: int) -> None:
     one id and either accepting it (it was already past ``start``,
     replace with a counter that re-emits it on the next call) or
     discarding it (was below ``start``, replace with ``count(start)``).
+
     """
     global _id_counter  # noqa: PLW0603 -- module-level counter requires global statement
     # Peek AND replace under one acquisition. Releasing between them lets a
@@ -229,6 +233,12 @@ class AgentSendMessage(SessionMessage):
 def labeled_agent_send_text(entry: AgentSendMessage) -> str:
     """Return ``entry.text`` prefixed with its ``[from <source>]: `` label.
 
+    Args:
+      entry: Agent-authored message to label.
+
+    Returns:
+      text: The original or prefixed message text.
+
     The single source of truth for agent-send attribution labels, shared by
     the splice-build coalescer (``types.tape._merge_user``) and the wire
     materializer (``request_materialization._label_agent_sends``) so the
@@ -236,6 +246,7 @@ def labeled_agent_send_text(entry: AgentSendMessage) -> str:
     re-labeling an already-labeled body is a no-op (idempotent); ``startswith``
     not substring ``in`` so a body legitimately quoting the marker is still
     labeled.
+
     """
     prefix = f"[from {entry.source}]: "
     return entry.text if entry.text.startswith(prefix) else f"{prefix}{entry.text}"
@@ -269,7 +280,7 @@ class AssistantMessage(SessionMessage):
         for tc in self.tool_calls:
             if tc.id in seen:
                 raise ValueError(
-                    f"duplicate tool_call id in AssistantMessage: {tc.id!r}"
+                    f"duplicate tool_call id in AssistantMessage: {tc.id!r}",
                 )
             seen.add(tc.id)
 
@@ -429,12 +440,19 @@ class CompactComplete:
     def from_override(cls, override: ContextSplice) -> CompactComplete:
         """Build the completion event from a compactor's override.
 
+        Args:
+          override: Compactor-produced context splice.
+
+        Returns:
+          completion: Completion event populated from ``override``.
+
         Both compaction tails -- the async ``_compact_and_post`` and the
         synchronous ``compact_now`` overflow-recovery path -- emit
         ``CompactComplete`` for the same override. Deriving every field
         here keeps them from drifting: a field added to the event is
         populated for both callers, and the token counts can never be
         silently dropped (which rendered ``~0 → ~0 tokens`` in the REPL).
+
         """
         return cls(
             records=(override,),

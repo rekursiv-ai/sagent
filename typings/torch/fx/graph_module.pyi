@@ -24,7 +24,9 @@ _loader = ...
 def reduce_graph_module(body: dict[Any, Any], import_block: str) -> torch.nn.Module: ...
 @compatibility(is_backward_compatible=True)
 def reduce_package_graph_module(
-    importer: PackageImporter, body: dict[Any, Any], generated_module_name: str
+    importer: PackageImporter,
+    body: dict[Any, Any],
+    generated_module_name: str,
 ) -> torch.nn.Module: ...
 
 class _CodeOnlyModule(torch.nn.Module):
@@ -63,7 +65,8 @@ class GraphModule(torch.nn.Module):
     @compatibility(is_backward_compatible=True)
     def recompile(self) -> PythonCode: ...
     def __reduce_package__(
-        self, exporter: PackageExporter
+        self,
+        exporter: PackageExporter,
     ) -> tuple[Callable[..., Module], tuple[dict[str, Any], str]]: ...
     def __reduce__(
         self,

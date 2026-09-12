@@ -29,7 +29,9 @@ _CONFIG_FOR_DOC = ...
 LARGE_NEGATIVE = ...
 
 def shift_tokens_right(
-    input_ids: tf.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: tf.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ): ...
 
 class TFMarianSinusoidalPositionalEmbedding(keras.layers.Layer):
@@ -210,7 +212,7 @@ class TFMarianModel(TFMarianPreTrainedModel):
         ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        MARIAN_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MARIAN_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -268,7 +270,8 @@ class TFMarianMTModel(TFMarianPreTrainedModel, TFCausalLanguageModelingLoss):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(MARIAN_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFSeq2SeqLMOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFSeq2SeqLMOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     @add_end_docstrings(MARIAN_GENERATION_EXAMPLE)
     def call(

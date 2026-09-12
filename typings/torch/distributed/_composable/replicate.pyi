@@ -15,15 +15,24 @@ class _ReplicateState(_State):
     def __init__(self) -> None: ...
     def lazy_init(self) -> None: ...
     def init(
-        self, module: nn.Module, ignored_modules: set[nn.Module], **kwargs
+        self,
+        module: nn.Module,
+        ignored_modules: set[nn.Module],
+        **kwargs,
     ) -> None: ...
     def register_comm_hook(self) -> None: ...
     def record_init_args(self, *args, **kwargs) -> None: ...
     def forward_pre_hook(
-        self, module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]
+        self,
+        module: nn.Module,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
     ) -> Any: ...
     def forward_post_hook(
-        self, module: nn.Module, input: tuple[torch.Tensor], output: torch.Tensor
+        self,
+        module: nn.Module,
+        input: tuple[torch.Tensor],
+        output: torch.Tensor,
     ) -> torch.Tensor: ...
 
 def unimplemented_deepcopy(*args: Any, **kwargs: Any) -> NoReturn: ...

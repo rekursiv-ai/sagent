@@ -28,10 +28,18 @@ def prod(
     mask: Tensor | None = ...,
 ) -> Tensor: ...
 def cumsum(
-    input: Tensor, dim: int, *, dtype: DType | None = ..., mask: Tensor | None = ...
+    input: Tensor,
+    dim: int,
+    *,
+    dtype: DType | None = ...,
+    mask: Tensor | None = ...,
 ) -> Tensor: ...
 def cumprod(
-    input: Tensor, dim: int, *, dtype: DType | None = ..., mask: Tensor | None = ...
+    input: Tensor,
+    dim: int,
+    *,
+    dtype: DType | None = ...,
+    mask: Tensor | None = ...,
 ) -> Tensor: ...
 def amax(
     input: Tensor | MaskedTensor,

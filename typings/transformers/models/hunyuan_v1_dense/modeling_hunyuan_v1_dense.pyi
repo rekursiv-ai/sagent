@@ -27,7 +27,10 @@ class HunYuanDenseV1RMSNorm(nn.Module):
 
 class HunYuanDenseV1MLP(nn.Module):
     def __init__(
-        self, config: HunYuanDenseV1Config, layer_idx=..., is_shared_mlp=...
+        self,
+        config: HunYuanDenseV1Config,
+        layer_idx=...,
+        is_shared_mlp=...,
     ) -> None: ...
     def forward(self, x):  # -> Any:
         ...
@@ -35,7 +38,12 @@ class HunYuanDenseV1MLP(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -141,7 +149,8 @@ class HunYuanDenseV1ForCausalLM(HunYuanDenseV1PreTrainedModel, GenerationMixin):
     ) -> CausalLMOutputWithPast: ...
 
 class HunYuanDenseV1ForSequenceClassification(
-    GenericForSequenceClassification, HunYuanDenseV1PreTrainedModel
+    GenericForSequenceClassification,
+    HunYuanDenseV1PreTrainedModel,
 ): ...
 
 __all__ = [

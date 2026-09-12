@@ -29,7 +29,7 @@ from sagent.agent.state import (
 )
 from sagent.providers import PROVIDER_NAMES
 from sagent.testing import MockModelCaps
-from sagent.tools import agent_spawn as _agent_spawn_mod
+from sagent.tools import agent_spawn
 from sagent.tools.agent_spawn import (
     AgentSpawn,
     ChildStats,
@@ -65,7 +65,7 @@ from sagent.types.runtime import (
 from sagent.types.tools import Tool
 
 
-_AGENT_SPAWN_LOGGER = _agent_spawn_mod.__name__
+_AGENT_SPAWN_LOGGER = agent_spawn.__name__
 
 
 @dataclass(slots=True, kw_only=True)
@@ -363,7 +363,7 @@ async def test_non_persistent_child_has_single_registry_label() -> None:
             return await StubProviderModel.stream(self, request, publish)
 
     parent_model = _RegistryInspectingModel(
-        responses=[AssistantMessage(text="child-said")]
+        responses=[AssistantMessage(text="child-said")],
     )
     parent = _make_parent(parent_model)
     with _parent_context(parent):
@@ -460,9 +460,9 @@ async def test_serviced_forwarder_delivers_first_reply_exactly_once() -> None:
     )
     child.runtime.append_history(UserMessage(text="go"))
     child.runtime.append_history(AssistantMessage(text="first reply"))
-    latched(AgentIdle())  # first work idle -- latched out
+    latched(AgentIdle())  # `first` work idle -- latched out.
     assert parent.runtime.inbox.empty(), "latched first work idle must not be pushed"
-    latched(AgentIdle())  # second work idle -- delivered
+    latched(AgentIdle())  # `second` work idle -- delivered.
     queue = parent.runtime.inbox._queue
     assert queue.qsize() == 1, f"expected exactly one delivery, got {queue.qsize()}"
     msg = queue.get_nowait()
@@ -734,7 +734,7 @@ def test_resolve_system_factory_then_parent() -> None:
     t = AgentSpawn(system="factory")
     assert t._resolve_system(None, parent) == "factory"
     t2 = AgentSpawn()
-    # parent has system="" by default; fallthrough returns "".
+    # Parent has system="" by default; fallthrough returns "".
     assert t2._resolve_system(None, parent) == ""
 
 
@@ -796,7 +796,7 @@ def test_resolve_model_rebuilds_fresh_transport_when_spec_matches() -> None:
         )
     assert isinstance(resolved, tuple)
     model, returned_spec = resolved
-    assert model is not parent.model  # fresh transport, not the shared alias
+    assert model is not parent.model  # Fresh transport, not the shared alias.
     assert returned_spec == spec
     build.assert_called_once_with("StubP", "env", account=None)
 
@@ -843,7 +843,7 @@ def test_resolve_model_no_spec_falls_back_to_parent_model() -> None:
     so aliasing ``parent.model`` is the only option and is correct here --
     the reuse hazard only exists when a rebuildable spec is present.
     """
-    parent = _make_parent()  # constructed with no model_recipe
+    parent = _make_parent()  # Constructed with no model_recipe.
     assert parent.model_recipe is None
     t = AgentSpawn()
     resolved = t._resolve_model(
@@ -904,7 +904,7 @@ def test_build_child_drops_an_inherited_knob_the_child_model_rejects() -> None:
     parent.model.settings.thinking_effort = "high"
     child = AgentSpawn()._build_child(
         system=None,
-        child_model=StubProviderModel(),  # offers only the ``none`` effort
+        child_model=StubProviderModel(),  # Offers only the ``none`` effort.
         child_spec=None,
         child_tools=[],
         max_rounds=None,
@@ -920,7 +920,7 @@ async def test_run_redirects_latency_option_to_service_tier() -> None:
     parent = _make_parent()
     with _parent_context(parent):
         result = await AgentSpawn().run(
-            {"prompt": "p", "model_options": {"latency": "fast"}}
+            {"prompt": "p", "model_options": {"latency": "fast"}},
         )
     assert result.is_error
     assert "service_tier" in result.content
@@ -1329,7 +1329,7 @@ def test_forwarder_notify_on_asleep_prefers_agent_send_content() -> None:
                     args={"to": "parent", "content": "report body"},
                 ),
             ),
-        )
+        ),
     )
     child.runtime.append_history(ToolResult(call_id="t1", content="Delivered"))
     child.runtime.append_history(AssistantMessage(text="Done."))
@@ -1383,7 +1383,7 @@ def test_forwarder_always_forwards_model_service_suspended() -> None:
     parent = _make_parent()
     seen: list[ChildEvent] = []
     parent.runtime.observers.append(
-        lambda event: seen.append(event) if isinstance(event, ChildEvent) else None
+        lambda event: seen.append(event) if isinstance(event, ChildEvent) else None,
     )
     fwd = _make_forwarder(parent, "child", notify_on_asleep=False)
     suspended = ModelServiceSuspended(
@@ -1414,7 +1414,7 @@ def test_forwarder_always_forwards_usage_notice() -> None:
     parent = _make_parent()
     seen: list[ChildEvent] = []
     parent.runtime.observers.append(
-        lambda event: seen.append(event) if isinstance(event, ChildEvent) else None
+        lambda event: seen.append(event) if isinstance(event, ChildEvent) else None,
     )
     fwd = _make_forwarder(parent, "child", notify_on_asleep=False)
     notice = NoticeMessage(text="[usage: 7d window 89% used]", tier="advisory")
@@ -1445,7 +1445,7 @@ def _child_done_tokens(parent: Agent, fwd: _ChildForwarder) -> int:
     """Run ``emit_done`` and return the published ``ChildDoneEvent.tokens``."""
     seen: list[ChildDoneEvent] = []
     parent.runtime.observers.append(
-        lambda e: seen.append(e) if isinstance(e, ChildDoneEvent) else None
+        lambda e: seen.append(e) if isinstance(e, ChildDoneEvent) else None,
     )
     fwd.emit_done()
     assert len(seen) == 1
@@ -1558,7 +1558,10 @@ async def test_persistent_spawn_writes_parent_lifecycle_record(tmp_path: Path) -
 
     with _parent_context(parent):
         result = spawn._spawn_serviced(
-            child, "fix-tools", "do work", notify_on_asleep=False
+            child,
+            "fix-tools",
+            "do work",
+            notify_on_asleep=False,
         )
 
     task = _persistent_tasks.get("fix-tools")
@@ -1616,7 +1619,10 @@ async def test_persistent_spawn_model_error_reaches_parent_inbox() -> None:
 
     with _parent_context(parent):
         result = t._spawn_serviced(
-            child, "doomed-child", "do work", notify_on_asleep=True
+            child,
+            "doomed-child",
+            "do work",
+            notify_on_asleep=True,
         )
         assert not result.is_error
         task = _persistent_tasks.get("doomed-child")
@@ -1626,7 +1632,7 @@ async def test_persistent_spawn_model_error_reaches_parent_inbox() -> None:
         while parent.runtime.inbox.empty():
             if asyncio.get_running_loop().time() >= deadline:
                 pytest.fail(
-                    "parent inbox never received the child's model-error notification"
+                    "parent inbox never received the child's model-error notification",
                 )
             await asyncio.sleep(0.01)
 
@@ -1663,7 +1669,10 @@ async def test_spawn_serviced_hot_child_keeps_frozen_system_after_ipc_augment() 
     t = AgentSpawn()
     with _parent_context(parent, label="Root"):
         result = t._spawn_serviced(
-            child, "hot-persist-1", "do work", notify_on_asleep=False
+            child,
+            "hot-persist-1",
+            "do work",
+            notify_on_asleep=False,
         )
     assert not result.is_error
     assert child._frozen_system is True
@@ -1698,7 +1707,10 @@ async def test_persistent_spawn_with_notify_on_asleep_notifies_parent() -> None:
 
     with _parent_context(parent):
         result = t._spawn_serviced(
-            child, "watcher-child", "do work", notify_on_asleep=True
+            child,
+            "watcher-child",
+            "do work",
+            notify_on_asleep=True,
         )
         assert not result.is_error
         task = _persistent_tasks.get("watcher-child")
@@ -1746,7 +1758,10 @@ async def test_persistent_spawn_notify_on_asleep_false_stays_silent() -> None:
 
     with _parent_context(parent):
         result = t._spawn_serviced(
-            child, "quiet-child", "do work", notify_on_asleep=False
+            child,
+            "quiet-child",
+            "do work",
+            notify_on_asleep=False,
         )
         assert not result.is_error
         task = _persistent_tasks.get("quiet-child")
@@ -1936,7 +1951,7 @@ def test_resolve_model_parent_provider_always_allowed() -> None:
         )
     assert isinstance(resolved, tuple)
     model, returned_spec = resolved
-    assert model is not parent_model  # fresh transport, parent provider allowed
+    assert model is not parent_model  # Fresh transport, parent provider allowed.
     assert returned_spec == spec
     build.assert_called_once_with("StubP", "env", account=None)
 

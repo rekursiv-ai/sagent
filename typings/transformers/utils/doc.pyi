@@ -102,7 +102,8 @@ def add_code_sample_docstrings(
 ):  # -> Callable[..., Any]:
     ...
 def replace_return_docstrings(
-    output_type=..., config_class=...
+    output_type=...,
+    config_class=...,
 ):  # -> Callable[..., Any]:
     ...
 def copy_func(f):  # -> _Wrapped[..., Any, ..., Any]:

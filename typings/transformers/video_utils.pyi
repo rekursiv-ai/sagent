@@ -65,37 +65,53 @@ def convert_pil_frames_to_video(
 ) -> list[np.ndarray | torch.Tensor]: ...
 def make_batched_videos(videos) -> list[np.ndarray | torch.Tensor | URL | Path]: ...
 def make_batched_metadata(
-    videos: VideoInput, video_metadata: VideoMetadata | dict
+    videos: VideoInput,
+    video_metadata: VideoMetadata | dict,
 ):  # -> VideoMetadata | dict[Any, Any] | <subclass of VideoMetadata and list> | <subclass of dict and list>:
     ...
 def get_video_size(
-    video: np.ndarray, channel_dim: ChannelDimension | None = ...
+    video: np.ndarray,
+    channel_dim: ChannelDimension | None = ...,
 ) -> tuple[int, int]: ...
 def get_uniform_frame_indices(
-    total_num_frames: int, num_frames: int | None = ...
+    total_num_frames: int,
+    num_frames: int | None = ...,
 ):  # -> NDArray[Any]:
     ...
 def default_sample_indices_fn(
-    metadata: VideoMetadata, num_frames=..., fps=..., **kwargs
+    metadata: VideoMetadata,
+    num_frames=...,
+    fps=...,
+    **kwargs,
 ):  # -> NDArray[Any]:
     ...
 def read_video_opencv(
-    video_path: URL | Path, sample_indices_fn: Callable, **kwargs
+    video_path: URL | Path,
+    sample_indices_fn: Callable,
+    **kwargs,
 ) -> tuple[np.ndarray, VideoMetadata]: ...
 def read_video_decord(
-    video_path: URL | Path, sample_indices_fn: Callable, **kwargs
+    video_path: URL | Path,
+    sample_indices_fn: Callable,
+    **kwargs,
 ):  # -> tuple[Any, VideoMetadata]:
     ...
 def read_video_pyav(
-    video_path: URL | Path, sample_indices_fn: Callable, **kwargs
+    video_path: URL | Path,
+    sample_indices_fn: Callable,
+    **kwargs,
 ):  # -> tuple[NDArray[Any], VideoMetadata]:
     ...
 def read_video_torchvision(
-    video_path: URL | Path, sample_indices_fn: Callable, **kwargs
+    video_path: URL | Path,
+    sample_indices_fn: Callable,
+    **kwargs,
 ):  # -> tuple[Any, VideoMetadata]:
     ...
 def read_video_torchcodec(
-    video_path: URL | Path, sample_indices_fn: Callable, **kwargs
+    video_path: URL | Path,
+    sample_indices_fn: Callable,
+    **kwargs,
 ):  # -> tuple[Tensor, VideoMetadata]:
     ...
 
@@ -110,7 +126,8 @@ def load_video(
     **kwargs,
 ) -> np.ndarray: ...
 def convert_to_rgb(
-    video: np.ndarray, input_data_format: str | ChannelDimension | None = ...
+    video: np.ndarray,
+    input_data_format: str | ChannelDimension | None = ...,
 ) -> np.ndarray: ...
 def pad(
     video: np.ndarray,
@@ -123,7 +140,8 @@ def pad(
 def group_videos_by_shape(
     videos: list[torch.Tensor],
 ) -> tuple[
-    dict[tuple[int, int], torch.Tensor], dict[int, tuple[tuple[int, int], int]]
+    dict[tuple[int, int], torch.Tensor],
+    dict[int, tuple[tuple[int, int], int]],
 ]: ...
 def reorder_videos(
     processed_videos: dict[tuple[int, int], torch.Tensor],

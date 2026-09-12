@@ -34,7 +34,9 @@ class TextNetImageProcessorFast(BaseImageProcessorFast):
     def __init__(self, **kwargs: Unpack[TextNetFastImageProcessorKwargs]) -> None: ...
     @auto_docstring
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[TextNetFastImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[TextNetFastImageProcessorKwargs],
     ) -> BatchFeature: ...
     def resize(
         self,

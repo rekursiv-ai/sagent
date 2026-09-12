@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Final
+from typing import TYPE_CHECKING, Annotated, Final
 
 import asyncio
 import json
@@ -28,7 +28,6 @@ from sagent.tools.core import (
 from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
     Invocation,
-    Node,
     bounding_sink,
     cwd_is_known,
     render_command,
@@ -49,6 +48,10 @@ from sagent.tools.lib.pdf import (
 )
 from sagent.tools.tool_spec import CLI_SETTABLE
 from sagent.types.runtime import BytesMessage, ToolResult
+
+
+if TYPE_CHECKING:
+    from bashlex.ast import node
 
 
 # Single source of truth for image handling: extension -> wire MIME. The set of
@@ -93,7 +96,7 @@ _READ_DENY: frozenset[str] = frozenset(
         "-T",
         "--show-all",
         "--show-nonprinting",
-    }
+    },
 )
 
 
@@ -150,7 +153,7 @@ class Read:
                 },
             },
             "required": ["file_path"],
-        }
+        },
     )
 
     async def run(self, args: Mapping[str, object]) -> ToolResult:
@@ -199,7 +202,9 @@ class Read:
             # envelope. ``Tool.run`` must RETURN failures: the agent loop
             # reads a raised exception as a crash, not a tool error.
             return ToolResult(
-                call_id="", content=f"Error reading {file_path}: {err}", is_error=True
+                call_id="",
+                content=f"Error reading {file_path}: {err}",
+                is_error=True,
             )
 
     output: Annotated[Toggle, CLI_SETTABLE] = "off"
@@ -336,7 +341,7 @@ class Read:
             last_lines=last_lines,
         )
 
-    def bash_match(self, trees: Sequence[Node]) -> str | None:
+    def bash_match(self, trees: Sequence[node]) -> str | None:
         """Emit a hint if any command reads a file the Read tool could.
 
         Detection is :func:`replaceable`; this decides only which
@@ -421,16 +426,13 @@ def _read_notebook(p: Path, *, file_path: str) -> ToolResult:
     return ToolResult(call_id="", content=body or "(empty notebook)")
 
 
+# Notebook formats spell an output three ways, and only ``stream`` uses ``text``:
+# ``execute_result``/``display_data`` put the value under ``data['text/plain']`` and
+# ``error`` puts the failure under ``traceback``. Reading just ``text`` therefore showed
+# neither what a cell returned nor how it failed -- the two things a reader opens a
+# notebook for.
 def _collect_cell_outputs(cell: Mapping[str, object], parts: list[str]) -> None:
-    """Append text outputs from a notebook cell to ``parts``.
-
-    nbformat spells an output three ways and only ``stream`` uses
-    ``text``: ``execute_result``/``display_data`` put the value under
-    ``data['text/plain']`` and ``error`` puts the failure under
-    ``traceback``. Reading just ``text`` therefore showed neither what a
-    cell returned nor how it failed -- the two things a reader opens a
-    notebook for.
-    """
+    """Append text outputs from a notebook cell to ``parts``."""
     for out_d in ListCodec.mappings(cell.get("outputs")):
         text = _joined(out_d.get("text"))
         if not text:
@@ -500,7 +502,11 @@ def _read_text(
             content=f"[File exists but is empty: {file_path}]",
         )
     body = _window_text(
-        text, file_path=file_path, offset=offset, limit=limit, last_lines=last_lines
+        text,
+        file_path=file_path,
+        offset=offset,
+        limit=limit,
+        last_lines=last_lines,
     )
     return ToolResult(call_id="", content=body)
 
@@ -548,12 +554,10 @@ def _has_glob(arg: str) -> bool:
     return any(ch in arg for ch in "*?[")
 
 
+# Runs after detection, so an unrecognised flag costs the caller a worked example rather
+# than the nudge itself.
 def _read_call(inv: Invocation) -> str:
-    """Render a concrete Read call for ``inv``, or ``""`` if not derivable.
-
-    Runs after detection, so an unrecognised flag costs the caller a
-    worked example rather than the nudge itself.
-    """
+    """Render a concrete Read call for ``inv``, or ``""`` if not derivable."""
     if inv.exe == "sed":
         return _sed_call(inv)
     paths, window, sign = _paths_and_window(inv.args)
@@ -584,13 +588,10 @@ def _read_call(inv: Invocation) -> str:
     return f" Try: Read file_path={target!r} {key}={window}"
 
 
+# Only those two truncate. ``cat``/``less``/``more`` page the whole stream, so reading a
+# count off them would invent a cap the command never asked for.
 def _sink_window(inv: Invocation) -> str:
-    """Render the line bound a ``| head``/``| tail`` sink imposes.
-
-    Only those two truncate. ``cat``/``less``/``more`` page the whole
-    stream, so reading a count off them would invent a cap the command
-    never asked for.
-    """
+    """Render the line bound a ``| head``/``| tail`` sink imposes."""
     sink = bounding_sink(inv)
     if sink is None:
         return ""
@@ -623,23 +624,14 @@ def _sed_call(inv: Invocation) -> str:
     return f" Try: Read file_path={target!r} offset={first} limit={limit}"
 
 
+# Every spelling of the count reaches the same place: ``-n N``, ``-nN``, ``--lines=N``,
+# ``--lines N``, and the bare ``-N``. Matching only ``-n`` left the rest falling through
+# to the default 10, so a command asking for 50 lines was advertised as asking for 10.
+#
+# The sign is RETURNED rather than stripped because it selects which end of the file is
+# meant, and the answer differs per executable.
 def _paths_and_window(args: tuple[str, ...]) -> tuple[list[str], int, str]:
-    """Split ``head``/``tail`` args into operands, a line count, and its sign.
-
-    Every spelling of the count reaches the same place: ``-n N``,
-    ``-nN``, ``--lines=N``, ``--lines N``, and the bare ``-N``. Matching
-    only ``-n`` left the rest falling through to the default 10, so a
-    command asking for 50 lines was advertised as asking for 10.
-
-    The sign is RETURNED rather than stripped because it selects which
-    end of the file is meant, and the answer differs per executable.
-
-    Returns:
-      paths: Non-flag operands, in argv order.
-      window: Line count; ``0`` when the count is present but unreadable.
-      sign: ``+``, ``-``, or ``""`` for an unsigned count.
-
-    """
+    """Split ``head``/``tail`` args into operands, a line count, and its sign."""
     paths: list[str] = []
     window = 10
     sign = ""
@@ -673,13 +665,11 @@ def _paths_and_window(args: tuple[str, ...]) -> tuple[list[str], int, str]:
     return paths, window, sign
 
 
+# Gated hard on a bare print range: a substitution or an in-place edit is Edit's
+# business, and silently nudging those toward Read would send the caller to a tool that
+# cannot do the job.
 def _sed_reads(args: tuple[str, ...]) -> bool:
-    """``sed -n 'M,Np'`` -- the hand-rolled line window Read's args express.
-
-    Gated hard on a bare print range: a substitution or an in-place edit
-    is Edit's business, and silently nudging those toward Read would
-    send the caller to a tool that cannot do the job.
-    """
+    """``sed -n 'M,Np'`` -- the hand-rolled line window Read's args express."""
     # ``-in`` is quiet PLUS in-place: the file is rewritten, so this is
     # Edit's business. Share the predicate rather than re-deriving it --
     # matching only on "a short flag containing n" accepted ``-in`` and
@@ -699,13 +689,10 @@ def _sed_reads(args: tuple[str, ...]) -> bool:
 _LINE_RANGE_SCRIPT: Final = re.compile(r"^\d+(,(\d+|\$))?p$")
 
 
+# The only caller gates on ``_IMAGE_EXTS``, which IS the key set of this table, so a
+# miss cannot happen -- a default would be a branch for an impossible case.
 def _image_mime(suffix: str) -> str:
-    """MIME type for an image file suffix.
-
-    The only caller gates on ``_IMAGE_EXTS``, which IS the key set of
-    this table, so a miss cannot happen -- a default would be a branch
-    for an impossible case.
-    """
+    """MIME type for an image file suffix."""
     return _MIME_BY_EXT[suffix]
 
 
@@ -769,32 +756,32 @@ def _read_pdf(path: Path, pages: str) -> ToolResult:
     )
 
 
+# Returns the rendered JPEGs and the PDF's full page count (for the continuation hint,
+# without a second open).
 def _render_pdf_jpegs(
-    path: Path, *, first: int | None, last: int | None
+    path: Path,
+    *,
+    first: int | None,
+    last: int | None,
 ) -> tuple[list[bytes], int]:
-    """Rasterize the page range to JPEGs under the rendered-byte budget.
-
-    Returns the rendered JPEGs and the PDF's full page count (for the
-    continuation hint, without a second open).
-    """
+    """Rasterize the page range to JPEGs under the rendered-byte budget."""
     return extract_pdf_pages(
-        path, first=first, last=last, max_total_bytes=_rendered_byte_budget()
+        path,
+        first=first,
+        last=last,
+        max_total_bytes=_rendered_byte_budget(),
     )
 
 
+# Provider request ceilings vary by orders of magnitude (a small local model may allow
+# far less than a 32 MB Anthropic request), so the bound must follow the ACTIVE model's
+# ``max_request_bytes``, not a single constant. The rendered JPEGs are raw bytes that
+# ship base64-expanded (``4/3``), and the request also carries system prompt + history +
+# text, so reserve headroom: budget the raw render at half the ceiling's base64-deflated
+# size. Falls back to ``MAX_RENDERED_BYTES`` when no agent is in context (standalone
+# tool use / tests) or the model declares no ceiling (``<= 0``).
 def _rendered_byte_budget() -> int:
-    """Per-read cap on cumulative rendered JPEG bytes, from the active model.
-
-    Provider request ceilings vary by orders of magnitude (a small local
-    model may allow far less than a 32 MB Anthropic request), so the bound
-    must follow the ACTIVE model's ``max_request_bytes``, not a single
-    constant. The rendered JPEGs are raw bytes that ship base64-expanded
-    (``4/3``), and the request also carries system prompt + history + text,
-    so reserve headroom: budget the raw render at half the ceiling's
-    base64-deflated size. Falls back to ``MAX_RENDERED_BYTES`` when no agent
-    is in context (standalone tool use / tests) or the model declares no
-    ceiling (``<= 0``).
-    """
+    """Per-read cap on cumulative rendered JPEG bytes, from the active model."""
     agent = current_agent_var.get(None)
     ceiling = agent.max_request_bytes if agent is not None else 0
     if ceiling <= 0:
@@ -805,7 +792,8 @@ def _rendered_byte_budget() -> int:
 
 
 def _resolve_page_range(
-    path: Path, pages: str
+    path: Path,
+    pages: str,
 ) -> tuple[int | None, int | None] | ToolResult:
     """Validate page-range spec and return ``(first, last)`` or an error."""
     if pages:
@@ -833,17 +821,14 @@ def _resolve_page_range(
     return None, None
 
 
+# Each tuple is ``(name, coerced, raw)``: ``coerced`` is the ``IntCodec.coerce`` result
+# we'd otherwise pass downstream; ``raw`` is the untouched directive value used to
+# detect "the caller supplied it" (an absent key has ``raw is None`` and is allowed to
+# fall through to the default).
 def _check_minimum(
     *fields: tuple[str, int, object],
 ) -> ToolResult | None:
-    """Reject schema-violating windowing args at the tool entrypoint.
-
-    Each tuple is ``(name, coerced, raw)``: ``coerced`` is the
-    ``IntCodec.coerce`` result we'd otherwise pass downstream; ``raw`` is the
-    untouched directive value used to detect "the caller supplied it"
-    (an absent key has ``raw is None`` and is allowed to fall through
-    to the default).
-    """
+    """Reject schema-violating windowing args at the tool entrypoint."""
     # Defense-in-depth: ``validate_tool_input`` (the JSON-schema gate run by
     # ``_AgentTool.run``) is the primary enforcer of these minima; this re-check
     # covers direct ``._run()`` callers (tests, internal reuse) that bypass it.

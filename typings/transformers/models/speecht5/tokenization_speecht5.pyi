@@ -21,7 +21,10 @@ class SpeechT5Tokenizer(PreTrainedTokenizer):
         **kwargs,
     ) -> None: ...
     def prepare_for_tokenization(
-        self, text, is_split_into_words=..., **kwargs
+        self,
+        text,
+        is_split_into_words=...,
+        **kwargs,
     ):  # -> tuple[str | Any, dict[str, Any]]:
         ...
     @property
@@ -40,7 +43,9 @@ class SpeechT5Tokenizer(PreTrainedTokenizer):
         ...
     def convert_tokens_to_string(self, tokens): ...
     def build_inputs_with_special_tokens(
-        self, token_ids_0, token_ids_1=...
+        self,
+        token_ids_0,
+        token_ids_1=...,
     ) -> list[int]: ...
     def get_special_tokens_mask(
         self,
@@ -49,7 +54,9 @@ class SpeechT5Tokenizer(PreTrainedTokenizer):
         already_has_special_tokens: bool = ...,
     ) -> list[int]: ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
 
 __all__ = ["SpeechT5Tokenizer"]

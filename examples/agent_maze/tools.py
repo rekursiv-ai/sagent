@@ -39,7 +39,7 @@ class WorldTool:
             "- press (needs partner): press the plate you are standing on, NAMING the "
             "agent you are pairing with. A lock has two same-letter plates far apart; it "
             "opens only when BOTH are pressed by two DIFFERENT agents who each name the "
-            "other, within a short window — so agree who-pairs-with-whom and time it. "
+            "other, within a short window -- so agree who-pairs-with-whom and time it. "
             "You have few press charges; a mistimed or mis-named press wastes one."
         )
 
@@ -56,11 +56,19 @@ class WorldTool:
                 },
             },
             "required": ["action"],
-        }
+        },
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
-        """Return a short summary of the tool invocation."""
+        """Return a short summary of the tool invocation.
+
+        Args:
+          args: Tool invocation arguments.
+
+        Returns:
+          summary: Compact description of the requested action.
+
+        """
         act = str(args.get("action", "?"))
         if act == "move":
             return f"world move ({args.get('x')},{args.get('y')})"
@@ -86,7 +94,15 @@ class WorldTool:
         return None
 
     async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Execute the tool with the given arguments."""
+        """Execute the tool with the given arguments.
+
+        Args:
+          args: Tool invocation arguments.
+
+        Returns:
+          result: Result describing the requested world action.
+
+        """
         async with self.engine.lock:
             aid = self._aid()
             if aid is None:
@@ -103,7 +119,9 @@ class WorldTool:
                 x, y = args.get("x"), args.get("y")
                 if not isinstance(x, int) or not isinstance(y, int):
                     return ToolResult(
-                        call_id="", content="move needs integer x and y.", is_error=True
+                        call_id="",
+                        content="move needs integer x and y.",
+                        is_error=True,
                     )
                 head = self.engine.move(aid, x, y)
                 return ToolResult(call_id="", content=self.engine.feedback(aid, head))
@@ -111,7 +129,9 @@ class WorldTool:
                 head = self.engine.press(aid, str(args.get("partner", "")))
                 return ToolResult(call_id="", content=self.engine.feedback(aid, head))
             return ToolResult(
-                call_id="", content=f"unknown action {action!r}", is_error=True
+                call_id="",
+                content=f"unknown action {action!r}",
+                is_error=True,
             )
 
 
@@ -166,17 +186,30 @@ class CommsTool:
                 "content": {"type": "string", "description": "Message text."},
             },
             "required": ["action", "content"],
-        }
+        },
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
-        """Return a short summary of the tool invocation."""
+        """Return a short summary of the tool invocation.
+
+        Args:
+          args: Tool invocation arguments.
+
+        Returns:
+          summary: Compact description of the requested communication.
+
+        """
         if str(args.get("action")) == "say":
             return f"comms say → {args.get('to')}"
         return "comms broadcast"
 
     def prompt(self) -> str:
-        """Return the tool prompt for the agent."""
+        """Return the tool prompt for the agent.
+
+        Returns:
+          prompt: Prompt describing the agent's reachable teammates.
+
+        """
         me = agent_label_var.get("")
         peers = sorted(a for a in agent_registry if a != me)
         if self.mesh:
@@ -193,18 +226,31 @@ class CommsTool:
         return None
 
     def _deliver(
-        self, frm: str, to: str, content: str, *, status: str = "delivered"
+        self,
+        frm: str,
+        to: str,
+        content: str,
+        *,
+        status: str = "delivered",
     ) -> None:
         """Deliver a message to a target agent and log it."""
         target = agent_registry.get(to)
         if target is not None:
             target.runtime.inbox.push_back(
-                AgentSendQueuedMessage(source=frm, text=content)
+                AgentSendQueuedMessage(source=frm, text=content),
             )
         self.engine.emit(frm, "message", to=to, text=content[:160], status=status)
 
     async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Execute the tool with the given arguments."""
+        """Execute the tool with the given arguments.
+
+        Args:
+          args: Tool invocation arguments.
+
+        Returns:
+          result: Result describing the requested communication.
+
+        """
         me = agent_label_var.get("")
         if not me:
             return ToolResult(call_id="", content="no identity.", is_error=True)
@@ -222,7 +268,7 @@ class CommsTool:
                 )
             peers = [a for a in sorted(agent_registry) if a != me]
             for p in peers:
-                self._deliver(me, p, content)  # broadcast = N delivered sends
+                self._deliver(me, p, content)  # Broadcast = N delivered sends.
             return ToolResult(call_id="", content=f"broadcast to {peers}")
 
         if action == "say":
@@ -237,8 +283,11 @@ class CommsTool:
                 )
             if to not in agent_registry:
                 self._deliver(
-                    me, to, content, status="dropped"
-                )  # no target → logs only
+                    me,
+                    to,
+                    content,
+                    status="dropped",
+                )  # No target → logs only.
                 return ToolResult(
                     call_id="",
                     content=f"unknown agent {to!r}; reachable: {sorted(agent_registry)}",
@@ -248,7 +297,9 @@ class CommsTool:
             return ToolResult(call_id="", content=f"sent to {to}")
 
         return ToolResult(
-            call_id="", content=f"unknown action {action!r}", is_error=True
+            call_id="",
+            content=f"unknown action {action!r}",
+            is_error=True,
         )
 
 
@@ -256,7 +307,7 @@ class SpawnTool:
     """Grow the team: spawn a helper on a visible empty tile (the recursion primitive).
 
     Thin by design. The autonomous demo runs each agent as its own concurrent task, so
-    the harness — not this tool — owns the child's lifecycle (it builds the child Agent,
+    the harness -- not this tool -- owns the child's lifecycle (it builds the child Agent,
     embodies it, registers its label, and launches its drive task). That's why we don't
     use sagent's ``AgentSpawn`` here: AgentSpawn bundles its own run-loop (run-to-
     completion or a persistent serve_forever peer), neither of which fits a tick-free
@@ -290,7 +341,7 @@ class SpawnTool:
         return (
             "Spawn a NEW teammate on an empty floor tile next to you that you can see "
             "(needs x,y). A lock needs two different agents pressing two plates at once, "
-            "so a lone agent can open nothing — spawn helpers early, then spread out to "
+            "so a lone agent can open nothing -- spawn helpers early, then spread out to "
             "find plates and pair up. The newcomer starts exploring on its own."
         )
 
@@ -299,7 +350,7 @@ class SpawnTool:
             "type": "object",
             "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}},
             "required": ["x", "y"],
-        }
+        },
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -316,12 +367,22 @@ class SpawnTool:
         return None
 
     async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Execute the maze interaction tool."""
+        """Execute the maze interaction tool.
+
+        Args:
+          args: Tool invocation arguments.
+
+        Returns:
+          result: Result describing the requested spawn action.
+
+        """
         async with self.engine.lock:
             me = agent_label_var.get("")
             if not me or me not in self.engine.world.agents:
                 return ToolResult(
-                    call_id="", content="you have no body.", is_error=True
+                    call_id="",
+                    content="you have no body.",
+                    is_error=True,
                 )
             if not self.mesh and me != self.coordinator:
                 self.engine.emit(me, "spawn", outcome="not_allowed")
@@ -332,17 +393,23 @@ class SpawnTool:
                 )
             if len(self.engine.world.agents) >= self.max_agents:
                 return ToolResult(
-                    call_id="", content="team is at capacity.", is_error=True
+                    call_id="",
+                    content="team is at capacity.",
+                    is_error=True,
                 )
             x, y = args.get("x"), args.get("y")
             if not isinstance(x, int) or not isinstance(y, int):
                 return ToolResult(
-                    call_id="", content="spawn needs integer x,y.", is_error=True
+                    call_id="",
+                    content="spawn needs integer x,y.",
+                    is_error=True,
                 )
             ok, why = self.engine.world.can_spawn(me, x, y)
             if not ok:
                 return ToolResult(
-                    call_id="", content=f"can't spawn there: {why}", is_error=True
+                    call_id="",
+                    content=f"can't spawn there: {why}",
+                    is_error=True,
                 )
             child = self._spawn_child(me, (x, y))
             return ToolResult(

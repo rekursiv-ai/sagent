@@ -87,12 +87,14 @@ class Trainer:
         compute_metrics: Callable[[EvalPrediction], dict] | None = ...,
         callbacks: list[TrainerCallback] | None = ...,
         optimizers: tuple[
-            torch.optim.Optimizer | None, torch.optim.lr_scheduler.LambdaLR | None
+            torch.optim.Optimizer | None,
+            torch.optim.lr_scheduler.LambdaLR | None,
         ] = ...,
         optimizer_cls_and_kwargs: tuple[type[torch.optim.Optimizer], dict[str, Any]]
         | None = ...,
         preprocess_logits_for_metrics: Callable[
-            [torch.Tensor, torch.Tensor], torch.Tensor
+            [torch.Tensor, torch.Tensor],
+            torch.Tensor,
         ]
         | None = ...,
     ) -> None: ...
@@ -108,7 +110,8 @@ class Trainer:
         ...
     def get_train_dataloader(self) -> DataLoader: ...
     def get_eval_dataloader(
-        self, eval_dataset: str | Dataset | None = ...
+        self,
+        eval_dataset: str | Dataset | None = ...,
     ) -> DataLoader: ...
     def get_test_dataloader(self, test_dataset: Dataset) -> DataLoader: ...
     def create_optimizer_and_scheduler(self, num_training_steps: int):  # -> None:
@@ -121,15 +124,19 @@ class Trainer:
     def get_learning_rates(self):  # -> list[Any]:
         ...
     def get_optimizer_group(
-        self, param: str | torch.nn.parameter.Parameter | None = ...
+        self,
+        param: str | torch.nn.parameter.Parameter | None = ...,
     ):  # -> dict[str, Any] | Any | list[Any]:
         ...
     @staticmethod
     def get_optimizer_cls_and_kwargs(
-        args: TrainingArguments, model: PreTrainedModel | None = ...
+        args: TrainingArguments,
+        model: PreTrainedModel | None = ...,
     ) -> tuple[Any, Any]: ...
     def create_scheduler(
-        self, num_training_steps: int, optimizer: torch.optim.Optimizer = ...
+        self,
+        num_training_steps: int,
+        optimizer: torch.optim.Optimizer = ...,
     ):  # -> LayerWiseDummyScheduler | ReduceLROnPlateau | LambdaLR:
         ...
     def num_examples(self, dataloader: DataLoader) -> int: ...
@@ -138,11 +145,16 @@ class Trainer:
     def call_model_init(self, trial=...):  # -> PreTrainedModel:
         ...
     def torch_jit_model_eval(
-        self, model, dataloader, training=...
+        self,
+        model,
+        dataloader,
+        training=...,
     ):  # -> RecursiveScriptModule:
         ...
     def compare_trainer_and_checkpoint_args(
-        self, training_args, trainer_state
+        self,
+        training_args,
+        trainer_state,
     ):  # -> None:
         ...
     def train(
@@ -168,7 +180,8 @@ class Trainer:
     def compute_loss_context_manager(self):  # -> ExitStack[bool | None]:
         ...
     def autocast_smart_context_manager(
-        self, cache_enabled: bool | None = ...
+        self,
+        cache_enabled: bool | None = ...,
     ):  # -> autocast | nullcontext[None]:
         ...
     def training_step(
@@ -188,7 +201,9 @@ class Trainer:
     def is_local_process_zero(self) -> bool: ...
     def is_world_process_zero(self) -> bool: ...
     def save_model(
-        self, output_dir: str | None = ..., _internal_call: bool = ...
+        self,
+        output_dir: str | None = ...,
+        _internal_call: bool = ...,
     ):  # -> None:
         ...
     def store_flos(self):  # -> None:
@@ -258,7 +273,10 @@ class Trainer:
     def propagate_args_to_deepspeed(self, auto_find_batch_size=...):  # -> None:
         ...
     def get_batch_samples(
-        self, epoch_iterator: Iterator, num_batches: int, device: torch.device
+        self,
+        epoch_iterator: Iterator,
+        num_batches: int,
+        device: torch.device,
     ) -> tuple[list, torch.Tensor | int | None]: ...
     def set_initial_training_values(
         self,

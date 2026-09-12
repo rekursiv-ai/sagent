@@ -9,7 +9,9 @@ __all__ = ["HalfCauchy"]
 class HalfCauchy(TransformedDistribution):
     base_dist: Cauchy
     def __init__(
-        self, scale: Tensor | float, validate_args: bool | None = ...
+        self,
+        scale: Tensor | float,
+        validate_args: bool | None = ...,
     ) -> None: ...
     def expand(self, batch_shape, _instance=...) -> Self: ...
     @property

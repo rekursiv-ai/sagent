@@ -5,7 +5,11 @@ logger = ...
 
 class DecoderConfig(PretrainedConfig):
     def __init__(
-        self, vocab_size=..., bos_token_id=..., is_encoder_decoder=..., **kwargs
+        self,
+        vocab_size=...,
+        bos_token_id=...,
+        is_encoder_decoder=...,
+        **kwargs,
     ) -> None: ...
 
 class FSMTConfig(PretrainedConfig):

@@ -49,7 +49,8 @@ class ROCmTemplateCaller(ChoiceCaller):
         input_nodes: list[Buffer],
         layout: Layout,
         make_kernel_render: Callable[
-            [ROCmTemplateBuffer, Sequence[IRNode] | None], str
+            [ROCmTemplateBuffer, Sequence[IRNode] | None],
+            str,
         ],
         bmreq: ROCmBenchmarkRequest,
         template: ROCmTemplate,

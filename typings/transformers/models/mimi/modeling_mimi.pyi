@@ -114,7 +114,12 @@ class MimiRotaryEmbedding(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 
@@ -183,7 +188,8 @@ class MimiTransformerLayer(GradientCheckpointingLayer):
         cache_position: torch.LongTensor | None = ...,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class MimiTransformerModel(nn.Module):
@@ -201,7 +207,9 @@ class MimiTransformerModel(nn.Module):
         cache_position: torch.LongTensor | None = ...,
     ) -> tuple | BaseModelOutputWithPast: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithPast: ...
 
 class MimiDecoder(nn.Module):
@@ -229,17 +237,23 @@ class MimiVectorQuantization(nn.Module):
 
 class MimiResidualVectorQuantizer(nn.Module):
     def __init__(
-        self, config: MimiConfig, num_quantizers: int | None = ...
+        self,
+        config: MimiConfig,
+        num_quantizers: int | None = ...,
     ) -> None: ...
     def encode(
-        self, embeddings: torch.Tensor, num_quantizers: int | None = ...
+        self,
+        embeddings: torch.Tensor,
+        num_quantizers: int | None = ...,
     ) -> torch.Tensor: ...
     def decode(self, codes: torch.Tensor) -> torch.Tensor: ...
 
 class MimiSplitResidualVectorQuantizer(nn.Module):
     def __init__(self, config: MimiConfig) -> None: ...
     def encode(
-        self, embeddings: torch.Tensor, num_quantizers: float | None = ...
+        self,
+        embeddings: torch.Tensor,
+        num_quantizers: float | None = ...,
     ) -> torch.Tensor: ...
     def decode(self, codes: torch.Tensor) -> torch.Tensor: ...
 
@@ -258,17 +272,20 @@ class MimiPreTrainedModel(PreTrainedModel):
 @auto_docstring(
     custom_intro="""
     The Mimi neural audio codec model.
-    """
+    """,
 )
 class MimiModel(MimiPreTrainedModel):
     def __init__(self, config: MimiConfig) -> None: ...
     def get_encoder(self):  # -> MimiEncoder:
         ...
     def get_encoded_length(
-        self, input_length: torch.LongTensor
+        self,
+        input_length: torch.LongTensor,
     ) -> torch.LongTensor: ...
     def get_audio_codes_mask(
-        self, padding_mask: torch.Tensor, padding_side: str = ...
+        self,
+        padding_mask: torch.Tensor,
+        padding_side: str = ...,
     ): ...
     def encode(
         self,

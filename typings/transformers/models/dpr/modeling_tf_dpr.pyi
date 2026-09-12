@@ -136,7 +136,8 @@ class TFDPRContextEncoder(TFDPRPretrainedContextEncoder):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(TF_DPR_ENCODERS_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFDPRContextEncoderOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFDPRContextEncoderOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -162,7 +163,8 @@ class TFDPRQuestionEncoder(TFDPRPretrainedQuestionEncoder):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(TF_DPR_ENCODERS_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFDPRQuestionEncoderOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFDPRQuestionEncoderOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -188,7 +190,8 @@ class TFDPRReader(TFDPRPretrainedReader):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(TF_DPR_READER_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFDPRReaderOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFDPRReaderOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,

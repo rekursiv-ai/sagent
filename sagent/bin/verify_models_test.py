@@ -18,8 +18,8 @@ def _cap(request: int, response: int) -> ModelCapability:
     """Build a capability carrying only the two limits ``compare`` reads."""
     return ModelCapability(
         context=MappingProxyType(
-            {"": ModelLimits(max_request_tokens=request, max_response_tokens=response)}
-        )
+            {"": ModelLimits(max_request_tokens=request, max_response_tokens=response)},
+        ),
     )
 
 
@@ -49,7 +49,9 @@ class _Response:
                 request=self.request,
             )
             raise httpx2.HTTPStatusError(
-                "boom", request=self.request, response=response
+                "boom",
+                request=self.request,
+                response=response,
             )
 
 
@@ -106,14 +108,14 @@ class TestFetchGoogle:
                     },
                     {"name": "models/incomplete", "inputTokenLimit": 1},
                 ],
-            }
+            },
         )
         monkeypatch.setattr(httpx2, "AsyncClient", _make_client([response]))
         assert await verify_models.fetch_google("key") == {
             "gemini-test": verify_models.LiveLimits(
                 max_request_tokens=10,
                 max_response_tokens=20,
-            )
+            ),
         }
 
 
@@ -135,7 +137,7 @@ class TestFetchOpenai:
             "ok": verify_models.LiveLimits(
                 max_request_tokens=1000,
                 max_response_tokens=200,
-            )
+            ),
         }
         out = capsys.readouterr().out
         assert "could not parse" in out
@@ -160,7 +162,7 @@ class TestFetchAnthropic:
             "ok": verify_models.LiveLimits(
                 max_request_tokens=100,
                 max_response_tokens=10,
-            )
+            ),
         }
         out = capsys.readouterr().out
         assert "missing limits" in out
@@ -173,7 +175,9 @@ class TestFetchAnthropic:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         monkeypatch.setattr(
-            httpx2, "AsyncClient", _make_client([_Response(status_code=404)])
+            httpx2,
+            "AsyncClient",
+            _make_client([_Response(status_code=404)]),
         )
         limits = await verify_models.fetch_anthropic("key", ["missing"])
         assert limits == {}
@@ -213,7 +217,7 @@ class TestCompare:
     def test_reports_all_ok(self, capsys: pytest.CaptureFixture[str]) -> None:
         known = {"m": _cap(1, 2)}
         live = {
-            "m": verify_models.LiveLimits(max_request_tokens=1, max_response_tokens=2)
+            "m": verify_models.LiveLimits(max_request_tokens=1, max_response_tokens=2),
         }
         assert verify_models.compare("Provider", known, live) == 0
         assert "all 1 models OK" in capsys.readouterr().out
@@ -245,7 +249,7 @@ class TestMain:
                 "extra": verify_models.LiveLimits(
                     max_request_tokens=1,
                     max_response_tokens=1,
-                )
+                ),
             }
 
         monkeypatch.setattr(verify_models, "fetch_openai", fake_fetch_openai)

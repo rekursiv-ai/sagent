@@ -60,7 +60,9 @@ class SegformerImageProcessor(BaseImageProcessor):
         input_data_format: str | ChannelDimension | None = ...,
     ) -> PIL.Image.Image: ...
     def post_process_semantic_segmentation(
-        self, outputs, target_sizes: list[tuple] | None = ...
+        self,
+        outputs,
+        target_sizes: list[tuple] | None = ...,
     ):  # -> list[Any]:
         ...
 

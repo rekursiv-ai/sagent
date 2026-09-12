@@ -57,7 +57,9 @@ class AutotuneArgs:
 class PartialRender:
     type HookFn = Callable[[], str]
     def __init__(
-        self, code: str, replacement_hooks: dict[str, HookFn | None]
+        self,
+        code: str,
+        replacement_hooks: dict[str, HookFn | None],
     ) -> None: ...
     @property
     def code(self) -> str: ...
@@ -90,10 +92,18 @@ class ModificationWrapper(V.WrapperHandler):
     ) -> None: ...
     def load(self, name: str, index: sympy.Expr): ...
     def indirect_indexing(
-        self, index_var: str, size, check, wrap_neg=...
+        self,
+        index_var: str,
+        size,
+        check,
+        wrap_neg=...,
     ) -> Symbol: ...
     def store(
-        self, name: str, index: sympy.Expr, value: CSEVariable, mode: StoreMode = ...
+        self,
+        name: str,
+        index: sympy.Expr,
+        value: CSEVariable,
+        mode: StoreMode = ...,
     ) -> str: ...
 
 type RecordedEventsType = list[tuple[str, list[Any], dict[str, Any]]]
@@ -162,7 +172,10 @@ class TritonTemplateKernel(TritonKernel):
         val_shape: list[str] | None = ...,
     ) -> str: ...
     def render(
-        self, template, kwargs, record_input_dependent_tracked_event=...
+        self,
+        template,
+        kwargs,
+        record_input_dependent_tracked_event=...,
     ) -> PartialRender: ...
     def make_load(self, name, indices, mask) -> str: ...
     def indexing(
@@ -222,7 +235,11 @@ class GeneratedCodeCache:
     ) -> str | None: ...
     def get_entry(self, cache_key: str | None) -> GeneratedCodeCacheEntry | None: ...
     def put_entry(
-        self, cache_key: str | None, code: str, extra: str, events: list[Any]
+        self,
+        cache_key: str | None,
+        code: str,
+        extra: str,
+        events: list[Any],
     ) -> None: ...
 
 class TritonTemplate(KernelTemplate):
@@ -243,7 +260,9 @@ class TritonTemplate(KernelTemplate):
     @property
     def uid(self) -> str: ...
     def maybe_append_choice(
-        self, choices: list[Any], **kwargs: Any
+        self,
+        choices: list[Any],
+        **kwargs: Any,
     ) -> NotImplementedError | None: ...
     def generate_and_load(
         self,
@@ -302,13 +321,19 @@ class ExternKernelChoice:
     @functools.cache  # noqa: B019 -- mirrors upstream @lru_cache on a method; not executed in a stub
     def hash_key(self) -> str: ...
     def bind(
-        self, input_nodes, layout, ordered_kwargs_for_cpp_kernel=..., **kwargs
+        self,
+        input_nodes,
+        layout,
+        ordered_kwargs_for_cpp_kernel=...,
+        **kwargs,
     ) -> ExternKernelCaller: ...
     @property
     def uid(self) -> str: ...
     def choice_or_none(self, **kwargs: Any) -> ChoiceCaller | None: ...
     def maybe_append_choice(
-        self, choices: list[Any], **kwargs: Any
+        self,
+        choices: list[Any],
+        **kwargs: Any,
     ) -> NotImplementedError | None: ...
 
 class TritonTemplateCaller(ir.TritonTemplateCallerBase):
@@ -364,7 +389,11 @@ class DataProcessorChoiceCallerWrapper:
 
 class DataProcessorTemplateWrapper:
     def __init__(
-        self, wrapped_template_cls, preprocessor, postprocessor, **kwargs
+        self,
+        wrapped_template_cls,
+        preprocessor,
+        postprocessor,
+        **kwargs,
     ) -> None: ...
     def __getattr__(self, name) -> Any: ...
     def maybe_append_choice(self, choices, **kwargs): ...
@@ -379,7 +408,9 @@ class NoValidChoicesError(RuntimeError): ...
 def get_num_workers() -> int: ...
 def create_inputs_key(input_nodes) -> str: ...
 def create_precompile_key(
-    name: str, inputs_key: str, choices: list[ChoiceCaller]
+    name: str,
+    inputs_key: str,
+    choices: list[ChoiceCaller],
 ) -> str: ...
 
 type FeedbackFunction = Callable[
@@ -429,11 +460,15 @@ class AlgorithmSelectorCache(PersistentCache):
     ) -> AutotuneArgs: ...
     @classmethod
     def benchmark_choice(
-        cls, choice: ChoiceCaller, autotune_args: AutotuneArgs
+        cls,
+        choice: ChoiceCaller,
+        autotune_args: AutotuneArgs,
     ) -> float: ...
     @classmethod
     def benchmark_choices(
-        cls, choices: Sequence[ChoiceCaller], autotune_args: AutotuneArgs
+        cls,
+        choices: Sequence[ChoiceCaller],
+        autotune_args: AutotuneArgs,
     ) -> dict[ChoiceCaller, float]: ...
     @classmethod
     def benchmark_in_current_process(
@@ -491,7 +526,12 @@ class AlgorithmSelectorCache(PersistentCache):
     def benchmark_example_value(node, hint_override: int | None = ...) -> Tensor: ...
     @staticmethod
     def generate_example_value(
-        size, stride, device, dtype, extra_size, allocation_size=...
+        size,
+        stride,
+        device,
+        dtype,
+        extra_size,
+        allocation_size=...,
     ) -> Tensor: ...
     @staticmethod
     def key_of(node) -> tuple[Any, str, *tuple[int, ...]]: ...

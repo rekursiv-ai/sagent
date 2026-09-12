@@ -61,7 +61,12 @@ class TFWav2Vec2GroupNorm(keras.layers.Layer):
 
 class TFWav2Vec2WeightNormConv1D(keras.layers.Conv1D):
     def __init__(
-        self, filters, kernel_size, groups, explicit_padding, **kwargs
+        self,
+        filters,
+        kernel_size,
+        groups,
+        explicit_padding,
+        **kwargs,
     ) -> None: ...
     def build(self, input_shape):  # -> None:
         ...
@@ -69,7 +74,10 @@ class TFWav2Vec2WeightNormConv1D(keras.layers.Conv1D):
 
 class TFWav2Vec2NoLayerNormConvLayer(keras.layers.Layer):
     def __init__(
-        self, config: Wav2Vec2Config, layer_id: int = ..., **kwargs: Any
+        self,
+        config: Wav2Vec2Config,
+        layer_id: int = ...,
+        **kwargs: Any,
     ) -> None: ...
     def call(self, hidden_states: tf.Tensor) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -77,7 +85,10 @@ class TFWav2Vec2NoLayerNormConvLayer(keras.layers.Layer):
 
 class TFWav2Vec2LayerNormConvLayer(keras.layers.Layer):
     def __init__(
-        self, config: Wav2Vec2Config, layer_id: int = ..., **kwargs: Any
+        self,
+        config: Wav2Vec2Config,
+        layer_id: int = ...,
+        **kwargs: Any,
     ) -> None: ...
     def call(self, hidden_states: tf.Tensor) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -85,7 +96,10 @@ class TFWav2Vec2LayerNormConvLayer(keras.layers.Layer):
 
 class TFWav2Vec2GroupNormConvLayer(keras.layers.Layer):
     def __init__(
-        self, config: Wav2Vec2Config, layer_id: int = ..., **kwargs: Any
+        self,
+        config: Wav2Vec2Config,
+        layer_id: int = ...,
+        **kwargs: Any,
     ) -> None: ...
     def call(self, hidden_states: tf.Tensor) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -242,7 +256,8 @@ class TFWav2Vec2Model(TFWav2Vec2PreTrainedModel):
     def __init__(self, config: Wav2Vec2Config, *inputs, **kwargs) -> None: ...
     @add_start_docstrings_to_model_forward(WAV2VEC2_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFBaseModelOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFBaseModelOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     @unpack_inputs
     def call(
@@ -274,7 +289,8 @@ class TFWav2Vec2ForCTC(TFWav2Vec2PreTrainedModel):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(WAV2VEC2_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFCausalLMOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFCausalLMOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,

@@ -57,7 +57,7 @@ _CHAR_TO_CELL: Final[dict[str, CellType]] = {
     "P": "plate",
 }
 _DIG_HP = 2  # config-globals: ignore -- ticks to break a diggable wall (retunable)
-PLATE_LETTERS: Final = "abcdefgh"  # a paired-plate lock: two tiles sharing a letter
+PLATE_LETTERS: Final = "abcdefgh"  # `a` paired-plate lock: two tiles sharing a letter.
 PRESS_WINDOW = 10  # config-globals: ignore -- ticks a press stays armed (retunable)
 PRESS_CHARGES = 6  # config-globals: ignore -- presses per agent (retunable)
 
@@ -68,9 +68,9 @@ class Item:
 
     name: str
     kind: Literal["diamond", "junk", "treasure"]
-    xy: tuple[int, int] | None  # None when held / collected
+    xy: tuple[int, int] | None  # None when held / collected.
     holder: str | None = None
-    collected: bool = False  # treasures: banked, not carried
+    collected: bool = False  # Treasures: banked, not carried.
 
 
 @dataclass(kw_only=True, slots=True)
@@ -85,7 +85,7 @@ class Agent:
     alive: bool = True
     extracted: bool = False
     presses_left: int = PRESS_CHARGES
-    armed_until: int = -1  # plate-press stays counted while tick <= armed_until
+    armed_until: int = -1  # plate-press stays counted while tick <= armed_until.
 
     @property
     def xy(self) -> tuple[int, int]:
@@ -108,7 +108,7 @@ class World:
         self.width = max(len(r) for r in rows)
         self.grid: list[list[CellType]] = []
         self.dig_hp: dict[tuple[int, int], int] = {}
-        self._plate_lock: dict[tuple[int, int], int] = {}  # plate tile -> lock index
+        self._plate_lock: dict[tuple[int, int], int] = {}  # Plate tile -> lock index.
         self.items: dict[str, Item] = {}
         self.agents: dict[str, Agent] = {}
         self.exit_xy: tuple[int, int] = (0, 0)
@@ -126,7 +126,7 @@ class World:
                     if ch == "E":
                         self.exit_xy = (x, y)
                     continue
-                if ch in PLATE_LETTERS:  # a paired-lock plate (two share a letter)
+                if ch in PLATE_LETTERS:  # `a` paired-lock plate (two share a letter)
                     cells.append("plate")
                     self._plate_lock[(x, y)] = PLATE_LETTERS.index(ch)
                     continue
@@ -134,15 +134,21 @@ class World:
                 cells.append("floor")
                 if ch == "*":
                     self.items["diamond"] = Item(
-                        name="diamond", kind="diamond", xy=(x, y)
+                        name="diamond",
+                        kind="diamond",
+                        xy=(x, y),
                     )
                 elif ch == "$":
                     self.items[f"t_{x}_{y}"] = Item(
-                        name=f"t_{x}_{y}", kind="treasure", xy=(x, y)
+                        name=f"t_{x}_{y}",
+                        kind="treasure",
+                        xy=(x, y),
                     )
                 elif ch == "k":
                     self.items[f"key_{x}_{y}"] = Item(
-                        name=f"key_{x}_{y}", kind="junk", xy=(x, y)
+                        name=f"key_{x}_{y}",
+                        kind="junk",
+                        xy=(x, y),
                     )
                 elif ch.isdigit() and ch != "0":
                     spawns.append((int(ch), f"agent{ch}"))
@@ -198,7 +204,9 @@ class World:
         return out
 
     def _bfs_next(
-        self, start: tuple[int, int], goal: tuple[int, int]
+        self,
+        start: tuple[int, int],
+        goal: tuple[int, int],
     ) -> tuple[int, int] | None:
         """First step on a shortest passable path from start to goal, or None."""
         if start == goal:
@@ -229,17 +237,30 @@ class World:
             self.agents[aid] = Agent(id=aid, x=x, y=y)
 
     def add_agent(self, aid: str, xy: tuple[int, int]) -> None:
-        """Add a dynamically-spawned agent's body at a tile (the spawner's tile).
+        """Add a dynamically-spawned agent's body at a tile.
 
         This is the crux of the spawn-location contrast: a mesh agent spawns at the
         fork it is standing on; the centralized coordinator spawns at the entrance.
+
+        Args:
+          aid: Identifier for the new agent.
+          xy: Coordinates where the spawner's tile places the agent.
+
         """
         self.agents[aid] = Agent(id=aid, x=xy[0], y=xy[1])
 
     # -- perception (fog of war) -------------------------------------------
 
     def view(self, agent_id: str) -> dict[str, object]:
-        """Return the agent's fog-limited view + own inventory + budget."""
+        """Return the agent's fog-limited view + own inventory + budget.
+
+        Args:
+          agent_id: Identifier of the agent requesting the view.
+
+        Returns:
+          view: Fog-limited cells, items, agents, and status metadata.
+
+        """
         a = self.agents[agent_id]
         cells: list[dict[str, object]] = []
         for dy in range(-self.sight, self.sight + 1):
@@ -289,7 +310,18 @@ class World:
         }
 
     def can_spawn(self, spawner_id: str, x: int, y: int) -> tuple[bool, str]:
-        """Validate a chosen spawn tile: visible to the spawner, passable, unoccupied."""
+        """Validate a chosen spawn tile: visible, passable, and unoccupied.
+
+        Args:
+          spawner_id: Identifier of the agent requesting the spawn.
+          x: Horizontal coordinate of the candidate tile.
+          y: Vertical coordinate of the candidate tile.
+
+        Returns:
+          allowed: Whether the tile can host a new agent.
+          reason: Explanation when the tile is not allowed.
+
+        """
         a = self.agents[spawner_id]
         if not self._within_sight(a, (x, y)):
             return (False, "that tile is out of your sight")
@@ -309,10 +341,17 @@ class World:
         self.agents[agent_id].target = xy
 
     def advance(self, agent_id: str) -> dict[str, object]:
-        """Walk one tile toward the agent's target. Decision-point reporter.
+        """Walk one tile toward the agent's target and report the result.
 
         Returns an event dict with ``kind`` in {arrived, moved, blocked, idle}.
         ``arrived``/``blocked``/``idle`` mean "the agent needs a new decision".
+
+        Args:
+          agent_id: Identifier of the agent to advance.
+
+        Returns:
+          event: Movement event with its kind, agent, and position.
+
         """
         a = self.agents[agent_id]
         if a.extracted or not a.alive:
@@ -337,7 +376,15 @@ class World:
         }
 
     def pick(self, agent_id: str) -> dict[str, object]:
-        """Pick up items on the agent's tile (treasures BANK; others are carried)."""
+        """Pick up items on the agent's tile.
+
+        Args:
+          agent_id: Identifier of the agent collecting items.
+
+        Returns:
+          event: Pickup event listing collected item names.
+
+        """
         a = self.agents[agent_id]
         got: list[str] = []
         for it in self.items.values():
@@ -354,7 +401,16 @@ class World:
         return {"kind": "pick", "id": agent_id, "got": got}
 
     def drop(self, agent_id: str, at_exit: bool = False) -> dict[str, object]:
-        """Drop carried items onto the current tile (e.g. deliver to the exit)."""
+        """Drop carried items onto the current tile.
+
+        Args:
+          agent_id: Identifier of the agent dropping items.
+          at_exit: Whether the drop occurs at the exit.
+
+        Returns:
+          event: Drop event listing item names and exit status.
+
+        """
         a = self.agents[agent_id]
         dropped = list(a.inventory)
         for name in dropped:
@@ -365,7 +421,16 @@ class World:
         return {"kind": "drop", "id": agent_id, "dropped": dropped, "at_exit": at_exit}
 
     def dig(self, agent_id: str, at: tuple[int, int]) -> dict[str, object]:
-        """Spend one tick chipping an adjacent diggable wall."""
+        """Spend one tick chipping an adjacent diggable wall.
+
+        Args:
+          agent_id: Identifier of the agent doing the digging.
+          at: Coordinates of the wall to chip.
+
+        Returns:
+          event: Dig event describing the resulting wall state.
+
+        """
         a = self.agents[agent_id]
         if max(abs(a.x - at[0]), abs(a.y - at[1])) > 1:
             return {"kind": "dig", "id": agent_id, "at": list(at), "result": "too_far"}
@@ -394,10 +459,17 @@ class World:
         }
 
     def press(self, agent_id: str) -> dict[str, object]:
-        """Press the plate under you: arms it for PRESS_WINDOW ticks, spends one charge.
+        """Press the plate under you and spend one charge.
 
         A lock needs BOTH its plates armed in the same tick, so a solo or mistimed press
         is a wasted charge -- partners must coordinate the moment (hence: communicate).
+
+        Args:
+          agent_id: Identifier of the agent pressing the plate.
+
+        Returns:
+          event: Press event describing the result and remaining charges.
+
         """
         a = self.agents[agent_id]
         if a.xy not in self._plate_lock:
@@ -429,7 +501,12 @@ class World:
     # -- tick + win/lose ---------------------------------------------------
 
     def pressed_plates(self) -> set[tuple[int, int]]:
-        """Return the set of plate tiles currently pressed by agents."""
+        """Return the set of plate tiles currently pressed by agents.
+
+        Returns:
+          plates: Coordinates of occupied plate tiles.
+
+        """
         plates = {
             (x, y)
             for y in range(self.height)
@@ -440,7 +517,12 @@ class World:
         return plates & on
 
     def all_plates(self) -> set[tuple[int, int]]:
-        """Return the set of all plate tiles in the maze."""
+        """Return the set of all plate tiles in the maze.
+
+        Returns:
+          plates: Coordinates of every plate tile.
+
+        """
         return {
             (x, y)
             for y in range(self.height)
@@ -490,7 +572,12 @@ class World:
         return False
 
     def frame(self) -> dict[str, object]:
-        """Snapshot the current tick for the replay trace."""
+        """Snapshot the current tick for the replay trace.
+
+        Returns:
+          frame: Serializable state snapshot for the current tick.
+
+        """
         return {
             "tick": self.tick,
             "budget_left": self.budget - self.tick,
@@ -587,9 +674,11 @@ LEVEL_TREASURE: Final = [
 
 
 def make_lock_level(
-    num_locks: int = 3, short: int = 3, long: int = 6
+    num_locks: int = 3,
+    short: int = 3,
+    long: int = 6,
 ) -> tuple[list[str], dict[str, object]]:
-    """Build a paired-plate LOCK maze (the validated pairwise-coordination mechanic).
+    """Build a paired-plate LOCK maze.
 
     ``num_locks`` horizontal corridors stacked vertically; corridor *i* holds lock *i*'s
     two plates at its far ends (``short+long`` apart -> out of each other's sight). The two
@@ -598,10 +687,20 @@ def make_lock_level(
     the degenerate "both walk out and press the same tick by coincidence" path: the early
     arriver is alone and must actually coordinate ("I'm here -- come now") to sync the press.
     A central vertical hall connects every corridor; workers spawn flanking it; the tree's
-    coordinator spawns at the hall centre. Returns ``(rows, meta)`` driving placement.
+    coordinator spawns at the hall centre.
+
+    Args:
+      num_locks: Number of paired locks to include.
+      short: Length of the shorter side of each corridor.
+      long: Length of the longer side of each corridor.
+
+    Returns:
+      rows: ASCII rows describing the generated maze.
+      meta: Placement metadata for the generated maze.
+
     """
     P = num_locks
-    cx = long + 1  # hall column (room for the long side on either flank)
+    cx = long + 1  # Hall column (room for the long side on either flank)
     width = 2 * long + 3
     height = 2 * P + 1
     g = [["#"] * width for _ in range(height)]
@@ -610,8 +709,8 @@ def make_lock_level(
         ry = 2 * i + 1
         ls, rs = (
             (long, short) if i % 2 == 0 else (short, long)
-        )  # alternate the long side
-        lp, rp = cx - ls, cx + rs  # left / right plate columns
+        )  # Alternate the long side.
+        lp, rp = cx - ls, cx + rs  # Left / right plate columns.
         for x in range(lp, rp + 1):
             g[ry][x] = "."
         g[ry][lp] = PLATE_LETTERS[i]
@@ -619,8 +718,8 @@ def make_lock_level(
         workers.append({"spawn": (cx - 1, ry), "plate": (lp, ry), "lock": i})
         workers.append({"spawn": (cx + 1, ry), "plate": (rp, ry), "lock": i})
     for y in range(1, height - 1):
-        g[y][cx] = "."  # vertical hall connecting the corridors
-    for i in range(P):  # partners are the two workers of a lock
+        g[y][cx] = "."  # Vertical hall connecting the corridors.
+    for i in range(P):  # Partners are the two workers of a lock.
         workers[2 * i]["partner"] = 2 * i + 1
         workers[2 * i + 1]["partner"] = 2 * i
     meta: dict[str, object] = {
@@ -632,15 +731,12 @@ def make_lock_level(
     return ["".join(r) for r in g], meta
 
 
-# Default lock level for the mesh-vs-tree coordination demo: 3 independent locks
-# (6 plates, 6 workers + 1 coordinator), partners staggered so coordination is real.
-LEVEL_LOCKS, LOCK_META = make_lock_level(num_locks=3, short=3, long=6)
-
-
 def make_spawn_level(
-    num_locks: int = 2, decoys: int = 2, lengths: tuple[int, ...] = (3, 6, 4, 5, 5, 3)
+    num_locks: int = 2,
+    decoys: int = 2,
+    lengths: tuple[int, ...] = (3, 6, 4, 5, 5, 3),
 ) -> tuple[list[str], SpawnMeta]:
-    """Build a level for the SPAWN demo: a single seed must explore + grow a team.
+    """Build a level for the SPAWN demo.
 
     A central vertical hall; each row has a LEFT and a RIGHT corridor of DIFFERENT lengths
     (``lengths`` cycles per slot, so no two arms are alike). Each lock's two same-letter
@@ -648,7 +744,17 @@ def make_spawn_level(
     opening one needs two spawned agents who found each other by talking. ``decoys`` rooms
     are left EMPTY -- dead-ends the team explores and finds nothing, so the seed must map
     the maze and cannot know up-front how many helpers it needs. One agent starts at the
-    hall top; everyone else is SPAWNED. Returns ``(rows, meta)``.
+    hall top; everyone else is SPAWNED.
+
+    Args:
+      num_locks: Number of paired locks to include.
+      decoys: Number of empty decoy rooms to include.
+      lengths: Corridor lengths cycled across room slots.
+
+    Returns:
+      rows: ASCII rows describing the generated maze.
+      meta: Spawn metadata for the generated maze.
+
     """
     rooms = 2 * num_locks + decoys
     nrows = (rooms + 1) // 2
@@ -657,7 +763,7 @@ def make_spawn_level(
     width = 2 * maxlen + 3
     height = 2 * nrows + 1
     g = [["#"] * width for _ in range(height)]
-    slots: list[tuple[int, int]] = []  # room (col,row) for slot 2r (left), 2r+1 (right)
+    slots: list[tuple[int, int]] = []  # Room (col,row) for slot 2r (left), 2r+1 (right)
     for r in range(nrows):
         ry = 2 * r + 1
         ll, rl = lengths[(2 * r) % len(lengths)], lengths[(2 * r + 1) % len(lengths)]
@@ -667,11 +773,11 @@ def make_spawn_level(
         slots.append((lp, ry))
         slots.append((rp, ry))
     for y in range(1, height - 1):
-        g[y][cx] = "."  # vertical hall
+        g[y][cx] = "."  # Vertical hall.
     plates: list[PlateInfo] = []
     for i in range(
-        num_locks
-    ):  # lock i: LEFT of row i + RIGHT of row (i+1) -> opposite + apart
+        num_locks,
+    ):  # Lock i: LEFT of row i + RIGHT of row (i+1) -> opposite + apart.
         ai, bi = 2 * i, 2 * ((i + 1) % nrows) + 1
         a, b = slots[ai], slots[bi]
         g[a[1]][a[0]] = PLATE_LETTERS[i]

@@ -21,7 +21,9 @@ class ActivationWrapper(torch.nn.Module, ABC):
     def __getattr__(self, name: str) -> Any: ...
     def __getitem__(self, key: int) -> Any: ...
     def named_parameters(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> Iterator[tuple[str, torch.nn.Parameter]]: ...
 
 class OffloadWrapper(ActivationWrapper):

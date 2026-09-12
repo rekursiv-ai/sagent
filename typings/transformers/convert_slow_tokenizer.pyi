@@ -297,7 +297,8 @@ class TikTokenConverter:
         **kwargs,
     ) -> None: ...
     def extract_vocab_merges_from_model(
-        self, tiktoken_url: str
+        self,
+        tiktoken_url: str,
     ):  # -> tuple[dict[Any, Any], list[tuple[str, str]]]:
         ...
     def tokenizer(self):  # -> Tokenizer:

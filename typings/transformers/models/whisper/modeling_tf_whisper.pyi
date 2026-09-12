@@ -26,7 +26,9 @@ LARGE_NEGATIVE = ...
 
 def sinusoidal_embedding_init(shape, dtype=...) -> tf.Tensor: ...
 def shift_tokens_right(
-    input_ids: tf.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: tf.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ): ...
 
 class TFWhisperPositionalEmbedding(keras.layers.Layer):
@@ -163,7 +165,8 @@ class TFWhisperMainLayer(keras.layers.Layer):
         ...
     @add_start_docstrings_to_model_forward(WHISPER_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFSeq2SeqLMOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFSeq2SeqLMOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     @unpack_inputs
     def call(
@@ -207,7 +210,8 @@ class TFWhisperModel(TFWhisperPreTrainedModel):
         ...
     @add_start_docstrings_to_model_forward(WHISPER_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFSeq2SeqModelOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFSeq2SeqModelOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     @unpack_inputs
     def call(
@@ -238,7 +242,8 @@ class TFWhisperModel(TFWhisperPreTrainedModel):
     WHISPER_START_DOCSTRING,
 )
 class TFWhisperForConditionalGeneration(
-    TFWhisperPreTrainedModel, TFCausalLanguageModelingLoss
+    TFWhisperPreTrainedModel,
+    TFCausalLanguageModelingLoss,
 ):
     base_model_prefix = ...
     _keys_to_ignore_on_load_missing = ...
@@ -251,11 +256,13 @@ class TFWhisperForConditionalGeneration(
     def set_output_embeddings(self, value):  # -> None:
         ...
     def resize_token_embeddings(
-        self, new_num_tokens: int
+        self,
+        new_num_tokens: int,
     ) -> keras.layers.Embedding: ...
     @add_start_docstrings_to_model_forward(WHISPER_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFSeq2SeqLMOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFSeq2SeqLMOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     @unpack_inputs
     def call(

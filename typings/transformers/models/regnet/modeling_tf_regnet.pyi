@@ -50,7 +50,11 @@ class TFRegNetEmbeddings(keras.layers.Layer):
 
 class TFRegNetShortCut(keras.layers.Layer):
     def __init__(
-        self, in_channels: int, out_channels: int, stride: int = ..., **kwargs
+        self,
+        in_channels: int,
+        out_channels: int,
+        stride: int = ...,
+        **kwargs,
     ) -> None: ...
     def call(self, inputs: tf.Tensor, training: bool = ...) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -169,7 +173,8 @@ class TFRegNetModel(TFRegNetPreTrainedModel):
     REGNET_START_DOCSTRING,
 )
 class TFRegNetForImageClassification(
-    TFRegNetPreTrainedModel, TFSequenceClassificationLoss
+    TFRegNetPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config: RegNetConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs

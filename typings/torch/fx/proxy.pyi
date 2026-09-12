@@ -108,11 +108,18 @@ class Proxy:
 @compatibility(is_backward_compatible=False)
 class MetaProxy(Proxy):
     def __init__(
-        self, node: Node, tracer: TracerBase | None = ..., fake_mode=...
+        self,
+        node: Node,
+        tracer: TracerBase | None = ...,
+        fake_mode=...,
     ) -> None: ...
     @classmethod
     def __torch_function__(
-        cls, orig_method, types, args=..., kwargs=...
+        cls,
+        orig_method,
+        types,
+        args=...,
+        kwargs=...,
     ) -> MetaProxy: ...
 
 @compatibility(is_backward_compatible=True)

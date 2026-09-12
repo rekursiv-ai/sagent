@@ -68,27 +68,39 @@ class ConsolePrinter:
     def write_line(self, text: str) -> None:
         """Render a complete line; the console adds the newline.
 
+        Args:
+          text: Line to render without Rich markup interpretation.
+
         Markup interpretation is disabled so payloads like
         ``[/clear] history cleared`` render verbatim instead of being
         parsed as a closing rich-markup tag.
+
         """
         self.console.print(text, markup=False, highlight=False)
 
     def write_chunk(self, text: str) -> None:
         """Render a streaming partial without a newline.
 
+        Args:
+          text: Partial text to append to the current output line.
+
         Skips Rich markdown / markup parsing; partials are emitted as
         raw ANSI-safe text so an unterminated ``[`` or backtick mid-
         stream doesn't trigger a parse error or visual reflow. The
         finalized block is re-rendered through :meth:`write_markdown`
         for proper formatting once the assistant turn closes.
+
         """
         self.console.out(text, end="", highlight=False)
 
     def write_markdown(self, text: str) -> None:
         """Render a stable markdown block as scrollback text.
 
+        Args:
+          text: Markdown block to render.
+
         Mirrors v1: leading newline, then ``TightMarkdown(text)``.
+
         """
         self.console.print()
         self.console.print(TightMarkdown(text))
@@ -100,26 +112,35 @@ class ConsolePrinter:
     def write_agent_bar(self, source: str, text: str) -> None:
         """Render an inter-agent message attributed to its source.
 
+        Args:
+          source: Agent identifier shown in the attribution prefix.
+          text: Message body to render.
+
         Visually distinct from the user bar (which is the live human's
         input) so the reader can tell at a glance who said what. The
         ``[from <source>]:`` prefix is dim cyan to mark the
         attribution as machinery; the body is rendered with a hard
         ``reset`` so it doesn't inherit the prefix's dim attribute
         and reads at normal weight.
+
         """
         prefix = f"[from {source}]: "
         for line in (text or "").splitlines() or [""]:
             self.console.print(
-                Text(prefix, style="dim cyan") + Text(line, style="reset")
+                Text(prefix, style="dim cyan") + Text(line, style="reset"),
             )
 
     def write_slash_block(self, text: str) -> None:
         """Render slash-command output as a tool-call-like block.
 
+        Args:
+          text: Slash-command output to render.
+
         Same dim-italic family as ``write_tool_label`` so the reader
         sees slash dispatches as machinery (not user text), but without
         the two-space indent -- slash output is at the top level of
         the user's interaction stream, not under a model turn.
+
         """
         for line in (text or "").splitlines() or [""]:
             self.console.print(Text(line, style="dim"))
@@ -170,11 +191,15 @@ class ConsolePrinter:
     def write_tool_error(self, text: str) -> None:
         """Render a red tool-error at the output indent (multi-line aware).
 
+        Args:
+          text: Error message to render.
+
         Errors are output, so they sit at the output indent rather than
         in a column of their own; the ``✗`` glyph marks the first line
         and continuations align under its message. An all-blank body
         still renders a placeholder: silently swallowing the call would
         let upstream callers think the operator saw the failure.
+
         """
         lines = text.rstrip("\n").splitlines() or [text.rstrip("\n")]
         if not any(line.strip() for line in lines):
@@ -186,13 +211,20 @@ class ConsolePrinter:
     def write_tool_summary(self, text: str) -> None:
         """Render a receipt line for a tool result.
 
+        Args:
+          text: Tool summary to render.
+
         Shares the ``⎿`` input glyph: a receipt describes the call, not
         its output, so it belongs in the same column as the command.
+
         """
         self._write_input(text.strip())
 
     def write_tool_output(self, text: str) -> None:
         """Render a tool's result body, indented under its label.
+
+        Args:
+          text: Tool output body to render.
 
         Output carries no glyph at all -- indentation alone separates it
         from the header, so a 20-line body does not become 20 lines of
@@ -202,6 +234,7 @@ class ConsolePrinter:
         the pane width: printing an over-wide line verbatim lets Rich
         break it back to column 0, outdenting the continuation past the
         indent so it reads as top-level output.
+
         """
         width = self.console.width - len(_OUTPUT_INDENT)
         for raw in text.split("\n"):
@@ -240,6 +273,11 @@ class ConsolePrinter:
     ) -> None:
         r"""Render a child agent's labeled block.
 
+        Args:
+          label: Child agent label shown in the gutter.
+          items: Messages and tool events to render.
+          output_policy: Optional callback resolving tool display settings.
+
         Format: first line carries the label gutter (``Agent_N  :  ``),
         subsequent lines indent to align with the gutter width. Each
         item is rendered through the same paths the parent uses for
@@ -257,6 +295,7 @@ class ConsolePrinter:
         the entire child block reads as background output. The dim
         attribute is re-applied after every Rich ``\x1b[0m`` reset so
         per-span styles don't drop it.
+
         """
         if not items:
             return
@@ -313,14 +352,11 @@ class ConsolePrinter:
         """Write an OSC 0 title escape (no-op when stderr is not a TTY)."""
         set_terminal_title(text)
 
+    # Wrapping happens here, not in the tool: this is the only place that knows the pane
+    # width and the glyph width. A row too wide for the pane continues at the output
+    # indent, so the ``⎿`` marks the input once rather than repeating down the block.
     def _write_input(self, row: str) -> None:
-        """Render one input row under its tool header.
-
-        Wrapping happens here, not in the tool: this is the only place
-        that knows the pane width and the glyph width. A row too wide for
-        the pane continues at the output indent, so the ``⎿`` marks the
-        input once rather than repeating down the block.
-        """
+        """Render one input row under its tool header."""
         width = self.console.width - len(_INPUT_GLYPH)
         for i, line in enumerate(_wrap_label(row, width) or [""]):
             marker = _INPUT_GLYPH if i == 0 else _OUTPUT_INDENT
@@ -338,16 +374,13 @@ _ANSI_DIM_OFF: Final = "\x1b[22m"
 _ANSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
 
 
+# Rich's ``write_markdown`` prefixes its output with a blank line for parent-output
+# spacing; that blank doesn't belong inside a gutter-rendered child block. TightMarkdown
+# likewise leaves a trailing blank line at the end of its render. Strip both edges.
+# Internal blank lines (between Markdown blocks within the same captured string) are
+# preserved -- they're meaningful spacing.
 def _strip_blank_edges(lines: list[str]) -> list[str]:
-    """Drop leading/trailing blank lines, ignoring ANSI escape codes.
-
-    Rich's ``write_markdown`` prefixes its output with a blank line
-    for parent-output spacing; that blank doesn't belong inside a
-    gutter-rendered child block. TightMarkdown likewise leaves a
-    trailing blank line at the end of its render. Strip both edges.
-    Internal blank lines (between Markdown blocks within the same
-    captured string) are preserved -- they're meaningful spacing.
-    """
+    """Drop leading/trailing blank lines, ignoring ANSI escape codes."""
     out = list(lines)
     while out and not _ANSI_PATTERN.sub("", out[0]).strip():
         _ = out.pop(0)
@@ -356,16 +389,13 @@ def _strip_blank_edges(lines: list[str]) -> list[str]:
     return out
 
 
+# The line may contain Rich-emitted ANSI for color/bold/italic, with a trailing
+# ``\x1b[0m`` resetting all attributes between spans. Each such reset would also drop
+# our dim attribute, so replace each full reset with reset+dim. Bracket the line with a
+# dim-on prefix and a dim-off suffix so the dim baseline doesn't leak past the end of
+# the child block.
 def _dim_baseline(line: str) -> str:
-    r"""Wrap a rendered ANSI line so dim is the baseline attribute.
-
-    The line may contain Rich-emitted ANSI for color/bold/italic, with
-    a trailing ``\x1b[0m`` resetting all attributes between spans. Each
-    such reset would also drop our dim attribute, so replace each
-    full reset with reset+dim. Bracket the line with a dim-on prefix
-    and a dim-off suffix so the dim baseline doesn't leak past the
-    end of the child block.
-    """
+    r"""Wrap a rendered ANSI line so dim is the baseline attribute."""
     rebound = line.replace(_ANSI_RESET, _ANSI_RESET_DIM)
     return _ANSI_DIM + rebound + _ANSI_DIM_OFF
 
@@ -388,17 +418,7 @@ _LABEL_MAX_LINES: Final = 12
 
 
 def _wrap_label(text: str, width: int) -> list[str]:
-    """Wrap ``text`` to ``width`` cells, capped at ``_LABEL_MAX_LINES``.
-
-    Args:
-      text: Raw label text; may contain newlines.
-      width: Usable cell width after the indent.
-
-    Returns:
-      lines: Wrapped lines, with a trailing ``... (N more lines)`` marker
-          when the cap elided content.
-
-    """
+    """Wrap ``text`` to ``width`` cells, capped at ``_LABEL_MAX_LINES``."""
     usable = max(1, width)
     out: list[str] = []
     for raw in (text or "").splitlines() or [""]:
@@ -412,34 +432,21 @@ def _wrap_label(text: str, width: int) -> list[str]:
     return [*out[:kept], f"... ({len(out) - kept} more lines)"]
 
 
+# The composed line is ``gutter + inner``, so the inner console must never claim more
+# than the terminal leaves. The prior fixed floor of 20 columns did exactly that on a
+# narrow pane: with a 14-column gutter, anything under 34 columns overran the terminal
+# and every child line wrapped raggedly.
 def _inner_width(outer_width: int, gutter_width: int) -> int:
-    """Usable width for a child block's inner console.
-
-    The composed line is ``gutter + inner``, so the inner console must
-    never claim more than the terminal leaves. The prior fixed floor of
-    20 columns did exactly that on a narrow pane: with a 14-column
-    gutter, anything under 34 columns overran the terminal and every
-    child line wrapped raggedly.
-
-    Args:
-      outer_width: Width of the enclosing console.
-      gutter_width: Columns consumed by the child-label gutter.
-
-    Returns:
-      width: Inner console width, at least 1 and never overrunning.
-
-    """
+    """Usable width for a child block's inner console."""
     return max(1, outer_width - gutter_width)
 
 
+# Format is ``" <label> : "`` -- leading 2-space indent matching parent tool labels,
+# then ``len(label) + 5`` for ``" : "``. Held to a floor of 14 columns for visual
+# consistency when labels are short (``Agent_0`` is the typical case at 14 chars
+# exactly).
 def _gutter_width(label: str) -> int:
-    """Width of the gutter column for a given child label.
-
-    Format is ``"  <label>  :  "`` -- leading 2-space indent matching
-    parent tool labels, then ``len(label) + 5`` for ``"  :  "``. Held
-    to a floor of 14 columns for visual consistency when labels are
-    short (``Agent_0`` is the typical case at 14 chars exactly).
-    """
+    """Width of the gutter column for a given child label."""
     return max(14, len(label) + 5 + len(_CHILD_INDENT))
 
 
@@ -451,21 +458,19 @@ def _gutter_prefix(label: str, width: int) -> str:
     return pfx
 
 
+# Exhaustive over :data:`repl.render.ChildItem`; ``assert_never`` makes the type checker
+# flag any new variant that forgets a branch here.
+#
+# ``output_policy`` resolves the child tool's display settings. Without it a subagent's
+# Bash body never renders even with ``output=on``, because the missing policy reads as
+# hidden.
 def _render_child_item(
     printer: ConsolePrinter,
     item: ChildItem,
     *,
     output_policy: Callable[[str], ToolDisplay] | None = None,
 ) -> None:
-    """Dispatch one child-block item to the appropriate printer method.
-
-    Exhaustive over :data:`repl.render.ChildItem`; ``assert_never`` makes
-    the type checker flag any new variant that forgets a branch here.
-
-    ``output_policy`` resolves the child tool's display settings. Without
-    it a subagent's Bash body never renders even with ``output=on``,
-    because the missing policy reads as hidden.
-    """
+    """Dispatch one child-block item to the appropriate printer method."""
     match item:
         case AssistantMessage(text=text):
             if text:

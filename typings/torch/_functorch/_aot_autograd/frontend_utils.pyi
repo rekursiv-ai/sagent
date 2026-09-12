@@ -15,5 +15,6 @@ def process_inputs(
     ignore_shape_env: bool = ...,
 ) -> FakifiedFlatArgs: ...
 def construct_fake_mode(
-    flat_args: list[Any], aot_config: AOTConfig
+    flat_args: list[Any],
+    aot_config: AOTConfig,
 ) -> tuple[FakeTensorMode, ShapeEnv | None]: ...

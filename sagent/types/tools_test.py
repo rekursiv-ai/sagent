@@ -38,7 +38,8 @@ def test_defaults_disable_off_loading() -> None:
 
 
 @pytest.mark.parametrize(
-    ("field", "value"), [("persist_tokens", -1), ("message_budget_tokens", -1)]
+    ("field", "value"),
+    [("persist_tokens", -1), ("message_budget_tokens", -1)],
 )
 def test_negative_thresholds_are_rejected(field: str, value: int) -> None:
     with pytest.raises(ValueError, match=field):

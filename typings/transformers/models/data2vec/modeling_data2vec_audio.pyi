@@ -79,7 +79,9 @@ class Data2VecAudioAttention(nn.Module):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class Data2VecAudioFeedForward(nn.Module):
@@ -90,7 +92,10 @@ class Data2VecAudioFeedForward(nn.Module):
 class Data2VecAudioEncoderLayer(GradientCheckpointingLayer):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states, attention_mask=..., output_attentions=...
+        self,
+        hidden_states,
+        attention_mask=...,
+        output_attentions=...,
     ):  # -> tuple[Any, Any] | tuple[Any]:
         ...
 

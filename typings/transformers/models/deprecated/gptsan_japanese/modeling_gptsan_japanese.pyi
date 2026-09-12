@@ -21,7 +21,8 @@ _CHECKPOINT_FOR_DOC = ...
 
 def router_z_loss_func(router_logits: torch.Tensor) -> float: ...
 def load_balancing_loss_func(
-    router_probs: torch.Tensor, expert_indices: torch.Tensor
+    router_probs: torch.Tensor,
+    expert_indices: torch.Tensor,
 ) -> float: ...
 
 class GPTSanJapaneseDenseActDense(nn.Module):
@@ -36,7 +37,9 @@ class GPTSanJapaneseTop1Router(nn.Module):
 
 class GPTSanJapaneseSparseMLP(nn.Module):
     def __init__(
-        self, config: GPTSanJapaneseConfig, expert_class: nn.Module = ...
+        self,
+        config: GPTSanJapaneseConfig,
+        expert_class: nn.Module = ...,
     ) -> None: ...
     def forward(self, hidden_states):  # -> tuple[Any, tuple[Any, Tensor]]:
         ...

@@ -37,14 +37,16 @@ class Glm4DecoderLayer(GradientCheckpointingLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class Glm4Attention(GlmAttention): ...
 
 class Glm4ForCausalLM(GlmForCausalLM):
     def forward(
-        self, **super_kwargs: Unpack[TransformersKwargs]
+        self,
+        **super_kwargs: Unpack[TransformersKwargs],
     ) -> tuple | CausalLMOutputWithPast: ...
     def __call__(self, *args: Any, **kwargs: Any) -> tuple | CausalLMOutputWithPast: ...
 

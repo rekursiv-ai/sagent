@@ -18,5 +18,6 @@ def build_global_metadata(
     recalc_metadata: bool = ...,
 ) -> ShardedTensorMetadata: ...
 def recalc_global_sharded_tensor_metadata(
-    global_sharded_tensor_metadata: ShardedTensorMetadata, sharded_dim: int
+    global_sharded_tensor_metadata: ShardedTensorMetadata,
+    sharded_dim: int,
 ) -> None: ...

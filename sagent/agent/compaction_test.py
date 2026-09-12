@@ -149,14 +149,20 @@ async def test_inject_background_status_wording_distinguishes_running_from_done(
 
     running_task = asyncio.create_task(_wait_gate())
     done_task = asyncio.create_task(_noop_coro())
-    await done_task  # drive ``_noop_coro`` to completion.
+    await done_task  # Drive ``_noop_coro`` to completion.
     assert done_task.done()
     assert not running_task.done()
     running = BackgroundTaskEntry(
-        task=running_task, tool_name="Bash", queue_id="qR", started=0.0
+        task=running_task,
+        tool_name="Bash",
+        queue_id="qR",
+        started=0.0,
     )
     done = BackgroundTaskEntry(
-        task=done_task, tool_name="Bash", queue_id="qD", started=0.0
+        task=done_task,
+        tool_name="Bash",
+        queue_id="qD",
+        started=0.0,
     )
     history: list[ModelContextEvent] = [UserMessage(text="orig")]
     try:

@@ -73,5 +73,6 @@ class GGUFGemmaConverter(GemmaConverter):
 GGUF_TO_FAST_CONVERTERS = ...
 
 def convert_gguf_tokenizer(
-    architecture: str, tokenizer_dict
+    architecture: str,
+    tokenizer_dict,
 ) -> tuple[Tokenizer, dict]: ...

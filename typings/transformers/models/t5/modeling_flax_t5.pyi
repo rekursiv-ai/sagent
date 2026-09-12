@@ -28,7 +28,9 @@ _CONFIG_FOR_DOC = ...
 remat = ...
 
 def shift_tokens_right(
-    input_ids: jnp.ndarray, pad_token_id: int, decoder_start_token_id: int
+    input_ids: jnp.ndarray,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ) -> jnp.ndarray: ...
 
 class FlaxT5LayerNorm(nn.Module):
@@ -217,7 +219,10 @@ class FlaxT5PreTrainedModel(FlaxPreTrainedModel):
     def enable_gradient_checkpointing(self):  # -> None:
         ...
     def init_weights(
-        self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...
+        self,
+        rng: jax.random.PRNGKey,
+        input_shape: tuple,
+        params: FrozenDict = ...,
     ) -> FrozenDict: ...
     @add_start_docstrings_to_model_forward(T5_INPUTS_DOCSTRING)
     def __call__(
@@ -249,7 +254,8 @@ class FlaxT5PreTrainedModel(FlaxPreTrainedModel):
     ): ...
     @add_start_docstrings(T5_DECODE_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=FlaxBaseModelOutputWithPastAndCrossAttentions, config_class=T5Config
+        output_type=FlaxBaseModelOutputWithPastAndCrossAttentions,
+        config_class=T5Config,
     )
     def decode(
         self,
@@ -332,7 +338,8 @@ class FlaxT5EncoderModel(FlaxT5PreTrainedModel):
     ): ...
 
 @add_start_docstrings(
-    """T5 Model with a `language modeling` head on top.""", T5_START_DOCSTRING
+    """T5 Model with a `language modeling` head on top.""",
+    T5_START_DOCSTRING,
 )
 class FlaxT5ForConditionalGenerationModule(nn.Module):
     config: T5Config
@@ -357,7 +364,8 @@ class FlaxT5ForConditionalGenerationModule(nn.Module):
 class FlaxT5ForConditionalGeneration(FlaxT5PreTrainedModel):
     @add_start_docstrings(T5_DECODE_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=FlaxCausalLMOutputWithCrossAttentions, config_class=T5Config
+        output_type=FlaxCausalLMOutputWithCrossAttentions,
+        config_class=T5Config,
     )
     def decode(
         self,

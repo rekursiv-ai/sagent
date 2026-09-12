@@ -31,7 +31,9 @@ class TypePromotionRule(abc.ABC):
     def is_valid(self) -> bool: ...
     @abc.abstractmethod
     def preview_type_promotion(
-        self, args: tuple, kwargs: dict
+        self,
+        args: tuple,
+        kwargs: dict,
     ) -> TypePromotionSnapshot: ...
 
 class ElementwiseTypePromotionRule(TypePromotionRule):
@@ -47,13 +49,17 @@ class ElementwiseTypePromotionRule(TypePromotionRule):
     def __eq__(self, other: object, /) -> bool: ...
     def __hash__(self) -> int: ...
     def preview_type_promotion(
-        self, args: tuple, kwargs: dict
+        self,
+        args: tuple,
+        kwargs: dict,
     ) -> TypePromotionSnapshot: ...
 
 class DivElementwiseTypePromotionRule(ElementwiseTypePromotionRule):
     def __init__(self) -> None: ...
     def preview_type_promotion(
-        self, args: tuple, kwargs: dict
+        self,
+        args: tuple,
+        kwargs: dict,
     ) -> TypePromotionSnapshot: ...
 
 class ReductionTypePromotionRule(TypePromotionRule):
@@ -66,18 +72,24 @@ class ReductionTypePromotionRule(TypePromotionRule):
     def __eq__(self, other: object, /) -> bool: ...
     def __hash__(self) -> int: ...
     def preview_type_promotion(
-        self, args: tuple, kwargs: dict
+        self,
+        args: tuple,
+        kwargs: dict,
     ) -> TypePromotionSnapshot: ...
 
 class AllOrAnyReductionTypePromotionRule(ReductionTypePromotionRule):
     def __init__(self, op_name: str) -> None: ...
     def preview_type_promotion(
-        self, args: tuple, kwargs: dict
+        self,
+        args: tuple,
+        kwargs: dict,
     ) -> TypePromotionSnapshot: ...
 
 class SumLikeReductionTypePromotionRule(ReductionTypePromotionRule):
     def preview_type_promotion(
-        self, args: tuple, kwargs: dict
+        self,
+        args: tuple,
+        kwargs: dict,
     ) -> TypePromotionSnapshot: ...
 
 _GENERATED_ATEN_TYPE_PROMOTION_RULE_SET = ...
@@ -91,11 +103,13 @@ class TypePromotionTable:
     def __init__(self) -> None: ...
     def add_rule(self, rule: TypePromotionRule) -> None: ...
     def get_rule(
-        self, py_op: torch._ops.OpOverloadPacket
+        self,
+        py_op: torch._ops.OpOverloadPacket,
     ) -> TypePromotionRule | None: ...
 
 def get_type_promotion_rule(
-    node: torch.fx.Node, type_promotion_table: TypePromotionTable
+    node: torch.fx.Node,
+    type_promotion_table: TypePromotionTable,
 ) -> TypePromotionRule | None: ...
 
 class _OpTraceDispatchMode(_python_dispatch.TorchDispatchMode):
@@ -103,12 +117,16 @@ class _OpTraceDispatchMode(_python_dispatch.TorchDispatchMode):
     def __torch_dispatch__(self, func, types, args=..., kwargs=...): ...
 
 def find_compatible_op_overload(
-    op: torch._ops.OpOverloadPacket, args: tuple, kwargs: dict
+    op: torch._ops.OpOverloadPacket,
+    args: tuple,
+    kwargs: dict,
 ) -> torch._ops.OpOverload: ...
 
 class _TypePromotionInterpreter(torch.fx.Interpreter):
     def __init__(
-        self, module: torch.fx.GraphModule, type_promotion_table: TypePromotionTable
+        self,
+        module: torch.fx.GraphModule,
+        type_promotion_table: TypePromotionTable,
     ) -> None: ...
     def run_node(self, n: torch.fx.Node) -> Any: ...
 

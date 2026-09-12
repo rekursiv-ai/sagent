@@ -192,11 +192,14 @@ class FlaxXLMRobertaPreTrainedModel(FlaxPreTrainedModel):
     def enable_gradient_checkpointing(self):  # -> None:
         ...
     def init_weights(
-        self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...
+        self,
+        rng: jax.random.PRNGKey,
+        input_shape: tuple,
+        params: FrozenDict = ...,
     ) -> FrozenDict: ...
     def init_cache(self, batch_size, max_length): ...
     @add_start_docstrings_to_model_forward(
-        XLM_ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        XLM_ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     def __call__(
         self,
@@ -405,7 +408,10 @@ class FlaxXLMRobertaForCausalLMModule(nn.Module):
 )
 class FlaxXLMRobertaForCausalLM(FlaxXLMRobertaPreTrainedModel):
     def prepare_inputs_for_generation(
-        self, input_ids, max_length, attention_mask: jax.Array | None = ...
+        self,
+        input_ids,
+        max_length,
+        attention_mask: jax.Array | None = ...,
     ):  # -> dict[str, Any | Array]:
         ...
     def update_inputs_for_generation(self, model_outputs, model_kwargs): ...

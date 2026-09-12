@@ -146,12 +146,14 @@ class TFBlipVisionModel(TFBlipPreTrainedModel):
     config_class = BlipVisionConfig
     def __init__(self, config: BlipVisionConfig, *args, **kwargs) -> None: ...
     def serving_output(
-        self, output: TFBaseModelOutputWithPooling
+        self,
+        output: TFBaseModelOutputWithPooling,
     ) -> TFBaseModelOutputWithPooling: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(BLIP_VISION_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFBaseModelOutputWithPooling, config_class=BlipVisionConfig
+        output_type=TFBaseModelOutputWithPooling,
+        config_class=BlipVisionConfig,
     )
     def call(
         self,
@@ -216,7 +218,9 @@ class TFBlipModel(TFBlipPreTrainedModel):
     ) -> tf.Tensor: ...
     @add_start_docstrings_to_model_forward(BLIP_VISION_INPUTS_DOCSTRING)
     def get_image_features(
-        self, pixel_values: tf.Tensor | None = ..., return_dict: bool | None = ...
+        self,
+        pixel_values: tf.Tensor | None = ...,
+        return_dict: bool | None = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -234,7 +238,8 @@ class TFBlipForConditionalGeneration(TFBlipPreTrainedModel):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(BLIP_VISION_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFBlipForConditionalGenerationModelOutput, config_class=BlipConfig
+        output_type=TFBlipForConditionalGenerationModelOutput,
+        config_class=BlipConfig,
     )
     def call(
         self,
@@ -269,7 +274,8 @@ class TFBlipForQuestionAnswering(TFBlipPreTrainedModel):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(BLIP_VISION_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFBlipTextVisionModelOutput, config_class=BlipVisionConfig
+        output_type=TFBlipTextVisionModelOutput,
+        config_class=BlipVisionConfig,
     )
     def call(
         self,
@@ -305,7 +311,8 @@ class TFBlipForImageTextRetrieval(TFBlipPreTrainedModel):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(BLIP_VISION_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFBlipImageTextMatchingModelOutput, config_class=BlipVisionConfig
+        output_type=TFBlipImageTextMatchingModelOutput,
+        config_class=BlipVisionConfig,
     )
     def call(
         self,

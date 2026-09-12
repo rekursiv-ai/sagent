@@ -43,18 +43,17 @@ if TYPE_CHECKING:
     # `_make_status_error`), so they must name the same package it does.
     import httpx2
 
-    import sagent.lib.image as image_lib
+    from sagent.lib import image
 else:
     from wrapt import lazy_import
 
-    anthropic = lazy_import("anthropic")  # 569ms cold
-    httpx2 = lazy_import("httpx2")  # 168ms cold
+    anthropic = lazy_import("anthropic")  # 569ms cold.
+    httpx2 = lazy_import("httpx2")  # 168ms cold.
     AsyncMessageStream = lazy_import("anthropic.lib.streaming", "AsyncMessageStream")
     AsyncStream = lazy_import("anthropic._streaming", "AsyncStream")
-    image_lib = lazy_import("sagent.lib.image")
+    image = lazy_import("sagent.lib.image")
 
 
-from sagent.catalog import anthropic as anthropic_catalog
 from sagent.lib import debug_log
 from sagent.lib.custom_json import MutableJSON, MutableJSONValue, json_unfreeze
 from sagent.providers.lib.errors import (
@@ -96,6 +95,8 @@ from sagent.types.runtime import (
     UserMessage,
 )
 from sagent.types.tools import Tool, ToolResultClearable
+
+import sagent.catalog.anthropic
 
 
 logger = logging.getLogger(__name__)
@@ -141,7 +142,7 @@ _DEFAULT_API_TARGET_INPUT_TOKENS = (
 )
 
 _DEFAULT_1M_MODELS = frozenset(
-    {"claude-fable-5-1", "claude-fable-5", "claude-sonnet-5", "claude-opus-5"}
+    {"claude-fable-5-1", "claude-fable-5", "claude-sonnet-5", "claude-opus-5"},
 )
 
 
@@ -161,7 +162,7 @@ _CONTEXT_MANAGEMENT_MODELS = frozenset(
         "claude-sonnet-4-6",
         "claude-sonnet-4-5",
         "claude-haiku-4-5",
-    }
+    },
 )
 
 
@@ -275,10 +276,12 @@ class Anthropic:
     #   - opus-4-5 / sonnet-4-5 / haiku-4-5: ``enabled`` only (``adaptive``
     #     400s 'not supported'), readable text. Efforts: opus-4-5
     #     low,medium,high; sonnet-4-5 / haiku-4-5 none.
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = anthropic_catalog.models()
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = (
+        sagent.catalog.anthropic.models()
+    )
     """Per-model capability, shared by every Anthropic transport."""
 
-    TRANSPORT: ClassVar[ModelCapability] = anthropic_catalog.api()
+    TRANSPORT: ClassVar[ModelCapability] = sagent.catalog.anthropic.api()
     """What this transport lets through; subclasses declare their own."""
 
     @property
@@ -288,7 +291,7 @@ class Anthropic:
             {
                 "default": self.DEFAULT_MODEL,
                 "utility": self.DEFAULT_UTILITY_MODEL or self.DEFAULT_MODEL,
-            }
+            },
         )
 
     def __init__(
@@ -373,7 +376,9 @@ class Anthropic:
         )
 
     def model(
-        self, model_id: str | None = None, **provider_options: object
+        self,
+        model_id: str | None = None,
+        **provider_options: object,
     ) -> _AnthropicModel:
         """Create a model backend.
 
@@ -396,7 +401,10 @@ class Anthropic:
         del provider_options
         mid = model_id if model_id is not None else "default"
         capability, settings = resolve(
-            mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT
+            mid,
+            models=self.CAPABILITIES,
+            roles=self.ROLES,
+            transport=self.TRANSPORT,
         )
         return _AnthropicModel(
             provider=self,
@@ -481,7 +489,7 @@ class Anthropic:
           system_param: System prompt in API format, or ``NOT_GIVEN``.
 
         """
-        del messages, cache_ttl  # unused in plain API mode
+        del messages, cache_ttl  # Unused in plain API mode.
         if system is not None:
             return system
         return anthropic.NOT_GIVEN
@@ -542,34 +550,22 @@ _RE_ANTHROPIC_TOKENS = re.compile(r"(\d[\d,]*)\s*tokens?\s*>\s*(\d[\d,]*)")
 # Statusless Anthropic errors with body-declared types in this set are
 # transient retryables that the shared status-code classifier misses.
 _RETRYABLE_BODY_TYPES = frozenset(
-    {"api_error", "overloaded_error", "rate_limit_error", "server_error"}
+    {"api_error", "overloaded_error", "rate_limit_error", "server_error"},
 )
 
 
+# Prefers the structured ``error.type``/``error.message`` fields on ``error_body`` when
+# present: an Anthropic ``invalid_request_error`` whose ``message`` text mentions
+# overflow phrases is canonical. When ``error_body`` is absent, falls back to substring
+# matching against the stringified error -- which is fragile and matches benign 400s
+# that incidentally mention "context window" (e.g. tool-schema validation errors).
+# Callers with access to the parsed SDK body should always pass ``error_body``.
 def _is_prompt_too_long_text(
     msg: str,
     *,
     error_body: Mapping[str, object] | None = None,
 ) -> bool:
-    """Check whether the error describes a context-window overflow.
-
-    Prefers the structured ``error.type``/``error.message`` fields on
-    ``error_body`` when present: an Anthropic ``invalid_request_error``
-    whose ``message`` text mentions overflow phrases is canonical. When
-    ``error_body`` is absent, falls back to substring matching against
-    the stringified error -- which is fragile and matches benign 400s
-    that incidentally mention "context window" (e.g. tool-schema
-    validation errors). Callers with access to the parsed SDK body
-    should always pass ``error_body``.
-
-    Args:
-      msg: Stringified error or message text.
-      error_body: Parsed Anthropic error body (``e.body``), when available.
-
-    Returns:
-      overflow: True when the error indicates a prompt-too-long condition.
-
-    """
+    """Check whether the error describes a context-window overflow."""
     if error_body is not None:
         nested = error_body.get("error")
         if isinstance(nested, Mapping):
@@ -632,19 +628,17 @@ def _tool_names_from_kwargs(kwargs: dict[str, object]) -> list[str | None]:
     return out
 
 
+# Gates on actual content rather than the API's ``stop_reason``, which is unreliable.
+# When violated, the tool block was almost certainly dropped mid-stream; retry usually
+# recovers. The partial response is carried on the error so the retry layer can fall
+# back gracefully.
 def _guard_stream_interrupt(
     resp: ModelResponse,
     *,
     kind: str,
     model_id: str,
 ) -> None:
-    """Raise ``StreamInterruptedError`` if a ``model_tool_use`` response arrived without any ``ToolCall``s.
-
-    Gates on actual content rather than the API's ``stop_reason``, which is
-    unreliable. When violated, the tool block was almost certainly dropped
-    mid-stream; retry usually recovers. The partial response is carried on
-    the error so the retry layer can fall back gracefully.
-    """
+    """Raise ``StreamInterruptedError`` if a ``model_tool_use`` response arrived without any ``ToolCall``s."""
     has_tool_calls = bool(resp.message.tool_calls)
     if resp.stop_reason == "model_tool_use" and not has_tool_calls:
         text = resp.message.text
@@ -671,7 +665,8 @@ def _request_id(e: BaseException) -> str | None:
     if headers is not None:
         try:
             return cast(
-                str | None, headers.get("request-id") or headers.get("x-request-id")
+                str | None,
+                headers.get("request-id") or headers.get("x-request-id"),
             )
         except Exception:  # noqa: BLE001 -- best-effort, must not mask the original error
             return None
@@ -726,7 +721,8 @@ class _AnthropicModel(ModelDefaults):
 
         """
         return int(
-            len(text) / anthropic_catalog.chars_per_token(self.capability.model_id)
+            len(text)
+            / sagent.catalog.anthropic.chars_per_token(self.capability.model_id),
         )
 
     @override
@@ -743,7 +739,7 @@ class _AnthropicModel(ModelDefaults):
           https://docs.anthropic.com/en/docs/build-with-claude/vision#calculate-image-costs
 
         """
-        dims = image_lib.get_dimensions(data)
+        dims = image.get_dimensions(data)
         return dims[0] * dims[1] // 750 if dims is not None else 0
 
     @override
@@ -766,7 +762,9 @@ class _AnthropicModel(ModelDefaults):
             await self._provider.handle_auth_error()
             sdk = await self._provider.get_sdk()
             kwargs["system"] = self._provider.build_system(
-                request.system, messages, cache_ttl=self._cache_ttl_wire()
+                request.system,
+                messages,
+                cache_ttl=self._cache_ttl_wire(),
             )
             result = await sdk.messages.count_tokens(**kwargs)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- dynamic kwargs
         return result.input_tokens
@@ -847,7 +845,9 @@ class _AnthropicModel(ModelDefaults):
             "max_tokens": max_tok,
             "temperature": request.temperature,
             "system": self._provider.build_system(
-                request.system, messages, cache_ttl=self._cache_ttl_wire()
+                request.system,
+                messages,
+                cache_ttl=self._cache_ttl_wire(),
             ),
         }
         if budget == "auto":
@@ -961,7 +961,9 @@ class _AnthropicModel(ModelDefaults):
             await self._provider.handle_auth_error()
             sdk = await self._provider.get_sdk()
             kwargs["system"] = self._provider.build_system(
-                request.system, messages, cache_ttl=self._cache_ttl_wire()
+                request.system,
+                messages,
+                cache_ttl=self._cache_ttl_wire(),
             )
             raw = await _stream_impl(sdk, kwargs, publish)
         except anthropic.APIStatusError as e:
@@ -1013,16 +1015,14 @@ class _AnthropicModel(ModelDefaults):
         return self._last_usage
 
 
+# Routes ``text_delta`` events to ``publish`` as ``ModelResponsePartial`` and
+# ``thinking_delta`` events as ``ModelResponseThinking`` as they arrive.
 async def _stream_impl(
     sdk: anthropic.AsyncAnthropic,
     kwargs: dict[str, object],
     publish: Callable[[RuntimeEvent], None] | None,
 ) -> anthropic.types.Message:
-    """Run the streaming call and return the final message.
-
-    Routes ``text_delta`` events to ``publish`` as ``ModelResponsePartial``
-    and ``thinking_delta`` events as ``ModelResponseThinking`` as they arrive.
-    """
+    """Run the streaming call and return the final message."""
     stream = await _raw_message_stream(sdk, kwargs)
     async with AsyncMessageStream(stream, output_format=anthropic.NOT_GIVEN) as s:
         loop = asyncio.get_running_loop()
@@ -1167,21 +1167,19 @@ def _add_cache_breakpoint(
             )
 
 
+# Tool-call IDs are remapped to ``toolu_N`` so history from other providers (OpenAI
+# ``fc_*``, etc.) is accepted by the Anthropic API.
+#
+# Anthropic uses alternating user/assistant messages with content blocks. Tool results
+# are content blocks inside user messages; consecutive tool results batch into one user
+# message.
 def _build_messages(
     request: ModelRequest,
     max_image_dim: int = 0,
     max_image_bytes: int = 0,
     cache_ttl: str = "5m",
 ) -> list[anthropic.types.MessageParam]:
-    """Convert history entries to Anthropic message format.
-
-    Tool-call IDs are remapped to ``toolu_N`` so history from other
-    providers (OpenAI ``fc_*``, etc.) is accepted by the Anthropic API.
-
-    Anthropic uses alternating user/assistant messages with content
-    blocks. Tool results are content blocks inside user messages;
-    consecutive tool results batch into one user message.
-    """
+    """Convert history entries to Anthropic message format."""
     ids = IdRemapper("toolu_")
     messages: list[anthropic.types.MessageParam] = []
     pending_tool_results: list[dict[str, object]] = []
@@ -1202,7 +1200,7 @@ def _build_messages(
                     cast(
                         anthropic.types.MessageParam,
                         {"role": "user", "content": blocks},
-                    )
+                    ),
                 )
         elif isinstance(entry, AssistantMessage):
             _flush_tool_results(messages, pending_tool_results)
@@ -1212,13 +1210,13 @@ def _build_messages(
                     cast(
                         anthropic.types.MessageParam,
                         {"role": "assistant", "content": blocks},
-                    )
+                    ),
                 )
         else:
             # TapeEvent is the closed union {UserMessage, AssistantMessage,
             # ToolResult}; the two branches above consume the first two.
             pending_tool_results.append(
-                _tool_result_block(entry, ids, max_image_dim, max_image_bytes)
+                _tool_result_block(entry, ids, max_image_dim, max_image_bytes),
             )
 
     _flush_tool_results(messages, pending_tool_results)
@@ -1245,31 +1243,26 @@ def _user_blocks(
     return blocks
 
 
+# Thinking blocks are emitted verbatim (the wire dict from ``block.model_dump()`` stored
+# on the message), with two exceptions:
+#
+# 1. A ``thinking`` block whose ``signature`` is set but whose ``thinking`` body is
+# empty has lost its signed payload and cannot re-validate server-side (Anthropic
+# answers HTTP 400 ``thinking blocks ... cannot be modified``). Such orphans are elided.
+# 2. Non-native thinking-block types (e.g. ``{"type":"reasoning"}`` from OpenAI /
+# Moonshot / MiniMax / OpenAI-subscription) cannot be translated and would trip
+# Anthropic's content-block validator after a cross- provider session switch. They are
+# dropped silently; the underlying reasoning is opaque to other providers and there is
+# no faithful re- encoding.
+#
+# ``redacted_thinking`` has no client-visible body to lose and always passes through.
+# Anthropic rejects assistant messages whose final block is thinking, so we append a
+# placeholder text block when no text or tool_use follows.
 def _assistant_blocks(
     entry: AssistantMessage,
     ids: IdRemapper,
 ) -> list[dict[str, object]]:
-    """Build Anthropic content blocks from an AssistantMessage.
-
-    Thinking blocks are emitted verbatim (the wire dict from
-    ``block.model_dump()`` stored on the message), with two exceptions:
-
-    1. A ``thinking`` block whose ``signature`` is set but whose ``thinking``
-       body is empty has lost its signed payload and cannot re-validate
-       server-side (Anthropic answers HTTP 400 ``thinking blocks ... cannot be
-       modified``). Such orphans are elided.
-    2. Non-native thinking-block types (e.g. ``{"type":"reasoning"}`` from
-       OpenAI / Moonshot / MiniMax / OpenAI-subscription) cannot be translated
-       and would trip Anthropic's content-block validator after a cross-
-       provider session switch. They are dropped silently; the underlying
-       reasoning is opaque to other providers and there is no faithful re-
-       encoding.
-
-    ``redacted_thinking`` has no client-visible body to lose and always passes
-    through. Anthropic rejects assistant messages whose final block is
-    thinking, so we append a placeholder text block when no text or tool_use
-    follows.
-    """
+    """Build Anthropic content blocks from an AssistantMessage."""
     blocks: list[dict[str, object]] = [
         dict(tb)
         for tb in entry.thinking_blocks
@@ -1307,16 +1300,14 @@ def _tool_use_block(tc: ToolCall, ids: IdRemapper) -> dict[str, object]:
     }
 
 
+# Image attachments inline as image blocks alongside the text.
 def _tool_result_block(
     entry: ToolResult,
     ids: IdRemapper,
     max_image_dim: int,
     max_image_bytes: int,
 ) -> dict[str, object]:
-    """Build a single tool_result block for a ToolResult.
-
-    Image attachments inline as image blocks alongside the text.
-    """
+    """Build a single tool_result block for a ToolResult."""
     image_attachments = [
         att for att in entry.attachments if _is_image_mime(att.descriptor)
     ]
@@ -1361,9 +1352,7 @@ def _attachment_block(
     raw = data
     mime = descriptor
     if is_image:
-        raw, mime = image_lib.resize(
-            raw, max_dim=max_image_dim, max_bytes=max_image_bytes
-        )
+        raw, mime = image.resize(raw, max_dim=max_image_dim, max_bytes=max_image_bytes)
     b64 = base64.b64encode(raw).decode()
     return {
         "type": "image" if is_image else "document",
@@ -1391,20 +1380,17 @@ def _flush_tool_results(
         cast(
             anthropic.types.MessageParam,
             {"role": "user", "content": list(pending)},
-        )
+        ),
     )
     pending.clear()
 
 
+# Filters template placeholders the model can echo back from the Anthropic server's
+# injected tool-use spec (e.g. ``$FUNCTION_NAME``, ``$TOOL_NAME``). Real registered
+# tools always have Python-identifier names; ``$FUNCTION_NAME`` is not an identifier so
+# ``isidentifier()`` alone rejects it.
 def _is_valid_tool_name(name: str) -> bool:
-    """Return True when ``name`` is a plausible registered tool name.
-
-    Filters template placeholders the model can echo back from the
-    Anthropic server's injected tool-use spec (e.g. ``$FUNCTION_NAME``,
-    ``$TOOL_NAME``). Real registered tools always have Python-identifier
-    names; ``$FUNCTION_NAME`` is not an identifier so ``isidentifier()``
-    alone rejects it.
-    """
+    """Return True when ``name`` is a plausible registered tool name."""
     return name.isidentifier()
 
 
@@ -1470,7 +1456,7 @@ def _parse_response(raw: _RawMessage, model: _AnthropicModel) -> ModelResponse:
                     id=block.id,
                     name=block.name,
                     args=cast(Mapping[str, object], dict(block.input)),
-                )
+                ),
             )
         elif isinstance(
             block,

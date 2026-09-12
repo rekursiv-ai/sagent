@@ -19,16 +19,22 @@ class FailureType(IntEnum):
     MISMATCHED_FAKE_KERNEL = ...
 
 def prettify_stack(
-    stack: list[dict[str, str]], str_to_filename: dict[int, str]
+    stack: list[dict[str, str]],
+    str_to_filename: dict[int, str],
 ) -> str: ...
 def prettify_frame_locals(
-    loc: str, locals: dict[str, Any], symbols: dict[str, Any]
+    loc: str,
+    locals: dict[str, Any],
+    symbols: dict[str, Any],
 ) -> str: ...
 def get_loc(filename: str, lineno: int) -> str | None: ...
 
 class FailureReport:
     def __init__(
-        self, failure_type: FailureType, data: dict[str, Any], xfail: bool = ...
+        self,
+        failure_type: FailureType,
+        data: dict[str, Any],
+        xfail: bool = ...,
     ) -> None: ...
     def print(self, str_to_filename: dict[int, str]) -> str: ...
 

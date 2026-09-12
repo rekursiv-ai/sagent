@@ -66,7 +66,7 @@ def test_send_success() -> None:
                     "channel": "C1",
                     "text": "hi",
                     "thread_ts": "thr1",
-                }
+                },
             ),
         )
     assert not result.is_error
@@ -88,7 +88,7 @@ def test_send_api_error() -> None:
     ):
         result = asyncio.run(
             Slack(token=_TOKEN).run(
-                {"operation": "send", "channel": "X", "text": "hi"}
+                {"operation": "send", "channel": "X", "text": "hi"},
             ),
         )
     assert result.is_error
@@ -105,7 +105,7 @@ def test_send_http_error() -> None:
     with patch("sagent.tools.slack.fetch", side_effect=err):
         result = asyncio.run(
             Slack(token=_TOKEN).run(
-                {"operation": "send", "channel": "C", "text": "hi"}
+                {"operation": "send", "channel": "C", "text": "hi"},
             ),
         )
     assert result.is_error
@@ -128,8 +128,8 @@ def test_list_channels_renders() -> None:
             "channels": [
                 {"id": "C1", "name": "general", "num_members": 10},
                 {"id": "C2", "name": "random"},
-            ]
-        }
+            ],
+        },
     )
     with patch(
         "sagent.tools.slack.fetch",
@@ -171,8 +171,8 @@ def test_list_messages_renders_with_reactions() -> None:
                     "reactions": [{"name": "tada", "count": 3}],
                 },
                 {"ts": "2.0", "bot_id": "B1", "text": "bot"},
-            ]
-        }
+            ],
+        },
     )
     with patch(
         "sagent.tools.slack.fetch",
@@ -203,7 +203,7 @@ def test_read_thread_renders() -> None:
                     "operation": "read_thread",
                     "channel": "C1",
                     "thread_ts": "1.0",
-                }
+                },
             ),
         )
     assert "[1.0] <U1> parent" in result.content
@@ -215,8 +215,8 @@ def test_list_users_filters_deleted() -> None:
             "members": [
                 {"id": "U1", "name": "alice", "real_name": "Alice"},
                 {"id": "U2", "name": "bob", "deleted": True},
-            ]
-        }
+            ],
+        },
     )
     with patch(
         "sagent.tools.slack.fetch",
@@ -251,7 +251,7 @@ def test_create_channel_success() -> None:
     ):
         result = asyncio.run(
             Slack(token=_TOKEN).run(
-                {"operation": "create_channel", "channel_name": "newroom"}
+                {"operation": "create_channel", "channel_name": "newroom"},
             ),
         )
     assert result.content == "id=C-new"

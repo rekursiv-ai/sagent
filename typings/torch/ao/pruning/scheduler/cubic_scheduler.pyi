@@ -18,6 +18,12 @@ class CubicSL(BaseScheduler):
     ) -> None: ...
     @staticmethod
     def sparsity_compute_fn(
-        s_0, s_f, t, t_0, dt, n, initially_zero=...
+        s_0,
+        s_f,
+        t,
+        t_0,
+        dt,
+        n,
+        initially_zero=...,
     ) -> Literal[0]: ...
     def get_sl(self) -> list[Any | int]: ...

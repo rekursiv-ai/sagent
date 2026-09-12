@@ -132,7 +132,7 @@ def test_environment_section_includes_model_metadata() -> None:
 def test_environment_section_unknown_model_falls_back() -> None:
     out = environment("custom-model-xyz")
     assert "custom-model-xyz" in out
-    assert "unknown" in out  # cutoff fallback
+    assert "unknown" in out  # Cutoff fallback.
 
 
 def test_environment_section_strips_context_tag() -> None:
@@ -196,7 +196,10 @@ def test_is_git_repo_reflects_runtime_change(monkeypatch: pytest.MonkeyPatch) ->
 
     def fake_run(*_args: object, **_kw: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(
-            args=[], returncode=returncode[0], stdout="", stderr=""
+            args=[],
+            returncode=returncode[0],
+            stdout="",
+            stderr="",
         )
 
     monkeypatch.setattr("sagent.prompt.subprocess.run", fake_run)
@@ -210,7 +213,10 @@ def test_is_git_worktree_false_when_command_fails(
 ) -> None:
     def fake_run(*_args: object, **_kw: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(
-            args=[], returncode=128, stdout="", stderr=""
+            args=[],
+            returncode=128,
+            stdout="",
+            stderr="",
         )
 
     monkeypatch.setattr("sagent.prompt.subprocess.run", fake_run)
@@ -230,7 +236,10 @@ def test_is_git_worktree_false_on_unexpected_output(
 ) -> None:
     def fake_run(*_args: object, **_kw: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="only-one-line", stderr=""
+            args=[],
+            returncode=0,
+            stdout="only-one-line",
+            stderr="",
         )
 
     monkeypatch.setattr("sagent.prompt.subprocess.run", fake_run)

@@ -22,16 +22,24 @@ class Text2TextGenerationPipeline(Pipeline):
     return_name = ...
     def __init__(self, *args, **kwargs) -> None: ...
     def check_inputs(
-        self, input_length: int, min_length: int, max_length: int
+        self,
+        input_length: int,
+        min_length: int,
+        max_length: int,
     ):  # -> Literal[True]:
         ...
     def __call__(
-        self, *args: str | list[str], **kwargs: Any
+        self,
+        *args: str | list[str],
+        **kwargs: Any,
     ) -> list[dict[str, str]]: ...
     def preprocess(self, inputs, truncation=..., **kwargs):  # -> BatchEncoding | Any:
         ...
     def postprocess(
-        self, model_outputs, return_type=..., clean_up_tokenization_spaces=...
+        self,
+        model_outputs,
+        return_type=...,
+        clean_up_tokenization_spaces=...,
     ):  # -> list[Any]:
         ...
 
@@ -41,18 +49,28 @@ class SummarizationPipeline(Text2TextGenerationPipeline):
     def __call__(self, *args, **kwargs):  # -> list[dict[str, str]]:
         ...
     def check_inputs(
-        self, input_length: int, min_length: int, max_length: int
+        self,
+        input_length: int,
+        min_length: int,
+        max_length: int,
     ) -> bool: ...
 
 @add_end_docstrings(build_pipeline_init_args(has_tokenizer=True))
 class TranslationPipeline(Text2TextGenerationPipeline):
     return_name = ...
     def check_inputs(
-        self, input_length: int, min_length: int, max_length: int
+        self,
+        input_length: int,
+        min_length: int,
+        max_length: int,
     ):  # -> Literal[True]:
         ...
     def preprocess(
-        self, *args, truncation=..., src_lang=..., tgt_lang=...
+        self,
+        *args,
+        truncation=...,
+        src_lang=...,
+        tgt_lang=...,
     ):  # -> BatchEncoding:
         ...
     def __call__(self, *args, **kwargs):  # -> list[dict[str, str]]:

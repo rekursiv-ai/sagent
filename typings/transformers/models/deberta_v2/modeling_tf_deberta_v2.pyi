@@ -50,7 +50,9 @@ class TFDebertaV2StableDropout(keras.layers.Layer):
     def xdropout(self, inputs):  # -> tuple[Any, Callable[..., Any]]:
         ...
     def call(
-        self, inputs: tf.Tensor, training: tf.Tensor = ...
+        self,
+        inputs: tf.Tensor,
+        training: tf.Tensor = ...,
     ):  # -> tuple[Any, Callable[..., Any]]:
         ...
 
@@ -84,7 +86,10 @@ class TFDebertaV2Intermediate(keras.layers.Layer):
 class TFDebertaV2Output(keras.layers.Layer):
     def __init__(self, config: DebertaV2Config, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -124,7 +129,10 @@ class TFDebertaV2Encoder(keras.layers.Layer):
         ...
     def get_attention_mask(self, attention_mask): ...
     def get_rel_pos(
-        self, hidden_states, query_states=..., relative_pos=...
+        self,
+        hidden_states,
+        query_states=...,
+        relative_pos=...,
     ):  # -> None:
         ...
     def call(
@@ -141,7 +149,10 @@ class TFDebertaV2Encoder(keras.layers.Layer):
 
 def make_log_bucket_position(relative_pos, bucket_size, max_position): ...
 def build_relative_position(
-    query_size, key_size, bucket_size=..., max_position=...
+    query_size,
+    key_size,
+    bucket_size=...,
+    max_position=...,
 ): ...
 def c2p_dynamic_expand(c2p_pos, query_layer, relative_pos): ...
 def p2c_dynamic_expand(c2p_pos, query_layer, key_layer): ...
@@ -151,7 +162,9 @@ def take_along_axis(x, indices): ...
 class TFDebertaV2DisentangledSelfAttention(keras.layers.Layer):
     def __init__(self, config: DebertaV2Config, **kwargs) -> None: ...
     def transpose_for_scores(
-        self, tensor: tf.Tensor, attention_heads: int
+        self,
+        tensor: tf.Tensor,
+        attention_heads: int,
     ) -> tf.Tensor: ...
     def call(
         self,
@@ -164,7 +177,12 @@ class TFDebertaV2DisentangledSelfAttention(keras.layers.Layer):
         training: bool = ...,
     ) -> tuple[tf.Tensor]: ...
     def disentangled_att_bias(
-        self, query_layer, key_layer, relative_pos, rel_embeddings, scale_factor
+        self,
+        query_layer,
+        key_layer,
+        relative_pos,
+        rel_embeddings,
+        scale_factor,
     ):  # -> Literal[0]:
         ...
     def build(self, input_shape=...):  # -> None:
@@ -192,7 +210,10 @@ class TFDebertaV2PredictionHeadTransform(keras.layers.Layer):
 
 class TFDebertaV2LMPredictionHead(keras.layers.Layer):
     def __init__(
-        self, config: DebertaV2Config, input_embeddings: keras.layers.Layer, **kwargs
+        self,
+        config: DebertaV2Config,
+        input_embeddings: keras.layers.Layer,
+        **kwargs,
     ) -> None: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -206,7 +227,10 @@ class TFDebertaV2LMPredictionHead(keras.layers.Layer):
 
 class TFDebertaV2OnlyMLMHead(keras.layers.Layer):
     def __init__(
-        self, config: DebertaV2Config, input_embeddings: keras.layers.Layer, **kwargs
+        self,
+        config: DebertaV2Config,
+        input_embeddings: keras.layers.Layer,
+        **kwargs,
     ) -> None: ...
     def call(self, sequence_output: tf.Tensor) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -249,7 +273,7 @@ class TFDebertaV2Model(TFDebertaV2PreTrainedModel):
     def __init__(self, config: DebertaV2Config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        DEBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        DEBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -277,7 +301,7 @@ class TFDebertaV2ForMaskedLM(TFDebertaV2PreTrainedModel, TFMaskedLanguageModelin
     def get_lm_head(self) -> keras.layers.Layer: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        DEBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        DEBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -305,12 +329,13 @@ class TFDebertaV2ForMaskedLM(TFDebertaV2PreTrainedModel, TFMaskedLanguageModelin
     DEBERTA_START_DOCSTRING,
 )
 class TFDebertaV2ForSequenceClassification(
-    TFDebertaV2PreTrainedModel, TFSequenceClassificationLoss
+    TFDebertaV2PreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config: DebertaV2Config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        DEBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        DEBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -338,12 +363,13 @@ class TFDebertaV2ForSequenceClassification(
     DEBERTA_START_DOCSTRING,
 )
 class TFDebertaV2ForTokenClassification(
-    TFDebertaV2PreTrainedModel, TFTokenClassificationLoss
+    TFDebertaV2PreTrainedModel,
+    TFTokenClassificationLoss,
 ):
     def __init__(self, config: DebertaV2Config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        DEBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        DEBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -371,12 +397,13 @@ class TFDebertaV2ForTokenClassification(
     DEBERTA_START_DOCSTRING,
 )
 class TFDebertaV2ForQuestionAnswering(
-    TFDebertaV2PreTrainedModel, TFQuestionAnsweringLoss
+    TFDebertaV2PreTrainedModel,
+    TFQuestionAnsweringLoss,
 ):
     def __init__(self, config: DebertaV2Config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        DEBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        DEBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -408,7 +435,7 @@ class TFDebertaV2ForMultipleChoice(TFDebertaV2PreTrainedModel, TFMultipleChoiceL
     def __init__(self, config: DebertaV2Config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        DEBERTA_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        DEBERTA_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,

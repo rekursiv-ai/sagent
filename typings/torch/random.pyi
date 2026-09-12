@@ -15,5 +15,9 @@ _fork_rng_warned_already = ...
 
 @contextlib.contextmanager
 def fork_rng(
-    devices=..., enabled=..., _caller=..., _devices_kw=..., device_type=...
+    devices=...,
+    enabled=...,
+    _caller=...,
+    _devices_kw=...,
+    device_type=...,
 ) -> Generator: ...

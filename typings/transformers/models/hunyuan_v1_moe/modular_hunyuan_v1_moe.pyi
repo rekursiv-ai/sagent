@@ -27,7 +27,10 @@ class HunYuanMoEV1RMSNorm(LlamaRMSNorm): ...
 
 class HunYuanMoEV1MLP(LlamaMLP):
     def __init__(
-        self, config: HunYuanMoEV1Config, layer_idx=..., is_shared_mlp=...
+        self,
+        config: HunYuanMoEV1Config,
+        layer_idx=...,
+        is_shared_mlp=...,
     ) -> None: ...
 
 class HunYuanMoEV1Attention(LlamaAttention):
@@ -42,19 +45,25 @@ class HunYuanMoEV1Attention(LlamaAttention):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class HunYuanMoEV1Gate(nn.Module):
     def __init__(
-        self, config: HunYuanMoEV1Config, layer_idx: int | None = ...
+        self,
+        config: HunYuanMoEV1Config,
+        layer_idx: int | None = ...,
     ) -> None: ...
     def forward(self, hidden_states):  # -> Any:
         ...
 
 class HunYuanMoEV1Moe(nn.Module):
     def __init__(
-        self, config: HunYuanMoEV1Config, layer_idx: int | None = ...
+        self,
+        config: HunYuanMoEV1Config,
+        layer_idx: int | None = ...,
     ) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...

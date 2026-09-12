@@ -30,7 +30,9 @@ _CONFIG_FOR_DOC = ...
 LARGE_NEGATIVE = ...
 
 def shift_tokens_right(
-    input_ids: tf.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: tf.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ): ...
 
 class TFPegasusSinusoidalPositionalEmbedding(keras.layers.Layer):
@@ -212,7 +214,7 @@ class TFPegasusModel(TFPegasusPreTrainedModel):
         ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        PEGASUS_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        PEGASUS_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -254,7 +256,8 @@ class BiasLayer(keras.layers.Layer):
     PEGASUS_START_DOCSTRING,
 )
 class TFPegasusForConditionalGeneration(
-    TFPegasusPreTrainedModel, TFCausalLanguageModelingLoss
+    TFPegasusPreTrainedModel,
+    TFCausalLanguageModelingLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
@@ -272,7 +275,8 @@ class TFPegasusForConditionalGeneration(
     @unpack_inputs
     @add_start_docstrings_to_model_forward(PEGASUS_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFSeq2SeqLMOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFSeq2SeqLMOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     @add_end_docstrings(PEGASUS_GENERATION_EXAMPLE)
     def call(

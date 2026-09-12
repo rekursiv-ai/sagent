@@ -62,7 +62,9 @@ class KyutaiSpeechToTextForConditionalGeneration(LlamaForCausalLM, GenerationMix
         ...
     @classmethod
     def from_pretrained(
-        cls, *args, **kwargs
+        cls,
+        *args,
+        **kwargs,
     ):  # -> tuple[Any | PreTrainedModel, Any] | PreTrainedModel:
         ...
     def save_pretrained(self, *args, **kwargs):  # -> None:

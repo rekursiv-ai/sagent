@@ -140,13 +140,15 @@ def test_ambiguous_byte_prefix_does_not_force_byte_classification() -> None:
     """
     assert (
         is_request_too_large(
-            413, "request exceeds the maximum context length for this model"
+            413,
+            "request exceeds the maximum context length for this model",
         )
         is False
     )
     assert (
         is_request_too_large(
-            400, "Request too large: prompt exceeds the model context window"
+            400,
+            "Request too large: prompt exceeds the model context window",
         )
         is False
     )
@@ -162,7 +164,8 @@ def test_unambiguous_byte_phrase_wins_over_co_occurring_context_phrase() -> None
     """
     assert (
         is_request_too_large(
-            413, "request entity too large; please reduce context window usage"
+            413,
+            "request entity too large; please reduce context window usage",
         )
         is True
     )
@@ -181,8 +184,8 @@ def test_context_overflow_text_structured_body_canonical_code() -> None:
             "error": {
                 "code": "context_length_exceeded",
                 "message": "This model's maximum context length is 128000 tokens.",
-            }
-        }
+            },
+        },
     )
     assert is_context_overflow_text(body) is True
 
@@ -195,8 +198,8 @@ def test_context_overflow_text_structured_per_item_string_cap() -> None:
                 "type": "invalid_request_error",
                 "param": "input[388].output",
                 "message": "String too long. Expected maximum length 10485760.",
-            }
-        }
+            },
+        },
     )
     assert is_context_overflow_text(PER_ITEM_STRING_CAP_BODY) is True
     assert is_context_overflow_text(body) is True
@@ -205,7 +208,7 @@ def test_context_overflow_text_structured_per_item_string_cap() -> None:
 
 def test_context_overflow_text_unknown_code_overrides_overflow_phrase() -> None:
     body = json.dumps(
-        {"error": {"code": "unknown_error", "message": "maximum context length"}}
+        {"error": {"code": "unknown_error", "message": "maximum context length"}},
     )
     assert is_context_overflow_text(body) is False
 
@@ -217,8 +220,8 @@ def test_context_overflow_text_structured_body_unrelated_code() -> None:
             "error": {
                 "code": "invalid_request_error",
                 "message": "tools[0].function: 'model context' field missing",
-            }
-        }
+            },
+        },
     )
     assert is_context_overflow_text(body) is False
 
@@ -260,7 +263,7 @@ def test_per_item_string_cap_is_not_the_byte_limit() -> None:
     propagating. See ``providers/openai/sub_test.py``.
     """
     assert is_request_too_large(400, PER_ITEM_STRING_CAP_BODY) is False
-    raise_if_request_too_large(400, PER_ITEM_STRING_CAP_BODY)  # must not raise
+    raise_if_request_too_large(400, PER_ITEM_STRING_CAP_BODY)  # Must not raise.
 
 
 def test_raise_if_request_too_large_raises_on_413() -> None:
@@ -269,7 +272,7 @@ def test_raise_if_request_too_large_raises_on_413() -> None:
 
 
 def test_raise_if_request_too_large_noop_on_token_overflow() -> None:
-    raise_if_request_too_large(400, "prompt is too long")  # must not raise
+    raise_if_request_too_large(400, "prompt is too long")  # Must not raise.
 
 
 class _StatusError(Exception):
@@ -287,7 +290,9 @@ def test_error_status_code_from_status_attr() -> None:
 def test_error_status_code_from_response_attr() -> None:
     request = httpx2.Request("POST", "https://example.test")
     err = httpx2.HTTPStatusError(
-        "x", request=request, response=httpx2.Response(413, request=request)
+        "x",
+        request=request,
+        response=httpx2.Response(413, request=request),
     )
     assert error_status_code(err) == 413
 

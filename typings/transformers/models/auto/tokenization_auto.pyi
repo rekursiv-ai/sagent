@@ -39,7 +39,10 @@ class AutoTokenizer:
     ) -> PreTrainedTokenizerFast: ...
     @staticmethod
     def register(
-        config_class, slow_tokenizer_class=..., fast_tokenizer_class=..., exist_ok=...
+        config_class,
+        slow_tokenizer_class=...,
+        fast_tokenizer_class=...,
+        exist_ok=...,
     ):  # -> None:
         ...
 

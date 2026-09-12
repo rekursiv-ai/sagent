@@ -3,7 +3,10 @@ from ..utils import add_end_docstrings
 
 class TableQuestionAnsweringArgumentHandler(ArgumentHandler):
     def __call__(
-        self, table=..., query=..., **kwargs
+        self,
+        table=...,
+        query=...,
+        **kwargs,
     ):  # -> Dataset[Any] | GeneratorType[Any, Any, Any] | list[dict[Any, Any]] | list[Any] | list[dict[str, Any]]:
         ...
 
@@ -21,14 +24,20 @@ class TableQuestionAnsweringPipeline(Pipeline):
         ...
     def sequential_inference(self, **inputs): ...
     def __call__(
-        self, *args, **kwargs
+        self,
+        *args,
+        **kwargs,
     ):  # -> Tensor | list[Any] | PipelineIterator | Generator[Any, Any, None] | None:
         ...
     def preprocess(
-        self, pipeline_input, padding=..., truncation=...
+        self,
+        pipeline_input,
+        padding=...,
+        truncation=...,
     ):  # -> BatchEncoding | Any:
         ...
     def postprocess(
-        self, model_outputs
+        self,
+        model_outputs,
     ):  # -> list[dict[str, str | Any]] | dict[str, str | Any]:
         ...

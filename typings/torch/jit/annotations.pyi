@@ -13,7 +13,8 @@ class EvalEnv:
     env = ...
     def __init__(self, rcb) -> None: ...
     def __getitem__(
-        self, name
+        self,
+        name,
     ) -> (
         type[
             Tensor

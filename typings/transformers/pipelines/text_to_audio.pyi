@@ -12,7 +12,12 @@ class TextToAudioPipeline(Pipeline):
     _load_tokenizer = ...
     _default_generation_config = ...
     def __init__(
-        self, *args, vocoder=..., sampling_rate=..., no_processor=..., **kwargs
+        self,
+        *args,
+        vocoder=...,
+        sampling_rate=...,
+        no_processor=...,
+        **kwargs,
     ) -> None: ...
     def preprocess(self, text, **kwargs):  # -> BatchEncoding | Any:
         ...
@@ -20,10 +25,14 @@ class TextToAudioPipeline(Pipeline):
     def __call__(self, text_inputs: str, **forward_params: Any) -> dict[str, Any]: ...
     @overload
     def __call__(
-        self, text_inputs: list[str], **forward_params: Any
+        self,
+        text_inputs: list[str],
+        **forward_params: Any,
     ) -> list[dict[str, Any]]: ...
     def __call__(
-        self, text_inputs: str | list[str], **forward_params
+        self,
+        text_inputs: str | list[str],
+        **forward_params,
     ) -> dict[str, Any] | list[dict[str, Any]]: ...
     def postprocess(self, audio):  # -> dict[Any, Any]:
         ...

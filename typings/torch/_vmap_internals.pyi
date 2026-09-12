@@ -9,5 +9,7 @@ type out_dims_t = int | tuple[int, ...]
     category=FutureWarning,
 )
 def vmap(
-    func: Callable, in_dims: in_dims_t = ..., out_dims: out_dims_t = ...
+    func: Callable,
+    in_dims: in_dims_t = ...,
+    out_dims: out_dims_t = ...,
 ) -> Callable: ...

@@ -21,7 +21,11 @@ _HIDDEN_STATES_START_POSITION = ...
 def make_log_bucket_position(relative_pos, bucket_size, max_position):  # -> Tensor:
     ...
 def build_relative_position(
-    query_size, key_size, bucket_size=..., max_position=..., device=...
+    query_size,
+    key_size,
+    bucket_size=...,
+    max_position=...,
+    device=...,
 ):  # -> Tensor:
     ...
 @torch.jit.script
@@ -128,7 +132,12 @@ class DisentangledSelfAttention(nn.Module):
     ):  # -> tuple[Tensor, Any] | Tensor:
         ...
     def disentangled_attention_bias(
-        self, query_layer, key_layer, relative_pos, rel_embeddings, scale_factor
+        self,
+        query_layer,
+        key_layer,
+        relative_pos,
+        rel_embeddings,
+        scale_factor,
     ):  # -> Tensor | Literal[0]:
         ...
 
@@ -179,7 +188,10 @@ class SEWDTransformerEncoder(nn.Module):
         ...
     def get_attention_mask(self, attention_mask): ...
     def get_rel_pos(
-        self, hidden_states, query_states=..., relative_pos=...
+        self,
+        hidden_states,
+        query_states=...,
+        relative_pos=...,
     ):  # -> Tensor | None:
         ...
     def forward(

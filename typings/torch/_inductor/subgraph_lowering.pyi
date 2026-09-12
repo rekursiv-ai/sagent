@@ -37,7 +37,10 @@ class PointwiseSubgraphLowering(torch.fx.Interpreter):
     def register_buffer(self, buffer: ir.Buffer, *, set_name: bool = ...) -> str: ...
     def __getattr__(self, name: str) -> Any: ...
     def call_function(
-        self, target: TargetType, args: Any, kwargs: dict[str, Any]
+        self,
+        target: TargetType,
+        args: Any,
+        kwargs: dict[str, Any],
     ) -> Any: ...
     def output(self, target: str, args: tuple[Any], kwargs: dict[str, Any]) -> None: ...
 
@@ -52,5 +55,6 @@ class TracingOpsHandler(WrapperHandler):
     def output(self, *args: tuple[object]) -> None: ...
 
 def lower_pointwise_subgraph(
-    subgraph: ir.Subgraph, inputs: list[InputDescriptor]
+    subgraph: ir.Subgraph,
+    inputs: list[InputDescriptor],
 ) -> Callable[_P, Any]: ...

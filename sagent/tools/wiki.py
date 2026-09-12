@@ -62,11 +62,6 @@ def find_root(start: str | Path) -> Path | None:
     return None
 
 
-def _pages_dir(root: Path) -> Path:
-    """Return the ``pages/`` directory under a wiki root."""
-    return root / "pages"
-
-
 def list_pages(root: Path) -> list[str]:
     """Return all page slugs under ``<root>/pages/`` (flat).
 
@@ -117,25 +112,6 @@ def read_page(root: Path, slug: str) -> str | None:
         return fp.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
-
-
-def _iter_page_files(root: Path) -> Iterable[Path]:
-    """Yield page files under ``<root>/pages/`` in sorted order."""
-    pd = _pages_dir(root)
-    if pd.exists():
-        yield from sorted(pd.glob("*.md"))
-
-
-def _parse_frontmatter_keys(text: str) -> set[str]:
-    """Extract the set of top-level keys from a page's YAML frontmatter."""
-    m = _FRONTMATTER_RE.match(text)
-    if m is None:
-        return set()
-    return {
-        line.split(":", 1)[0].strip()
-        for line in m.group("body").splitlines()
-        if line.strip() and not line.lstrip().startswith("#") and ":" in line
-    }
 
 
 def lint(root: Path) -> dict[str, list[str]]:
@@ -207,7 +183,7 @@ class Wiki:
                 },
             },
             "required": ["operation"],
-        }
+        },
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -261,7 +237,11 @@ class Wiki:
         )
 
     def _run(
-        self, *, operation: str, slug: str = "", cwd: str = ""
+        self,
+        *,
+        operation: str,
+        slug: str = "",
+        cwd: str = "",
     ) -> str | ToolResult:
         """Locate the wiki root and route to the operation handler."""
         if operation not in _OPERATIONS:
@@ -312,7 +292,9 @@ def _read_page_op(root: Path, slug: str) -> str | ToolResult:
         )
     if not valid_slug(slug):
         return ToolResult(
-            call_id="", content=f"Invalid page slug: {slug!r}", is_error=True
+            call_id="",
+            content=f"Invalid page slug: {slug!r}",
+            is_error=True,
         )
     content = read_page(root, slug)
     if content is None:
@@ -346,3 +328,27 @@ def _lint_op(root: Path) -> str:
         parts.append("Missing frontmatter:")
         parts.extend(f"  {e}" for e in missing)
     return "\n".join(parts)
+
+
+def _pages_dir(root: Path) -> Path:
+    """Return the ``pages/`` directory under a wiki root."""
+    return root / "pages"
+
+
+def _iter_page_files(root: Path) -> Iterable[Path]:
+    """Yield page files under ``<root>/pages/`` in sorted order."""
+    pd = _pages_dir(root)
+    if pd.exists():
+        yield from sorted(pd.glob("*.md"))
+
+
+def _parse_frontmatter_keys(text: str) -> set[str]:
+    """Extract the set of top-level keys from a page's YAML frontmatter."""
+    m = _FRONTMATTER_RE.match(text)
+    if m is None:
+        return set()
+    return {
+        line.split(":", 1)[0].strip()
+        for line in m.group("body").splitlines()
+        if line.strip() and not line.lstrip().startswith("#") and ":" in line
+    }

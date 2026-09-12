@@ -50,17 +50,27 @@ class CompilerBisector:
     def read_lines_from_file(cls, file_path: str) -> list[str]: ...
     @classmethod
     def update_run_state(
-        cls, backend_name: str, subsystem: Subsystem, run_state: str
+        cls,
+        backend_name: str,
+        subsystem: Subsystem,
+        run_state: str,
     ) -> None: ...
     @classmethod
     def set_config_values(
-        cls, backend: str, subsystem: str, config_data: dict[str, object]
+        cls,
+        backend: str,
+        subsystem: str,
+        config_data: dict[str, object],
     ) -> None: ...
     @classmethod
     def update_bisect_status(cls, backend_name: str, subsystem_name: str) -> None: ...
     @classmethod
     def update_bisect_range(
-        cls, backend_name: str, subsystem_name: str, low: int, high: int
+        cls,
+        backend_name: str,
+        subsystem_name: str,
+        low: int,
+        high: int,
     ) -> None: ...
     @classmethod
     def get_backend(cls) -> str | None: ...
@@ -68,13 +78,17 @@ class CompilerBisector:
     def get_subsystem(cls) -> str | None: ...
     @classmethod
     def get_subsystem_object(
-        cls, backend_name: str, subsystem_name: str
+        cls,
+        backend_name: str,
+        subsystem_name: str,
     ) -> Subsystem: ...
     @classmethod
     def get_run_state(cls, backend_name: str, subsystem_name: str) -> str | None: ...
     @classmethod
     def get_bisect_range(
-        cls, backend_name: str, subsystem_name: str
+        cls,
+        backend_name: str,
+        subsystem_name: str,
     ) -> tuple[int, int]: ...
     @classmethod
     def update_config_change(cls, backend: str, subsystem: ConfigChange) -> None: ...
@@ -86,11 +100,16 @@ class CompilerBisector:
     def get_system_counter(cls, name: str, increment: bool = ...) -> int: ...
     @classmethod
     def disable_subsystem(
-        cls, backend: str, subsystem: str, debug_info: Callable[[], str] | None = ...
+        cls,
+        backend: str,
+        subsystem: str,
+        debug_info: Callable[[], str] | None = ...,
     ) -> bool: ...
     @classmethod
     def advance_subsystem(
-        cls, curr_backend: str, curr_subsystem: Subsystem
+        cls,
+        curr_backend: str,
+        curr_subsystem: Subsystem,
     ) -> Subsystem | None: ...
     @classmethod
     def advance_backend(cls, curr_backend: str) -> str | None: ...
@@ -106,7 +125,9 @@ class CompilerBisector:
     def initialize_system(cls) -> None: ...
     @classmethod
     def do_bisect(
-        cls, fn: Callable[[], bool], cli_interface: bool = ...
+        cls,
+        fn: Callable[[], bool],
+        cli_interface: bool = ...,
     ) -> BisectionResult | None: ...
 
 def command_line_usage() -> None: ...

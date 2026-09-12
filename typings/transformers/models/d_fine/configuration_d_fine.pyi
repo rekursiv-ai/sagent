@@ -87,7 +87,9 @@ class DFineConfig(PretrainedConfig):
         ...
     @classmethod
     def from_backbone_configs(
-        cls, backbone_config: PretrainedConfig, **kwargs
+        cls,
+        backbone_config: PretrainedConfig,
+        **kwargs,
     ):  # -> Self:
         ...
 

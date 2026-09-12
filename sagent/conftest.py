@@ -1,4 +1,4 @@
-# pytest fixtures are referenced by parameter name, not imported
+# Pytest fixtures are referenced by parameter name, not imported.
 """Pytest configuration for sagent tests."""
 
 from __future__ import annotations
@@ -13,11 +13,9 @@ from sagent.agent.state import (
     agent_registry,
     fresh_default_tool_state,
 )
+from sagent.lib.testing import userdirs_fixture
 from sagent.lib.testing.resource_markers import pytest_collection_modifyitems
-from sagent.lib.testing.userdirs_fixture import (
-    isolate_user_dirs,
-    pytest_configure as _register_real_user_dirs_marker,
-)
+from sagent.lib.testing.userdirs_fixture import isolate_user_dirs
 from sagent.tools.agent_spawn import _persistent_tasks
 
 
@@ -41,7 +39,7 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "real_llm: spawns a real model CLI/binary; runs in a low-parallelism gate",
     )
-    _register_real_user_dirs_marker(config)
+    userdirs_fixture.pytest_configure(config)
 
 
 @pytest.fixture(autouse=True)

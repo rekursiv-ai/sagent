@@ -4,6 +4,8 @@ class SocketModeResponse:
     envelope_id: str
     payload: dict | None
     def __init__(
-        self, envelope_id: str, payload: dict | JsonObject | str | None = ...
+        self,
+        envelope_id: str,
+        payload: dict | JsonObject | str | None = ...,
     ) -> None: ...
     def to_dict(self) -> dict: ...

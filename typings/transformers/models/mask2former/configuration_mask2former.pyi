@@ -46,7 +46,9 @@ class Mask2FormerConfig(PretrainedConfig):
         ...
     @classmethod
     def from_backbone_config(
-        cls, backbone_config: PretrainedConfig, **kwargs
+        cls,
+        backbone_config: PretrainedConfig,
+        **kwargs,
     ):  # -> Self:
         ...
 

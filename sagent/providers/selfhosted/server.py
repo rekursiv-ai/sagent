@@ -99,7 +99,7 @@ if TYPE_CHECKING:
     import torch
     import transformers as transformers_lib
 
-    import sagent.lib.image as image_lib
+    from sagent.lib import image
 else:
     from wrapt import lazy_import
 
@@ -109,7 +109,7 @@ else:
     # ``SelfHosted`` lives in the same package.
     transformers_lib = lazy_import("transformers")
     torch = lazy_import("torch")
-    image_lib = lazy_import("sagent.lib.image")
+    image = lazy_import("sagent.lib.image")
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +209,7 @@ def _parse_model_option(option: str) -> tuple[_ModelOption, object]:
             return key, values[normalized]
     valid = sorted(value for values in parsers.values() for value in values)
     raise ValueError(
-        f"Unsupported SelfHosted model option {option!r}; use {', '.join(valid)}."
+        f"Unsupported SelfHosted model option {option!r}; use {', '.join(valid)}.",
     )
 
 
@@ -432,7 +432,10 @@ class SelfHosted:
         )
 
     def model(
-        self, model_id: str | None = None, /, max_request_tokens: int | None = None
+        self,
+        model_id: str | None = None,
+        /,
+        max_request_tokens: int | None = None,
     ) -> SelfHostedModel:
         """Return the bound model.
 
@@ -484,27 +487,6 @@ class _ProviderLike(Protocol):
     def tokenizer(self) -> _Tokenizer: ...
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _HfEstimator:
-    """``TokenEstimator`` adapter using a HuggingFace tokenizer for text.
-
-    Attributes:
-      tokenizer: HF tokenizer with an ``encode`` method.
-      image_fallback: ``SelfHostedModel`` whose ``approx_image_tokens``
-          provides image-token estimates.
-
-    """
-
-    tokenizer: _Tokenizer
-    image_fallback: SelfHostedModel
-
-    def approx_text_tokens(self, text: str) -> int:
-        return len(self.tokenizer.encode(text, add_special_tokens=False))
-
-    def approx_image_tokens(self, data: bytes) -> int:
-        return self.image_fallback.approx_image_tokens(data)
-
-
 class SelfHostedModel(ModelDefaults):
     """``Model`` backend for a self-hosted HuggingFace model."""
 
@@ -519,8 +501,8 @@ class SelfHostedModel(ModelDefaults):
                     "": ModelLimits(
                         max_request_tokens=provider.hosted_max_request_tokens,
                         max_response_tokens=provider.hosted_max_response_tokens,
-                    )
-                }
+                    ),
+                },
             ),
             prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
             # In-process weights: there is no server to roll history.
@@ -615,7 +597,7 @@ class SelfHostedModel(ModelDefaults):
         Default matches Qwen3.6-27B (``patch_size=16, spatial_merge_size=2`` →
         32x32 pixels per token); other self-hosted models override.
         """
-        dims = image_lib.get_dimensions(data)
+        dims = image.get_dimensions(data)
         return dims[0] * dims[1] // (32 * 32) if dims is not None else 0
 
     @override
@@ -750,7 +732,7 @@ class SelfHostedModel(ModelDefaults):
             ),
             stop_reason=normalize_stop_reason(
                 finish_reason,
-                kind="openai",  # use OpenAI vocab - same stop/length semantics
+                kind="openai",  # Use OpenAI vocab - same stop/length semantics.
                 has_tool_use=bool(tool_calls),
             ),
         )
@@ -767,14 +749,11 @@ class SelfHostedModel(ModelDefaults):
             publish(ModelResponsePartial(resp.message.text))
         return resp
 
+    # Tool declarations are passed to ``apply_chat_template`` when the tokenizer
+    # supports the ``tools=`` kwarg; otherwise they're rendered as a system-preamble
+    # JSON block so the model at least sees the schema.
     def _render(self, request: ModelRequest) -> Tensor:
-        """Render a ``ModelRequest`` into token ids via the chat template.
-
-        Tool declarations are passed to ``apply_chat_template`` when the
-        tokenizer supports the ``tools=`` kwarg; otherwise they're
-        rendered as a system-preamble JSON block so the model at least
-        sees the schema.
-        """
+        """Render a ``ModelRequest`` into token ids via the chat template."""
         return self._render_prompt(request).input_ids
 
     def _render_prompt(self, request: ModelRequest) -> _RenderedPrompt:
@@ -790,7 +769,10 @@ class SelfHostedModel(ModelDefaults):
         if request.tools:
             kwargs["tools"] = [_tool_schema(t) for t in request.tools]
         rendered = _apply_chat_template(
-            tokenizer, messages, kwargs, request.tools or []
+            tokenizer,
+            messages,
+            kwargs,
+            request.tools or [],
         )
         ids_tensor = cast("Tensor", _input_ids(rendered))
         if ids_tensor.ndim == 1:
@@ -815,7 +797,7 @@ def _apply_chat_template(
 
     if "enable_thinking" in kwargs:
         logger.debug(
-            "SelfHosted tokenizer rejected enable_thinking; retrying without it."
+            "SelfHosted tokenizer rejected enable_thinking; retrying without it.",
         )
         retry_kwargs = dict(kwargs)
         retry_kwargs.pop("enable_thinking")
@@ -827,7 +809,7 @@ def _apply_chat_template(
 
     if "tools" in kwargs:
         logger.debug(
-            "SelfHosted tokenizer rejected native tools; retrying with inlined schema."
+            "SelfHosted tokenizer rejected native tools; retrying with inlined schema.",
         )
         _inline_tool_preamble(messages, tools)
         retry_kwargs = dict(kwargs)
@@ -941,7 +923,7 @@ def _build_chat_messages(request: ModelRequest) -> list[MutableJSON]:
                     "role": "tool",
                     "tool_call_id": ids.map(entry.call_id),
                     "content": content,
-                }
+                },
             )
     return messages
 
@@ -992,17 +974,19 @@ def _extract_tool_calls(
     *,
     allowed_tools: set[str] | None = None,
 ) -> tuple[list[ToolCall], str]:
-    """Strip Qwen/DeepSeek tool-call blocks out of ``text``.
-
-    Returns:
-      tool_calls: Parsed tool calls extracted from the response text.
-      remaining_text: Response text with the tool-call blocks removed.
-
-    """
+    """Strip Qwen/DeepSeek tool-call blocks out of ``text``."""
     calls: list[ToolCall] = []
 
     def qwen_repl(match: re.Match[str]) -> str:
-        """Consume one Qwen tool-call block, recording the call when valid."""
+        """Consume one Qwen tool-call block, recording the call when valid.
+
+        Args:
+          match: Regex match containing the serialized tool call.
+
+        Returns:
+          replacement: Empty text when parsed, otherwise the original block.
+
+        """
         tc = _parse_qwen_tool_call(match.group(1))
         if tc is None:
             logger.warning("SelfHosted preserved malformed Qwen tool call.")
@@ -1019,7 +1003,15 @@ def _extract_tool_calls(
     cleaned = _QWEN_TOOL_CALL.sub(qwen_repl, text)
 
     def deepseek_repl(block: re.Match[str]) -> str:
-        """Consume one DeepSeek tool-call block, recording its calls when valid."""
+        """Consume one DeepSeek tool-call block, recording its calls when valid.
+
+        Args:
+          block: Regex match containing one or more serialized tool calls.
+
+        Returns:
+          replacement: Empty text when parsed, otherwise the original block.
+
+        """
         block_calls: list[ToolCall] = []
         for inner in _DS_ONE.finditer(block.group(1)):
             tc = _parse_deepseek_tool_call(inner.group(1))
@@ -1088,3 +1080,24 @@ def _parse_deepseek_tool_call(raw: str) -> ToolCall | None:
         name=name_match.group(1),
         args=DictCodec.coerce(parsed),
     )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _HfEstimator:
+    """``TokenEstimator`` adapter using a HuggingFace tokenizer for text.
+
+    Attributes:
+      tokenizer: HF tokenizer with an ``encode`` method.
+      image_fallback: ``SelfHostedModel`` whose ``approx_image_tokens``
+          provides image-token estimates.
+
+    """
+
+    tokenizer: _Tokenizer
+    image_fallback: SelfHostedModel
+
+    def approx_text_tokens(self, text: str) -> int:
+        return len(self.tokenizer.encode(text, add_special_tokens=False))
+
+    def approx_image_tokens(self, data: bytes) -> int:
+        return self.image_fallback.approx_image_tokens(data)

@@ -52,5 +52,6 @@ def validate_model_outputs(
 ):  # -> None:
     ...
 def ensure_model_and_config_inputs_match(
-    model: PreTrainedModel | TFPreTrainedModel, model_inputs: Iterable[str]
+    model: PreTrainedModel | TFPreTrainedModel,
+    model_inputs: Iterable[str],
 ) -> tuple[bool, list[str]]: ...

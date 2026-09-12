@@ -84,7 +84,12 @@ class SamImageProcessor(BaseImageProcessor):
     ):  # -> list[Any]:
         ...
     def post_process_for_mask_generation(
-        self, all_masks, all_scores, all_boxes, crops_nms_thresh, return_tensors=...
+        self,
+        all_masks,
+        all_scores,
+        all_boxes,
+        crops_nms_thresh,
+        return_tensors=...,
     ):  # -> tuple[list[ndarray[Any, Any]], Any, list[Any], Any] | None:
         ...
     def generate_crop_boxes(

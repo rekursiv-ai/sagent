@@ -7,5 +7,8 @@ def name_to_linear_tag(name):  # -> LiteralString:
 def get_linear_tags(model):  # -> list[Any]:
     ...
 def prepare_for_hqq_linear(
-    model, quantization_config=..., modules_to_not_convert=..., has_been_replaced=...
+    model,
+    quantization_config=...,
+    modules_to_not_convert=...,
+    has_been_replaced=...,
 ): ...

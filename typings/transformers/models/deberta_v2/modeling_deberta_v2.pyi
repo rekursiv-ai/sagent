@@ -27,11 +27,16 @@ class DebertaV2SelfOutput(nn.Module):
 
 @torch.jit.script
 def make_log_bucket_position(
-    relative_pos, bucket_size: int, max_position: int
+    relative_pos,
+    bucket_size: int,
+    max_position: int,
 ):  # -> Tensor:
     ...
 def build_relative_position(
-    query_layer, key_layer, bucket_size: int = ..., max_position: int = ...
+    query_layer,
+    key_layer,
+    bucket_size: int = ...,
+    max_position: int = ...,
 ):  # -> Tensor:
     ...
 @torch.jit.script
@@ -67,7 +72,12 @@ class DisentangledSelfAttention(nn.Module):
     ):  # -> tuple[Tensor, None] | tuple[Tensor, Any]:
         ...
     def disentangled_attention_bias(
-        self, query_layer, key_layer, relative_pos, rel_embeddings, scale_factor
+        self,
+        query_layer,
+        key_layer,
+        relative_pos,
+        rel_embeddings,
+        scale_factor,
     ):  # -> Literal[0]:
         ...
 
@@ -83,7 +93,9 @@ class DebertaV2Attention(nn.Module):
         rel_embeddings=...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class DebertaV2Intermediate(nn.Module):
@@ -108,7 +120,9 @@ class DebertaV2Layer(GradientCheckpointingLayer):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class ConvLayer(nn.Module):
@@ -134,7 +148,10 @@ class DebertaV2Encoder(nn.Module):
         ...
     def get_attention_mask(self, attention_mask): ...
     def get_rel_pos(
-        self, hidden_states, query_states=..., relative_pos=...
+        self,
+        hidden_states,
+        query_states=...,
+        relative_pos=...,
     ):  # -> Tensor | None:
         ...
     def forward(

@@ -19,7 +19,9 @@ class OpenAIGPTTokenizerFast(PreTrainedTokenizerFast):
     def do_lower_case(self):  # -> Literal[True]:
         ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
 
 __all__ = ["OpenAIGPTTokenizerFast"]

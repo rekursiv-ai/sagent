@@ -26,7 +26,8 @@ class ProgressiveCompilationState:
     post_compile_data: _PostCompileData | None
     def check_and_get_ready_stage(self) -> int: ...
     def switch_to_progression_stage(
-        self, stage_index: int
+        self,
+        stage_index: int,
     ) -> tuple[OutputCode, bool]: ...
 
 @final

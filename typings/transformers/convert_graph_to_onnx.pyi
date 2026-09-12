@@ -15,11 +15,14 @@ def generate_identified_filename(filename: Path, identifier: str) -> Path: ...
 def check_onnxruntime_requirements(minimum_version: Version):  # -> None:
     ...
 def ensure_valid_input(
-    model, tokens, input_names
+    model,
+    tokens,
+    input_names,
 ):  # -> tuple[list[Any], tuple[Any, ...]]:
     ...
 def infer_shapes(
-    nlp: Pipeline, framework: str
+    nlp: Pipeline,
+    framework: str,
 ) -> tuple[list[str], list[str], dict, BatchEncoding]: ...
 def load_graph_from_args(
     pipeline_name: str,
@@ -29,7 +32,10 @@ def load_graph_from_args(
     **models_kwargs,
 ) -> Pipeline: ...
 def convert_pytorch(
-    nlp: Pipeline, opset: int, output: Path, use_external_format: bool
+    nlp: Pipeline,
+    opset: int,
+    output: Path,
+    use_external_format: bool,
 ):  # -> None:
     ...
 def convert_tensorflow(nlp: Pipeline, opset: int, output: Path):  # -> None:

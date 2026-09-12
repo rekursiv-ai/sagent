@@ -48,7 +48,8 @@ def compute_hash_embeddings(
     encoder_hash_byte_group_vocab: int,
 ) -> torch.Tensor: ...
 def process_patch_lengths(
-    patch_lengths: torch.Tensor, max_patch_length: int | None
+    patch_lengths: torch.Tensor,
+    max_patch_length: int | None,
 ) -> torch.Tensor: ...
 
 class BltMLP(MllamaTextMLP): ...
@@ -74,7 +75,10 @@ class BltSelfAttention(MllamaTextSelfAttention):
 
 class BltCrossAttention(MllamaTextCrossAttention):
     def __init__(
-        self, config: BltConfig, layer_idx: int, hidden_size: int | None = ...
+        self,
+        config: BltConfig,
+        layer_idx: int,
+        hidden_size: int | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -171,7 +175,10 @@ class BltPatcher(BltPreTrainedModel):
         ...
     @staticmethod
     def patch_lengths_from_entropies(
-        entropies, sequence_length, patch_size=..., threshold=...
+        entropies,
+        sequence_length,
+        patch_size=...,
+        threshold=...,
     ):  # -> Tensor:
         ...
 

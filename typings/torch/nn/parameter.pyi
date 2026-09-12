@@ -19,13 +19,19 @@ class UninitializedParameter(Tensor):
 class Buffer(Tensor):
     persistent: bool
     def __init__(
-        self, data: Tensor = ..., requires_grad: bool = ..., persistent: bool = ...
+        self,
+        data: Tensor = ...,
+        requires_grad: bool = ...,
+        persistent: bool = ...,
     ) -> None: ...
 
 class UninitializedBuffer(Tensor):
     persistent: bool
     def __init__(
-        self, data: Tensor = ..., requires_grad: bool = ..., persistent: bool = ...
+        self,
+        data: Tensor = ...,
+        requires_grad: bool = ...,
+        persistent: bool = ...,
     ) -> None: ...
     def materialize(
         self,

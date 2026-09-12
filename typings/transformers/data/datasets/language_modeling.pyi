@@ -22,7 +22,10 @@ class TextDataset(Dataset):
 
 class LineByLineTextDataset(Dataset):
     def __init__(
-        self, tokenizer: PreTrainedTokenizer, file_path: str, block_size: int
+        self,
+        tokenizer: PreTrainedTokenizer,
+        file_path: str,
+        block_size: int,
     ) -> None: ...
     def __len__(self):  # -> int:
         ...
@@ -42,10 +45,17 @@ class LineByLineWithRefDataset(Dataset):
 
 class LineByLineWithSOPTextDataset(Dataset):
     def __init__(
-        self, tokenizer: PreTrainedTokenizer, file_dir: str, block_size: int
+        self,
+        tokenizer: PreTrainedTokenizer,
+        file_dir: str,
+        block_size: int,
     ) -> None: ...
     def create_examples_from_document(
-        self, document, block_size, tokenizer, short_seq_prob=...
+        self,
+        document,
+        block_size,
+        tokenizer,
+        short_seq_prob=...,
     ):  # -> list[Any]:
         ...
     def __len__(self):  # -> int:
@@ -63,7 +73,10 @@ class TextDatasetForNextSentencePrediction(Dataset):
         nsp_probability=...,
     ) -> None: ...
     def create_examples_from_document(
-        self, document: list[list[int]], doc_index: int, block_size: int
+        self,
+        document: list[list[int]],
+        doc_index: int,
+        block_size: int,
     ):  # -> None:
         ...
     def __len__(self):  # -> int:

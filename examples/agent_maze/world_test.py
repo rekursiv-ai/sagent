@@ -41,7 +41,7 @@ def test_spawn_places_agents() -> None:
 def test_passable_and_paths_exist() -> None:
     w = World(LEVEL_V1)
     w.spawn(["a"])
-    assert not w.passable(0, 0)  # outer wall
+    assert not w.passable(0, 0)  # Outer wall.
     diamond = next(it for it in w.items.values() if it.kind == "diamond")
     assert diamond.xy is not None
     # A path must exist from spawn to both the diamond and the exit.
@@ -87,7 +87,7 @@ def test_dig_breaks_wall() -> None:
     ]
     w = World(rows)
     w.spawn(["a"])
-    assert not w.passable(2, 1)  # diggable wall blocks
+    assert not w.passable(2, 1)  # Diggable wall blocks.
     r1 = w.dig("a", (2, 1))
     assert r1["result"] == "chipped"
     r2 = w.dig("a", (2, 1))
@@ -117,10 +117,10 @@ def test_vault_needs_all_plates() -> None:
     w = World(rows)
     w.spawn(["a", "b"])
     assert not w.vault_open()
-    _nav(w, "a", (2, 1))  # plate 1
-    assert not w.vault_open()  # only one plate pressed
-    _nav(w, "b", (4, 1))  # plate 2
-    assert w.vault_open()  # both pressed simultaneously
+    _nav(w, "a", (2, 1))  # Plate 1.
+    assert not w.vault_open()  # Only one plate pressed.
+    _nav(w, "b", (4, 1))  # Plate 2.
+    assert w.vault_open()  # Both pressed simultaneously.
 
 
 if __name__ == "__main__":

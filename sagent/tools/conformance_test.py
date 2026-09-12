@@ -38,12 +38,10 @@ _DISPLAY_TOOLS = [
 ]
 
 
+# An unresolvable forward reference means no knob can be declared either, so an empty
+# list is the honest answer.
 def _settable_keys(cls: type) -> list[str]:
-    """Return the constructor parameters opted into ``--tool``.
-
-    An unresolvable forward reference means no knob can be declared
-    either, so an empty list is the honest answer.
-    """
+    """Return the constructor parameters opted into ``--tool``."""
     try:
         hints = get_type_hints(cls.__init__, include_extras=True)
     except (NameError, TypeError):

@@ -39,7 +39,9 @@ class SmolVLMPreTrainedModel(PreTrainedModel):
 class SmolVLMVisionEmbeddings(nn.Module):
     def __init__(self, config: SmolVLMVisionConfig) -> None: ...
     def forward(
-        self, pixel_values: torch.FloatTensor, patch_attention_mask: torch.BoolTensor
+        self,
+        pixel_values: torch.FloatTensor,
+        patch_attention_mask: torch.BoolTensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -64,7 +66,9 @@ class SmolVLMVisionAttention(nn.Module):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class SmolVLMVisionMLP(nn.Module):
@@ -86,7 +90,9 @@ class SmolVLMEncoder(nn.Module):
     def __init__(self, config: SmolVLMConfig) -> None: ...
     @auto_docstring
     def forward(
-        self, inputs_embeds, attention_mask: torch.Tensor | None = ...
+        self,
+        inputs_embeds,
+        attention_mask: torch.Tensor | None = ...,
     ) -> tuple | BaseModelOutput: ...
 
 @auto_docstring(custom_intro=...)

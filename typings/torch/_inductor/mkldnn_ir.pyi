@@ -27,7 +27,11 @@ class ConvolutionUnary(ExternKernelAlloc):
 
 class ConvolutionBinary(ExternKernelAlloc):
     def __init__(
-        self, layout, inputs, constant_args=..., cpp_constant_args=...
+        self,
+        layout,
+        inputs,
+        constant_args=...,
+        cpp_constant_args=...,
     ) -> None: ...
     def codegen(self, wrapper) -> None: ...
     @classmethod

@@ -165,7 +165,9 @@ class Cache:
         ...
     def get_seq_length(self, layer_idx: int = ...) -> int: ...
     def get_mask_sizes(
-        self, cache_position: torch.Tensor, layer_idx: int
+        self,
+        cache_position: torch.Tensor,
+        layer_idx: int,
     ) -> tuple[int, int]: ...
     def get_max_cache_shape(self, layer_idx: int = ...) -> int: ...
     def reset(self):  # -> None:
@@ -205,7 +207,8 @@ class DynamicCache(Cache):
     def to_legacy_cache(self) -> tuple[tuple[torch.Tensor, torch.Tensor]]: ...
     @classmethod
     def from_legacy_cache(
-        cls, past_key_values: tuple[tuple[torch.Tensor, torch.Tensor]]
+        cls,
+        past_key_values: tuple[tuple[torch.Tensor, torch.Tensor]],
     ) -> DynamicCache: ...
 
 class StaticCache(Cache):
@@ -237,14 +240,16 @@ class EncoderDecoderCache(Cache):
     ):  # -> Generator[tuple[Tensor | None, Tensor | None, Tensor | None, Tensor | None], Any, None]:
         ...
     def __getitem__(
-        self, layer_idx: int
+        self,
+        layer_idx: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def __len__(self):  # -> int:
         ...
     def to_legacy_cache(self) -> tuple[tuple[torch.Tensor]]: ...
     @classmethod
     def from_legacy_cache(
-        cls, past_key_values: Iterable[tuple[torch.FloatTensor, ...]] | None
+        cls,
+        past_key_values: Iterable[tuple[torch.FloatTensor, ...]] | None,
     ) -> EncoderDecoderCache: ...
     def get_seq_length(self, layer_idx: int = ...) -> int: ...
     def reset(self):  # -> None:
@@ -256,7 +261,9 @@ class EncoderDecoderCache(Cache):
     def crop(self, maximum_length: int):  # -> None:
         ...
     def batch_split(
-        self, full_batch_size: int, split_size: int
+        self,
+        full_batch_size: int,
+        split_size: int,
     ) -> list[EncoderDecoderCache]: ...
     def batch_repeat_interleave(self, repeats: int):  # -> None:
         ...
@@ -264,7 +271,9 @@ class EncoderDecoderCache(Cache):
         ...
     def get_max_cache_shape(self) -> int: ...
     def get_mask_sizes(
-        self, cache_position: torch.Tensor, layer_idx: int
+        self,
+        cache_position: torch.Tensor,
+        layer_idx: int,
     ) -> tuple[int, int]: ...
     @property
     def is_sliding(self):  # -> list[bool]:
@@ -283,27 +292,47 @@ class OffloadedCache(DynamicCache):
 
 class OffloadedStaticCache(StaticCache):
     def __init__(
-        self, config: PretrainedConfig, max_cache_len: int, *args, **kwargs
+        self,
+        config: PretrainedConfig,
+        max_cache_len: int,
+        *args,
+        **kwargs,
     ) -> None: ...
 
 class SlidingWindowCache(StaticCache):
     def __init__(
-        self, config: PretrainedConfig, max_cache_len: int, *args, **kwargs
+        self,
+        config: PretrainedConfig,
+        max_cache_len: int,
+        *args,
+        **kwargs,
     ) -> None: ...
 
 class HybridCache(StaticCache):
     def __init__(
-        self, config: PretrainedConfig, max_cache_len: int, *args, **kwargs
+        self,
+        config: PretrainedConfig,
+        max_cache_len: int,
+        *args,
+        **kwargs,
     ) -> None: ...
 
 class HybridChunkedCache(StaticCache):
     def __init__(
-        self, config: PretrainedConfig, max_cache_len: int, *args, **kwargs
+        self,
+        config: PretrainedConfig,
+        max_cache_len: int,
+        *args,
+        **kwargs,
     ) -> None: ...
 
 class OffloadedHybridCache(StaticCache):
     def __init__(
-        self, config: PretrainedConfig, max_cache_len: int, *args, **kwargs
+        self,
+        config: PretrainedConfig,
+        max_cache_len: int,
+        *args,
+        **kwargs,
     ) -> None: ...
 
 class QuantoQuantizedCache(QuantizedCache):

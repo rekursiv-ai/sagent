@@ -65,7 +65,12 @@ class FalconH1RotaryEmbedding(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -96,7 +101,11 @@ class FalconH1Attention(nn.Module):
 
 class FalconH1RMSNormGated(torch.nn.Module):
     def __init__(
-        self, hidden_size, eps=..., n_groups=..., norm_before_gate=...
+        self,
+        hidden_size,
+        eps=...,
+        n_groups=...,
+        norm_before_gate=...,
     ) -> None: ...
     def forward(self, hidden_states, gate=...): ...
 
@@ -166,7 +175,8 @@ class FalconH1DecoderLayer(GradientCheckpointingLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring

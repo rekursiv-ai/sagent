@@ -30,7 +30,8 @@ class LlavaOnevisionImageProcessorFast(BaseImageProcessorFast):
     valid_kwargs = LlavaOnevisionFastImageProcessorKwargs
     model_input_names = ...
     def __init__(
-        self, **kwargs: Unpack[LlavaOnevisionFastImageProcessorKwargs]
+        self,
+        **kwargs: Unpack[LlavaOnevisionFastImageProcessorKwargs],
     ) -> None: ...
     @auto_docstring
     def preprocess(

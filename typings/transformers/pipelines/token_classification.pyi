@@ -10,7 +10,9 @@ from ..utils import (
 
 class TokenClassificationArgumentHandler(ArgumentHandler):
     def __call__(
-        self, inputs: str | list[str], **kwargs
+        self,
+        inputs: str | list[str],
+        **kwargs,
     ):  # -> tuple[<subclass of list[str] and Dataset>, Any, None, Any | None] | tuple[list[str], Any, list[list[Any]] | Any | list[Any] | None, Any | None]:
         ...
 
@@ -36,17 +38,27 @@ class TokenClassificationPipeline(ChunkPipeline):
     def __call__(self, inputs: str, **kwargs: Any) -> list[dict[str, str]]: ...
     @overload
     def __call__(
-        self, inputs: list[str], **kwargs: Any
+        self,
+        inputs: list[str],
+        **kwargs: Any,
     ) -> list[list[dict[str, str]]]: ...
     def __call__(
-        self, inputs: str | list[str], **kwargs: Any
+        self,
+        inputs: str | list[str],
+        **kwargs: Any,
     ) -> list[dict[str, str]] | list[list[dict[str, str]]]: ...
     def preprocess(
-        self, sentence, offset_mapping=..., **preprocess_params
+        self,
+        sentence,
+        offset_mapping=...,
+        **preprocess_params,
     ):  # -> Generator[dict[Any, Any], Any, None]:
         ...
     def postprocess(
-        self, all_outputs, aggregation_strategy=..., ignore_labels=...
+        self,
+        all_outputs,
+        aggregation_strategy=...,
+        ignore_labels=...,
     ):  # -> list[Any]:
         ...
     def aggregate_overlapping_entities(self, entities):  # -> list[Any]:
@@ -63,13 +75,19 @@ class TokenClassificationPipeline(ChunkPipeline):
         word_to_chars_map: list[tuple[int, int]] | None = ...,
     ) -> list[dict]: ...
     def aggregate(
-        self, pre_entities: list[dict], aggregation_strategy: AggregationStrategy
+        self,
+        pre_entities: list[dict],
+        aggregation_strategy: AggregationStrategy,
     ) -> list[dict]: ...
     def aggregate_word(
-        self, entities: list[dict], aggregation_strategy: AggregationStrategy
+        self,
+        entities: list[dict],
+        aggregation_strategy: AggregationStrategy,
     ) -> dict: ...
     def aggregate_words(
-        self, entities: list[dict], aggregation_strategy: AggregationStrategy
+        self,
+        entities: list[dict],
+        aggregation_strategy: AggregationStrategy,
     ) -> list[dict]: ...
     def group_sub_entities(self, entities: list[dict]) -> dict: ...
     def get_tag(self, entity_name: str) -> tuple[str, str]: ...

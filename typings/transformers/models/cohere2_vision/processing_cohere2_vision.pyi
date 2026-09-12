@@ -15,7 +15,11 @@ class Cohere2VisionProcessor(ProcessorMixin):
     image_processor_class = ...
     tokenizer_class = ...
     def __init__(
-        self, image_processor=..., tokenizer=..., chat_template=..., **kwargs
+        self,
+        image_processor=...,
+        tokenizer=...,
+        chat_template=...,
+        **kwargs,
     ) -> None: ...
     def __call__(
         self,

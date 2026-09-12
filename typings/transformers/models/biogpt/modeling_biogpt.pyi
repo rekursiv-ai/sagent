@@ -94,7 +94,8 @@ class BioGptDecoderLayer(GradientCheckpointingLayer):
         cache_position: torch.Tensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring

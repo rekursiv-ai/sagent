@@ -15,7 +15,7 @@ import time
 import pytest
 
 from sagent.lib.custom_json import MutableJSON
-from sagent.providers.google import cli as google_cli
+from sagent.providers.google import cli
 from sagent.providers.google.api import Google
 from sagent.providers.google.cli import (
     GoogleCLI,
@@ -59,12 +59,13 @@ def _write_creds(tmp_path: Path) -> Path:
 
 
 def test_google_cli_does_not_import_subscription_provider() -> None:
-    source = inspect.getsource(google_cli)
+    source = inspect.getsource(cli)
     assert "providers.google_sub" not in source
 
 
 def test_from_cli_requires_credentials(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """``from_credentials`` raises ``FileNotFoundError`` if no creds file exists."""
     monkeypatch.setattr(
@@ -76,7 +77,8 @@ def test_from_cli_requires_credentials(
 
 
 def test_from_cli_rejects_missing_executable(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """``from_credentials`` fails fast if ``gemini`` is not on ``PATH``."""
     creds = _write_creds(tmp_path)
@@ -98,7 +100,8 @@ def test_from_cli_rejects_missing_executable(
 
 
 def test_from_cli_with_credentials(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """``from_credentials`` returns a configured provider when both creds + CLI exist."""
     creds = _write_creds(tmp_path)
@@ -121,7 +124,8 @@ def test_from_cli_with_credentials(
 
 
 def test_from_cli_rejects_malformed_credentials(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     creds = tmp_path / "oauth_creds.json"
     creds.write_text("", encoding="utf-8")
@@ -143,7 +147,8 @@ def test_from_cli_rejects_malformed_credentials(
 
 
 def test_from_cli_rejects_credentials_missing_oauth_fields(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     creds = tmp_path / "oauth_creds.json"
     creds.write_text(json.dumps({}), encoding="utf-8")
@@ -255,7 +260,9 @@ def test_byte_limit_not_classified_as_context_overflow() -> None:
 def test_user_prompt_blocks_text_only() -> None:
     """Plain text turns into a single ``{type:text}`` block."""
     blocks = _user_prompt_blocks(
-        UserMessage(text="hi"), max_image_dim=3072, max_image_bytes=20 * 1024 * 1024
+        UserMessage(text="hi"),
+        max_image_dim=3072,
+        max_image_bytes=20 * 1024 * 1024,
     )
     assert blocks == [{"type": "text", "text": "hi"}]
 
@@ -263,7 +270,9 @@ def test_user_prompt_blocks_text_only() -> None:
 def test_user_prompt_blocks_empty_user_emits_placeholder() -> None:
     """An empty user message still emits one block to satisfy ACP shape."""
     blocks = _user_prompt_blocks(
-        UserMessage(text=""), max_image_dim=3072, max_image_bytes=20 * 1024 * 1024
+        UserMessage(text=""),
+        max_image_dim=3072,
+        max_image_bytes=20 * 1024 * 1024,
     )
     assert blocks == [{"type": "text", "text": ""}]
 
@@ -295,13 +304,13 @@ def test_dispatch_session_update_routes_text_and_thinking() -> None:
         "update": {
             "sessionUpdate": "agent_message_chunk",
             "content": {"text": "hello"},
-        }
+        },
     }
     thought_chunk: MutableJSON = {
         "update": {
             "sessionUpdate": "agent_thought_chunk",
             "content": {"text": "thinking..."},
-        }
+        },
     }
     _dispatch_session_update(
         message_chunk,
@@ -326,7 +335,7 @@ def test_dispatch_session_update_ignores_unknown_kinds() -> None:
     text_parts: list[str] = []
     thinking_parts: list[str] = []
     unknown_update: MutableJSON = {
-        "update": {"sessionUpdate": "tool_call_update", "id": 1}
+        "update": {"sessionUpdate": "tool_call_update", "id": 1},
     }
     _dispatch_session_update(
         unknown_update,
@@ -678,7 +687,7 @@ async def test_exchange_turn_skips_assistant_replay(
                 UserMessage(text="first"),
                 AssistantMessage(text="hidden"),
                 UserMessage(text="second"),
-            ]
+            ],
         ),
         publish=None,
     )
@@ -896,7 +905,8 @@ def test_build_response_estimates_tokens_and_cost() -> None:
 
 @pytest.mark.asyncio
 async def test_writeback_credentials_atomic_and_0o600(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Writeback is atomic (failure leaves target untouched) and target is ``0o600``.
 
@@ -924,7 +934,8 @@ async def test_writeback_credentials_atomic_and_0o600(
     target.chmod(0o600)
     later = (time.time() + 7200) * 1000.0
     src.write_text(
-        json.dumps({**_CRED_PAYLOAD, "expiry_date": later}), encoding="utf-8"
+        json.dumps({**_CRED_PAYLOAD, "expiry_date": later}),
+        encoding="utf-8",
     )
 
     real_open = os.open
@@ -953,7 +964,8 @@ async def test_writeback_credentials_atomic_and_0o600(
 
 
 def test_writeback_credentials_works_across_event_loops(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """A model whose lock was first used in loop A still works in loop B."""
     monkeypatch.setattr(

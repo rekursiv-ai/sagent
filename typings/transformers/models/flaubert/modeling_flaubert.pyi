@@ -53,7 +53,9 @@ class TransformerFFN(nn.Module):
 class FlaubertPredLayer(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, x, y=...
+        self,
+        x,
+        y=...,
     ):  # -> tuple[Tensor, Any] | tuple[Any] | tuple[Any, Any | Tensor] | tuple[Any | Tensor]:
         ...
 
@@ -165,7 +167,9 @@ class FlaubertWithLMHeadModel(FlaubertPreTrainedModel, GenerationMixin):
     def set_output_embeddings(self, new_embeddings):  # -> None:
         ...
     def prepare_inputs_for_generation(
-        self, input_ids, **kwargs
+        self,
+        input_ids,
+        **kwargs,
     ):  # -> dict[str, Tensor | None]:
         ...
     @auto_docstring

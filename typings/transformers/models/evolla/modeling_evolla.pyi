@@ -27,7 +27,11 @@ def create_position_ids_from_input_ids(input_ids, padding_idx): ...
 class EvollaSaProtEmbeddings(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, input_ids=..., attention_mask=..., position_ids=..., inputs_embeds=...
+        self,
+        input_ids=...,
+        attention_mask=...,
+        position_ids=...,
+        inputs_embeds=...,
     ):  # -> Any:
         ...
     def create_position_ids_from_inputs_embeds(self, inputs_embeds):  # -> Tensor:
@@ -41,10 +45,14 @@ class EvollaSaProtRotaryEmbedding(nn.Module):
     inv_freq: torch.Tensor
     def __init__(self, dim: int) -> None: ...
     def forward(
-        self, q: torch.Tensor, k: torch.Tensor
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 def eager_attention_forward(
@@ -62,7 +70,11 @@ def eager_attention_forward(
 
 class EvollaSaProtSelfAttention(nn.Module):
     def __init__(
-        self, config, position_embedding_type=..., layer_idx=..., is_cross_attention=...
+        self,
+        config,
+        position_embedding_type=...,
+        layer_idx=...,
+        is_cross_attention=...,
     ) -> None: ...
     def forward(
         self,
@@ -195,7 +207,10 @@ class EvollaProteinEncoder(nn.Module):
     def __init__(self, config: EvollaConfig) -> None: ...
     @can_return_tuple
     def forward(
-        self, input_ids: torch.LongTensor, attention_mask: torch.FloatTensor, **kwargs
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: torch.FloatTensor,
+        **kwargs,
     ):  # -> EvollaProteinEncoderModelOutput:
         ...
 
@@ -259,7 +274,12 @@ class EvollaMLP(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...

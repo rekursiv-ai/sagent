@@ -112,14 +112,12 @@ def _skip_if_bridge_unavailable(exc: Exception) -> None:
         pytest.skip(f"{_AUTH_UNAVAILABLE}: {msg}")
 
 
+# Returns a non-empty reason string when the CLI is reachable but its token is
+# expired/refreshing (a transient skip) so the caller can skip every live test fast
+# instead of each one burning ~175s on the CLI's auth retries. A timeout or spawn
+# failure here is itself treated as auth-unavailable.
 def _probe_claude_auth() -> str:
-    """Run one bounded ``claude --print`` turn; return ``""`` if auth works.
-
-    Returns a non-empty reason string when the CLI is reachable but its token is
-    expired/refreshing (a transient skip) so the caller can skip every live
-    test fast instead of each one burning ~175s on the CLI's auth retries. A
-    timeout or spawn failure here is itself treated as auth-unavailable.
-    """
+    """Run one bounded ``claude --print`` turn; return ``""`` if auth works."""
     try:
         proc = subprocess.run(
             [  # noqa: S607
@@ -143,7 +141,7 @@ def _probe_claude_auth() -> str:
     try:
         parsed: object = json.loads(proc.stdout or "{}")
     except json.JSONDecodeError:
-        return ""  # unparseable but exit 0: let the real test surface it
+        return ""  # Unparseable but exit 0: let the real test surface it.
     if not isinstance(parsed, dict):
         return ""
     result = cast(dict[str, object], parsed)
@@ -170,7 +168,7 @@ def require_live_claude_auth() -> None:
     CLI's multi-minute auth retry. A working token is a no-op.
     """
     if not _claude_available():
-        return  # the per-test ``_requires_claude`` skipif already handles this
+        return  # The per-test ``_requires_claude`` skipif already handles this.
     if _auth_probe_cache[0] is None:
         _auth_probe_cache[0] = _probe_claude_auth()
     if _auth_probe_cache[0]:
@@ -226,7 +224,7 @@ async def test_session_resume_two_turns() -> None:
                     # turn-1 assistant reply is on disk; only the new
                     # entry is fed via stdin.
                     UserMessage(
-                        text="What was the codeword? Reply with just the word."
+                        text="What was the codeword? Reply with just the word.",
                     ),
                 ],
             ),
@@ -480,18 +478,16 @@ async def test_real_claude_drives_full_detach_path() -> None:
     )
 
 
+# Non-empty ``_bg_done`` is the proof: claude emitted ``background: true`` and the
+# bridge ran the tool as a task. Retrying within one session would not be an independent
+# sample -- a transcript holding an inline call biases the next turn toward repeating it
+# -- so each attempt mints a session id.
 async def _background_electing_turn_one(
     slow_oracle: Tool,
     prompt: str,
     attempts: int = 3,
 ) -> tuple[_AnthropicCLIModel, ModelResponse]:
-    """Return a model whose first turn really backgrounded ``slow_oracle``.
-
-    Non-empty ``_bg_done`` is the proof: claude emitted ``background: true``
-    and the bridge ran the tool as a task. Retrying within one session would
-    not be an independent sample -- a transcript holding an inline call biases
-    the next turn toward repeating it -- so each attempt mints a session id.
-    """
+    """Return a model whose first turn really backgrounded ``slow_oracle``."""
     last = ""
     for _ in range(attempts):
         model = AnthropicCLI.from_credentials().model(
@@ -522,7 +518,7 @@ async def _background_electing_turn_one(
         await model.close()
     raise AssertionError(
         f"real claude declined to background the tool in {attempts} fresh "
-        f"sessions (ran it inline or skipped it); last turn-1 text was {last!r}"
+        f"sessions (ran it inline or skipped it); last turn-1 text was {last!r}",
     )
 
 

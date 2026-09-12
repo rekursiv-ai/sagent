@@ -71,7 +71,9 @@ class IBertAttention(nn.Module):
 class IBertIntermediate(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states, hidden_states_scaling_factor
+        self,
+        hidden_states,
+        hidden_states_scaling_factor,
     ):  # -> tuple[Any, Any]:
         ...
 
@@ -98,7 +100,9 @@ class IBertLayer(nn.Module):
     ):  # -> Any:
         ...
     def feed_forward_chunk(
-        self, attention_output, attention_output_scaling_factor
+        self,
+        attention_output,
+        attention_output_scaling_factor,
     ):  # -> tuple[Any, Any]:
         ...
 
@@ -255,7 +259,9 @@ class IBertForQuestionAnswering(IBertPreTrainedModel):
     ) -> QuestionAnsweringModelOutput | tuple[torch.FloatTensor]: ...
 
 def create_position_ids_from_input_ids(
-    input_ids, padding_idx, past_key_values_length=...
+    input_ids,
+    padding_idx,
+    past_key_values_length=...,
 ): ...
 
 __all__ = [

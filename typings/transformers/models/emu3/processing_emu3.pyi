@@ -26,7 +26,11 @@ class Emu3Processor(ProcessorMixin):
     tokenizer_class = ...
     image_processor_class = ...
     def __init__(
-        self, image_processor, tokenizer, chat_template=..., **kwargs
+        self,
+        image_processor,
+        tokenizer,
+        chat_template=...,
+        **kwargs,
     ) -> None: ...
     def __call__(
         self,
@@ -41,7 +45,10 @@ class Emu3Processor(ProcessorMixin):
         **kwargs: Unpack[Emu3ProcessorKwargs],
     ) -> BatchFeature: ...
     def calculate_generate_size(
-        self, ratio, image_area, spatial_factor
+        self,
+        ratio,
+        image_area,
+        spatial_factor,
     ):  # -> tuple[int, int]:
         ...
     def postprocess(self, images: ImageInput, **kwargs): ...

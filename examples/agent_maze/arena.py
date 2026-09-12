@@ -14,8 +14,8 @@ told   : the system prompt states the topology.   discover : it doesn't (illegal
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+from collections.abc import AsyncGenerator, Callable
+from typing import Any, Protocol, cast
 
 import asyncio
 import contextlib
@@ -27,58 +27,13 @@ from examples.agent_maze.tools import (
     WorldTool,
 )
 from examples.agent_maze.world import SpawnMeta
-from sagent.agent import Agent
+from sagent.agent.agent import Agent
 from sagent.agent.state import agent_label_var
 from sagent.types.model import Model
 from sagent.types.runtime import UserMessage
 
 
 SEED = "a0"  # config-globals: ignore -- level/seed tuning dial, retuned per run
-
-
-def _system(label: str, role: str, *, mesh: bool, told: bool, coordinator: str) -> str:
-    core = (
-        "You are in a FOGGY maze. A LOCK has TWO same-letter plates far apart (out of "
-        "each other's sight). It opens ONLY when two DIFFERENT agents stand on the two "
-        "plates and BOTH press, EACH naming the other, within a short window — a lone or "
-        "mistimed or mis-named press just wastes one of your few charges. Tools: `world` "
-        "(look / move x y / press partner), `comms` (talk)"
-    )
-    can_spawn = mesh or label == coordinator
-    core += ", `spawn` (x y: add a helper).\n" if can_spawn else ".\n"
-    if role == "seed":
-        core += (
-            "You are the FIRST agent, ALONE — you can open nothing by yourself. Your very "
-            "first job is to SPAWN several helpers on empty tiles next to you, then spread "
-            "the team out to find plates and pair up. ASSIGN pairs explicitly (e.g. 'a1 & "
-            "a2 take lock a; a3 & a4 take lock b') so exactly two agents converge on each "
-            "lock. "
-        )
-    else:
-        core += (
-            "You were just spawned to help. Find a plate, announce which plate/lock you are "
-            "on, and pair with whoever holds the matching plate. "
-        )
-    if told and mesh:
-        core += "You may message ANYONE, broadcast discoveries, and spawn helpers.\n"
-    elif told and label == coordinator:
-        core += (
-            f"You are the COORDINATOR '{coordinator}': workers report only to you and you "
-            "relay; only you may spawn. Direct the team.\n"
-        )
-    elif told:
-        core += (
-            f"Message ONLY the coordinator '{coordinator}' (it relays); you cannot spawn "
-            "or reach peers directly.\n"
-        )
-    else:
-        core += "Work out who you can reach and whether you can spawn.\n"
-    core += (
-        "Be TERSE: a couple of short messages to coordinate, then ACT (move/press) — "
-        "don't narrate or chat. Keep acting until ALL locks are open; do not stop early "
-        "while any lock remains."
-    )
-    return core
 
 
 class Arena:
@@ -99,7 +54,7 @@ class Arena:
     ) -> None:
         self.engine = Engine(rows, model=model_id)
         self.meta = meta
-        # A FRESH model (its own provider/SDK) per agent: Agent.shutdown() closes the
+        # A fresh model (its own provider/SDK) per agent: Agent.shutdown() closes the
         # agent's own model, so one agent finishing must not tear down a sibling's SDK.
         self.make_model = make_model
         self.mesh = mesh
@@ -129,30 +84,31 @@ class Arena:
         agent = Agent(
             model=self.make_model(),
             system=_system(
-                label, role, mesh=self.mesh, told=self.told, coordinator=SEED
+                label,
+                role,
+                mesh=self.mesh,
+                told=self.told,
+                coordinator=SEED,
             ),
             tools=self._tools_for(label),
             max_tool_call_rounds=self.rounds,
         )
         self.agents[label] = agent
         wake = (
-            "You wake, alone." if role == "seed" else "You were just spawned — act now."
+            "You wake, alone."
+            if role == "seed"
+            else "You were just spawned -- act now."
         )
 
-        async def drive() -> None:
-            agent_label_var.set(label)
-            gen = agent.run(UserMessage(text=self.engine.feedback(label, wake)))
-            try:
-                async for _ev in gen:
-                    if self.engine.all_locks_open() or self.engine.t >= self.budget_t:
-                        break
-            except asyncio.CancelledError:
-                pass
-            finally:
-                with contextlib.suppress(Exception):
-                    await gen.aclose()
-
-        self.tasks[label] = asyncio.create_task(drive())
+        self.tasks[label] = asyncio.create_task(
+            _drive_agent(
+                agent,
+                label,
+                self.engine,
+                wake,
+                self.budget_t,
+            ),
+        )
 
     def spawn_child(self, parent: str, xy: tuple[int, int]) -> str:
         """Spawn and launch a new helper task."""
@@ -163,12 +119,20 @@ class Arena:
         return label
 
     async def run(self, *, wall_s: float = 300.0) -> Engine:
-        """Run the arena until the goal is solved or time runs out."""
+        """Run the arena until the goal is solved or time runs out.
+
+        Args:
+          wall_s: Maximum wall-clock runtime in seconds.
+
+        Returns:
+          engine: Engine containing the final world state and event log.
+
+        """
         loop = asyncio.get_event_loop()
         self.engine.add_agent(SEED, self.meta["seed_spawn"])
         self._launch(SEED, "seed")
         deadline = loop.time() + wall_s
-        # poll external solve/budget/task state (not a single event), then barrier-stop
+        # Poll external solve/budget/task state, then barrier-stop.
         while (  # noqa: ASYNC110
             not self.engine.all_locks_open()
             and self.engine.t < self.budget_t
@@ -179,20 +143,89 @@ class Arena:
         await self._shutdown()
         return self.engine
 
+    # The engine froze on solve (no post-win events), so this just stops the tasks; each
+    # agent closes its OWN model. Re-gather in a loop because a task mid-spawn can
+    # create a new drive task after the first cancel sweep.
     async def _shutdown(self) -> None:
-        """Quiesce every agent.
-
-        The engine froze on solve (no post-win events), so this just stops the
-        tasks; each agent closes its OWN model. Re-gather in a loop because a
-        task mid-spawn can create a new drive task after the first cancel sweep.
-        """
+        """Quiesce every agent."""
         for _ in range(5):
             tasks = list(self.tasks.values())
             for agent in self.agents.values():
                 with contextlib.suppress(Exception):
-                    agent.shutdown()  # sync: closes the agent's own model + bg jobs
+                    agent.shutdown()  # Sync: closes the agent's own model + bg jobs.
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             if all(t.done() for t in self.tasks.values()):
                 break
+
+
+class _AgentRunner(Protocol):
+    def run(self, msg: UserMessage) -> AsyncGenerator[object, None]: ...
+
+
+async def _drive_agent(
+    agent: Agent,
+    label: str,
+    engine: Engine,
+    wake: str,
+    budget_t: int,
+) -> None:
+    """Run one agent until the maze is solved or the interaction budget expires."""
+    agent_label_var.set(label)
+    runner = cast(_AgentRunner, agent)
+    gen = runner.run(UserMessage(text=engine.feedback(label, wake)))
+    try:
+        async for _ev in gen:
+            if engine.all_locks_open() or engine.t >= budget_t:
+                break
+    except asyncio.CancelledError:
+        pass
+    finally:
+        with contextlib.suppress(Exception):
+            await gen.aclose()
+
+
+def _system(label: str, role: str, *, mesh: bool, told: bool, coordinator: str) -> str:
+    core = (
+        "You are in a FOGGY maze. A LOCK has TWO same-letter plates far apart (out of "
+        "each other's sight). It opens ONLY when two DIFFERENT agents stand on the two "
+        "plates and BOTH press, EACH naming the other, within a short window -- a lone or "
+        "mistimed or mis-named press just wastes one of your few charges. Tools: `world` "
+        "(look / move x y / press partner), `comms` (talk)"
+    )
+    can_spawn = mesh or label == coordinator
+    core += ", `spawn` (x y: add a helper).\n" if can_spawn else ".\n"
+    if role == "seed":
+        core += (
+            "You are the FIRST agent, ALONE -- you can open nothing by yourself. Your very "
+            "first job is to SPAWN several helpers on empty tiles next to you, then spread "
+            "the team out to find plates and pair up. ASSIGN pairs explicitly (e.g. 'a1 & "
+            "a2 take lock a; a3 & a4 take lock b') so exactly two agents converge on each "
+            "lock. "
+        )
+    else:
+        core += (
+            "You were just spawned to help. Find a plate, announce which plate/lock you are "
+            "on, and pair with whoever holds the matching plate. "
+        )
+    if told and mesh:
+        core += "You may message ANYONE, broadcast discoveries, and spawn helpers.\n"
+    elif told and label == coordinator:
+        core += (
+            f"You are the COORDINATOR '{coordinator}': workers report only to you and you "
+            "relay; only you may spawn. Direct the team.\n"
+        )
+    elif told:
+        core += (
+            f"Message ONLY the coordinator '{coordinator}' (it relays); you cannot spawn "
+            "or reach peers directly.\n"
+        )
+    else:
+        core += "Work out who you can reach and whether you can spawn.\n"
+    core += (
+        "Be TERSE: a couple of short messages to coordinate, then ACT (move/press) -- "
+        "don't narrate or chat. Keep acting until ALL locks are open; do not stop early "
+        "while any lock remains."
+    )
+    return core

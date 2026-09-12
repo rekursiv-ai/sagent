@@ -72,7 +72,9 @@ class BertSdpaSelfAttention(BertSelfAttention):
 class BertSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -102,7 +104,9 @@ class BertIntermediate(nn.Module):
 class BertOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -140,7 +144,9 @@ class BertEncoder(nn.Module):
         cache_position: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
 
 class BertPooler(nn.Module):
@@ -185,7 +191,7 @@ class BertPreTrainedModel(PreTrainedModel):
 @auto_docstring(
     custom_intro="""
     Output type of [`BertForPreTraining`].
-    """
+    """,
 )
 class BertForPreTrainingOutput(ModelOutput):
     loss: torch.FloatTensor | None = ...
@@ -299,7 +305,10 @@ class BertForMaskedLM(BertPreTrainedModel):
         return_dict: bool | None = ...,
     ) -> tuple[torch.Tensor] | MaskedLMOutput: ...
     def prepare_inputs_for_generation(
-        self, input_ids, attention_mask=..., **model_kwargs
+        self,
+        input_ids,
+        attention_mask=...,
+        **model_kwargs,
     ):  # -> dict[str, Tensor | Any]:
         ...
     @classmethod

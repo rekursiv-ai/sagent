@@ -1,6 +1,11 @@
-"""Driver for the self-escalating Bayesian sampler demo.
+#!/bin/sh
+# ruff: noqa: EXE003, D300, D205, T201 -- Polyglot CLI demo.
+# fmt: off
+'''' 2>/dev/null #
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
+Driver for the self-escalating Bayesian sampler demo.
 
-Default mode is **replay** — it just points you at the webpage, which replays a
+Default mode is **replay** -- it just points you at the webpage, which replays a
 captured success run from ``web/data.js`` (deterministic, no API key needed).
 
 ``--live`` runs the three conditions for real against a provider, grades them in
@@ -12,9 +17,9 @@ the harness, measures the self-mutate success rate over ``--trials`` runs (defau
 
     # run live (needs the provider's key configured) and re-capture
     uv run python -m examples.self_escalating_solver.run --live --provider google --trials 4
-"""
+'''
+# fmt: on
 
-# ruff: noqa: T201 -- a CLI demo: progress + URLs print to stdout by design.
 from __future__ import annotations
 
 from pathlib import Path
@@ -49,7 +54,7 @@ _CWD: Final = Path(__file__).resolve().parent
 # prompt is model-agnostic; only these change. "cross" is the headline: a Google
 # cheap model that upgrades itself ACROSS vendors to an Anthropic strong model.
 # Each config: cheap tier, the high-tier baseline model, and the model the
-# self-mutate agent UPGRADES to. For "cross" they differ on purpose — the
+# self-mutate agent UPGRADES to. For "cross" they differ on purpose -- the
 # high-tier baseline is expensive Opus, while the self-mutator upgrades only to
 # the cheaper Sonnet, so adaptive self-mutation beats always-Opus on cost.
 CONFIGS: Final = {
@@ -71,32 +76,20 @@ CONFIGS: Final = {
 }
 
 
-def _read_key(provider_name: str) -> str | None:
-    # Prefer a file (so the key never has to be exported into the CLI's env);
-    # fall back to env if already set for this process.
-    env_names = {
-        "Google": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
-        "Anthropic": ("ANTHROPIC_API_KEY",),
-    }
-    key_files = {"Google": "google_api_key", "Anthropic": "anthropic_api_key"}
-    for e in env_names[provider_name]:
-        if os.environ.get(e):
-            return os.environ[e]
-    kf = config_dir() / "rekursiv-ai" / "sagent" / key_files[provider_name]
-    return kf.read_text().strip() if kf.exists() else None
-
-
-def _provider(provider_name: str):
-    key = _read_key(provider_name)
-    if provider_name == "Google":
-        return Google.from_key(key) if key else Google.from_env()
-    return Anthropic.from_key(key) if key else Anthropic.from_env()
-
-
 def build(provider_name: str, model_id: str):
-    """Return (Model, ModelRecipe) for one arm. The spec is what AgentSelf swaps from."""
+    """Return (Model, ModelRecipe) for one arm.
+
+    Args:
+      provider_name: Provider class name.
+      model_id: Model identifier for the arm.
+
+    Returns:
+      model: Constructed provider model.
+      recipe: Recipe used by AgentSelf for model replacement.
+
+    """
     model = _provider(provider_name).model(model_id)
-    # auth must map to a real provider factory; "api" had no `from_api`. The
+    # Auth must map to a real provider factory; "api" had no `from_api`. The
     # provider's conventional auth (Anthropic/Google → "env") is what AgentSelf
     # uses when it reconstructs the model to swap, so reuse that here.
     spec = ModelRecipe(
@@ -108,8 +101,13 @@ def build(provider_name: str, model_id: str):
 
 
 def canonical_histograms() -> dict[str, Any]:
-    """Generate canonical histograms for visualization of sampler behavior."""
-    # Canonical biased/fixed sampler histograms for the viz (illustrative — the
+    """Generate canonical histograms for visualization of sampler behavior.
+
+    Returns:
+      histograms: Histogram data for the biased, fixed, and reference samplers.
+
+    """
+    # Canonical biased/fixed sampler histograms for the viz (illustrative -- the
     # same bias the agent hits). Run in a subprocess so numpy/scipy need not be
     # in this env.
     canon_hist = r"""
@@ -143,7 +141,12 @@ print("HIST " + json.dumps({
     "exp_ref": stats.expon.pdf(centers, scale=2).tolist(),
 }))
 """
-    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:
+    with tempfile.NamedTemporaryFile(
+        "w",
+        suffix=".py",
+        prefix="sagent-histogram-",
+        delete=False,
+    ) as fh:
         fh.write(canon_hist)
         path = fh.name
     try:
@@ -162,39 +165,31 @@ print("HIST " + json.dumps({
         Path(path).unlink(missing_ok=True)
 
 
-def _slim(s: dict[str, Any]) -> dict[str, Any]:
-    return {
-        k: s[k]
-        for k in (
-            "swapped",
-            "first_verdict",
-            "final_verdict",
-            "correct",
-            "self_report",
-            "cost_usd",
-            "n_runs",
-            "n_checks",
-            "error",
-        )
-    }
-
-
 async def run_live(config_name: str, trials: int) -> dict[str, Any]:
-    """Run the self-escalating solver experiment and capture results."""
+    """Run the self-escalating solver experiment and capture results.
+
+    Args:
+      config_name: Provider configuration name.
+      trials: Minimum number of self-mutation trials.
+
+    Returns:
+      data: Captured experiment results.
+
+    """
     cfg = CONFIGS[config_name]
     cheap_prov, cheap_id = cfg["cheap"]
-    high_prov, high_id = cfg["high"]  # expensive baseline (high-tier panel)
-    mut_prov, mut_id = cfg["mutate"]  # what the self-mutate agent upgrades to
+    high_prov, high_id = cfg["high"]  # Expensive baseline (high-tier panel)
+    mut_prov, mut_id = cfg["mutate"]  # What the self-mutate agent upgrades to.
     # Make the Anthropic key discoverable under the canonical env name so a
     # cross-provider AgentSelf swap (Google → Anthropic) can build the provider.
-    # Set on THIS process only — never the CLI's env.
+    # Set on THIS process only -- never the CLI's env.
     if "Anthropic" in (cheap_prov, high_prov, mut_prov):
         akey = _read_key("Anthropic")
         if akey:
             os.environ["ANTHROPIC_API_KEY"] = akey
     print(
         f"config={config_name}  cheap={cheap_prov}/{cheap_id}  high={high_prov}/{high_id}"
-        f"  mutate→{mut_prov}/{mut_id}"
+        f"  mutate→{mut_prov}/{mut_id}",
     )
 
     # low-tier and high-tier get the IDENTICAL prompt (SYS_BASE); only the model differs.
@@ -217,13 +212,14 @@ async def run_live(config_name: str, trials: int) -> dict[str, Any]:
             print("    (low-tier produced no graded result; retrying)", flush=True)
             continue
         if not low["correct"]:
-            break  # ran, got graded, and FAILed — the contrast we want
+            break  # Ran, got graded, and FAILed -- the contrast we want.
         print(
-            "    (low-tier happened to solve it — re-rolling for the FAIL)", flush=True
+            "    (low-tier happened to solve it -- re-rolling for the FAIL)",
+            flush=True,
         )
     print(
         f"    first={low['first_verdict']} final={low['final_verdict']} "
-        f"correct={low['correct']} ${low['cost_usd']}"
+        f"correct={low['correct']} ${low['cost_usd']}",
     )
 
     print("• high-tier (expensive baseline) …", flush=True)
@@ -237,7 +233,7 @@ async def run_live(config_name: str, trials: int) -> dict[str, Any]:
     )
     print(
         f"    first={high['first_verdict']} final={high['final_verdict']} "
-        f"correct={high['correct']} ${high['cost_usd']}"
+        f"correct={high['correct']} ${high['cost_usd']}",
     )
 
     # self-mutate starts cheap, carries a ModelRecipe, and upgrades to mut_id
@@ -246,7 +242,7 @@ async def run_live(config_name: str, trials: int) -> dict[str, Any]:
     self_runs: list[dict[str, Any]] = []
     # Run `trials` trials, but keep going (to a hard cap of trials + 4) until at
     # least one is a money-path (swap + fix) so the captured hero is always a real
-    # cross-vendor swap — the centerpiece of the demo.
+    # cross-vendor swap -- the centerpiece of the demo.
     while True:
         n = len(self_runs)
         has_money = any(s["swapped"] and s["correct"] for s in self_runs)
@@ -265,7 +261,7 @@ async def run_live(config_name: str, trials: int) -> dict[str, Any]:
         self_runs.append(s)
         print(
             f"    swapped={s['swapped']} models={s['models']} first={s['first_verdict']} "
-            f"final={s['final_verdict']} correct={s['correct']} ${s['cost_usd']} err={s['error']!r}"
+            f"final={s['final_verdict']} correct={s['correct']} ${s['cost_usd']} err={s['error']!r}",
         )
 
     money = [s for s in self_runs if s["swapped"] and s["correct"]]
@@ -311,10 +307,10 @@ async def run_live(config_name: str, trials: int) -> dict[str, Any]:
     print(f"  ended correct (any path):        {len(end_correct)}/{len(self_runs)}")
     print(
         f"  hero captured: swapped={hero['swapped']} first={hero['first_verdict']} "
-        f"final={hero['final_verdict']} correct={hero['correct']}"
+        f"final={hero['final_verdict']} correct={hero['correct']}",
     )
     print(
-        f"  contrast: low={low['correct']} high={high['correct']}  (want low=False high=True)"
+        f"  contrast: low={low['correct']} high={high['correct']}  (want low=False high=True)",
     )
     print(f"wrote {out}")
     return data
@@ -323,12 +319,18 @@ async def run_live(config_name: str, trials: int) -> dict[str, Any]:
 def serve(port: int = 8000, host: str = "127.0.0.1") -> None:
     """Serve web/ and print the URL + the ssh -L line for remote viewing.
 
+    Args:
+      port: Local TCP port to bind.
+      host: Interface address to bind.
+
     Binds a FIXED port (default 8000) so an SSH tunnel can be set up ahead of
     time. ``--host 0.0.0.0`` exposes it on the LAN instead (less secure).
+
     """
     web = _CWD / "web"
     handler = functools.partial(
-        http.server.SimpleHTTPRequestHandler, directory=str(web)
+        http.server.SimpleHTTPRequestHandler,
+        directory=str(web),
     )
     socketserver.TCPServer.allow_reuse_address = True
     try:
@@ -341,16 +343,121 @@ def serve(port: int = 8000, host: str = "127.0.0.1") -> None:
     print(f"\n  ▶  Report served on this machine at:  {url}")
     print("\n  Viewing over SSH? Forward the port from your laptop:")
     print(
-        f"      ssh -L {actual}:localhost:{actual}  {socket.gethostname()}   # or  <user>@<host>"
+        f"      ssh -L {actual}:localhost:{actual}  {socket.gethostname()}   # or  <user>@<host>",
     )
     print(f"  then open  {url}  in your LOCAL browser.")
-    print("\n  (replaying the captured run — press Ctrl-C to stop)\n")
-    with contextlib.suppress(Exception):  # headless/remote box: just print the URL
+    print("\n  (replaying the captured run -- press Ctrl-C to stop)\n")
+    with contextlib.suppress(Exception):  # headless/remote box: just print the URL.
         webbrowser.open(url)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("\n  stopped.")
+
+
+def main() -> int:
+    """Run the solver demo with replay or live experiment.
+
+    Returns:
+      status: Zero after replay or the live experiment completes.
+
+    """
+    ap = argparse.ArgumentParser(
+        description="Default: replay the captured run in a local webpage. "
+        "--live re-runs it for real, then serves the fresh result.",
+    )
+    _add_arguments(ap)
+    args = ap.parse_args()
+
+    if args.live:
+        provider = args.provider or _pick_provider()
+        asyncio.run(run_live(provider, args.trials))
+
+    data_js = _CWD / "web" / "data.js"
+    if not data_js.exists():
+        print("no web/data.js yet -- run with --live to capture one.")
+        return 0
+    if args.no_serve:
+        print(f"open {_CWD / 'web' / 'index.html'} in a browser to view the report.")
+        return 0
+    serve(args.port, args.host)
+    return 0
+
+
+def _add_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register command-line flags on ``parser``."""
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="run the experiment for real first",
+    )
+    parser.add_argument(
+        "--provider",
+        choices=["cross", "google", "anthropic"],
+        default=None,
+        help="cross = Google cheap -> Anthropic strong; omit (with --live) to be asked",
+    )
+    parser.add_argument(
+        "--trials",
+        type=int,
+        default=4,
+        help="self-mutate trials (live)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="web server port (fixed, for ssh -L)",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="bind host; 0.0.0.0 exposes on the LAN",
+    )
+    parser.add_argument(
+        "--no-serve",
+        action="store_true",
+        help="skip opening the webpage",
+    )
+
+
+def _read_key(provider_name: str) -> str | None:
+    # Prefer a file (so the key never has to be exported into the CLI's env);
+    # fall back to env if already set for this process.
+    env_names = {
+        "Google": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+        "Anthropic": ("ANTHROPIC_API_KEY",),
+    }
+    key_files = {"Google": "google_api_key", "Anthropic": "anthropic_api_key"}
+    for e in env_names[provider_name]:
+        if os.environ.get(e):
+            return os.environ[e]
+    kf = config_dir() / "rekursiv-ai" / "sagent" / key_files[provider_name]
+    return kf.read_text().strip() if kf.exists() else None
+
+
+def _provider(provider_name: str):
+    key = _read_key(provider_name)
+    if provider_name == "Google":
+        return Google.from_key(key) if key else Google.from_env()
+    return Anthropic.from_key(key) if key else Anthropic.from_env()
+
+
+def _slim(s: dict[str, Any]) -> dict[str, Any]:
+    return {
+        k: s[k]
+        for k in (
+            "swapped",
+            "first_verdict",
+            "final_verdict",
+            "correct",
+            "self_report",
+            "cost_usd",
+            "n_runs",
+            "n_checks",
+            "error",
+        )
+    }
 
 
 def _pick_provider() -> str:
@@ -371,44 +478,6 @@ def _pick_provider() -> str:
     return choice
 
 
-def main() -> None:
-    """Run the solver demo with replay or live experiment."""
-    ap = argparse.ArgumentParser(
-        description="Default: replay the captured run in a local webpage. "
-        "--live re-runs it for real, then serves the fresh result."
-    )
-    ap.add_argument(
-        "--live", action="store_true", help="run the experiment for real first"
-    )
-    ap.add_argument(
-        "--provider",
-        choices=["cross", "google", "anthropic"],
-        default=None,
-        help="cross = Google cheap -> Anthropic strong; omit (with --live) to be asked",
-    )
-    ap.add_argument("--trials", type=int, default=4, help="self-mutate trials (live)")
-    ap.add_argument(
-        "--port", type=int, default=8000, help="web server port (fixed, for ssh -L)"
-    )
-    ap.add_argument(
-        "--host", default="127.0.0.1", help="bind host; 0.0.0.0 exposes on the LAN"
-    )
-    ap.add_argument("--no-serve", action="store_true", help="skip opening the webpage")
-    args = ap.parse_args()
-
-    if args.live:
-        provider = args.provider or _pick_provider()
-        asyncio.run(run_live(provider, args.trials))
-
-    data_js = _CWD / "web" / "data.js"
-    if not data_js.exists():
-        print("no web/data.js yet — run with --live to capture one.")
-        return
-    if args.no_serve:
-        print(f"open {_CWD / 'web' / 'index.html'} in a browser to view the report.")
-        return
-    serve(args.port, args.host)
-
-
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
+# vim: ft=python

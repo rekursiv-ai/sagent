@@ -28,7 +28,9 @@ class non_deterministic:
     deterministic_fn: Callable[[], bool]
     def __init__(self, arg: type[IterDataPipe] | Callable[[], bool]) -> None: ...
     def __call__(
-        self, *args, **kwargs
+        self,
+        *args,
+        **kwargs,
     ) -> IterDataPipe[Any] | Callable[..., IterDataPipe[Any]]: ...
     def deterministic_wrapper_fn(self, *args, **kwargs) -> IterDataPipe: ...
 

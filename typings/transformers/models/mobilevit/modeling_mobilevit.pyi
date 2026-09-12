@@ -19,7 +19,9 @@ from ...utils import auto_docstring
 logger = ...
 
 def make_divisible(
-    value: int, divisor: int = ..., min_value: int | None = ...
+    value: int,
+    divisor: int = ...,
+    min_value: int | None = ...,
 ) -> int: ...
 
 class MobileViTConvLayer(nn.Module):
@@ -81,30 +83,44 @@ class MobileViTAttention(nn.Module):
 
 class MobileViTIntermediate(nn.Module):
     def __init__(
-        self, config: MobileViTConfig, hidden_size: int, intermediate_size: int
+        self,
+        config: MobileViTConfig,
+        hidden_size: int,
+        intermediate_size: int,
     ) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class MobileViTOutput(nn.Module):
     def __init__(
-        self, config: MobileViTConfig, hidden_size: int, intermediate_size: int
+        self,
+        config: MobileViTConfig,
+        hidden_size: int,
+        intermediate_size: int,
     ) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class MobileViTTransformerLayer(nn.Module):
     def __init__(
-        self, config: MobileViTConfig, hidden_size: int, intermediate_size: int
+        self,
+        config: MobileViTConfig,
+        hidden_size: int,
+        intermediate_size: int,
     ) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class MobileViTTransformer(nn.Module):
     def __init__(
-        self, config: MobileViTConfig, hidden_size: int, num_stages: int
+        self,
+        config: MobileViTConfig,
+        hidden_size: int,
+        num_stages: int,
     ) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -134,7 +150,9 @@ class MobileViTEncoder(nn.Module):
         return_dict: bool = ...,
     ) -> tuple | BaseModelOutputWithNoAttention: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithNoAttention: ...
 
 @auto_docstring
@@ -170,7 +188,10 @@ class MobileViTForImageClassification(MobileViTPreTrainedModel):
 
 class MobileViTASPPPooling(nn.Module):
     def __init__(
-        self, config: MobileViTConfig, in_channels: int, out_channels: int
+        self,
+        config: MobileViTConfig,
+        in_channels: int,
+        out_channels: int,
     ) -> None: ...
     def forward(self, features: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...

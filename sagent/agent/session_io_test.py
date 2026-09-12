@@ -17,7 +17,7 @@ import threading
 import pytest
 
 from sagent.agent import (
-    runtime as agent_runtime,
+    runtime,
     session_io,
 )
 from sagent.agent.agent import Agent
@@ -135,7 +135,10 @@ def test_serialize_tool_state_round_trip(tmp_path: Path) -> None:
     state.additional_dirs = ["/tmp/a"]  # noqa: S108 -- placeholder
     state.invoked_rules.add("/tmp/a/.sagent/rules/python.md")  # noqa: S108
     state.read_cache["/tmp/x.txt"] = ReadCacheEntry(  # noqa: S108
-        offset=0, limit=100, last_lines=10, mtime=1234.5
+        offset=0,
+        limit=100,
+        last_lines=10,
+        mtime=1234.5,
     )
     blob = serialize_tool_state(state)
     restored = ToolState()
@@ -155,7 +158,8 @@ def _round_trip(entry: ModelContextEvent, tmp_path: Path) -> ModelContextEvent:
 
 
 def _round_trip_history(
-    entries: list[ModelContextEvent], tmp_path: Path
+    entries: list[ModelContextEvent],
+    tmp_path: Path,
 ) -> list[ModelContextEvent]:
     """Write ``entries`` to a fresh session and return the reloaded history."""
     session_file = tmp_path / "session.jsonl"
@@ -318,7 +322,11 @@ def test_tool_result_round_trip(tmp_path: Path) -> None:
     tc = ToolCall(id="c1", name="Echo", args={})
     asst = AssistantMessage(tool_calls=(tc,))
     res = ToolResult(
-        call_id="c1", content="ran", diff="--- a\n+++ b\n", hint="hi", summary="1"
+        call_id="c1",
+        content="ran",
+        diff="--- a\n+++ b\n",
+        hint="hi",
+        summary="1",
     )
     history = _round_trip_history([asst, res], tmp_path)
     assert len(history) == 2
@@ -358,19 +366,19 @@ def test_legacy_tool_result_infers_kind_from_content() -> None:
     time so a resumed old session does not mis-forward a stub.
     """
     pending = _entry_from_json(
-        {"type": "tool_result", "call_id": "c1", "content": DETACHED_PLACEHOLDER}
+        {"type": "tool_result", "call_id": "c1", "content": DETACHED_PLACEHOLDER},
     )
     assert isinstance(pending, ToolResult)
     assert pending.kind is ToolResultKind.PENDING
 
     cancelled = _entry_from_json(
-        {"type": "tool_result", "call_id": "c1", "content": CANCELLED_PLACEHOLDER}
+        {"type": "tool_result", "call_id": "c1", "content": CANCELLED_PLACEHOLDER},
     )
     assert isinstance(cancelled, ToolResult)
     assert cancelled.kind is ToolResultKind.CANCELLED
 
     final = _entry_from_json(
-        {"type": "tool_result", "call_id": "c1", "content": "real output"}
+        {"type": "tool_result", "call_id": "c1", "content": "real output"},
     )
     assert isinstance(final, ToolResult)
     assert final.kind is ToolResultKind.FINAL
@@ -392,7 +400,7 @@ def test_legacy_update_recomputes_kind_from_patched_content() -> None:
         id=7,
     )
     tape: list[TapeRecord] = [
-        ReferrableTapeEvent(ref=TapeRef(session_id="s", ordinal=0), event=stub)
+        ReferrableTapeEvent(ref=TapeRef(session_id="s", ordinal=0), event=stub),
     ]
     _apply_update_in_place(
         tape,
@@ -414,10 +422,12 @@ def test_is_barrier_splice_is_session_scoped() -> None:
     barrier and discarding a valid ``ToolState`` snapshot.
     """
     a0 = ReferrableTapeEvent(
-        ref=TapeRef(session_id="A", ordinal=0), event=UserMessage(text="a")
+        ref=TapeRef(session_id="A", ordinal=0),
+        event=UserMessage(text="a"),
     )
     b0 = ReferrableTapeEvent(
-        ref=TapeRef(session_id="B", ordinal=0), event=UserMessage(text="b")
+        ref=TapeRef(session_id="B", ordinal=0),
+        event=UserMessage(text="b"),
     )
     # A splice that masks only A:0 (not B:0), inserted at head.
     splice = ContextSplice.replay(
@@ -442,7 +452,7 @@ def test_append_context_repair_masks_current_view(tmp_path: Path) -> None:
         [
             UserMessage(text="x" * 1_000),
             UserMessage(text="y" * 1_000),
-        ]
+        ],
     )
     state = ToolState()
     state.invoked_skills.add("debug")
@@ -503,7 +513,7 @@ def test_clear_barrier_drops_prior_history(tmp_path: Path) -> None:
                 insert_after=None,
                 payload=(),
                 strategy="clear",
-            )
+            ),
         ],
     )
     append_session(
@@ -550,7 +560,7 @@ def test_tool_state_post_clear_wins(tmp_path: Path) -> None:
                 insert_after=None,
                 payload=(),
                 strategy="clear",
-            )
+            ),
         ],
     )
     append_session(session_file, tool_state_snapshot=serialize_tool_state(s2))
@@ -637,7 +647,11 @@ def test_append_session_crash_during_write_preserves_prior_state(
         return real_write(fd, data[:1])
 
     new_meta = SessionMeta(
-        session_id="abc", model_id="m2", provider="P", auth="env", status="failed"
+        session_id="abc",
+        model_id="m2",
+        provider="P",
+        auth="env",
+        status="failed",
     )
     with (
         patch("sagent.agent.session_io.os.write", _explode),
@@ -810,7 +824,7 @@ async def test_load_session_with_repair_preserves_meta_bash_cwd(
             ReferrableTapeEvent(
                 ref=TapeRef(session_id="dangling", ordinal=0),
                 event=AssistantMessage(
-                    tool_calls=(ToolCall(id="call_1", name="Bash", args={}),)
+                    tool_calls=(ToolCall(id="call_1", name="Bash", args={}),),
                 ),
             ),
         ],
@@ -839,7 +853,7 @@ def test_out_of_order_barrier_resets_prior_tool_state(tmp_path: Path) -> None:
                 [
                     {"session_id": "abc", "ordinal": 0},
                     {"session_id": "abc", "ordinal": 1},
-                ]
+                ],
             ],
             "insert_after": None,
             "payload": [{"type": "user", "text": "after"}],
@@ -873,7 +887,7 @@ def test_load_session_dangling_repair_resets_prior_tool_state(tmp_path: Path) ->
             ReferrableTapeEvent(
                 ref=TapeRef(session_id="dangling", ordinal=0),
                 event=AssistantMessage(
-                    tool_calls=(ToolCall(id="call_1", name="Bash", args={}),)
+                    tool_calls=(ToolCall(id="call_1", name="Bash", args={}),),
                 ),
             ),
         ],
@@ -912,13 +926,16 @@ def test_load_session_repairs_orphan_tool_result(tmp_path: Path) -> None:
         meta=meta.serialize(),
         tape_delta=[
             ReferrableTapeEvent(
-                ref=TapeRef(session_id="orphan", ordinal=0), event=user1
+                ref=TapeRef(session_id="orphan", ordinal=0),
+                event=user1,
             ),
             ReferrableTapeEvent(
-                ref=TapeRef(session_id="orphan", ordinal=1), event=orphan
+                ref=TapeRef(session_id="orphan", ordinal=1),
+                event=orphan,
             ),
             ReferrableTapeEvent(
-                ref=TapeRef(session_id="orphan", ordinal=2), event=user2
+                ref=TapeRef(session_id="orphan", ordinal=2),
+                event=user2,
             ),
         ],
     )
@@ -1134,7 +1151,8 @@ def test_a_tape_ref_rejects_a_non_position_ordinal() -> None:
     assert _ref_from_json({"session_id": "s", "ordinal": True}) is None
     assert _ref_from_json({"session_id": "s", "ordinal": -1}) is None
     assert _ref_from_json({"session_id": "s", "ordinal": 3}) == TapeRef(
-        session_id="s", ordinal=3
+        session_id="s",
+        ordinal=3,
     )
 
 
@@ -1323,7 +1341,7 @@ def test_a_relocated_record_does_not_land_inside_an_existing_mask(
                 [
                     {"session_id": sid, "ordinal": 0},
                     {"session_id": sid, "ordinal": 99},
-                ]
+                ],
             ],
             "insert_after": None,
             "payload": [{"type": "user", "text": "barrier"}],
@@ -1380,7 +1398,7 @@ def test_a_carried_mask_does_not_overlap_the_range_it_extends(
                 [
                     {"session_id": sid, "ordinal": 0},
                     {"session_id": sid, "ordinal": 10},
-                ]
+                ],
             ],
             "insert_after": None,
             "payload": [],
@@ -1411,7 +1429,8 @@ def test_a_duplicated_dead_splice_is_not_resurrected(tmp_path: Path) -> None:
         meta=SessionMeta(session_id=sid, model_id="m").serialize(),
         tape_delta=[
             ReferrableTapeEvent(
-                ref=TapeRef(session_id=sid, ordinal=0), event=UserMessage(text="real")
+                ref=TapeRef(session_id=sid, ordinal=0),
+                event=UserMessage(text="real"),
             ),
             ContextSplice(
                 ref=poison,
@@ -1798,11 +1817,14 @@ def test_load_session_repairs_orphan_tool_result_from_splice_payload(
 ) -> None:
     session_file = tmp_path / "session.jsonl"
     meta = SessionMeta(
-        session_id="orphan-splice", model_id="m", provider="P", auth="env"
+        session_id="orphan-splice",
+        model_id="m",
+        provider="P",
+        auth="env",
     )
     user = UserMessage(text="go")
     assistant = AssistantMessage(
-        tool_calls=(ToolCall(id="kept", name="Echo", args={}),)
+        tool_calls=(ToolCall(id="kept", name="Echo", args={}),),
     )
     result = ToolResult(call_id="kept", content="done")
     summary = UserMessage(text="[summary]")
@@ -1845,10 +1867,10 @@ def test_load_session_repairs_orphan_tool_result_from_splice_payload(
         and record.mask == (MaskRange.between(refs[0], refs[4]),)
         for record in tape
     )
-    runtime = agent_runtime.AgentRuntime(model=_RuntimeModel())
-    runtime.replay_tape(tape)
-    runtime.append_splice(
-        mask=(MaskRange.between(runtime.tape[0].ref, runtime.tape[-1].ref),),
+    runtime_obj = runtime.AgentRuntime(model=_RuntimeModel())
+    runtime_obj.replay_tape(tape)
+    runtime_obj.append_splice(
+        mask=(MaskRange.between(runtime_obj.tape[0].ref, runtime_obj.tape[-1].ref),),
         insert_after=None,
         payload=(UserMessage(text="[next summary]"),),
         strategy="summary",
@@ -1884,7 +1906,7 @@ def test_resumed_dangling_session_survives_the_next_user_message(
             ReferrableTapeEvent(
                 ref=refs[2],
                 event=AssistantMessage(
-                    tool_calls=(ToolCall(id="call_1", name="Bash", args={}),)
+                    tool_calls=(ToolCall(id="call_1", name="Bash", args={}),),
                 ),
             ),
             ReferrableTapeEvent(ref=refs[3], event=UserMessage(text="still there?")),
@@ -1894,14 +1916,14 @@ def test_resumed_dangling_session_survives_the_next_user_message(
     loaded = load_session(tmp_path)
     assert loaded is not None
     _, tape, _ = loaded
-    runtime = agent_runtime.AgentRuntime(model=_RuntimeModel(), session_id="resumed")
-    runtime.replay_tape(tape)
-    before = len(runtime.context().messages)
+    runtime_obj = runtime.AgentRuntime(model=_RuntimeModel(), session_id="resumed")
+    runtime_obj.replay_tape(tape)
+    before = len(runtime_obj.context().messages)
     assert before > 1, "fixture did not resume a multi-message conversation"
 
-    runtime._append_or_coalesce_user(UserMessage(text="next"))
+    runtime_obj._append_or_coalesce_user(UserMessage(text="next"))
 
-    messages = runtime.context().messages
+    messages = runtime_obj.context().messages
     assert len(messages) == before, (
         f"resume lost history: {before} messages before the reply, "
         f"{len(messages)} after -- {[getattr(m, 'text', '') for m in messages]}"
@@ -1985,7 +2007,8 @@ def test_load_session_decodes_model_service_suspended_event(tmp_path: Path) -> N
 
 def test_model_service_suspended_account_none_round_trips(tmp_path: Path) -> None:
     append_session(
-        tmp_path / "session.jsonl", runtime_events=[_service_suspended(None)]
+        tmp_path / "session.jsonl",
+        runtime_events=[_service_suspended(None)],
     )
 
     loaded = load_session(tmp_path)
@@ -2068,7 +2091,7 @@ def test_append_session_writes_persistent_agent_lifecycle(tmp_path: Path) -> Non
                 tools=("Read", "Edit"),
                 system="system text",
                 notify_on_asleep=True,
-            )
+            ),
         ],
     )
 
@@ -2317,7 +2340,9 @@ def test_json_bool_default_is_reachable_from_every_caller() -> None:
     [(True, True), (False, False), ("false", True), (1, True), (None, True)],
 )
 def test_persistent_agent_notify_on_asleep_decodes_through_json_bool(
-    tmp_path: Path, raw: object, expected: bool
+    tmp_path: Path,
+    raw: object,
+    expected: bool,
 ) -> None:
     """Non-bool ``notify_on_asleep`` takes the default; a JSON ``false`` does not.
 
@@ -2350,7 +2375,11 @@ def test_persistent_agent_notify_on_asleep_decodes_through_json_bool(
 
 def test_session_meta_round_trip() -> None:
     src = SessionMeta(
-        session_id="x", model_id="y", provider="P", auth="env", status="busy"
+        session_id="x",
+        model_id="y",
+        provider="P",
+        auth="env",
+        status="busy",
     )
     blob = src.serialize()
     back = SessionMeta.deserialize(blob)
@@ -2403,7 +2432,7 @@ def test_load_session_drops_attachment_with_bad_mime_or_data(tmp_path: Path) -> 
                 "not a dict",
                 {"mime": 5, "data": "abc"},
                 {"mime": "image/png", "data": "!!! not base64 !!!"},
-                {"mime": "image/png", "data": "aGVsbG8="},  # valid
+                {"mime": "image/png", "data": "aGVsbG8="},  # Valid.
             ],
         },
     )
@@ -2481,7 +2510,7 @@ def test_repair_dangling_tape_handles_legacy_consecutive_assistants(
                     "id": "call_x",
                     "name": "echo",
                     "args": _NO_ARGS,
-                }
+                },
             ],
         },
     )
@@ -2518,7 +2547,7 @@ def test_repair_dangling_tape_handles_legacy_duplicate_tool_call_id(
                     "id": "t1",
                     "name": "echo",
                     "args": _NO_ARGS,
-                }
+                },
             ],
         },
         {
@@ -2530,7 +2559,7 @@ def test_repair_dangling_tape_handles_legacy_duplicate_tool_call_id(
                     "id": "t1",
                     "name": "echo",
                     "args": _NO_ARGS,
-                }
+                },
             ],
         },
     )
@@ -2547,13 +2576,16 @@ def test_sort_tape_by_ordinal_keeps_file_order_for_a_tie() -> None:
     conversations on resumed and forked tapes.
     """
     rec_a = ReferrableTapeEvent(
-        ref=TapeRef(session_id="b", ordinal=1), event=UserMessage(text="b-1")
+        ref=TapeRef(session_id="b", ordinal=1),
+        event=UserMessage(text="b-1"),
     )
     rec_b = ReferrableTapeEvent(
-        ref=TapeRef(session_id="a", ordinal=1), event=UserMessage(text="a-1")
+        ref=TapeRef(session_id="a", ordinal=1),
+        event=UserMessage(text="a-1"),
     )
     rec_c = ReferrableTapeEvent(
-        ref=TapeRef(session_id="a", ordinal=0), event=UserMessage(text="a-0")
+        ref=TapeRef(session_id="a", ordinal=0),
+        event=UserMessage(text="a-0"),
     )
     sorted_tape = session_io._sort_tape_by_ordinal([rec_a, rec_b, rec_c])
     assert [(r.ref.session_id, r.ref.ordinal) for r in sorted_tape] == [
@@ -2626,11 +2658,11 @@ def test_load_session_skips_blank_lines_and_non_dict_records(tmp_path: Path) -> 
     session_file = tmp_path / "session.jsonl"
     session_file.parent.mkdir(parents=True, exist_ok=True)
     with session_file.open("w", encoding="utf-8") as f:
-        _ = f.write("\n")  # blank line → ``continue``
-        _ = f.write("   \n")  # whitespace-only line
-        _ = f.write("42\n")  # not a dict
+        _ = f.write("\n")  # Blank line → ``continue``
+        _ = f.write("   \n")  # whitespace-only line.
+        _ = f.write("42\n")  # Not a dict.
         _ = f.write(
-            json.dumps({"kind": "history", "type": "user", "text": "hi"}) + "\n"
+            json.dumps({"kind": "history", "type": "user", "text": "hi"}) + "\n",
         )
 
     loaded = load_session(tmp_path)
@@ -2650,7 +2682,7 @@ def test_load_session_preserves_and_skips_corrupt_lines(tmp_path: Path) -> None:
     with session_file.open("w", encoding="utf-8") as f:
         _ = f.write("{not valid json\n")
         _ = f.write(
-            json.dumps({"kind": "history", "type": "user", "text": "after"}) + "\n"
+            json.dumps({"kind": "history", "type": "user", "text": "after"}) + "\n",
         )
 
     loaded = load_session(tmp_path)
@@ -2693,7 +2725,8 @@ def test_load_session_uses_meta_bash_cwd_when_no_snapshot(tmp_path: Path) -> Non
 
 
 def test_preserve_corrupt_session_swallows_oserror(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """``_preserve_corrupt_session`` logs and returns if write fails."""
     session_file = tmp_path / "session.jsonl"
@@ -2716,10 +2749,10 @@ def test_restore_tool_state_drops_bad_read_cache_entries() -> None:
         "bash_cwd": "/x",
         "depth": 0,
         "additional_dirs": [],
-        "recent_files": ["", 42, "/real/path"],  # blank, non-str, valid
+        "recent_files": ["", 42, "/real/path"],  # Blank, non-str, valid.
         "read_cache": [
-            "not-a-dict",  # skipped
-            {"path": "", "offset": 0},  # skipped (empty path)
+            "not-a-dict",  # Skipped.
+            {"path": "", "offset": 0},  # Skipped (empty path)
             {
                 "path": "/p/x.txt",
                 "offset": 0,
@@ -2765,7 +2798,11 @@ def test_restore_model_success_path() -> None:
 
     class _FakeBuilder:
         def build_provider(
-            self, provider: str, auth: str, *, account: str | None = None
+            self,
+            provider: str,
+            auth: str,
+            *,
+            account: str | None = None,
         ) -> _FakeProvider:
             del provider, auth, account
             return _FakeProvider()
@@ -2943,7 +2980,8 @@ def test_mask_from_json_drops_malformed_legacy_ranges(
 
 
 def test_persisted_refs_warns_on_unreadable_file(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # SESSION-3: an existing-but-unreadable session file must warn, not
     # silently return empty (which would re-append the whole tape next save).

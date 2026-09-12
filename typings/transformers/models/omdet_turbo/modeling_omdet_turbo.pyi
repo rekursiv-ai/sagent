@@ -78,7 +78,10 @@ class OmDetTurboLRUCache:
 class OmDetTurboLanguageBackbone(nn.Module):
     def __init__(self, config: OmDetTurboConfig) -> None: ...
     def forward(
-        self, hidden_states, mask=..., encode_type=...
+        self,
+        hidden_states,
+        mask=...,
+        encode_type=...,
     ):  # -> tuple[Any, Any] | Any:
         ...
 
@@ -89,10 +92,15 @@ class OmDetTurboVisionBackbone(nn.Module):
 
 class OmDetTurboMultiscaleDeformableAttention(nn.Module):
     def __init__(
-        self, config: OmDetTurboConfig, num_heads: int, n_points: int
+        self,
+        config: OmDetTurboConfig,
+        num_heads: int,
+        n_points: int,
     ) -> None: ...
     def with_pos_embed(
-        self, tensor: torch.Tensor, position_embeddings: Tensor | None
+        self,
+        tensor: torch.Tensor,
+        position_embeddings: Tensor | None,
     ):  # -> Tensor:
         ...
     def forward(
@@ -162,17 +170,28 @@ class OmDetTurboEncoderLayer(nn.Module):
 class OmDetTurboEncoder(nn.Module):
     def __init__(self, config: OmDetTurboConfig) -> None: ...
     def forward(
-        self, src, src_mask=..., pos_embed=..., output_attentions: bool = ...
+        self,
+        src,
+        src_mask=...,
+        pos_embed=...,
+        output_attentions: bool = ...,
     ) -> tuple[torch.Tensor | tuple[torch.Tensor]]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor | tuple[torch.Tensor]]: ...
 
 class OmDetTurboHybridEncoder(nn.Module):
     def __init__(self, config: OmDetTurboConfig) -> None: ...
     @staticmethod
     def build_2d_sincos_position_embedding(
-        width, height, embed_dim=..., temperature=..., device=..., dtype=...
+        width,
+        height,
+        embed_dim=...,
+        temperature=...,
+        device=...,
+        dtype=...,
     ):  # -> Tensor:
         ...
     def forward(
@@ -231,11 +250,15 @@ class OmDetTurboPreTrainedModel(PreTrainedModel):
     base_model_prefix = ...
     main_input_name = ...
     def get_cached_class_embeddings(
-        self, classes_input_ids, classes_attention_mask
+        self,
+        classes_input_ids,
+        classes_attention_mask,
     ):  # -> Tensor:
         ...
     def get_cached_task_embeddings(
-        self, tasks_input_ids, tasks_attention_mask
+        self,
+        tasks_input_ids,
+        tasks_attention_mask,
     ):  # -> tuple[Tensor, Tensor]:
         ...
     def get_language_embedding(
@@ -255,7 +278,11 @@ class OmDetTurboDecoder(OmDetTurboPreTrainedModel):
     def __init__(self, config: OmDetTurboConfig) -> None: ...
     @lru_cache(maxsize=32)  # noqa: B019 -- mirrors upstream @lru_cache on a method; not executed in a stub
     def generate_anchors(
-        self, spatial_shapes=..., grid_size=..., device=..., dtype=...
+        self,
+        spatial_shapes=...,
+        grid_size=...,
+        device=...,
+        dtype=...,
     ):  # -> tuple[Tensor, Tensor]:
         ...
     def forward(

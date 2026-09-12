@@ -44,7 +44,9 @@ class TFXLMRobertaEmbeddings(keras.layers.Layer):
     def build(self, input_shape=...):  # -> None:
         ...
     def create_position_ids_from_input_ids(
-        self, input_ids, past_key_values_length=...
+        self,
+        input_ids,
+        past_key_values_length=...,
     ): ...
     def call(
         self,
@@ -82,7 +84,10 @@ class TFXLMRobertaSelfAttention(keras.layers.Layer):
 class TFXLMRobertaSelfOutput(keras.layers.Layer):
     def __init__(self, config: XLMRobertaConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -113,7 +118,10 @@ class TFXLMRobertaIntermediate(keras.layers.Layer):
 class TFXLMRobertaOutput(keras.layers.Layer):
     def __init__(self, config: XLMRobertaConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -193,7 +201,7 @@ class TFXLMRobertaModel(TFXLMRobertaPreTrainedModel):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        XLM_ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        XLM_ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -239,7 +247,8 @@ class TFXLMRobertaLMHead(keras.layers.Layer):
     XLM_ROBERTA_START_DOCSTRING,
 )
 class TFXLMRobertaForMaskedLM(
-    TFXLMRobertaPreTrainedModel, TFMaskedLanguageModelingLoss
+    TFXLMRobertaPreTrainedModel,
+    TFMaskedLanguageModelingLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
@@ -248,7 +257,7 @@ class TFXLMRobertaForMaskedLM(
     def get_prefix_bias_name(self): ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        XLM_ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        XLM_ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -280,7 +289,8 @@ class TFXLMRobertaForMaskedLM(
     XLM_ROBERTA_START_DOCSTRING,
 )
 class TFXLMRobertaForCausalLM(
-    TFXLMRobertaPreTrainedModel, TFCausalLanguageModelingLoss
+    TFXLMRobertaPreTrainedModel,
+    TFCausalLanguageModelingLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config: XLMRobertaConfig, *inputs, **kwargs) -> None: ...
@@ -288,12 +298,16 @@ class TFXLMRobertaForCausalLM(
         ...
     def get_prefix_bias_name(self): ...
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=..., attention_mask=..., **model_kwargs
+        self,
+        input_ids,
+        past_key_values=...,
+        attention_mask=...,
+        **model_kwargs,
     ):  # -> dict[str, Any | None]:
         ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        XLM_ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        XLM_ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -332,13 +346,14 @@ class TFXLMRobertaClassificationHead(keras.layers.Layer):
     XLM_ROBERTA_START_DOCSTRING,
 )
 class TFXLMRobertaForSequenceClassification(
-    TFXLMRobertaPreTrainedModel, TFSequenceClassificationLoss
+    TFXLMRobertaPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        XLM_ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        XLM_ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="cardiffnlp/twitter-roberta-base-emotion",
@@ -374,7 +389,7 @@ class TFXLMRobertaForMultipleChoice(TFXLMRobertaPreTrainedModel, TFMultipleChoic
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        XLM_ROBERTA_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        XLM_ROBERTA_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -403,14 +418,15 @@ class TFXLMRobertaForMultipleChoice(TFXLMRobertaPreTrainedModel, TFMultipleChoic
     XLM_ROBERTA_START_DOCSTRING,
 )
 class TFXLMRobertaForTokenClassification(
-    TFXLMRobertaPreTrainedModel, TFTokenClassificationLoss
+    TFXLMRobertaPreTrainedModel,
+    TFTokenClassificationLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     _keys_to_ignore_on_load_missing = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        XLM_ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        XLM_ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="ydshieh/roberta-large-ner-english",
@@ -441,13 +457,14 @@ class TFXLMRobertaForTokenClassification(
     XLM_ROBERTA_START_DOCSTRING,
 )
 class TFXLMRobertaForQuestionAnswering(
-    TFXLMRobertaPreTrainedModel, TFQuestionAnsweringLoss
+    TFXLMRobertaPreTrainedModel,
+    TFQuestionAnsweringLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        XLM_ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        XLM_ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="ydshieh/roberta-base-squad2",

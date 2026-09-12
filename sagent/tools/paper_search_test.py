@@ -23,7 +23,10 @@ from sagent.tools.paper_search import PaperSearch, _empty_hint
 
 
 def _result(
-    records: list[PaperRecord], *, total: int | None = None, complete: bool = True
+    records: list[PaperRecord],
+    *,
+    total: int | None = None,
+    complete: bool = True,
 ) -> SearchResult:
     """Build a library ``SearchResult`` for mocking ``paper_search.search``."""
     return SearchResult(
@@ -103,7 +106,7 @@ def test_run_rejects_zero_limit() -> None:
 
 def test_run_rejects_inverted_year_range() -> None:
     result = asyncio.run(
-        PaperSearch().run({"query": "x", "year_from": 2025, "year_to": 2020})
+        PaperSearch().run({"query": "x", "year_from": 2025, "year_to": 2020}),
     )
     assert result.is_error
     assert "year_from" in result.content
@@ -134,7 +137,7 @@ def test_run_renders_records() -> None:
         return_value=_result([rec]),
     ):
         result = asyncio.run(
-            PaperSearch().run({"query": "transformers", "source": "s2"})
+            PaperSearch().run({"query": "transformers", "source": "s2"}),
         )
     assert not result.is_error
     assert "Attention Is All You Need" in result.content
@@ -172,7 +175,7 @@ def test_run_abstract_truncated_to_cap() -> None:
         return_value=_result([rec]),
     ):
         result = asyncio.run(
-            PaperSearch().run({"query": "x", "source": "s2", "abstract_chars": 10})
+            PaperSearch().run({"query": "x", "source": "s2", "abstract_chars": 10}),
         )
     assert "..." in result.content
     # Cap applies to abstract chars, not the whole rendering.
@@ -187,7 +190,7 @@ def test_run_limit_caps_rendered_hits() -> None:
         return_value=_result(recs, total=5),
     ):
         result = asyncio.run(
-            PaperSearch().run({"query": "x", "source": "s2", "limit": 2})
+            PaperSearch().run({"query": "x", "source": "s2", "limit": 2}),
         )
     assert "P0" in result.content
     assert "P1" in result.content
@@ -230,8 +233,8 @@ def test_run_multiterm_empty_appends_and_hint() -> None:
     ):
         result = asyncio.run(
             PaperSearch().run(
-                {"query": "object-centric slot attention ARC", "source": "fused"}
-            )
+                {"query": "object-centric slot attention ARC", "source": "fused"},
+            ),
         )
     assert "(no results)" in result.content
     assert "every query term" in result.content.lower()
@@ -245,7 +248,7 @@ def test_run_empty_appends_author_hint() -> None:
         return_value=_result([], total=0),
     ):
         result = asyncio.run(
-            PaperSearch().run({"query": "Andrews Sparks", "source": "s2"})
+            PaperSearch().run({"query": "Andrews Sparks", "source": "s2"}),
         )
     assert "(no results)" in result.content
     assert "PaperAuthor" in result.content
@@ -278,7 +281,7 @@ def test_run_caches_complete_results() -> None:
         args: MutableJSON = {"query": "uniquecachetestkey1", "source": "s2"}
         first = asyncio.run(PaperSearch().run(args))
         second = asyncio.run(PaperSearch().run(args))
-    assert mock_search.call_count == 1  # second served from cache
+    assert mock_search.call_count == 1  # `second` served from cache.
     assert first.content == second.content
 
 
@@ -286,11 +289,14 @@ def test_run_does_not_cache_partial_results() -> None:
     _clear_cache()
     rec = PaperRecord(title="Partial", sources=("openalex",))
     partial = _result([rec], complete=False)
-    with patch("sagent.tools.paper_search.search", return_value=partial) as mock_search:
+    with patch(
+        "sagent.tools.paper_search.search",
+        return_value=partial,
+    ) as mock_search:
         args: MutableJSON = {"query": "partialcacheprobe", "source": "fused"}
         _ = asyncio.run(PaperSearch().run(args))
         _ = asyncio.run(PaperSearch().run(args))
-    assert mock_search.call_count == 2  # partial result re-queried, not cached
+    assert mock_search.call_count == 2  # `partial` result re-queried, not cached.
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +324,7 @@ def test_run_paper_error_not_cached() -> None:
         args: MutableJSON = {"query": "errornotcachedprobe", "source": "fused"}
         _ = asyncio.run(PaperSearch().run(args))
         _ = asyncio.run(PaperSearch().run(args))
-    assert mock_search.call_count == 2  # errors never cached
+    assert mock_search.call_count == 2  # Errors never cached.
 
 
 if __name__ == "__main__":

@@ -28,40 +28,16 @@ _CWD: Final = Path(__file__).resolve().parent
 MODEL = "claude-sonnet-4-6"  # config-globals: ignore -- model choice, user retunes
 
 
-def _key() -> str:
-    """Return the API key."""
-    return (
-        (config_dir() / "rekursiv-ai" / "sagent" / "anthropic_api_key")
-        .read_text()
-        .strip()
-    )
-
-
-def _make_model() -> Model:
-    """Fresh provider+model per call → each Agent owns its own SDK (isolated shutdown)."""
-    return Anthropic.from_key(_key()).model(MODEL)
-
-
-def _lineage(eng: Engine) -> dict[str, str]:
-    """Return agent parent-child relationships."""
-    return {
-        e["child"]: e["agent"]
-        for e in eng.events
-        if e["kind"] == "spawn" and e.get("child") and e["agent"] != e["child"]
-    }
-
-
-def _roster(eng: Engine) -> list[str]:
-    """Return the list of agent names."""
-    roster: list[str] = []
-    for e in eng.events:
-        if e["kind"] == "spawn" and e.get("child") and e["child"] not in roster:
-            roster.append(e["child"])
-    return roster
-
-
 def metrics(eng: Engine) -> dict[str, Any]:
-    """Return metrics about the engine state."""
+    """Return metrics about the engine state.
+
+    Args:
+      eng: Engine whose event and world state provide the metrics.
+
+    Returns:
+      metrics: Summary values for the completed or partial run.
+
+    """
     ev = eng.events
     msgs = [e for e in ev if e["kind"] == "message" and e.get("status") == "delivered"]
     presses = [e for e in ev if e["kind"] == "press"]
@@ -78,13 +54,21 @@ def metrics(eng: Engine) -> dict[str, Any]:
         "msgs_per_lock": round(len(msgs) / opened, 1) if opened else None,
         "presses": len(presses),
         "failed_press": len(failed),
-        "interactions": eng.t + len(msgs),  # world actions + delivered messages
+        "interactions": eng.t + len(msgs),  # `world` actions + delivered messages.
         "termination": "solved" if eng.all_locks_open() else "budget",
     }
 
 
 def arm_payload(eng: Engine) -> dict[str, Any]:
-    """Return the arm payload."""
+    """Return the serialized payload for one engine run.
+
+    Args:
+      eng: Engine whose scene, events, and metrics are captured.
+
+    Returns:
+      payload: Replay data, agent lineage, and run metrics.
+
+    """
     return {
         "scene": eng.scene,
         "events": eng.events,
@@ -105,7 +89,22 @@ async def run_arm(
     rounds: int = 28,
     budget_t: int = 140,
 ) -> Engine:
-    """Run an arm and return the results."""
+    """Run one coordination arm and return its engine.
+
+    Args:
+      rows: Maze rows used to initialize the arena.
+      meta: Spawn metadata for the maze level.
+      mesh: Whether agents may communicate and spawn across the mesh.
+      told: Whether the system prompt describes the topology.
+      wall_s: Maximum wall-clock runtime in seconds.
+      max_agents: Maximum number of agents in the arena.
+      rounds: Maximum model tool-call rounds per agent.
+      budget_t: Maximum logical interactions.
+
+    Returns:
+      engine: Engine containing the arm's event log and final world state.
+
+    """
     arena = Arena(
         rows,
         meta,
@@ -120,16 +119,20 @@ async def run_arm(
     return await arena.run(wall_s=wall_s)
 
 
-def _interactions(eng: Engine) -> int:
-    m = metrics(eng)
-    return int(m["interactions"])
-
-
 def pick(engs: list[Engine], *, best: bool) -> Engine:
     """Return the best/worst engine by solve/lock/interaction metrics.
 
+    Args:
+      engs: Candidate engines to rank.
+      best: Whether to select the best run rather than the worst run.
+
+    Returns:
+      engine: Selected candidate according to the requested ranking.
+
+
     Best mesh: solved, then MOST locks opened, then fewest interactions.
     Worst tree: least locks opened, then most interactions.
+
     """
     if best:
         return min(
@@ -153,7 +156,21 @@ async def capture(
     rounds: int = 28,
     budget_t: int = 140,
 ) -> dict[str, Any]:
-    """Run all coordination modes and return captured results."""
+    """Run all coordination modes and return captured results.
+
+    Args:
+      num_locks: Number of locks to place in the generated maze.
+      decoys: Number of decoy features in the generated maze.
+      k: Number of runs per coordination mode and arm.
+      write: Whether to write the replay artifact.
+      max_agents: Maximum number of agents in each arena.
+      rounds: Maximum model tool-call rounds per agent.
+      budget_t: Maximum logical interactions per arena.
+
+    Returns:
+      data: Captured metadata and payloads for every coordination mode.
+
+    """
     rows, meta = make_spawn_level(num_locks=num_locks, decoys=decoys)
     data: dict[str, Any] = {
         "meta": {
@@ -196,3 +213,40 @@ async def capture(
         out.write_text("window.MAZE = " + json.dumps(data) + ";\n", encoding="utf-8")
         print(f"wrote {out}")  # noqa: T201
     return data
+
+
+def _key() -> str:
+    """Return the API key."""
+    return (
+        (config_dir() / "rekursiv-ai" / "sagent" / "anthropic_api_key")
+        .read_text()
+        .strip()
+    )
+
+
+def _make_model() -> Model:
+    """Fresh provider+model per call → each Agent owns its own SDK (isolated shutdown)."""
+    return Anthropic.from_key(_key()).model(MODEL)
+
+
+def _lineage(eng: Engine) -> dict[str, str]:
+    """Return agent parent-child relationships."""
+    return {
+        e["child"]: e["agent"]
+        for e in eng.events
+        if e["kind"] == "spawn" and e.get("child") and e["agent"] != e["child"]
+    }
+
+
+def _roster(eng: Engine) -> list[str]:
+    """Return the list of agent names."""
+    roster: list[str] = []
+    for e in eng.events:
+        if e["kind"] == "spawn" and e.get("child") and e["child"] not in roster:
+            roster.append(e["child"])
+    return roster
+
+
+def _interactions(eng: Engine) -> int:
+    m = metrics(eng)
+    return int(m["interactions"])

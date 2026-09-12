@@ -28,16 +28,25 @@ class LightGlueKeypointMatchingOutput(ModelOutput):
 class LightGluePositionalEncoder(nn.Module):
     def __init__(self, config: LightGlueConfig) -> None: ...
     def forward(
-        self, keypoints: torch.Tensor, output_hidden_states: bool | None = ...
+        self,
+        keypoints: torch.Tensor,
+        output_hidden_states: bool | None = ...,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
 
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -81,22 +90,32 @@ class LightGlueTransformerLayer(nn.Module):
         output_hidden_states: bool | None = ...,
         output_attentions: bool | None = ...,
     ) -> tuple[
-        torch.Tensor, tuple[torch.Tensor] | None, tuple[torch.Tensor] | None
+        torch.Tensor,
+        tuple[torch.Tensor] | None,
+        tuple[torch.Tensor] | None,
     ]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[
-        torch.Tensor, tuple[torch.Tensor] | None, tuple[torch.Tensor] | None
+        torch.Tensor,
+        tuple[torch.Tensor] | None,
+        tuple[torch.Tensor] | None,
     ]: ...
 
 def sigmoid_log_double_softmax(
-    similarity: torch.Tensor, matchability0: torch.Tensor, matchability1: torch.Tensor
+    similarity: torch.Tensor,
+    matchability0: torch.Tensor,
+    matchability1: torch.Tensor,
 ) -> torch.Tensor: ...
 
 class LightGlueMatchAssignmentLayer(nn.Module):
     def __init__(self, config: LightGlueConfig) -> None: ...
     def forward(
-        self, descriptors: torch.Tensor, mask: torch.Tensor
+        self,
+        descriptors: torch.Tensor,
+        mask: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
     def get_matchability(self, descriptors: torch.Tensor) -> torch.Tensor: ...
@@ -116,10 +135,13 @@ class LightGluePreTrainedModel(PreTrainedModel):
     _supports_sdpa = ...
 
 def get_matches_from_scores(
-    scores: torch.Tensor, threshold: float
+    scores: torch.Tensor,
+    threshold: float,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 def normalize_keypoints(
-    keypoints: torch.Tensor, height: int, width: int
+    keypoints: torch.Tensor,
+    height: int,
+    width: int,
 ) -> torch.Tensor: ...
 
 @auto_docstring(custom_intro=...)

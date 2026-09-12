@@ -37,11 +37,17 @@ def mark_compile_region(
 def get_invoke_subgraph_cache() -> None: ...
 def trace_joint_graph(fn, fw_inputs, fw_outputs) -> GraphModule: ...
 def create_fw_bw_graph(
-    subgraph, operands, grad_outputs=...
+    subgraph,
+    operands,
+    grad_outputs=...,
 ) -> tuple[GraphModule, GraphModule, OutputMetadata]: ...
 def get_output_metadata(subgraph, *operands) -> OutputMetadata: ...
 def trace_joint_graph_as_bwd(
-    subgraph, num_primals, joint_operands, include_key_set, exclude_key_set
+    subgraph,
+    num_primals,
+    joint_operands,
+    include_key_set,
+    exclude_key_set,
 ) -> GraphModule: ...
 
 class InvokeSubgraphAutogradOp(torch.autograd.Function):

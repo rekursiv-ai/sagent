@@ -19,44 +19,6 @@ from sagent.types.runtime import (
 logger = logging.getLogger(__name__)
 
 
-def _deliver(
-    to: str,
-    sender: str,
-    content: str,
-    delay: int,
-) -> None:
-    """Deliver a delayed message into the target's inbox.
-
-    Re-resolves ``to`` against ``agent_registry`` at delivery time
-    rather than capturing the target object at schedule time: a
-    persistent agent that died, restarted, or was relabelled between
-    schedule and delivery would otherwise receive the message on a
-    stale handle (or worse, a different identity reusing the old
-    object). Re-resolution makes the registry the single source of
-    truth and turns the dead-target case into a soft warning instead
-    of a silent delivery to a defunct inbox.
-
-    Posts an ``AgentSendMessage`` (preempting) -- the ``call_later``
-    delay timer alone supplies the "wait before delivery" semantic.
-    Using ``AgentSendDeferredMessage`` here would double-defer the
-    delivery: the runtime parks deferred messages until ``AgentIdle``,
-    so a busy target would not see the wake-up the delay timer was
-    meant to provide.
-
-    Prepends a ``[delayed Ns]`` marker to the body so the recipient
-    can tell a scheduled reminder from a fresh send (the description
-    tooltip and ``assets/default/tools_agentsend.md`` promise this).
-    """
-    target = agent_registry.get(to)
-    if target is None:
-        logger.warning("Delayed message to dead agent %r from %s", to, sender)
-        return
-    body = f"[delayed {delay}s] {content}" if delay > 0 else content
-    target.runtime.inbox.push_back(
-        AgentSendMessage(source=sender, text=body),
-    )
-
-
 class AgentSend:
     """Tool: send a text message to another live agent."""
 
@@ -83,7 +45,7 @@ class AgentSend:
                 },
             },
             "required": ["to", "content"],
-        }
+        },
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -140,7 +102,9 @@ class AgentSend:
             return ToolResult(call_id="", content="'to' is required.", is_error=True)
         if not content:
             return ToolResult(
-                call_id="", content="'content' is required.", is_error=True
+                call_id="",
+                content="'content' is required.",
+                is_error=True,
             )
         if delay is not None and delay < 0:
             return ToolResult(
@@ -198,3 +162,36 @@ class AgentSend:
                 ),
             )
         return ToolResult(call_id="", content=f"Delivered to {to}.")
+
+
+# Re-resolves ``to`` against ``agent_registry`` at delivery time rather than capturing
+# the target object at schedule time: a persistent agent that died, restarted, or was
+# relabelled between schedule and delivery would otherwise receive the message on a
+# stale handle (or worse, a different identity reusing the old object). Re-resolution
+# makes the registry the single source of truth and turns the dead-target case into a
+# soft warning instead of a silent delivery to a defunct inbox.
+#
+# Posts an ``AgentSendMessage`` (preempting) -- the ``call_later`` delay timer alone
+# supplies the "wait before delivery" semantic. Using ``AgentSendDeferredMessage`` here
+# would double-defer the delivery: the runtime parks deferred messages until
+# ``AgentIdle``, so a busy target would not see the wake-up the delay timer was meant to
+# provide.
+#
+# Prepends a ``[delayed Ns]`` marker to the body so the recipient can tell a scheduled
+# reminder from a fresh send (the description tooltip and
+# ``assets/default/tools_agentsend.md`` promise this).
+def _deliver(
+    to: str,
+    sender: str,
+    content: str,
+    delay: int,
+) -> None:
+    """Deliver a delayed message into the target's inbox."""
+    target = agent_registry.get(to)
+    if target is None:
+        logger.warning("Delayed message to dead agent %r from %s", to, sender)
+        return
+    body = f"[delayed {delay}s] {content}" if delay > 0 else content
+    target.runtime.inbox.push_back(
+        AgentSendMessage(source=sender, text=body),
+    )

@@ -47,7 +47,6 @@ agent_lib = lazy_import("sagent.agent")
 
 __all__ = [
     "BackgroundTask",
-    "BackgroundTaskEntry",
     "cancel_persistent_subagent",
     "shutdown_persistent_subagent",
 ]
@@ -75,7 +74,7 @@ class BackgroundTask:
                 },
             },
             "required": ["operation"],
-        }
+        },
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -133,7 +132,9 @@ class BackgroundTask:
         agent = current_agent_var.get(None)
         if agent is None:
             return ToolResult(
-                call_id="", content="BackgroundTask: no active agent", is_error=True
+                call_id="",
+                content="BackgroundTask: no active agent",
+                is_error=True,
             )
 
         if op == "list":
@@ -143,7 +144,9 @@ class BackgroundTask:
         if op == "foreground":
             return await self._foreground(agent, job_id)
         return ToolResult(
-            call_id="", content=f"Unknown operation: {op!r}", is_error=True
+            call_id="",
+            content=f"Unknown operation: {op!r}",
+            is_error=True,
         )
 
     def _list(self, agent: AgentLike) -> ToolResult:
@@ -178,12 +181,16 @@ class BackgroundTask:
         """Cancel a tracked background task by job id."""
         if not job_id:
             return ToolResult(
-                call_id="", content="cancel requires an id", is_error=True
+                call_id="",
+                content="cancel requires an id",
+                is_error=True,
             )
         job = agent.background.get(job_id)
         if job is None or job.hidden:
             return ToolResult(
-                call_id="", content=f"No such job: {job_id}", is_error=True
+                call_id="",
+                content=f"No such job: {job_id}",
+                is_error=True,
             )
         if job.kind == "subagent":
             # Strip the ``persistent:`` prefix to recover the child's label;
@@ -202,31 +209,24 @@ class BackgroundTask:
             content=f"Cancelled: {job.tool_name} ({job_id})",
         )
 
+    # Tracked tasks post results via ``DetachedResult`` to the runtime inbox; the task
+    # object itself returns ``None``. If the result has already been spliced into
+    # history (splice fires when the runtime drains the ``DetachedResult``), read it
+    # from there; otherwise wait for the event.
     async def _foreground(self, agent: AgentLike, job_id: str) -> ToolResult:
-        """Resolve a tracked background task to its result.
-
-        Tracked tasks post results via ``DetachedResult`` to the
-        runtime inbox; the task object itself returns ``None``. If the
-        result has already been spliced into history (splice fires when
-        the runtime drains the ``DetachedResult``), read it from there;
-        otherwise wait for the event.
-
-        Args:
-          agent: The current agent.
-          job_id: Queue id of the registered task to foreground.
-
-        Returns:
-          result: The completed task's tool result, or an error result.
-
-        """
+        """Resolve a tracked background task to its result."""
         if not job_id:
             return ToolResult(
-                call_id="", content="foreground requires an id", is_error=True
+                call_id="",
+                content="foreground requires an id",
+                is_error=True,
             )
         job = agent.background.get(job_id)
         if job is None or job.hidden:
             return ToolResult(
-                call_id="", content=f"No such job: {job_id}", is_error=True
+                call_id="",
+                content=f"No such job: {job_id}",
+                is_error=True,
             )
         if job.kind == "subagent" and job.lifecycle == "serviced":
             return ToolResult(
@@ -246,12 +246,20 @@ class BackgroundTask:
             spliced = await _await_detached(agent, call_id, job)
         agent.cancel_background(job_id)
         return ToolResult(
-            call_id="", content=spliced.content, is_error=spliced.is_error
+            call_id="",
+            content=spliced.content,
+            is_error=spliced.is_error,
         )
 
 
 def shutdown_persistent_subagent(agent: AgentLike, job: BackgroundTaskEntry) -> None:
-    """Shut down a persistent child through its public lifecycle hook."""
+    """Shut down a persistent child through its public lifecycle hook.
+
+    Args:
+      agent: Parent agent owning the child.
+      job: Background-task entry for the persistent child.
+
+    """
     child = agent_registry.get(job.queue_id)
     if child is None:
         return
@@ -307,12 +315,10 @@ def _get_agent_class() -> type[Agent]:
     return cast(type["Agent"], agent_lib.Agent)
 
 
+# A ``CANCELLED`` result is a valid final answer here (a killed job's outcome is
+# "cancelled"); only a still-running ``PENDING`` stub is skipped.
 def _find_history_result(agent: AgentLike, call_id: str) -> ToolResult | None:
-    """Return the most recent final (non-``PENDING``) result for ``call_id``.
-
-    A ``CANCELLED`` result is a valid final answer here (a killed job's outcome
-    is "cancelled"); only a still-running ``PENDING`` stub is skipped.
-    """
+    """Return the most recent final (non-``PENDING``) result for ``call_id``."""
     for entry in reversed(agent.runtime.context().messages):
         if (
             isinstance(entry, ToolResult)
@@ -408,15 +414,13 @@ def _splice_from_inbox_items(
     return result
 
 
+# The result is returned as the ``BackgroundTask foreground`` tool's own answer (forward
+# delivery -- the model asked for it). The original ``[Running in background]``
+# placeholder is left in place: it is the honest record that the call was backgrounded,
+# and rewriting it in-slot would be a silent back-patch (see
+# ``docs/private/design_detached_tool_results.md``).
 def _splice_detached(agent: AgentLike, event: DetachedResult) -> ToolResult:
-    """Return the foreground result for a drained ``DetachedResult``.
-
-    The result is returned as the ``BackgroundTask foreground`` tool's own
-    answer (forward delivery -- the model asked for it). The original
-    ``[Running in background]`` placeholder is left in place: it is the honest
-    record that the call was backgrounded, and rewriting it in-slot would be a
-    silent back-patch (see ``docs/private/design_detached_tool_results.md``).
-    """
+    """Return the foreground result for a drained ``DetachedResult``."""
     del agent
     return _tool_result_from_detached(event)
 

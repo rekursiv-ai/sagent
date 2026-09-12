@@ -33,7 +33,12 @@ _CONFIG_FOR_DOC = ...
 
 class TFAttention(keras.layers.Layer):
     def __init__(
-        self, nx, config, scale=..., is_cross_attention=..., **kwargs
+        self,
+        nx,
+        config,
+        scale=...,
+        is_cross_attention=...,
+        **kwargs,
     ) -> None: ...
     def prune_heads(self, heads):  # -> None:
         ...
@@ -170,7 +175,11 @@ class TFGPT2LMHeadModel(TFGPT2PreTrainedModel, TFCausalLanguageModelingLoss):
     def set_output_embeddings(self, value):  # -> None:
         ...
     def prepare_inputs_for_generation(
-        self, inputs, past_key_values=..., use_cache=..., **kwargs
+        self,
+        inputs,
+        past_key_values=...,
+        use_cache=...,
+        **kwargs,
     ):  # -> dict[str, Any | None]:
         ...
     @unpack_inputs
@@ -210,7 +219,8 @@ class TFGPT2DoubleHeadsModel(TFGPT2PreTrainedModel):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(GPT2_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFGPT2DoubleHeadsModelOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFGPT2DoubleHeadsModelOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -239,7 +249,8 @@ class TFGPT2DoubleHeadsModel(TFGPT2PreTrainedModel):
     GPT2_START_DOCSTRING,
 )
 class TFGPT2ForSequenceClassification(
-    TFGPT2PreTrainedModel, TFSequenceClassificationLoss
+    TFGPT2PreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs

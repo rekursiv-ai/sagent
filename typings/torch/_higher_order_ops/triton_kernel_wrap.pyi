@@ -26,12 +26,15 @@ type TritonKernelType = Autotuner | JITFunction
 type TritonAutotunerType = Autotuner
 log = ...
 type TMAExperimentalMetadata = tuple[
-    str, tuple[list[IntLikeType], list[IntLikeType], IntLikeType]
+    str,
+    tuple[list[IntLikeType], list[IntLikeType], IntLikeType],
 ]
 type TMAStableMetadata = tuple[str, tuple[list[IntLikeType],]]
 
 def create_tma_experimental_metadata(
-    dims: list[IntLikeType], block_dims: list[IntLikeType], element_size: IntLikeType
+    dims: list[IntLikeType],
+    block_dims: list[IntLikeType],
+    element_size: IntLikeType,
 ) -> TMAExperimentalMetadata: ...
 def maybe_unpack_tma_experimental_metadata(
     tma_meta: TMAExperimentalMetadata | TMAStableMetadata,
@@ -98,11 +101,14 @@ class MemoizeWithCycleCheck:
 
 @MemoizeWithCycleCheck
 def get_tma_stores(
-    functions: dict[str, dict[Intermediate, list[Op]]], fn_name: str
+    functions: dict[str, dict[Intermediate, list[Op]]],
+    fn_name: str,
 ) -> set[Intermediate | Param]: ...
 @MemoizeWithCycleCheck
 def analyze_kernel_mutations(
-    functions: dict[str, dict[Intermediate, list[Op]]], fn_name: str, num_args: int
+    functions: dict[str, dict[Intermediate, list[Op]]],
+    fn_name: str,
+    num_args: int,
 ) -> list[bool]: ...
 def identify_mutated_tensors(
     kernel: TritonKernelType,
@@ -243,7 +249,10 @@ class TritonHOPifier:
     def is_callable(self, maybe_callable: Any) -> bool: ...
     def get_value(self, val: Any) -> Any: ...
     def call_grid(
-        self, grid, meta, tx
+        self,
+        grid,
+        meta,
+        tx,
     ) -> tuple[int | sympy.Expr | SymInt, ...] | tuple[Proxy, ...]: ...
     def wrap_user_defined_obj(
         self,
@@ -261,7 +270,9 @@ class TritonHOPifier:
         variable: TritonKernelVariable | TraceableTritonKernelWrapper | None,
     ) -> Any: ...
     def maybe_unpack_configs(
-        self, configs: list[TritonConfig], tx: InstructionTranslator | None
+        self,
+        configs: list[TritonConfig],
+        tx: InstructionTranslator | None,
     ) -> list[TritonConfig]: ...
     def maybe_unpack_heuristic_result(self, result: Any) -> Any: ...
     @staticmethod
@@ -275,10 +286,15 @@ class TritonHOPifier:
         kwargs: dict,
     ) -> list[TritonConfig]: ...
     def call_HOP(
-        self, variable, grids, combined_args: dict[str, Any], tx
+        self,
+        variable,
+        grids,
+        combined_args: dict[str, Any],
+        tx,
     ) -> ConstantVariable | None: ...
     def check_grid(
-        self, grid
+        self,
+        grid,
     ) -> tuple[int | sympy.Expr | SymInt, ...] | tuple[Proxy, ...]: ...
     def init_variable(
         self,
@@ -312,7 +328,10 @@ class TracingTritonHOPifier(TritonHOPifier):
     def is_callable(self, maybe_callable: Any) -> bool: ...
     def get_value(self, val: Any) -> Any: ...
     def call_grid(
-        self, grid: TritonGridCallableType, meta: TritonMetaParamsType, tx: None
+        self,
+        grid: TritonGridCallableType,
+        meta: TritonMetaParamsType,
+        tx: None,
     ) -> tuple[int | sympy.Expr | SymInt, ...]: ...
     def wrap_user_defined_obj(
         self,
@@ -330,14 +349,18 @@ class TracingTritonHOPifier(TritonHOPifier):
         variable: TritonKernelVariable | TraceableTritonKernelWrapper | None,
     ) -> Any: ...
     def maybe_unpack_configs(
-        self, configs: list[TritonConfig], tx: InstructionTranslator | None
+        self,
+        configs: list[TritonConfig],
+        tx: InstructionTranslator | None,
     ) -> list[TritonConfig]: ...
     def maybe_unpack_heuristic_result(self, result: Any) -> Any: ...
     def check_grid(
-        self, grid: TritonGridType
+        self,
+        grid: TritonGridType,
     ) -> tuple[int | sympy.Expr | SymInt, ...]: ...
     def store_non_graphable_args(
-        self, combined_args: dict[str, Any]
+        self,
+        combined_args: dict[str, Any],
     ) -> tuple[dict, int]: ...
     def call_HOP(
         self,

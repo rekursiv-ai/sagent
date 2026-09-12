@@ -11,5 +11,7 @@ SUPPORTED_OPS = ...
 
 @torch.fx._compatibility.compatibility(is_backward_compatible=False)
 def tensorify_python_scalars(
-    gm: GraphModule, shape_env: ShapeEnv, fake_mode: fake_tensor.FakeTensorMode
+    gm: GraphModule,
+    shape_env: ShapeEnv,
+    fake_mode: fake_tensor.FakeTensorMode,
 ) -> None: ...

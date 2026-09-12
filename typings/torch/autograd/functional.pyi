@@ -5,7 +5,11 @@ from torch import Tensor
 __all__ = ["hessian", "hvp", "jacobian", "jvp", "vhp", "vjp"]
 
 def vjp(
-    func, inputs, v=..., create_graph=..., strict=...
+    func,
+    inputs,
+    v=...,
+    create_graph=...,
+    strict=...,
 ) -> tuple[
     Any | tuple[Any, ...] | tuple[Any] | tuple[tuple[Any, ...] | Any | tuple[Any], ...],
     Tensor
@@ -18,7 +22,11 @@ def vjp(
     | tuple[tuple[Tensor, ...] | tuple[()] | tuple[Tensor] | tuple[Any, ...], ...],
 ]: ...
 def jvp(
-    func, inputs, v=..., create_graph=..., strict=...
+    func,
+    inputs,
+    v=...,
+    create_graph=...,
+    strict=...,
 ) -> tuple[
     Any | tuple[Any, ...] | tuple[Any] | tuple[tuple[Any, ...] | Any | tuple[Any], ...],
     Tensor
@@ -31,7 +39,12 @@ def jvp(
     | tuple[tuple[Tensor, ...] | tuple[()] | tuple[Tensor] | tuple[Any, ...], ...],
 ]: ...
 def jacobian(
-    func, inputs, create_graph=..., strict=..., vectorize=..., strategy=...
+    func,
+    inputs,
+    create_graph=...,
+    strict=...,
+    vectorize=...,
+    strategy=...,
 ) -> (
     tuple[Any, ...]
     | list[Any]
@@ -58,7 +71,11 @@ def hessian(
     | tuple[tuple[Any, ...] | tuple[tuple[Any, ...], ...], ...]
 ): ...
 def vhp(
-    func, inputs, v=..., create_graph=..., strict=...
+    func,
+    inputs,
+    v=...,
+    create_graph=...,
+    strict=...,
 ) -> tuple[
     Any | tuple[Any, ...] | tuple[Any] | tuple[tuple[Any, ...] | Any | tuple[Any], ...],
     Tensor
@@ -71,7 +88,11 @@ def vhp(
     | tuple[tuple[Tensor, ...] | tuple[()] | tuple[Tensor] | tuple[Any, ...], ...],
 ]: ...
 def hvp(
-    func, inputs, v=..., create_graph=..., strict=...
+    func,
+    inputs,
+    v=...,
+    create_graph=...,
+    strict=...,
 ) -> tuple[
     Any | tuple[Any, ...] | tuple[Any] | tuple[tuple[Any, ...] | Any | tuple[Any], ...],
     Tensor

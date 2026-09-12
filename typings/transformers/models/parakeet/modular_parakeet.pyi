@@ -44,19 +44,25 @@ class ParakeetEncoderAttention(LlamaAttention):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class ParakeetEncoderSubsamplingConv2D(nn.Module):
     def __init__(self, config: ParakeetEncoderConfig) -> None: ...
     def forward(
-        self, input_features: torch.Tensor, attention_mask: torch.Tensor = ...
+        self,
+        input_features: torch.Tensor,
+        attention_mask: torch.Tensor = ...,
     ):  # -> Any:
         ...
 
 class ParakeetEncoderBlock(GradientCheckpointingLayer):
     def __init__(
-        self, config: ParakeetEncoderConfig, layer_idx: int | None = ...
+        self,
+        config: ParakeetEncoderConfig,
+        layer_idx: int | None = ...,
     ) -> None: ...
     def forward(
         self,

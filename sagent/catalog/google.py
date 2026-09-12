@@ -211,8 +211,8 @@ def _context(*, request: int) -> Mapping[ContextTag, ModelLimits]:
                 max_request_tokens=request,
                 max_response_tokens=65_536,
                 max_request_bytes=20 * 1024 * 1024,
-            )
-        }
+            ),
+        },
     )
 
 
@@ -224,8 +224,8 @@ def _prices(*, request: float, response: float, cache_read: float) -> PriceCatal
                 request=request,
                 response=response,
                 cache_read=cache_read,
-            )
-        }
+            ),
+        },
     )
 
 

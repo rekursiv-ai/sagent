@@ -60,7 +60,6 @@ __all__ = [
     "ScrunchPlan",
     "ScrunchResult",
     "ScrunchTooLargeError",
-    "estimate_entry_tokens",
     "plan_scrunch",
     "scrunch_to_fit",
 ]
@@ -118,35 +117,6 @@ class ScrunchResult:
 
     splices: tuple[ContextSplice, ...]
     view: tuple[ModelContextEvent, ...]
-
-
-def _approx_tokens(context: Sequence[ModelContextEvent], model: Model) -> int:
-    """Estimate token count of ``context`` via the model's own tokenizer."""
-    return estimate_entry_tokens(model, context)
-
-
-def _pair_safe_boundaries(
-    context: Sequence[ModelContextEvent],
-) -> list[bool]:
-    """Return whether each prefix boundary has no unresolved tool pairs.
-
-    ``boundaries[i]`` is True iff ``context[:i]`` has no
-    ``AssistantMessage.tool_calls`` id without a matching
-    ``ToolResult`` in ``context[:i]``. A partition ending at index
-    ``i`` is pair-safe iff ``boundaries[i]`` is True.
-
-    Mirrors :func:`sagent.compaction.summary._safe_split_boundaries`.
-    """
-    unresolved: set[str] = set()
-    safe = [True]
-    for entry in context:
-        if isinstance(entry, AssistantMessage):
-            for tc in entry.tool_calls:
-                unresolved.add(tc.id)
-        elif isinstance(entry, ToolResult):
-            unresolved.discard(entry.call_id)
-        safe.append(not unresolved)
-    return safe
 
 
 def plan_scrunch(
@@ -216,12 +186,12 @@ def plan_scrunch(
     """
     if max_partition_tokens <= 0:
         raise ValueError(
-            f"max_partition_tokens must be > 0, got {max_partition_tokens}"
+            f"max_partition_tokens must be > 0, got {max_partition_tokens}",
         )
     if summary_size_estimate_tokens < 0:
         raise ValueError(
             f"summary_size_estimate_tokens must be >= 0, got"
-            f" {summary_size_estimate_tokens}"
+            f" {summary_size_estimate_tokens}",
         )
     total = _approx_tokens(context, model)
     if total <= target_input_tokens:
@@ -235,7 +205,7 @@ def plan_scrunch(
         # already-fits early return).
         raise ValueError(
             f"summary_size_estimate_tokens ({summary_size_estimate_tokens}) must be"
-            f" < max_partition_tokens ({max_partition_tokens})"
+            f" < max_partition_tokens ({max_partition_tokens})",
         )
 
     n = len(context)
@@ -396,7 +366,8 @@ async def scrunch_to_fit(
     # clamps the estimate rather than raising on an otherwise valid call.
     if max_partition_tokens > 0:
         summary_size_estimate_tokens = min(
-            summary_size_estimate_tokens, max(0, max_partition_tokens - 1)
+            summary_size_estimate_tokens,
+            max(0, max_partition_tokens - 1),
         )
     plan = plan_scrunch(
         context=context,
@@ -494,3 +465,29 @@ async def scrunch_to_fit(
                 f" still exceeds target {target_input_tokens}",
             )
     return ScrunchResult(splices=tuple(produced), view=tuple(working_context))
+
+
+def _approx_tokens(context: Sequence[ModelContextEvent], model: Model) -> int:
+    """Estimate token count of ``context`` via the model's own tokenizer."""
+    return estimate_entry_tokens(model, context)
+
+
+# ``boundaries[i]`` is True iff ``context[:i]`` has no ``AssistantMessage.tool_calls``
+# id without a matching ``ToolResult`` in ``context[:i]``. A partition ending at index
+# ``i`` is pair-safe iff ``boundaries[i]`` is True.
+#
+# Mirrors :func:`sagent.compaction.summary._safe_split_boundaries`.
+def _pair_safe_boundaries(
+    context: Sequence[ModelContextEvent],
+) -> list[bool]:
+    """Return whether each prefix boundary has no unresolved tool pairs."""
+    unresolved: set[str] = set()
+    safe = [True]
+    for entry in context:
+        if isinstance(entry, AssistantMessage):
+            for tc in entry.tool_calls:
+                unresolved.add(tc.id)
+        elif isinstance(entry, ToolResult):
+            unresolved.discard(entry.call_id)
+        safe.append(not unresolved)
+    return safe

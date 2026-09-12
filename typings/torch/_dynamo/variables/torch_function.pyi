@@ -88,7 +88,12 @@ class TorchFunctionModeVariable(GenericContextWrappingVariable):
     def fn_name(self) -> str: ...
     def python_type(self) -> type[object]: ...
     def call_torch_function(
-        self, tx: InstructionTranslator, fn, types, args, kwargs
+        self,
+        tx: InstructionTranslator,
+        fn,
+        types,
+        args,
+        kwargs,
     ): ...
     def enter(self, tx) -> VariableTracker: ...
     def exit(self, tx: InstructionTranslator, *args) -> VariableTracker: ...
@@ -100,7 +105,10 @@ def call_torch_function(tx, torch_function_var, fn, types, args, kwargs): ...
 def get_torch_function_fn(tx: InstructionTranslator, vt) -> VariableTracker: ...
 def can_dispatch_torch_function(tx: InstructionTranslator, args, kwargs) -> bool: ...
 def dispatch_torch_function(
-    tx: InstructionTranslator, fn, args, kwargs
+    tx: InstructionTranslator,
+    fn,
+    args,
+    kwargs,
 ) -> ConstantVariable | Any: ...
 
 class TensorWithTFOverrideVariable(TensorVariable):
@@ -111,7 +119,9 @@ class TensorWithTFOverrideVariable(TensorVariable):
     def class_type_var(self, tx) -> TensorSubclassVariable: ...
     def global_mangled_class_name(self, tx) -> str: ...
     def var_getattr(
-        self, tx: InstructionTranslator, name
+        self,
+        tx: InstructionTranslator,
+        name,
     ) -> (
         UserMethodVariable
         | VariableTracker
@@ -121,8 +131,17 @@ class TensorWithTFOverrideVariable(TensorVariable):
         | GetAttrVariable
     ): ...
     def call_torch_function(
-        self, tx: InstructionTranslator, fn, types, args, kwargs
+        self,
+        tx: InstructionTranslator,
+        fn,
+        types,
+        args,
+        kwargs,
     ): ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...

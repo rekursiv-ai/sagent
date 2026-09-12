@@ -69,10 +69,12 @@ def _billed_model() -> OpenAICompatModel:
         PriceCatalog(
             {
                 PriceCatalogProduct(): TokenPrice(
-                    request=1.0, response=2.0, cache_write=1.25
-                )
-            }
-        )
+                    request=1.0,
+                    response=2.0,
+                    cache_write=1.25,
+                ),
+            },
+        ),
     )
 
 
@@ -90,7 +92,9 @@ def _tiktoken_model() -> OpenAICompatModel:
 
 
 def _make_request(
-    *, messages: list[ModelContextEvent], system: str | None = None
+    *,
+    messages: list[ModelContextEvent],
+    system: str | None = None,
 ) -> ModelRequest:
     return ModelRequest(messages=messages, system=system)
 
@@ -130,9 +134,9 @@ def test_build_messages_assistant_with_tool_call_remaps_id() -> None:
                         "name": "Bash",
                         "arguments": json.dumps({"cmd": "ls"}),
                     },
-                }
+                },
             ],
-        }
+        },
     ]
 
 
@@ -303,7 +307,7 @@ async def test_consume_stream_preserves_chat_refusal_text() -> None:
                 {
                     "delta": {"refusal": "I can’t help with that."},
                     "finish_reason": "stop",
-                }
+                },
             ],
             "usage": {"prompt_tokens": 4, "completion_tokens": 6},
         },
@@ -330,11 +334,11 @@ async def test_consume_stream_tool_call_accumulates() -> None:
                                 "index": 0,
                                 "id": "call_a",
                                 "function": {"name": "Bash"},
-                            }
-                        ]
+                            },
+                        ],
                     },
                     "finish_reason": None,
-                }
+                },
             ],
         },
         {
@@ -342,11 +346,11 @@ async def test_consume_stream_tool_call_accumulates() -> None:
                 {
                     "delta": {
                         "tool_calls": [
-                            {"index": 0, "function": {"arguments": '{"cmd"'}}
-                        ]
+                            {"index": 0, "function": {"arguments": '{"cmd"'}},
+                        ],
                     },
                     "finish_reason": None,
-                }
+                },
             ],
         },
         {
@@ -354,11 +358,11 @@ async def test_consume_stream_tool_call_accumulates() -> None:
                 {
                     "delta": {
                         "tool_calls": [
-                            {"index": 0, "function": {"arguments": ': "ls"}'}}
-                        ]
+                            {"index": 0, "function": {"arguments": ': "ls"}'}},
+                        ],
                     },
                     "finish_reason": "tool_calls",
-                }
+                },
             ],
         },
     ]
@@ -384,7 +388,7 @@ async def test_consume_stream_reasoning_captured() -> None:
                 {
                     "delta": {"reasoning_content": "think "},
                     "finish_reason": None,
-                }
+                },
             ],
         },
         {
@@ -392,7 +396,7 @@ async def test_consume_stream_reasoning_captured() -> None:
                 {
                     "delta": {"reasoning_content": "more"},
                     "finish_reason": "stop",
-                }
+                },
             ],
         },
     ]
@@ -471,11 +475,11 @@ class _DummyProvider(OpenAICompat):
             "stub-1": ModelCapability(
                 model_id="stub-1",
                 context=MappingProxyType(
-                    {"": _stub_limits(1000), "+1m": _stub_limits(1_000_000)}
+                    {"": _stub_limits(1000), "+1m": _stub_limits(1_000_000)},
                 ),
                 prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
-            )
-        }
+            ),
+        },
     )
 
 
@@ -575,7 +579,7 @@ def test_model_is_context_overflow_rejects_unrelated_errors(message: str) -> Non
 async def test_actual_text_tokens_falls_back_to_approx_for_unknown_model() -> None:
     """Non-OpenAI model ids that tiktoken doesn't recognize use ``approx_text_tokens``."""
     p = _DummyProvider.from_key("k")
-    m = p.model("stub-1")  # tiktoken has no encoding for ``stub-1``.
+    m = p.model("stub-1")  # `tiktoken` has no encoding for ``stub-1``.
     assert await m.actual_text_tokens("x" * 12) == m.approx_text_tokens("x" * 12)
 
 
@@ -598,8 +602,8 @@ async def test_actual_request_tokens_treats_special_token_text_as_ordinary() -> 
                 call_id="read",
                 content=text,
                 is_error=True,
-            )
-        ]
+            ),
+        ],
     )
     expected = len(tiktoken.get_encoding("o200k_base").encode_ordinary(text))
     assert await model.actual_request_tokens(request) == expected

@@ -36,10 +36,15 @@ class Mamba2Cache:
         device: str | None = ...,
     ) -> None: ...
     def update_conv_state(
-        self, layer_idx: int, new_conv_state: torch.Tensor, cache_init: bool = ...
+        self,
+        layer_idx: int,
+        new_conv_state: torch.Tensor,
+        cache_init: bool = ...,
     ) -> torch.Tensor: ...
     def update_ssm_state(
-        self, layer_idx: int, new_ssm_state: torch.Tensor
+        self,
+        layer_idx: int,
+        new_ssm_state: torch.Tensor,
     ):  # -> Tensor:
         ...
     def reset(self):  # -> None:
@@ -102,7 +107,7 @@ class Mamba2PreTrainedModel(PreTrainedModel):
 @auto_docstring(
     custom_intro="""
     Class for the MAMBA2 model outputs.
-    """
+    """,
 )
 class Mamba2Output(ModelOutput):
     last_hidden_state: torch.FloatTensor | None = ...

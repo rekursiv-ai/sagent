@@ -103,13 +103,19 @@ def replace_batch_norm(model):  # -> None:
 class DetaBackboneWithPositionalEncodings(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, pixel_values: torch.Tensor, pixel_mask: torch.Tensor
+        self,
+        pixel_values: torch.Tensor,
+        pixel_mask: torch.Tensor,
     ):  # -> tuple[list[Any], list[Any]]:
         ...
 
 class DetaSinePositionEmbedding(nn.Module):
     def __init__(
-        self, embedding_dim=..., temperature=..., normalize=..., scale=...
+        self,
+        embedding_dim=...,
+        temperature=...,
+        normalize=...,
+        scale=...,
     ) -> None: ...
     def forward(self, pixel_values, pixel_mask):  # -> Tensor:
         ...
@@ -133,7 +139,9 @@ def multi_scale_deformable_attention(
 class DetaMultiscaleDeformableAttention(nn.Module):
     def __init__(self, config: DetaConfig, num_heads: int, n_points: int) -> None: ...
     def with_pos_embed(
-        self, tensor: torch.Tensor, position_embeddings: Tensor | None
+        self,
+        tensor: torch.Tensor,
+        position_embeddings: Tensor | None,
     ):  # -> Tensor:
         ...
     def forward(
@@ -152,10 +160,16 @@ class DetaMultiscaleDeformableAttention(nn.Module):
 
 class DetaMultiheadAttention(nn.Module):
     def __init__(
-        self, embed_dim: int, num_heads: int, dropout: float = ..., bias: bool = ...
+        self,
+        embed_dim: int,
+        num_heads: int,
+        dropout: float = ...,
+        bias: bool = ...,
     ) -> None: ...
     def with_pos_embed(
-        self, tensor: torch.Tensor, position_embeddings: Tensor | None
+        self,
+        tensor: torch.Tensor,
+        position_embeddings: Tensor | None,
     ):  # -> Tensor:
         ...
     def forward(
@@ -166,7 +180,9 @@ class DetaMultiheadAttention(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class DetaEncoderLayer(nn.Module):
@@ -261,12 +277,16 @@ class DetaModel(DetaPreTrainedModel):
     def get_proposal_pos_embed(self, proposals):  # -> Tensor:
         ...
     def gen_encoder_output_proposals(
-        self, enc_output, padding_mask, spatial_shapes
+        self,
+        enc_output,
+        padding_mask,
+        spatial_shapes,
     ):  # -> tuple[Any, Tensor, Tensor]:
         ...
     @add_start_docstrings_to_model_forward(DETA_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=DetaModelOutput, config_class=_CONFIG_FOR_DOC
+        output_type=DetaModelOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,
@@ -291,7 +311,8 @@ class DetaForObjectDetection(DetaPreTrainedModel):
     def __init__(self, config: DetaConfig) -> None: ...
     @add_start_docstrings_to_model_forward(DETA_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=DetaObjectDetectionOutput, config_class=_CONFIG_FOR_DOC
+        output_type=DetaObjectDetectionOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,
@@ -309,7 +330,11 @@ class DetaForObjectDetection(DetaPreTrainedModel):
 
 def dice_loss(inputs, targets, num_boxes): ...
 def sigmoid_focal_loss(
-    inputs, targets, num_boxes, alpha: float = ..., gamma: float = ...
+    inputs,
+    targets,
+    num_boxes,
+    alpha: float = ...,
+    gamma: float = ...,
 ): ...
 
 class DetaLoss(nn.Module):
@@ -327,13 +352,22 @@ class DetaLoss(nn.Module):
         ...
     @torch.no_grad()
     def loss_cardinality(
-        self, outputs, targets, indices, num_boxes
+        self,
+        outputs,
+        targets,
+        indices,
+        num_boxes,
     ):  # -> dict[str, Tensor]:
         ...
     def loss_boxes(self, outputs, targets, indices, num_boxes):  # -> dict[Any, Any]:
         ...
     def get_loss(
-        self, loss, outputs, targets, indices, num_boxes
+        self,
+        loss,
+        outputs,
+        targets,
+        indices,
+        num_boxes,
     ):  # -> dict[str, Tensor] | dict[str, Any] | dict[Any, Any]:
         ...
     def forward(self, outputs, targets):  # -> dict[Any, Any]:
@@ -346,7 +380,10 @@ class DetaMLPPredictionHead(nn.Module):
 
 class DetaHungarianMatcher(nn.Module):
     def __init__(
-        self, class_cost: float = ..., bbox_cost: float = ..., giou_cost: float = ...
+        self,
+        class_cost: float = ...,
+        bbox_cost: float = ...,
+        giou_cost: float = ...,
     ) -> None: ...
     @torch.no_grad()
     def forward(self, outputs, targets):  # -> list[tuple[Tensor, Tensor]]:
@@ -371,22 +408,34 @@ class DetaMatcher:
         ...
 
 def subsample_labels(
-    labels: torch.Tensor, num_samples: int, positive_fraction: float, bg_label: int
+    labels: torch.Tensor,
+    num_samples: int,
+    positive_fraction: float,
+    bg_label: int,
 ):  # -> tuple[Tensor, Tensor]:
     ...
 def sample_topk_per_gt(
-    pr_inds, gt_inds, iou, k
+    pr_inds,
+    gt_inds,
+    iou,
+    k,
 ):  # -> tuple[Any, Any] | tuple[Tensor, Tensor]:
     ...
 
 class DetaStage2Assigner(nn.Module):
     def __init__(self, num_queries, max_k=...) -> None: ...
     def forward(
-        self, outputs, targets, return_cost_matrix=...
+        self,
+        outputs,
+        targets,
+        return_cost_matrix=...,
     ):  # -> tuple[list[Any], list[Any]] | list[Any]:
         ...
     def postprocess_indices(
-        self, pr_inds, gt_inds, iou
+        self,
+        pr_inds,
+        gt_inds,
+        iou,
     ):  # -> tuple[Any, Any] | tuple[Tensor, Tensor]:
         ...
 
@@ -395,7 +444,10 @@ class DetaStage1Assigner(nn.Module):
     def forward(self, outputs, targets):  # -> list[Any]:
         ...
     def postprocess_indices(
-        self, pr_inds, gt_inds, iou
+        self,
+        pr_inds,
+        gt_inds,
+        iou,
     ):  # -> tuple[Any, Any] | tuple[Tensor, Tensor]:
         ...
 

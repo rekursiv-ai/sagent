@@ -53,13 +53,10 @@ def _schema_property(schema: object, name: str) -> Mapping[str, object]:
     return _as_mapping(props[name])
 
 
+# ``isinstance(v, Mapping)`` narrows to ``Mapping[Unknown, object]`` in ty/basedpyright;
+# cast at this single boundary so callers see the precise typed form.
 def _as_mapping(value: object) -> Mapping[str, object]:
-    """Narrow an object to ``Mapping[str, object]`` or fail.
-
-    ``isinstance(v, Mapping)`` narrows to ``Mapping[Unknown, object]``
-    in ty/basedpyright; cast at this single boundary so callers see
-    the precise typed form.
-    """
+    """Narrow an object to ``Mapping[str, object]`` or fail."""
     assert isinstance(value, Mapping)
     return cast(Mapping[str, object], value)
 

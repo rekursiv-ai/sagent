@@ -24,7 +24,8 @@ class LayoutLMv2Embeddings(nn.Module):
 class LayoutLMv2SelfAttention(nn.Module):
     def __init__(self, config) -> None: ...
     def compute_qkv(
-        self, hidden_states
+        self,
+        hidden_states,
     ):  # -> tuple[Tensor | Any, Tensor | Any, Tensor | Any]:
         ...
     def forward(
@@ -64,7 +65,9 @@ class LayoutLMv2Intermediate(nn.Module):
 class LayoutLMv2Output(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -84,7 +87,10 @@ class LayoutLMv2Layer(GradientCheckpointingLayer):
         ...
 
 def relative_position_bucket(
-    relative_position, bidirectional=..., num_buckets=..., max_distance=...
+    relative_position,
+    bidirectional=...,
+    num_buckets=...,
+    max_distance=...,
 ):  # -> Tensor:
     ...
 

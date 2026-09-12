@@ -49,7 +49,8 @@ class MaskFormerImageProcessorFast(BaseImageProcessorFast):
     do_reduce_labels = ...
     valid_kwargs = MaskFormerFastImageProcessorKwargs
     def __init__(
-        self, **kwargs: Unpack[MaskFormerFastImageProcessorKwargs]
+        self,
+        **kwargs: Unpack[MaskFormerFastImageProcessorKwargs],
     ) -> None: ...
     def to_dict(self) -> dict[str, Any]: ...
     def reduce_label(self, labels: list[torch.Tensor]):  # -> None:
@@ -84,7 +85,9 @@ class MaskFormerImageProcessorFast(BaseImageProcessorFast):
         target_size: tuple[int, int] | None = ...,
     ) -> torch.Tensor: ...
     def post_process_semantic_segmentation(
-        self, outputs, target_sizes: list[tuple[int, int]] | None = ...
+        self,
+        outputs,
+        target_sizes: list[tuple[int, int]] | None = ...,
     ) -> torch.Tensor: ...
     def post_process_instance_segmentation(
         self,

@@ -28,14 +28,14 @@ import uuid
 if TYPE_CHECKING:
     import httpx2
 
-    import sagent.lib.image as image_lib
+    from sagent.lib import image
 else:
     from wrapt import lazy_import
 
-    httpx2 = lazy_import("httpx2")  # 100ms cold
-    image_lib = lazy_import("sagent.lib.image")
+    httpx2 = lazy_import("httpx2")  # 100ms cold.
+    image = lazy_import("sagent.lib.image")
 
-from sagent.catalog import google as google_catalog
+from sagent.catalog import google
 from sagent.lib.custom_json import (
     IntCodec,
     MutableJSON,
@@ -103,11 +103,11 @@ class Google:
 
     # Model limits and pricing.
     # ModelLimits: https://ai.google.dev/gemini-api/docs/models
-    # Pricing: https://ai.google.dev/gemini-api/docs/pricing
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = google_catalog.models()
+    # Pricing: https://ai.google.dev/gemini-api/docs/pricing.
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = google.models()
     """Per-model capability, shared by every Gemini transport."""
 
-    TRANSPORT: ClassVar[ModelCapability] = google_catalog.api()
+    TRANSPORT: ClassVar[ModelCapability] = google.api()
     """What this transport lets through; subclasses declare their own."""
 
     @property
@@ -117,7 +117,7 @@ class Google:
             {
                 "default": self.DEFAULT_MODEL,
                 "utility": self.DEFAULT_UTILITY_MODEL or self.DEFAULT_MODEL,
-            }
+            },
         )
 
     def __init__(self, *, api_key: str) -> None:
@@ -170,7 +170,10 @@ class Google:
         """
         mid = model_id if model_id is not None else "default"
         capability, settings = resolve(
-            mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT
+            mid,
+            models=self.CAPABILITIES,
+            roles=self.ROLES,
+            transport=self.TRANSPORT,
         )
         return _GeminiModel(
             provider=self,
@@ -263,7 +266,7 @@ class _GeminiModel(ModelDefaults):
     def approx_image_tokens(self, data: bytes) -> int:
         """Local estimate via Gemini's tile formula (``tiles * 258``)."""
         # Tile size undocumented; using OpenAI's 512x512 as proxy.
-        dims = image_lib.get_dimensions(data)
+        dims = image.get_dimensions(data)
         if dims is None:
             return 0
         tiles = math.ceil(dims[0] / 512) * math.ceil(dims[1] / 512)
@@ -382,19 +385,16 @@ def _strip_additional_properties(schema: MutableJSONValue) -> MutableJSONValue:
     return schema
 
 
+# Gemini groups consecutive ``functionResponse`` parts into one ``role=user`` content.
+# Tool results with image attachments emit ``functionResponse`` + ``inlineData``
+# siblings in that same user content per Gemini's rules.
 def _build_request(
     request: ModelRequest,
     capability: ModelCapability,
     settings: ModelSettings,
     limits: ModelLimits,
 ) -> MutableJSON:
-    """Convert history entries to the Gemini API request body.
-
-    Gemini groups consecutive ``functionResponse`` parts into one
-    ``role=user`` content. Tool results with image attachments emit
-    ``functionResponse`` + ``inlineData`` siblings in that same user
-    content per Gemini's rules.
-    """
+    """Convert history entries to the Gemini API request body."""
     # Build tool_use_id → function name mapping from prior model responses
     # so we can echo the right name when emitting functionResponse parts.
     call_names: dict[str, str] = {
@@ -413,7 +413,9 @@ def _build_request(
                 parts.append({"text": entry.text})
             for att in entry.attachments:
                 block = _attachment_part(
-                    att, limits.max_image_edge_px, limits.max_image_bytes
+                    att,
+                    limits.max_image_edge_px,
+                    limits.max_image_bytes,
                 )
                 if block is not None:
                     parts.append(block)
@@ -467,11 +469,13 @@ def _build_request(
                         "name": func_name,
                         "response": {"content": text},
                     },
-                }
+                },
             )
             for att in entry.attachments:
                 block = _attachment_part(
-                    att, limits.max_image_edge_px, limits.max_image_bytes
+                    att,
+                    limits.max_image_edge_px,
+                    limits.max_image_bytes,
                 )
                 if block is not None:
                     pending_tool_parts.append(block)
@@ -505,8 +509,9 @@ def _build_request(
                             "description": t.description,
                             "parameters": _strip_additional_properties(
                                 cast(
-                                    MutableJSONValue, json_unfreeze(t.directive_schema)
-                                )
+                                    MutableJSONValue,
+                                    json_unfreeze(t.directive_schema),
+                                ),
                             ),
                         }
                         for t in request.tools
@@ -518,7 +523,8 @@ def _build_request(
 
 
 def _thinking_config(
-    capability: ModelCapability, settings: ModelSettings
+    capability: ModelCapability,
+    settings: ModelSettings,
 ) -> MutableJSON | None:
     """Return Gemini thinking config, or ``None`` when thinking is off."""
     # gemini-1.5 rejects ``thinkingConfig`` outright, so an off row must send
@@ -528,7 +534,7 @@ def _thinking_config(
     include = settings.thinking_output == "text"
     if settings.thinking_budget == "auto":
         return {"includeThoughts": include, "thinkingBudget": -1}
-    budget = google_catalog.thinking_budget(settings.thinking_effort)
+    budget = google.thinking_budget(settings.thinking_effort)
     return {"includeThoughts": include, "thinkingBudget": int(budget)}
 
 
@@ -552,9 +558,7 @@ def _attachment_part(
     raw = data
     mime = descriptor
     if is_image:
-        raw, mime = image_lib.resize(
-            raw, max_dim=max_image_dim, max_bytes=max_image_bytes
-        )
+        raw, mime = image.resize(raw, max_dim=max_image_dim, max_bytes=max_image_bytes)
     b64 = base64.b64encode(raw).decode()
     return {"inlineData": {"mimeType": mime, "data": b64}}
 
@@ -566,6 +570,9 @@ def _flush_tool_parts(contents: list[MutableJSON], pending: list[MutableJSON]) -
         pending.clear()
 
 
+# Each ``data:`` line is a full GenerateContentResponse JSON object with partial
+# content; we accumulate text and tool calls across events. ``publish`` receives a
+# ``RuntimeEvent`` per chunk; ``None`` disables streaming.
 async def _consume_gemini_stream(
     r: httpx2.Response,
     *,
@@ -573,13 +580,7 @@ async def _consume_gemini_stream(
     model: _GeminiModel,
     chunk_unwrap: Callable[[MutableJSON], MutableJSON] | None = None,
 ) -> ModelResponse:
-    """Parse SSE stream from :streamGenerateContent?alt=sse.
-
-    Each ``data:`` line is a full GenerateContentResponse JSON object
-    with partial content; we accumulate text and tool calls across
-    events. ``publish`` receives a ``RuntimeEvent`` per chunk; ``None``
-    disables streaming.
-    """
+    """Parse SSE stream from :streamGenerateContent?alt=sse."""
     text_chunks: list[str] = []
     text_signature: str = ""
     thinking_chunks: list[str] = []
@@ -648,9 +649,10 @@ async def _consume_gemini_stream(
                                 name=fc_name,
                                 args=cast(Mapping[str, object], fc_args),
                                 thought_signature=cast(
-                                    str, part.get("thoughtSignature", "")
+                                    str,
+                                    part.get("thoughtSignature", ""),
                                 ),
-                            )
+                            ),
                         )
 
     if malformed_chunks and not parsed_chunks:
@@ -686,7 +688,8 @@ def _build_response(
     # ``promptTokenCount`` is cache-inclusive; store the non-cached remainder so
     # ``TokenCount.input_tokens`` is disjoint from ``cache_read_tokens``.
     input_tokens = max(
-        0, IntCodec.coerce(usage.get("promptTokenCount"), 0) - cache_read
+        0,
+        IntCodec.coerce(usage.get("promptTokenCount"), 0) - cache_read,
     )
     tokens = TokenCount(
         request=input_tokens,

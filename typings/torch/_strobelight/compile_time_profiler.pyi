@@ -26,5 +26,9 @@ class StrobelightCompileTimeProfiler:
     def enable(cls, profiler_class: Any = ...) -> None: ...
     @classmethod
     def profile_compile_time(
-        cls, func: Any, phase_name: str, *args: Any, **kwargs: Any
+        cls,
+        func: Any,
+        phase_name: str,
+        *args: Any,
+        **kwargs: Any,
     ) -> Any: ...

@@ -59,5 +59,9 @@ if is_available():
     _is_tensorpipe_available = ...
     rendezvous_iterator: Generator[tuple[Store, int, int]]
     def init_rpc(
-        name, backend=..., rank=..., world_size=..., rpc_backend_options=...
+        name,
+        backend=...,
+        rank=...,
+        world_size=...,
+        rpc_backend_options=...,
     ) -> None: ...

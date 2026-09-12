@@ -15,13 +15,21 @@ class LinearReLU(nnq.Linear):
     def from_float(cls, mod, use_precomputed_fake_quant=...) -> Self: ...
     @classmethod
     def from_reference(
-        cls, ref_linear_relu, output_scale, output_zero_point
+        cls,
+        ref_linear_relu,
+        output_scale,
+        output_zero_point,
     ) -> Self: ...
 
 class LinearLeakyReLU(nnq.Linear):
     _FLOAT_MODULE = nni.LinearLeakyReLU
     def __init__(
-        self, in_features, out_features, negative_slope, bias=..., dtype=...
+        self,
+        in_features,
+        out_features,
+        negative_slope,
+        bias=...,
+        dtype=...,
     ) -> None: ...
     def forward(self, x: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...

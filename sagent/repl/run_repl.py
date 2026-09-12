@@ -168,7 +168,9 @@ async def run_repl(
                     raise
             except Exception as exc:  # noqa: BLE001 -- pump shutdown catches any slash-handler exception; UserFacingError routed to warning, others to exception
                 log_exception_or_warning(
-                    logger, "REPL input pump raised during shutdown", exc
+                    logger,
+                    "REPL input pump raised during shutdown",
+                    exc,
                 )
             agent.cancel_background(REPL_PUMP_KEY)
     # A non-empty tape with no transcript on disk is silent data loss. The
@@ -189,34 +191,8 @@ async def run_repl(
             "sagent --continue         # most recent session in this dir\n"
             "sagent --resume           # interactive picker for this dir\n"
             "sagent --continue-all     # most recent session across all dirs\n"
-            "sagent --resume-all       # interactive picker across all dirs\n"
+            "sagent --resume-all       # interactive picker across all dirs\n",
         )
-
-
-def _tool_output_policy(agent: Agent, call_id: str) -> ToolDisplay:
-    """Return the output policy for the tool behind ``call_id``.
-
-    Whether a result body renders is the TOOL's setting (e.g.
-    ``--tool Bash.output=on``), so the renderer resolves the owning tool
-    rather than carrying a display policy of its own.
-    """
-    name, _started = agent.tool_name_for_call(call_id)
-    tool = agent.tools_map.get(name)
-    return ToolDisplay() if tool is None else row_spec(tool)
-
-
-def _background_tasks_for_repl_cancel(agent: Agent) -> list[asyncio.Task[object]]:
-    """Return unfinished REPL-owned background tasks safe to raw-cancel.
-
-    Subagents (either lifecycle) own their own ``serve_forever`` loop and
-    must be stopped gracefully, never raw-cancelled from the REPL
-    teardown -- so they are excluded here.
-    """
-    return [
-        job.task
-        for job in list(agent.background.values())
-        if job.kind != "subagent" and not job.task.done()
-    ]
 
 
 def install_input_queue_committer(
@@ -271,52 +247,6 @@ def install_input_queue_committer(
             agent.runtime.before_tool_spawn = previous_before_tool_spawn
 
     return uninstall
-
-
-def _input_queue_committer_observer(
-    agent: Agent,
-    queues: InputQueues,
-) -> Callable[[RuntimeEvent], None]:
-    """Return the observer half of the queue committer.
-
-    Module-private: production callers go through
-    :func:`install_input_queue_committer`, which also installs the
-    ``before_tool_spawn`` hook and returns the uninstall closure.
-    Exposed for observer-only unit tests that exercise dispatch in
-    isolation from the install / uninstall mechanics.
-    """
-    return functools.partial(_commit_local_queues, agent=agent, queues=queues)
-
-
-def _before_tool_spawn(
-    message: AssistantMessage,
-    *,
-    queues: InputQueues,
-    previous_before_tool_spawn: Callable[[AssistantMessage], RuntimeEvent | None]
-    | None,
-) -> RuntimeEvent | None:
-    if previous_before_tool_spawn is not None:
-        event = previous_before_tool_spawn(message)
-        if event is not None:
-            return event
-    return queues.pop_queue_message()
-
-
-def _commit_local_queues(
-    event: RuntimeEvent,
-    *,
-    agent: Agent,
-    queues: InputQueues,
-) -> None:
-    # ``ClearComplete`` flushes alongside ``AgentIdle``: a self-issued
-    # ``Clear`` arms ``AWAIT_USER`` so ``_fully_drained`` stays False and
-    # ``AgentIdle`` never publishes -- without this, deferred (Tab) input
-    # staged after a model self-clear would wedge until Ctrl+D. ``Clear`` is
-    # the only ``AWAIT_USER`` arm that publishes a distinguishing terminal
-    # event (Halt / ModelResponseError do not), so the released input lands
-    # exactly where a fresh user redirect would.
-    if isinstance(event, (AgentIdle, ClearComplete)) and not queues.commit_queue(agent):
-        queues.commit_deferred_on_idle(agent)
 
 
 def do_switch_model(
@@ -383,7 +313,9 @@ def do_switch_model(
 
 
 def do_switch_thinking(
-    agent: Controllable, command: str, printer: Printer | None
+    agent: Controllable,
+    command: str,
+    printer: Printer | None,
 ) -> None:
     """Render a ``/thinking`` slash command against the model's settings.
 
@@ -440,23 +372,13 @@ def do_switch_effort(agent: Controllable, value: str, printer: Printer | None) -
         return
     try:
         settings.thinking_effort = cast(
-            ThinkingEffort, "none" if value in ("off", "unset") else value
+            ThinkingEffort,
+            "none" if value in ("off", "unset") else value,
         )
     except ValueError:
         _write(printer, f"[/effort] {value!r} is not one of: {options}")
         return
     _write(printer, f"[/effort] {settings.thinking_effort}")
-
-
-def _reachable_thinking_words(agent: Controllable) -> tuple[str, ...]:
-    """Return the ``/thinking`` words this model can actually honor.
-
-    Each word is checked by applying it, because a word names one axis and
-    inherits the rest -- ``redact`` is reachable only when the model can
-    both budget the reasoning and withhold its body.
-    """
-    settings = agent.model.settings
-    return tuple(word for word in THINKING_COMMANDS if thinking_offered(word, settings))
 
 
 async def do_login(agent: Controllable, printer: Printer | None) -> None:
@@ -517,7 +439,7 @@ def format_tasks(agent: Agent) -> str:
                 phase = _generic_job_phase(job, now)
             lines.append(
                 f"    bg: {label}/{job.queue_id:<10s}  {job.tool_name:<16s}  "
-                f"{phase:<10s}  {now - job.started:.0f}s"
+                f"{phase:<10s}  {now - job.started:.0f}s",
             )
     header = (
         f"sagent: {len(agent_registry)} agent(s), "
@@ -528,13 +450,11 @@ def format_tasks(agent: Agent) -> str:
     return header
 
 
+# ``"errored"`` distinguishes crashes from graceful ``"completed"``; parallels
+# :func:`_subagent_phase`'s same distinction so both bg-row families surface failures
+# the same way.
 def _generic_job_phase(job: BackgroundTaskEntry, now: float) -> str:
-    """Phase label for non-persistent-subagent bg jobs.
-
-    ``"errored"`` distinguishes crashes from graceful ``"completed"``;
-    parallels :func:`_subagent_phase`'s same distinction so both bg-row
-    families surface failures the same way.
-    """
+    """Phase label for non-persistent-subagent bg jobs."""
     if job.task.cancelled():
         return "cancelled"
     if job.task.done():
@@ -548,21 +468,10 @@ def _generic_job_phase(job: BackgroundTaskEntry, now: float) -> str:
     return "running"
 
 
+# Reads child runtime state directly -- safe because asyncio is single-threaded and
+# ``format_tasks`` contains no ``await``.
 def _subagent_phase(job: BackgroundTaskEntry) -> str:
-    """Return a lifecycle label for a persistent-subagent bg-job row.
-
-    Reads child runtime state directly -- safe because asyncio is
-    single-threaded and ``format_tasks`` contains no ``await``.
-
-    Args:
-      job: The ``BackgroundTaskEntry`` for the persistent subagent.
-
-    Returns:
-      phase: One of ``"idle"``, ``"running"``, ``"compacting"``,
-          ``"tool-wait"``, ``"gate-armed"``, ``"errored"``, or
-          ``"stopped"``.
-
-    """
+    """Return a lifecycle label for a persistent-subagent bg-job row."""
     if job.task.done():
         # Distinguish crash from graceful exit so the operator can
         # tell whether a missing child was intentional.
@@ -586,14 +495,11 @@ def _subagent_phase(job: BackgroundTaskEntry) -> str:
     return "idle"
 
 
+# Slash-command output (``/model``, ``/thinking``, ``/login``, ``/tasks``) renders as
+# machinery, not user text -- dim, no user bar -- so the operator can tell at a glance
+# which lines are REPL infrastructure vs. agent dialogue.
 def _write(printer: Printer | None, line: str) -> None:
-    """Forward ``line`` to ``printer.write_slash_block`` when a printer is wired.
-
-    Slash-command output (``/model``, ``/thinking``, ``/login``,
-    ``/tasks``) renders as machinery, not user text -- dim, no user
-    bar -- so the operator can tell at a glance which lines are
-    REPL infrastructure vs. agent dialogue.
-    """
+    """Forward ``line`` to ``printer.write_slash_block`` when a printer is wired."""
     if printer is not None:
         printer.write_slash_block(line)
 
@@ -682,3 +588,76 @@ def _parse_model_args(tokens: list[str]) -> _ParsedModelArgs | str:
         account_set=account_set,
         model_id=model_id,
     )
+
+
+# Whether a result body renders is the TOOL's setting (e.g. ``--tool Bash.output=on``),
+# so the renderer resolves the owning tool rather than carrying a display policy of its
+# own.
+def _tool_output_policy(agent: Agent, call_id: str) -> ToolDisplay:
+    """Return the output policy for the tool behind ``call_id``."""
+    name, _started = agent.tool_name_for_call(call_id)
+    tool = agent.tools_map.get(name)
+    return ToolDisplay() if tool is None else row_spec(tool)
+
+
+# Subagents (either lifecycle) own their own ``serve_forever`` loop and must be stopped
+# gracefully, never raw-cancelled from the REPL teardown -- so they are excluded here.
+def _background_tasks_for_repl_cancel(agent: Agent) -> list[asyncio.Task[object]]:
+    """Return unfinished REPL-owned background tasks safe to raw-cancel."""
+    return [
+        job.task
+        for job in list(agent.background.values())
+        if job.kind != "subagent" and not job.task.done()
+    ]
+
+
+# Module-private: production callers go through :func:`install_input_queue_committer`,
+# which also installs the ``before_tool_spawn`` hook and returns the uninstall closure.
+# Exposed for observer-only unit tests that exercise dispatch in isolation from the
+# install / uninstall mechanics.
+def _input_queue_committer_observer(
+    agent: Agent,
+    queues: InputQueues,
+) -> Callable[[RuntimeEvent], None]:
+    """Return the observer half of the queue committer."""
+    return functools.partial(_commit_local_queues, agent=agent, queues=queues)
+
+
+def _before_tool_spawn(
+    message: AssistantMessage,
+    *,
+    queues: InputQueues,
+    previous_before_tool_spawn: Callable[[AssistantMessage], RuntimeEvent | None]
+    | None,
+) -> RuntimeEvent | None:
+    if previous_before_tool_spawn is not None:
+        event = previous_before_tool_spawn(message)
+        if event is not None:
+            return event
+    return queues.pop_queue_message()
+
+
+def _commit_local_queues(
+    event: RuntimeEvent,
+    *,
+    agent: Agent,
+    queues: InputQueues,
+) -> None:
+    # ``ClearComplete`` flushes alongside ``AgentIdle``: a self-issued
+    # ``Clear`` arms ``AWAIT_USER`` so ``_fully_drained`` stays False and
+    # ``AgentIdle`` never publishes -- without this, deferred (Tab) input
+    # staged after a model self-clear would wedge until Ctrl+D. ``Clear`` is
+    # the only ``AWAIT_USER`` arm that publishes a distinguishing terminal
+    # event (Halt / ModelResponseError do not), so the released input lands
+    # exactly where a fresh user redirect would.
+    if isinstance(event, (AgentIdle, ClearComplete)) and not queues.commit_queue(agent):
+        queues.commit_deferred_on_idle(agent)
+
+
+# Each word is checked by applying it, because a word names one axis and inherits the
+# rest -- ``redact`` is reachable only when the model can both budget the reasoning and
+# withhold its body.
+def _reachable_thinking_words(agent: Controllable) -> tuple[str, ...]:
+    """Return the ``/thinking`` words this model can actually honor."""
+    settings = agent.model.settings
+    return tuple(word for word in THINKING_COMMANDS if thinking_offered(word, settings))

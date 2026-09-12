@@ -26,7 +26,10 @@ class CppBmmTemplate(CppGemmTemplate):
     ) -> None: ...
     @staticmethod
     def get_padded_size(
-        n, block_n, k, should_block_weight
+        n,
+        block_n,
+        k,
+        should_block_weight,
     ) -> tuple[list[Any], Any] | tuple[list[int | Any], Any]: ...
     @staticmethod
     def check_if_block_weight(W, micro_gemm) -> Literal[True]: ...

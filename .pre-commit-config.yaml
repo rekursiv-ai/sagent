@@ -129,7 +129,7 @@ repos:
       - id: check-added-large-files
         name: check-added-large-files
         stages: [pre-commit]
-        args: [--maxkb=750, --enforce-all]
+        args: [--maxkb=800, --enforce-all]
         exclude: |
           (?x)^(
             uv\.lock

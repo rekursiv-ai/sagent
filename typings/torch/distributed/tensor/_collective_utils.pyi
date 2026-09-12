@@ -31,10 +31,13 @@ def mesh_broadcast(
 def pad_tensor(tensor: torch.Tensor, pad_dim: int, pad_size: int) -> torch.Tensor: ...
 def unpad_tensor(tensor: torch.Tensor, pad_dim: int, pad_size: int) -> torch.Tensor: ...
 def fill_empty_tensor_to_shards(
-    shards: list[torch.Tensor], shard_dim: int, num_empty_tensors: int
+    shards: list[torch.Tensor],
+    shard_dim: int,
+    num_empty_tensors: int,
 ) -> list[torch.Tensor]: ...
 def check_tensor_meta(
-    local_tensor, check_shape_stride=...
+    local_tensor,
+    check_shape_stride=...,
 ) -> dtensor_spec.TensorMeta | None: ...
 def spec_to_bytes(spec: dtensor_spec.DTensorSpec) -> int: ...
 
@@ -49,14 +52,21 @@ class MeshTopoInfo:
     def build_from_mesh(mesh: DeviceMesh) -> MeshTopoInfo: ...
 
 def allgather_cost(
-    bytes_gb: float, mesh_topo: MeshTopoInfo, mesh_dim: int
+    bytes_gb: float,
+    mesh_topo: MeshTopoInfo,
+    mesh_dim: int,
 ) -> float: ...
 def allreduce_cost(
-    bytes_gb: float, mesh_topo: MeshTopoInfo, mesh_dim: int
+    bytes_gb: float,
+    mesh_topo: MeshTopoInfo,
+    mesh_dim: int,
 ) -> float: ...
 def reduce_scatter_cost(
-    bytes_gb: float, mesh_topo: MeshTopoInfo, mesh_dim: int
+    bytes_gb: float,
+    mesh_topo: MeshTopoInfo,
+    mesh_dim: int,
 ) -> float: ...
 def redistribute_cost(
-    current_spec: dtensor_spec.DTensorSpec, target_spec: dtensor_spec.DTensorSpec
+    current_spec: dtensor_spec.DTensorSpec,
+    target_spec: dtensor_spec.DTensorSpec,
 ) -> float: ...

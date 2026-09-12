@@ -28,7 +28,8 @@ log = ...
 triton_name_sub = ...
 
 def generate_lookup_hash_from_source_code(
-    size_hints_str: str, source_code: str
+    size_hints_str: str,
+    source_code: str,
 ) -> str: ...
 def lookup_autotune_config(size_hints, fn) -> Config | None: ...
 def get_total_reduction_numel(numels: dict[str, int]) -> int: ...
@@ -40,7 +41,9 @@ def autotune_hints_to_configs(
 ) -> list[Config]: ...
 def disable_pointwise_autotuning(inductor_meta) -> bool: ...
 def check_autotune_cache(
-    configs: list[Config], filename: str | None, inductor_meta: dict[str, Any]
+    configs: list[Config],
+    filename: str | None,
+    inductor_meta: dict[str, Any],
 ) -> tuple[list[Config], AutotuneCache | None, dict[str, Any]]: ...
 
 class CachingAutotuner(KernelInterface):
@@ -62,10 +65,13 @@ class CachingAutotuner(KernelInterface):
     ) -> None: ...
     def is_statically_launchable(self) -> bool: ...
     def recheck_autotune_cache(
-        self, reload_kernel_from_src: Callable[[], CachingAutotuner]
+        self,
+        reload_kernel_from_src: Callable[[], CachingAutotuner],
     ) -> None: ...
     def set_compile_info(
-        self, compile_id: CompileId | None, is_backward: bool
+        self,
+        compile_id: CompileId | None,
+        is_backward: bool,
     ) -> None: ...
     def precompile(
         self,
@@ -75,24 +81,34 @@ class CachingAutotuner(KernelInterface):
     ) -> None: ...
     def prepare_for_pickle(self) -> tuple[Any, Any, Any, Any, Any, Any]: ...
     def restore_after_unpickle(
-        self, old_values: tuple[Any, Any, Any, Any, Any, Any] | None
+        self,
+        old_values: tuple[Any, Any, Any, Any, Any, Any] | None,
     ) -> None: ...
     def prepare_for_caching(self) -> None: ...
     def __getstate__(self) -> dict[str, Any]: ...
     def __setstate__(self, state: dict[str, Any]) -> None: ...
     def get_device_interface(self) -> type[DeviceInterface]: ...
     def bench(
-        self, launcher, *args, with_profiler=..., **kwargs
+        self,
+        launcher,
+        *args,
+        with_profiler=...,
+        **kwargs,
     ) -> float | list[float]: ...
     def copy_args_to_cpu_if_needed(self, *args, **kwargs) -> dict[Any, Any]: ...
     def restore_args_from_cpu(self, cpu_copies) -> None: ...
     def reset_to_zero_args(self, *args, **kwargs) -> None: ...
     def maybe_clone_args(
-        self, exclude: Container[str], *args, **kwargs
+        self,
+        exclude: Container[str],
+        *args,
+        **kwargs,
     ) -> tuple[list[Any], dict[str, Any]]: ...
     def clone_args(self, *args, **kwargs) -> tuple[list[Any], dict[str, Any]]: ...
     def benchmark_all_configs(
-        self, *args, **kwargs
+        self,
+        *args,
+        **kwargs,
     ) -> dict[LauncherType, float | list[float]]: ...
     def autotune_to_one_config(self, *args, **kwargs) -> None: ...
     def save_gpu_kernel(self, stream, launcher) -> None: ...
@@ -180,7 +196,12 @@ def triton_config_reduction(
     dynamic_scale_rblock=...,
 ) -> Config: ...
 def triton_config_tiled_reduction(
-    size_hints, x, y, r, num_stages=..., register_intensive=...
+    size_hints,
+    x,
+    y,
+    r,
+    num_stages=...,
+    register_intensive=...,
 ) -> object: ...
 def pointwise(
     size_hints,
@@ -191,7 +212,10 @@ def pointwise(
     inductor_meta=...,
 ) -> Callable[..., DebugAutotuner | CachingAutotuner]: ...
 def match_target_block_product(
-    size_hints, tiling_scores, target_block_product, min_block_size=...
+    size_hints,
+    tiling_scores,
+    target_block_product,
+    min_block_size=...,
 ) -> dict[Any, Any]: ...
 def adapt_config_for_tiling(
     size_hints,
@@ -204,16 +228,32 @@ def adapt_config_for_tiling(
     persistent_reduction=...,
 ) -> Config: ...
 def reduction(
-    size_hints, reduction_hint=..., triton_meta=..., filename=..., inductor_meta=...
+    size_hints,
+    reduction_hint=...,
+    triton_meta=...,
+    filename=...,
+    inductor_meta=...,
 ) -> Callable[..., DebugAutotuner | CachingAutotuner]: ...
 def cooperative_reduction(
-    size_hints, reduction_hint, triton_meta, filename, inductor_meta
+    size_hints,
+    reduction_hint,
+    triton_meta,
+    filename,
+    inductor_meta,
 ) -> Callable[..., DebugAutotuner | CachingAutotuner]: ...
 def persistent_reduction(
-    size_hints, reduction_hint=..., triton_meta=..., filename=..., inductor_meta=...
+    size_hints,
+    reduction_hint=...,
+    triton_meta=...,
+    filename=...,
+    inductor_meta=...,
 ) -> Callable[..., DebugAutotuner | CachingAutotuner]: ...
 def split_scan(
-    size_hints, reduction_hint=..., triton_meta=..., filename=..., inductor_meta=...
+    size_hints,
+    reduction_hint=...,
+    triton_meta=...,
+    filename=...,
+    inductor_meta=...,
 ) -> Callable[..., DebugAutotuner | CachingAutotuner]: ...
 def template(
     num_stages,
@@ -227,13 +267,23 @@ def template(
 def config_to_dict(config: Config) -> dict[str, Any]: ...
 def config_from_dict(config: dict[str, Any]) -> Config: ...
 def fixed_config(
-    config, filename, triton_meta, inductor_meta
+    config,
+    filename,
+    triton_meta,
+    inductor_meta,
 ) -> Callable[..., DebugAutotuner | CachingAutotuner]: ...
 def user_autotune(
-    configs, triton_meta, filename=..., inductor_meta=..., custom_kernel=...
+    configs,
+    triton_meta,
+    filename=...,
+    inductor_meta=...,
+    custom_kernel=...,
 ) -> Callable[..., DebugAutotuner | CachingAutotuner]: ...
 def foreach(
-    triton_meta, num_warps, filename=..., inductor_meta=...
+    triton_meta,
+    num_warps,
+    filename=...,
+    inductor_meta=...,
 ) -> Callable[..., DebugAutotuner | CachingAutotuner]: ...
 
 @dataclasses.dataclass
@@ -287,15 +337,24 @@ class PrecomputedGrid(GridExpr):
 class ComboKernelGrid(GridExpr):
     def generate(self, meta: dict[str, int]) -> None: ...
     def combo_x_grid(
-        self, xnumels: list[int | str], no_x_dims: list[bool], meta: dict[str, int]
+        self,
+        xnumels: list[int | str],
+        no_x_dims: list[bool],
+        meta: dict[str, int],
     ) -> str | int: ...
 
 class SequentialComboKernelGrid(ComboKernelGrid):
     def combo_x_grid(
-        self, xnumels: list[int | str], no_x_dims: list[bool], meta: dict[str, int]
+        self,
+        xnumels: list[int | str],
+        no_x_dims: list[bool],
+        meta: dict[str, int],
     ) -> str | int: ...
 
 class RoundRobinComboKernelGrid(ComboKernelGrid):
     def combo_x_grid(
-        self, xnumels: list[int | str], no_x_dims: list[bool], meta: dict[str, int]
+        self,
+        xnumels: list[int | str],
+        no_x_dims: list[bool],
+        meta: dict[str, int],
     ) -> str: ...

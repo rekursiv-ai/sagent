@@ -22,7 +22,10 @@ def repack_weights(
 def get_tensor_shard(param, empty_param, device_mesh, rank, dim):  # -> Tensor:
     ...
 def distribute_module(
-    module: nn.Module, device_mesh=..., input_fn=..., output_fn=...
+    module: nn.Module,
+    device_mesh=...,
+    input_fn=...,
+    output_fn=...,
 ) -> nn.Module: ...
 
 class TensorParallelLayer:
@@ -147,7 +150,11 @@ class PackedRowwiseParallel(RowwiseParallel):
 
 class SequenceParallel(TensorParallelLayer):
     def __init__(
-        self, *, sequence_dim: int = ..., use_local_output: bool = ..., use_dtensor=...
+        self,
+        *,
+        sequence_dim: int = ...,
+        use_local_output: bool = ...,
+        use_dtensor=...,
     ) -> None: ...
     def partition_tensor(
         self,
@@ -194,10 +201,15 @@ class ParallelInterface(GeneralInterface):
 ALL_PARALLEL_STYLES: ParallelInterface = ...
 
 def convert_local_tensor_to_dtensor(
-    parameter: torch.Tensor, parameter_name: str, device_mesh, tp_plan: dict[str, str]
+    parameter: torch.Tensor,
+    parameter_name: str,
+    device_mesh,
+    tp_plan: dict[str, str],
 ) -> DTensor: ...
 def replace_state_dict_local_with_dtensor(
-    state_dict: dict[str, torch.Tensor], tp_plan: dict[str, str], device_mesh
+    state_dict: dict[str, torch.Tensor],
+    tp_plan: dict[str, str],
+    device_mesh,
 ) -> dict[str, torch.Tensor]: ...
 def add_tensor_parallel_hooks_to_module(
     model,
@@ -221,7 +233,8 @@ def shard_and_distribute_module(
 ):  # -> Parameter:
     ...
 def verify_tp_plan(
-    expected_keys: list[str], tp_plan: dict[str, str] | None
+    expected_keys: list[str],
+    tp_plan: dict[str, str] | None,
 ):  # -> None:
     ...
 def distribute_model(model, distributed_config, device_mesh, tp_size): ...

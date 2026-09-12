@@ -55,7 +55,9 @@ class BlenderbotOnnxConfig(OnnxSeq2SeqConfigWithPast):
         framework: TensorType | None = ...,
     ) -> Mapping[str, Any]: ...
     def fill_with_past_key_values_(
-        self, inputs_or_outputs: Mapping[str, Mapping[int, str]], direction: str
+        self,
+        inputs_or_outputs: Mapping[str, Mapping[int, str]],
+        direction: str,
     ):  # -> None:
         ...
 

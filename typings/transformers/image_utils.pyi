@@ -60,23 +60,30 @@ def is_batched(img):  # -> bool:
 def is_scaled_image(image: np.ndarray) -> bool: ...
 def make_list_of_images(images, expected_ndims: int = ...) -> list[ImageInput]: ...
 def make_flat_list_of_images(
-    images: list[ImageInput] | ImageInput, expected_ndims: int = ...
+    images: list[ImageInput] | ImageInput,
+    expected_ndims: int = ...,
 ) -> ImageInput: ...
 def make_nested_list_of_images(
-    images: list[ImageInput] | ImageInput, expected_ndims: int = ...
+    images: list[ImageInput] | ImageInput,
+    expected_ndims: int = ...,
 ) -> list[ImageInput]: ...
 def to_numpy_array(img) -> np.ndarray: ...
 def infer_channel_dimension_format(
-    image: np.ndarray, num_channels: int | tuple[int, ...] | None = ...
+    image: np.ndarray,
+    num_channels: int | tuple[int, ...] | None = ...,
 ) -> ChannelDimension: ...
 def get_channel_dimension_axis(
-    image: np.ndarray, input_data_format: ChannelDimension | str | None = ...
+    image: np.ndarray,
+    input_data_format: ChannelDimension | str | None = ...,
 ) -> int: ...
 def get_image_size(
-    image: np.ndarray, channel_dim: ChannelDimension | None = ...
+    image: np.ndarray,
+    channel_dim: ChannelDimension | None = ...,
 ) -> tuple[int, int]: ...
 def get_image_size_for_max_height_width(
-    image_size: tuple[int, int], max_height: int, max_width: int
+    image_size: tuple[int, int],
+    max_height: int,
+    max_width: int,
 ) -> tuple[int, int]: ...
 def is_valid_annotation_coco_detection(
     annotation: dict[str, list | tuple],
@@ -91,10 +98,12 @@ def valid_coco_panoptic_annotations(
     annotations: Iterable[dict[str, list | tuple]],
 ) -> bool: ...
 def load_image(
-    image: str | PIL.Image.Image, timeout: float | None = ...
+    image: str | PIL.Image.Image,
+    timeout: float | None = ...,
 ) -> PIL.Image.Image: ...
 def load_images(
-    images: list | tuple | str | PIL.Image.Image, timeout: float | None = ...
+    images: list | tuple | str | PIL.Image.Image,
+    timeout: float | None = ...,
 ) -> PIL.Image.Image | list[PIL.Image.Image] | list[list[PIL.Image.Image]]: ...
 def validate_preprocess_arguments(
     do_rescale: bool | None = ...,
@@ -120,7 +129,10 @@ class ImageFeatureExtractionMixin:
         ...
     def rescale(self, image: np.ndarray, scale: float) -> np.ndarray: ...
     def to_numpy_array(
-        self, image, rescale=..., channel_first=...
+        self,
+        image,
+        rescale=...,
+        channel_first=...,
     ):  # -> NDArray[Any] | ndarray[Any, Any]:
         ...
     def expand_dims(self, image):  # -> Image | NDArray[Any]:
@@ -128,15 +140,23 @@ class ImageFeatureExtractionMixin:
     def normalize(self, image, mean, std, rescale=...):  # -> NDArray[Any]:
         ...
     def resize(
-        self, image, size, resample=..., default_to_square=..., max_size=...
+        self,
+        image,
+        size,
+        resample=...,
+        default_to_square=...,
+        max_size=...,
     ):  # -> Image:
         ...
     def center_crop(
-        self, image, size
+        self,
+        image,
+        size,
     ):  # -> Image | ndarray[Any, dtype[Any]] | ndarray[Any, Any]:
         ...
     def flip_channel_order(
-        self, image
+        self,
+        image,
     ):  # -> ndarray[Any, dtype[Any]] | ndarray[Any, Any]:
         ...
     def rotate(
@@ -157,7 +177,8 @@ def validate_annotations(
     annotations: list[dict],
 ) -> None: ...
 def validate_kwargs(
-    valid_processor_keys: list[str], captured_kwargs: list[str]
+    valid_processor_keys: list[str],
+    captured_kwargs: list[str],
 ):  # -> None:
     ...
 

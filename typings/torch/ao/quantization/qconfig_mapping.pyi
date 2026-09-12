@@ -25,16 +25,26 @@ class QConfigMapping:
     def __init__(self) -> None: ...
     def set_global(self, global_qconfig: QConfigAny) -> QConfigMapping: ...
     def set_object_type(
-        self, object_type: Callable | str, qconfig: QConfigAny
+        self,
+        object_type: Callable | str,
+        qconfig: QConfigAny,
     ) -> QConfigMapping: ...
     def set_module_name_regex(
-        self, module_name_regex: str, qconfig: QConfigAny
+        self,
+        module_name_regex: str,
+        qconfig: QConfigAny,
     ) -> QConfigMapping: ...
     def set_module_name(
-        self, module_name: str, qconfig: QConfigAny
+        self,
+        module_name: str,
+        qconfig: QConfigAny,
     ) -> QConfigMapping: ...
     def set_module_name_object_type_order(
-        self, module_name: str, object_type: Callable, index: int, qconfig: QConfigAny
+        self,
+        module_name: str,
+        object_type: Callable,
+        index: int,
+        qconfig: QConfigAny,
     ) -> QConfigMapping: ...
     def to_dict(self) -> dict[str, Any]: ...
     @classmethod

@@ -47,40 +47,54 @@ class PrepareCustomConfig:
         backend_config: BackendConfig | None,
     ) -> PrepareCustomConfig: ...
     def set_float_to_observed_mapping(
-        self, float_class: type, observed_class: type, quant_type: QuantType = ...
+        self,
+        float_class: type,
+        observed_class: type,
+        quant_type: QuantType = ...,
     ) -> PrepareCustomConfig: ...
     def set_non_traceable_module_names(
-        self, module_names: list[str]
+        self,
+        module_names: list[str],
     ) -> PrepareCustomConfig: ...
     def set_non_traceable_module_classes(
-        self, module_classes: list[type]
+        self,
+        module_classes: list[type],
     ) -> PrepareCustomConfig: ...
     def set_input_quantized_indexes(
-        self, indexes: list[int]
+        self,
+        indexes: list[int],
     ) -> PrepareCustomConfig: ...
     def set_output_quantized_indexes(
-        self, indexes: list[int]
+        self,
+        indexes: list[int],
     ) -> PrepareCustomConfig: ...
     def set_preserved_attributes(
-        self, attributes: list[str]
+        self,
+        attributes: list[str],
     ) -> PrepareCustomConfig: ...
     @classmethod
     def from_dict(
-        cls, prepare_custom_config_dict: dict[str, Any]
+        cls,
+        prepare_custom_config_dict: dict[str, Any],
     ) -> PrepareCustomConfig: ...
     def to_dict(self) -> dict[str, Any]: ...
 
 class ConvertCustomConfig:
     def __init__(self) -> None: ...
     def set_observed_to_quantized_mapping(
-        self, observed_class: type, quantized_class: type, quant_type: QuantType = ...
+        self,
+        observed_class: type,
+        quantized_class: type,
+        quant_type: QuantType = ...,
     ) -> ConvertCustomConfig: ...
     def set_preserved_attributes(
-        self, attributes: list[str]
+        self,
+        attributes: list[str],
     ) -> ConvertCustomConfig: ...
     @classmethod
     def from_dict(
-        cls, convert_custom_config_dict: dict[str, Any]
+        cls,
+        convert_custom_config_dict: dict[str, Any],
     ) -> ConvertCustomConfig: ...
     def to_dict(self) -> dict[str, Any]: ...
 

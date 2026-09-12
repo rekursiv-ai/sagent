@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from typing import (
     Annotated,
+    Final,
     Literal,
     TypeAliasType,
     get_args,
@@ -26,7 +27,7 @@ import inspect
 
 __all__ = ["CLI_SETTABLE", "ToolSpecError", "coerce_kwargs", "parse_tool_overrides"]
 
-CLI_SETTABLE = "cli-settable"
+CLI_SETTABLE: Final = "cli-settable"
 """Marker opting a constructor parameter into ``--tool NAME.key=value``.
 
 Applied as ``Annotated[T, CLI_SETTABLE]``. Opt-IN rather than inferred
@@ -62,12 +63,12 @@ def parse_tool_overrides(specs: Iterable[str]) -> dict[str, dict[str, str]]:
         path, sep, value = spec.partition("=")
         if not sep:
             raise ToolSpecError(
-                f"--tool {spec!r}: expected NAME.key=value (missing '=')"
+                f"--tool {spec!r}: expected NAME.key=value (missing '=')",
             )
         name, dot, key = path.rpartition(".")
         if not dot or not name or not key:
             raise ToolSpecError(
-                f"--tool {spec!r}: expected NAME.key=value (missing '.')"
+                f"--tool {spec!r}: expected NAME.key=value (missing '.')",
             )
         out.setdefault(name, {})[key] = value
     return out
@@ -98,7 +99,7 @@ def coerce_kwargs(cls: type, overrides: Mapping[str, str]) -> dict[str, object]:
         # ``CLI_SETTABLE``; without it the marker is stripped and nothing
         # reads as settable.
         hints = get_type_hints(cls.__init__, include_extras=True)
-    except (NameError, TypeError) as exc:  # unresolvable forward ref
+    except (NameError, TypeError) as exc:  # Unresolvable forward ref.
         raise ToolSpecError(f"{cls.__name__}: cannot inspect settings: {exc}") from exc
     params = inspect.signature(cls.__init__).parameters
     # Keyword-only AND coercible from a string. A parameter typed as an
@@ -117,7 +118,7 @@ def coerce_kwargs(cls: type, overrides: Mapping[str, str]) -> dict[str, object]:
         if key not in settable:
             available = ", ".join(settable) or "(none)"
             raise ToolSpecError(
-                f"{cls.__name__}: unknown setting {key!r}. Settable: {available}"
+                f"{cls.__name__}: unknown setting {key!r}. Settable: {available}",
             )
         kwargs[key] = _coerce(cls.__name__, key, _unwrap(hints[key]), raw)
     return kwargs
@@ -130,15 +131,12 @@ def _is_cli_settable(annotation: object) -> bool:
     )
 
 
+# Two wrappers hide it. ``Annotated[T, ...]`` carries the ``CLI_SETTABLE`` marker, and a
+# PEP 695 ``type X = Literal[...]`` binds a ``TypeAliasType`` whose ``get_origin`` is
+# ``None`` -- so an unresolved alias reads as an uncoercible annotation and every knob
+# declared through one is rejected.
 def _unwrap(annotation: object) -> object:
-    """Resolve wrappers until the coercible type is reached.
-
-    Two wrappers hide it. ``Annotated[T, ...]`` carries the
-    ``CLI_SETTABLE`` marker, and a PEP 695 ``type X = Literal[...]``
-    binds a ``TypeAliasType`` whose ``get_origin`` is ``None`` -- so an
-    unresolved alias reads as an uncoercible annotation and every knob
-    declared through one is rejected.
-    """
+    """Resolve wrappers until the coercible type is reached."""
     if get_origin(annotation) is Annotated:
         return _unwrap(get_args(annotation)[0])
     if isinstance(annotation, TypeAliasType):
@@ -172,5 +170,5 @@ def _coerce(tool: str, key: str, annotation: object, raw: str) -> object:
         return raw
     raise ToolSpecError(
         f"{tool}.{key}: setting is not settable from the command line"
-        f" (annotation {annotation!r})"
+        f" (annotation {annotation!r})",
     )

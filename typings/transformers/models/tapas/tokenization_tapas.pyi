@@ -93,22 +93,34 @@ class TapasTokenizer(PreTrainedTokenizer):
     def convert_tokens_to_string(self, tokens):  # -> str:
         ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
     def create_attention_mask_from_sequences(
-        self, query_ids: list[int], table_values: list[TableValue]
+        self,
+        query_ids: list[int],
+        table_values: list[TableValue],
     ) -> list[int]: ...
     def create_segment_token_type_ids_from_sequences(
-        self, query_ids: list[int], table_values: list[TableValue]
+        self,
+        query_ids: list[int],
+        table_values: list[TableValue],
     ) -> list[int]: ...
     def create_column_token_type_ids_from_sequences(
-        self, query_ids: list[int], table_values: list[TableValue]
+        self,
+        query_ids: list[int],
+        table_values: list[TableValue],
     ) -> list[int]: ...
     def create_row_token_type_ids_from_sequences(
-        self, query_ids: list[int], table_values: list[TableValue]
+        self,
+        query_ids: list[int],
+        table_values: list[TableValue],
     ) -> list[int]: ...
     def build_inputs_with_special_tokens(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = ...
+        self,
+        token_ids_0: list[int],
+        token_ids_1: list[int] | None = ...,
     ) -> list[int]: ...
     def get_special_tokens_mask(
         self,
@@ -146,7 +158,8 @@ class TapasTokenizer(PreTrainedTokenizer):
         **kwargs,
     ) -> BatchEncoding: ...
     @add_end_docstrings(
-        ENCODE_KWARGS_DOCSTRING, TAPAS_ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING
+        ENCODE_KWARGS_DOCSTRING,
+        TAPAS_ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING,
     )
     def batch_encode_plus(
         self,
@@ -186,7 +199,8 @@ class TapasTokenizer(PreTrainedTokenizer):
         **kwargs,
     ) -> list[int]: ...
     @add_end_docstrings(
-        ENCODE_KWARGS_DOCSTRING, TAPAS_ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING
+        ENCODE_KWARGS_DOCSTRING,
+        TAPAS_ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING,
     )
     def encode_plus(
         self,
@@ -210,7 +224,8 @@ class TapasTokenizer(PreTrainedTokenizer):
         **kwargs,
     ) -> BatchEncoding: ...
     @add_end_docstrings(
-        ENCODE_KWARGS_DOCSTRING, TAPAS_ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING
+        ENCODE_KWARGS_DOCSTRING,
+        TAPAS_ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING,
     )
     def prepare_for_model(
         self,
@@ -246,7 +261,11 @@ class TapasTokenizer(PreTrainedTokenizer):
     ):  # -> list[int]:
         ...
     def convert_logits_to_predictions(
-        self, data, logits, logits_agg=..., cell_classification_threshold=...
+        self,
+        data,
+        logits,
+        logits_agg=...,
+        cell_classification_threshold=...,
     ):  # -> tuple[list[Any], Any] | tuple[list[Any]]:
         ...
 
@@ -345,7 +364,9 @@ def get_numeric_sort_key_fn(
 ):  # -> Callable[..., Any | tuple[None, ...]]:
     ...
 def get_numeric_relation(
-    value, other_value, sort_key_fn
+    value,
+    other_value,
+    sort_key_fn,
 ):  # -> Literal[Relation.EQ, Relation.LT, Relation.GT] | None:
     ...
 def add_numeric_values_to_question(question):  # -> Question:

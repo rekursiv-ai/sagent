@@ -80,10 +80,11 @@ class TrajectoryTransformerModel(TrajectoryTransformerPreTrainedModel):
     def pad_to_full_observation(self, hidden_states):  # -> tuple[Tensor, Any]:
         ...
     @add_start_docstrings_to_model_forward(
-        TRAJECTORY_TRANSFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        TRAJECTORY_TRANSFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TrajectoryTransformerOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TrajectoryTransformerOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,

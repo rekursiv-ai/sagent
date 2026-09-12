@@ -61,14 +61,11 @@ def _write_wheel(path: Path, files: dict[str, str]) -> None:
             archive.writestr(name, content)
 
 
+# ``check_wheel`` derives the modules it expects from the build config and the on-disk
+# package, so the check needs a source tree to scan. The tree mirrors the ``.py``
+# entries in ``_BASE_FILES`` plus test/conftest files the wheel exclude globs must drop.
 def _write_source_tree(tmp_path: Path) -> None:
-    """Materialize ``pyproject.toml`` and the canonical source ``.py`` tree.
-
-    ``check_wheel`` derives the modules it expects from the build config and
-    the on-disk package, so the check needs a source tree to scan. The tree
-    mirrors the ``.py`` entries in ``_BASE_FILES`` plus test/conftest files
-    the wheel exclude globs must drop.
-    """
+    """Materialize ``pyproject.toml`` and the canonical source ``.py`` tree."""
     (tmp_path / "pyproject.toml").write_text(_PYPROJECT, encoding="utf-8")
     modules = [name for name in _BASE_FILES if name.endswith(".py")]
     # Excluded by the wheel globs: present in source, must not be required.
@@ -91,7 +88,9 @@ class TestCheckWheel:
     """Wheel validation tests for import surface and recipe assets."""
 
     def test_accepts_required_public_wheel_surface(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         """Accept a wheel with entry points, modules, and recipe assets."""
         monkeypatch.chdir(tmp_path)
@@ -100,7 +99,9 @@ class TestCheckWheel:
         assert check_wheel.main() == 0
 
     def test_rejects_missing_prompt_assets(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         """Reject a wheel missing an asset referenced by system_prompt."""
         monkeypatch.chdir(tmp_path)
@@ -113,7 +114,9 @@ class TestCheckWheel:
             _ = check_wheel.main()
 
     def test_rejects_recipe_referenced_missing_tool_asset(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         """Reject a missing asset referenced by tool_descriptions."""
         monkeypatch.chdir(tmp_path)
@@ -125,7 +128,9 @@ class TestCheckWheel:
             _ = check_wheel.main()
 
     def test_rejects_missing_included_asset(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         """Reject missing include targets and report the include chain."""
         monkeypatch.chdir(tmp_path)
@@ -140,7 +145,9 @@ class TestCheckWheel:
             _ = check_wheel.main()
 
     def test_rejects_malformed_recipe(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         """Reject invalid YAML before asset validation."""
         monkeypatch.chdir(tmp_path)
@@ -152,7 +159,9 @@ class TestCheckWheel:
             _ = check_wheel.main()
 
     def test_rejects_non_string_asset_path(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         """Reject recipe asset entries that are not strings."""
         monkeypatch.chdir(tmp_path)
@@ -164,7 +173,9 @@ class TestCheckWheel:
             _ = check_wheel.main()
 
     def test_rejects_include_cycle(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         """Reject recursive include graphs with a readable cycle path."""
         monkeypatch.chdir(tmp_path)
@@ -184,7 +195,9 @@ class TestCheckWheelErrors:
     """Error paths for missing wheels, modules, and recipe shape."""
 
     def test_rejects_no_wheels(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         monkeypatch.chdir(tmp_path)
         (tmp_path / "dist").mkdir()
@@ -192,7 +205,9 @@ class TestCheckWheelErrors:
             _ = check_wheel.main()
 
     def test_rejects_missing_entry_points_file(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         monkeypatch.chdir(tmp_path)
         files = dict(_BASE_FILES | _RECIPE_FILES)
@@ -202,7 +217,9 @@ class TestCheckWheelErrors:
             _ = check_wheel.main()
 
     def test_rejects_source_module_missing_from_wheel(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         """Reject a wheel that dropped a ``.py`` present in the source tree."""
         monkeypatch.chdir(tmp_path)
@@ -216,7 +233,9 @@ class TestCheckWheelErrors:
             _ = check_wheel.main()
 
     def test_rejects_missing_console_script(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         monkeypatch.chdir(tmp_path)
         files = dict(_BASE_FILES | _RECIPE_FILES)
@@ -228,7 +247,9 @@ class TestCheckWheelErrors:
             _ = check_wheel.main()
 
     def test_rejects_recipe_not_a_mapping(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         monkeypatch.chdir(tmp_path)
         files = dict(_BASE_FILES | _RECIPE_FILES)
@@ -238,7 +259,9 @@ class TestCheckWheelErrors:
             _ = check_wheel.main()
 
     def test_skips_non_mapping_recipe_section(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         monkeypatch.chdir(tmp_path)
         files = dict(_BASE_FILES | _RECIPE_FILES)
@@ -254,7 +277,9 @@ class TestCheckWheelErrors:
         assert check_wheel.main() == 0
 
     def test_rejects_absolute_asset_path(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
         monkeypatch.chdir(tmp_path)
         files = dict(_BASE_FILES | _RECIPE_FILES)

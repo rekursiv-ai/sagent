@@ -2,13 +2,33 @@
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Final, Literal, cast, get_args
 
 import inspect
 import sys
 
 from sagent.types.providers import Provider
 
+
+type ProviderName = Literal[
+    "Anthropic",
+    "AnthropicCLI",
+    "DashScope",
+    "Google",
+    "GoogleCLI",
+    "LlamaCpp",
+    "MiniMax",
+    "Moonshot",
+    "OpenAI",
+    "OpenAICompat",
+    "OpenAISubscription",
+    "SelfHosted",
+]
+
+PROVIDER_NAMES: Final[tuple[ProviderName, ...]] = cast(
+    tuple[ProviderName, ...],
+    get_args(ProviderName.__value__),
+)
 
 _MODEL_PROVIDER_MAP: Final[list[tuple[str, str]]] = [
     ("claude", "Anthropic"),
@@ -34,10 +54,10 @@ _MODEL_PROVIDER_MAP: Final[list[tuple[str, str]]] = [
 # Without this, ``AgentSelf(model_id="claude-sonnet-4-6")`` from an
 # AnthropicCLI-backed agent would silently try to build a fresh
 # Anthropic API provider, requiring ``ANTHROPIC_API_KEY`` to be set.
-_ACCOUNT_OVERRIDES: dict[str, str] = {
+_ACCOUNT_OVERRIDES: Final[dict[str, str]] = {
     "Anthropic": "AnthropicCLI",
 }
-_ACCOUNT_PROVIDERS: set[str] = set(_ACCOUNT_OVERRIDES.values())
+_ACCOUNT_PROVIDERS: Final[frozenset[str]] = frozenset(_ACCOUNT_OVERRIDES.values())
 
 
 def infer_provider(
@@ -59,6 +79,7 @@ def infer_provider(
     if _is_local_model_path(model_id):
         return ("SelfHosted", model_id)
 
+    prefer_account = current_provider in _ACCOUNT_PROVIDERS
     for prefix, base_prov in _MODEL_PROVIDER_MAP:
         if model_id.startswith(prefix):
             if current_provider.startswith(base_prov):
@@ -70,10 +91,9 @@ def infer_provider(
                 # override table, so it holds for variants that table does not
                 # enumerate (e.g. ``OpenAISubscription`` in the public build).
                 return None
-            account_target = _ACCOUNT_OVERRIDES.get(base_prov)
             target = (
-                account_target
-                if account_target is not None and current_provider == account_target
+                _ACCOUNT_OVERRIDES.get(base_prov, base_prov)
+                if prefer_account
                 else base_prov
             )
             if target == current_provider:
@@ -81,11 +101,6 @@ def infer_provider(
             auth = "credentials" if target in _ACCOUNT_PROVIDERS else "env"
             return (target, auth)
     return None
-
-
-def _is_local_model_path(model_id: str) -> bool:
-    """Return whether ``model_id`` looks like a local HF snapshot path."""
-    return model_id.startswith(("/", "./", "../", "~/"))
 
 
 def build_provider(
@@ -147,7 +162,8 @@ def default_auth_for_provider(provider_name: str) -> str:
     if cls is None:
         raise AttributeError(f"unknown provider {provider_name!r}")
     if provider_name.endswith(("CLI", "Subscription")) and hasattr(
-        cls, "from_credentials"
+        cls,
+        "from_credentials",
     ):
         return "credentials"
     if hasattr(cls, "from_env"):
@@ -155,3 +171,8 @@ def default_auth_for_provider(provider_name: str) -> str:
     if hasattr(cls, "from_key"):
         return "key"
     raise AttributeError(f"provider {provider_name!r} has no default auth method")
+
+
+def _is_local_model_path(model_id: str) -> bool:
+    """Return whether ``model_id`` looks like a local HF snapshot path."""
+    return model_id.startswith(("/", "./", "../", "~/"))

@@ -42,12 +42,18 @@ class TFDeiTForImageClassificationWithTeacherOutput(ModelOutput):
 
 class TFDeiTEmbeddings(keras.layers.Layer):
     def __init__(
-        self, config: DeiTConfig, use_mask_token: bool = ..., **kwargs
+        self,
+        config: DeiTConfig,
+        use_mask_token: bool = ...,
+        **kwargs,
     ) -> None: ...
     def build(self, input_shape=...):  # -> None:
         ...
     def interpolate_pos_encoding(
-        self, embeddings: tf.Tensor, height: int, width: int
+        self,
+        embeddings: tf.Tensor,
+        height: int,
+        width: int,
     ) -> tf.Tensor: ...
     def call(
         self,
@@ -79,7 +85,10 @@ class TFDeiTSelfAttention(keras.layers.Layer):
 class TFDeiTSelfOutput(keras.layers.Layer):
     def __init__(self, config: DeiTConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -106,7 +115,10 @@ class TFDeiTIntermediate(keras.layers.Layer):
 class TFDeiTOutput(keras.layers.Layer):
     def __init__(self, config: DeiTConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -233,7 +245,8 @@ class TFDeiTForMaskedImageModeling(TFDeiTPreTrainedModel):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(DEIT_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFMaskedImageModelingOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFMaskedImageModelingOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -258,7 +271,8 @@ class TFDeiTForImageClassification(TFDeiTPreTrainedModel, TFSequenceClassificati
     @unpack_inputs
     @add_start_docstrings_to_model_forward(DEIT_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFImageClassifierOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFImageClassifierOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,

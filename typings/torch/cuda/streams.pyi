@@ -17,7 +17,11 @@ class ExternalStream(Stream):
 
 class Event(torch._C._CudaEventBase):
     def __new__(
-        cls, enable_timing=..., blocking=..., interprocess=..., external=...
+        cls,
+        enable_timing=...,
+        blocking=...,
+        interprocess=...,
+        external=...,
     ) -> Self: ...
     @classmethod
     def from_ipc_handle(cls, device, handle) -> _CudaEventBase: ...

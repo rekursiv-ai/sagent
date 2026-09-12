@@ -41,7 +41,8 @@ class Glm4DecoderLayer(GradientCheckpointingLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -59,7 +60,12 @@ def eager_attention_forward(
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Tensor, Tensor]:
     ...
 
@@ -145,10 +151,12 @@ class Glm4ForCausalLM(Glm4PreTrainedModel, GenerationMixin):
     ) -> tuple | CausalLMOutputWithPast: ...
 
 class Glm4ForSequenceClassification(
-    GenericForSequenceClassification, Glm4PreTrainedModel
+    GenericForSequenceClassification,
+    Glm4PreTrainedModel,
 ): ...
 class Glm4ForTokenClassification(
-    GenericForTokenClassification, Glm4PreTrainedModel
+    GenericForTokenClassification,
+    Glm4PreTrainedModel,
 ): ...
 
 __all__ = [

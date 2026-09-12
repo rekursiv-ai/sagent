@@ -96,7 +96,9 @@ class ErnieMEncoder(nn.Module):
         return_dict: bool | None = ...,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
 
 class ErnieMPooler(nn.Module):
@@ -122,7 +124,7 @@ class ErnieMModel(ErnieMPreTrainedModel):
     def set_input_embeddings(self, value):  # -> None:
         ...
     @add_start_docstrings_to_model_forward(
-        ERNIE_M_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ERNIE_M_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         processor_class=_TOKENIZER_FOR_DOC,
@@ -151,7 +153,7 @@ class ErnieMModel(ErnieMPreTrainedModel):
 class ErnieMForSequenceClassification(ErnieMPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(
-        ERNIE_M_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ERNIE_M_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         processor_class=_TOKENIZER_FOR_DOC,
@@ -181,7 +183,7 @@ class ErnieMForSequenceClassification(ErnieMPreTrainedModel):
 class ErnieMForMultipleChoice(ErnieMPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(
-        ERNIE_M_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        ERNIE_M_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -208,7 +210,7 @@ class ErnieMForMultipleChoice(ErnieMPreTrainedModel):
 class ErnieMForTokenClassification(ErnieMPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(
-        ERNIE_M_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ERNIE_M_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         processor_class=_TOKENIZER_FOR_DOC,
@@ -237,7 +239,7 @@ class ErnieMForTokenClassification(ErnieMPreTrainedModel):
 class ErnieMForQuestionAnswering(ErnieMPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(
-        ERNIE_M_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ERNIE_M_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         processor_class=_TOKENIZER_FOR_DOC,
@@ -266,7 +268,7 @@ class ErnieMForQuestionAnswering(ErnieMPreTrainedModel):
 class ErnieMForInformationExtraction(ErnieMPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(
-        ERNIE_M_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        ERNIE_M_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     def forward(
         self,

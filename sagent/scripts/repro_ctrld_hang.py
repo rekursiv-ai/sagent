@@ -53,10 +53,16 @@ class BlockingModel(agent_test.StubModel):
         raise AssertionError("unreachable")
 
 
+def main() -> int:
+    """Run the teardown repro; return the process exit code."""
+    asyncio.run(_main())
+    return 0
+
+
 async def _main() -> None:
     parent = Agent(model=agent_test.StubModel(), tools=[], name="Agent")
-    # parent replies instantly and idles; child blocks mid-stream.
-    parent.model = parent.model  # keep parent responsive
+    # The parent replies instantly and idles; the child blocks mid-stream.
+    parent.model = parent.model  # Keep parent responsive.
     spawn = AgentSpawn()
     parent_drive = asyncio.create_task(parent.serve_forever())
     await asyncio.sleep(0.05)
@@ -69,12 +75,15 @@ async def _main() -> None:
         # Route through the serviced spawn path directly; the repro's whole
         # point is to exercise this internal path with a mid-stream-blocked child.
         res = spawn._spawn_serviced(  # noqa: SLF001 -- repro targets the internal serviced-spawn path
-            child, "worker", "do work", notify_on_asleep=True
+            child,
+            "worker",
+            "do work",
+            notify_on_asleep=True,
         )
         print("SPAWN:", res.content.split(".")[0])
     finally:
         current_agent_var.reset(token)
-    await asyncio.sleep(0.2)  # let child enter the blocking stream
+    await asyncio.sleep(0.2)  # Let child enter the blocking stream.
     print("registry:", sorted(agent_registry))
     child_rt_busy = child.runtime.model_call is not None
     print("child mid-model-call:", child_rt_busy)
@@ -104,17 +113,12 @@ async def _main() -> None:
         t.cancel()
     try:
         await asyncio.wait_for(
-            asyncio.gather(*pending, return_exceptions=True), timeout=3.0
+            asyncio.gather(*pending, return_exceptions=True),
+            timeout=3.0,
         )
         print(f"pending cancelled in {time.monotonic() - t1:.2f}s -> NO HANG")
     except TimeoutError:
         print("HANG: mid-stream serviced child did NOT cancel within 3s")
-
-
-def main() -> int:
-    """Run the teardown repro; return the process exit code."""
-    asyncio.run(_main())
-    return 0
 
 
 if __name__ == "__main__":

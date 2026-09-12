@@ -10,30 +10,65 @@ if torch._C._has_mkldnn:
     class MkldnnDeviceOpBase:
         def get_linear_transpose_weight(self, weight_node): ...
         def pack_conv_weight(
-            self, graph, is_transposed, weight, constant_args, input_size
+            self,
+            graph,
+            is_transposed,
+            weight,
+            constant_args,
+            input_size,
         ): ...
         def pack_linear_weight(
-            self, graph, is_lp_weight, transpose_weight_node, batch_size
+            self,
+            graph,
+            is_lp_weight,
+            transpose_weight_node,
+            batch_size,
         ): ...
         def pack_linear(
-            self, graph, is_lp_weight, batch_size, input, packed_weight_node, bias
+            self,
+            graph,
+            is_lp_weight,
+            batch_size,
+            input,
+            packed_weight_node,
+            bias,
         ): ...
 
     class CpuMkldnnDeviceOp(MkldnnDeviceOpBase):
         def get_linear_transpose_weight(self, weight_node): ...
         def pack_conv_weight(
-            self, graph, is_transposed, weight, constant_args, input_size
+            self,
+            graph,
+            is_transposed,
+            weight,
+            constant_args,
+            input_size,
         ): ...
         def pack_linear_weight(
-            self, graph, is_lp_weight, transpose_weight_node, batch_size
+            self,
+            graph,
+            is_lp_weight,
+            transpose_weight_node,
+            batch_size,
         ): ...
         def pack_linear(
-            self, graph, is_lp_weight, batch_size, input, packed_weight_node, bias
+            self,
+            graph,
+            is_lp_weight,
+            batch_size,
+            input,
+            packed_weight_node,
+            bias,
         ): ...
 
     class XpuMkldnnDeviceOp(MkldnnDeviceOpBase):
         def pack_conv_weight(
-            self, graph, is_transposed, weight, constant_args, input_size
+            self,
+            graph,
+            is_transposed,
+            weight,
+            constant_args,
+            input_size,
         ): ...
 
     def grouped_gemm_pass(graph: torch.fx.Graph) -> None: ...
@@ -42,7 +77,10 @@ if torch._C._has_mkldnn:
     computation_ops = ...
     class UnaryAttr:
         def __init__(
-            self, op_name: str, scalars_attr=..., algorithm_attr=...
+            self,
+            op_name: str,
+            scalars_attr=...,
+            algorithm_attr=...,
         ) -> None: ...
 
     _aten_conv_args = ...

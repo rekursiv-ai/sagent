@@ -81,7 +81,9 @@ def eager_attention_forward(
 
 class ModernBertDecoderAttention(nn.Module):
     def __init__(
-        self, config: ModernBertDecoderConfig, layer_idx: int | None = ...
+        self,
+        config: ModernBertDecoderConfig,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -96,7 +98,9 @@ class ModernBertDecoderAttention(nn.Module):
 
 class ModernBertDecoderLayer(GradientCheckpointingLayer):
     def __init__(
-        self, config: ModernBertDecoderConfig, layer_idx: int | None = ...
+        self,
+        config: ModernBertDecoderConfig,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -110,7 +114,8 @@ class ModernBertDecoderLayer(GradientCheckpointingLayer):
         cache_position: torch.LongTensor | None = ...,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class ModernBertDecoderPredictionHead(ModernBertPredictionHead): ...

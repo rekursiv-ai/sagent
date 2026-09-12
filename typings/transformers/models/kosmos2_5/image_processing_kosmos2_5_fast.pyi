@@ -29,11 +29,16 @@ class Kosmos2_5ImageProcessorFast(BaseImageProcessorFast):
     def __init__(self, **kwargs: Unpack[Kosmos2_5FastImageProcessorKwargs]) -> None: ...
     @auto_docstring
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[Kosmos2_5FastImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[Kosmos2_5FastImageProcessorKwargs],
     ) -> BatchFeature: ...
     def normalize(self, image: torch.Tensor, **kwargs) -> torch.Tensor: ...
     def extract_flattened_patches(
-        self, image: torch.Tensor, max_patches: int, patch_size: dict
+        self,
+        image: torch.Tensor,
+        max_patches: int,
+        patch_size: dict,
     ) -> torch.Tensor: ...
 
 __all__ = ["Kosmos2_5ImageProcessorFast"]

@@ -3,14 +3,24 @@ import torch
 from .loss_rt_detr import RTDetrLoss
 
 def weighting_function(
-    max_num_bins: int, up: torch.Tensor, reg_scale: int
+    max_num_bins: int,
+    up: torch.Tensor,
+    reg_scale: int,
 ) -> torch.Tensor: ...
 def translate_gt(
-    gt: torch.Tensor, max_num_bins: int, reg_scale: int, up: torch.Tensor
+    gt: torch.Tensor,
+    max_num_bins: int,
+    reg_scale: int,
+    up: torch.Tensor,
 ):  # -> tuple[Tensor, Tensor, Tensor]:
     ...
 def bbox2distance(
-    points, bbox, max_num_bins, reg_scale, up, eps=...
+    points,
+    bbox,
+    max_num_bins,
+    reg_scale,
+    up,
+    eps=...,
 ):  # -> tuple[Tensor, Tensor, Tensor]:
     ...
 
@@ -27,11 +37,21 @@ class DFineLoss(RTDetrLoss):
         avg_factor=...,
     ): ...
     def loss_local(
-        self, outputs, targets, indices, num_boxes, T=...
+        self,
+        outputs,
+        targets,
+        indices,
+        num_boxes,
+        T=...,
     ):  # -> dict[Any, Any]:
         ...
     def get_loss(
-        self, loss, outputs, targets, indices, num_boxes
+        self,
+        loss,
+        outputs,
+        targets,
+        indices,
+        num_boxes,
     ):  # -> dict[str, Any] | dict[Any, Any] | dict[str, Tensor]:
         ...
 

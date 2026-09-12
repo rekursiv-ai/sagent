@@ -14,7 +14,10 @@ class FbgemmFp8HfQuantizer(HfQuantizer):
         ...
     def update_dtype(self, dtype: torch.dtype) -> torch.dtype: ...
     def param_needs_quantization(
-        self, model: PreTrainedModel, param_name: str, **kwargs
+        self,
+        model: PreTrainedModel,
+        param_name: str,
+        **kwargs,
     ) -> bool: ...
     def create_quantized_param(
         self,
@@ -26,7 +29,10 @@ class FbgemmFp8HfQuantizer(HfQuantizer):
     ):  # -> None:
         ...
     def update_missing_keys(
-        self, model, missing_keys: list[str], prefix: str
+        self,
+        model,
+        missing_keys: list[str],
+        prefix: str,
     ) -> list[str]: ...
     def update_tp_plan(self, config): ...
     def is_serializable(self, safe_serialization=...):  # -> Literal[True]:

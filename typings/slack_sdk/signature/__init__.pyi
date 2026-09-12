@@ -6,5 +6,8 @@ class SignatureVerifier:
     def is_valid_request(self, body: str | bytes, headers: dict[str, str]) -> bool: ...
     def is_valid(self, body: str | bytes, timestamp: str, signature: str) -> bool: ...
     def generate_signature(
-        self, *, timestamp: str, body: str | bytes
+        self,
+        *,
+        timestamp: str,
+        body: str | bytes,
     ) -> str | None: ...

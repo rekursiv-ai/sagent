@@ -20,7 +20,12 @@ from ...utils import ModelOutput, auto_docstring
 
 class EdgeTamLayerNorm(nn.LayerNorm):
     def __init__(
-        self, normalized_shape, *, eps=..., data_format=..., **kwargs
+        self,
+        normalized_shape,
+        *,
+        eps=...,
+        data_format=...,
+        **kwargs,
     ) -> None: ...
     def forward(self, features: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -57,12 +62,16 @@ class EdgeTamAttention(nn.Module):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class EdgeTamTwoWayAttentionBlock(nn.Module):
     def __init__(
-        self, config: EdgeTamMaskDecoderConfig, skip_first_layer_pe: bool = ...
+        self,
+        config: EdgeTamMaskDecoderConfig,
+        skip_first_layer_pe: bool = ...,
     ) -> None: ...
     def forward(
         self,
@@ -117,10 +126,13 @@ class EdgeTamSinePositionEmbedding(nn.Module):
 class EdgeTamVisionNeck(nn.Module):
     def __init__(self, config: EdgeTamVisionConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
     ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]: ...
 
 @auto_docstring(custom_intro=...)
@@ -167,7 +179,9 @@ class EdgeTamPromptEncoder(nn.Module):
         input_masks: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class EdgeTamTwoWayTransformer(nn.Module):
@@ -198,7 +212,9 @@ class EdgeTamMaskDecoder(nn.Module):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 @auto_docstring(custom_intro=...)
@@ -211,7 +227,9 @@ class EdgeTamModel(EdgeTamPreTrainedModel):
     def get_image_wide_positional_embeddings(self) -> torch.Tensor: ...
     @torch.no_grad()
     def get_image_embeddings(
-        self, pixel_values: torch.FloatTensor, **kwargs: Unpack[TransformersKwargs]
+        self,
+        pixel_values: torch.FloatTensor,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> list[torch.Tensor]: ...
     @torch.no_grad()
     def get_prompt_embeddings(
@@ -238,7 +256,9 @@ class EdgeTamModel(EdgeTamPreTrainedModel):
         **kwargs: Unpack[TransformersKwargs],
     ) -> EdgeTamImageSegmentationOutput: ...
     def get_image_features(
-        self, pixel_values: torch.FloatTensor, **kwargs: Unpack[TransformersKwargs]
+        self,
+        pixel_values: torch.FloatTensor,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[
         list[torch.Tensor],
         list[torch.Tensor],

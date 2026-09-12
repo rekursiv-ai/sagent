@@ -16,7 +16,9 @@ from ...utils import auto_docstring
 logger = ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class PoolFormerDropPath(nn.Module):
@@ -27,7 +29,13 @@ class PoolFormerDropPath(nn.Module):
 
 class PoolFormerEmbeddings(nn.Module):
     def __init__(
-        self, hidden_size, num_channels, patch_size, stride, padding, norm_layer=...
+        self,
+        hidden_size,
+        num_channels,
+        patch_size,
+        stride,
+        padding,
+        norm_layer=...,
     ) -> None: ...
     def forward(self, pixel_values):  # -> Any:
         ...
@@ -41,14 +49,24 @@ class PoolFormerPooling(nn.Module):
 
 class PoolFormerOutput(nn.Module):
     def __init__(
-        self, config, dropout_prob, hidden_size, intermediate_size
+        self,
+        config,
+        dropout_prob,
+        hidden_size,
+        intermediate_size,
     ) -> None: ...
     def forward(self, hidden_states):  # -> Any:
         ...
 
 class PoolFormerLayer(nn.Module):
     def __init__(
-        self, config, num_channels, pool_size, hidden_size, intermediate_size, drop_path
+        self,
+        config,
+        num_channels,
+        pool_size,
+        hidden_size,
+        intermediate_size,
+        drop_path,
     ) -> None: ...
     def forward(self, hidden_states):  # -> tuple[Any]:
         ...
@@ -56,7 +74,10 @@ class PoolFormerLayer(nn.Module):
 class PoolFormerEncoder(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, pixel_values, output_hidden_states=..., return_dict=...
+        self,
+        pixel_values,
+        output_hidden_states=...,
+        return_dict=...,
     ):  # -> tuple[Any | tuple[()] | tuple[Any, ...], ...] | BaseModelOutputWithNoAttention:
         ...
 

@@ -43,28 +43,38 @@ class YosoLSHCumulation(torch.autograd.Function):
     def forward(ctx, query_mask, key_mask, query, key, value, config): ...
     @staticmethod
     def backward(
-        ctx, grad
+        ctx,
+        grad,
     ):  # -> tuple[None, None, Any | Tensor, Any | Tensor, Any | Tensor, None]:
         ...
 
 class YosoEmbeddings(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, input_ids=..., token_type_ids=..., position_ids=..., inputs_embeds=...
+        self,
+        input_ids=...,
+        token_type_ids=...,
+        position_ids=...,
+        inputs_embeds=...,
     ):  # -> Any:
         ...
 
 class YosoSelfAttention(nn.Module):
     def __init__(self, config, position_embedding_type=...) -> None: ...
     def forward(
-        self, hidden_states, attention_mask=..., output_attentions=...
+        self,
+        hidden_states,
+        attention_mask=...,
+        output_attentions=...,
     ):  # -> tuple[Tensor | Any, Tensor | Any] | tuple[Tensor | Any]:
         ...
 
 class YosoSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -73,7 +83,10 @@ class YosoAttention(nn.Module):
     def prune_heads(self, heads):  # -> None:
         ...
     def forward(
-        self, hidden_states, attention_mask=..., output_attentions=...
+        self,
+        hidden_states,
+        attention_mask=...,
+        output_attentions=...,
     ):  # -> Any:
         ...
 
@@ -85,14 +98,19 @@ class YosoIntermediate(nn.Module):
 class YosoOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class YosoLayer(GradientCheckpointingLayer):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states, attention_mask=..., output_attentions=...
+        self,
+        hidden_states,
+        attention_mask=...,
+        output_attentions=...,
     ):  # -> Any:
         ...
     def feed_forward_chunk(self, attention_output):  # -> Any:

@@ -44,7 +44,7 @@ class DetrObjectDetectionOutput(ModelOutput):
 @auto_docstring(
     custom_intro="""
     Output type of [`DetrForSegmentation`].
-    """
+    """,
 )
 class DetrSegmentationOutput(ModelOutput):
     loss: torch.FloatTensor | None = ...
@@ -71,7 +71,9 @@ def replace_batch_norm(model):  # -> None:
 class DetrConvEncoder(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, pixel_values: torch.Tensor, pixel_mask: torch.Tensor
+        self,
+        pixel_values: torch.Tensor,
+        pixel_mask: torch.Tensor,
     ):  # -> list[Any]:
         ...
 
@@ -82,7 +84,11 @@ class DetrConvModel(nn.Module):
 
 class DetrSinePositionEmbedding(nn.Module):
     def __init__(
-        self, embedding_dim=..., temperature=..., normalize=..., scale=...
+        self,
+        embedding_dim=...,
+        temperature=...,
+        normalize=...,
+        scale=...,
     ) -> None: ...
     def forward(self, pixel_values, pixel_mask):  # -> Tensor:
         ...
@@ -99,10 +105,16 @@ def build_position_encoding(
 
 class DetrAttention(nn.Module):
     def __init__(
-        self, embed_dim: int, num_heads: int, dropout: float = ..., bias: bool = ...
+        self,
+        embed_dim: int,
+        num_heads: int,
+        dropout: float = ...,
+        bias: bool = ...,
     ) -> None: ...
     def with_pos_embed(
-        self, tensor: torch.Tensor, object_queries: Tensor | None
+        self,
+        tensor: torch.Tensor,
+        object_queries: Tensor | None,
     ):  # -> Tensor:
         ...
     def forward(
@@ -115,7 +127,9 @@ class DetrAttention(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class DetrEncoderLayer(nn.Module):
@@ -250,7 +264,13 @@ class DetrMaskHeadSmallConv(nn.Module):
 
 class DetrMHAttentionMap(nn.Module):
     def __init__(
-        self, query_dim, hidden_dim, num_heads, dropout=..., bias=..., std=...
+        self,
+        query_dim,
+        hidden_dim,
+        num_heads,
+        dropout=...,
+        bias=...,
+        std=...,
     ) -> None: ...
     def forward(self, q, k, mask: Tensor | None = ...):  # -> Any:
         ...

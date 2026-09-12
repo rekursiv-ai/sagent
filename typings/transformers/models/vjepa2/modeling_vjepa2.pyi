@@ -77,11 +77,15 @@ class VJEPA2RopeAttention(nn.Module):
         head_mask: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class VJEPA2DropPath(nn.Module):
@@ -92,7 +96,10 @@ class VJEPA2DropPath(nn.Module):
 
 class VJEPA2MLP(nn.Module):
     def __init__(
-        self, config: VJEPA2Config, hidden_size: int = ..., mlp_ratio: float = ...
+        self,
+        config: VJEPA2Config,
+        hidden_size: int = ...,
+        mlp_ratio: float = ...,
     ) -> None: ...
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -141,13 +148,19 @@ class VJEPA2PredictorEmbeddings(nn.Module):
         mask_index: int = ...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class VJEPA2Predictor(nn.Module):
     def __init__(self, config: VJEPA2Config) -> None: ...
     def sort_tokens(
-        self, hidden_states, position_masks, argsort, head_mask=...
+        self,
+        hidden_states,
+        position_masks,
+        argsort,
+        head_mask=...,
     ):  # -> tuple[Tensor, Tensor, Tensor | Any | None]:
         ...
     def unsort_tokens(self, hidden_states, argsort):  # -> Tensor:
@@ -173,7 +186,9 @@ class VJEPA2PoolerSelfAttention(nn.Module):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class VJEPA2PoolerCrossAttention(nn.Module):
@@ -187,7 +202,9 @@ class VJEPA2PoolerCrossAttention(nn.Module):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class VJEPA2PoolerSelfAttentionLayer(GradientCheckpointingLayer):

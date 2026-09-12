@@ -33,7 +33,8 @@ or by creating appropriate graph nodes when needed.
 log = ...
 IN_PLACE_DESUGARING_MAP = ...
 type _HandlerCallback = Callable[
-    [InstructionTranslator, typing.Any, typing.Any], VariableTracker
+    [InstructionTranslator, typing.Any, typing.Any],
+    VariableTracker,
 ]
 type _TrackersType = type[VariableTracker] | tuple[type[VariableTracker], ...]
 polyfill_fn_mapping = ...
@@ -85,36 +86,58 @@ class BuiltinVariable(VariableTracker):
         kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
 
     call_int = ...
     call_float = ...
     def call_bool(
-        self, tx: InstructionTranslator, arg
+        self,
+        tx: InstructionTranslator,
+        arg,
     ) -> SymNodeVariable | VariableTracker | None: ...
     def call_str(
-        self, tx: InstructionTranslator, arg
+        self,
+        tx: InstructionTranslator,
+        arg,
     ) -> VariableTracker | Any | None: ...
 
     call_min = ...
     call_max = ...
     def call_abs(
-        self, tx: InstructionTranslator, arg: VariableTracker
+        self,
+        tx: InstructionTranslator,
+        arg: VariableTracker,
     ) -> VariableTracker: ...
     def call_pos(
-        self, tx: InstructionTranslator, arg: VariableTracker
+        self,
+        tx: InstructionTranslator,
+        arg: VariableTracker,
     ) -> VariableTracker: ...
     def call_index(
-        self, tx: InstructionTranslator, arg: VariableTracker
+        self,
+        tx: InstructionTranslator,
+        arg: VariableTracker,
     ) -> VariableTracker: ...
     def call_round(
-        self, tx: InstructionTranslator, arg, *args, **kwargs
+        self,
+        tx: InstructionTranslator,
+        arg,
+        *args,
+        **kwargs,
     ) -> VariableTracker: ...
     def call_range(self, tx: InstructionTranslator, *args) -> RangeVariable | None: ...
     def call_slice(self, tx: InstructionTranslator, *args) -> SliceVariable: ...
     def call_iter(
-        self, tx: InstructionTranslator, obj, *args, **kwargs
+        self,
+        tx: InstructionTranslator,
+        obj,
+        *args,
+        **kwargs,
     ) -> (
         ObjectIteratorVariable
         | VariableTracker
@@ -134,36 +157,56 @@ class BuiltinVariable(VariableTracker):
     call_tuple = ...
     call_list = ...
     def call_callable(
-        self, tx: InstructionTranslator, arg
+        self,
+        tx: InstructionTranslator,
+        arg,
     ) -> VariableTracker | None: ...
     def call_cast(self, _, *args, **kwargs): ...
     def call_dir(self, tx: InstructionTranslator, arg) -> None: ...
     def call_dict(self, tx: InstructionTranslator, *args, **kwargs) -> Any: ...
     @staticmethod
     def call_custom_dict(
-        tx: InstructionTranslator, user_cls, *args, **kwargs
+        tx: InstructionTranslator,
+        user_cls,
+        *args,
+        **kwargs,
     ) -> Any: ...
     @staticmethod
     def call_custom_dict_fromkeys(
-        tx: InstructionTranslator, user_cls, *args, **kwargs
+        tx: InstructionTranslator,
+        user_cls,
+        *args,
+        **kwargs,
     ) -> ConstDictVariable | DefaultDictVariable: ...
     def call_set(self, tx: InstructionTranslator, *args, **kwargs) -> SetVariable: ...
     def call_frozenset(
-        self, tx: InstructionTranslator, *args, **kwargs
+        self,
+        tx: InstructionTranslator,
+        *args,
+        **kwargs,
     ) -> FrozensetVariable: ...
     def call_zip(self, tx: InstructionTranslator, *args, **kwargs) -> ZipVariable: ...
     def call_len(self, tx: InstructionTranslator, *args, **kwargs): ...
     def call_getitem(self, tx: InstructionTranslator, *args, **kwargs): ...
     def call_isinstance(
-        self, tx: InstructionTranslator, arg, isinstance_type
+        self,
+        tx: InstructionTranslator,
+        arg,
+        isinstance_type,
     ) -> VariableTracker: ...
     def call_issubclass(
-        self, tx: InstructionTranslator, left_ty, right_ty
+        self,
+        tx: InstructionTranslator,
+        left_ty,
+        right_ty,
     ) -> ConstantVariable: ...
     def call_super(self, tx: InstructionTranslator, a, b) -> SuperVariable: ...
     def call_next(self, tx: InstructionTranslator, *args) -> VariableTracker: ...
     def call_hasattr(
-        self, tx: InstructionTranslator, obj, attr
+        self,
+        tx: InstructionTranslator,
+        obj,
+        attr,
     ) -> ConstantVariable | None: ...
     def call_map(self, tx: InstructionTranslator, fn, *seqs) -> MapVariable: ...
     def call_filter(self, tx: InstructionTranslator, fn, seq) -> FilterVariable: ...
@@ -203,20 +246,34 @@ class BuiltinVariable(VariableTracker):
         ConstantVariable | VariableTracker | ExceptionVariable | TensorVariable | None
     ): ...
     def call_delattr(
-        self, tx: InstructionTranslator, obj: VariableTracker, name_var: VariableTracker
+        self,
+        tx: InstructionTranslator,
+        obj: VariableTracker,
+        name_var: VariableTracker,
     ) -> VariableTracker: ...
     def call_type(self, tx: InstructionTranslator, obj: VariableTracker) -> Any: ...
     def call_reversed(
-        self, tx: InstructionTranslator, obj: VariableTracker
+        self,
+        tx: InstructionTranslator,
+        obj: VariableTracker,
     ) -> TupleVariable | None: ...
     def call_sorted(
-        self, tx: InstructionTranslator, obj: VariableTracker, **kwargs: VariableTracker
+        self,
+        tx: InstructionTranslator,
+        obj: VariableTracker,
+        **kwargs: VariableTracker,
     ) -> ListVariable | None: ...
     def call_neg(
-        self, tx: InstructionTranslator, a
+        self,
+        tx: InstructionTranslator,
+        a,
     ) -> VariableTracker | SymNodeVariable | None: ...
     def call_format(
-        self, tx: InstructionTranslator, _format_string, *args, **kwargs
+        self,
+        tx: InstructionTranslator,
+        _format_string,
+        *args,
+        **kwargs,
     ) -> VariableTracker | StringFormatVariable: ...
     def call_id(self, tx: InstructionTranslator, *args) -> VariableTracker: ...
     def call_deepcopy(self, tx: InstructionTranslator, x): ...
@@ -225,22 +282,39 @@ class BuiltinVariable(VariableTracker):
     def call_sub(self, tx: InstructionTranslator, a, b) -> VariableTracker | None: ...
     def call_isub(self, tx: InstructionTranslator, a, b) -> VariableTracker | None: ...
     def call_and_(
-        self, tx: InstructionTranslator, a, b
+        self,
+        tx: InstructionTranslator,
+        a,
+        b,
     ) -> VariableTracker | SymNodeVariable | None: ...
     def call_iand(
-        self, tx: InstructionTranslator, a, b
+        self,
+        tx: InstructionTranslator,
+        a,
+        b,
     ) -> VariableTracker | SymNodeVariable | None: ...
     def call_or_(
-        self, tx: InstructionTranslator, a, b
+        self,
+        tx: InstructionTranslator,
+        a,
+        b,
     ) -> VariableTracker | SymNodeVariable | None: ...
     def call_ior(
-        self, tx: InstructionTranslator, a, b
+        self,
+        tx: InstructionTranslator,
+        a,
+        b,
     ) -> VariableTracker | SymNodeVariable | None: ...
     def call_not_(
-        self, tx: InstructionTranslator, a
+        self,
+        tx: InstructionTranslator,
+        a,
     ) -> VariableTracker | SymNodeVariable | None: ...
     def call_contains(
-        self, tx: InstructionTranslator, a: VariableTracker, b: VariableTracker
+        self,
+        tx: InstructionTranslator,
+        a: VariableTracker,
+        b: VariableTracker,
     ) -> VariableTracker: ...
 
 @contextlib.contextmanager

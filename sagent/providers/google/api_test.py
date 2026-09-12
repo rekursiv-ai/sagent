@@ -67,7 +67,7 @@ def test_strip_additional_properties_recurses_into_lists_and_dicts() -> None:
                 "nested": {
                     "additionalProperties": False,
                     "type": "object",
-                }
+                },
             },
             "items": [{"additionalProperties": False}],
         },
@@ -95,18 +95,15 @@ def _thinking_capability() -> ModelCapability:
     return Google.from_key("k").model("gemini-2.5-pro").capability
 
 
+# Bound rather than bare: every axis validates on assignment, so a default-capability
+# object cannot hold the thinking selections these tests are about.
 def _settings(
     *,
     thinking_effort: ThinkingEffort = "none",
     thinking_budget: ThinkingBudget = "none",
     thinking_output: ThinkingOutput = "none",
 ) -> ModelSettings:
-    """Return settings bound to the thinking-capable row.
-
-    Bound rather than bare: every axis validates on assignment, so a
-    default-capability object cannot hold the thinking selections these
-    tests are about.
-    """
+    """Return settings bound to the thinking-capable row."""
     return ModelSettings(
         capability=_thinking_capability(),
         thinking_effort=thinking_effort,
@@ -307,7 +304,10 @@ async def test_google_stream_logs_and_skips_malformed_json_chunk(
     m = p.model("gemini-2.5-flash")
     m._client = httpx2.AsyncClient(transport=transport)
     with (
-        caplog.at_level(logging.WARNING, logger="sagent.providers.google.api"),
+        caplog.at_level(
+            logging.WARNING,
+            logger="sagent.providers.google.api",
+        ),
         pytest.raises(StreamInterruptedError) as raised,
     ):
         await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
@@ -388,9 +388,11 @@ def test_google_build_response_cache_tokens_split_input_cost() -> None:
         prices=PriceCatalog(
             {
                 PriceCatalogProduct(): TokenPrice(
-                    request=1.0, response=2.0, cache_read=0.5
-                )
-            }
+                    request=1.0,
+                    response=2.0,
+                    cache_read=0.5,
+                ),
+            },
         ),
     )
     usage: MutableJSON = {
@@ -500,7 +502,9 @@ def test_build_request_fixed_thinking_uses_the_effort_budget() -> None:
     body = _wire(
         ModelRequest(messages=[UserMessage(text="x")]),
         _settings(
-            thinking_budget="fixed", thinking_effort="max", thinking_output="text"
+            thinking_budget="fixed",
+            thinking_effort="max",
+            thinking_output="text",
         ),
     )
     gen_config = cast(MutableJSON, body["generationConfig"])
@@ -514,7 +518,9 @@ def test_build_request_effort_min_sets_small_budget() -> None:
     body = _wire(
         ModelRequest(messages=[UserMessage(text="x")]),
         _settings(
-            thinking_budget="fixed", thinking_effort="min", thinking_output="text"
+            thinking_budget="fixed",
+            thinking_effort="min",
+            thinking_output="text",
         ),
     )
     gen_config = cast(MutableJSON, body["generationConfig"])
@@ -528,7 +534,9 @@ def test_build_request_effort_max_sets_largest_budget() -> None:
     body = _wire(
         ModelRequest(messages=[UserMessage(text="x")]),
         _settings(
-            thinking_budget="fixed", thinking_effort="max", thinking_output="text"
+            thinking_budget="fixed",
+            thinking_effort="max",
+            thinking_output="text",
         ),
     )
     gen_config = cast(MutableJSON, body["generationConfig"])
@@ -639,7 +647,8 @@ async def test_google_stream_400_exceeds_maximum_normalizes() -> None:
     def handle(request: httpx2.Request) -> httpx2.Response:
         del request
         return httpx2.Response(
-            400, text="The input token count exceeds the maximum allowed."
+            400,
+            text="The input token count exceeds the maximum allowed.",
         )
 
     transport = httpx2.MockTransport(handle)
@@ -663,7 +672,7 @@ async def test_google_stream_400_too_long_raises_prompt_too_long() -> None:
     p = Google.from_key("k")
     m = p.model("gemini-2.5-flash")
     m._client = httpx2.AsyncClient(transport=transport)
-    del sse_body  # only error path exercised
+    del sse_body  # Only error path exercised.
     with pytest.raises(PromptTooLongError):
         await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
 
@@ -778,7 +787,8 @@ def test_build_request_echoes_thought_signature() -> None:
     )
     body = _wire(_make_request([asst]))
     parts = cast(
-        list[MutableJSON], cast(list[MutableJSON], body["contents"])[0]["parts"]
+        list[MutableJSON],
+        cast(list[MutableJSON], body["contents"])[0]["parts"],
     )
     assert parts[0] == {"text": "answer", "thoughtSignature": "sig-text"}
     assert parts[1]["thoughtSignature"] == "sig-fc"
@@ -792,7 +802,8 @@ def test_build_request_omits_empty_thought_signature() -> None:
     )
     body = _wire(_make_request([asst]))
     parts = cast(
-        list[MutableJSON], cast(list[MutableJSON], body["contents"])[0]["parts"]
+        list[MutableJSON],
+        cast(list[MutableJSON], body["contents"])[0]["parts"],
     )
     assert parts[0] == {"text": "hi"}
     assert "thoughtSignature" not in parts[1]
@@ -812,7 +823,8 @@ def test_build_request_preserves_per_call_signature_order() -> None:
     )
     body = _wire(_make_request([asst]))
     parts = cast(
-        list[MutableJSON], cast(list[MutableJSON], body["contents"])[0]["parts"]
+        list[MutableJSON],
+        cast(list[MutableJSON], body["contents"])[0]["parts"],
     )
     assert cast(MutableJSON, parts[1]["functionCall"])["args"] == {"i": 1}
     assert parts[1]["thoughtSignature"] == "sig-a"

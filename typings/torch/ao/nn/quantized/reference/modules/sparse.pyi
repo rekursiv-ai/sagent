@@ -52,5 +52,8 @@ class EmbeddingBag(nn.EmbeddingBag, ReferenceQuantizedModule):
     def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...
     @classmethod
     def from_float(
-        cls, mod, weight_qparams, use_precomputed_fake_quant=...
+        cls,
+        mod,
+        weight_qparams,
+        use_precomputed_fake_quant=...,
     ) -> Self: ...

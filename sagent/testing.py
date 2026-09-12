@@ -27,7 +27,6 @@ import asyncio
 import itertools
 import time
 
-from sagent.agent import runtime as agent_runtime
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.cost_tracker import CostTracker
 from sagent.agent.state import (
@@ -65,6 +64,8 @@ from sagent.types.runtime import (
     Quit,
     RuntimeEvent,
 )
+
+import sagent.agent.runtime
 
 
 __all__ = ["FakeAgent", "MockModelCaps", "with_fake_agent"]
@@ -111,15 +112,15 @@ class MockModelCaps:
                         max_request_bytes=32 * 1024 * 1024,
                         max_image_edge_px=8000,
                         max_image_bytes=5 * 1024 * 1024,
-                    )
-                }
+                    ),
+                },
             ),
             prices=PriceCatalog(
                 {PriceCatalogProduct(): TokenPrice()}
                 | {
                     PriceCatalogProduct(service_tier=t): TokenPrice()
                     for t in self.service_tiers
-                }
+                },
             ),
             thinking_effort=thinking,
             thinking_budget=(
@@ -163,7 +164,15 @@ class MockModelCaps:
         return f"{self.model_id}{self.settings.context}"
 
     def spend(self, tokens: TokenCount) -> TokenCost:
-        """Price ``tokens`` at the tier these settings select."""
+        """Price ``tokens`` at the tier these settings select.
+
+        Args:
+          tokens: Token counts to price.
+
+        Returns:
+          cost: Cost at the selected service tier.
+
+        """
         prompt = tokens.request + tokens.cache_write + tokens.cache_read
         return (
             self.capability.prices[
@@ -242,9 +251,9 @@ class _NullModel:
         return AssistantMessage(text="")
 
 
-def _new_runtime() -> agent_runtime.AgentRuntime:
+def _new_runtime() -> sagent.agent.runtime.AgentRuntime:
     """Build a fresh ``AgentRuntime`` wired to a null model."""
-    return agent_runtime.AgentRuntime(model=_NullModel())
+    return sagent.agent.runtime.AgentRuntime(model=_NullModel())
 
 
 class _NullRichModel(MockModelCaps):
@@ -286,7 +295,9 @@ class FakeAgent:
     chars_per_token: int = 4
     """Divisor backing :meth:`approx_text_tokens`."""
 
-    runtime: agent_runtime.AgentRuntime = field(default_factory=_new_runtime)
+    runtime: sagent.agent.runtime.AgentRuntime = field(
+        default_factory=_new_runtime,
+    )
     """Real ``AgentRuntime`` with a null model; its observers list
     captures every published event."""
 
@@ -352,7 +363,12 @@ class FakeAgent:
         return merged
 
     def cancel_background(self, job_id: str) -> None:
-        """Cancel and forget a visible background job, if present."""
+        """Cancel and forget a visible background job, if present.
+
+        Args:
+          job_id: Human-readable job or provider call identifier.
+
+        """
         job = self._bg.pop(job_id, None)
         if job is None:
             job = self.background.get(job_id)
@@ -382,11 +398,16 @@ class FakeAgent:
     def kill_tool(self, qid: str) -> None:
         """Cancel one outstanding tool task by human job id or call id.
 
+        Args:
+          qid: Human-readable job id or provider call id.
+
+
         ``qid`` may be either id; ``cancel_background`` resolves either
         form via its ``_bg`` / ``background`` lookups, while the queued
         ``Kill`` carries the resolved provider ``call_id`` so the
         runtime's tool dispatch handler matches its registry key.
         Mirrors ``Agent.kill_tool``.
+
         """
         call_id = self._call_id_for_job(qid)
         self.cancel_background(qid)
@@ -424,7 +445,18 @@ class FakeAgent:
         model_id: str | None = None,
         account: str | None = None,
     ) -> ModelRecipe:
-        """Stub for ``AgentLike.change_model``; records the resolved recipe."""
+        """Stub for ``AgentLike.change_model``; records the resolved recipe.
+
+        Args:
+          provider: Optional provider name.
+          auth: Optional authentication method.
+          model_id: Optional model identifier.
+          account: Optional credential account.
+
+        Returns:
+          recipe: Resolved model recipe.
+
+        """
         current = self.model_recipe
         recipe = ModelRecipe(
             provider=provider or (current.provider if current else "Mock"),
@@ -445,11 +477,19 @@ class FakeAgent:
     def job_id_for_call(self, call_id: str) -> str:
         """Return the stable human job id for a provider call id, minting on miss.
 
+        Args:
+          call_id: Provider call identifier to resolve.
+
+        Returns:
+          job_id: Stable human-readable job identifier.
+
+
         Asymmetric with ``_call_id_for_job`` by design: a provider call
         id always wants a stable display id, so the lookup mints one on
         miss; a display id without a known call id falls back to itself
         (the runtime's id space is the same shape as the human one).
         Mirrors ``Agent.job_id_for_call``.
+
         """
         job_id = self._job_ids_by_call_id.get(call_id)
         if job_id is not None:

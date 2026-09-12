@@ -44,7 +44,9 @@ class AlbertAttention(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
 
 class AlbertSdpaAttention(AlbertAttention):
@@ -57,7 +59,9 @@ class AlbertSdpaAttention(AlbertAttention):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
 
 ALBERT_ATTENTION_CLASSES = ...
@@ -73,7 +77,9 @@ class AlbertLayer(nn.Module):
         output_hidden_states: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def ff_chunk(self, attention_output: torch.Tensor) -> torch.Tensor: ...
 
@@ -88,7 +94,9 @@ class AlbertLayerGroup(nn.Module):
         output_hidden_states: bool = ...,
     ) -> tuple[torch.Tensor | tuple[torch.Tensor], ...]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor | tuple[torch.Tensor], ...]: ...
 
 class AlbertTransformer(nn.Module):
@@ -115,7 +123,7 @@ class AlbertPreTrainedModel(PreTrainedModel):
 @auto_docstring(
     custom_intro="""
     Output type of [`AlbertForPreTraining`].
-    """
+    """,
 )
 class AlbertForPreTrainingOutput(ModelOutput):
     loss: torch.FloatTensor | None = ...

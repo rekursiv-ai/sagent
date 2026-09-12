@@ -66,7 +66,8 @@ class CUTLASSGemmTemplate(CUTLASSTemplate, ABC):
     @staticmethod
     @functools.lru_cache(32)
     def layout_match(
-        torch_layout: ir.Layout, cutlass_layout: cutlass_lib.LayoutType
+        torch_layout: ir.Layout,
+        cutlass_layout: cutlass_lib.LayoutType,
     ) -> bool: ...
     @staticmethod
     def set_layout(tensor_desc: TensorDescription, torch_layout: ir.Layout) -> None: ...
@@ -88,10 +89,12 @@ class CUTLASSGemmTemplate(CUTLASSTemplate, ABC):
     ) -> cutlass_library.gemm_op.GemmOperation: ...
     @classmethod
     def global_filter_ops(
-        cls, ops: list[cutlass_library.gemm_op.GemmOperation]
+        cls,
+        ops: list[cutlass_library.gemm_op.GemmOperation],
     ) -> list[cutlass_library.gemm_op.GemmOperation]: ...
     def filter_op(
-        self, op: cutlass_library.gemm_op.GemmOperation
+        self,
+        op: cutlass_library.gemm_op.GemmOperation,
     ) -> cutlass_library.gemm_op.GemmOperation: ...
     def gen_ops(self) -> list[tuple[str, cutlass_gemm_op.GemmOperation]]: ...
     def gemm_mode(self) -> str: ...

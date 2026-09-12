@@ -23,22 +23,31 @@ def get_image_size_fit_to_canvas(
 ) -> tuple[int, int]: ...
 @lru_cache(maxsize=100)
 def get_optimal_tiled_canvas(
-    image_height: int, image_width: int, max_image_tiles: int, tile_size: int
+    image_height: int,
+    image_width: int,
+    max_image_tiles: int,
+    tile_size: int,
 ) -> tuple[int, int]: ...
 def split_to_tiles(
-    image: np.ndarray, num_tiles_height: int, num_tiles_width: int
+    image: np.ndarray,
+    num_tiles_height: int,
+    num_tiles_width: int,
 ) -> np.ndarray: ...
 def build_aspect_ratio_mask(
-    aspect_ratios: list[list[tuple[int, int]]], max_image_tiles: int
+    aspect_ratios: list[list[tuple[int, int]]],
+    max_image_tiles: int,
 ) -> np.ndarray: ...
 def pack_images(
-    batch_images: list[list[np.ndarray]], max_image_tiles: int
+    batch_images: list[list[np.ndarray]],
+    max_image_tiles: int,
 ) -> tuple[np.ndarray, list[list[int]]]: ...
 def pack_aspect_ratios(
-    aspect_ratios: list[list[tuple[int, int]]], pad_value: int = ...
+    aspect_ratios: list[list[tuple[int, int]]],
+    pad_value: int = ...,
 ) -> np.ndarray: ...
 def convert_aspect_ratios_to_ids(
-    aspect_ratios: list[list[tuple[int, int]]], max_image_tiles: int
+    aspect_ratios: list[list[tuple[int, int]]],
+    max_image_tiles: int,
 ) -> np.ndarray: ...
 def to_channel_dimension_format(
     image: np.ndarray,

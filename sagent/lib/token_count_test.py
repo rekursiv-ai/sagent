@@ -123,7 +123,7 @@ def test_image_tokens_are_modality_tokens_not_byte_inflated() -> None:
                 ),
             ],
         ),
-        _TokenModel(),  # approx_image_tokens returns 7
+        _TokenModel(),  # approx_image_tokens returns 7.
     )
     # Modality estimate only: 7. NOT byte-inflated to ~1M.
     assert n == 7

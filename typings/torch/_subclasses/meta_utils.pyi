@@ -61,10 +61,17 @@ class MetaTensorDescriber:
     def get_tensor_id(self, t: torch.Tensor) -> MetaTensorId: ...
     def get_storage_id(self, s: torch.UntypedStorage) -> MetaStorageId: ...
     def describe_storage(
-        self, s: torch.UntypedStorage, *, trace: bool = ...
+        self,
+        s: torch.UntypedStorage,
+        *,
+        trace: bool = ...,
     ) -> MetaStorageDesc: ...
     def describe_tensor(
-        self, t: torch.Tensor, *, recurse: bool = ..., trace: bool = ...
+        self,
+        t: torch.Tensor,
+        *,
+        recurse: bool = ...,
+        trace: bool = ...,
     ) -> MetaTensorDesc: ...
 
 @dataclass(frozen=True)
@@ -119,7 +126,11 @@ class _CustomViewFunc(ViewFunc[_TensorT], Generic[_TensorT]):
 
 class _MetaTensorCallback(Protocol, Generic[_TensorT_cov]):
     def __call__(
-        self, arg: Callable[[], torch.Tensor], /, *, device: torch.device | str
+        self,
+        arg: Callable[[], torch.Tensor],
+        /,
+        *,
+        device: torch.device | str,
     ) -> _TensorT_cov: ...
 
 class _MetaTensorCallbackKwargs(TypedDict, total=False):

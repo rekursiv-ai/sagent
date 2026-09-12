@@ -34,7 +34,7 @@ class FocalNetModelOutput(ModelOutput):
 @auto_docstring(
     custom_intro="""
     FocalNet masked image model outputs.
-    """
+    """,
 )
 class FocalNetMaskedImageModelingOutput(ModelOutput):
     loss: torch.FloatTensor | None = ...
@@ -74,14 +74,19 @@ class FocalNetPatchEmbeddings(nn.Module):
     def maybe_pad(self, pixel_values, height, width):  # -> Tensor:
         ...
     def forward(
-        self, pixel_values: torch.FloatTensor | None
+        self,
+        pixel_values: torch.FloatTensor | None,
     ) -> tuple[torch.Tensor, tuple[int]]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, tuple[int]]: ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class FocalNetDropPath(nn.Module):
@@ -92,14 +97,25 @@ class FocalNetDropPath(nn.Module):
 
 class FocalNetModulation(nn.Module):
     def __init__(
-        self, config, index, dim, focal_factor=..., bias=..., projection_dropout=...
+        self,
+        config,
+        index,
+        dim,
+        focal_factor=...,
+        bias=...,
+        projection_dropout=...,
     ) -> None: ...
     def forward(self, hidden_state):  # -> Any:
         ...
 
 class FocalNetMlp(nn.Module):
     def __init__(
-        self, config, in_features, hidden_features=..., out_features=..., drop=...
+        self,
+        config,
+        in_features,
+        hidden_features=...,
+        out_features=...,
+        drop=...,
     ) -> None: ...
     def forward(self, hidden_state):  # -> Any:
         ...
@@ -111,7 +127,9 @@ class FocalNetLayer(nn.Module):
 class FocalNetStage(GradientCheckpointingLayer):
     def __init__(self, config, index, input_resolution) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_dimensions: tuple[int, int]
+        self,
+        hidden_states: torch.Tensor,
+        input_dimensions: tuple[int, int],
     ) -> tuple[torch.Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> tuple[torch.Tensor]: ...
 

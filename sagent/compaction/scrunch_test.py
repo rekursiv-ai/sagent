@@ -59,7 +59,8 @@ def _user(text: str) -> UserMessage:
 
 
 def _assistant(
-    text: str = "", tool_calls: tuple[ToolCall, ...] = ()
+    text: str = "",
+    tool_calls: tuple[ToolCall, ...] = (),
 ) -> AssistantMessage:
     return AssistantMessage(text=text, tool_calls=tool_calls)
 
@@ -124,7 +125,7 @@ class _SizedCompactor:
 
 def test_plan_scrunch_already_fits_returns_empty_plan() -> None:
     """No partitions when estimated tokens already <= target."""
-    context: list[ModelContextEvent] = [_user("x" * 40)]  # ~10 tokens
+    context: list[ModelContextEvent] = [_user("x" * 40)]  # ~10 tokens.
     plan = plan_scrunch(
         context=context,
         model=_stub_model(),
@@ -179,7 +180,7 @@ def test_plan_scrunch_partition_is_pair_safe_grows_to_include_tool_result() -> N
     context: list[ModelContextEvent] = [
         _user("u0"),
         _assistant(tool_calls=(ToolCall(id="c1", name="t", args={}),)),
-        _tool_result("c1", "r1" * 200),  # large; partition would want to stop here
+        _tool_result("c1", "r1" * 200),  # Large; partition would want to stop here.
         _user("u3"),
         _user("u4"),
     ]
@@ -273,10 +274,10 @@ def test_plan_scrunch_measures_tokens_via_model_not_chars() -> None:
         max_request_tokens: int = 200_000
 
         @override
-        def approx_text_tokens(self, text: str) -> int:  # 2 chars/token
+        def approx_text_tokens(self, text: str) -> int:  # 2 chars/token.
             return len(text) // 2
 
-    context: list[ModelContextEvent] = [_user("x" * 200)]  # 100 tokens at 2 c/tok
+    context: list[ModelContextEvent] = [_user("x" * 200)]  # 100 tokens at 2 c/tok.
     plan = plan_scrunch(
         context=context,
         model=cast(Model, _HalfModel()),

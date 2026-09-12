@@ -67,7 +67,9 @@ class AltRobertaSelfAttention(nn.Module):
 class AltRobertaSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -94,7 +96,9 @@ class AltRobertaIntermediate(nn.Module):
 class AltRobertaOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -153,7 +157,9 @@ class AltCLIPAttention(nn.Module):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class AltCLIPMLP(nn.Module):
@@ -188,10 +194,15 @@ class AltCLIPEncoder(nn.Module):
 class AltCLIPVisionEmbeddings(nn.Module):
     def __init__(self, config: AltCLIPVisionConfig) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
-        self, pixel_values: torch.FloatTensor, interpolate_pos_encoding=...
+        self,
+        pixel_values: torch.FloatTensor,
+        interpolate_pos_encoding=...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -258,7 +269,8 @@ class AltCLIPTextModel(AltCLIPPreTrainedModel):
     def get_input_embeddings(self) -> nn.Module: ...
     def set_input_embeddings(self, value: nn.Embedding) -> None: ...
     def resize_token_embeddings(
-        self, new_num_tokens: int | None = ...
+        self,
+        new_num_tokens: int | None = ...,
     ) -> nn.Embedding: ...
     @can_return_tuple
     @auto_docstring
@@ -290,7 +302,9 @@ class AltCLIPModel(AltCLIPPreTrainedModel):
     @filter_out_non_signature_kwargs()
     @auto_docstring
     def get_image_features(
-        self, pixel_values: torch.FloatTensor, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values: torch.FloatTensor,
+        interpolate_pos_encoding: bool = ...,
     ) -> torch.FloatTensor: ...
     @auto_docstring
     def forward(
@@ -308,7 +322,9 @@ class AltCLIPModel(AltCLIPPreTrainedModel):
     ) -> tuple | AltCLIPOutput: ...
 
 def create_position_ids_from_input_ids(
-    input_ids, padding_idx, past_key_values_length=...
+    input_ids,
+    padding_idx,
+    past_key_values_length=...,
 ): ...
 
 __all__ = [

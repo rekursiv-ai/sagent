@@ -32,7 +32,10 @@ class DeformableDetrFastImageProcessorKwargs(DefaultFastImageProcessorKwargs):
 SUPPORTED_ANNOTATION_FORMATS = ...
 
 def convert_coco_poly_to_mask(
-    segmentations, height: int, width: int, device: torch.device
+    segmentations,
+    height: int,
+    width: int,
+    device: torch.device,
 ) -> torch.Tensor: ...
 def prepare_coco_detection_annotation(
     image,
@@ -68,11 +71,14 @@ class DeformableDetrImageProcessorFast(BaseImageProcessorFast):
     model_input_names = ...
     valid_kwargs = DeformableDetrFastImageProcessorKwargs
     def __init__(
-        self, **kwargs: Unpack[DeformableDetrFastImageProcessorKwargs]
+        self,
+        **kwargs: Unpack[DeformableDetrFastImageProcessorKwargs],
     ) -> None: ...
     @classmethod
     def from_dict(
-        cls, image_processor_dict: dict[str, Any], **kwargs
+        cls,
+        image_processor_dict: dict[str, Any],
+        **kwargs,
     ):  # -> tuple[Self, dict[str, Any]] | Self:
         ...
     def prepare_annotation(
@@ -101,7 +107,9 @@ class DeformableDetrImageProcessorFast(BaseImageProcessorFast):
     ):  # -> dict[Any, Any]:
         ...
     def normalize_annotation(
-        self, annotation: dict, image_size: tuple[int, int]
+        self,
+        annotation: dict,
+        image_size: tuple[int, int],
     ) -> dict: ...
     def pad(
         self,

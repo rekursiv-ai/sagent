@@ -75,7 +75,7 @@ def test_background_aware_tool_preserves_existing_properties() -> None:
     """Existing ``properties`` survive the merge unchanged."""
     tool = _StubTool(
         directive_schema=json_freeze(
-            {"type": "object", "properties": {"msg": {"type": "string"}}}
+            {"type": "object", "properties": {"msg": {"type": "string"}}},
         ),
     )
     wrapped = BackgroundAwareTool(tool)

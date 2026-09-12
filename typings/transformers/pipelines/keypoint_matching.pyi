@@ -26,11 +26,17 @@ class KeypointMatchingPipeline(Pipeline):
     def __init__(self, *args, **kwargs) -> None: ...
     @overload
     def __call__(
-        self, inputs: ImagePair, threshold: float = ..., **kwargs: Any
+        self,
+        inputs: ImagePair,
+        threshold: float = ...,
+        **kwargs: Any,
     ) -> list[Match]: ...
     @overload
     def __call__(
-        self, inputs: list[ImagePair], threshold: float = ..., **kwargs: Any
+        self,
+        inputs: list[ImagePair],
+        threshold: float = ...,
+        **kwargs: Any,
     ) -> list[list[Match]]: ...
     def __call__(
         self,
@@ -39,7 +45,9 @@ class KeypointMatchingPipeline(Pipeline):
         **kwargs: Any,
     ) -> list[Match] | list[list[Match]]: ...
     def preprocess(
-        self, images, timeout=...
+        self,
+        images,
+        timeout=...,
     ):  # -> dict[str, BatchFeature | Any | list[tuple[int, int]]]:
         ...
     def postprocess(self, forward_outputs, threshold=...) -> list[Match]: ...

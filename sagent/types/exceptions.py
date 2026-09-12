@@ -104,9 +104,16 @@ class ContextOverflowError(UserFacingError):
 
 
 def log_exception_or_warning(
-    logger: logging.Logger, msg: str, exc: BaseException
+    logger: logging.Logger,
+    msg: str,
+    exc: BaseException,
 ) -> None:
     """Log ``msg`` per the user-facing-error policy.
+
+    Args:
+      logger: Logger receiving the formatted message.
+      msg: Context describing the operation that failed.
+      exc: Exception whose type determines the logging policy.
 
     - ``UserFacingError`` (or subclass): ``logger.warning("%s: %s", msg, exc)``
       -- no traceback. The exception's message is already polished
@@ -117,6 +124,7 @@ def log_exception_or_warning(
 
     Passing ``exc_info=exc`` explicitly keeps the traceback even when
     called outside an ``except`` block, where ``sys.exc_info()`` is empty.
+
     """
     if isinstance(exc, UserFacingError):
         logger.warning("%s: %s", msg, exc)
@@ -125,9 +133,17 @@ def log_exception_or_warning(
 
 
 def log_task_exception(
-    logger: logging.Logger, where: str
+    logger: logging.Logger,
+    where: str,
 ) -> Callable[[asyncio.Task[object]], None]:
     """Build an ``asyncio.Task`` done-callback that logs unhandled errors.
+
+    Args:
+      logger: Logger receiving messages for failed tasks.
+      where: Description of the task's location or purpose.
+
+    Returns:
+      callback: Done-callback that logs the task's unhandled exception.
 
     Fire-and-forget ``asyncio.create_task`` sites swallow exceptions
     silently -- ``asyncio`` only surfaces them as
@@ -152,6 +168,7 @@ def log_task_exception(
     branch catches only the ``Exception`` subset; non-``Exception``
     ``BaseException`` instances fall through to the ``error`` branch
     with ``exc_info`` so the operator sees the originating traceback.
+
     """
 
     def _cb(task: asyncio.Task[object]) -> None:

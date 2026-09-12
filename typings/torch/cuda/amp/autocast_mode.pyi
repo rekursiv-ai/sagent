@@ -14,7 +14,10 @@ class autocast(torch.amp.autocast_mode.autocast):
         category=FutureWarning,
     )
     def __init__(
-        self, enabled: bool = ..., dtype: torch.dtype = ..., cache_enabled: bool = ...
+        self,
+        enabled: bool = ...,
+        dtype: torch.dtype = ...,
+        cache_enabled: bool = ...,
     ) -> None: ...
     def __enter__(self) -> Self: ...
     def __exit__(
@@ -30,7 +33,9 @@ class autocast(torch.amp.autocast_mode.autocast):
     category=FutureWarning,
 )
 def custom_fwd(
-    fwd=..., *, cast_inputs=...
+    fwd=...,
+    *,
+    cast_inputs=...,
 ) -> partial[Any] | _Wrapped[..., Any, ..., Any]: ...
 @deprecated(
     "`torch.cuda.amp.custom_bwd(args...)` is deprecated. Please use `torch.amp.custom_bwd(args..., device_type='cuda')` instead.",

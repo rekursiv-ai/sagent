@@ -19,7 +19,10 @@ class QuantEmbedding(nn.Module):
         quant_mode=...,
     ) -> None: ...
     def forward(
-        self, x, positions=..., incremental_state=...
+        self,
+        x,
+        positions=...,
+        incremental_state=...,
     ):  # -> tuple[Tensor, None] | tuple[Any, Any]:
         ...
 
@@ -59,7 +62,9 @@ class QuantLinear(nn.Module):
     def __repr__(self):  # -> str:
         ...
     def forward(
-        self, x, prev_act_scaling_factor=...
+        self,
+        x,
+        prev_act_scaling_factor=...,
     ):  # -> tuple[Tensor, None] | tuple[Any, Any]:
         ...
 
@@ -81,24 +86,37 @@ class IntSoftmax(nn.Module):
 
 class IntLayerNorm(nn.Module):
     def __init__(
-        self, normalized_shape, eps, output_bit=..., quant_mode=..., force_dequant=...
+        self,
+        normalized_shape,
+        eps,
+        output_bit=...,
+        quant_mode=...,
+        force_dequant=...,
     ) -> None: ...
     def set_shift(self, y_int):  # -> None:
         ...
     def overflow_fallback(self, y_int): ...
     def forward(
-        self, x, scaling_factor=...
+        self,
+        x,
+        scaling_factor=...,
     ):  # -> tuple[Any, None] | tuple[Any, Tensor]:
         ...
 
 def get_percentile_min_max(
-    input, lower_percentile, upper_percentile, output_tensor=...
+    input,
+    lower_percentile,
+    upper_percentile,
+    output_tensor=...,
 ):  # -> tuple[Number | Tensor, Number | Tensor]:
     ...
 def linear_quantize(input, scale, zero_point, inplace=...):  # -> Tensor:
     ...
 def symmetric_linear_quantization_params(
-    num_bits, saturation_min, saturation_max, per_channel=...
+    num_bits,
+    saturation_min,
+    saturation_max,
+    per_channel=...,
 ): ...
 
 class SymmetricQuantFunction(Function):
@@ -140,6 +158,7 @@ class FixedPointMul(Function):
         ...
     @staticmethod
     def backward(
-        ctx, grad_output
+        ctx,
+        grad_output,
     ):  # -> tuple[Any, None, None, None, None, Any | None, None]:
         ...

@@ -143,7 +143,11 @@ def test_exit_marker_survives_truncation(stdout_size: int) -> None:
     proc = MagicMock()
     proc.returncode = 7
     out = _process_output(
-        proc, "x" * stdout_size, "fatal: boom", sentinel="__NONE__", state=ToolState()
+        proc,
+        "x" * stdout_size,
+        "fatal: boom",
+        sentinel="__NONE__",
+        state=ToolState(),
     )
     assert _EXIT_MARKER_RE.search(out), (
         f"exit-code marker lost at stdout={stdout_size:,}: a failed command"
@@ -215,7 +219,7 @@ async def test_run_empty_output(tmp_path: Path) -> None:
     b = Bash()
     with with_fake_agent() as agent:
         agent.tool_state.bash_cwd = str(tmp_path)
-        result = await b.run({"command": ":"})  # builtin no-op
+        result = await b.run({"command": ":"})  # Builtin no-op.
     assert result.content == "(no output)"
 
 
@@ -256,10 +260,10 @@ async def test_detached_child_reaped_at_exit_without_resource_warning(
     with with_fake_agent() as agent:
         agent.tool_state.bash_cwd = str(tmp_path)
         _ = await b.run({"command": "sleep 0.01", "run_as_fully_detached": True})
-    await asyncio.sleep(0.05)  # child certainly finished, intentionally unreaped
+    await asyncio.sleep(0.05)  # Child certainly finished, intentionally unreaped.
     with warnings.catch_warnings():
         warnings.simplefilter("error", ResourceWarning)
-        _reap_at_exit()  # reaps finished children; no warning may escape
+        _reap_at_exit()  # Reaps finished children; no warning may escape.
 
 
 def test_suppress_oserror_swallows_oserror() -> None:
@@ -286,7 +290,7 @@ async def test_kill_process_group_sigterm_succeeds() -> None:
     """``_kill_process_group`` exits cleanly when ``wait`` returns inside budget."""
     proc = MagicMock()
     proc.returncode = None
-    proc.pid = 99_999  # killpg races into OSError (suppressed).
+    proc.pid = 99_999  # Killpg races into OSError (suppressed).
 
     async def _wait() -> int:
         return 0
@@ -297,7 +301,8 @@ async def test_kill_process_group_sigterm_succeeds() -> None:
 
 @pytest.mark.asyncio
 async def test_run_foreground_timeout(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """``_run_foreground`` returns a ``[timeout after Xs]`` line."""
 
@@ -318,7 +323,10 @@ async def test_run_foreground_timeout(
         del coro, timeout
         raise TimeoutError
 
-    monkeypatch.setattr("sagent.tools.bash.asyncio.create_subprocess_exec", _create)
+    monkeypatch.setattr(
+        "sagent.tools.bash.asyncio.create_subprocess_exec",
+        _create,
+    )
     monkeypatch.setattr("asyncio.wait_for", _raise_timeout)
     b = Bash()
     with with_fake_agent() as agent:
@@ -463,7 +471,8 @@ async def test_cwd_tracking_survives_unterminated_output(tmp_path: Path) -> None
     ["trap - EXIT; ", 'trap "echo mine" EXIT; ', "trap '' EXIT; "],
 )
 async def test_cwd_tracking_survives_a_command_that_owns_the_exit_trap(
-    tmp_path: Path, prologue: str
+    tmp_path: Path,
+    prologue: str,
 ) -> None:
     """A command may set its own EXIT trap; tracking must not depend on ours.
 
@@ -496,7 +505,8 @@ async def test_cwd_tracking_survives_a_command_that_owns_the_exit_trap(
     ],
 )
 async def test_a_trailing_continuation_cannot_swallow_the_cwd_report(
-    tmp_path: Path, command: str
+    tmp_path: Path,
+    command: str,
 ) -> None:
     """The command must not be able to splice into the wrapper's own lines."""
     state = ToolState()
@@ -513,7 +523,9 @@ async def test_a_trailing_continuation_cannot_swallow_the_cwd_report(
     [("false", "[exit code: 1]"), ("exit 3", "[exit code: 3]"), ("true", "")],
 )
 async def test_the_commands_own_exit_status_is_reported(
-    tmp_path: Path, command: str, expected: str
+    tmp_path: Path,
+    command: str,
+    expected: str,
 ) -> None:
     """The wrapper must not overwrite the status with its own.
 
@@ -534,7 +546,8 @@ async def test_the_commands_own_exit_status_is_reported(
     [(1_999, 1.999), (500, 0.5), (1, 0.001), (120_000, 120.0)],
 )
 def test_a_sub_second_timeout_is_not_truncated(
-    timeout_ms: int, expected_s: float
+    timeout_ms: int,
+    expected_s: float,
 ) -> None:
     """The schema takes MILLISECONDS, so the conversion must keep them.
 
@@ -549,7 +562,7 @@ def test_a_sub_second_timeout_is_not_truncated(
 def test_a_timeout_over_the_ceiling_is_clamped() -> None:
     """The advertised maximum is still the maximum."""
     assert _timeout_seconds(BASH_MAX_TIMEOUT_MS * 10) == pytest.approx(
-        BASH_MAX_TIMEOUT_MS / 1000
+        BASH_MAX_TIMEOUT_MS / 1000,
     )
 
 
@@ -621,7 +634,7 @@ def test_a_writing_command_serializes_against_other_bash(command: str) -> None:
 def test_writers_share_one_key_so_they_queue_behind_each_other() -> None:
     b = Bash()
     assert b.serialize_key({"command": "rm a"}) == b.serialize_key(
-        {"command": "git checkout ."}
+        {"command": "git checkout ."},
     )
 
 

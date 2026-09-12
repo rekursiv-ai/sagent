@@ -147,10 +147,14 @@ class MemoryPlanningLine(WrapperLine):
 class EfficientPeakEstimate:
     def __init__(self) -> None: ...
     def peak_between(
-        self, line_a: FreeIfNotReusedLine, line_b: AllocateLine
+        self,
+        line_a: FreeIfNotReusedLine,
+        line_b: AllocateLine,
     ) -> int: ...
     def update_peak_between(
-        self, line_a: FreeIfNotReusedLine, line_b: AllocateLine
+        self,
+        line_a: FreeIfNotReusedLine,
+        line_b: AllocateLine,
     ) -> None: ...
 
 @dataclasses.dataclass
@@ -158,7 +162,9 @@ class AllocateLine(MemoryPlanningLine):
     node: BufferLike
     def __post_init__(self) -> None: ...
     def should_reuse_buffer(
-        self, free_line: FreeIfNotReusedLine, size: int
+        self,
+        free_line: FreeIfNotReusedLine,
+        size: int,
     ) -> bool: ...
     def plan(self, state: MemoryPlanningState) -> MemoryPlanningLine: ...
     def codegen(self, code: IndentedBuffer) -> None: ...
@@ -210,7 +216,14 @@ class CommBufferAllocateLine(CommBufferLine):
     def codegen(self, code: IndentedBuffer) -> None: ...
     @staticmethod
     def make_allocation_line(
-        comm_buffer_type, group_name, wrapper, name, device, dtype, shape, stride
+        comm_buffer_type,
+        group_name,
+        wrapper,
+        name,
+        device,
+        dtype,
+        shape,
+        stride,
     ) -> str: ...
     def codegen_fx(self, converter: FxConverter) -> FxConversionFunc: ...
 
@@ -303,7 +316,12 @@ class PythonWrapperCodegen(CodeGen):
         kwargs,
     ) -> None: ...
     def generate_index_put_fallback(
-        self, kernel, x, indices, values, accumulate
+        self,
+        kernel,
+        x,
+        indices,
+        values,
+        accumulate,
     ) -> None: ...
     def generate_fallback_kernel_with_runtime_lookup(
         self,
@@ -318,14 +336,18 @@ class PythonWrapperCodegen(CodeGen):
     def get_wrapper_call_indent(self) -> int: ...
     @contextlib.contextmanager
     def set_writeline(
-        self, new: Callable[..., None]
+        self,
+        new: Callable[..., None],
     ) -> Iterator[Callable[..., None]]: ...
     def generate_and_run_autotune_block(self) -> None: ...
     def memory_plan(self) -> None: ...
     def memory_plan_reuse(self) -> None: ...
     def run_wrapper_ir_passes(self, is_inference: bool) -> None: ...
     def codegen_input_symbol_assignment(
-        self, name: str, value: ir.TensorBox, bound_vars: OrderedSet[sympy.Symbol]
+        self,
+        name: str,
+        value: ir.TensorBox,
+        bound_vars: OrderedSet[sympy.Symbol],
     ) -> None: ...
     def codegen_inputs(self) -> None: ...
     def ensure_size_computed(self, sym: sympy.Symbol) -> None: ...
@@ -337,10 +359,21 @@ class PythonWrapperCodegen(CodeGen):
     def codegen_python_shape_tuple(self, shape: Sequence[Expr]) -> str: ...
     def codegen_shape_tuple(self, shape: Sequence[Expr]) -> str: ...
     def codegen_alloc_from_pool(
-        self, name, offset, dtype, shape, stride
+        self,
+        name,
+        offset,
+        dtype,
+        shape,
+        stride,
     ) -> tuple[str, list[str]]: ...
     def codegen_reinterpret_view(
-        self, data, size, stride, offset, writeline: Callable[..., None], dtype=...
+        self,
+        data,
+        size,
+        stride,
+        offset,
+        writeline: Callable[..., None],
+        dtype=...,
     ) -> str: ...
     def codegen_device_copy(self, src, dst, non_blocking: bool | str) -> None: ...
     def codegen_multi_output(self, node: ir.MultiOutput) -> None: ...
@@ -370,7 +403,10 @@ class PythonWrapperCodegen(CodeGen):
         | tuple[str, dict[str, Any], list[Expr] | list[Symbol]]
     ): ...
     def generate_numel_expr(
-        self, kernel_name: str, tree, suffix: str | None = ...
+        self,
+        kernel_name: str,
+        tree,
+        suffix: str | None = ...,
     ) -> SymbolicCallArg: ...
     def generate_workspace_allocation(self, ws: WorkspaceArg) -> None: ...
     def generate_workspace_deallocation(self, ws: WorkspaceArg) -> None: ...
@@ -405,30 +441,49 @@ class PythonWrapperCodegen(CodeGen):
     @cache_on_self
     def write_memory_track_allocation_once(self) -> None: ...
     def make_allocation(
-        self, name, device, dtype, shape, stride, allocation_shape=..., is_pinned=...
+        self,
+        name,
+        device,
+        dtype,
+        shape,
+        stride,
+        allocation_shape=...,
+        is_pinned=...,
     ) -> str: ...
     def make_comment(self, line) -> None: ...
     def make_tensor_alias(self, new_name, old_name, comment=...) -> str: ...
     def make_buffer_free(self, buffer: BufferLike | ir.TorchBindObject) -> str: ...
     def make_free_by_names(self, names_to_del: list[str]) -> str: ...
     def codegen_exact_buffer_reuse(
-        self, old_name: str, new_name: str, del_line: str
+        self,
+        old_name: str,
+        new_name: str,
+        del_line: str,
     ) -> str: ...
     def write_provenance_debug_handle(
-        self, kernel_name, debug_handle: int | None = ...
+        self,
+        kernel_name,
+        debug_handle: int | None = ...,
     ) -> None: ...
     def make_buffer_reuse(
-        self, old: BufferLike, new: BufferLike, delete_old: bool
+        self,
+        old: BufferLike,
+        new: BufferLike,
+        delete_old: bool,
     ) -> str: ...
     def codegen_deferred_allocation(
-        self, name: str, view: ir.ReinterpretView
+        self,
+        name: str,
+        view: ir.ReinterpretView,
     ) -> None: ...
     def codegen_allocation(self, buffer: ir.Buffer) -> None: ...
     def codegen_free(self, buffer) -> None: ...
     def can_reuse(self, input_buffer, output_buffer=...) -> bool: ...
     def did_reuse(self, buffer, reused_buffer) -> Literal[False]: ...
     def codegen_inplace_reuse(
-        self, input_buffer: ir.Buffer, output_buffer: ir.Buffer
+        self,
+        input_buffer: ir.Buffer,
+        output_buffer: ir.Buffer,
     ) -> None: ...
     def codegen_unbacked_symbol_decl(self, symbol) -> str: ...
     def codegen_unbacked_symbol_defs_for_outputs(
@@ -438,21 +493,35 @@ class PythonWrapperCodegen(CodeGen):
         unbacked_bindings: dict[sympy.Symbol, pytree.KeyPath] | None,
     ) -> None: ...
     def codegen_subgraph_by_inlining(
-        self, subgraph, outer_inputs, outer_outputs
+        self,
+        subgraph,
+        outer_inputs,
+        outer_outputs,
     ) -> None: ...
     def codegen_partition_call(
-        self, partition_id: int, partition_signatures: ir.GraphPartitionSignature
+        self,
+        partition_id: int,
+        partition_signatures: ir.GraphPartitionSignature,
     ) -> None: ...
     def set_all_partition_names(self, num_partitions: int) -> None: ...
     def codegen_subgraph_call_with_flattened_outputs(
-        self, subgraph, outer_inputs, outer_flattened_outputs
+        self,
+        subgraph,
+        outer_inputs,
+        outer_flattened_outputs,
     ) -> None: ...
     def codegen_subgraph_call(
-        self, subgraph, outer_inputs, outer_buffer_name
+        self,
+        subgraph,
+        outer_inputs,
+        outer_buffer_name,
     ) -> None: ...
     def codegen_subgraph_common(self, subgraph) -> None: ...
     def codegen_subgraph_with_flattened_outputs(
-        self, subgraph, outer_inputs, outer_flattened_outputs
+        self,
+        subgraph,
+        outer_inputs,
+        outer_flattened_outputs,
     ) -> None: ...
     def codegen_subgraph(self, subgraph, outer_inputs, outer_buffer_name) -> None: ...
     def codegen_invoke_subgraph(self, invoke_subgraph) -> None: ...

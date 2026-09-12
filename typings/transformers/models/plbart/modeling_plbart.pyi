@@ -103,12 +103,16 @@ class PLBartEncoderLayer(GradientCheckpointingLayer):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
 
 class PLBartEncoder(PLBartPreTrainedModel):
     def __init__(
-        self, config: PLBartConfig, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: PLBartConfig,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -138,12 +142,15 @@ class PLBartDecoderLayer(GradientCheckpointingLayer):
         use_cache: bool | None = ...,
         cache_position: torch.Tensor | None = ...,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class PLBartDecoder(PLBartPreTrainedModel):
     def __init__(
-        self, config: PLBartConfig, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: PLBartConfig,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -162,7 +169,9 @@ class PLBartDecoder(PLBartPreTrainedModel):
         cache_position: torch.LongTensor | None = ...,
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
 
 def shift_tokens_right(input_ids: torch.Tensor, pad_token_id: int):  # -> Tensor:
@@ -241,7 +250,11 @@ class PLBartForConditionalGeneration(PLBartPreTrainedModel, GenerationMixin):
 
 class PLBartClassificationHead(nn.Module):
     def __init__(
-        self, input_dim: int, inner_dim: int, num_classes: int, pooler_dropout: float
+        self,
+        input_dim: int,
+        inner_dim: int,
+        num_classes: int,
+        pooler_dropout: float,
     ) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...

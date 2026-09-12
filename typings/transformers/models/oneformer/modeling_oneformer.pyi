@@ -27,14 +27,20 @@ def multi_scale_deformable_attention(
 ) -> Tensor: ...
 def dice_loss(inputs: Tensor, labels: Tensor, num_masks: int) -> Tensor: ...
 def sigmoid_cross_entropy_loss(
-    inputs: torch.Tensor, labels: torch.Tensor, num_masks: int
+    inputs: torch.Tensor,
+    labels: torch.Tensor,
+    num_masks: int,
 ) -> torch.Tensor: ...
 def pair_wise_dice_loss(inputs: Tensor, labels: Tensor) -> Tensor: ...
 def pair_wise_sigmoid_cross_entropy_loss(
-    inputs: torch.Tensor, labels: torch.Tensor
+    inputs: torch.Tensor,
+    labels: torch.Tensor,
 ) -> torch.Tensor: ...
 def sample_point(
-    input_features: torch.Tensor, point_coordinates: torch.Tensor, add_dim=..., **kwargs
+    input_features: torch.Tensor,
+    point_coordinates: torch.Tensor,
+    add_dim=...,
+    **kwargs,
 ) -> torch.Tensor: ...
 
 class OneFormerHungarianMatcher(nn.Module):
@@ -47,7 +53,11 @@ class OneFormerHungarianMatcher(nn.Module):
     ) -> None: ...
     @torch.no_grad()
     def forward(
-        self, masks_queries_logits, class_queries_logits, mask_labels, class_labels
+        self,
+        masks_queries_logits,
+        class_queries_logits,
+        mask_labels,
+        class_labels,
     ) -> list[tuple[Tensor]]: ...
 
 class OneFormerLoss(nn.Module):
@@ -63,7 +73,9 @@ class OneFormerLoss(nn.Module):
         contrastive_temperature: float | None = ...,
     ) -> None: ...
     def loss_contrastive(
-        self, contrastive_queries_logits: Tensor, text_queries: Tensor
+        self,
+        contrastive_queries_logits: Tensor,
+        text_queries: Tensor,
     ):  # -> dict[str, Tensor]:
         ...
     def loss_labels(
@@ -101,7 +113,9 @@ class OneFormerLoss(nn.Module):
     ) -> dict[str, Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> dict[str, Tensor]: ...
     def get_num_masks(
-        self, class_labels: torch.Tensor, device: torch.device
+        self,
+        class_labels: torch.Tensor,
+        device: torch.device,
     ) -> torch.Tensor: ...
 
 @dataclass
@@ -171,10 +185,16 @@ class OneFormerPixelDecoderFrozenBatchNorm2d(nn.Module):
 
 class OneFormerPixelDecoderEncoderMultiscaleDeformableAttention(nn.Module):
     def __init__(
-        self, embed_dim: int, num_heads: int, n_levels: int, n_points: int
+        self,
+        embed_dim: int,
+        num_heads: int,
+        n_levels: int,
+        n_points: int,
     ) -> None: ...
     def with_pos_embed(
-        self, tensor: torch.Tensor, position_embeddings: Tensor | None
+        self,
+        tensor: torch.Tensor,
+        position_embeddings: Tensor | None,
     ):  # -> Tensor:
         ...
     def forward(
@@ -240,10 +260,14 @@ class OneFormerPixelDecoder(nn.Module):
 class OneFormerPixelLevelModule(nn.Module):
     def __init__(self, config: OneFormerConfig) -> None: ...
     def forward(
-        self, pixel_values: Tensor, output_hidden_states: bool = ...
+        self,
+        pixel_values: Tensor,
+        output_hidden_states: bool = ...,
     ) -> OneFormerPixelLevelModuleOutput: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> OneFormerPixelLevelModuleOutput: ...
 
 class OneFormerAttention(nn.Module):
@@ -256,7 +280,9 @@ class OneFormerAttention(nn.Module):
         bias: bool = ...,
     ) -> None: ...
     def with_pos_embed(
-        self, tensor: torch.Tensor, position_embeddings: Tensor | None
+        self,
+        tensor: torch.Tensor,
+        position_embeddings: Tensor | None,
     ):  # -> Tensor:
         ...
     def forward(
@@ -269,7 +295,9 @@ class OneFormerAttention(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class OneFormerTransformerDecoderSelfAttentionLayer(nn.Module):
@@ -369,7 +397,11 @@ class OneFormerTransformerDecoderFFNLayer(nn.Module):
 
 class OneFormerMLPPredictionHead(nn.Module):
     def __init__(
-        self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int = ...
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        output_dim: int,
+        num_layers: int = ...,
     ) -> None: ...
     def forward(self, input: Tensor) -> Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...
@@ -390,7 +422,11 @@ class OneFormerTransformerDecoderLayer(nn.Module):
 
 class OneFormerTransformerDecoderQueryTransformerDecoder(nn.Module):
     def __init__(
-        self, decoder_layer, num_layers, norm=..., return_intermediate=...
+        self,
+        decoder_layer,
+        num_layers,
+        norm=...,
+        return_intermediate=...,
     ) -> None: ...
     def forward(
         self,
@@ -485,7 +521,10 @@ class OneFormerTransformerDecoder(nn.Module):
     ):  # -> OneFormerTransformerDecoderOutput:
         ...
     def forward_prediction_heads(
-        self, output, mask_features, attention_mask_target_size
+        self,
+        output,
+        mask_features,
+        attention_mask_target_size,
     ):  # -> tuple[Any, Tensor, Tensor]:
         ...
 
@@ -499,7 +538,9 @@ class OneFormerTransformerModule(nn.Module):
         output_attentions: bool = ...,
     ) -> OneFormerTransformerDecoderOutput: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> OneFormerTransformerDecoderOutput: ...
 
 class OneFormerSinePositionEmbedding(nn.Module):
@@ -567,7 +608,11 @@ class OneFormerTextMLP(nn.Module):
 
 class OneFormerTextTransformerLayer(GradientCheckpointingLayer):
     def __init__(
-        self, width: int, heads: int, attn_mask: torch.Tensor, layer_norm_eps=...
+        self,
+        width: int,
+        heads: int,
+        attn_mask: torch.Tensor,
+        layer_norm_eps=...,
     ) -> None: ...
     def forward(
         self,

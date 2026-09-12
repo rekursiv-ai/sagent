@@ -21,7 +21,8 @@ class LlavaNextVideoVideoProcessor(BaseVideoProcessor):
     valid_kwargs = LlavaNextVideoFastVideoProcessorInitKwargs
     model_input_names = ...
     def __init__(
-        self, **kwargs: Unpack[LlavaNextVideoFastVideoProcessorInitKwargs]
+        self,
+        **kwargs: Unpack[LlavaNextVideoFastVideoProcessorInitKwargs],
     ) -> None: ...
 
 __all__ = ["LlavaNextVideoVideoProcessor"]

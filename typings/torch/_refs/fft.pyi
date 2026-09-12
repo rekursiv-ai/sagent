@@ -33,32 +33,50 @@ aten = ...
 @register_decomposition(aten.fft_fft)
 @out_wrapper()
 def fft(
-    input: TensorLikeType, n: int | None = ..., dim: int = ..., norm: NormType = ...
+    input: TensorLikeType,
+    n: int | None = ...,
+    dim: int = ...,
+    norm: NormType = ...,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.fft_ifft)
 @out_wrapper()
 def ifft(
-    input: TensorLikeType, n: int | None = ..., dim: int = ..., norm: NormType = ...
+    input: TensorLikeType,
+    n: int | None = ...,
+    dim: int = ...,
+    norm: NormType = ...,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.fft_rfft)
 @out_wrapper()
 def rfft(
-    input: TensorLikeType, n: int | None = ..., dim: int = ..., norm: NormType = ...
+    input: TensorLikeType,
+    n: int | None = ...,
+    dim: int = ...,
+    norm: NormType = ...,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.fft_irfft)
 @out_wrapper()
 def irfft(
-    input: TensorLikeType, n: int | None = ..., dim: int = ..., norm: NormType = ...
+    input: TensorLikeType,
+    n: int | None = ...,
+    dim: int = ...,
+    norm: NormType = ...,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.fft_hfft)
 @out_wrapper()
 def hfft(
-    input: TensorLikeType, n: int | None = ..., dim: int = ..., norm: NormType = ...
+    input: TensorLikeType,
+    n: int | None = ...,
+    dim: int = ...,
+    norm: NormType = ...,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.fft_ihfft)
 @out_wrapper()
 def ihfft(
-    input: TensorLikeType, n: int | None = ..., dim: int = ..., norm: NormType = ...
+    input: TensorLikeType,
+    n: int | None = ...,
+    dim: int = ...,
+    norm: NormType = ...,
 ) -> TensorLikeType: ...
 
 class _ShapeAndDims(NamedTuple):

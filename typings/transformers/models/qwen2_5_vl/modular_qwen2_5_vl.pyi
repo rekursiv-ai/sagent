@@ -67,7 +67,10 @@ class Qwen2_5_VisionRotaryEmbedding(VisionRotaryEmbedding): ...
 
 class Qwen2_5_VLPatchMerger(PatchMerger):
     def __init__(
-        self, dim: int, context_dim: int, spatial_merge_size: int = ...
+        self,
+        dim: int,
+        context_dim: int,
+        spatial_merge_size: int = ...,
     ) -> None: ...
 
 class Qwen2_5_VLVisionAttention(VisionAttention):
@@ -95,7 +98,10 @@ class Qwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VLPreTrainedModel):
     def get_window_index(self, grid_thw):  # -> tuple[list[Any], list[Any]]:
         ...
     def forward(
-        self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, **kwargs
+        self,
+        hidden_states: torch.Tensor,
+        grid_thw: torch.Tensor,
+        **kwargs,
     ) -> torch.Tensor: ...
 
 class Qwen2_5_VLModelOutputWithPast(Qwen2VLModelOutputWithPast): ...

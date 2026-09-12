@@ -37,7 +37,9 @@ def _capability(
 def _thinking() -> ModelSettings:
     """Return a model that thinks, with the reasoning currently on."""
     return ModelSettings(
-        capability=_capability(), thinking_budget="auto", thinking_output="text"
+        capability=_capability(),
+        thinking_budget="auto",
+        thinking_output="text",
     )
 
 
@@ -56,7 +58,8 @@ def test_a_display_word_leaves_the_budget_alone() -> None:
 
 
 @pytest.mark.parametrize(
-    ("word", "budget"), [("adaptive", "auto"), ("on", "fixed"), ("off", "none")]
+    ("word", "budget"),
+    [("adaptive", "auto"), ("on", "fixed"), ("off", "none")],
 )
 def test_each_budget_word_selects_its_rung(word: str, budget: ThinkingBudget) -> None:
     settings = _thinking()
@@ -138,7 +141,9 @@ def test_an_unofferable_word_leaves_the_settings_untouched() -> None:
 def test_off_is_offerable_even_on_a_model_that_cannot_think() -> None:
     """``none`` is on every ladder, so turning it off never fails."""
     settings = ModelSettings(
-        capability=_capability(budgets=frozenset({"none"}), outputs=frozenset({"none"}))
+        capability=_capability(
+            budgets=frozenset({"none"}), outputs=frozenset({"none"})
+        ),
     )
     assert thinking_offered("off", settings)
     assert not thinking_offered("adaptive", settings)
@@ -155,7 +160,9 @@ def test_off_is_offerable_even_on_a_model_that_cannot_think() -> None:
     ],
 )
 def test_describe_renders_the_words_that_reproduce_the_selection(
-    word: str, show: bool, described: str
+    word: str,
+    show: bool,
+    described: str,
 ) -> None:
     settings = _thinking()
     shown = apply_thinking_command(word, settings, show=show)

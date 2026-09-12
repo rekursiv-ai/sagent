@@ -31,7 +31,9 @@ class LlavaNextImageProcessorFast(BaseImageProcessorFast):
     def __init__(self, **kwargs: Unpack[LlavaNextFastImageProcessorKwargs]) -> None: ...
     @auto_docstring
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[LlavaNextFastImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[LlavaNextFastImageProcessorKwargs],
     ) -> BatchFeature: ...
 
 __all__ = ["LlavaNextImageProcessorFast"]

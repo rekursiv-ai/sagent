@@ -119,7 +119,8 @@ class ZambaAttentionDecoderLayer(nn.Module):
         use_cache: bool | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class ZambaMambaDecoderLayer(nn.Module):
@@ -139,7 +140,8 @@ class ZambaMambaDecoderLayer(nn.Module):
         transformer_hidden_states: torch.Tensor | None = ...,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class ZambaHybridLayer(nn.Module):
@@ -162,7 +164,8 @@ class ZambaHybridLayer(nn.Module):
         use_cache: bool | None = ...,
         cache_position: torch.LongTensor | None = ...,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring

@@ -29,7 +29,11 @@ class DeferredTritonCallWrapper:
     ) -> None: ...
     def generate_load_kernel(self, prefix, kernel_var_name, params) -> None: ...
     def generate_launch_kernel(
-        self, prefix, wrapper, kernel_var_name, params
+        self,
+        prefix,
+        wrapper,
+        kernel_var_name,
+        params,
     ) -> None: ...
 
 class CppWrapperGpu(CppWrapperCpu):
@@ -61,7 +65,8 @@ class CppWrapperGpu(CppWrapperCpu):
     ) -> str: ...
     @staticmethod
     def prepare_triton_wrapper_args(
-        call_args: list[Any], arg_types: list[Any]
+        call_args: list[Any],
+        arg_types: list[Any],
     ) -> tuple[list[Any], list[Any]]: ...
     def make_zero_buffer(self, name) -> str: ...
 

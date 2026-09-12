@@ -30,14 +30,20 @@ use_buck = ...
 
 class WrapBackendDebug:
     def __init__(
-        self, unconfigured_compiler_fn: CompilerFn, compiler_name: str | None
+        self,
+        unconfigured_compiler_fn: CompilerFn,
+        compiler_name: str | None,
     ) -> None: ...
     def __call__(
-        self, gm: torch.fx.GraphModule, example_inputs: list[Any], **kwargs: Any
+        self,
+        gm: torch.fx.GraphModule,
+        example_inputs: list[Any],
+        **kwargs: Any,
     ) -> torch.fx.GraphModule: ...
 
 def wrap_backend_debug(
-    unconfigured_compiler_fn: CompilerFn, compiler_name: str | None
+    unconfigured_compiler_fn: CompilerFn,
+    compiler_name: str | None,
 ) -> WrapBackendDebug: ...
 def generate_dynamo_fx_repro_string(
     gm: torch.fx.GraphModule,
@@ -62,15 +68,21 @@ def dump_backend_state(
     check_accuracy: bool = ...,
 ) -> None: ...
 def dump_to_minify_after_dynamo(
-    gm: torch.fx.GraphModule, args: Sequence[Any], compiler_name: str | None
+    gm: torch.fx.GraphModule,
+    args: Sequence[Any],
+    compiler_name: str | None,
 ) -> None: ...
 @register_debug_backend
 def dynamo_minifier_backend(
-    gm: fx.GraphModule, example_inputs: Sequence[Any], compiler_name: str | None
+    gm: fx.GraphModule,
+    example_inputs: Sequence[Any],
+    compiler_name: str | None,
 ) -> fx.GraphModule: ...
 @register_debug_backend
 def dynamo_accuracy_minifier_backend(
-    gm: fx.GraphModule, example_inputs: Sequence[Any], compiler_name: str | None
+    gm: fx.GraphModule,
+    example_inputs: Sequence[Any],
+    compiler_name: str | None,
 ) -> fx.GraphModule: ...
 def backend_fails(
     gm: fx.GraphModule,

@@ -18,7 +18,10 @@ class ZeroShotImageClassificationPipeline(Pipeline):
     def __init__(self, **kwargs) -> None: ...
     @overload
     def __call__(
-        self, image: str | Image.Image, candidate_labels: list[str], **kwargs: Any
+        self,
+        image: str | Image.Image,
+        candidate_labels: list[str],
+        **kwargs: Any,
     ) -> list[dict[str, Any]]: ...
     @overload
     def __call__(

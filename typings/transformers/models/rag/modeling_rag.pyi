@@ -119,7 +119,8 @@ class RagSequenceForGeneration(RagPreTrainedModel):
     def set_retriever(self, retriever: RagRetriever):  # -> None:
         ...
     def set_context_encoder_for_training(
-        self, ctx_encoder: PreTrainedModel
+        self,
+        ctx_encoder: PreTrainedModel,
     ):  # -> None:
         ...
     @auto_docstring
@@ -192,7 +193,8 @@ class RagTokenForGeneration(RagPreTrainedModel, GenerationMixin):
     def set_retriever(self, retriever: RagRetriever):  # -> None:
         ...
     def set_context_encoder_for_training(
-        self, ctx_encoder: PreTrainedModel
+        self,
+        ctx_encoder: PreTrainedModel,
     ):  # -> None:
         ...
     def prepare_inputs_for_generation(
@@ -263,7 +265,13 @@ class RagTokenForGeneration(RagPreTrainedModel, GenerationMixin):
         ...
     def shift_tokens_right(self, input_ids, start_token_id=...): ...
     def get_nll(
-        self, seq_logits, doc_scores, target, reduce_loss=..., epsilon=..., n_docs=...
+        self,
+        seq_logits,
+        doc_scores,
+        target,
+        reduce_loss=...,
+        epsilon=...,
+        n_docs=...,
     ):  # -> Tensor:
         ...
 

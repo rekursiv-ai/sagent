@@ -21,15 +21,21 @@ class BlockElement(JsonObject, metaclass=ABCMeta):
     @property
     def subtype(self) -> str | None: ...
     def __init__(
-        self, *, type: str | None = ..., subtype: str | None = ..., **others: dict
+        self,
+        *,
+        type: str | None = ...,
+        subtype: str | None = ...,
+        **others: dict,
     ) -> None: ...
     @classmethod
     def parse(
-        cls, block_element: dict | BlockElement
+        cls,
+        block_element: dict | BlockElement,
     ) -> BlockElement | TextObject | None: ...
     @classmethod
     def parse_all(
-        cls, block_elements: Sequence[dict | BlockElement | TextObject]
+        cls,
+        block_elements: Sequence[dict | BlockElement | TextObject],
     ) -> list[BlockElement | TextObject]: ...
 
 class InteractiveElement(BlockElement):
@@ -578,7 +584,10 @@ class RichTextQuoteElement(RichTextElement):
     @property
     def attributes(self) -> set[str]: ...
     def __init__(
-        self, *, elements: Sequence[dict | RichTextElement], **others: dict
+        self,
+        *,
+        elements: Sequence[dict | RichTextElement],
+        **others: dict,
     ) -> None: ...
 
 class RichTextSectionElement(RichTextElement):
@@ -586,7 +595,10 @@ class RichTextSectionElement(RichTextElement):
     @property
     def attributes(self) -> set[str]: ...
     def __init__(
-        self, *, elements: Sequence[dict | RichTextElement], **others: dict
+        self,
+        *,
+        elements: Sequence[dict | RichTextElement],
+        **others: dict,
     ) -> None: ...
 
 class RichTextElementParts:

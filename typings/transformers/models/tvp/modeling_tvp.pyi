@@ -25,14 +25,29 @@ class TvpVideoGroundingOutput(ModelOutput):
 class TvpLoss(nn.Module):
     def __init__(self, losses) -> None: ...
     def loss_iou(
-        self, start_time, end_time, candidates_start_time, candidates_end_time, duration
+        self,
+        start_time,
+        end_time,
+        candidates_start_time,
+        candidates_end_time,
+        duration,
     ): ...
     def loss_distance(
-        self, start_time, end_time, candidates_start_time, candidates_end_time, duration
+        self,
+        start_time,
+        end_time,
+        candidates_start_time,
+        candidates_end_time,
+        duration,
     ):  # -> Tensor:
         ...
     def loss_duration(
-        self, start_time, end_time, candidates_start_time, candidates_end_time, duration
+        self,
+        start_time,
+        end_time,
+        candidates_start_time,
+        candidates_end_time,
+        duration,
     ):  # -> Tensor:
         ...
     def forward(self, logits, labels):  # -> dict[Any, Any]:
@@ -46,10 +61,15 @@ class TvpVisionModel(nn.Module):
 class TvpVisualInputEmbedding(nn.Module):
     def __init__(self, config) -> None: ...
     def interpolate_pos_encoding(
-        self, embedding: torch.Tensor, height: int, width: int
+        self,
+        embedding: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def add_2d_positional_embeddings(
-        self, grid, interpolate_pos_encoding: bool = ...
+        self,
+        grid,
+        interpolate_pos_encoding: bool = ...,
     ): ...
     def forward(self, grid, interpolate_pos_encoding: bool = ...):  # -> Any:
         ...
@@ -57,7 +77,11 @@ class TvpVisualInputEmbedding(nn.Module):
 class TvpTextInputEmbeddings(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, input_ids=..., token_type_ids=..., position_ids=..., inputs_embeds=...
+        self,
+        input_ids=...,
+        token_type_ids=...,
+        position_ids=...,
+        inputs_embeds=...,
     ):  # -> Any:
         ...
 
@@ -82,7 +106,9 @@ class TvpIntermediate(nn.Module):
 class TvpOutputLayer(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -128,7 +154,10 @@ class TvpFrameDownPadPrompter(nn.Module):
 class TvpFramePadPrompter(nn.Module):
     def __init__(self, config) -> None: ...
     def interpolate_pad_encoding(
-        self, prompt: torch.Tensor, height: int, width: int
+        self,
+        prompt: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(self, pixel_values, interpolate_pad_encoding: bool = ...): ...
 

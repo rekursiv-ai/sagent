@@ -25,7 +25,9 @@ def aten_rms_norm(
     eps: float | None = ...,
 ) -> TFloat: ...
 @onnx_impl(
-    aten.scaled_dot_product_attention.default, trace_only=True, opset_introduced=23
+    aten.scaled_dot_product_attention.default,
+    trace_only=True,
+    opset_introduced=23,
 )
 def aten_scaled_dot_product_attention_23(
     query: TFloat,

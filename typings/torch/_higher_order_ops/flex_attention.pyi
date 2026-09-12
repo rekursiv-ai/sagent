@@ -46,7 +46,10 @@ class FlexAttentionBackwardHOP(HigherOrderOperator):
         score_mod_other_buffers: tuple = ...,
         mask_mod_other_buffers: tuple = ...,
     ) -> tuple[
-        torch.Tensor, torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        tuple[torch.Tensor | None, ...],
     ]: ...
 
 flex_attention_backward = ...
@@ -147,7 +150,10 @@ class FlexAttentionAutogradOp(torch.autograd.Function):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
     @staticmethod
     def backward(
-        ctx: Any, grad_out: Tensor, grad_logsumexp: Tensor, grad_max_scores: Tensor
+        ctx: Any,
+        grad_out: Tensor,
+        grad_logsumexp: Tensor,
+        grad_max_scores: Tensor,
     ) -> tuple[Tensor | None, ...]: ...
 
 @flex_attention.py_impl(DispatchKey.Autograd)
@@ -179,7 +185,10 @@ def sdpa_dense_backward(
     score_mod_other_buffers: tuple,
     mask_mod_other_buffers: tuple,
 ) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    tuple[torch.Tensor | None, ...],
 ]: ...
 def trace_flex_attention_backward(
     proxy_mode: ProxyTorchDispatchMode,
@@ -198,7 +207,10 @@ def trace_flex_attention_backward(
     score_mod_other_buffers: tuple = ...,
     mask_mod_other_buffers: tuple = ...,
 ) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    tuple[torch.Tensor | None, ...],
 ]: ...
 @flex_attention_backward.py_impl(ProxyTorchDispatchMode)
 def flex_attention_backward_proxy_torch_dispatch_mode(
@@ -218,7 +230,10 @@ def flex_attention_backward_proxy_torch_dispatch_mode(
     score_mod_other_buffers: tuple = ...,
     mask_mod_other_buffers: tuple = ...,
 ) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    tuple[torch.Tensor | None, ...],
 ]: ...
 @flex_attention_backward.py_functionalize_impl
 def flex_attention_backward_functionalize(
@@ -238,7 +253,10 @@ def flex_attention_backward_functionalize(
     score_mod_other_buffers: tuple = ...,
     mask_mod_other_buffers: tuple = ...,
 ) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    tuple[torch.Tensor | None, ...],
 ]: ...
 @register_fake(flex_attention_backward)
 def flex_attention_backward_fake_tensor_mode(
@@ -257,5 +275,8 @@ def flex_attention_backward_fake_tensor_mode(
     score_mod_other_buffers: tuple = ...,
     mask_mod_other_buffers: tuple = ...,
 ) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, tuple[torch.Tensor | None, ...]
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    tuple[torch.Tensor | None, ...],
 ]: ...

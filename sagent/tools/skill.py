@@ -112,11 +112,6 @@ def discover(cwd: str | Path) -> list[SkillInfo]:
     return out
 
 
-def _discover_for_state(tool_state: ToolState) -> list[SkillInfo]:
-    """Discover skills for the active tool state."""
-    return discover(tool_state.bash_cwd)
-
-
 def format_listing(skills: list[SkillInfo]) -> str:
     """Format skills into a system prompt section (names + descriptions).
 
@@ -134,7 +129,7 @@ def format_listing(skills: list[SkillInfo]) -> str:
         (
             "The following user-authored skills are available. Invoke one by"
             ' calling the `Skill` tool with `{"skill": "<name>"}`. Each skill'
-            " description states when to use it — match against user requests"
+            " description states when to use it -- match against user requests"
             " and invoke when applicable."
         ),
         "",
@@ -188,7 +183,7 @@ class Skill:
                 },
             },
             "required": ["skill"],
-        }
+        },
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -273,7 +268,7 @@ class Skill:
             parts.append(
                 "Not restored (post-compaction budget): "
                 + ", ".join(sorted(skipped))
-                + ". Re-invoke Skill if you need one of these."
+                + ". Re-invoke Skill if you need one of these.",
             )
         if not parts:
             return
@@ -373,14 +368,11 @@ def _load_skill(skill_dir: Path, source: str) -> SkillInfo | None:
     )
 
 
+# Recurses into nested skill directories so a child doc such as ``trax/paper/SKILL.md``
+# registers as its own skill (name from frontmatter). Symlink cycles (e.g. ``.claude``
+# -> ``.sagent``) are broken via a resolved-path visited set.
 def _scan_roots(roots: list[Path], source: str) -> list[SkillInfo]:
-    """Collect every loadable ``<name>/SKILL.md`` under each root.
-
-    Recurses into nested skill directories so a child doc such as
-    ``trax/paper/SKILL.md`` registers as its own skill (name from
-    frontmatter). Symlink cycles (e.g. ``.claude`` -> ``.sagent``) are
-    broken via a resolved-path visited set.
-    """
+    """Collect every loadable ``<name>/SKILL.md`` under each root."""
     out: list[SkillInfo] = []
     visited: set[Path] = set()
     for root in roots:
@@ -410,3 +402,8 @@ def _scan_skill_dir(
     for sub in sorted(skill_dir.iterdir()):
         if sub.is_dir():
             _scan_skill_dir(sub, source, out, visited)
+
+
+def _discover_for_state(tool_state: ToolState) -> list[SkillInfo]:
+    """Discover skills for the active tool state."""
+    return discover(tool_state.bash_cwd)

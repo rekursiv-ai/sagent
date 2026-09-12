@@ -43,7 +43,9 @@ class AveragedModel(Module):
 
 @torch.no_grad()
 def update_bn(
-    loader: Iterable[Any], model: Module, device: int | torch.device | None = ...
+    loader: Iterable[Any],
+    model: Module,
+    device: int | torch.device | None = ...,
 ) -> None: ...
 
 class SWALR(LRScheduler):

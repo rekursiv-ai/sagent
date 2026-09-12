@@ -47,7 +47,11 @@ class TFConvNextV2Embeddings(keras.layers.Layer):
 
 class TFConvNextV2Layer(keras.layers.Layer):
     def __init__(
-        self, config: ConvNextV2Config, dim: int, drop_path: float = ..., **kwargs
+        self,
+        config: ConvNextV2Config,
+        dim: int,
+        drop_path: float = ...,
+        **kwargs,
     ) -> None: ...
     def call(self, hidden_states, training=...): ...
     def build(self, input_shape=...):  # -> None:
@@ -133,7 +137,8 @@ class TFConvNextV2Model(TFConvNextV2PreTrainedModel):
     CONVNEXTV2_START_DOCSTRING,
 )
 class TFConvNextV2ForImageClassification(
-    TFConvNextV2PreTrainedModel, TFSequenceClassificationLoss
+    TFConvNextV2PreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config: ConvNextV2Config, *inputs, **kwargs) -> None: ...
     @unpack_inputs

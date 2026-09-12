@@ -113,7 +113,9 @@ def get_contrastive_denoising_training_group(
 class RTDetrConvEncoder(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, pixel_values: torch.Tensor, pixel_mask: torch.Tensor
+        self,
+        pixel_values: torch.Tensor,
+        pixel_mask: torch.Tensor,
     ):  # -> list[Any]:
         ...
 
@@ -156,7 +158,9 @@ class RTDetrCSPRepLayer(nn.Module):
 class RTDetrMultiscaleDeformableAttention(nn.Module):
     def __init__(self, config: RTDetrConfig, num_heads: int, n_points: int) -> None: ...
     def with_pos_embed(
-        self, tensor: torch.Tensor, position_embeddings: Tensor | None
+        self,
+        tensor: torch.Tensor,
+        position_embeddings: Tensor | None,
     ):  # -> Tensor:
         ...
     def forward(
@@ -176,10 +180,16 @@ class RTDetrMultiscaleDeformableAttention(nn.Module):
 
 class RTDetrMultiheadAttention(nn.Module):
     def __init__(
-        self, embed_dim: int, num_heads: int, dropout: float = ..., bias: bool = ...
+        self,
+        embed_dim: int,
+        num_heads: int,
+        dropout: float = ...,
+        bias: bool = ...,
     ) -> None: ...
     def with_pos_embed(
-        self, tensor: torch.Tensor, position_embeddings: Tensor | None
+        self,
+        tensor: torch.Tensor,
+        position_embeddings: Tensor | None,
     ):  # -> Tensor:
         ...
     def forward(
@@ -190,7 +200,9 @@ class RTDetrMultiheadAttention(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class RTDetrDecoderLayer(nn.Module):
@@ -219,7 +231,11 @@ class RTDetrPreTrainedModel(PreTrainedModel):
 class RTDetrEncoder(nn.Module):
     def __init__(self, config: RTDetrConfig) -> None: ...
     def forward(
-        self, src, src_mask=..., pos_embed=..., output_attentions: bool = ...
+        self,
+        src,
+        src_mask=...,
+        pos_embed=...,
+        output_attentions: bool = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -227,7 +243,12 @@ class RTDetrHybridEncoder(nn.Module):
     def __init__(self, config: RTDetrConfig) -> None: ...
     @staticmethod
     def build_2d_sincos_position_embedding(
-        width, height, embed_dim=..., temperature=..., device=..., dtype=...
+        width,
+        height,
+        embed_dim=...,
+        temperature=...,
+        device=...,
+        dtype=...,
     ):  # -> Tensor:
         ...
     def forward(
@@ -279,7 +300,11 @@ class RTDetrModel(RTDetrPreTrainedModel):
         ...
     @compile_compatible_method_lru_cache(maxsize=32)
     def generate_anchors(
-        self, spatial_shapes=..., grid_size=..., device=..., dtype=...
+        self,
+        spatial_shapes=...,
+        grid_size=...,
+        device=...,
+        dtype=...,
     ):  # -> tuple[Tensor, Tensor]:
         ...
     @auto_docstring

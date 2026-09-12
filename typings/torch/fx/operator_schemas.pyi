@@ -33,11 +33,14 @@ _SCHEMA_TO_SIGNATURE_CACHE: dict[tuple[str, str], inspect.Signature] = ...
 
 @compatibility(is_backward_compatible=False)
 def check_for_mutable_operation(
-    target: Callable, args: tuple[Argument, ...], kwargs: dict[str, Argument]
+    target: Callable,
+    args: tuple[Argument, ...],
+    kwargs: dict[str, Argument],
 ) -> None: ...
 @compatibility(is_backward_compatible=False)
 def get_signature_for_torch_op(
-    op: Callable, return_schemas: bool = ...
+    op: Callable,
+    return_schemas: bool = ...,
 ) -> (
     tuple[list[Signature], None]
     | tuple[None, None]

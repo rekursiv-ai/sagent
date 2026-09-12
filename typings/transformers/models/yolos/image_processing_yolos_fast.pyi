@@ -32,7 +32,10 @@ class YolosFastImageProcessorKwargs(DefaultFastImageProcessorKwargs):
 SUPPORTED_ANNOTATION_FORMATS = ...
 
 def convert_coco_poly_to_mask(
-    segmentations, height: int, width: int, device: torch.device
+    segmentations,
+    height: int,
+    width: int,
+    device: torch.device,
 ) -> torch.Tensor: ...
 def prepare_coco_detection_annotation(
     image,
@@ -76,7 +79,9 @@ class YolosImageProcessorFast(BaseImageProcessorFast):
     def __init__(self, **kwargs: Unpack[YolosFastImageProcessorKwargs]) -> None: ...
     @classmethod
     def from_dict(
-        cls, image_processor_dict: dict[str, Any], **kwargs
+        cls,
+        image_processor_dict: dict[str, Any],
+        **kwargs,
     ):  # -> tuple[Self, dict[str, Any]] | Self:
         ...
     def prepare_annotation(
@@ -105,7 +110,9 @@ class YolosImageProcessorFast(BaseImageProcessorFast):
     ):  # -> dict[Any, Any]:
         ...
     def normalize_annotation(
-        self, annotation: dict, image_size: tuple[int, int]
+        self,
+        annotation: dict,
+        image_size: tuple[int, int],
     ) -> dict: ...
     def pad(
         self,

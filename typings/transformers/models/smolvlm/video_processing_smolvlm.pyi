@@ -16,7 +16,8 @@ MAX_IMAGE_SIZE = ...
 
 def get_max_height_width(videos: list[torch.Tensor]) -> list[int]: ...
 def get_resize_output_image_size(
-    video, resolution_max_side: int
+    video,
+    resolution_max_side: int,
 ) -> tuple[int, int]: ...
 
 class SmolVLMVideoProcessorInitKwargs(VideosKwargs):

@@ -20,7 +20,9 @@ from ...utils import (
 logger = ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class Florence2VisionDropPath(nn.Module):
@@ -38,7 +40,8 @@ class Florence2VisionPositionalEmbeddingCosine1D(nn.Module):
     def __init__(self, config: Florence2Config) -> None: ...
     @staticmethod
     def get_sinusoid_embeddings(
-        max_positions: int, embed_dim: int
+        max_positions: int,
+        embed_dim: int,
     ):  # -> tuple[Tensor, Tensor]:
         ...
     def forward(self, seq_embeds: torch.Tensor) -> torch.Tensor: ...
@@ -74,7 +77,10 @@ class Florence2VisionChannelAttention(nn.Module):
 
 class Florence2VisionChannelBlock(nn.Module):
     def __init__(
-        self, config: Florence2VisionConfig, stage_idx: int, drop_path_rate: float
+        self,
+        config: Florence2VisionConfig,
+        stage_idx: int,
+        drop_path_rate: float,
     ) -> None: ...
     def forward(self, hidden_states: torch.Tensor):  # -> Tensor:
         ...
@@ -86,7 +92,10 @@ class Florence2VisionWindowAttention(nn.Module):
 
 class Florence2VisionSpatialBlock(nn.Module):
     def __init__(
-        self, config: Florence2VisionConfig, stage_idx: int, drop_path_rate: float
+        self,
+        config: Florence2VisionConfig,
+        stage_idx: int,
+        drop_path_rate: float,
     ) -> None: ...
     def forward(self, hidden_states: torch.Tensor):  # -> Tensor:
         ...
@@ -193,7 +202,9 @@ class Florence2Model(Florence2PreTrainedModel):
         ...
 
 def shift_tokens_right(
-    input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: torch.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ):  # -> Tensor:
     ...
 

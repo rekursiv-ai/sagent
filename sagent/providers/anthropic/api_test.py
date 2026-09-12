@@ -78,7 +78,8 @@ def _free_model() -> _AnthropicModel:
     """Return a model whose every rate is zero -- cost is not what these assert."""
     m = Anthropic.from_key("k").model("claude-opus-4-7")
     m._capability = replace(
-        m.capability, prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()})
+        m.capability,
+        prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
     )
     return m
 
@@ -92,9 +93,10 @@ def _fast_model() -> _AnthropicModel:
             {
                 PriceCatalogProduct(): TokenPrice(request=5.0, response=25.0),
                 PriceCatalogProduct(service_tier="priority"): TokenPrice(
-                    request=10.0, response=50.0
+                    request=10.0,
+                    response=50.0,
                 ),
-            }
+            },
         ),
     )
     m._settings = replace(m.settings, service_tier="priority")
@@ -250,7 +252,7 @@ def test_build_messages_tool_result_id_pairs_with_call() -> None:
         tool_calls=(ToolCall(id="orig-X", name="N", args={}),),
     )
     msgs = _build_messages(
-        _make_request([asst, ToolResult(call_id="orig-X", content="ok")])
+        _make_request([asst, ToolResult(call_id="orig-X", content="ok")]),
     )
     blocks = cast(list[dict[str, object]], msgs[0]["content"])
     tool_use = next(b for b in blocks if b.get("type") == "tool_use")
@@ -450,8 +452,11 @@ def _build_anthropic_message(
     for tc_id, tc_name, args in tool_calls:
         text_blocks.append(
             anthropic_sdk.types.ToolUseBlock(
-                type="tool_use", id=tc_id, name=tc_name, input=args
-            )
+                type="tool_use",
+                id=tc_id,
+                name=tc_name,
+                input=args,
+            ),
         )
     usage = MagicMock()
     usage.input_tokens = input_tokens
@@ -528,15 +533,18 @@ def test_parse_response_cache_tokens_split_correctly() -> None:
         prices=PriceCatalog(
             {
                 PriceCatalogProduct(): TokenPrice(
-                    request=1.0, response=2.0, cache_write=4.0, cache_read=0.5
-                )
-            }
+                    request=1.0,
+                    response=2.0,
+                    cache_write=4.0,
+                    cache_read=0.5,
+                ),
+            },
         ),
     )
     resp = _parse_response(raw, model)
     assert resp.tokens.cache_write == 200
     assert resp.tokens.cache_read == 400
-    # input cost = 1000*1 + 200*4 + 400*0.5 = 2000 / 1M = 0.002.
+    # Input cost = 1000*1 + 200*4 + 400*0.5 = 2000 / 1M = 0.002.
     assert (
         resp.spend.request + resp.spend.cache_write + resp.spend.cache_read
     ) == pytest.approx(0.002)
@@ -598,7 +606,7 @@ def test_anthropic_model_known_id_returns_backend() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-haiku-4-5")
     assert m.capability.model_id == "claude-haiku-4-5"
-    # haiku supports thinking via ``enabled`` only (measured: 249 readable
+    # Haiku supports thinking via ``enabled`` only (measured: 249 readable
     # thinking chars; ``adaptive`` 400s 'not supported on this model').
     assert m.capability.thinking_budget != frozenset({"none"})
     assert m.limits.max_request_tokens == 200_000
@@ -676,7 +684,7 @@ def test_anthropic_fable_5_1_model_profile() -> None:
     assert m.capability.prices[PriceCatalogProduct()].request == 10.0
     assert m.capability.prices[PriceCatalogProduct()].response == 50.0
     assert m.capability.thinking_effort == frozenset(
-        {"none", "low", "medium", "high", "xhigh", "max"}
+        {"none", "low", "medium", "high", "xhigh", "max"},
     )
     assert "priority" not in m.capability.service_tier
     # ``enabled`` 400s, so the row offers the adaptive budget only.
@@ -718,7 +726,7 @@ def test_anthropic_sonnet_5_model_profile() -> None:
     assert m.capability.prices[PriceCatalogProduct()].request == 2.0
     assert m.capability.prices[PriceCatalogProduct()].response == 10.0
     assert m.capability.thinking_effort == frozenset(
-        {"none", "low", "medium", "high", "xhigh", "max"}
+        {"none", "low", "medium", "high", "xhigh", "max"},
     )
 
 
@@ -878,7 +886,10 @@ def test_anthropic_priority_tier_is_unselectable_on_an_unsupported_model() -> No
 
 def test_parse_response_bills_fast_when_server_reports_fast() -> None:
     raw = _build_anthropic_message(
-        text="x", input_tokens=1_000_000, output_tokens=1_000_000, speed="fast"
+        text="x",
+        input_tokens=1_000_000,
+        output_tokens=1_000_000,
+        speed="fast",
     )
     resp = _parse_response(raw, _fast_model())
     assert (resp.spend.request + resp.spend.cache_write + resp.spend.cache_read) == 10.0
@@ -887,7 +898,10 @@ def test_parse_response_bills_fast_when_server_reports_fast() -> None:
 
 def test_parse_response_bills_standard_when_server_falls_back() -> None:
     raw = _build_anthropic_message(
-        text="x", input_tokens=1_000_000, output_tokens=1_000_000, speed="standard"
+        text="x",
+        input_tokens=1_000_000,
+        output_tokens=1_000_000,
+        speed="standard",
     )
     resp = _parse_response(raw, _fast_model())
     assert (resp.spend.request + resp.spend.cache_write + resp.spend.cache_read) == 5.0
@@ -933,8 +947,8 @@ def test_anthropic_image_byte_limits_read_from_the_row_not_a_constant() -> None:
                     max_image_edge_px=4096,
                     max_image_bytes=7 * 1024 * 1024,
                     max_request_bytes=15 * 1024 * 1024,
-                )
-            }
+                ),
+            },
         ),
     )
     m = _AnthropicModel(
@@ -982,7 +996,7 @@ def test_anthropic_byte_413_without_structured_body_stays_byte() -> None:
     err = anthropic_sdk.APIStatusError(
         "request entity too large: maximum exceeded by context window",
         response=response,
-        body=None,  # no structured body -> falls to substring path
+        body=None,  # No structured body -> falls to substring path.
     )
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-7")
@@ -1000,7 +1014,7 @@ async def test_anthropic_stream_request_too_large_raises_typed_error() -> None:
     m = p.model("claude-opus-4-7")
     err = _request_too_large_error(
         "Request exceeds the maximum allowed number of bytes."
-        " The maximum request size is 32 MB"
+        " The maximum request size is 32 MB",
     )
     with (
         patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
@@ -1359,8 +1373,9 @@ def test_build_kwargs_no_context_management_by_default() -> None:
     req = ModelRequest(messages=[UserMessage(text="hi")], system="s")
     msgs: list[MessageParam] = [
         cast(
-            MessageParam, {"role": "user", "content": [{"type": "text", "text": "hi"}]}
-        )
+            MessageParam,
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        ),
     ]
     kwargs = model._build_kwargs(req, msgs)
     body = kwargs.get("extra_body")
@@ -1379,8 +1394,9 @@ def test_build_kwargs_includes_context_management_when_opted_in() -> None:
     )
     msgs: list[MessageParam] = [
         cast(
-            MessageParam, {"role": "user", "content": [{"type": "text", "text": "hi"}]}
-        )
+            MessageParam,
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        ),
     ]
     kwargs = model._build_kwargs(req, msgs)
     body = cast(dict[str, object], kwargs["extra_body"])
@@ -1411,8 +1427,9 @@ def test_build_kwargs_context_management_trigger_scales_with_context_window() ->
     req = ModelRequest(messages=[UserMessage(text="hi")], system="s")
     msgs: list[MessageParam] = [
         cast(
-            MessageParam, {"role": "user", "content": [{"type": "text", "text": "hi"}]}
-        )
+            MessageParam,
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        ),
     ]
 
     m200 = p.model("claude-opus-4-7")
@@ -1478,8 +1495,9 @@ def test_build_kwargs_preserves_provider_context_management() -> None:
     req = ModelRequest(messages=[UserMessage(text="hi")], system="s")
     msgs: list[MessageParam] = [
         cast(
-            MessageParam, {"role": "user", "content": [{"type": "text", "text": "hi"}]}
-        )
+            MessageParam,
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        ),
     ]
     kwargs = model._build_kwargs(req, msgs)
     body = cast(dict[str, object], kwargs["extra_body"])

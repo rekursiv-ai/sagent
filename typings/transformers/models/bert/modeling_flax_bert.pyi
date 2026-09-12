@@ -203,7 +203,10 @@ class FlaxBertPreTrainingHeads(nn.Module):
     def setup(self):  # -> None:
         ...
     def __call__(
-        self, hidden_states, pooled_output, shared_embedding=...
+        self,
+        hidden_states,
+        pooled_output,
+        shared_embedding=...,
     ):  # -> tuple[Any, Any]:
         ...
 
@@ -224,11 +227,14 @@ class FlaxBertPreTrainedModel(FlaxPreTrainedModel):
     def enable_gradient_checkpointing(self):  # -> None:
         ...
     def init_weights(
-        self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...
+        self,
+        rng: jax.random.PRNGKey,
+        input_shape: tuple,
+        params: FrozenDict = ...,
     ) -> FrozenDict: ...
     def init_cache(self, batch_size, max_length): ...
     @add_start_docstrings_to_model_forward(
-        BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     def __call__(
         self,
@@ -327,7 +333,8 @@ class FlaxBertForMaskedLMModule(nn.Module):
         ...
 
 @add_start_docstrings(
-    """Bert Model with a `language modeling` head on top.""", BERT_START_DOCSTRING
+    """Bert Model with a `language modeling` head on top.""",
+    BERT_START_DOCSTRING,
 )
 class FlaxBertForMaskedLM(FlaxBertPreTrainedModel): ...
 
@@ -492,7 +499,10 @@ class FlaxBertForCausalLMModule(nn.Module):
 )
 class FlaxBertForCausalLM(FlaxBertPreTrainedModel):
     def prepare_inputs_for_generation(
-        self, input_ids, max_length, attention_mask: jax.Array | None = ...
+        self,
+        input_ids,
+        max_length,
+        attention_mask: jax.Array | None = ...,
     ):  # -> dict[str, Any | Array]:
         ...
     def update_inputs_for_generation(self, model_outputs, model_kwargs): ...

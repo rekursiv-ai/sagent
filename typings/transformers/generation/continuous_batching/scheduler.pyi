@@ -6,7 +6,9 @@ from ...utils.metrics import attach_tracer, traced
 
 class Scheduler(ABC):
     def __init__(
-        self, cache: PagedAttentionCache, retain_cache_on_finish: bool = ...
+        self,
+        cache: PagedAttentionCache,
+        retain_cache_on_finish: bool = ...,
     ) -> None: ...
     @traced
     def add_waiting_request(self, state: RequestState):  # -> None:

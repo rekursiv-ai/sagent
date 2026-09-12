@@ -29,7 +29,10 @@ class UnivNetKernelPredictorResidualBlock(nn.Module):
 
 class UnivNetKernelPredictor(nn.Module):
     def __init__(
-        self, config: UnivNetConfig, conv_kernel_size: int = ..., conv_layers: int = ...
+        self,
+        config: UnivNetConfig,
+        conv_kernel_size: int = ...,
+        conv_layers: int = ...,
     ) -> None: ...
     def forward(self, spectrogram: torch.FloatTensor):  # -> tuple[Any, Any]:
         ...
@@ -40,7 +43,10 @@ class UnivNetKernelPredictor(nn.Module):
 
 class UnivNetLvcResidualBlock(nn.Module):
     def __init__(
-        self, config: UnivNetConfig, kernel_size: int, dilation: int
+        self,
+        config: UnivNetConfig,
+        kernel_size: int,
+        dilation: int,
     ) -> None: ...
     def forward(self, hidden_states, kernel, bias, hop_size=...): ...
     def location_variable_convolution(
@@ -59,10 +65,15 @@ class UnivNetLvcResidualBlock(nn.Module):
 
 class UnivNetLvcBlock(nn.Module):
     def __init__(
-        self, config: UnivNetConfig, layer_id: int, lvc_hop_size: int = ...
+        self,
+        config: UnivNetConfig,
+        layer_id: int,
+        lvc_hop_size: int = ...,
     ) -> None: ...
     def forward(
-        self, hidden_states: torch.FloatTensor, spectrogram: torch.FloatTensor
+        self,
+        hidden_states: torch.FloatTensor,
+        spectrogram: torch.FloatTensor,
     ):  # -> FloatTensor:
         ...
     def apply_weight_norm(self):  # -> None:

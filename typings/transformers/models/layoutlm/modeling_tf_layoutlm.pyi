@@ -65,7 +65,10 @@ class TFLayoutLMSelfAttention(keras.layers.Layer):
 class TFLayoutLMSelfOutput(keras.layers.Layer):
     def __init__(self, config: LayoutLMConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -96,7 +99,10 @@ class TFLayoutLMIntermediate(keras.layers.Layer):
 class TFLayoutLMOutput(keras.layers.Layer):
     def __init__(self, config: LayoutLMConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -150,7 +156,10 @@ class TFLayoutLMPredictionHeadTransform(keras.layers.Layer):
 
 class TFLayoutLMLMPredictionHead(keras.layers.Layer):
     def __init__(
-        self, config: LayoutLMConfig, input_embeddings: keras.layers.Layer, **kwargs
+        self,
+        config: LayoutLMConfig,
+        input_embeddings: keras.layers.Layer,
+        **kwargs,
     ) -> None: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -164,7 +173,10 @@ class TFLayoutLMLMPredictionHead(keras.layers.Layer):
 
 class TFLayoutLMMLMHead(keras.layers.Layer):
     def __init__(
-        self, config: LayoutLMConfig, input_embeddings: keras.layers.Layer, **kwargs
+        self,
+        config: LayoutLMConfig,
+        input_embeddings: keras.layers.Layer,
+        **kwargs,
     ) -> None: ...
     def call(self, sequence_output: tf.Tensor) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -174,7 +186,10 @@ class TFLayoutLMMLMHead(keras.layers.Layer):
 class TFLayoutLMMainLayer(keras.layers.Layer):
     config_class = LayoutLMConfig
     def __init__(
-        self, config: LayoutLMConfig, add_pooling_layer: bool = ..., **kwargs
+        self,
+        config: LayoutLMConfig,
+        add_pooling_layer: bool = ...,
+        **kwargs,
     ) -> None: ...
     def get_input_embeddings(self) -> keras.layers.Layer: ...
     def set_input_embeddings(self, value: tf.Variable):  # -> None:
@@ -217,7 +232,7 @@ class TFLayoutLMModel(TFLayoutLMPreTrainedModel):
     def __init__(self, config: LayoutLMConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        LAYOUTLM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        LAYOUTLM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
         output_type=TFBaseModelOutputWithPoolingAndCrossAttentions,
@@ -253,10 +268,11 @@ class TFLayoutLMForMaskedLM(TFLayoutLMPreTrainedModel, TFMaskedLanguageModelingL
     def get_prefix_bias_name(self) -> str: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        LAYOUTLM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        LAYOUTLM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFMaskedLMOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFMaskedLMOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -281,17 +297,19 @@ class TFLayoutLMForMaskedLM(TFLayoutLMPreTrainedModel, TFMaskedLanguageModelingL
     LAYOUTLM_START_DOCSTRING,
 )
 class TFLayoutLMForSequenceClassification(
-    TFLayoutLMPreTrainedModel, TFSequenceClassificationLoss
+    TFLayoutLMPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     _keys_to_ignore_on_load_missing = ...
     def __init__(self, config: LayoutLMConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        LAYOUTLM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        LAYOUTLM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFSequenceClassifierOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFSequenceClassifierOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -316,17 +334,19 @@ class TFLayoutLMForSequenceClassification(
     LAYOUTLM_START_DOCSTRING,
 )
 class TFLayoutLMForTokenClassification(
-    TFLayoutLMPreTrainedModel, TFTokenClassificationLoss
+    TFLayoutLMPreTrainedModel,
+    TFTokenClassificationLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     _keys_to_ignore_on_load_missing = ...
     def __init__(self, config: LayoutLMConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        LAYOUTLM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        LAYOUTLM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFTokenClassifierOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFTokenClassifierOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -351,16 +371,18 @@ class TFLayoutLMForTokenClassification(
     LAYOUTLM_START_DOCSTRING,
 )
 class TFLayoutLMForQuestionAnswering(
-    TFLayoutLMPreTrainedModel, TFQuestionAnsweringLoss
+    TFLayoutLMPreTrainedModel,
+    TFQuestionAnsweringLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config: LayoutLMConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        LAYOUTLM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        LAYOUTLM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFQuestionAnsweringModelOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFQuestionAnsweringModelOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,

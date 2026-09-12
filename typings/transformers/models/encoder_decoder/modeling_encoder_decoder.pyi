@@ -13,7 +13,9 @@ logger = ...
 DEPRECATION_WARNING = ...
 
 def shift_tokens_right(
-    input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: torch.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ):  # -> Tensor:
     ...
 
@@ -44,7 +46,10 @@ class EncoderDecoderModel(PreTrainedModel, GenerationMixin):
         ...
     @classmethod
     def from_pretrained(
-        cls, pretrained_model_name_or_path, *model_args, **kwargs
+        cls,
+        pretrained_model_name_or_path,
+        *model_args,
+        **kwargs,
     ):  # -> PreTrainedModel | Self:
         ...
     @classmethod

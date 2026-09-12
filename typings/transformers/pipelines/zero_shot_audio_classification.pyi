@@ -8,7 +8,7 @@ from ..utils import add_end_docstrings
 logger = ...
 
 @add_end_docstrings(
-    build_pipeline_init_args(has_feature_extractor=True, has_tokenizer=True)
+    build_pipeline_init_args(has_feature_extractor=True, has_tokenizer=True),
 )
 class ZeroShotAudioClassificationPipeline(Pipeline):
     _load_processor = ...
@@ -17,10 +17,15 @@ class ZeroShotAudioClassificationPipeline(Pipeline):
     _load_tokenizer = ...
     def __init__(self, **kwargs) -> None: ...
     def __call__(
-        self, audios: np.ndarray | bytes | str | dict, **kwargs: Any
+        self,
+        audios: np.ndarray | bytes | str | dict,
+        **kwargs: Any,
     ) -> list[dict[str, Any]]: ...
     def preprocess(
-        self, audio, candidate_labels=..., hypothesis_template=...
+        self,
+        audio,
+        candidate_labels=...,
+        hypothesis_template=...,
     ):  # -> Any:
         ...
     def postprocess(self, model_outputs):  # -> list[dict[str, Any]]:

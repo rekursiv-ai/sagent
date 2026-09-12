@@ -5,7 +5,8 @@ logger = ...
 VOCAB_FILES_NAMES = ...
 
 def load_vocab_and_emoji(
-    vocab_file, emoji_file
+    vocab_file,
+    emoji_file,
 ):  # -> tuple[OrderedDict[Any, Any], OrderedDict[Any, Any], OrderedDict[Any, Any], Any]:
     ...
 
@@ -30,13 +31,21 @@ class GPTSanJapaneseTokenizer(PreTrainedTokenizer):
     def convert_tokens_to_string(self, tokens):  # -> LiteralString:
         ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
     def create_token_type_ids_from_sequences(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = ...
+        self,
+        token_ids_0: list[int],
+        token_ids_1: list[int] | None = ...,
     ) -> list[int]: ...
     def prepare_for_tokenization(
-        self, text, prefix_text=..., add_sep_token=..., **kwargs
+        self,
+        text,
+        prefix_text=...,
+        add_sep_token=...,
+        **kwargs,
     ):  # -> tuple[Any, dict[str, Any]]:
         ...
 

@@ -46,7 +46,8 @@ class _InputBackref:
 class _PySymInputStub:
     value: PySymType | _DeconstructedSymType | _InputBackref
     def __init__(
-        self, value: PySymType | _DeconstructedSymType | _InputBackref
+        self,
+        value: PySymType | _DeconstructedSymType | _InputBackref,
     ) -> None: ...
     def strip_shape_env(self) -> None: ...
     def extract(self, shape_env: ShapeEnv) -> PySymType: ...

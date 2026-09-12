@@ -23,7 +23,9 @@ class BertweetTokenizer(PreTrainedTokenizer):
         **kwargs,
     ) -> None: ...
     def build_inputs_with_special_tokens(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = ...
+        self,
+        token_ids_0: list[int],
+        token_ids_1: list[int] | None = ...,
     ) -> list[int]: ...
     def get_special_tokens_mask(
         self,
@@ -32,7 +34,9 @@ class BertweetTokenizer(PreTrainedTokenizer):
         already_has_special_tokens: bool = ...,
     ) -> list[int]: ...
     def create_token_type_ids_from_sequences(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = ...
+        self,
+        token_ids_0: list[int],
+        token_ids_1: list[int] | None = ...,
     ) -> list[int]: ...
     @property
     def vocab_size(self):  # -> int:
@@ -48,7 +52,9 @@ class BertweetTokenizer(PreTrainedTokenizer):
     def convert_tokens_to_string(self, tokens):  # -> str:
         ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
     def add_from_file(self, f):  # -> None:
         ...
@@ -63,7 +69,10 @@ ENT_RE = ...
 
 class TweetTokenizer:
     def __init__(
-        self, preserve_case=..., reduce_len=..., strip_handles=...
+        self,
+        preserve_case=...,
+        reduce_len=...,
+        strip_handles=...,
     ) -> None: ...
     def tokenize(self, text):  # -> list[Any]:
         ...
@@ -73,7 +82,10 @@ def reduce_lengthening(text):  # -> str:
 def remove_handles(text):  # -> str:
     ...
 def casual_tokenize(
-    text, preserve_case=..., reduce_len=..., strip_handles=...
+    text,
+    preserve_case=...,
+    reduce_len=...,
+    strip_handles=...,
 ):  # -> list[Any]:
     ...
 

@@ -86,7 +86,8 @@ class Cohere2VisionModel(Cohere2VisionPreTrainedModel):
 
 @auto_docstring(custom_intro=...)
 class Cohere2VisionForConditionalGeneration(
-    Cohere2VisionPreTrainedModel, GenerationMixin
+    Cohere2VisionPreTrainedModel,
+    GenerationMixin,
 ):
     _checkpoint_conversion_mapping = ...
     _tied_weights_keys = ...

@@ -36,7 +36,8 @@ class Dots1Model(Qwen3Model): ...
 
 class Dots1ForCausalLM(Qwen3ForCausalLM):
     def forward(
-        self, **super_kwargs: Unpack[TransformersKwargs]
+        self,
+        **super_kwargs: Unpack[TransformersKwargs],
     ) -> CausalLMOutputWithPast: ...
     def __call__(self, *args: Any, **kwargs: Any) -> CausalLMOutputWithPast: ...
 

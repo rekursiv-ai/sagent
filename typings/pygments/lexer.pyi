@@ -33,10 +33,13 @@ class Lexer(metaclass=LexerMeta):
     def __init__(self, **options) -> None: ...
     def add_filter(self, filter_, **options) -> None: ...
     def get_tokens(
-        self, text: str, unfiltered: bool = ...
+        self,
+        text: str,
+        unfiltered: bool = ...,
     ) -> Iterator[tuple[_TokenType, str]]: ...
     def get_tokens_unprocessed(
-        self, text: str
+        self,
+        text: str,
     ) -> Iterator[tuple[int, _TokenType, str]]: ...
 
 class DelegatingLexer(Lexer):
@@ -44,10 +47,15 @@ class DelegatingLexer(Lexer):
     language_lexer: Incomplete
     needle: Incomplete
     def __init__(
-        self, _root_lexer, _language_lexer, _needle=..., **options
+        self,
+        _root_lexer,
+        _language_lexer,
+        _needle=...,
+        **options,
     ) -> None: ...
     def get_tokens_unprocessed(
-        self, text: str
+        self,
+        text: str,
     ) -> Iterator[tuple[int, _TokenType, str]]: ...
 
 class include(str): ...
@@ -95,7 +103,9 @@ class RegexLexer(Lexer, metaclass=RegexLexerMeta):
     flags: ClassVar[RegexFlag]
     tokens: ClassVar[dict[str, list[Incomplete]]]
     def get_tokens_unprocessed(
-        self, text: str, stack: Iterable[str] = ...
+        self,
+        text: str,
+        stack: Iterable[str] = ...,
     ) -> Iterator[tuple[int, _TokenType, str]]: ...
 
 class LexerContext:
@@ -107,12 +117,16 @@ class LexerContext:
 
 class ExtendedRegexLexer(RegexLexer):
     def get_tokens_unprocessed(
-        self, text: str | None = ..., context: LexerContext | None = ...
+        self,
+        text: str | None = ...,
+        context: LexerContext | None = ...,
     ) -> Iterator[tuple[int, _TokenType, str]]: ...
 
 class ProfilingRegexLexerMeta(RegexLexerMeta): ...
 
 class ProfilingRegexLexer(RegexLexer, metaclass=ProfilingRegexLexerMeta):
     def get_tokens_unprocessed(
-        self, text: str, stack: Iterable[str] = ...
+        self,
+        text: str,
+        stack: Iterable[str] = ...,
     ) -> Iterator[tuple[int, _TokenType, str]]: ...

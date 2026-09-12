@@ -9,7 +9,7 @@ import shutil
 
 import pytest
 
-from sagent.providers.llamacpp import server as llamacpp_mod
+from sagent.providers.llamacpp import server
 from sagent.providers.llamacpp.server import (
     LlamaCpp,
     _free_port,
@@ -118,7 +118,7 @@ def test_llamacpp_argv_missing_server_raises(
         return None
 
     monkeypatch.setattr(shutil, "which", _which)
-    monkeypatch.setattr(llamacpp_mod, "_docker_server", _no_docker)
+    monkeypatch.setattr(server, "_docker_server", _no_docker)
     with pytest.raises(RuntimeError, match="llama-server not found"):
         _ = p._argv(8080)
 

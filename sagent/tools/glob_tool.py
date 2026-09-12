@@ -119,7 +119,7 @@ class Glob:
                 },
             },
             "required": ["pattern"],
-        }
+        },
     )
 
     output: Annotated[Toggle, CLI_SETTABLE] = "off"
@@ -295,29 +295,17 @@ class Glob:
         return None
 
 
+# The shell rule this tool advertises: ``*`` does not match a leading dot, ``.*``
+# matches only those. ``Path.glob`` implements neither, so an unfiltered ``*`` handed
+# back ``.env`` and every ``.git`` entry to a caller who asked for visible files -- and
+# List's ``show_hidden`` toggle exists precisely because Glob was supposed to answer
+# this through the pattern instead.
+#
+# Matched PER SEGMENT against the pattern's corresponding segment, since
+# ``.config/*.json`` names a hidden directory explicitly and its contents are then not
+# hidden by the caller's reckoning.
 def _honor_dotfile_rule(matches: list[Path], *, pattern: str, root: Path) -> list[Path]:
-    """Drop hidden matches unless the pattern's own segment asks for them.
-
-    The shell rule this tool advertises: ``*`` does not match a leading
-    dot, ``.*`` matches only those. ``Path.glob`` implements neither, so
-    an unfiltered ``*`` handed back ``.env`` and every ``.git`` entry to a
-    caller who asked for visible files -- and List's ``show_hidden``
-    toggle exists precisely because Glob was supposed to answer this
-    through the pattern instead.
-
-    Matched PER SEGMENT against the pattern's corresponding segment, since
-    ``.config/*.json`` names a hidden directory explicitly and its
-    contents are then not hidden by the caller's reckoning.
-
-    Args:
-      matches: Paths ``Path.glob`` returned.
-      pattern: The caller's glob pattern.
-      root: Directory the pattern was resolved against.
-
-    Returns:
-      kept: Matches whose hidden segments were each asked for.
-
-    """
+    """Drop hidden matches unless the pattern's own segment asks for them."""
     segments = Path(pattern).parts
     if not any(part.startswith(".") for part in segments):
         wants_hidden = ()
@@ -361,23 +349,20 @@ def _long_line(p: Path) -> str:
     return f"{size:>10}  {mtime}  {p.resolve()}\n"
 
 
+# Runs after detection, so an unsupported predicate (``-newer``, ``-maxdepth``) costs
+# the caller a worked example rather than the nudge itself -- gating detection on this
+# parse is what made most of ``find``'s ~80 predicates silent.
+#
+# ``cwd`` is the enclosing ``cd`` prefix. Glob resolves a relative ``path`` against the
+# AGENT's cwd, not the shell's, so dropping it searches a different tree than the
+# command being replaced.
 def _glob_call(
     args: tuple[str, ...],
     *,
     cwd: str = "",
     max_results: int | None = None,
 ) -> str:
-    """Render a concrete Glob call, or ``""`` when a predicate is untranslatable.
-
-    Runs after detection, so an unsupported predicate (``-newer``,
-    ``-maxdepth``) costs the caller a worked example rather than the
-    nudge itself -- gating detection on this parse is what made most of
-    ``find``'s ~80 predicates silent.
-
-    ``cwd`` is the enclosing ``cd`` prefix. Glob resolves a relative
-    ``path`` against the AGENT's cwd, not the shell's, so dropping it
-    searches a different tree than the command being replaced.
-    """
+    """Render a concrete Glob call, or ``""`` when a predicate is untranslatable."""
     path = ""
     pattern = ""
     i = 0

@@ -22,10 +22,15 @@ from ...utils import auto_docstring
 logger = ...
 
 def build_alibi_tensor(
-    attention_mask: torch.Tensor, num_heads: int, dtype: torch.dtype
+    attention_mask: torch.Tensor,
+    num_heads: int,
+    dtype: torch.dtype,
 ) -> torch.Tensor: ...
 def dropout_add(
-    x: torch.Tensor, residual: torch.Tensor, prob: float, training: bool
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    prob: float,
+    training: bool,
 ) -> torch.Tensor: ...
 def bloom_gelu_forward(x: torch.Tensor) -> torch.Tensor: ...
 def bloom_gelu_back(g: torch.Tensor, x: torch.Tensor) -> torch.Tensor: ...
@@ -60,7 +65,9 @@ class BloomAttention(nn.Module):
 class BloomMLP(nn.Module):
     def __init__(self, config: BloomConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, residual: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -93,7 +100,10 @@ class BloomPreTrainedModel(PreTrainedModel):
 class BloomModel(BloomPreTrainedModel):
     def __init__(self, config: BloomConfig) -> None: ...
     def build_alibi_tensor(
-        self, attention_mask: torch.Tensor, num_heads: int, dtype: torch.dtype
+        self,
+        attention_mask: torch.Tensor,
+        num_heads: int,
+        dtype: torch.dtype,
     ) -> torch.Tensor: ...
     def get_input_embeddings(self):  # -> Embedding | Tensor:
         ...

@@ -16,11 +16,13 @@ logger = ...
 MAX_IMAGE_SIZE = ...
 
 def get_resize_output_image_size(
-    image, resolution_max_side: int
+    image,
+    resolution_max_side: int,
 ) -> tuple[int, int]: ...
 def get_max_height_width(images_list: list[list[torch.Tensor]]) -> tuple[int, int]: ...
 def make_pixel_mask(
-    image: torch.Tensor, output_size: tuple[int, int]
+    image: torch.Tensor,
+    output_size: tuple[int, int],
 ) -> torch.Tensor: ...
 
 class Idefics3FastImageProcessorKwargs(DefaultFastImageProcessorKwargs):
@@ -75,12 +77,17 @@ class Idefics3ImageProcessorFast(BaseImageProcessorFast):
         ...
     @auto_docstring
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[Idefics3FastImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[Idefics3FastImageProcessorKwargs],
     ) -> BatchFeature: ...
     def to_dict(self):  # -> dict[str, Any]:
         ...
     def get_number_of_image_patches(
-        self, height: int, width: int, images_kwargs=...
+        self,
+        height: int,
+        width: int,
+        images_kwargs=...,
     ):  # -> tuple[Any | Literal[1], Any | Literal[1], Any | Literal[1]]:
         ...
 

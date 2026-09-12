@@ -50,7 +50,11 @@ class TFResNetEmbeddings(keras.layers.Layer):
 
 class TFResNetShortCut(keras.layers.Layer):
     def __init__(
-        self, in_channels: int, out_channels: int, stride: int = ..., **kwargs
+        self,
+        in_channels: int,
+        out_channels: int,
+        stride: int = ...,
+        **kwargs,
     ) -> None: ...
     def call(self, x: tf.Tensor, training: bool = ...) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -165,7 +169,8 @@ class TFResNetModel(TFResNetPreTrainedModel):
     RESNET_START_DOCSTRING,
 )
 class TFResNetForImageClassification(
-    TFResNetPreTrainedModel, TFSequenceClassificationLoss
+    TFResNetPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config: ResNetConfig, **kwargs) -> None: ...
     def classifier(self, x: tf.Tensor) -> tf.Tensor: ...

@@ -36,27 +36,38 @@ of module state.
 def initialize_lazy_module(tx: InstructionTranslator, mod, args, kwargs) -> None: ...
 @contextmanager
 def record_nn_module_stack(
-    module_key: str, source, tx, mod: torch.nn.Module
+    module_key: str,
+    source,
+    tx,
+    mod: torch.nn.Module,
 ) -> Generator[None, Any]: ...
 def guard_to_detect_forward_monkeypatching(source, mod) -> None: ...
 
 class NNModuleVariable(VariableTracker):
     _nonvar_fields = ...
     def __init__(
-        self, module_type: type, module_key: str, value: torch.nn.Module, **kwargs
+        self,
+        module_type: type,
+        module_key: str,
+        value: torch.nn.Module,
+        **kwargs,
     ) -> None: ...
     def get_nn_module_stack_source(self) -> Source: ...
     def set_nn_module_stack_source(self, source) -> None: ...
     def python_type(self) -> type | Tensor | Module | Any: ...
     def unpack_var_sequence(self, tx) -> list[Any]: ...
     def call_obj_hasattr(
-        self, tx: InstructionTranslator, name: str
+        self,
+        tx: InstructionTranslator,
+        name: str,
     ) -> VariableTracker: ...
     def is_training(self, tx) -> bool: ...
     def convert_to_unspecialized(self, tx): ...
     def has_key_in_generic_dict(self, tx: InstructionTranslator, key) -> bool: ...
     def var_getattr(
-        self, tx: InstructionTranslator, name
+        self,
+        tx: InstructionTranslator,
+        name,
     ) -> (
         GetAttrVariable
         | VariableTracker
@@ -68,7 +79,10 @@ class NNModuleVariable(VariableTracker):
         | UserFunctionVariable
     ): ...
     def call_function(
-        self, tx, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def call_method(
         self,
@@ -85,7 +99,8 @@ class UnspecializedNNModuleVariable(UserDefinedObjectVariable):
     def get_nn_module_stack_source(self) -> Source: ...
     def set_nn_module_stack_source(self, source) -> None: ...
     def unpack_var_sequence(
-        self, tx
+        self,
+        tx,
     ) -> list[LazyVariableTracker] | list[VariableTracker]: ...
     def call_function(
         self,
@@ -94,13 +109,22 @@ class UnspecializedNNModuleVariable(UserDefinedObjectVariable):
         kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def getattr_helper(
-        self, tx: InstructionTranslator, field, name_vt
+        self,
+        tx: InstructionTranslator,
+        field,
+        name_vt,
     ) -> VariableTracker | None: ...
     def var_getattr(
-        self, tx: InstructionTranslator, name
+        self,
+        tx: InstructionTranslator,
+        name,
     ) -> (
         ConstDictVariable
         | NNModuleHooksDictVariable
@@ -115,7 +139,9 @@ class UnspecializedNNModuleVariable(UserDefinedObjectVariable):
         | LazyVariableTracker
     ): ...
     def manually_trace_nn_module_getattr(
-        self, tx: InstructionTranslator, name
+        self,
+        tx: InstructionTranslator,
+        name,
     ) -> VariableTracker: ...
 
 class UnspecializedBuiltinNNModuleVariable(UnspecializedNNModuleVariable): ...

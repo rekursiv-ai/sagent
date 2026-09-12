@@ -21,12 +21,10 @@ import time
 import httpx2
 import pytest
 
-from sagent import (
-    providers as providers_module,
-)
+from sagent import providers
 from sagent.agent import (
-    agent as agent_module,
-    runtime as agent_runtime,
+    agent,
+    runtime,
 )
 from sagent.agent.agent import (
     MAX_OVERFLOW_RECOVERY,
@@ -144,17 +142,18 @@ from sagent.types.tools import (
 )
 
 
+# Delegates to the real ``SummaryCompactor`` so a stub that stubs only the PREDICATE
+# still reports the production scalar -- the two are one heuristic, and a stub answering
+# them independently would let a test pass against a combination production cannot
+# produce.
 def _stub_largest_context(budget: AgentSettings) -> int:
-    """``largest_context`` for the stub compactors below.
-
-    Delegates to the real ``SummaryCompactor`` so a stub that stubs only
-    the PREDICATE still reports the production scalar -- the two are one
-    heuristic, and a stub answering them independently would let a test
-    pass against a combination production cannot produce.
-    """
+    """``largest_context`` for the stub compactors below."""
     return SummaryCompactor().largest_context(budget)
 
 
+# When ``tape`` is supplied, the mask covers every existing record so every alive splice
+# is absorbed and every HR is hidden. Without ``tape``, the splice has an empty mask
+# (used by tests that only care about the payload and don't need barrier semantics).
 def _summary_override(
     summary: list[ModelContextEvent],
     mint_ref: Callable[[], TapeRef],
@@ -166,13 +165,7 @@ def _summary_override(
     token_before: int = 0,
     token_after: int = 0,
 ) -> ContextSplice:
-    """Build a barrier splice carrying ``summary`` as its payload.
-
-    When ``tape`` is supplied, the mask covers every existing record so
-    every alive splice is absorbed and every HR is hidden. Without
-    ``tape``, the splice has an empty mask (used by tests that only
-    care about the payload and don't need barrier semantics).
-    """
+    """Build a barrier splice carrying ``summary`` as its payload."""
     if tape:
         mask: tuple[MaskRange, ...] = (MaskRange.between(tape[0].ref, tape[-1].ref),)
     else:
@@ -226,15 +219,15 @@ class StubModel:
                         max_request_bytes=self.max_request_bytes,
                         max_image_edge_px=self.max_image_dim,
                         max_image_bytes=self.max_image_bytes,
-                    )
-                }
+                    ),
+                },
             ),
             prices=PriceCatalog(
                 {PriceCatalogProduct(): TokenPrice()}
                 | {
                     PriceCatalogProduct(service_tier=t): TokenPrice()
                     for t in self.valid_service_tiers
-                }
+                },
             ),
             thinking_effort=thinking,
             thinking_budget=(
@@ -425,7 +418,7 @@ async def test_agent_tool_injects_conditional_agents_md_rule(tmp_path: Path) -> 
     rules = tmp_path / ".sagent" / "rules"
     rules.mkdir(parents=True)
     _ = (rules / "python.md").write_text(
-        "---\npaths: ['**/*.py']\n---\nUse Python rule.\n"
+        "---\npaths: ['**/*.py']\n---\nUse Python rule.\n",
     )
     target = tmp_path / "main.py"
     target.write_text("print('hi')\n")
@@ -496,12 +489,12 @@ def test_persist_budget_used_tokens_excludes_error_results() -> None:
     a.runtime.append_history(
         AssistantMessage(
             tool_calls=(read_call, bash_call, err_call),
-        )
+        ),
     )
     a.runtime.append_history(ToolResult(call_id="read-1", content="r" * 200))
     a.runtime.append_history(ToolResult(call_id="bash-1", content="b" * 50))
     a.runtime.append_history(
-        ToolResult(call_id="bash-err", content="e" * 30, is_error=True)
+        ToolResult(call_id="bash-err", content="e" * 30, is_error=True),
     )
     # Both non-error results count (200 + 50 chars at 4 chars/token);
     # only the error result is excluded.
@@ -696,7 +689,7 @@ async def test_agent_request_tools_wrapped_in_background_aware() -> None:
     model = StubModel()
     tool = StubTool(
         directive_schema=json_freeze(
-            {"type": "object", "properties": {"msg": {"type": "string"}}}
+            {"type": "object", "properties": {"msg": {"type": "string"}}},
         ),
     )
     a = _build_agent(model=model, tools=[tool])
@@ -839,8 +832,8 @@ async def test_agent_run_does_not_silently_drop_failed_detached_redrive() -> Non
             if idle_count == 1:
                 a.runtime.inbox.push_back(
                     DetachedResult(
-                        result=ToolResult(call_id="t1", content="late evidence")
-                    )
+                        result=ToolResult(call_id="t1", content="late evidence"),
+                    ),
                 )
 
     a.runtime.observers.append(_land_detached_after_idle)
@@ -927,7 +920,7 @@ async def test_agent_run_waits_for_background_tool_result() -> None:
         responses=[
             AssistantMessage(tool_calls=(bg_call,)),
             AssistantMessage(text="ack, working in background"),
-        ]
+        ],
     )
     a = _build_agent(model=model, tools=[SlowEchoTool()])
 
@@ -987,7 +980,7 @@ async def test_agent_run_not_blocked_by_persistent_subagent() -> None:
     except TimeoutError:
         pytest.fail(
             "Agent.run hung on a serviced subagent: has_pending_background"
-            " counts kind='subagent' as turn-blocking work"
+            " counts kind='subagent' as turn-blocking work",
         )
     finally:
         _ = daemon.cancel()
@@ -1028,7 +1021,7 @@ async def test_agent_run_not_blocked_by_hidden_background_infra() -> None:
     except TimeoutError:
         pytest.fail(
             "Agent.run hung on hidden infra: has_pending_background counts"
-            " hidden=True jobs as turn-blocking work"
+            " hidden=True jobs as turn-blocking work",
         )
     finally:
         _ = pump.cancel()
@@ -1147,7 +1140,7 @@ async def test_agent_run_does_not_hang_on_external_quit() -> None:
         ) -> ModelResponse:
             del request, publish
             blocked.set()
-            await asyncio.Event().wait()  # never returns
+            await asyncio.Event().wait()  # Never returns.
             raise AssertionError("unreachable")
 
     a = _build_agent(model=BlockingModel())
@@ -1168,7 +1161,7 @@ async def test_agent_run_does_not_hang_on_external_quit() -> None:
         pytest.fail(
             "Agent.run hung after an external Quit: run_forever returned"
             " without AgentIdle/ModelResponseError and run never observed"
-            " the driver's completion"
+            " the driver's completion",
         )
     finally:
         if not driver.done():
@@ -1228,7 +1221,7 @@ async def test_background_result_lands_before_single_agent_idle() -> None:
         responses=[
             AssistantMessage(tool_calls=(bg_call,)),
             AssistantMessage(text="ack"),
-        ]
+        ],
     )
     a = _build_agent(model=model, tools=[SlowEchoTool()])
 
@@ -1304,15 +1297,15 @@ def test_fully_drained_ignores_background_when_callback_unset() -> None:
     term must then drop out entirely, leaving the predicate byte-identical
     to its pre-callback form. Pins the standalone-runtime safety property.
     """
-    runtime = agent_runtime.AgentRuntime(model=cast(agent_runtime.Model, StubModel()))
-    assert runtime.has_pending_background is None
+    bare_runtime = runtime.AgentRuntime(model=cast(runtime.Model, StubModel()))
+    assert bare_runtime.has_pending_background is None
     # Fresh runtime, empty inbox, no work -> fully drained, as before.
-    assert runtime._fully_drained() is True
+    assert bare_runtime._fully_drained() is True
     # Setting a callback that reports pending flips it; clearing restores.
-    runtime.has_pending_background = lambda: True
-    assert runtime._fully_drained() is False
-    runtime.has_pending_background = None
-    assert runtime._fully_drained() is True
+    bare_runtime.has_pending_background = lambda: True
+    assert bare_runtime._fully_drained() is False
+    bare_runtime.has_pending_background = None
+    assert bare_runtime._fully_drained() is True
 
 
 @pytest.mark.asyncio
@@ -1322,7 +1315,7 @@ async def test_agent_tool_persists_with_runtime_call_id(tmp_path: Path) -> None:
         responses=[
             AssistantMessage(tool_calls=(call,)),
             AssistantMessage(text="done"),
-        ]
+        ],
     )
     tool = StubTool(response="X" * 5_000)
     a = _build_agent(model=model, tools=[tool], session_dir=tmp_path)
@@ -1393,7 +1386,7 @@ def test_agent_record_response_budget_exhaustion_raises() -> None:
             ModelResponse(
                 message=AssistantMessage(text="x"),
                 spend=TokenCost(request=2.0),
-            )
+            ),
         )
     assert exc_info.value.max_budget_usd == 1.0
     assert exc_info.value.total_cost_usd == pytest.approx(2.0)
@@ -1417,7 +1410,7 @@ def test_record_response_anchors_on_disjoint_token_pools() -> None:
                 response=500,
                 cache_read=400_000,
             ),
-        )
+        ),
     )
     assert a._last_input_tokens == 500_000
 
@@ -1431,13 +1424,15 @@ def test_record_response_detects_cache_miss_within_ttl_window() -> None:
     a = _build_agent(model=StubModel(supports_cache_control=True))
     a.record_response(
         ModelResponse(
-            message=AssistantMessage(text="x"), tokens=TokenCount(cache_read=10_000)
-        )
+            message=AssistantMessage(text="x"),
+            tokens=TokenCount(cache_read=10_000),
+        ),
     )
     a.record_response(
         ModelResponse(
-            message=AssistantMessage(text="y"), tokens=TokenCount(request=10_000)
-        )
+            message=AssistantMessage(text="y"),
+            tokens=TokenCount(request=10_000),
+        ),
     )
     assert len(a.cost_tracker.cache_misses) == 1
     miss = a.cost_tracker.cache_misses[0]
@@ -1450,8 +1445,9 @@ def test_record_response_skips_cache_miss_on_first_response() -> None:
     a = _build_agent(model=StubModel(supports_cache_control=True))
     a.record_response(
         ModelResponse(
-            message=AssistantMessage(text="x"), tokens=TokenCount(request=5_000)
-        )
+            message=AssistantMessage(text="x"),
+            tokens=TokenCount(request=5_000),
+        ),
     )
     assert a.cost_tracker.cache_misses == []
 
@@ -1469,7 +1465,7 @@ def test_record_response_surfaces_usage_warning_once() -> None:
     # Crosses 0.75: one advisory.
     model.usage = UsageSnapshot(windows=(UsageWindow(label="7d", utilization=0.89),))
     a.record_response(resp)
-    a.record_response(resp)  # still high -> not re-warned
+    a.record_response(resp)  # Still high -> not re-warned.
 
     notices = [e for e in published if isinstance(e, NoticeMessage)]
     assert len(notices) == 1
@@ -1486,7 +1482,7 @@ def test_record_response_usage_warning_rearms_after_drop() -> None:
     resp = ModelResponse(message=AssistantMessage(text="x"))
     for util in (0.9, 0.5, 0.9):
         model.usage = UsageSnapshot(
-            windows=(UsageWindow(label="5h", utilization=util),)
+            windows=(UsageWindow(label="5h", utilization=util),),
         )
         a.record_response(resp)
     # Warned at the first 0.9, cleared at 0.5 (< 0.60), re-warned at 0.9.
@@ -1505,7 +1501,7 @@ def test_record_response_usage_warning_escalates_to_blocked() -> None:
     a.record_response(resp)
     # Same window now hard-blocked: the escalation must surface a new advisory.
     model.usage = UsageSnapshot(
-        windows=(UsageWindow(label="7d", utilization=1.0, blocked=True),)
+        windows=(UsageWindow(label="7d", utilization=1.0, blocked=True),),
     )
     a.record_response(resp)
 
@@ -1526,7 +1522,7 @@ def test_record_response_usage_warning_no_chatter_above_clear() -> None:
     # must warn once, not on every crossing of 0.75.
     for util in (0.78, 0.72, 0.78, 0.72):
         model.usage = UsageSnapshot(
-            windows=(UsageWindow(label="5h", utilization=util),)
+            windows=(UsageWindow(label="5h", utilization=util),),
         )
         a.record_response(resp)
     notices = [e for e in published if isinstance(e, NoticeMessage)]
@@ -1641,7 +1637,7 @@ def test_change_model_builds_the_provider_without_construction_options(
     del patched_build_provider
     a = _build_agent_with_spec()
     _ = a.change_model(model_id="claude-sonnet-4-6")
-    build_provider = providers_module.build_provider
+    build_provider = providers.build_provider
     assert isinstance(build_provider, Mock)
     build_provider.assert_called_with("Anthropic", "api", account=None)
 
@@ -1808,7 +1804,10 @@ def test_background_merges_detached_and_explicit() -> None:
         a.register_background(
             "job-2",
             BackgroundTaskEntry(
-                task=ex_task, tool_name="X", queue_id="job-2", started=0.0
+                task=ex_task,
+                tool_name="X",
+                queue_id="job-2",
+                started=0.0,
             ),
         )
         merged = a.background
@@ -1929,7 +1928,7 @@ def test_swap_model_pushes_compact_when_history_exceeds_new_budget() -> None:
         tools=[],
         compactor=SummaryCompactor(),
     )
-    a.runtime.inbox.drain_nowait()  # clear any startup events
+    a.runtime.inbox.drain_nowait()  # `clear` any startup events.
     a.runtime.append_history(UserMessage(text="payload"))
 
     # Swap to a smaller model that also reports 500k tokens for the
@@ -2071,7 +2070,7 @@ def test_swap_gate_and_turn_gate_agree_on_one_threshold() -> None:
             max_request_tokens=1_000_000,
             max_response_tokens=128_000,
             reported=used,
-        )
+        ),
     )
     swap_gate_fires = any(
         isinstance(ev, Compact) for ev in a.runtime.inbox.drain_nowait()
@@ -2244,16 +2243,17 @@ async def test_swap_model_logs_close_failure_via_log_task_exception(
 # --- Agent.change_model -----------------------------------------------------
 
 
+# ``_build_agent`` uses ``StubModel`` without a spec. ``change_model`` consults
+# ``self.model_recipe`` to inherit fields and to detect the cross-provider case; this
+# helper attaches an Anthropic spec.
 def _build_agent_with_spec(model_id: str = "claude-opus-4-7") -> Agent:
-    """Build an agent with a real ``types.model.ModelRecipe`` so ``change_model`` works.
-
-    ``_build_agent`` uses ``StubModel`` without a spec. ``change_model``
-    consults ``self.model_recipe`` to inherit fields and to detect the
-    cross-provider case; this helper attaches an Anthropic spec.
-    """
+    """Build an agent with a real ``types.model.ModelRecipe`` so ``change_model`` works."""
     a = _build_agent()
     a.model_recipe = ModelRecipe(
-        provider="Anthropic", auth="api", model_id=model_id, account=None
+        provider="Anthropic",
+        auth="api",
+        model_id=model_id,
+        account=None,
     )
     return a
 
@@ -2443,10 +2443,12 @@ def test_change_model_apply_resets_oversized_budget(
     """Queued ``/model`` swaps reset stale budgets before applying the model."""
     del patched_build_provider
     a = _build_agent(
-        model=StubModel(max_request_tokens=1_000_000, max_response_tokens=32_000)
+        model=StubModel(max_request_tokens=1_000_000, max_response_tokens=32_000),
     )
     a.model_recipe = ModelRecipe(
-        provider="Anthropic", auth="api", model_id="claude-opus-4-7+1m"
+        provider="Anthropic",
+        auth="api",
+        model_id="claude-opus-4-7+1m",
     )
     _ = a.change_model(model_id="claude-sonnet-4-6")
     items = asyncio.new_event_loop().run_until_complete(a.runtime.inbox.drain())
@@ -2466,7 +2468,7 @@ async def test_relogin_calls_login_classmethod() -> None:
     login_mock = MagicMock()
     fake_provider_cls = MagicMock()
     fake_provider_cls.login = login_mock
-    with patch.object(providers_module, "Anthropic", fake_provider_cls, create=True):
+    with patch.object(providers, "Anthropic", fake_provider_cls, create=True):
         await a.relogin()
     login_mock.assert_called_once()
 
@@ -2481,7 +2483,7 @@ async def test_relogin_anthropic_cli_invokes_native_login() -> None:
         model_id="claude-opus-4-8",
     )
 
-    with patch.object(providers_module.AnthropicCLI, "login") as login:
+    with patch.object(providers.AnthropicCLI, "login") as login:
         await a.relogin()
 
     login.assert_called_once_with()
@@ -2505,7 +2507,7 @@ async def test_relogin_forwards_named_account() -> None:
             calls.append(account)
 
     with patch.object(
-        providers_module,
+        providers,
         "OpenAISubscription",
         _Provider,
         create=True,
@@ -2543,7 +2545,7 @@ async def test_relogin_runs_blocking_login_off_event_loop() -> None:
         loop_progressed = True
         release.set()
 
-    with patch.object(providers_module, "Anthropic", fake_provider_cls, create=True):
+    with patch.object(providers, "Anthropic", fake_provider_cls, create=True):
         await asyncio.gather(a.relogin(), _drive())
 
     assert loop_progressed
@@ -2574,12 +2576,14 @@ async def test_relogin_reloads_auth_when_provider_supports_protocol() -> None:
 
     a = _build_agent(model=model)
     a.model_recipe = ModelRecipe(
-        provider="Anthropic", auth="api", model_id="claude-opus-4-7"
+        provider="Anthropic",
+        auth="api",
+        model_id="claude-opus-4-7",
     )
 
     fake_cls = MagicMock()
     fake_cls.login = MagicMock()
-    with patch.object(providers_module, "Anthropic", fake_cls, create=True):
+    with patch.object(providers, "Anthropic", fake_cls, create=True):
         await a.relogin()
     assert live_provider.handle_auth_error_count == 1
 
@@ -2604,7 +2608,7 @@ async def test_relogin_clears_suspension_and_halts_inflight_call() -> None:
     try:
         fake_cls = MagicMock()
         fake_cls.login = MagicMock()
-        with patch.object(providers_module, "Anthropic", fake_cls, create=True):
+        with patch.object(providers, "Anthropic", fake_cls, create=True):
             await a.relogin()
         assert a.runtime.service_suspended_until is None
         assert a.runtime.resume_retry_at is None
@@ -2621,7 +2625,7 @@ async def test_relogin_no_halt_when_idle() -> None:
     a.runtime.service_suspended_until = time.time() + 100.0
     fake_cls = MagicMock()
     fake_cls.login = MagicMock()
-    with patch.object(providers_module, "Anthropic", fake_cls, create=True):
+    with patch.object(providers, "Anthropic", fake_cls, create=True):
         await a.relogin()
     assert a.runtime.service_suspended_until is None
     items = a.runtime.inbox.drain_nowait()
@@ -2632,8 +2636,8 @@ async def test_relogin_no_halt_when_idle() -> None:
 async def test_relogin_raises_when_provider_has_no_login() -> None:
     """Providers without a ``login`` classmethod surface as ``ValueError``."""
     a = _build_agent_with_spec()
-    fake_cls = MagicMock(spec=[])  # no ``login`` attribute
-    with patch.object(providers_module, "Anthropic", fake_cls, create=True):  # noqa: SIM117 -- pytest.raises is a separate context manager and reads more clearly when nested with the patch
+    fake_cls = MagicMock(spec=[])  # No ``login`` attribute.
+    with patch.object(providers, "Anthropic", fake_cls, create=True):  # noqa: SIM117 -- pytest.raises is a separate context manager and reads more clearly when nested with the patch
         with pytest.raises(ValueError, match="no login method"):
             await a.relogin()
 
@@ -2802,7 +2806,9 @@ async def test_compact_awaits_compact_complete_event() -> None:
             del context, model
             del custom_instructions
             return _summary_override(
-                [UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")],
+                mint_ref,
+                tape=tape,
             )
 
         def maintain(
@@ -2958,7 +2964,9 @@ async def test_recompact_awaits_compact_complete_event() -> None:
             del context, model
             del custom_instructions
             return _summary_override(
-                [UserMessage(text="[recompacted]")], mint_ref, tape=tape
+                [UserMessage(text="[recompacted]")],
+                mint_ref,
+                tape=tape,
             )
 
         def maintain(
@@ -3134,9 +3142,11 @@ async def test_activity_pauses_during_model_service_suspended() -> None:
             delay_sec=0.05,
             server_supplied=True,
             error=ServiceErrorSnapshot(
-                type_name="RateLimitError", message="429", status=429
+                type_name="RateLimitError",
+                message="429",
+                status=429,
             ),
-        )
+        ),
     )
     banked = a.activity.elapsed_seconds
     assert banked > 0
@@ -3199,7 +3209,7 @@ async def test_run_bg_propagates_external_cancellation() -> None:
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
             tool_started.set()
-            await release.wait()  # never released
+            await release.wait()  # Never released.
             return ToolResult(call_id="", content="unreached")
 
     a = _build_agent()
@@ -3247,8 +3257,8 @@ async def test_activity_current_call_start_resets_on_each_model_call() -> None:
             message=AssistantMessage(
                 text="",
                 tool_calls=(ToolCall(id="t1", name="Bash", args={}),),
-            )
-        )
+            ),
+        ),
     )
     await asyncio.sleep(0.02)
     a.publish(ModelCallStarted())
@@ -3306,7 +3316,7 @@ async def test_streaming_live_tokens_tokenize_whole_not_per_chunk() -> None:
 
     a = _build_agent(model=_Floor3Model())
     a.publish(ModelCallStarted())
-    for _ in range(9):  # nine 1-char chunks
+    for _ in range(9):  # Nine 1-char chunks.
         a.publish(ModelResponsePartial(text="x"))
     # Per-chunk: 9 * int(1/3) = 0. Whole: int(9/3) = 3.
     assert a.model.approx_text_tokens(a.activity.live_response_text) == 3
@@ -3376,7 +3386,9 @@ async def test_compact_now_replaces_history_in_place() -> None:
             del context, model
             del custom_instructions
             return _summary_override(
-                [UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")],
+                mint_ref,
+                tape=tape,
             )
 
         def maintain(
@@ -3504,7 +3516,9 @@ async def test_compact_recall_reset_waits_for_barrier_adoption(tmp_path: Path) -
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")],
+                mint_ref,
+                tape=tape,
             )
 
     a = Agent(model=StubModel(), tools=[], compactor=_NoopCompactor())
@@ -3564,7 +3578,9 @@ async def test_compact_now_clears_tool_recall(tmp_path: Path) -> None:
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")],
+                mint_ref,
+                tape=tape,
             )
 
     a = Agent(model=StubModel(), tools=[], compactor=_NoopCompactor())
@@ -3622,7 +3638,9 @@ async def test_compact_now_returns_true_on_success() -> None:
             del context, model
             del custom_instructions
             return _summary_override(
-                [UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")],
+                mint_ref,
+                tape=tape,
             )
 
         def maintain(
@@ -3788,7 +3806,7 @@ def test_wire_attachment_bytes_pdf_base64_no_resize() -> None:
             call_id="c",
             content="pdf",
             attachments=(BytesMessage(raw, "application/pdf"),),
-        )
+        ),
     ]
     got = _wire_attachment_bytes(msgs, max_image_bytes=5 * 1024 * 1024)
     assert got == 4 * ((len(raw) + 2) // 3)
@@ -3802,10 +3820,10 @@ def test_wire_attachment_bytes_image_clamped_then_base64() -> None:
         UserMessage(
             text="",
             attachments=(BytesMessage(raw, "image/jpeg"),),
-        )
+        ),
     ]
     got = _wire_attachment_bytes(msgs, max_image_bytes=cap)
-    assert got == 4 * ((cap + 2) // 3)  # clamped to cap, not 30 MB
+    assert got == 4 * ((cap + 2) // 3)  # Clamped to cap, not 30 MB.
 
 
 def test_wire_attachment_bytes_ignores_non_bytes_and_empty() -> None:
@@ -3829,7 +3847,7 @@ def test_wire_attachment_bytes_zero_image_cap_means_unlimited() -> None:
         UserMessage(
             text="",
             attachments=(BytesMessage(b"abcd", "image/png"),),
-        )
+        ),
     ]
     # 4 raw bytes, no clamp -> base64 wire size 4*ceil(4/3) = 8, NOT 0.
     assert _wire_attachment_bytes(msgs, max_image_bytes=0) == 8
@@ -3841,7 +3859,7 @@ def test_wire_attachment_bytes_positive_image_cap_still_clamps() -> None:
         UserMessage(
             text="",
             attachments=(BytesMessage(b"abcdefghij", "image/png"),),
-        )
+        ),
     ]
     # 10 raw bytes clamped to 5 -> base64 4*ceil(5/3) = 8.
     assert _wire_attachment_bytes(msgs, max_image_bytes=5) == 8
@@ -3862,7 +3880,7 @@ def test_wire_attachment_bytes_exact_base64_length(raw_len: int, expected: int) 
             call_id="c",
             content="pdf",
             attachments=(BytesMessage(b"x" * raw_len, "application/pdf"),),
-        )
+        ),
     ]
     assert _wire_attachment_bytes(msgs, max_image_bytes=5 * 1024 * 1024) == expected
 
@@ -3877,20 +3895,18 @@ class _TokenIdleByteTightModel(StubModel):
     @override
     def approx_request_tokens(self, request: ModelRequest) -> int:
         del request
-        return 1  # trivially under any token threshold
+        return 1  # Trivially under any token threshold.
 
 
+# The byte gate only counts attachments in the prefix up to and including the last
+# ``AssistantMessage`` -- the bytes that rode in a prior request and can be shed. A bare
+# trailing ToolResult is this-turn's fresh input and is NOT compactable, so it must be
+# wrapped behind an AssistantMessage plus a following AssistantMessage to land in the
+# compactable prefix.
 def _sent_turn(
     attachment: BytesMessage,
 ) -> list[ModelContextEvent]:
-    """Build a compactable (already-sent) turn: AM tool_call + its ToolResult.
-
-    The byte gate only counts attachments in the prefix up to and including
-    the last ``AssistantMessage`` -- the bytes that rode in a prior request
-    and can be shed. A bare trailing ToolResult is this-turn's fresh input
-    and is NOT compactable, so it must be wrapped behind an AssistantMessage
-    plus a following AssistantMessage to land in the compactable prefix.
-    """
+    """Build a compactable (already-sent) turn: AM tool_call + its ToolResult."""
     return [
         AssistantMessage(tool_calls=(ToolCall(id="c", name="Read", args={}),)),
         ToolResult(call_id="c", content="[PDF: big.pdf]", attachments=(attachment,)),
@@ -3913,7 +3929,8 @@ async def test_compact_if_needed_fires_on_byte_pressure_even_when_token_gate_idl
     rec = _ThresholdCompactor()
     a = Agent(
         model=_TokenIdleByteTightModel(
-            max_request_tokens=1_000_000, max_response_tokens=128_000
+            max_request_tokens=1_000_000,
+            max_response_tokens=128_000,
         ),
         tools=[],
         compactor=rec,
@@ -3942,7 +3959,8 @@ async def test_compact_if_needed_byte_trigger_is_overridable_kwarg() -> None:
     default_rec = _ThresholdCompactor()
     a_default = Agent(
         model=_TokenIdleByteTightModel(
-            max_request_tokens=1_000_000, max_response_tokens=128_000
+            max_request_tokens=1_000_000,
+            max_response_tokens=128_000,
         ),
         tools=[],
         compactor=default_rec,
@@ -3953,7 +3971,8 @@ async def test_compact_if_needed_byte_trigger_is_overridable_kwarg() -> None:
     low_rec = _ThresholdCompactor()
     a_low = Agent(
         model=_TokenIdleByteTightModel(
-            max_request_tokens=1_000_000, max_response_tokens=128_000
+            max_request_tokens=1_000_000,
+            max_response_tokens=128_000,
         ),
         tools=[],
         compactor=low_rec,
@@ -3975,7 +3994,8 @@ async def test_byte_gate_does_not_strip_fresh_turn_user_attachment() -> None:
     rec = _ThresholdCompactor()
     a = Agent(
         model=_TokenIdleByteTightModel(
-            max_request_tokens=1_000_000, max_response_tokens=128_000
+            max_request_tokens=1_000_000,
+            max_response_tokens=128_000,
         ),
         tools=[],
         compactor=rec,
@@ -4130,7 +4150,8 @@ async def test_compact_if_needed_triggers_on_last_response_total() -> None:
     rec = _ThresholdCompactor()
     a = Agent(
         model=_UndercountModel(
-            max_request_tokens=1_000_000, max_response_tokens=128_000
+            max_request_tokens=1_000_000,
+            max_response_tokens=128_000,
         ),
         tools=[],
         compactor=rec,
@@ -4145,7 +4166,7 @@ async def test_compact_if_needed_triggers_on_last_response_total() -> None:
         ModelResponse(
             message=AssistantMessage(text=""),
             tokens=TokenCount(request=990_000),
-        )
+        ),
     )
     await a.compact_if_needed(history, a.model)
     assert rec.compacted is True
@@ -4171,7 +4192,7 @@ async def test_compact_if_needed_adds_tokens_appended_since_last_response() -> N
         ModelResponse(
             message=AssistantMessage(text=""),
             tokens=TokenCount(request=800_000),
-        )
+        ),
     )
     # History ends with the response's AssistantMessage, then a fresh
     # ToolResult appended this turn: 600_000 chars / 4 = ~150_000 est tokens
@@ -4205,7 +4226,7 @@ async def test_compact_if_needed_no_since_term_when_response_is_tail() -> None:
         ModelResponse(
             message=AssistantMessage(text=""),
             tokens=TokenCount(request=700_000),
-        )
+        ),
     )
     history: list[ModelContextEvent] = [
         UserMessage(text="q"),
@@ -4236,7 +4257,7 @@ async def test_compact_if_needed_counts_cached_input_tokens() -> None:
         ModelResponse(
             message=AssistantMessage(text=""),
             tokens=TokenCount(request=5_000, cache_read=985_000),
-        )
+        ),
     )
     # 5_000 + 985_000 = 990_000; 1.1 * 990_000 = 1_089_000 >= 1M -> fires.
     await a.compact_if_needed(history, a.model)
@@ -4395,7 +4416,9 @@ async def test_circuit_breaker_resets_on_successful_compaction() -> None:
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")],
+                mint_ref,
+                tape=tape,
             )
 
         def maintain(
@@ -4709,7 +4732,9 @@ async def test_agent_compactor_retrigger_estimate_failure_is_nonfatal() -> None:
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")],
+                mint_ref,
+                tape=tape,
             )
 
         def maintain(
@@ -4783,7 +4808,7 @@ async def test_agent_compactor_repairs_payload_after_scrunch() -> None:
                     AssistantMessage(
                         text="partial",
                         tool_calls=(ToolCall(id="orphan", name="x", args={}),),
-                    )
+                    ),
                 ],
                 mint_ref,
                 tape=tape or None,
@@ -4813,7 +4838,9 @@ async def test_agent_compactor_repairs_payload_after_scrunch() -> None:
             )
 
     budget = AgentSettings(
-        max_request_tokens=1_000, max_response_tokens=100, buffer_tokens=100
+        max_request_tokens=1_000,
+        max_response_tokens=100,
+        buffer_tokens=100,
     )
     a = Agent(
         model=_OverflowModel(),
@@ -4899,7 +4926,7 @@ async def test_agent_compactor_scrunch_uses_agent_budget_not_model_cap() -> None
 
     @dataclass(slots=True, kw_only=True)
     class _OverflowModel(StubModel):
-        max_request_tokens: int = 1_000_000  # model cap is huge
+        max_request_tokens: int = 1_000_000  # `model` cap is huge.
         max_response_tokens: int = 100
 
         @override
@@ -4912,7 +4939,9 @@ async def test_agent_compactor_scrunch_uses_agent_budget_not_model_cap() -> None
 
     # Agent budget far below the model cap.
     budget = AgentSettings(
-        max_request_tokens=1_000, max_response_tokens=100, buffer_tokens=100
+        max_request_tokens=1_000,
+        max_response_tokens=100,
+        buffer_tokens=100,
     )
     a = Agent(
         model=_OverflowModel(),
@@ -4986,7 +5015,10 @@ async def test_agent_compactor_scrunch_target_subtracts_system_tool_overhead() -
             return _stub_largest_context(settings)
 
         def should_compact(
-            self, current_tokens: int, largest_context: int, system_tokens: int = 0
+            self,
+            current_tokens: int,
+            largest_context: int,
+            system_tokens: int = 0,
         ) -> bool:
             del current_tokens, largest_context, system_tokens
             return False
@@ -5011,7 +5043,9 @@ async def test_agent_compactor_scrunch_target_subtracts_system_tool_overhead() -
     # System prompt of 800 chars -> 200 tokens of fixed overhead.
     system = "s" * 800
     budget = AgentSettings(
-        max_request_tokens=1_000, max_response_tokens=100, buffer_tokens=100
+        max_request_tokens=1_000,
+        max_response_tokens=100,
+        buffer_tokens=100,
     )
     a = Agent(
         model=_SystemCountingModel(),
@@ -5039,7 +5073,7 @@ async def test_agent_compactor_scrunch_target_subtracts_system_tool_overhead() -
     budget_target = (
         a.max_request_tokens - a.max_response_tokens - a.budget.buffer_tokens
     )
-    system_overhead = a.model.approx_text_tokens(system)  # 200
+    system_overhead = a.model.approx_text_tokens(system)  # 200.
     # The messages-only scrunch target must reserve the system overhead.
     assert seen_targets[0] == budget_target - system_overhead, (
         f"scrunch target {seen_targets[0]} did not subtract system overhead"
@@ -5182,8 +5216,8 @@ class _OverflowModel:
                     "": ModelLimits(
                         max_request_tokens=self.max_request_tokens,
                         max_response_tokens=self.max_response_tokens,
-                    )
-                }
+                    ),
+                },
             ),
             prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
         )
@@ -5290,8 +5324,8 @@ class _RawOverflowModel:
                     "": ModelLimits(
                         max_request_tokens=self.max_request_tokens,
                         max_response_tokens=self.max_response_tokens,
-                    )
-                }
+                    ),
+                },
             ),
             prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
         )
@@ -5394,7 +5428,9 @@ async def test_agent_model_overflow_triggers_compact_now() -> None:
             del custom_instructions
             compact_calls.append(1)
             return _summary_override(
-                [UserMessage(text="[compact]")], mint_ref, tape=tape
+                [UserMessage(text="[compact]")],
+                mint_ref,
+                tape=tape,
             )
 
         def maintain(
@@ -5471,7 +5507,9 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
             del custom_instructions
             order.append("compact")
             return _summary_override(
-                [UserMessage(text="[compact]")], mint_ref, tape=tape
+                [UserMessage(text="[compact]")],
+                mint_ref,
+                tape=tape,
             )
 
         def maintain(
@@ -5514,8 +5552,8 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
                         "": ModelLimits(
                             max_request_tokens=self.max_request_tokens,
                             max_response_tokens=self.max_response_tokens,
-                        )
-                    }
+                        ),
+                    },
                 ),
                 prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
             )
@@ -5622,7 +5660,9 @@ async def test_compact_now_publishes_compaction_progress_events() -> None:
             del context, model
             del custom_instructions
             return _summary_override(
-                [UserMessage(text="[compact]")], mint_ref, tape=tape
+                [UserMessage(text="[compact]")],
+                mint_ref,
+                tape=tape,
             )
 
         def maintain(
@@ -5767,7 +5807,9 @@ async def test_sync_compact_now_appends_lifecycle_markers_to_tape() -> None:
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [UserMessage(text="[compact]")], mint_ref, tape=tape
+                [UserMessage(text="[compact]")],
+                mint_ref,
+                tape=tape,
             )
 
         def maintain(
@@ -6046,7 +6088,9 @@ async def test_agent_model_overflow_exhausts_recovery_raises() -> None:
             del custom_instructions
             # Returns short summary; model keeps overflowing.
             return _summary_override(
-                [UserMessage(text="[compact]")], mint_ref, tape=tape
+                [UserMessage(text="[compact]")],
+                mint_ref,
+                tape=tape,
             )
 
         def maintain(
@@ -6059,7 +6103,7 @@ async def test_agent_model_overflow_exhausts_recovery_raises() -> None:
             del tape, context, tools, mint_ref
             return ()
 
-    model = _OverflowModel(overflow_count=10)  # always overflow
+    model = _OverflowModel(overflow_count=10)  # Always overflow.
     a = Agent(model=model, tools=[], compactor=_NoOpCompactor())
     with pytest.raises(ContextOverflowError) as ei:
         await a._agent_model.stream(
@@ -6199,7 +6243,9 @@ async def test_agent_model_overflow_recovery_via_classifier_not_isinstance() -> 
             del custom_instructions
             compact_calls.append(1)
             return _summary_override(
-                [UserMessage(text="[compact]")], mint_ref, tape=tape
+                [UserMessage(text="[compact]")],
+                mint_ref,
+                tape=tape,
             )
 
         def maintain(
@@ -6294,7 +6340,9 @@ async def test_agent_model_request_too_large_recovers_via_compaction() -> None:
             del context, model, custom_instructions
             compact_calls.append(1)
             return _summary_override(
-                [UserMessage(text="[compact]")], mint_ref, tape=tape
+                [UserMessage(text="[compact]")],
+                mint_ref,
+                tape=tape,
             )
 
         def maintain(
@@ -6355,7 +6403,9 @@ async def test_resume_retry_at_consumed_once_across_overflow_recovery() -> None:
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [UserMessage(text="[compact]")], mint_ref, tape=tape
+                [UserMessage(text="[compact]")],
+                mint_ref,
+                tape=tape,
             )
 
         def maintain(
@@ -6368,7 +6418,7 @@ async def test_resume_retry_at_consumed_once_across_overflow_recovery() -> None:
             del tape, context, tools, mint_ref
             return ()
 
-    model = _ByteOverflowModel(overflow_count=1)  # one overflow, then success
+    model = _ByteOverflowModel(overflow_count=1)  # One overflow, then success.
     a = Agent(model=model, tools=[], compactor=_PassThroughCompactor())
     # A short, in-range resume wait so ``send_with_retry`` sleeps it the first
     # time. Overflow raises immediately (no backoff sleep), so the ONLY sleeps
@@ -6382,7 +6432,7 @@ async def test_resume_retry_at_consumed_once_across_overflow_recovery() -> None:
         # The resume wait is the only multi-second sleep in this scenario.
         if delay > 1.0:
             resume_sleeps.append(delay)
-            return None  # don't actually wait 30s
+            return None  # don't actually wait 30s.
         return await real_sleep(delay, *args, **kwargs)
 
     with patch("sagent.agent.retry.asyncio.sleep", _recording_sleep):
@@ -6434,7 +6484,9 @@ async def test_agent_model_request_too_large_exhaustion_byte_remediation() -> No
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [UserMessage(text="[compact]")], mint_ref, tape=tape
+                [UserMessage(text="[compact]")],
+                mint_ref,
+                tape=tape,
             )
 
         def maintain(
@@ -6447,7 +6499,7 @@ async def test_agent_model_request_too_large_exhaustion_byte_remediation() -> No
             del tape, context, tools, mint_ref
             return ()
 
-    model = _ByteOverflowModel(overflow_count=10)  # always too large
+    model = _ByteOverflowModel(overflow_count=10)  # Always too large.
     a = Agent(model=model, tools=[], compactor=_NoOpCompactor())
     with pytest.raises(RequestTooLargeError) as ei:
         await a._agent_model.stream(
@@ -6590,7 +6642,7 @@ async def test_pre_send_guard_measures_materialized_not_raw_history() -> None:
     # calls a tool, a 5 MB tool result returns, then a fresh user turn.
     a.runtime.append_history(UserMessage(text="hi"))
     a.runtime.append_history(
-        AssistantMessage(tool_calls=(ToolCall(id="c1", name="Bash", args={}),))
+        AssistantMessage(tool_calls=(ToolCall(id="c1", name="Bash", args={}),)),
     )
     a.runtime.append_history(ToolResult(call_id="c1", content="x" * (5 * 1024 * 1024)))
     a.runtime.append_history(UserMessage(text="continue"))
@@ -6667,8 +6719,8 @@ async def test_agent_tool_invalid_input_labels_then_errors() -> None:
                 "properties": {"msg": {"type": "string"}},
                 "required": ["msg"],
                 "additionalProperties": False,
-            }
-        )
+            },
+        ),
     )
     a = _build_agent(tools=[inner])
     labels: list[ToolLabel] = []
@@ -6743,15 +6795,15 @@ async def test_cancelled_background_tool_splices_placeholder() -> None:
 
     a = _build_agent(tools=[SlowTool()])
     wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
-    token = agent_runtime.current_call_id_var.set("bg-1")
+    token = runtime.current_call_id_var.set("bg-1")
     try:
         placeholder = await wrapper.run({"background": True})
     finally:
-        agent_runtime.current_call_id_var.reset(token)
+        runtime.current_call_id_var.reset(token)
     a.runtime.append_history(
         AssistantMessage(
-            tool_calls=(ToolCall(id="bg-1", name="Echo", args={"background": True}),)
-        )
+            tool_calls=(ToolCall(id="bg-1", name="Echo", args={"background": True}),),
+        ),
     )
     a.runtime.append_history(placeholder)
     task = a.background["job-1"].task
@@ -6865,7 +6917,7 @@ async def test_tool_call_round_cap_allows_first_round_when_cap_is_one() -> None:
         responses=[
             AssistantMessage(tool_calls=(ToolCall(id="c1", name="Echo", args={}),)),
             AssistantMessage(text="done"),
-        ]
+        ],
     )
     a = Agent(model=model, tools=[SideEffectTool()], max_tool_call_rounds=1)
     events = [type(ev) async for ev in a.run(UserMessage(text="go"))]
@@ -6898,7 +6950,7 @@ async def test_tool_call_round_cap_blocks_second_round_when_cap_is_one() -> None
         responses=[
             AssistantMessage(tool_calls=(ToolCall(id="c1", name="Echo", args={}),)),
             AssistantMessage(tool_calls=(ToolCall(id="c2", name="Echo", args={}),)),
-        ]
+        ],
     )
     a = Agent(model=model, tools=[CountingTool()], max_tool_call_rounds=1)
     events = [type(ev) async for ev in a.run(UserMessage(text="go"))]
@@ -7023,7 +7075,9 @@ async def test_agent_compactor_appends_continuation_when_summary_ends_assistant(
             del context, model
             del custom_instructions
             return _summary_override(
-                [AssistantMessage(text="model said")], mint_ref, tape=tape
+                [AssistantMessage(text="model said")],
+                mint_ref,
+                tape=tape,
             )
 
         def maintain(
@@ -7051,7 +7105,8 @@ async def test_agent_compactor_appends_continuation_when_summary_ends_assistant(
 
 @pytest.mark.asyncio
 async def test_agent_compactor_post_enrich_failure_swallowed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Errors inside ``post_compact_enrich`` are logged and don't propagate."""
 
@@ -7084,7 +7139,9 @@ async def test_agent_compactor_post_enrich_failure_swallowed(
             del context, model
             del custom_instructions
             return _summary_override(
-                [UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")],
+                mint_ref,
+                tape=tape,
             )
 
         def maintain(
@@ -7108,7 +7165,10 @@ async def test_agent_compactor_post_enrich_failure_swallowed(
     )
     a.runtime.append_history(UserMessage(text="x"))
 
-    monkeypatch.setattr("sagent.agent.agent.post_compact_enrich", _boom)
+    monkeypatch.setattr(
+        "sagent.agent.agent.post_compact_enrich",
+        _boom,
+    )
     await a.compact_now()
 
     # Summary still survived; the enrich failure was swallowed.
@@ -7297,7 +7357,7 @@ def test_tool_state_depth_restored_on_context_exit() -> None:
     from a stale starting value and the depth cap drifts.
     """
     root = _build_agent()
-    deep = _build_agent()  # one agent object reused under two parents
+    deep = _build_agent()  # One agent object reused under two parents.
     with root._install_contextvars(), deep._install_contextvars():
         assert deep.tool_state.depth == 1
     # After both blocks exit, the reused agent's depth must be back to its
@@ -7604,8 +7664,8 @@ async def test_compactor_estimates_use_live_background_aware_tools() -> None:
     model = _RecordingModel()
     tool = StubTool(
         directive_schema=json_freeze(
-            {"type": "object", "properties": {"msg": {"type": "string"}}}
-        )
+            {"type": "object", "properties": {"msg": {"type": "string"}}},
+        ),
     )
     a = Agent(model=model, tools=[tool], compactor=_NoopCompactor())
 
@@ -7650,7 +7710,9 @@ async def test_agent_compactor_receives_canonical_context() -> None:
             del model, custom_instructions
             seen_context.append(context)
             return _summary_override(
-                [UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")],
+                mint_ref,
+                tape=tape,
             )
 
     call = ToolCall(id="call_1", name="Bash", args={})
@@ -7706,14 +7768,16 @@ async def test_post_compact_estimates_use_live_background_aware_tools() -> None:
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")],
+                mint_ref,
+                tape=tape,
             )
 
     model = _RecordingModel()
     tool = StubTool(
         directive_schema=json_freeze(
-            {"type": "object", "properties": {"msg": {"type": "string"}}}
-        )
+            {"type": "object", "properties": {"msg": {"type": "string"}}},
+        ),
     )
     a = Agent(model=model, tools=[tool], compactor=_OkCompactor())
     a.runtime.append_history(UserMessage(text="x"))
@@ -7977,7 +8041,9 @@ async def test_post_compact_hook_budget_is_what_the_strategy_left_over() -> None
         ) -> ContextSplice:
             del context, model, custom_instructions
             return _summary_override(
-                [UserMessage(text="[summary]")], mint_ref, tape=tape
+                [UserMessage(text="[summary]")],
+                mint_ref,
+                tape=tape,
             )
 
     budget = AgentSettings(
@@ -8009,7 +8075,7 @@ def test_agent_with_session_dir_auto_persists(tmp_path: Path) -> None:
     Now Agent.__init__ auto-installs.
     """
     a = _build_agent(session_dir=tmp_path)
-    a.status = "working"  # triggers StatusChanged → persistence observer fires
+    a.status = "working"  # Triggers StatusChanged → persistence observer fires.
     session_file = tmp_path / "session.jsonl"
     assert session_file.exists()
     lines = session_file.read_text(encoding="utf-8").splitlines()
@@ -8039,7 +8105,7 @@ def test_agent_resume_rebaselines_persistence(tmp_path: Path) -> None:
     # Phase 1: write some records via a first agent.
     a1 = _build_agent(session_dir=tmp_path)
     a1.status = "first"
-    a1.status = "second"  # ensure at least one tape record gets written
+    a1.status = "second"  # Ensure at least one tape record gets written.
     a1.runtime.publish(SaveSession())
     session_file = tmp_path / "session.jsonl"
     assert session_file.exists()
@@ -8419,19 +8485,22 @@ async def test_should_cancel_background_tools_only_mode() -> None:
         )
         assert (
             _should_cancel_background(
-                _bg_entry(live, kind="detached"), mode="tools_only"
+                _bg_entry(live, kind="detached"),
+                mode="tools_only",
             )
             is False
         )
         assert (
             _should_cancel_background(
-                _bg_entry(live, kind="subagent"), mode="tools_only"
+                _bg_entry(live, kind="subagent"),
+                mode="tools_only",
             )
             is False
         )
         assert (
             _should_cancel_background(
-                _bg_entry(live, kind="tool", hidden=True), mode="tools_only"
+                _bg_entry(live, kind="tool", hidden=True),
+                mode="tools_only",
             )
             is False
         )
@@ -8462,19 +8531,22 @@ async def test_should_cancel_background_all_mode() -> None:
         )
         assert (
             _should_cancel_background(
-                _bg_entry(live, kind="subagent", lifecycle="serviced"), mode="all"
+                _bg_entry(live, kind="subagent", lifecycle="serviced"),
+                mode="all",
             )
             is False
         )
         assert (
             _should_cancel_background(
-                _bg_entry(live, kind="subagent", lifecycle="oneshot"), mode="all"
+                _bg_entry(live, kind="subagent", lifecycle="oneshot"),
+                mode="all",
             )
             is True
         )
         assert (
             _should_cancel_background(
-                _bg_entry(live, kind="tool", hidden=True), mode="all"
+                _bg_entry(live, kind="tool", hidden=True),
+                mode="all",
             )
             is False
         )
@@ -8685,7 +8757,7 @@ def test_tool_round_cap_pushes_single_error_when_before_spawn_blocks() -> None:
         responses=[
             AssistantMessage(tool_calls=(ToolCall(id="c1", name="Echo", args={}),)),
             AssistantMessage(tool_calls=(ToolCall(id="c2", name="Echo", args={}),)),
-        ]
+        ],
     )
     a = Agent(model=model, tools=[CountingTool()], max_tool_call_rounds=1)
 
@@ -8742,7 +8814,7 @@ def test_tool_registry_is_bounded_across_a_long_session(
 ) -> None:
     """One entry per tool call, never pruned, grows for the whole session."""
     registry_max = 8
-    monkeypatch.setattr(agent_module, "_TOOL_REGISTRY_MAX", registry_max)
+    monkeypatch.setattr(agent, "_TOOL_REGISTRY_MAX", registry_max)
     a = _build_agent()
     for i in range(registry_max + 2):
         a._track_tool_registry(
@@ -8761,7 +8833,7 @@ def test_tool_registry_keeps_detached_calls_however_old(
 ) -> None:
     """A detached result lands later; forgetting it loses its attribution."""
     registry_max = 8
-    monkeypatch.setattr(agent_module, "_TOOL_REGISTRY_MAX", registry_max)
+    monkeypatch.setattr(agent, "_TOOL_REGISTRY_MAX", registry_max)
     a = _build_agent()
     loop = asyncio.new_event_loop()
     try:

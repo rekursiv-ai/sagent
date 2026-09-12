@@ -121,7 +121,10 @@ class LinearLR(LRScheduler):
 
 class ExponentialLR(LRScheduler):
     def __init__(
-        self, optimizer: Optimizer, gamma: float, last_epoch: int = ...
+        self,
+        optimizer: Optimizer,
+        gamma: float,
+        last_epoch: int = ...,
     ) -> None: ...
     @override
     def get_lr(self) -> list[float]: ...
@@ -165,7 +168,9 @@ class CosineAnnealingLR(LRScheduler):
 
 class ChainedScheduler(LRScheduler):
     def __init__(
-        self, schedulers: Sequence[LRScheduler], optimizer: Optimizer | None = ...
+        self,
+        schedulers: Sequence[LRScheduler],
+        optimizer: Optimizer | None = ...,
     ) -> None: ...
     def step(self) -> None: ...
     @override

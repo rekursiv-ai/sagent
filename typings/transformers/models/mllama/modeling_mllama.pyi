@@ -31,14 +31,18 @@ logger = ...
 class MllamaPrecomputedAspectRatioEmbedding(nn.Module):
     def __init__(self, config: MllamaVisionConfig, is_gated: bool = ...) -> None: ...
     def forward(
-        self, hidden_state: torch.Tensor, aspect_ratio_ids: torch.Tensor
+        self,
+        hidden_state: torch.Tensor,
+        aspect_ratio_ids: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class MllamaPrecomputedPositionEmbedding(nn.Module):
     def __init__(self, config: MllamaVisionConfig) -> None: ...
     def forward(
-        self, hidden_state: torch.Tensor, aspect_ratio_ids: torch.Tensor
+        self,
+        hidden_state: torch.Tensor,
+        aspect_ratio_ids: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -69,22 +73,31 @@ class MllamaVisionAttention(nn.Module):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class MllamaVisionEncoderLayer(nn.Module):
     def __init__(self, config: MllamaVisionConfig, is_gated: bool = ...) -> None: ...
     def forward(
-        self, hidden_state: torch.Tensor, attention_mask: torch.Tensor | None = ...
+        self,
+        hidden_state: torch.Tensor,
+        attention_mask: torch.Tensor | None = ...,
     ):  # -> Tensor:
         ...
 
 class MllamaVisionEncoder(nn.Module):
     def __init__(
-        self, config: MllamaVisionConfig, num_layers=..., is_gated=...
+        self,
+        config: MllamaVisionConfig,
+        num_layers=...,
+        is_gated=...,
     ) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, attention_mask: torch.Tensor | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = ...,
     ) -> BaseModelOutput: ...
     def __call__(self, *args: Any, **kwargs: Any) -> BaseModelOutput: ...
 
@@ -96,7 +109,9 @@ class MllamaTextRMSNorm(nn.Module):
 
 class MllamaTextCrossAttention(nn.Module):
     def __init__(
-        self, config: MllamaTextConfig | None = ..., layer_idx: int | None = ...
+        self,
+        config: MllamaTextConfig | None = ...,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -113,7 +128,12 @@ class MllamaTextCrossAttention(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 
@@ -154,7 +174,8 @@ class MllamaSelfAttentionDecoderLayer(GradientCheckpointingLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class MllamaCrossAttentionDecoderLayer(GradientCheckpointingLayer):

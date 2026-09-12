@@ -64,7 +64,10 @@ class TFSwinImageClassifierOutput(ModelOutput):
 
 def window_partition(input_feature: tf.Tensor, window_size: int) -> tf.Tensor: ...
 def window_reverse(
-    windows: tf.Tensor, window_size: int, height: int, width: int
+    windows: tf.Tensor,
+    window_size: int,
+    height: int,
+    width: int,
 ) -> tf.Tensor: ...
 def drop_path(
     input: tf.Tensor,
@@ -75,7 +78,10 @@ def drop_path(
 
 class TFSwinEmbeddings(keras.layers.Layer):
     def __init__(
-        self, config: SwinConfig, use_mask_token: bool = ..., **kwargs
+        self,
+        config: SwinConfig,
+        use_mask_token: bool = ...,
+        **kwargs,
     ) -> None: ...
     def build(self, input_shape: tf.TensorShape) -> None: ...
     def call(
@@ -88,10 +94,15 @@ class TFSwinEmbeddings(keras.layers.Layer):
 class TFSwinPatchEmbeddings(keras.layers.Layer):
     def __init__(self, config, **kwargs) -> None: ...
     def maybe_pad(
-        self, pixel_values: tf.Tensor, height: int, width: int
+        self,
+        pixel_values: tf.Tensor,
+        height: int,
+        width: int,
     ) -> tf.Tensor: ...
     def call(
-        self, pixel_values: tf.Tensor, training: bool = ...
+        self,
+        pixel_values: tf.Tensor,
+        training: bool = ...,
     ) -> tuple[tf.Tensor, tuple[int, int]]: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -105,7 +116,10 @@ class TFSwinPatchMerging(keras.layers.Layer):
         **kwargs,
     ) -> None: ...
     def maybe_pad(
-        self, input_feature: tf.Tensor, height: int, width: int
+        self,
+        input_feature: tf.Tensor,
+        height: int,
+        width: int,
     ) -> tf.Tensor: ...
     def call(
         self,
@@ -118,13 +132,20 @@ class TFSwinPatchMerging(keras.layers.Layer):
 
 class TFSwinDropPath(keras.layers.Layer):
     def __init__(
-        self, drop_prob: float | None = ..., scale_by_keep: bool = ..., **kwargs
+        self,
+        drop_prob: float | None = ...,
+        scale_by_keep: bool = ...,
+        **kwargs,
     ) -> None: ...
     def call(self, input: tf.Tensor, training: bool = ...) -> tf.Tensor: ...
 
 class TFSwinSelfAttention(keras.layers.Layer):
     def __init__(
-        self, config: SwinConfig, dim: int, num_heads: int, **kwargs
+        self,
+        config: SwinConfig,
+        dim: int,
+        num_heads: int,
+        **kwargs,
     ) -> None: ...
     def build(self, input_shape: tf.TensorShape) -> None: ...
     def transpose_for_scores(self, x: tf.Tensor) -> tf.Tensor: ...
@@ -140,14 +161,21 @@ class TFSwinSelfAttention(keras.layers.Layer):
 class TFSwinSelfOutput(keras.layers.Layer):
     def __init__(self, config: SwinConfig, dim: int, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
 
 class TFSwinAttention(keras.layers.Layer):
     def __init__(
-        self, config: SwinConfig, dim: int, num_heads: int, **kwargs
+        self,
+        config: SwinConfig,
+        dim: int,
+        num_heads: int,
+        **kwargs,
     ) -> None: ...
     def prune_heads(self, heads): ...
     def call(
@@ -185,10 +213,18 @@ class TFSwinLayer(keras.layers.Layer):
         **kwargs,
     ) -> None: ...
     def get_attn_mask(
-        self, height: int, width: int, window_size: int, shift_size: int
+        self,
+        height: int,
+        width: int,
+        window_size: int,
+        shift_size: int,
     ) -> tf.Tensor | None: ...
     def maybe_pad(
-        self, hidden_states: tf.Tensor, window_size: int, height: int, width: int
+        self,
+        hidden_states: tf.Tensor,
+        window_size: int,
+        height: int,
+        width: int,
     ) -> tuple[tf.Tensor, tf.Tensor]: ...
     def call(
         self,
@@ -226,7 +262,10 @@ class TFSwinStage(keras.layers.Layer):
 
 class TFSwinEncoder(keras.layers.Layer):
     def __init__(
-        self, config: SwinConfig, grid_size: tuple[int, int], **kwargs
+        self,
+        config: SwinConfig,
+        grid_size: tuple[int, int],
+        **kwargs,
     ) -> None: ...
     def call(
         self,
@@ -341,7 +380,8 @@ class TFSwinForMaskedImageModeling(TFSwinPreTrainedModel):
     def __init__(self, config: SwinConfig) -> None: ...
     @add_start_docstrings_to_model_forward(SWIN_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFSwinMaskedImageModelingOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFSwinMaskedImageModelingOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     @unpack_inputs
     def call(

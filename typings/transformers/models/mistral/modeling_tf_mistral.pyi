@@ -28,14 +28,23 @@ class TFMistralRMSNorm(keras.layers.Layer):
 
 class TFMistralRotaryEmbedding(keras.layers.Layer):
     def __init__(
-        self, dim, max_position_embeddings=..., base=..., **kwargs
+        self,
+        dim,
+        max_position_embeddings=...,
+        base=...,
+        **kwargs,
     ) -> None: ...
     def call(self, x, seq_len=...):  # -> tuple[Any, Any]:
         ...
 
 def rotate_half(x): ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids, unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 
@@ -49,7 +58,10 @@ def repeat_kv(hidden_states: tf.Tensor, n_rep: int) -> tf.Tensor: ...
 
 class TFMistralAttention(keras.layers.Layer):
     def __init__(
-        self, config: MistralConfig, layer_idx: int | None = ..., **kwargs
+        self,
+        config: MistralConfig,
+        layer_idx: int | None = ...,
+        **kwargs,
     ) -> None: ...
     def call(
         self,
@@ -139,7 +151,7 @@ class TFMistralForCausalLM(TFMistralPreTrainedModel, TFCausalLanguageModelingLos
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        MISTRAL_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MISTRAL_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     def call(
         self,
@@ -171,12 +183,13 @@ class TFMistralForCausalLM(TFMistralPreTrainedModel, TFCausalLanguageModelingLos
     MISTRAL_START_DOCSTRING,
 )
 class TFMistralForSequenceClassification(
-    TFMistralPreTrainedModel, TFSequenceClassificationLoss
+    TFMistralPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        MISTRAL_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MISTRAL_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     def call(
         self,

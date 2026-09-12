@@ -25,7 +25,7 @@ async def test_edit_basic_replacement(tmp_path: Path) -> None:
     with with_fake_agent() as agent:
         agent.tool_state.bash_cwd = str(tmp_path)
         result = await edit.run(
-            {"file_path": str(f), "old_string": "bar", "new_string": "qux"}
+            {"file_path": str(f), "old_string": "bar", "new_string": "qux"},
         )
     assert not result.is_error
     assert "Replaced 1" in result.content
@@ -41,7 +41,7 @@ async def test_edit_relative_path(tmp_path: Path) -> None:
     with with_fake_agent() as agent:
         agent.tool_state.bash_cwd = str(tmp_path)
         result = await edit.run(
-            {"file_path": "r.txt", "old_string": "hello", "new_string": "world"}
+            {"file_path": "r.txt", "old_string": "hello", "new_string": "world"},
         )
     assert not result.is_error
     assert f.read_text() == "world\n"
@@ -59,7 +59,7 @@ async def test_edit_replace_all(tmp_path: Path) -> None:
                 "old_string": "aa",
                 "new_string": "XX",
                 "replace_all": True,
-            }
+            },
         )
     assert not result.is_error
     assert "Replaced 3" in result.content
@@ -73,7 +73,7 @@ async def test_edit_empty_old_string_errors(tmp_path: Path) -> None:
     with with_fake_agent() as agent:
         agent.tool_state.bash_cwd = str(tmp_path)
         result = await edit.run(
-            {"file_path": str(f), "old_string": "", "new_string": "X"}
+            {"file_path": str(f), "old_string": "", "new_string": "X"},
         )
     assert result.is_error
     assert "old_string cannot be empty" in result.content
@@ -88,7 +88,7 @@ async def test_edit_missing_file_errors(tmp_path: Path) -> None:
                 "file_path": str(tmp_path / "missing"),
                 "old_string": "x",
                 "new_string": "y",
-            }
+            },
         )
     assert result.is_error
     assert "not found" in result.content.lower()
@@ -101,7 +101,7 @@ async def test_edit_directory_errors(tmp_path: Path) -> None:
     with with_fake_agent() as agent:
         agent.tool_state.bash_cwd = str(tmp_path)
         result = await edit.run(
-            {"file_path": str(sub), "old_string": "x", "new_string": "y"}
+            {"file_path": str(sub), "old_string": "x", "new_string": "y"},
         )
     assert result.is_error
     assert "directory" in result.content
@@ -114,7 +114,7 @@ async def test_edit_not_found_string(tmp_path: Path) -> None:
     with with_fake_agent() as agent:
         agent.tool_state.bash_cwd = str(tmp_path)
         result = await edit.run(
-            {"file_path": str(f), "old_string": "absent", "new_string": "X"}
+            {"file_path": str(f), "old_string": "absent", "new_string": "X"},
         )
     assert result.is_error
     assert "not found" in result.content
@@ -127,7 +127,7 @@ async def test_edit_multiple_matches_without_replace_all(tmp_path: Path) -> None
     with with_fake_agent() as agent:
         agent.tool_state.bash_cwd = str(tmp_path)
         result = await edit.run(
-            {"file_path": str(f), "old_string": "aa", "new_string": "XX"}
+            {"file_path": str(f), "old_string": "aa", "new_string": "XX"},
         )
     assert result.is_error
     assert "found 2 times" in result.content
@@ -144,7 +144,7 @@ async def test_edit_stale_file_errors(tmp_path: Path) -> None:
         new_mtime = time.time() + 100
         os.utime(f, (new_mtime, new_mtime))
         result = await edit.run(
-            {"file_path": str(f), "old_string": "disk", "new_string": "X"}
+            {"file_path": str(f), "old_string": "disk", "new_string": "X"},
         )
     assert result.is_error
     assert "modified since read" in result.content
@@ -161,13 +161,13 @@ async def test_edit_chain_three_edits_no_staleness(tmp_path: Path) -> None:
         agent.tool_state.bash_cwd = str(tmp_path)
         agent.tool_state.mark_read(str(f), content="v0\n")
         r1 = await edit.run(
-            {"file_path": str(f), "old_string": "v0", "new_string": "v1"}
+            {"file_path": str(f), "old_string": "v0", "new_string": "v1"},
         )
         r2 = await edit.run(
-            {"file_path": str(f), "old_string": "v1", "new_string": "v2"}
+            {"file_path": str(f), "old_string": "v1", "new_string": "v2"},
         )
         r3 = await edit.run(
-            {"file_path": str(f), "old_string": "v2", "new_string": "v3"}
+            {"file_path": str(f), "old_string": "v2", "new_string": "v3"},
         )
     for r in (r1, r2, r3):
         assert not r.is_error, r.content
@@ -186,7 +186,7 @@ async def test_edit_non_utf8_file_returns_error(tmp_path: Path) -> None:
         agent.tool_state.bash_cwd = str(tmp_path)
         agent.tool_state.mark_read(str(f), content="")
         result = await edit.run(
-            {"file_path": str(f), "old_string": "calf", "new_string": "X"}
+            {"file_path": str(f), "old_string": "calf", "new_string": "X"},
         )
     assert result.is_error
     assert "UTF-8" in result.content
@@ -200,7 +200,7 @@ async def test_edit_preserves_mode(tmp_path: Path) -> None:
     with with_fake_agent() as agent:
         agent.tool_state.bash_cwd = str(tmp_path)
         result = await edit.run(
-            {"file_path": str(f), "old_string": "foo", "new_string": "bar"}
+            {"file_path": str(f), "old_string": "foo", "new_string": "bar"},
         )
     assert not result.is_error
     assert stat.S_IMODE(f.stat().st_mode) == 0o600
@@ -321,7 +321,8 @@ def test_bash_match_unknown_shape_no_nudge() -> None:
     ],
 )
 def test_bash_match_names_the_file_the_command_edits(
-    command: str, expected: str
+    command: str,
+    expected: str,
 ) -> None:
     """Edit resolves a relative path against the AGENT's cwd, not the shell's.
 

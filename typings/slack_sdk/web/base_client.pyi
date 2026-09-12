@@ -40,5 +40,9 @@ class BaseClient:
     ) -> SlackResponse: ...
     @staticmethod
     def validate_slack_signature(
-        *, signing_secret: str, data: str, timestamp: str, signature: str
+        *,
+        signing_secret: str,
+        data: str,
+        timestamp: str,
+        signature: str,
     ) -> bool: ...

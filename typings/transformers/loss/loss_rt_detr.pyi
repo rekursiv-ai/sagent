@@ -11,16 +11,30 @@ class RTDetrHungarianMatcher(nn.Module):
 class RTDetrLoss(nn.Module):
     def __init__(self, config) -> None: ...
     def loss_labels_vfl(
-        self, outputs, targets, indices, num_boxes, log=...
+        self,
+        outputs,
+        targets,
+        indices,
+        num_boxes,
+        log=...,
     ):  # -> dict[str, Any]:
         ...
     def loss_labels(
-        self, outputs, targets, indices, num_boxes, log=...
+        self,
+        outputs,
+        targets,
+        indices,
+        num_boxes,
+        log=...,
     ):  # -> dict[str, Tensor]:
         ...
     @torch.no_grad()
     def loss_cardinality(
-        self, outputs, targets, indices, num_boxes
+        self,
+        outputs,
+        targets,
+        indices,
+        num_boxes,
     ):  # -> dict[str, Tensor]:
         ...
     def loss_boxes(self, outputs, targets, indices, num_boxes):  # -> dict[Any, Any]:
@@ -28,15 +42,30 @@ class RTDetrLoss(nn.Module):
     def loss_masks(self, outputs, targets, indices, num_boxes):  # -> dict[str, Any]:
         ...
     def loss_labels_bce(
-        self, outputs, targets, indices, num_boxes, log=...
+        self,
+        outputs,
+        targets,
+        indices,
+        num_boxes,
+        log=...,
     ):  # -> dict[str, Any]:
         ...
     def loss_labels_focal(
-        self, outputs, targets, indices, num_boxes, log=...
+        self,
+        outputs,
+        targets,
+        indices,
+        num_boxes,
+        log=...,
     ):  # -> dict[str, Any]:
         ...
     def get_loss(
-        self, loss, outputs, targets, indices, num_boxes
+        self,
+        loss,
+        outputs,
+        targets,
+        indices,
+        num_boxes,
     ):  # -> dict[str, Tensor] | dict[str, Any] | dict[Any, Any]:
         ...
     @staticmethod

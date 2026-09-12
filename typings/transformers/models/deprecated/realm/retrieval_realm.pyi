@@ -7,7 +7,8 @@ _REALM_BLOCK_RECORDS_FILENAME = ...
 logger = ...
 
 def convert_tfrecord_to_np(
-    block_records_path: str, num_block_records: int
+    block_records_path: str,
+    num_block_records: int,
 ) -> np.ndarray: ...
 
 class ScaNNSearcher:
@@ -44,7 +45,9 @@ class RealmRetriever:
     def save_pretrained(self, save_directory):  # -> None:
         ...
     def block_has_answer(
-        self, concat_inputs, answer_ids
+        self,
+        concat_inputs,
+        answer_ids,
     ):  # -> tuple[list[Any], list[Any], list[Any]]:
         ...
 

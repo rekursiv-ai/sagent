@@ -318,7 +318,10 @@ class AutoModelWithLMHead(_AutoModelWithLMHead):
         ...
     @classmethod
     def from_pretrained(
-        cls, pretrained_model_name_or_path, *model_args, **kwargs
+        cls,
+        pretrained_model_name_or_path,
+        *model_args,
+        **kwargs,
     ):  # -> Any:
         ...
 
@@ -328,7 +331,10 @@ class AutoModelForVision2Seq(_AutoModelForVision2Seq):
         ...
     @classmethod
     def from_pretrained(
-        cls, pretrained_model_name_or_path, *model_args, **kwargs
+        cls,
+        pretrained_model_name_or_path,
+        *model_args,
+        **kwargs,
     ):  # -> Any:
         ...
 

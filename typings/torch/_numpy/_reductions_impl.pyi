@@ -142,7 +142,12 @@ def cumprod(
 cumproduct = ...
 
 def average(
-    a: ArrayLike, axis=..., weights: ArrayLike = ..., returned=..., *, keepdims=...
+    a: ArrayLike,
+    axis=...,
+    weights: ArrayLike = ...,
+    returned=...,
+    *,
+    keepdims=...,
 ) -> tuple[Any, Tensor | Any]: ...
 def quantile(
     a: ArrayLike,

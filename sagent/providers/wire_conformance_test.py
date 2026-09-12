@@ -89,7 +89,10 @@ def _anthropic_thinking(model: Model, settings: ModelSettings) -> object:
 def _google_thinking(model: Model, settings: ModelSettings) -> object:
     """Gemini's ``thinkingConfig``, or ``None`` when it sends none."""
     body: MutableJSON = _build_request(
-        _request(), model.capability, settings, settings.limits
+        _request(),
+        model.capability,
+        settings,
+        settings.limits,
     )
     gen_config = body["generationConfig"]
     assert isinstance(gen_config, dict)
@@ -119,7 +122,8 @@ def _chat_thinking(model: Model, settings: ModelSettings) -> object:
 # wire body. Adding a provider without adding it here leaves its catalog
 # unverified, so the roster is asserted complete below.
 _WireBuilder = tuple[
-    Callable[[], "_CatalogProvider"], Callable[["Model", ModelSettings], object]
+    Callable[[], "_CatalogProvider"],
+    Callable[["Model", ModelSettings], object],
 ]
 _WIRE_BUILDERS: Mapping[str, _WireBuilder] = {
     "Anthropic": (lambda: Anthropic.from_key("k"), _anthropic_thinking),
@@ -161,7 +165,8 @@ def _settings_for(capability: ModelCapability, effort: ThinkingEffort) -> ModelS
 
 @pytest.mark.parametrize(("provider_name", "model_id"), _ROWS, ids=str)
 def test_every_advertised_effort_reaches_the_wire(
-    provider_name: str, model_id: str
+    provider_name: str,
+    model_id: str,
 ) -> None:
     """Each effort the row advertises builds a body carrying it.
 
@@ -181,7 +186,8 @@ def test_every_advertised_effort_reaches_the_wire(
 
 @pytest.mark.parametrize(("provider_name", "model_id"), _ROWS, ids=str)
 def test_a_row_with_no_efforts_sends_no_thinking_knob(
-    provider_name: str, model_id: str
+    provider_name: str,
+    model_id: str,
 ) -> None:
     """A row that advertises no effort must not send one.
 
@@ -202,7 +208,8 @@ def test_a_row_with_no_efforts_sends_no_thinking_knob(
 
 @pytest.mark.parametrize(("provider_name", "model_id"), _ROWS, ids=str)
 def test_distinct_efforts_stay_distinct_on_the_wire(
-    provider_name: str, model_id: str
+    provider_name: str,
+    model_id: str,
 ) -> None:
     """Efforts the row distinguishes must not collapse into one body.
 
@@ -268,7 +275,8 @@ def test_an_unoffered_context_is_rejected(provider_name: str, model_id: str) -> 
 
 @pytest.mark.parametrize(("provider_name", "model_id"), _ROWS, ids=str)
 def test_every_priced_tier_survives_the_transport(
-    provider_name: str, model_id: str
+    provider_name: str,
+    model_id: str,
 ) -> None:
     """A tier the row prices but the transport withholds bills unreachably."""
     make, _ = _WIRE_BUILDERS[provider_name]

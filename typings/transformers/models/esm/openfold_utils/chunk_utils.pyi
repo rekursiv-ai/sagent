@@ -14,5 +14,8 @@ def chunk_layer(
 class ChunkSizeTuner:
     def __init__(self, max_chunk_size: int = ...) -> None: ...
     def tune_chunk_size(
-        self, representative_fn: Callable, args: tuple, min_chunk_size: int
+        self,
+        representative_fn: Callable,
+        args: tuple,
+        min_chunk_size: int,
     ) -> int: ...

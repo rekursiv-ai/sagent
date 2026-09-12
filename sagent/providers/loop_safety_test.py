@@ -30,16 +30,7 @@ from sagent.tools.core import locked_file_write
 
 
 def _drive(work: Callable[[], Awaitable[None]], runs: int = 3) -> list[str]:
-    """Run ``work`` on ``runs`` successive fresh loops.
-
-    Args:
-      work: Builds the coroutine to run on each loop.
-      runs: How many loops to drive.
-
-    Returns:
-      failures: One message per loop that raised ``RuntimeError``.
-
-    """
+    """Run ``work`` on ``runs`` successive fresh loops."""
     failures: list[str] = []
     for _ in range(runs):
         loop = asyncio.new_event_loop()

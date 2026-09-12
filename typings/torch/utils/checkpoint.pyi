@@ -92,7 +92,11 @@ class _NoopSaveInputs(torch.autograd.Function):
 
 class _CheckpointFrame:
     def __init__(
-        self, recompute_fn, early_stop, unpack_error_cb, metadata_fn
+        self,
+        recompute_fn,
+        early_stop,
+        unpack_error_cb,
+        metadata_fn,
     ) -> None: ...
     def check_recomputed_tensors_match(self, gid) -> None: ...
 
@@ -135,5 +139,6 @@ class _CachedTorchDispatchMode(TorchDispatchMode):
     def __torch_dispatch__(self, func, types, args=..., kwargs=...) -> PyTree: ...
 
 def create_selective_checkpoint_contexts(
-    policy_fn_or_list, allow_cache_entry_mutation=...
+    policy_fn_or_list,
+    allow_cache_entry_mutation=...,
 ) -> tuple[_CachingTorchDispatchMode, _CachedTorchDispatchMode]: ...

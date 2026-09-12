@@ -19,7 +19,11 @@ class GroundingDinoHungarianMatcher(HungarianMatcher):
 class GroundingDinoImageLoss(ImageLoss):
     def __init__(self, matcher, focal_alpha, losses) -> None: ...
     def loss_labels(
-        self, outputs, targets, indices, num_boxes
+        self,
+        outputs,
+        targets,
+        indices,
+        num_boxes,
     ):  # -> dict[str, Tensor]:
         ...
 

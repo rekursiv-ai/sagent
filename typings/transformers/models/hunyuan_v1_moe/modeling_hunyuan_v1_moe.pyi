@@ -29,7 +29,10 @@ class HunYuanMoEV1RMSNorm(nn.Module):
 
 class HunYuanMoEV1MLP(nn.Module):
     def __init__(
-        self, config: HunYuanMoEV1Config, layer_idx=..., is_shared_mlp=...
+        self,
+        config: HunYuanMoEV1Config,
+        layer_idx=...,
+        is_shared_mlp=...,
     ) -> None: ...
     def forward(self, x):  # -> Any:
         ...
@@ -37,7 +40,12 @@ class HunYuanMoEV1MLP(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -68,14 +76,18 @@ class HunYuanMoEV1Attention(nn.Module):
 
 class HunYuanMoEV1Gate(nn.Module):
     def __init__(
-        self, config: HunYuanMoEV1Config, layer_idx: int | None = ...
+        self,
+        config: HunYuanMoEV1Config,
+        layer_idx: int | None = ...,
     ) -> None: ...
     def forward(self, hidden_states):  # -> Any:
         ...
 
 class HunYuanMoEV1Moe(nn.Module):
     def __init__(
-        self, config: HunYuanMoEV1Config, layer_idx: int | None = ...
+        self,
+        config: HunYuanMoEV1Config,
+        layer_idx: int | None = ...,
     ) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -157,7 +169,8 @@ class HunYuanMoEV1ForCausalLM(HunYuanMoEV1PreTrainedModel, GenerationMixin):
     ) -> CausalLMOutputWithPast: ...
 
 class HunYuanMoEV1ForSequenceClassification(
-    GenericForSequenceClassification, HunYuanMoEV1PreTrainedModel
+    GenericForSequenceClassification,
+    HunYuanMoEV1PreTrainedModel,
 ): ...
 
 __all__ = [

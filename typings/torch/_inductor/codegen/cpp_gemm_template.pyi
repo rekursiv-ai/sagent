@@ -30,7 +30,8 @@ _T = TypeVar("_T", ir.IRNode, torch.Tensor)
 def transpose_w(W: _T, trans_w: bool) -> _T: ...
 def expand_bias(B: _T | None, X: _T) -> _T | None: ...
 def prune_tensors(
-    input_nodes: list[ir.IRNode], new_input_nodes: list[ir.IRNode]
+    input_nodes: list[ir.IRNode],
+    new_input_nodes: list[ir.IRNode],
 ) -> None: ...
 def gen_2d_view_of_epilogue_buf(
     Y: ir.Buffer,
@@ -39,7 +40,8 @@ def gen_2d_view_of_epilogue_buf(
     reindexers: list[Callable[[list[Any]], list[Any]] | None],
     default_reindexers: list[Callable[[list[Any]], list[Any]] | None],
 ) -> tuple[
-    ir.Buffer | ir.ReinterpretView, list[Callable[[list[Any]], list[Any]] | None]
+    ir.Buffer | ir.ReinterpretView,
+    list[Callable[[list[Any]], list[Any]] | None],
 ]: ...
 
 class CppGemmTemplate(CppTemplate):
@@ -76,7 +78,10 @@ class CppGemmTemplate(CppTemplate):
     ) -> DataProcessorTemplateWrapper: ...
     @staticmethod
     def get_padded_size(
-        n, block_n, k, should_block_weight
+        n,
+        block_n,
+        k,
+        should_block_weight,
     ) -> tuple[list[Any], Any]: ...
     @classmethod
     def prep_weight(
@@ -103,7 +108,12 @@ class CppGemmTemplate(CppTemplate):
         epilogue_nodes: list[ir.IRNode] | None = ...,
     ) -> dict[str, Any]: ...
     def is_int8_woq_gemm_small_m_dim(
-        self, X: ir.ReinterpretView, W: ir.ReinterpretView, N, K, micro_gemm
+        self,
+        X: ir.ReinterpretView,
+        W: ir.ReinterpretView,
+        N,
+        K,
+        micro_gemm,
     ) -> bool: ...
     def render(
         self,

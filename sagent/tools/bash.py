@@ -14,6 +14,7 @@ from typing import Annotated, Final
 import asyncio
 import atexit
 import contextlib
+import functools
 import logging
 import os
 import secrets
@@ -28,6 +29,7 @@ from sagent.agent.state import (
 )
 from sagent.lib import debug_log
 from sagent.lib.custom_json import BoolCodec, IntCodec, json_freeze
+from sagent.lib.userdirs import config_dir
 from sagent.tools.core import (
     bound_by_tokens,
     load_tool_description,
@@ -52,11 +54,6 @@ logger = logging.getLogger(__name__)
 _WRITER_KEY: Final = "bash:writer"
 
 
-def _suppress_oserror() -> contextlib.suppress:
-    """OSError handler for process-group signals (race: proc may have exited)."""
-    return contextlib.suppress(OSError)
-
-
 BASH_DEFAULT_TIMEOUT_MS = 120_000  # config-globals: ignore -- default timeout dial
 BASH_MAX_TIMEOUT_MS = 600_000  # config-globals: ignore -- max timeout dial
 
@@ -76,32 +73,6 @@ def reap_background_processes() -> None:
     Still-running children stay retained.
     """
     _BACKGROUND_PROCESSES[:] = [p for p in _BACKGROUND_PROCESSES if p.poll() is None]
-
-
-def _reap_at_exit() -> None:
-    """Reap retained detached children at interpreter shutdown.
-
-    A child that finished after the last
-    :func:`reap_background_processes` call is otherwise garbage-collected
-    by ``Popen.__del__`` while still unwaited, emitting a spurious
-    ``ResourceWarning`` at exit -- seen under ``pytest -n`` worker
-    teardown. A final ``poll()`` of each handle reaps every finished
-    child (setting its ``returncode``), which is exactly the condition
-    ``Popen.__del__`` checks, so no finished child warns.
-
-    A child still genuinely running at exit is a different case: clearing
-    the list drops the last reference, so ``Popen.__del__`` runs and emits
-    ``ResourceWarning`` for it. That warning is accurate -- a
-    ``start_new_session`` child is being left running past this process --
-    and is not suppressed here.
-    """
-    for proc in _BACKGROUND_PROCESSES:
-        with contextlib.suppress(Exception):
-            proc.poll()
-    _BACKGROUND_PROCESSES.clear()
-
-
-atexit.register(_reap_at_exit)
 
 
 def _render_bash_description(text: str) -> str:
@@ -189,7 +160,7 @@ class Bash:
             # hatch (orphan subprocesses); strict additionalProperties keeps
             # the LLM from invoking it via tool calls.
             "additionalProperties": False,
-        }
+        },
     )
 
     peers: Sequence[object] = ()
@@ -226,13 +197,11 @@ class Bash:
         header = f"Bash {desc}".rstrip()
         return f"{header}\n{cmd}" if cmd else header
 
+    # Recomputed rather than cached: ``functools.cached_property`` needs a ``__dict__``,
+    # which ``slots=True`` removes.
     @property
     def _peer_matchers(self) -> tuple[Callable[[Sequence[Node]], str | None], ...]:
-        """Lint hooks contributed by sibling tools.
-
-        Recomputed rather than cached: ``functools.cached_property``
-        needs a ``__dict__``, which ``slots=True`` removes.
-        """
+        """Lint hooks contributed by sibling tools."""
         return tuple(
             peer.bash_match for peer in self.peers if isinstance(peer, BashMatcher)
         )
@@ -269,7 +238,8 @@ class Bash:
 
         """
         trees = cached_parse_bash(
-            str(args.get("command", "")), get_tool_state().bash_parse_cache
+            str(args.get("command", "")),
+            get_tool_state().bash_parse_cache,
         )
         if trees is not None and is_read_only(trees):
             return None
@@ -293,6 +263,7 @@ class Bash:
             truncate the body before appending trailing diagnostics.
 
         """
+        _register_exit_reaper()
         command = str(args.get("command", ""))
         timeout = IntCodec.coerce(args.get("timeout"), BASH_DEFAULT_TIMEOUT_MS)
         run_as_fully_detached = BoolCodec.coerce(
@@ -325,15 +296,12 @@ class Bash:
             hint="\n".join(nudges),
         )
 
+    # Every Bash call is traced, nudged or not. Whether the banner changes behaviour is
+    # unmeasurable from the matchers alone -- replaying them over old sessions counts
+    # shapes, not deliveries -- so the delivered rate and what follows it have to be
+    # recorded as they happen.
     def _collect_nudges(self, command: str) -> list[str]:
-        """Run peer ``bash_match`` matchers and return any nudges.
-
-        Every Bash call is traced, nudged or not. Whether the banner
-        changes behaviour is unmeasurable from the matchers alone --
-        replaying them over old sessions counts shapes, not deliveries --
-        so the delivered rate and what follows it have to be recorded as
-        they happen.
-        """
+        """Run peer ``bash_match`` matchers and return any nudges."""
         trees = cached_parse_bash(command, get_tool_state().bash_parse_cache)
         if trees is None:
             return []
@@ -346,7 +314,9 @@ def _ensure_valid_cwd(state: ToolState) -> None:
     """Reset ``state.bash_cwd`` to ``start_cwd`` (or ``$HOME``) if it's gone."""
     if not Path(state.bash_cwd).is_dir():
         state.bash_cwd = (
-            state.start_cwd if Path(state.start_cwd).is_dir() else str(Path.home())  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)
+            state.start_cwd
+            if Path(state.start_cwd).is_dir()
+            else str(config_dir().parent)
         )
 
 
@@ -368,14 +338,12 @@ def _run_as_fully_detached(command: str, *, state: ToolState) -> str:
     return f"(running in background, pid={proc.pid})"
 
 
+# Float, not floor division: ``// 1000`` mapped 1999ms to 1s -- half the requested
+# budget -- and anything under 1000ms to 0, which the old ``max(1, ...)`` then raised to
+# a full second, 1000x the request. The schema's ``minimum: 1`` makes a 1ms timeout
+# legal, so it must survive.
 def _timeout_seconds(timeout_ms: int) -> float:
-    """Convert the directive's millisecond timeout to wait_for seconds.
-
-    Float, not floor division: ``// 1000`` mapped 1999ms to 1s -- half the
-    requested budget -- and anything under 1000ms to 0, which the old
-    ``max(1, ...)`` then raised to a full second, 1000x the request. The
-    schema's ``minimum: 1`` makes a 1ms timeout legal, so it must survive.
-    """
+    """Convert the directive's millisecond timeout to wait_for seconds."""
     return min(max(timeout_ms, 1), BASH_MAX_TIMEOUT_MS) / 1000
 
 
@@ -464,6 +432,8 @@ async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
         _ = await proc.wait()
 
 
+# The single exit path for every outcome -- clean, failed, timed out -- so the sentinel
+# is stripped and the bound applied exactly once.
 def _process_output(
     proc: asyncio.subprocess.Process,
     stdout: str,
@@ -473,24 +443,7 @@ def _process_output(
     state: ToolState,
     reason: str = "",
 ) -> str:
-    """Extract the cwd sentinel, bound the output, append diagnostics.
-
-    The single exit path for every outcome -- clean, failed, timed out --
-    so the sentinel is stripped and the bound applied exactly once.
-
-    Args:
-      proc: The finished (or killed) process, read for its exit code.
-      stdout: Decoded stdout, still carrying the cwd sentinel line.
-      stderr: Decoded stderr.
-      sentinel: Token the tracking trap echoes with the final cwd.
-      state: Tool state whose ``bash_cwd`` the sentinel updates.
-      reason: Non-empty when the run did not finish on its own, e.g.
-          ``"timeout after 1.0s"``.
-
-    Returns:
-      text: Bounded body followed by any diagnostics.
-
-    """
+    """Extract the cwd sentinel, bound the output, append diagnostics."""
     body_lines: list[str] = []
     for line in stdout.split("\n"):
         if line.startswith(f"{sentinel}="):
@@ -507,7 +460,8 @@ def _process_output(
     # and the total stays bounded however noisy one of them is.
     budget = result_token_budget()
     diagnostics, _ = bound_by_tokens(
-        (f"{line}\n" for line in stderr.strip().split("\n")), budget=budget // 4
+        (f"{line}\n" for line in stderr.strip().split("\n")),
+        budget=budget // 4,
     )
     diagnostics = diagnostics.strip()
     body, kept = bound_by_tokens(
@@ -524,3 +478,33 @@ def _process_output(
     elif proc.returncode != 0:
         out += f"\n[exit code: {proc.returncode}]"
     return out.strip() or "(no output)"
+
+
+def _suppress_oserror() -> contextlib.suppress:
+    """OSError handler for process-group signals (race: proc may have exited)."""
+    return contextlib.suppress(OSError)
+
+
+# A child that finished after the last :func:`reap_background_processes` call is
+# otherwise garbage-collected by ``Popen.__del__`` while still unwaited, emitting a
+# spurious ``ResourceWarning`` at exit -- seen under ``pytest -n`` worker teardown. A
+# final ``poll()`` of each handle reaps every finished child (setting its
+# ``returncode``), which is exactly the condition ``Popen.__del__`` checks, so no
+# finished child warns.
+#
+# A child still genuinely running at exit is a different case: clearing the list drops
+# the last reference, so ``Popen.__del__`` runs and emits ``ResourceWarning`` for it.
+# That warning is accurate -- a ``start_new_session`` child is being left running past
+# this process -- and is not suppressed here.
+def _reap_at_exit() -> None:
+    """Reap retained detached children at interpreter shutdown."""
+    for proc in _BACKGROUND_PROCESSES:
+        with contextlib.suppress(Exception):
+            proc.poll()
+    _BACKGROUND_PROCESSES.clear()
+
+
+@functools.cache
+def _register_exit_reaper() -> None:
+    """Register detached-child cleanup when Bash is first used."""
+    atexit.register(_reap_at_exit)

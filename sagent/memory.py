@@ -62,30 +62,6 @@ def ensure_memory_dir(cwd: str | Path, *, projects_dir: Path | None = None) -> P
     return d
 
 
-def _truncate_index(text: str) -> tuple[str, str | None]:
-    """Apply line/byte caps to an index file.
-
-    Returns ``(truncated_text, warning_or_none)``. Byte truncation
-    cuts at the last newline so we don't mangle a line. When both
-    line and byte caps fire the returned warning lists both reasons,
-    joined with ``"; "``.
-    """
-    warnings: list[str] = []
-    lines = text.splitlines(keepends=True)
-    if len(lines) > _MAX_ENTRYPOINT_LINES:
-        lines = lines[:_MAX_ENTRYPOINT_LINES]
-        warnings.append(f"exceeded {_MAX_ENTRYPOINT_LINES}-line cap")
-    truncated = "".join(lines)
-    if len(truncated.encode()) > _MAX_ENTRYPOINT_BYTES:
-        b = truncated.encode()[:_MAX_ENTRYPOINT_BYTES]
-        nl = b.rfind(b"\n")
-        if nl > 0:
-            b = b[:nl]
-        truncated = b.decode(errors="replace") + "\n"
-        warnings.append(f"exceeded {_MAX_ENTRYPOINT_BYTES}-byte cap")
-    return truncated, "; ".join(warnings) if warnings else None
-
-
 def load_index(cwd: str | Path, *, projects_dir: Path | None = None) -> str:
     """Load MEMORY.md for ``cwd``, with truncation.
 
@@ -143,24 +119,24 @@ Remove the entry when asked to forget.
 
 Each memory file belongs to exactly one type:
 
-- **user** — role, goals, preferences, expertise. \
+- **user** -- role, goals, preferences, expertise. \
 Save when you learn something about the person.
-- **feedback** — corrections and confirmed approaches. \
+- **feedback** -- corrections and confirmed approaches. \
 Save when the user corrects you or validates a non-obvious method. \
 Structure: rule, then **Why:** and **How to apply:** lines.
-- **project** — decisions, ownership, timelines, incidents \
+- **project** -- decisions, ownership, timelines, incidents \
 not derivable from code or git. Save when you learn who/what/why/when. \
 Use absolute dates. Structure: fact, then **Why:** and **How to apply:**.
-- **reference** — pointers to external systems (issue trackers, \
+- **reference** -- pointers to external systems (issue trackers, \
 dashboards, channels). Save when you learn where information lives.
 
 ## What NOT to save
 
 Do not persist anything derivable from the current project state:
 
-- Code patterns, architecture, file layout — read the code.
-- Git history, authorship — use `git log` / `git blame`.
-- Bug fixes, debugging recipes — the fix is in the code.
+- Code patterns, architecture, file layout -- read the code.
+- Git history, authorship -- use `git log` / `git blame`.
+- Bug fixes, debugging recipes -- the fix is in the code.
 - Content already in AGENTS.md files.
 - Ephemeral work: in-progress state, conversation context.
 
@@ -182,7 +158,7 @@ type: {{user | feedback | project | reference}}
 ```
 
 **2.** Add one index line to `MEMORY.md`:
-`- [Title](file.md) — one-line hook` (keep each under 150 chars).
+`- [Title](file.md) -- one-line hook` (keep each under 150 chars).
 
 `MEMORY.md` is an index only. Never put memory content in it.
 
@@ -198,3 +174,24 @@ or flag, verify it still exists with Read or Grep.
 
 {index_block}
 """
+
+
+# Returns ``(truncated_text, warning_or_none)``. Byte truncation cuts at the last
+# newline so we don't mangle a line. When both line and byte caps fire the returned
+# warning lists both reasons, joined with ``"; "``.
+def _truncate_index(text: str) -> tuple[str, str | None]:
+    """Apply line/byte caps to an index file."""
+    warnings: list[str] = []
+    lines = text.splitlines(keepends=True)
+    if len(lines) > _MAX_ENTRYPOINT_LINES:
+        lines = lines[:_MAX_ENTRYPOINT_LINES]
+        warnings.append(f"exceeded {_MAX_ENTRYPOINT_LINES}-line cap")
+    truncated = "".join(lines)
+    if len(truncated.encode()) > _MAX_ENTRYPOINT_BYTES:
+        b = truncated.encode()[:_MAX_ENTRYPOINT_BYTES]
+        nl = b.rfind(b"\n")
+        if nl > 0:
+            b = b[:nl]
+        truncated = b.decode(errors="replace") + "\n"
+        warnings.append(f"exceeded {_MAX_ENTRYPOINT_BYTES}-byte cap")
+    return truncated, "; ".join(warnings) if warnings else None

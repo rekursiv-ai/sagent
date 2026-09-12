@@ -28,10 +28,15 @@ logger = ...
 class InstructBlipVideoVisionEmbeddings(nn.Module):
     def __init__(self, config: InstructBlipVideoVisionConfig) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
-        self, pixel_values: torch.FloatTensor, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values: torch.FloatTensor,
+        interpolate_pos_encoding: bool = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -68,7 +73,9 @@ class InstructBlipVideoAttention(nn.Module):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class InstructBlipVideoMLP(nn.Module):
@@ -135,7 +142,9 @@ class InstructBlipVideoQFormerMultiHeadAttention(nn.Module):
 class InstructBlipVideoQFormerSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -162,7 +171,9 @@ class InstructBlipVideoQFormerIntermediate(nn.Module):
 class InstructBlipVideoQFormerOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -262,7 +273,9 @@ class InstructBlipVideoModel(InstructBlipVideoPreTrainedModel):
     def set_input_embeddings(self, value):  # -> None:
         ...
     def get_placeholder_mask(
-        self, input_ids: torch.LongTensor, inputs_embeds: torch.FloatTensor
+        self,
+        input_ids: torch.LongTensor,
+        inputs_embeds: torch.FloatTensor,
     ):  # -> Any:
         ...
     @can_return_tuple
@@ -287,7 +300,8 @@ class InstructBlipVideoModel(InstructBlipVideoPreTrainedModel):
 
 @auto_docstring(custom_intro=...)
 class InstructBlipVideoForConditionalGeneration(
-    InstructBlipVideoPreTrainedModel, GenerationMixin
+    InstructBlipVideoPreTrainedModel,
+    GenerationMixin,
 ):
     config: InstructBlipVideoConfig
     main_input_name = ...
@@ -315,7 +329,9 @@ class InstructBlipVideoForConditionalGeneration(
     ):  # -> None:
         ...
     def get_placeholder_mask(
-        self, input_ids: torch.LongTensor, inputs_embeds: torch.FloatTensor
+        self,
+        input_ids: torch.LongTensor,
+        inputs_embeds: torch.FloatTensor,
     ):  # -> Any:
         ...
     @can_return_tuple

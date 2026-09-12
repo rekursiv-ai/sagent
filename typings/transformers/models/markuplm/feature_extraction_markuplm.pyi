@@ -10,7 +10,8 @@ class MarkupLMFeatureExtractor(FeatureExtractionMixin):
     def xpath_soup(self, element):  # -> tuple[list[Any], list[Any]]:
         ...
     def get_three_from_single(
-        self, html_string
+        self,
+        html_string,
     ):  # -> tuple[list[Any], list[Any], list[Any]]:
         ...
     def construct_xpath(self, xpath_tags, xpath_subscripts):  # -> str:

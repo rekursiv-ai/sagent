@@ -6,7 +6,10 @@ class BaseStreamer:
 
 class TextStreamer(BaseStreamer):
     def __init__(
-        self, tokenizer: AutoTokenizer, skip_prompt: bool = ..., **decode_kwargs
+        self,
+        tokenizer: AutoTokenizer,
+        skip_prompt: bool = ...,
+        **decode_kwargs,
     ) -> None: ...
     def put(self, value):  # -> None:
         ...

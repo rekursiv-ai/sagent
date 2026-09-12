@@ -19,7 +19,9 @@ from ...utils import auto_docstring
 logger = ...
 
 def make_divisible(
-    value: int, divisor: int = ..., min_value: int | None = ...
+    value: int,
+    divisor: int = ...,
+    min_value: int | None = ...,
 ) -> int: ...
 def clip(value: float, min_val: float = ..., max_val: float = ...) -> float: ...
 
@@ -93,7 +95,10 @@ class MobileViTV2TransformerLayer(nn.Module):
 
 class MobileViTV2Transformer(nn.Module):
     def __init__(
-        self, config: MobileViTV2Config, n_layers: int, d_model: int
+        self,
+        config: MobileViTV2Config,
+        n_layers: int,
+        d_model: int,
     ) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -110,10 +115,13 @@ class MobileViTV2Layer(GradientCheckpointingLayer):
         stride: int = ...,
     ) -> None: ...
     def unfolding(
-        self, feature_map: torch.Tensor
+        self,
+        feature_map: torch.Tensor,
     ) -> tuple[torch.Tensor, tuple[int, int]]: ...
     def folding(
-        self, patches: torch.Tensor, output_size: tuple[int, int]
+        self,
+        patches: torch.Tensor,
+        output_size: tuple[int, int],
     ) -> torch.Tensor: ...
     def forward(self, features: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -127,7 +135,9 @@ class MobileViTV2Encoder(nn.Module):
         return_dict: bool = ...,
     ) -> tuple | BaseModelOutputWithNoAttention: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithNoAttention: ...
 
 @auto_docstring
@@ -141,7 +151,9 @@ class MobileViTV2PreTrainedModel(PreTrainedModel):
 @auto_docstring
 class MobileViTV2Model(MobileViTV2PreTrainedModel):
     def __init__(
-        self, config: MobileViTV2Config, expand_output: bool = ...
+        self,
+        config: MobileViTV2Config,
+        expand_output: bool = ...,
     ) -> None: ...
     @auto_docstring
     def forward(
@@ -165,7 +177,10 @@ class MobileViTV2ForImageClassification(MobileViTV2PreTrainedModel):
 
 class MobileViTV2ASPPPooling(nn.Module):
     def __init__(
-        self, config: MobileViTV2Config, in_channels: int, out_channels: int
+        self,
+        config: MobileViTV2Config,
+        in_channels: int,
+        out_channels: int,
     ) -> None: ...
     def forward(self, features: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...

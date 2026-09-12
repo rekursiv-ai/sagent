@@ -84,7 +84,8 @@ _STREAM_BUF_FLUSH_BYTES = (
 # :func:`strict_observer` context manager so dispatch failures re-raise
 # instead of getting logged.
 _strict_observer: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "repl_render_strict_observer", default=False
+    "repl_render_strict_observer",
+    default=False,
 )
 
 
@@ -492,6 +493,13 @@ def error_text(exc: BaseException) -> str:
     class-name prefix would add Python-internals noise to a message the
     reader is meant to act on. Shared so the child-block path cannot
     drift from the parent's rule.
+
+    Args:
+      exc: Exception to render for the user.
+
+    Returns:
+      text: User-facing exception text.
+
     """
     return (
         str(exc) if isinstance(exc, UserFacingError) else f"{type(exc).__name__}: {exc}"
@@ -505,6 +513,13 @@ def strip_reminders(content: str) -> str:
     model reads it, and surfaces the same text on ``hint`` for the human.
     Rendering ``content`` verbatim therefore prints every nudge twice,
     the second time wrapped in a tag that means nothing to the reader.
+
+    Args:
+      content: Text that may contain system-reminder blocks.
+
+    Returns:
+      text: Content with reminder blocks removed.
+
     """
     return _REMINDER_RE.sub("", content).strip()
 
@@ -532,12 +547,6 @@ def make_render_observer(
 
     """
     return RenderObserver(printer, output_policy=output_policy)
-
-
-def _no_output(call_id: str) -> ToolDisplay:
-    """Default policy: render no result bodies."""
-    del call_id
-    return ToolDisplay()
 
 
 class RenderObserver:
@@ -604,7 +613,9 @@ class RenderObserver:
                 self._flush_stream()
                 display = self._output_policy(event.call_id)
                 self._printer.write_tool_label(
-                    text, command=display.command, lang=display.command_lang
+                    text,
+                    command=display.command,
+                    lang=display.command_lang,
                 )
             case ToolResult():
                 render_tool_result(
@@ -661,7 +672,7 @@ class RenderObserver:
                 self._printer.write_line(
                     f"[/model] budget reset to {model_id} defaults "
                     f"(max_request_tokens {prior_in:,} -> {new_in:,}); "
-                    f"re-apply customised budget if needed."
+                    f"re-apply customised budget if needed.",
                 )
             case ChildEvent(label=label, inner=inner):
                 self._consume_child(label, inner)
@@ -731,15 +742,12 @@ class RenderObserver:
         if remaining:
             self._printer.write_markdown(remaining)
 
+    # Whenever the active child label changes, every *other* label's pending text and
+    # items are flushed first. Cost is O(num-other- children) per event -- intentional,
+    # not a hot path: the cross- child flush keeps slow children from rendering
+    # interleaved into the wrong slot, and the typical cohort fanout is small.
     def _consume_child(self, label: str, inner: RuntimeEvent) -> None:
-        """Buffer one child event; flush at stable boundaries or atomic events.
-
-        Whenever the active child label changes, every *other* label's
-        pending text and items are flushed first. Cost is O(num-other-
-        children) per event -- intentional, not a hot path: the cross-
-        child flush keeps slow children from rendering interleaved into
-        the wrong slot, and the typical cohort fanout is small.
-        """
+        """Buffer one child event; flush at stable boundaries or atomic events."""
         # ``ChildEvent`` may nest: a grandchild forwards through its
         # parent, which forwards to us as ``ChildEvent(label,
         # ChildEvent(...))``. Unwrap so the innermost runtime event is
@@ -802,19 +810,18 @@ class RenderObserver:
         items = self._child_items.pop(label, [])
         if items:
             self._printer.write_child_block(
-                label, items, output_policy=self._output_policy
+                label,
+                items,
+                output_policy=self._output_policy,
             )
 
 
+# Any forwardable atomic child event renders in the child block; only
+# ``ModelResponsePartial`` needs separate streaming handling (done in ``_consume_child``
+# before this is called). The accepted set must stay a superset of what ``agent_spawn``
+# always-forwards -- see ``test_every_always_forwarded_event_renders_a_child_block``.
 def _child_atomic_item(inner: RuntimeEvent) -> ChildItem | None:
-    """Translate a non-streaming child event into a child-block item.
-
-    Any forwardable atomic child event renders in the child block; only
-    ``ModelResponsePartial`` needs separate streaming handling (done in
-    ``_consume_child`` before this is called). The accepted set must stay a
-    superset of what ``agent_spawn`` always-forwards -- see
-    ``test_every_always_forwarded_event_renders_a_child_block``.
-    """
+    """Translate a non-streaming child event into a child-block item."""
     if isinstance(inner, _CHILD_ITEM_TYPES):
         return inner
     return None
@@ -857,3 +864,9 @@ sagent commands
   /kill     <qid|all|target>  cancel tool task(s) or matching subagents
   /defer    <text>            send as deferred (non-preempting); drains at AgentIdle\
 """
+
+
+def _no_output(call_id: str) -> ToolDisplay:
+    """Default policy: render no result bodies."""
+    del call_id
+    return ToolDisplay()

@@ -119,7 +119,9 @@ class NavState:
 
 
 def build_key_bindings(
-    agent: Agent, queues: InputQueues, nav: NavState | None = None
+    agent: Agent,
+    queues: InputQueues,
+    nav: NavState | None = None,
 ) -> KeyBindings:
     """Build the REPL keybindings bound to ``agent``, ``queues``, and ``nav``.
 
@@ -164,6 +166,13 @@ def build_key_bindings(
     return kb
 
 
+# Dispatch-vs-stage consults the predicate matching the key's intent: Enter
+# (``deferred=False``) uses ``accepts_user_dispatch`` -- it dispatches mid-cohort to
+# redirect. Tab (``deferred=True``) uses ``accepts_deferred_dispatch`` -- it STAGES mid-
+# cohort, because a defer must wait behind the running round chain rather than preempt
+# it. The two predicates differ only in the mid-cohort state. ``attachments`` ride the
+# committed message (a lifted queued/deferred block may carry image/PDF payloads).
+# Empty/whitespace text is a no-op (the caller guards this) and never reaches here.
 def _stage_or_dispatch(
     agent: Agent,
     queues: InputQueues,
@@ -172,18 +181,7 @@ def _stage_or_dispatch(
     deferred: bool,
     attachments: tuple[BytesMessage, ...] = (),
 ) -> None:
-    """Dispatch ``text`` when the runtime accepts it, else stage into a pane.
-
-    Dispatch-vs-stage consults the predicate matching the key's intent:
-    Enter (``deferred=False``) uses ``accepts_user_dispatch`` -- it
-    dispatches mid-cohort to redirect. Tab (``deferred=True``) uses
-    ``accepts_deferred_dispatch`` -- it STAGES mid-cohort, because a defer
-    must wait behind the running round chain rather than preempt it. The
-    two predicates differ only in the mid-cohort state. ``attachments``
-    ride the committed message (a lifted queued/deferred block may carry
-    image/PDF payloads). Empty/whitespace text is a no-op (the caller
-    guards this) and never reaches here.
-    """
+    """Dispatch ``text`` when the runtime accepts it, else stage into a pane."""
     dispatches = (
         agent.runtime.accepts_deferred_dispatch
         if deferred
@@ -203,18 +201,20 @@ def _stage_or_dispatch(
         queues.stage_queue(text, attachments)
 
 
+# Placement follows the spec: at a pane's OWN stop, staging replaces that pane's message
+# (no doubling); at any other stop, staging appends via the pane's coalesce. Idle
+# dispatches immediately regardless of stop. The current stop's attachments ride the
+# committed message so a lifted image/PDF payload is never silently dropped. The buffer
+# is cleared by the caller via ``nav.end`` + reset.
 def _commit_nav_stop(
-    queues: InputQueues, nav: NavState, text: str, *, deferred: bool, agent: Agent
+    queues: InputQueues,
+    nav: NavState,
+    text: str,
+    *,
+    deferred: bool,
+    agent: Agent,
 ) -> None:
-    """Commit ``text`` from the current nav stop, then end navigation.
-
-    Placement follows the spec: at a pane's OWN stop, staging replaces
-    that pane's message (no doubling); at any other stop, staging appends
-    via the pane's coalesce. Idle dispatches immediately regardless of
-    stop. The current stop's attachments ride the committed message so a
-    lifted image/PDF payload is never silently dropped. The buffer is
-    cleared by the caller via ``nav.end`` + reset.
-    """
+    """Commit ``text`` from the current nav stop, then end navigation."""
     stop = nav.stops[nav.cursor]
     own_pane = (stop.kind is StopKind.QUEUE and not deferred) or (
         stop.kind is StopKind.DEFERRED and deferred
@@ -227,27 +227,28 @@ def _commit_nav_stop(
         else:
             queues.queue = None
     _stage_or_dispatch(
-        agent, queues, text, deferred=deferred, attachments=stop.attachments
+        agent,
+        queues,
+        text,
+        deferred=deferred,
+        attachments=stop.attachments,
     )
 
 
+# Branches:
+#
+# - Slash command: route through the pump via ``validate_and_handle``. - Buffer ends
+# with ``\``: backslash continuation -> literal newline. - Empty / whitespace-only
+# buffer: no-op; ends navigation. - Navigation active: commit the stop's value (replace
+# own pane / append elsewhere / dispatch when idle); end navigation. - Not navigating:
+# dispatch when idle, else stage into the queue pane.
 def _kb_submit(
     agent: Agent,
     queues: InputQueues,
     nav: NavState,
     event: KeyPressEvent,
 ) -> None:
-    r"""Enter handler. See ``docs/private/input_ux.md`` for the contract.
-
-    Branches:
-
-    - Slash command: route through the pump via ``validate_and_handle``.
-    - Buffer ends with ``\``: backslash continuation -> literal newline.
-    - Empty / whitespace-only buffer: no-op; ends navigation.
-    - Navigation active: commit the stop's value (replace own pane /
-      append elsewhere / dispatch when idle); end navigation.
-    - Not navigating: dispatch when idle, else stage into the queue pane.
-    """
+    r"""Enter handler. See ``docs/private/input_ux.md`` for the contract."""
     buf = event.current_buffer
     text = buf.text
     stripped = text.strip()
@@ -280,20 +281,17 @@ def _kb_submit(
     buf.reset()
 
 
+# Mirror of Enter with the deferred pane as the target: dispatch when idle (as a
+# ``UserDeferredMessage``), else stage into the deferred pane. Empty/whitespace is a no-
+# op and ends navigation. During navigation, commit the stop's value to the deferred
+# pane (replace own pane / append elsewhere) and end navigation.
 def _kb_defer(
     agent: Agent,
     queues: InputQueues,
     nav: NavState,
     event: KeyPressEvent,
 ) -> None:
-    """Tab handler. See ``docs/private/input_ux.md`` for the contract.
-
-    Mirror of Enter with the deferred pane as the target: dispatch when
-    idle (as a ``UserDeferredMessage``), else stage into the deferred
-    pane. Empty/whitespace is a no-op and ends navigation. During
-    navigation, commit the stop's value to the deferred pane (replace own
-    pane / append elsewhere) and end navigation.
-    """
+    """Tab handler. See ``docs/private/input_ux.md`` for the contract."""
     buf = event.current_buffer
     text = buf.text
     if not text.strip():
@@ -311,18 +309,16 @@ def _kb_defer(
     buf.reset()
 
 
+# First Up builds the stop list from the current input, the panes, and sent history.
+# Each subsequent Up applies the modified-test to the stop being left, then advances. Up
+# at the oldest stop is a no-op.
 def _kb_up(
     agent: Agent,
     queues: InputQueues,
     nav: NavState,
     event: KeyPressEvent,
 ) -> None:
-    """Up handler. Walk toward older stops; see ``input_ux.md``.
-
-    First Up builds the stop list from the current input, the panes, and
-    sent history. Each subsequent Up applies the modified-test to the
-    stop being left, then advances. Up at the oldest stop is a no-op.
-    """
+    """Up handler. Walk toward older stops; see ``input_ux.md``."""
     buf = event.current_buffer
     if not nav.active():
         _begin_navigation(queues, nav, buf)
@@ -336,18 +332,16 @@ def _kb_up(
     _enter_stop(queues, nav.stops[nav.cursor], buf)
 
 
+# Pure replay: hand back each stop's current value with edits intact; never re-derive.
+# Leaving a pane stop downward restores that pane (the cursor no longer sits on it).
+# Down at the input stop ends navigation.
 def _kb_down(
     agent: Agent,
     queues: InputQueues,
     nav: NavState,
     event: KeyPressEvent,
 ) -> None:
-    """Down handler. Walk back toward the input stop; see ``input_ux.md``.
-
-    Pure replay: hand back each stop's current value with edits intact;
-    never re-derive. Leaving a pane stop downward restores that pane (the
-    cursor no longer sits on it). Down at the input stop ends navigation.
-    """
+    """Down handler. Walk back toward the input stop; see ``input_ux.md``."""
     buf = event.current_buffer
     if not nav.active():
         if buf.text:
@@ -376,7 +370,7 @@ def _begin_navigation(queues: InputQueues, nav: NavState, buf: Buffer) -> None:
                 loaded=queues.queue.text,
                 current=queues.queue.text,
                 attachments=queues.queue.attachments,
-            )
+            ),
         )
     if queues.deferred is not None:
         stops.append(
@@ -385,7 +379,7 @@ def _begin_navigation(queues: InputQueues, nav: NavState, buf: Buffer) -> None:
                 loaded=queues.deferred.text,
                 current=queues.deferred.text,
                 attachments=queues.deferred.attachments,
-            )
+            ),
         )
     stops.extend(
         Stop(kind=StopKind.HISTORY, loaded=entry, current=entry)
@@ -398,13 +392,11 @@ def _begin_navigation(queues: InputQueues, nav: NavState, buf: Buffer) -> None:
     _enter_stop(queues, nav.stops[1], buf)
 
 
+# A pane stop that still owns its message (``not consumed``) empties its pane while the
+# cursor sits on it -- its value is in the buffer. A consumed pane stop, or a
+# history/input stop, owns no live pane.
 def _enter_stop(queues: InputQueues, stop: Stop, buf: Buffer) -> None:
-    """Load ``stop`` into the buffer; empty its pane if it is a live pane stop.
-
-    A pane stop that still owns its message (``not consumed``) empties
-    its pane while the cursor sits on it -- its value is in the buffer.
-    A consumed pane stop, or a history/input stop, owns no live pane.
-    """
+    """Load ``stop`` into the buffer; empty its pane if it is a live pane stop."""
     if not stop.consumed:
         if stop.kind is StopKind.QUEUE:
             queues.queue = None
@@ -414,16 +406,16 @@ def _enter_stop(queues: InputQueues, stop: Stop, buf: Buffer) -> None:
     buf.cursor_position = len(buf.text)
 
 
+# Runs once per pane stop. Unchanged -> restore the pane (scrolling past). Modified or
+# cleared -> mark the stop consumed; the pane stays empty and the edited value rides the
+# cursor. No-op for non-pane or already-consumed stops.
 def _leave_stop_upward(
-    queues: InputQueues, stop: Stop, *, agent: Agent | None = None
+    queues: InputQueues,
+    stop: Stop,
+    *,
+    agent: Agent | None = None,
 ) -> None:
-    """Modified-test as the cursor leaves ``stop`` going up.
-
-    Runs once per pane stop. Unchanged -> restore the pane (scrolling
-    past). Modified or cleared -> mark the stop consumed; the pane stays
-    empty and the edited value rides the cursor. No-op for non-pane or
-    already-consumed stops.
-    """
+    """Modified-test as the cursor leaves ``stop`` going up."""
     if stop.kind not in (StopKind.QUEUE, StopKind.DEFERRED) or stop.consumed:
         return
     if stop.current != stop.loaded:
@@ -432,31 +424,33 @@ def _leave_stop_upward(
     _restore_pane(queues, stop, stop.current, agent=agent)
 
 
+# Down never re-derives: it restores the pane to the stop's CURRENT value (edits
+# intact). A consumed pane stop owns no pane. The modified-test is Up-only, so Down does
+# not consult ``loaded``.
 def _leave_stop_downward(
-    queues: InputQueues, stop: Stop, *, agent: Agent | None = None
+    queues: InputQueues,
+    stop: Stop,
+    *,
+    agent: Agent | None = None,
 ) -> None:
-    """Restore a live pane stop's pane as the cursor leaves it going down.
-
-    Down never re-derives: it restores the pane to the stop's CURRENT
-    value (edits intact). A consumed pane stop owns no pane. The
-    modified-test is Up-only, so Down does not consult ``loaded``.
-    """
+    """Restore a live pane stop's pane as the cursor leaves it going down."""
     if stop.kind not in (StopKind.QUEUE, StopKind.DEFERRED) or stop.consumed:
         return
     _restore_pane(queues, stop, stop.current, agent=agent)
 
 
+# Routes through ``_stage_or_dispatch`` when ``agent`` is known: the pane was emptied
+# while the cursor sat on it, and the runtime may have gone idle in that window. Writing
+# the pane directly would leave the message waiting on an ``AgentIdle`` that never fires
+# again, stranding it until Ctrl+D.
 def _restore_pane(
-    queues: InputQueues, stop: Stop, text: str, *, agent: Agent | None = None
+    queues: InputQueues,
+    stop: Stop,
+    text: str,
+    *,
+    agent: Agent | None = None,
 ) -> None:
-    """Put ``text`` back into the pane ``stop`` represents.
-
-    Routes through ``_stage_or_dispatch`` when ``agent`` is known: the
-    pane was emptied while the cursor sat on it, and the runtime may have
-    gone idle in that window. Writing the pane directly would leave the
-    message waiting on an ``AgentIdle`` that never fires again, stranding
-    it until Ctrl+D.
-    """
+    """Put ``text`` back into the pane ``stop`` represents."""
     if agent is not None:
         _stage_or_dispatch(
             agent,
@@ -473,14 +467,12 @@ def _restore_pane(
         queues.deferred = block
 
 
+# Used when the user runs a slash command mid-navigation: the buffer now holds the
+# command, not the lifted pane content, so the pane the cursor sat on must return to its
+# ``loaded`` value rather than vanish. A consumed or non-pane stop owns no live pane and
+# needs no restore.
 def _abandon_navigation(queues: InputQueues, nav: NavState) -> None:
-    """Restore the sat-on live pane stop and end navigation.
-
-    Used when the user runs a slash command mid-navigation: the buffer
-    now holds the command, not the lifted pane content, so the pane the
-    cursor sat on must return to its ``loaded`` value rather than vanish.
-    A consumed or non-pane stop owns no live pane and needs no restore.
-    """
+    """Restore the sat-on live pane stop and end navigation."""
     if nav.active():
         stop = nav.stops[nav.cursor]
         if stop.kind in (StopKind.QUEUE, StopKind.DEFERRED) and not stop.consumed:
@@ -493,11 +485,9 @@ def _kb_newline(event: KeyPressEvent) -> None:
     event.current_buffer.insert_text("\n")
 
 
+# The walk reads the REPL history file (prompt-toolkit ``FileHistory``).
 def _history_strings(buf: Buffer) -> list[str]:
-    """Return the sagent input history entries, oldest-first.
-
-    The walk reads the REPL history file (prompt-toolkit ``FileHistory``).
-    """
+    """Return the sagent input history entries, oldest-first."""
     return list(buf.history.get_strings())
 
 
@@ -527,32 +517,27 @@ def _kb_history_prefix_fwd(event: KeyPressEvent) -> None:
             break
 
 
+# Blocks the prompt-toolkit event loop until the editor exits -- prompt-toolkit's
+# ``open_in_editor`` shells out synchronously. The REPL renderer and the underlying
+# agent loop both pause for the editor session; this is documented prompt-toolkit
+# behavior.
 def _kb_open_editor(event: KeyPressEvent) -> None:
-    """Open the current buffer in ``$EDITOR`` (Ctrl+X Ctrl+E).
-
-    Blocks the prompt-toolkit event loop until the editor exits --
-    prompt-toolkit's ``open_in_editor`` shells out synchronously. The
-    REPL renderer and the underlying agent loop both pause for the
-    editor session; this is documented prompt-toolkit behavior.
-    """
+    """Open the current buffer in ``$EDITOR`` (Ctrl+X Ctrl+E)."""
     event.current_buffer.open_in_editor()
 
 
+# One rule, matching every Unix line editor: Ctrl+C abandons the line you are composing
+# and gives you a fresh prompt. The abandoned text is recorded in the sagent input
+# history (Up-arrow recalls it) but is never carried into the next turn.
+#
+# When the agent is busy (``agent.work`` -- a model call or compaction -- or a non-empty
+# ``runtime.cohort``), Ctrl+C also halts the running turn. Queued/deferred panes are
+# deliberately submitted content, not the line being composed, so Ctrl+C leaves them
+# untouched.
+#
+# To exit the REPL use Ctrl+D or ``/quit``.
 def _kb_ctrl_c(agent: Agent, event: KeyPressEvent) -> None:
-    r"""Abandon the line being composed; never exit the REPL.
-
-    One rule, matching every Unix line editor: Ctrl+C abandons the line
-    you are composing and gives you a fresh prompt. The abandoned text is
-    recorded in the sagent input history (Up-arrow recalls it) but is
-    never carried into the next turn.
-
-    When the agent is busy (``agent.work`` -- a model call or compaction
-    -- or a non-empty ``runtime.cohort``), Ctrl+C also halts the running
-    turn. Queued/deferred panes are deliberately submitted content, not
-    the line being composed, so Ctrl+C leaves them untouched.
-
-    To exit the REPL use Ctrl+D or ``/quit``.
-    """
+    r"""Abandon the line being composed; never exit the REPL."""
     if agent.work is not None or agent.runtime.cohort:
         agent.halt()
     event.current_buffer.reset(append_to_history=True)

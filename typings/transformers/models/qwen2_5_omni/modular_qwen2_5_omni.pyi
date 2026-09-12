@@ -230,7 +230,10 @@ class Qwen2_5OmniPreTrainedModelForConditionalGeneration(Qwen2_5OmniPreTrainedMo
     ):  # -> Tensor:
         ...
     def get_chunked_index(
-        self, token_indices: torch.Tensor, tokens_per_chunk: int, remove_index: int
+        self,
+        token_indices: torch.Tensor,
+        tokens_per_chunk: int,
+        remove_index: int,
     ) -> list[tuple[int, int]]: ...
     def get_rope_index(
         self,
@@ -263,7 +266,9 @@ class Qwen2_5OmniAudioAttention(nn.Module):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class Qwen2_5OmniAudioEncoderLayer(Qwen2AudioEncoderLayer):
@@ -294,16 +299,25 @@ class Qwen2_5OmniAudioEncoder(Qwen2_5OmniPreTrainedModel):
         ...
     @auto_docstring
     def forward(
-        self, input_features, feature_lens=..., aftercnn_lens=..., **kwargs
+        self,
+        input_features,
+        feature_lens=...,
+        aftercnn_lens=...,
+        **kwargs,
     ):  # -> BaseModelOutput:
         ...
     def padded_and_mask_function(
-        self, tensor_list, tensor_len, padding_value=..., padding_side=...
+        self,
+        tensor_list,
+        tensor_len,
+        padding_value=...,
+        padding_side=...,
     ):  # -> tuple[Tensor, Tensor, Tensor]:
         ...
 
 def apply_rotary_pos_emb_vision(
-    tensor: torch.Tensor, freqs: torch.Tensor
+    tensor: torch.Tensor,
+    freqs: torch.Tensor,
 ) -> torch.Tensor: ...
 
 class Qwen2_5OmniVisionAttention(nn.Module):
@@ -332,10 +346,16 @@ class Qwen2_5OmniVisionEncoder(Qwen2_5_VisionTransformerPretrainedModel):
     config: Qwen2_5OmniVisionEncoderConfig
     _no_split_modules = ...
     def __init__(
-        self, config: Qwen2_5OmniVisionEncoderConfig, *inputs, **kwargs
+        self,
+        config: Qwen2_5OmniVisionEncoderConfig,
+        *inputs,
+        **kwargs,
     ) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, **kwargs
+        self,
+        hidden_states: torch.Tensor,
+        grid_thw: torch.Tensor,
+        **kwargs,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -344,7 +364,9 @@ class Qwen2_5OmniRotaryEmbedding(Qwen2VLRotaryEmbedding):
 
 class Qwen2_5OmniAttention(Qwen2_5_VLAttention):
     def __init__(
-        self, config: Qwen2_5OmniConfig, layer_idx: int | None = ...
+        self,
+        config: Qwen2_5OmniConfig,
+        layer_idx: int | None = ...,
     ) -> None: ...
 
 class Qwen2MLP(Qwen2_5_VLMLP): ...
@@ -356,7 +378,8 @@ class Qwen2_5OmniThinkerTextModel(Qwen2_5_VLTextModel):
 
 @auto_docstring(custom_intro=...)
 class Qwen2_5OmniThinkerForConditionalGeneration(
-    Qwen2_5OmniPreTrainedModelForConditionalGeneration, GenerationMixin
+    Qwen2_5OmniPreTrainedModelForConditionalGeneration,
+    GenerationMixin,
 ):
     config: Qwen2_5OmniThinkerConfig
     base_model_prefix = ...
@@ -458,7 +481,8 @@ class Qwen2_5OmniTalkerModel(Qwen2_5_VLTextModel):
     def __init__(self, config: Qwen2_5OmniTalkerConfig) -> None: ...
 
 class Qwen2_5OmniTalkerForConditionalGeneration(
-    Qwen2_5OmniPreTrainedModelForConditionalGeneration, GenerationMixin
+    Qwen2_5OmniPreTrainedModelForConditionalGeneration,
+    GenerationMixin,
 ):
     config: Qwen2_5OmniTalkerConfig
     base_model_prefix = ...
@@ -520,7 +544,12 @@ class Qwen2_5OmniDiTRotaryEmbedding(nn.Module):
         ...
 
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 
@@ -531,7 +560,12 @@ class TimeDelayNetBlock(nn.Module):
 
 class Res2NetBlock(torch.nn.Module):
     def __init__(
-        self, in_channels, out_channels, scale=..., kernel_size=..., dilation=...
+        self,
+        in_channels,
+        out_channels,
+        scale=...,
+        kernel_size=...,
+        dilation=...,
     ) -> None: ...
     def forward(self, hidden_states):  # -> Tensor:
         ...
@@ -584,7 +618,9 @@ class DiTCodecEmbedding(nn.Module):
 class Qwen2_5_OmniAdaLayerNormZero(nn.Module):
     def __init__(self, dim) -> None: ...
     def forward(
-        self, hidden_states, emb=...
+        self,
+        hidden_states,
+        emb=...,
     ):  # -> tuple[Any, Tensor, Tensor, Tensor, Tensor]:
         ...
 
@@ -601,7 +637,10 @@ class DiTMLP(nn.Module):
 class DiTAttention(nn.Module):
     def __init__(self, config: Qwen2_5OmniDiTConfig) -> None: ...
     def forward(
-        self, hidden_states, position_embeddings=..., attention_mask=...
+        self,
+        hidden_states,
+        position_embeddings=...,
+        attention_mask=...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -623,7 +662,11 @@ class DiTDecoderLayer(nn.Module):
         look_backward_block=...,
     ) -> None: ...
     def forward(
-        self, hidden_states, timestep, position_embeddings=..., block_diff=...
+        self,
+        hidden_states,
+        timestep,
+        position_embeddings=...,
+        block_diff=...,
     ): ...
 
 class SnakeBeta(nn.Module):

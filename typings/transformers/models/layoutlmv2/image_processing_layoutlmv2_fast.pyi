@@ -26,11 +26,14 @@ class LayoutLMv2ImageProcessorFast(BaseImageProcessorFast):
     tesseract_config = ...
     valid_kwargs = LayoutLMv2FastImageProcessorKwargs
     def __init__(
-        self, **kwargs: Unpack[LayoutLMv2FastImageProcessorKwargs]
+        self,
+        **kwargs: Unpack[LayoutLMv2FastImageProcessorKwargs],
     ) -> None: ...
     @auto_docstring
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[LayoutLMv2FastImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[LayoutLMv2FastImageProcessorKwargs],
     ) -> BatchFeature: ...
 
 __all__ = ["LayoutLMv2ImageProcessorFast"]

@@ -138,21 +138,11 @@ _DEFAULT_AUTH = "env"
 _PROVIDER_STARTUP_ERRORS = (FileNotFoundError, RuntimeError, ValueError)
 
 
-def _default_allow_providers() -> tuple[str, ...]:
-    """Default allow-list, led by ``_DEFAULT_PROVIDER``.
-
-    ``--provider`` defaults to the first allowed provider, so the lead
-    entry is the zero-flag default; the rest follow in declaration order.
-    """
-    rest = tuple(p for p in PROVIDER_NAMES if p != _DEFAULT_PROVIDER)
-    return (_DEFAULT_PROVIDER, *rest)
-
-
 DEFAULT_TOOLS: Final = [
     "AgentSpawn",
     "AgentSend",
     "AgentSelf",
-    # "BackgroundTask",
+    # "BackgroundTask".
     "Bash",
     "Read",
     "Write",
@@ -209,7 +199,7 @@ def resolve_tools(
     if unknown_tools:
         raise SystemExit(
             f"--tool names tool(s) not loaded: {', '.join(unknown_tools)}."
-            f" Loaded: {', '.join(names)}"
+            f" Loaded: {', '.join(names)}",
         )
     if names == ["none"]:
         return []
@@ -231,181 +221,13 @@ def resolve_tools(
     for name in names:
         if name == "Bash":
             bash = tools.Bash(
-                peers=peers, **_tool_kwargs(tools.Bash, by_tool.get(name, {}))
+                peers=peers,
+                **_tool_kwargs(tools.Bash, by_tool.get(name, {})),
             )
             resolved.append(bash)
         else:
             resolved.append(non_bash[name])
     return resolved
-
-
-def _tool_kwargs(cls: type, overrides: Mapping[str, str]) -> dict[str, Any]:
-    """Coerce ``--tool`` overrides for ``cls``, exiting on a bad key.
-
-    Values are ``Any`` deliberately: the result is splatted into a tool
-    constructor whose signature varies per tool, and the values were
-    already validated against that signature by ``coerce_kwargs``.
-    """
-    if not overrides:
-        return {}
-    try:
-        return coerce_kwargs(cls, overrides)
-    except ToolSpecError as exc:
-        raise SystemExit(str(exc)) from exc
-
-
-def _parse_tool_flag(specs: list[str]) -> dict[str, dict[str, str]]:
-    """Parse ``--tool`` values, exiting with the message on a bad spec."""
-    try:
-        return parse_tool_overrides(specs)
-    except ToolSpecError as exc:
-        raise SystemExit(str(exc)) from exc
-
-
-def _positive_int(raw: str) -> int:
-    """Parse a count that must be at least one.
-
-    A cap of zero renders an empty picker whose blank-input default then
-    indexes row 0, and a negative one slices from the end -- both silently
-    wrong rather than refused. ``argparse`` turns the raise into a usage error.
-
-    Args:
-      raw: The raw command-line token.
-
-    Returns:
-      value: The parsed count.
-
-    Raises:
-      argparse.ArgumentTypeError: When ``raw`` is not an integer >= 1.
-
-    """
-    try:
-        value = int(raw)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"expected an integer, got {raw!r}") from None
-    if value < 1:
-        raise argparse.ArgumentTypeError(f"must be >= 1, got {value}")
-    return value
-
-
-def _resolve_session_dir(args: argparse.Namespace) -> str | None:
-    """Pick the session directory per --session / --resume / --continue."""
-    if args.session is not None:
-        return str(args.session)
-    cwd = Path.cwd()
-    if args.continue_:
-        return _resolve_continue(cwd)
-    if args.continue_all:
-        return _resolve_continue_all()
-    if args.resume is not None:
-        if args.resume is True:
-            return _resolve_resume(cwd, args.resume_limit)
-        return _resolve_resume_hash(str(args.resume), cwd)
-    if args.resume_all:
-        return _resolve_resume_all(args.resume_limit)
-    return str(sessions.new_session_dir(cwd))
-
-
-def _resolve_continue(cwd: Path) -> str:
-    """Resume the most recent session for ``cwd``, or start fresh."""
-    latest = sessions.latest_session(cwd)
-    if latest is not None:
-        sys.stderr.write(f"[resume] {latest.path}\n")
-        return str(latest.path)
-    sys.stderr.write("[resume] no prior sessions for this cwd; starting fresh.\n")
-    return str(sessions.new_session_dir(cwd))
-
-
-def _resolve_resume_hash(session_hash: str, cwd: Path) -> str:
-    """Resume a session by hash prefix (directory name match).
-
-    ``--resume`` is cwd-scoped (``--resume-all`` is the global door), so
-    a prefix unique within this directory wins even when a session
-    elsewhere shares it. Widening to every project only happens when
-    this directory has no match. The prefix must be unambiguous WITHIN
-    the scope that matched: taking the first of several would attach to
-    a session the operator did not name, with nothing in the output to
-    reveal it -- hence the scope is named on every resolution.
-    """
-    if not session_hash:
-        # ``"".startswith(x)`` is universally true, so an empty prefix
-        # would match every session: one on disk resumes silently, several
-        # report "ambiguous". Neither is what the operator asked for.
-        sys.stderr.write("[resume] HASH cannot be empty.\n")
-        raise SystemExit(1)
-    # Both scopes match on the directory NAME, so neither reads a transcript.
-    # The cwd scope still resolves first, and is still evaluated lazily: the
-    # global glob is skipped entirely when this directory already matched.
-    scopes: tuple[tuple[str, Callable[[], list[Path]]], ...] = (
-        (
-            "this directory",
-            lambda: [
-                session_dir
-                for project in sessions.project_dirs(cwd)
-                for session_dir in sessions.find_session_dirs_by_prefix(
-                    session_hash, projects_dir=project
-                )
-            ],
-        ),
-        ("all projects", lambda: sessions.find_session_dirs_by_prefix(session_hash)),
-    )
-    for label, load in scopes:
-        matches = load()
-        if len(matches) > 1:
-            names = ", ".join(sorted(path.name for path in matches))
-            sys.stderr.write(
-                f"[resume] {session_hash!r} is ambiguous in {label}; "
-                f"matches: {names}.\n"
-                "[resume] Re-run with a longer prefix.\n"
-            )
-            raise SystemExit(1)
-        if matches:
-            sys.stderr.write(f"[resume] {matches[0]} (matched in {label})\n")
-            return str(matches[0])
-    sys.stderr.write(
-        f"[resume] no session matching {session_hash!r}; starting fresh.\n"
-    )
-    return str(sessions.new_session_dir(cwd))
-
-
-def _resolve_resume(cwd: Path, pick_cap: int) -> str:
-    """Show interactive session picker, or start fresh on no selection."""
-    avail = sessions.list_sessions(cwd, limit=pick_cap + 1)
-    if not avail:
-        sys.stderr.write("[resume] no prior sessions; starting fresh.\n")
-        return str(sessions.new_session_dir(cwd))
-    choice = sessions.pick_session(avail, pick_cap=pick_cap)
-    if choice is not None:
-        sys.stderr.write(f"[resume] {choice.path}\n")
-        return str(choice.path)
-    sys.stderr.write("[resume] no selection; starting fresh.\n")
-    return str(sessions.new_session_dir(cwd))
-
-
-def _resolve_continue_all() -> str:
-    """Resume the most recent session across all projects, or start fresh."""
-    # One row is all this path uses: it takes ``[0]`` and discards the rest.
-    all_sessions = sessions.list_all_sessions(limit=1)
-    if all_sessions:
-        sys.stderr.write(f"[resume] {all_sessions[0].path}\n")
-        return str(all_sessions[0].path)
-    sys.stderr.write("[resume] no prior sessions; starting fresh.\n")
-    return str(sessions.new_session_dir(Path.cwd()))
-
-
-def _resolve_resume_all(pick_cap: int) -> str:
-    """Show interactive picker across all projects, or start fresh on no selection."""
-    # One extra row lets the bounded picker disclose that older sessions exist.
-    avail = sessions.list_all_sessions(limit=pick_cap + 1)
-    if not avail:
-        sys.stderr.write("[resume] no prior sessions; starting fresh.\n")
-        return str(sessions.new_session_dir(Path.cwd()))
-    choice = sessions.pick_session(avail, pick_cap=pick_cap)
-    if choice is not None:
-        sys.stderr.write(f"[resume] {choice.path}\n")
-        return str(choice.path)
-    sys.stderr.write("[resume] no selection; starting fresh.\n")
-    return str(sessions.new_session_dir(Path.cwd()))
 
 
 def parse_agent_args(
@@ -452,7 +274,8 @@ def parse_agent_args(
     parser.add_argument(
         "--allow-providers",
         default=os.environ.get(
-            "SAGENT_ALLOW_PROVIDERS", ",".join(_default_allow_providers())
+            "SAGENT_ALLOW_PROVIDERS",
+            ",".join(_default_allow_providers()),
         ),
         metavar="LIST",
         help=(
@@ -594,6 +417,376 @@ def parse_agent_args(
     args.account_explicit = _flag_present(raw_argv, "--account")
     args.model_explicit = _flag_present(raw_argv, "--model")
     return args, remaining
+
+
+def main() -> int:
+    """Parse args, launch the agent, and return the process exit code.
+
+    Returns:
+      exit_code: Process exit code.
+
+    """
+    parser = argparse.ArgumentParser(
+        description=(__doc__ or "").split("\n", 2)[2],
+        epilog=(
+            "modes:\n"
+            "  tty stdin       interactive REPL\n"
+            "  non-tty stdin   headless one-shot (read prompt from stdin to EOF)\n"
+            "\n"
+            "examples:\n"
+            "  sagent                                  # REPL\n"
+            "  echo 'fix the bug' | sagent             # headless, text in, text out\n"
+            "  sagent < prompt.txt                     # headless, text from file\n"
+            "  sagent --output-format json < p.txt     # text in, JSON result out\n"
+            "  sagent --input-format stream-json \\\n"
+            "         --output-format stream-json \\\n"
+            "         < prompts.ndjson                 # NDJSON in, NDJSON events out\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    args, remaining = _parse_cli_args(parser)
+    if remaining == ["login"]:
+        _do_login(args)
+        return 0
+    if remaining:
+        parser.error(f"unrecognized arguments: {' '.join(remaining)}")
+    _configure_logging(args.log_level)
+    # Copy a pre-convention sagent home (a real ``~/.sagent`` or, for users who
+    # symlinked it, the ``~/.claude`` squat) into the XDG home, before any
+    # sagent path (sessions, caches) is read below.
+    sessions.migrate_legacy_home()
+    if args.recipe is not None:
+        set_recipe(args.recipe)
+    session_dir = None if args.ephemeral else _resolve_session_dir(args)
+    loaded_session = None
+    if session_dir is not None:
+        loaded_session = load_session(Path(session_dir))
+        if loaded_session is not None:
+            _apply_resume_model_defaults(args, loaded_session[0])
+    # The provider is "explicit" when the user passed ``--provider`` or a
+    # resumed session pinned one; otherwise it defaults to the first
+    # allowed provider (``primary=None``).
+    resumed_provider = loaded_session is not None and bool(loaded_session[0].provider)
+    args.provider_from_resume = resumed_provider
+    user_explicit = bool(getattr(args, "provider_explicit", False))
+    explicit = user_explicit or resumed_provider
+    args.provider, allow_providers = _resolve_provider_and_allow(
+        args.allow_providers,
+        primary=args.provider if explicit else None,
+        from_resume=resumed_provider and not user_explicit,
+    )
+    try:
+        provider, model, resolved_auth = _build_provider_model(
+            args,
+            allow_providers=allow_providers,
+        )
+        show_thinking = _apply_cli_thinking(args, model)
+        if args.effort is not None:
+            model.settings.thinking_effort = cast(ThinkingEffort, args.effort)
+    except (AttributeError, FileNotFoundError, RuntimeError, ValueError) as e:
+        sys.stderr.write(f"Error: {e}\n")
+        return 1
+    model_recipe = ModelRecipe(
+        provider=args.provider,
+        auth=resolved_auth,
+        model_id=model.tagged_model_id,
+        account=args.account,
+    )
+    if loaded_session is not None:
+        meta, history, tool_state = loaded_session
+        loaded_session = (
+            dataclasses.replace(
+                meta,
+                provider=model_recipe.provider,
+                auth=model_recipe.auth,
+                model_id=model_recipe.model_id,
+                account=model_recipe.account or "",
+            ),
+            history,
+            tool_state,
+        )
+    compactor = SummaryCompactor() if args.compact else None
+
+    headless = not sys.stdin.isatty()
+    if not headless:
+        sys.stderr.write(f"[{args.provider}] {model.tagged_model_id}\n")
+
+    tool_names = args.tools or DEFAULT_TOOLS
+    agent_tools = resolve_tools(
+        tool_names,
+        allow_providers=allow_providers,
+        overrides=_parse_tool_flag(args.tool),
+    )
+    if args.advisor:
+        advisor_model = provider.model(args.advisor)
+        agent_tools.append(
+            Advisor(model=advisor_model, max_uses=args.advisor_max_uses),
+        )
+        if not headless:
+            sys.stderr.write(f"[advisor] {advisor_model.tagged_model_id}\n")
+
+    custom_system = args.system
+
+    def _system() -> str:
+        return build_system(
+            model.tagged_model_id,
+            custom=custom_system,
+            include_memory=not args.ephemeral,
+        )
+
+    agent = Agent(
+        name=args.name,
+        description="Interactive CLI agent.",
+        model=model,
+        model_recipe=model_recipe,
+        system=_system,
+        tools=agent_tools,
+        compactor=compactor,
+        session_dir=session_dir,
+        max_tool_call_rounds=args.max_tool_call_rounds,
+        max_budget_usd=args.max_budget_usd,
+    )
+    if args.max_request_tokens is not None:
+        agent.max_request_tokens = args.max_request_tokens
+    if args.max_response_tokens is not None:
+        agent.max_response_tokens = args.max_response_tokens
+
+    if loaded_session is not None:
+        agent.resume(*loaded_session)
+
+    agent.tool_state.additional_dirs = list(args.add_dir)
+
+    if not headless:
+        if args.output_format != "text":
+            sys.stderr.write(
+                "Note: --output-format is ignored in interactive REPL mode.\n",
+            )
+        _install_repl_logging(args.log_level, session_dir=session_dir)
+        asyncio.run(
+            _with_signals(
+                agent,
+                _with_resumed_persistent(
+                    agent,
+                    run_repl(agent, history=args.history, show_thinking=show_thinking),
+                    session_dir=session_dir,
+                    resume_persistent=args.resume_persistent,
+                    allow_providers=allow_providers,
+                ),
+                provider=provider,
+            ),
+        )
+    else:
+        asyncio.run(
+            _with_signals(
+                agent,
+                _with_resumed_persistent(
+                    agent,
+                    _run_headless(
+                        agent,
+                        input_format=args.input_format,
+                        output_format=args.output_format,
+                    ),
+                    session_dir=session_dir,
+                    resume_persistent=args.resume_persistent,
+                    allow_providers=allow_providers,
+                ),
+                provider=provider,
+            ),
+        )
+    return 0
+
+
+def _do_login(args: argparse.Namespace) -> None:
+    """Run the OAuth flow for ``args.provider`` and save under ``args.account``."""
+    cls = getattr(providers, args.provider, None)
+    if cls is None:
+        sys.stderr.write(f"Error: unknown provider {args.provider!r}\n")
+        sys.exit(1)
+    login_fn = getattr(cls, "login", None)
+    save_fn = getattr(cls, "save", None)
+    if login_fn is None or save_fn is None:
+        if args.provider == "AnthropicCLI":
+            if args.account not in (None, "default"):
+                sys.stderr.write(
+                    "Error: AnthropicCLI named accounts use legacy credential "
+                    "files and do not support interactive login.\n",
+                )
+                sys.exit(1)
+            sys.stderr.write(
+                "Error: AnthropicCLI uses the Claude CLI login. Run:\n"
+                "  claude auth login --claudeai\n",
+            )
+            sys.exit(1)
+        sys.stderr.write(
+            f"Error: {args.provider} does not support interactive login.\n",
+        )
+        sys.exit(1)
+    account = args.account or "default"
+    sys.stderr.write(f"[login] provider={args.provider} account={account!r}\n")
+    creds = login_fn(output=sys.stderr, account=args.account, manual=args.headless)
+    save_fn(creds, account=args.account)
+    sys.stderr.write(f"[login] saved credentials for account '{account}'.\n")
+
+
+# ``--provider`` defaults to the first allowed provider, so the lead entry is the zero-
+# flag default; the rest follow in declaration order.
+def _default_allow_providers() -> tuple[str, ...]:
+    """Default allow-list, led by ``_DEFAULT_PROVIDER``."""
+    rest = tuple(p for p in PROVIDER_NAMES if p != _DEFAULT_PROVIDER)
+    return (_DEFAULT_PROVIDER, *rest)
+
+
+# Values are ``Any`` deliberately: the result is splatted into a tool constructor whose
+# signature varies per tool, and the values were already validated against that
+# signature by ``coerce_kwargs``.
+def _tool_kwargs(cls: type, overrides: Mapping[str, str]) -> dict[str, Any]:
+    """Coerce ``--tool`` overrides for ``cls``, exiting on a bad key."""
+    if not overrides:
+        return {}
+    try:
+        return coerce_kwargs(cls, overrides)
+    except ToolSpecError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _parse_tool_flag(specs: list[str]) -> dict[str, dict[str, str]]:
+    """Parse ``--tool`` values, exiting with the message on a bad spec."""
+    try:
+        return parse_tool_overrides(specs)
+    except ToolSpecError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+# A cap of zero renders an empty picker whose blank-input default then indexes row 0,
+# and a negative one slices from the end -- both silently wrong rather than refused.
+# ``argparse`` turns the raise into a usage error.
+def _positive_int(raw: str) -> int:
+    """Parse a count that must be at least one."""
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected an integer, got {raw!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {value}")
+    return value
+
+
+def _resolve_session_dir(args: argparse.Namespace) -> str | None:
+    """Pick the session directory per --session / --resume / --continue."""
+    if args.session is not None:
+        return str(args.session)
+    cwd = Path.cwd()
+    if args.continue_:
+        return _resolve_continue(cwd)
+    if args.continue_all:
+        return _resolve_continue_all()
+    if args.resume is not None:
+        if args.resume is True:
+            return _resolve_resume(cwd, args.resume_limit)
+        return _resolve_resume_hash(str(args.resume), cwd)
+    if args.resume_all:
+        return _resolve_resume_all(args.resume_limit)
+    return str(sessions.new_session_dir(cwd))
+
+
+def _resolve_continue(cwd: Path) -> str:
+    """Resume the most recent session for ``cwd``, or start fresh."""
+    latest = sessions.latest_session(cwd)
+    if latest is not None:
+        sys.stderr.write(f"[resume] {latest.path}\n")
+        return str(latest.path)
+    sys.stderr.write("[resume] no prior sessions for this cwd; starting fresh.\n")
+    return str(sessions.new_session_dir(cwd))
+
+
+# ``--resume`` is cwd-scoped (``--resume-all`` is the global door), so a prefix unique
+# within this directory wins even when a session elsewhere shares it. Widening to every
+# project only happens when this directory has no match. The prefix must be unambiguous
+# WITHIN the scope that matched: taking the first of several would attach to a session
+# the operator did not name, with nothing in the output to reveal it -- hence the scope
+# is named on every resolution.
+def _resolve_resume_hash(session_hash: str, cwd: Path) -> str:
+    """Resume a session by hash prefix (directory name match)."""
+    if not session_hash:
+        # ``"".startswith(x)`` is universally true, so an empty prefix
+        # would match every session: one on disk resumes silently, several
+        # report "ambiguous". Neither is what the operator asked for.
+        sys.stderr.write("[resume] HASH cannot be empty.\n")
+        raise SystemExit(1)
+    # Both scopes match on the directory NAME, so neither reads a transcript.
+    # The cwd scope still resolves first, and is still evaluated lazily: the
+    # global glob is skipped entirely when this directory already matched.
+    scopes: tuple[tuple[str, Callable[[], list[Path]]], ...] = (
+        (
+            "this directory",
+            lambda: [
+                session_dir
+                for project in sessions.project_dirs(cwd)
+                for session_dir in sessions.find_session_dirs_by_prefix(
+                    session_hash,
+                    projects_dir=project,
+                )
+            ],
+        ),
+        ("all projects", lambda: sessions.find_session_dirs_by_prefix(session_hash)),
+    )
+    for label, load in scopes:
+        matches = load()
+        if len(matches) > 1:
+            names = ", ".join(sorted(path.name for path in matches))
+            sys.stderr.write(
+                f"[resume] {session_hash!r} is ambiguous in {label}; "
+                f"matches: {names}.\n"
+                "[resume] Re-run with a longer prefix.\n",
+            )
+            raise SystemExit(1)
+        if matches:
+            sys.stderr.write(f"[resume] {matches[0]} (matched in {label})\n")
+            return str(matches[0])
+    sys.stderr.write(
+        f"[resume] no session matching {session_hash!r}; starting fresh.\n",
+    )
+    return str(sessions.new_session_dir(cwd))
+
+
+def _resolve_resume(cwd: Path, pick_cap: int) -> str:
+    """Show interactive session picker, or start fresh on no selection."""
+    avail = sessions.list_sessions(cwd, limit=pick_cap + 1)
+    if not avail:
+        sys.stderr.write("[resume] no prior sessions; starting fresh.\n")
+        return str(sessions.new_session_dir(cwd))
+    choice = sessions.pick_session(avail, pick_cap=pick_cap)
+    if choice is not None:
+        sys.stderr.write(f"[resume] {choice.path}\n")
+        return str(choice.path)
+    sys.stderr.write("[resume] no selection; starting fresh.\n")
+    return str(sessions.new_session_dir(cwd))
+
+
+def _resolve_continue_all() -> str:
+    """Resume the most recent session across all projects, or start fresh."""
+    # One row is all this path uses: it takes ``[0]`` and discards the rest.
+    all_sessions = sessions.list_all_sessions(limit=1)
+    if all_sessions:
+        sys.stderr.write(f"[resume] {all_sessions[0].path}\n")
+        return str(all_sessions[0].path)
+    sys.stderr.write("[resume] no prior sessions; starting fresh.\n")
+    return str(sessions.new_session_dir(Path.cwd()))
+
+
+def _resolve_resume_all(pick_cap: int) -> str:
+    """Show interactive picker across all projects, or start fresh on no selection."""
+    # One extra row lets the bounded picker disclose that older sessions exist.
+    avail = sessions.list_all_sessions(limit=pick_cap + 1)
+    if not avail:
+        sys.stderr.write("[resume] no prior sessions; starting fresh.\n")
+        return str(sessions.new_session_dir(Path.cwd()))
+    choice = sessions.pick_session(avail, pick_cap=pick_cap)
+    if choice is not None:
+        sys.stderr.write(f"[resume] {choice.path}\n")
+        return str(choice.path)
+    sys.stderr.write("[resume] no selection; starting fresh.\n")
+    return str(sessions.new_session_dir(Path.cwd()))
 
 
 def _flag_present(argv: list[str], flag: str) -> bool:
@@ -745,46 +938,40 @@ def _parse_cli_args(
     return parse_agent_args(parser, argv)
 
 
+# Exits with a clear error on empty input or unknown provider names.
 def _parse_allow_providers(spec: str) -> tuple[str, ...]:
-    """Parse ``--allow-providers`` / ``SAGENT_ALLOW_PROVIDERS`` CSV.
-
-    Exits with a clear error on empty input or unknown provider names.
-    """
+    """Parse ``--allow-providers`` / ``SAGENT_ALLOW_PROVIDERS`` CSV."""
     parsed = tuple(p.strip() for p in spec.split(",") if p.strip())
     if not parsed:
         sys.stderr.write(
             "Error: --allow-providers requires at least one provider name;"
-            f" valid: {list(PROVIDER_NAMES)}\n"
+            f" valid: {list(PROVIDER_NAMES)}\n",
         )
         sys.exit(1)
     unknown = [p for p in parsed if p not in PROVIDER_NAMES]
     if unknown:
         sys.stderr.write(
             f"Error: --allow-providers contains unknown: {unknown};"
-            f" valid: {list(PROVIDER_NAMES)}\n"
+            f" valid: {list(PROVIDER_NAMES)}\n",
         )
         sys.exit(1)
     return parsed
 
 
+# ``primary`` is the provider when the user passed ``--provider`` or a resumed session
+# pinned one; ``None`` means "use the default", which is the first allowed provider. An
+# explicit ``--provider`` is unioned into the allow-set so the caller need not name it
+# twice. A resumed provider (``from_resume``) is NOT consent to widen the operator's
+# ``SAGENT_ALLOW_PROVIDERS`` lock: if it falls outside ``spec`` it is rejected, so an
+# old session cannot smuggle a disallowed provider past the master knob. Unknown or
+# empty ``spec`` exits via :func:`_parse_allow_providers`.
 def _resolve_provider_and_allow(
     spec: str,
     *,
     primary: str | None,
     from_resume: bool = False,
 ) -> tuple[str, tuple[str, ...]]:
-    """Resolve the provider and its allow-list together from ``spec``.
-
-    ``primary`` is the provider when the user passed ``--provider`` or a
-    resumed session pinned one; ``None`` means "use the default", which
-    is the first allowed provider. An explicit ``--provider`` is unioned
-    into the allow-set so the caller need not name it twice. A resumed
-    provider (``from_resume``) is NOT consent to widen the operator's
-    ``SAGENT_ALLOW_PROVIDERS`` lock: if it falls outside ``spec`` it is
-    rejected, so an old session cannot smuggle a disallowed provider past
-    the master knob. Unknown or empty ``spec`` exits via
-    :func:`_parse_allow_providers`.
-    """
+    """Resolve the provider and its allow-list together from ``spec``."""
     parsed = _parse_allow_providers(spec)
     if primary is None:
         return parsed[0], parsed
@@ -795,7 +982,7 @@ def _resolve_provider_and_allow(
             f"Error: resumed session's provider {primary!r} is not in"
             f" --allow-providers {list(parsed)}; the operator's allow-list"
             " is not widened by a persisted provider. Pass"
-            f" --provider {primary} to override, or widen --allow-providers.\n"
+            f" --provider {primary} to override, or widen --allow-providers.\n",
         )
         sys.exit(1)
     # Route the union back through ``_parse_allow_providers`` so an
@@ -856,7 +1043,7 @@ def _build_provider_model_fallback(
                 error,
                 allow_providers=allow_providers,
                 account=args.account,
-            )
+            ),
         ) from error
     original_provider = str(args.provider)
     for fallback_provider in _credential_fallback_providers(
@@ -874,7 +1061,7 @@ def _build_provider_model_fallback(
             f"[provider] {original_provider} unavailable: {error}\n"
             f"[provider] falling back to {fallback_provider} ({model.tagged_model_id}).\n"
             f"[provider] To use {original_provider}, run: "
-            f"sagent --provider {original_provider} login\n"
+            f"sagent --provider {original_provider} login\n",
         )
         return provider, model, auth
     args.provider = original_provider
@@ -884,7 +1071,7 @@ def _build_provider_model_fallback(
             error,
             allow_providers=allow_providers,
             account=args.account,
-        )
+        ),
     ) from error
 
 
@@ -972,7 +1159,7 @@ def _credential_error_message(
             _credential_setup_commands(
                 fallback_provider,
                 account=account,
-            )
+            ),
         )
     commands = list(dict.fromkeys(commands))
     lines = [f"{provider_name} credentials are unavailable: {error}"]
@@ -983,19 +1170,7 @@ def _credential_error_message(
 
 
 def _apply_cli_thinking(args: argparse.Namespace, model: Model) -> bool:
-    """Apply ``--thinking`` to the model's settings; return the display flag.
-
-    Args:
-      args: Parsed CLI namespace.
-      model: The model whose settings the word selects on.
-
-    Returns:
-      show: Whether reasoning renders locally.
-
-    Raises:
-      ValueError: The model does not offer the requested selection.
-
-    """
+    """Apply ``--thinking`` to the model's settings; return the display flag."""
     raw = str(args.thinking)
     if raw == "default":
         return True
@@ -1006,7 +1181,7 @@ def _apply_cli_thinking(args: argparse.Namespace, model: Model) -> bool:
         )
         raise ValueError(
             f"thinking {raw!r} not supported by {model.tagged_model_id!r};"
-            f" options: {options}"
+            f" options: {options}",
         )
     return apply_thinking_command(raw, settings, show=True)
 
@@ -1029,14 +1204,11 @@ def _apply_resume_model_defaults(args: argparse.Namespace, meta: SessionMeta) ->
             args.model = None
 
 
+# Mirrors the providers' profile-lookup rule: latency tags (``+fast``) ride on catalog
+# ids and are stripped before the membership check, while context tags stay -- ``+1m``
+# variants are catalog keys where supported and must keep failing the check elsewhere.
 def _provider_knows_model(provider_name: str, model_id: str) -> bool:
-    """Return True when the named provider's catalog includes ``model_id``.
-
-    Mirrors the providers' profile-lookup rule: latency tags (``+fast``)
-    ride on catalog ids and are stripped before the membership check,
-    while context tags stay -- ``+1m`` variants are catalog keys where
-    supported and must keep failing the check elsewhere.
-    """
+    """Return True when the named provider's catalog includes ``model_id``."""
     cls = getattr(providers, provider_name, None)
     if cls is None:
         return False
@@ -1059,7 +1231,7 @@ async def _resume_persistent_agents(
         if record.provider not in allow_providers:
             sys.stderr.write(
                 f"[resume-persistent] skipping {record.label!r}:"
-                f" provider {record.provider!r} is not allowed.\n"
+                f" provider {record.provider!r} is not allowed.\n",
             )
             continue
         try:
@@ -1073,7 +1245,7 @@ async def _resume_persistent_agents(
             continue
         if not record.session_dir:
             sys.stderr.write(
-                f"[resume-persistent] skipping {record.label!r}: missing session_dir.\n"
+                f"[resume-persistent] skipping {record.label!r}: missing session_dir.\n",
             )
             continue
         loaded_child = load_session(Path(record.session_dir))
@@ -1083,7 +1255,7 @@ async def _resume_persistent_agents(
         if label != record.label:
             sys.stderr.write(
                 f"[resume-persistent] label {record.label!r} already active;"
-                f" restored as {label!r}.\n"
+                f" restored as {label!r}.\n",
             )
         _start_resumed_persistent(parent, child, record, label)
 
@@ -1160,7 +1332,7 @@ def _start_resumed_persistent(
     if forwarder is not None:
         child.runtime.observers.append(forwarder)
     task = asyncio.create_task(
-        _serve_resumed_persistent(parent, child, label, forwarder)
+        _serve_resumed_persistent(parent, child, label, forwarder),
     )
     parent.register_background(
         f"persistent:{label}",
@@ -1217,38 +1389,30 @@ def _configure_logging(level: str | None) -> None:
     logging.getLogger("sagent").setLevel(value)
 
 
+# Python's default ``lastResort`` handler emits ``WARNING+`` records to stderr, which
+# corrupts prompt-toolkit's display (any stderr write overlays the rendered UI). Policy:
+# stderr is for headless mode only. This function:
+#
+# - Replaces ``logging.lastResort`` with ``NullHandler`` so the implicit fallback is
+# silent. - Removes any pre-installed stderr/stdout-bound handlers on the root logger
+# (e.g. from a prior ``basicConfig`` call). - Routes records to ``SAGENT_LOG_FILE`` or,
+# by default, ``<session_dir>/repl.log`` via a ``FileHandler`` so the user can ``tail
+# -f`` for diagnostics without breaking the REPL.
+#
+# Headless mode (``_configure_logging`` path) is unchanged.
 def _install_repl_logging(
     level: str | None = None,
     *,
     session_dir: str | Path | None = None,
 ) -> None:
-    """REPL mode: never write logs to stderr.
-
-    Python's default ``lastResort`` handler emits ``WARNING+`` records
-    to stderr, which corrupts prompt-toolkit's display (any stderr write
-    overlays the rendered UI). Policy: stderr is for headless mode
-    only. This function:
-
-      - Replaces ``logging.lastResort`` with ``NullHandler`` so the
-        implicit fallback is silent.
-      - Removes any pre-installed stderr/stdout-bound handlers on the
-        root logger (e.g. from a prior ``basicConfig`` call).
-      - Routes records to ``SAGENT_LOG_FILE`` or, by default,
-        ``<session_dir>/repl.log`` via a ``FileHandler`` so the user
-        can ``tail -f`` for diagnostics without breaking the REPL.
-
-    Headless mode (``_configure_logging`` path) is unchanged.
-
-    Args:
-      level: Optional CLI log level; overrides ``SAGENT_LOG_LEVEL``.
-      session_dir: Session directory containing ``session.jsonl``.
-
-    """
+    """REPL mode: never write logs to stderr."""
     logging.lastResort = logging.NullHandler()
     root = logging.getLogger()
     for handler in list(root.handlers):
         if isinstance(handler, logging.StreamHandler) and getattr(
-            cast(object, handler), "stream", None
+            cast(object, handler),
+            "stream",
+            None,
         ) in (sys.stderr, sys.stdout):
             root.removeHandler(cast(logging.Handler, handler))
 
@@ -1299,24 +1463,15 @@ async def _with_resumed_persistent(
     await coro
 
 
+# First signal: push ``Quit()`` to ``agent.inbox`` so the runtime drains cleanly. Second
+# signal: ``os._exit(1)``.
 async def _with_signals(
     agent: Agent,
     coro: Coroutine[object, object, None],
     *,
     provider: Provider | None = None,
 ) -> None:
-    """Install SIGINT/SIGTERM handlers around ``coro`` for graceful + escape exit.
-
-    First signal: push ``Quit()`` to ``agent.inbox`` so the runtime
-    drains cleanly. Second signal: ``os._exit(1)``.
-
-    Args:
-      agent: Agent whose inbox receives ``Quit()``.
-      coro: The work to run under the handlers.
-      provider: Provider to close on exit. It owns the client its models
-          share, so teardown belongs to whoever built it -- here.
-
-    """
+    """Install SIGINT/SIGTERM handlers around ``coro`` for graceful + escape exit."""
     loop = asyncio.get_running_loop()
     handler = _quit_handler(agent)
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -1404,21 +1559,17 @@ def _event_to_json_record(event: RuntimeEvent) -> MutableJSON | None:
     return None
 
 
+# Reads stdin via ``asyncio.to_thread`` so the asyncio event loop keeps iterating while
+# the read is blocked. The asyncio signal handler from :func:`_with_signals` is
+# suspended for the duration of the read because ``to_thread`` cannot be cancelled mid-
+# read -- Python's default SIGINT handler (KeyboardInterrupt) is what gets the user out.
 async def _run_headless(
     agent: Agent,
     *,
     input_format: str,
     output_format: str,
 ) -> None:
-    """Non-interactive execution for piped/scripted usage.
-
-    Reads stdin via ``asyncio.to_thread`` so the asyncio event loop
-    keeps iterating while the read is blocked. The asyncio signal
-    handler from :func:`_with_signals` is suspended for the duration
-    of the read because ``to_thread`` cannot be cancelled mid-read --
-    Python's default SIGINT handler (KeyboardInterrupt) is what gets
-    the user out.
-    """
+    """Non-interactive execution for piped/scripted usage."""
     loop = asyncio.get_running_loop()
     # ONE handler shared by both signals: its ``triggered`` flag is what
     # turns the second signal into a force-exit, so building a fresh
@@ -1520,210 +1671,6 @@ def _quit_handler(agent: Agent) -> Callable[[], None]:
         agent.runtime.inbox.push_back(Quit())
 
     return _on_signal
-
-
-def main() -> int:
-    """Parse args, launch the agent, and return the process exit code."""
-    parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
-        epilog=(
-            "modes:\n"
-            "  tty stdin       interactive REPL\n"
-            "  non-tty stdin   headless one-shot (read prompt from stdin to EOF)\n"
-            "\n"
-            "examples:\n"
-            "  sagent                                  # REPL\n"
-            "  echo 'fix the bug' | sagent             # headless, text in, text out\n"
-            "  sagent < prompt.txt                     # headless, text from file\n"
-            "  sagent --output-format json < p.txt     # text in, JSON result out\n"
-            "  sagent --input-format stream-json \\\n"
-            "         --output-format stream-json \\\n"
-            "         < prompts.ndjson                 # NDJSON in, NDJSON events out\n"
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    args, remaining = _parse_cli_args(parser)
-    if remaining == ["login"]:
-        _do_login(args)
-        return 0
-    if remaining:
-        parser.error(f"unrecognized arguments: {' '.join(remaining)}")
-    _configure_logging(args.log_level)
-    # Copy a pre-convention sagent home (a real ``~/.sagent`` or, for users who
-    # symlinked it, the ``~/.claude`` squat) into the XDG home, before any
-    # sagent path (sessions, caches) is read below.
-    sessions.migrate_legacy_home()
-    if args.recipe is not None:
-        set_recipe(args.recipe)
-    session_dir = None if args.ephemeral else _resolve_session_dir(args)
-    loaded_session = None
-    if session_dir is not None:
-        loaded_session = load_session(Path(session_dir))
-        if loaded_session is not None:
-            _apply_resume_model_defaults(args, loaded_session[0])
-    # The provider is "explicit" when the user passed ``--provider`` or a
-    # resumed session pinned one; otherwise it defaults to the first
-    # allowed provider (``primary=None``).
-    resumed_provider = loaded_session is not None and bool(loaded_session[0].provider)
-    args.provider_from_resume = resumed_provider
-    user_explicit = bool(getattr(args, "provider_explicit", False))
-    explicit = user_explicit or resumed_provider
-    args.provider, allow_providers = _resolve_provider_and_allow(
-        args.allow_providers,
-        primary=args.provider if explicit else None,
-        from_resume=resumed_provider and not user_explicit,
-    )
-    try:
-        provider, model, resolved_auth = _build_provider_model(
-            args,
-            allow_providers=allow_providers,
-        )
-        show_thinking = _apply_cli_thinking(args, model)
-        if args.effort is not None:
-            model.settings.thinking_effort = cast(ThinkingEffort, args.effort)
-    except (AttributeError, FileNotFoundError, RuntimeError, ValueError) as e:
-        sys.stderr.write(f"Error: {e}\n")
-        return 1
-    model_recipe = ModelRecipe(
-        provider=args.provider,
-        auth=resolved_auth,
-        model_id=model.tagged_model_id,
-        account=args.account,
-    )
-    if loaded_session is not None:
-        meta, history, tool_state = loaded_session
-        loaded_session = (
-            dataclasses.replace(
-                meta,
-                provider=model_recipe.provider,
-                auth=model_recipe.auth,
-                model_id=model_recipe.model_id,
-                account=model_recipe.account or "",
-            ),
-            history,
-            tool_state,
-        )
-    compactor = SummaryCompactor() if args.compact else None
-
-    headless = not sys.stdin.isatty()
-    if not headless:
-        sys.stderr.write(f"[{args.provider}] {model.tagged_model_id}\n")
-
-    tool_names = args.tools or DEFAULT_TOOLS
-    agent_tools = resolve_tools(
-        tool_names,
-        allow_providers=allow_providers,
-        overrides=_parse_tool_flag(args.tool),
-    )
-    if args.advisor:
-        advisor_model = provider.model(args.advisor)
-        agent_tools.append(
-            Advisor(model=advisor_model, max_uses=args.advisor_max_uses),
-        )
-        if not headless:
-            sys.stderr.write(f"[advisor] {advisor_model.tagged_model_id}\n")
-
-    custom_system = args.system
-
-    def _system() -> str:
-        return build_system(
-            model.tagged_model_id,
-            custom=custom_system,
-            include_memory=not args.ephemeral,
-        )
-
-    agent = Agent(
-        name=args.name,
-        description="Interactive CLI agent.",
-        model=model,
-        model_recipe=model_recipe,
-        system=_system,
-        tools=agent_tools,
-        compactor=compactor,
-        session_dir=session_dir,
-        max_tool_call_rounds=args.max_tool_call_rounds,
-        max_budget_usd=args.max_budget_usd,
-    )
-    if args.max_request_tokens is not None:
-        agent.max_request_tokens = args.max_request_tokens
-    if args.max_response_tokens is not None:
-        agent.max_response_tokens = args.max_response_tokens
-
-    if loaded_session is not None:
-        agent.resume(*loaded_session)
-
-    agent.tool_state.additional_dirs = list(args.add_dir)
-
-    if not headless:
-        if args.output_format != "text":
-            sys.stderr.write(
-                "Note: --output-format is ignored in interactive REPL mode.\n"
-            )
-        _install_repl_logging(args.log_level, session_dir=session_dir)
-        asyncio.run(
-            _with_signals(
-                agent,
-                _with_resumed_persistent(
-                    agent,
-                    run_repl(agent, history=args.history, show_thinking=show_thinking),
-                    session_dir=session_dir,
-                    resume_persistent=args.resume_persistent,
-                    allow_providers=allow_providers,
-                ),
-                provider=provider,
-            ),
-        )
-    else:
-        asyncio.run(
-            _with_signals(
-                agent,
-                _with_resumed_persistent(
-                    agent,
-                    _run_headless(
-                        agent,
-                        input_format=args.input_format,
-                        output_format=args.output_format,
-                    ),
-                    session_dir=session_dir,
-                    resume_persistent=args.resume_persistent,
-                    allow_providers=allow_providers,
-                ),
-                provider=provider,
-            )
-        )
-    return 0
-
-
-def _do_login(args: argparse.Namespace) -> None:
-    """Run the OAuth flow for ``args.provider`` and save under ``args.account``."""
-    cls = getattr(providers, args.provider, None)
-    if cls is None:
-        sys.stderr.write(f"Error: unknown provider {args.provider!r}\n")
-        sys.exit(1)
-    login_fn = getattr(cls, "login", None)
-    save_fn = getattr(cls, "save", None)
-    if login_fn is None or save_fn is None:
-        if args.provider == "AnthropicCLI":
-            if args.account not in (None, "default"):
-                sys.stderr.write(
-                    "Error: AnthropicCLI named accounts use legacy credential "
-                    "files and do not support interactive login.\n"
-                )
-                sys.exit(1)
-            sys.stderr.write(
-                "Error: AnthropicCLI uses the Claude CLI login. Run:\n"
-                "  claude auth login --claudeai\n"
-            )
-            sys.exit(1)
-        sys.stderr.write(
-            f"Error: {args.provider} does not support interactive login.\n"
-        )
-        sys.exit(1)
-    account = args.account or "default"
-    sys.stderr.write(f"[login] provider={args.provider} account={account!r}\n")
-    creds = login_fn(output=sys.stderr, account=args.account, manual=args.headless)
-    save_fn(creds, account=args.account)
-    sys.stderr.write(f"[login] saved credentials for account '{account}'.\n")
 
 
 if __name__ == "__main__":

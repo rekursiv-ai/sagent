@@ -4,7 +4,11 @@ import sympy
 
 class TritonSplitScanKernel(TritonKernel):
     def __init__(
-        self, tiling: dict[str, sympy.Expr], pid_cache=..., fixed_config=..., **kwargs
+        self,
+        tiling: dict[str, sympy.Expr],
+        pid_cache=...,
+        fixed_config=...,
+        **kwargs,
     ) -> None: ...
     def should_use_persistent_reduction(self) -> bool: ...
     def should_use_cooperative_reduction(self) -> bool: ...

@@ -11,14 +11,19 @@ class TracableCreateParameter(torch.autograd.Function):
     def forward(ctx: Any, tensor: Any, placeholder: Any) -> torch.nn.Parameter: ...
     @staticmethod
     def backward(
-        ctx: Any, *grad_outputs: torch.Tensor
+        ctx: Any,
+        *grad_outputs: torch.Tensor,
     ) -> tuple[None, torch.Tensor]: ...
 
 def tracable_create_parameter(
-    tensor: torch.Tensor, placeholder: torch.nn.Parameter
+    tensor: torch.Tensor,
+    placeholder: torch.nn.Parameter,
 ) -> torch.nn.Parameter: ...
 def new_parameter_placeholder(
-    size: tuple[int, ...], dtype: torch.dtype, device: torch.device, requires_grad: bool
+    size: tuple[int, ...],
+    dtype: torch.dtype,
+    device: torch.device,
+    requires_grad: bool,
 ) -> torch.nn.Parameter: ...
 
 _TLS = ...

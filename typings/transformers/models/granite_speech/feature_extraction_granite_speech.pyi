@@ -18,7 +18,9 @@ class GraniteSpeechFeatureExtractor(FeatureExtractionMixin):
         **kwargs,
     ) -> None: ...
     def __call__(
-        self, audios: AudioInput, device: str | None = ...
+        self,
+        audios: AudioInput,
+        device: str | None = ...,
     ) -> BatchFeature: ...
 
 __all__ = ["GraniteSpeechFeatureExtractor"]

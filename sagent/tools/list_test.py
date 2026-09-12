@@ -63,7 +63,7 @@ async def test_list_long_format(tmp_path: Path) -> None:
     f.write_text("hello")
     result = await _run_list({"path": str(tmp_path), "long": True}, tmp_path)
     assert "x.txt" in result.content
-    assert "5" in result.content  # 5 bytes file
+    assert "5" in result.content  # 5 bytes file.
 
 
 @pytest.mark.asyncio
@@ -186,7 +186,8 @@ def test_bash_match_ls_reverse_only() -> None:
 
 
 @pytest.mark.parametrize(
-    "command", ["ls --color=auto", "ls -Z", "ls a b", "ls -tS", "ls -R", "ls -lh"]
+    "command",
+    ["ls --color=auto", "ls -Z", "ls a b", "ls -tS", "ls -R", "ls -lh"],
 )
 def test_bash_match_an_untranslatable_ls_still_nudges(command: str) -> None:
     """A flag List cannot express costs the worked example, not the nudge."""
@@ -254,7 +255,8 @@ def test_bash_match_ls_pipe_head_no_count() -> None:
 
 
 @pytest.mark.parametrize(
-    "command", ["ls | head -c 5", "ls | head -nabc", "ls | head -n", "ls | head -0"]
+    "command",
+    ["ls | head -c 5", "ls | head -nabc", "ls | head -n", "ls | head -0"],
 )
 def test_bash_match_an_unparsable_count_drops_only_the_bound(command: str) -> None:
     """An unreadable ``head`` count leaves the listing nudge intact."""

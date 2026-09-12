@@ -85,7 +85,9 @@ _PoisonedVirtual = ...
 
 class Virtualized(Generic[T]):
     def __init__(
-        self, vname: str, default: Callable[[], T] | type[NullHandler]
+        self,
+        vname: str,
+        default: Callable[[], T] | type[NullHandler],
     ) -> None: ...
     def __getattr__(self, name: str) -> Any: ...
 

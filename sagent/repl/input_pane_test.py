@@ -13,17 +13,13 @@ from prompt_toolkit.formatted_text import FormattedText
 
 import pytest
 
-from sagent.agent.agent import (
-    Agent,
-    Agent as _RealAgent,
-)
+from sagent.agent.agent import Agent
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.state import (
     AgentLike,
     agent_label_var,
     agent_registry,
 )
-from sagent.repl import input_pane as repl_input_mod
 from sagent.repl.input_pane import (
     REPL_PUMP_KEY,
     PromptToolkitInputSource,
@@ -36,22 +32,6 @@ from sagent.repl.input_pane import (
 )
 from sagent.repl.input_queues import InputQueues, QueuedInputBlock
 from sagent.repl.render import RecordingPrinter
-from sagent.repl.slash import (
-    Clear as SlashClear,
-    Compact as SlashCompact,
-    Defer as SlashDefer,
-    Halt as SlashHalt,
-    Help as SlashHelp,
-    Kill as SlashKill,
-    Login as SlashLogin,
-    ModelSwitch as SlashModelSwitch,
-    Quit as SlashQuit,
-    Recompact as SlashRecompact,
-    Send as SlashSend,
-    Tasks as SlashTasks,
-    Text as SlashText,
-    Unknown as SlashUnknown,
-)
 from sagent.types.model import ModelRecipe
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -62,6 +42,9 @@ from sagent.types.runtime import (
     UserDeferredMessage,
     UserMessage,
 )
+
+import sagent.repl.input_pane
+import sagent.repl.slash
 
 
 # `sys.modules`, not an import: `repl/__init__.py` re-exports a FUNCTION named
@@ -176,7 +159,7 @@ async def test_stub_input_source_yields_then_none() -> None:
 async def test_dispatch_quit_shuts_down_and_exits() -> None:
     a = _agent()
     stub = cast(_StubAgent, a)
-    exit_ = await _dispatch(a, SlashQuit(), None)
+    exit_ = await _dispatch(a, sagent.repl.slash.Quit(), None)
     assert exit_ is True
     assert stub.shutdown_calls == [False]
 
@@ -185,7 +168,7 @@ async def test_dispatch_quit_shuts_down_and_exits() -> None:
 async def test_dispatch_halt_self_calls_halt() -> None:
     a = _agent()
     stub = cast(_StubAgent, a)
-    _ = await _dispatch(a, SlashHalt(target=""), None)
+    _ = await _dispatch(a, sagent.repl.slash.Halt(target=""), None)
     assert stub.halted == 1
 
 
@@ -200,7 +183,11 @@ async def test_dispatch_halt_bare_name_does_not_halt_when_registry_label_suffixe
         "sagent.repl.input_pane.agent_registry",
         new={"AgentA_2": a},
     ):
-        _ = await _dispatch(a, SlashHalt(target="AgentA"), p)
+        _ = await _dispatch(
+            a,
+            sagent.repl.slash.Halt(target="AgentA"),
+            p,
+        )
     assert stub.halted == 0
     assert any("no matching subagents" in e for e in p.tool_errors)
 
@@ -215,7 +202,11 @@ async def test_dispatch_halt_by_registry_label() -> None:
         "sagent.repl.input_pane.agent_registry",
         new={"fix-tools": child},
     ):
-        _ = await _dispatch(a, SlashHalt(target="fix-tools"), p)
+        _ = await _dispatch(
+            a,
+            sagent.repl.slash.Halt(target="fix-tools"),
+            p,
+        )
     assert child_stub.halted == 1
     assert "[/halt fix-tools] halted" in p.slash_blocks
 
@@ -229,7 +220,11 @@ async def test_dispatch_halt_unknown_agent_writes_error() -> None:
         "sagent.repl.input_pane.agent_registry",
         new=empty,
     ):
-        _ = await _dispatch(a, SlashHalt(target="Other"), p)
+        _ = await _dispatch(
+            a,
+            sagent.repl.slash.Halt(target="Other"),
+            p,
+        )
     assert any("no matching subagents" in e for e in p.tool_errors)
 
 
@@ -238,7 +233,7 @@ async def test_dispatch_kill_job_id() -> None:
     a = _agent()
     stub = cast(_StubAgent, a)
     p = RecordingPrinter()
-    _ = await _dispatch(a, SlashKill(target="job-1"), p)
+    _ = await _dispatch(a, sagent.repl.slash.Kill(target="job-1"), p)
     assert stub.killed == ["job-1"]
     assert any("cancelled job-1" in line for line in p.slash_blocks)
 
@@ -253,7 +248,11 @@ async def test_dispatch_kill_namespaced_subagent_job() -> None:
         "sagent.repl.input_pane.agent_registry",
         new={"fix-tools": child},
     ):
-        _ = await _dispatch(a, SlashKill(target="fix-tools/job-1"), p)
+        _ = await _dispatch(
+            a,
+            sagent.repl.slash.Kill(target="fix-tools/job-1"),
+            p,
+        )
     assert child_stub.killed == ["job-1"]
     assert "[/kill fix-tools/job-1] cancelled" in p.slash_blocks
 
@@ -274,7 +273,11 @@ async def test_dispatch_kill_owner_slash_job_unknown_owner_surfaces_error() -> N
         "sagent.repl.input_pane.agent_registry",
         new=empty,
     ):
-        _ = await _dispatch(a, SlashKill(target="bogus/qid"), p)
+        _ = await _dispatch(
+            a,
+            sagent.repl.slash.Kill(target="bogus/qid"),
+            p,
+        )
     assert stub.killed == [], (
         f"unknown owner must not trigger self.kill_tool fallback; got {stub.killed!r}"
     )
@@ -288,7 +291,7 @@ async def test_dispatch_kill_all() -> None:
     a = _agent()
     stub = cast(_StubAgent, a)
     p = RecordingPrinter()
-    _ = await _dispatch(a, SlashKill(target="all"), p)
+    _ = await _dispatch(a, sagent.repl.slash.Kill(target="all"), p)
     assert stub.killed_all == 1
     assert any("cancelled all" in line for line in p.slash_blocks)
 
@@ -307,7 +310,12 @@ async def test_dispatch_kill_all_clears_local_repl_queues() -> None:
         queue=QueuedInputBlock(text="staged urgent"),
         deferred=QueuedInputBlock(text="staged later"),
     )
-    _ = await _dispatch(a, SlashKill(target="all"), p, queues=queues)
+    _ = await _dispatch(
+        a,
+        sagent.repl.slash.Kill(target="all"),
+        p,
+        queues=queues,
+    )
     assert stub.killed_all == 1
     assert not queues.has_any(), (
         f"/kill all must clear REPL queues; got queue={queues.queue!r}"
@@ -332,7 +340,11 @@ async def test_dispatch_kill_persistent_subagent() -> None:
             new=registry,
         ),
     ):
-        _ = await _dispatch(a, SlashKill(target="fix-tools"), p)
+        _ = await _dispatch(
+            a,
+            sagent.repl.slash.Kill(target="fix-tools"),
+            p,
+        )
     assert child_stub.shutdown_calls == [True]
     assert "[/kill fix-tools] cancelled" in p.slash_blocks
 
@@ -342,7 +354,7 @@ async def test_dispatch_clear_pushes_clear_event() -> None:
     a = _agent()
     stub = cast(_StubAgent, a)
     p = RecordingPrinter()
-    _ = await _dispatch(a, SlashClear(), p)
+    _ = await _dispatch(a, sagent.repl.slash.Clear(), p)
     assert any(isinstance(i, Clear) for i in stub.runtime.inbox.items)
     assert any("history cleared" in line for line in p.slash_blocks)
 
@@ -352,7 +364,7 @@ async def test_dispatch_compact_pushes_compact_with_args() -> None:
     a = _agent()
     stub = cast(_StubAgent, a)
     p = RecordingPrinter()
-    _ = await _dispatch(a, SlashCompact(args="hints"), p)
+    _ = await _dispatch(a, sagent.repl.slash.Compact(args="hints"), p)
     pushed = stub.runtime.inbox.items
     assert any(isinstance(i, Compact) and i.args == "hints" for i in pushed)
     assert any("/compact" in line for line in p.slash_blocks)
@@ -362,7 +374,7 @@ async def test_dispatch_compact_pushes_compact_with_args() -> None:
 async def test_dispatch_compact_no_args_no_note() -> None:
     a = _agent()
     p = RecordingPrinter()
-    _ = await _dispatch(a, SlashCompact(args=""), p)
+    _ = await _dispatch(a, sagent.repl.slash.Compact(args=""), p)
     line = next(line for line in p.slash_blocks if "/compact" in line)
     assert "(" not in line
 
@@ -372,7 +384,11 @@ async def test_dispatch_recompact_pushes_recompact() -> None:
     a = _agent()
     stub = cast(_StubAgent, a)
     p = RecordingPrinter()
-    _ = await _dispatch(a, SlashRecompact(args="redo"), p)
+    _ = await _dispatch(
+        a,
+        sagent.repl.slash.Recompact(args="redo"),
+        p,
+    )
     pushed = stub.runtime.inbox.items
     assert any(isinstance(i, Recompact) for i in pushed)
 
@@ -381,7 +397,7 @@ async def test_dispatch_recompact_pushes_recompact() -> None:
 async def test_dispatch_text_pushes_user_message() -> None:
     a = _agent()
     stub = cast(_StubAgent, a)
-    _ = await _dispatch(a, SlashText(content="hi"), None)
+    _ = await _dispatch(a, sagent.repl.slash.Text(content="hi"), None)
     pushed = stub.runtime.inbox.items
     assert any(isinstance(i, UserMessage) and i.text == "hi" for i in pushed)
 
@@ -399,7 +415,11 @@ async def test_dispatch_defer_pushes_user_deferred_message() -> None:
     """
     a = _agent()
     stub = cast(_StubAgent, a)
-    _ = await _dispatch(a, SlashDefer(content="for later"), None)
+    _ = await _dispatch(
+        a,
+        sagent.repl.slash.Defer(content="for later"),
+        None,
+    )
     pushed = stub.runtime.inbox.items
     assert any(
         isinstance(i, UserDeferredMessage) and i.text == "for later" for i in pushed
@@ -429,7 +449,7 @@ def test_resolve_targets_star_excludes_caller_and_root() -> None:
     not the caller and not the root), so a fan-out cannot route to self
     or to the root.
     """
-    root = _agent()  # is_subagent=False -> the root
+    root = _agent()  # is_subagent=False -> the root.
     me = cast(Agent, _StubAgent(name="me", is_subagent=True))
     peer = cast(Agent, _StubAgent(name="peer", is_subagent=True))
     agent_registry.update({"root": root, "me": me, "peer": peer})
@@ -453,7 +473,7 @@ def test_resolve_targets_supports_exact_glob_brace_and_regex() -> None:
             "fix-tools": child1,
             "fix-compact": child2,
             "helper": non_persistent,
-        }
+        },
     )
     try:
         assert _resolve_targets("fix-tools") == ["fix-tools"]
@@ -508,7 +528,11 @@ async def test_dispatch_halt_all_targets_every_persistent_subagent() -> None:
         "sagent.repl.input_pane.agent_registry",
         new={"fix-tools": child1, "fix-compact": child2},
     ):
-        _ = await _dispatch(a, SlashHalt(target="all"), p)
+        _ = await _dispatch(
+            a,
+            sagent.repl.slash.Halt(target="all"),
+            p,
+        )
     assert child1_stub.halted == 1, (
         f"fix-tools must be halted by /halt all; halted={child1_stub.halted}"
     )
@@ -535,7 +559,11 @@ async def test_dispatch_halt_all_never_halts_self() -> None:
         new={"me": me, "peer": peer},
     ):
         try:
-            _ = await _dispatch(me, SlashHalt(target="all"), None)
+            _ = await _dispatch(
+                me,
+                sagent.repl.slash.Halt(target="all"),
+                None,
+            )
         finally:
             agent_label_var.reset(label_token)
     assert me_stub.halted == 0, "/halt all must never halt the caller itself"
@@ -560,7 +588,14 @@ async def test_dispatch_send_pushes_agent_send_message_with_source() -> None:
     p = RecordingPrinter()
     agent_registry["fix-tools"] = child
     try:
-        _ = await _dispatch(a, SlashSend(target="fix-tools", content="continue"), p)
+        _ = await _dispatch(
+            a,
+            sagent.repl.slash.Send(
+                target="fix-tools",
+                content="continue",
+            ),
+            p,
+        )
     finally:
         agent_registry.clear()
 
@@ -591,7 +626,10 @@ async def test_dispatch_send_model_switch_routes_to_child() -> None:
         ) as mock:
             _ = await _dispatch(
                 a,
-                SlashSend(target="fix-tools", content="/model claude-opus-4-7"),
+                sagent.repl.slash.Send(
+                    target="fix-tools",
+                    content="/model claude-opus-4-7",
+                ),
                 p,
             )
     finally:
@@ -606,7 +644,11 @@ async def test_dispatch_send_model_switch_routes_to_child() -> None:
 async def test_dispatch_send_unknown_writes_error() -> None:
     a = _agent()
     p = RecordingPrinter()
-    _ = await _dispatch(a, SlashSend(target="missing", content="hello"), p)
+    _ = await _dispatch(
+        a,
+        sagent.repl.slash.Send(target="missing", content="hello"),
+        p,
+    )
     assert any("no matching subagents" in error for error in p.tool_errors)
 
 
@@ -614,7 +656,11 @@ async def test_dispatch_send_unknown_writes_error() -> None:
 async def test_dispatch_send_invalid_target_regex_writes_target_error() -> None:
     a = _agent()
     p = RecordingPrinter()
-    exit_ = await _dispatch(a, SlashSend(target="/[/", content="hello"), p)
+    exit_ = await _dispatch(
+        a,
+        sagent.repl.slash.Send(target="/[/", content="hello"),
+        p,
+    )
     assert exit_ is False
     assert any("invalid target regex" in error for error in p.tool_errors)
 
@@ -623,7 +669,7 @@ async def test_dispatch_send_invalid_target_regex_writes_target_error() -> None:
 async def test_dispatch_help_writes_help() -> None:
     a = _agent()
     p = RecordingPrinter()
-    _ = await _dispatch(a, SlashHelp(), p)
+    _ = await _dispatch(a, sagent.repl.slash.Help(), p)
     assert any("/help" in line for line in p.lines)
 
 
@@ -636,7 +682,7 @@ async def test_dispatch_tasks_calls_run_repl_format_tasks() -> None:
         "format_tasks",
         return_value="tasks listing",
     ) as mock:
-        _ = await _dispatch(a, SlashTasks(), p)
+        _ = await _dispatch(a, sagent.repl.slash.Tasks(), p)
     assert mock.called
     assert "tasks listing" in p.lines
 
@@ -645,7 +691,11 @@ async def test_dispatch_tasks_calls_run_repl_format_tasks() -> None:
 async def test_dispatch_unknown_writes_error() -> None:
     a = _agent()
     p = RecordingPrinter()
-    _ = await _dispatch(a, SlashUnknown(text="oops bad cmd"), p)
+    _ = await _dispatch(
+        a,
+        sagent.repl.slash.Unknown(text="oops bad cmd"),
+        p,
+    )
     assert "oops bad cmd" in p.tool_errors
 
 
@@ -657,7 +707,11 @@ async def test_dispatch_model_switch_calls_run_repl() -> None:
         run_repl_mod,
         "do_switch_model",
     ) as mock:
-        _ = await _dispatch(a, SlashModelSwitch(args="claude-opus-4-7"), p)
+        _ = await _dispatch(
+            a,
+            sagent.repl.slash.ModelSwitch(args="claude-opus-4-7"),
+            p,
+        )
     args = mock.call_args.args
     assert args[1] == "claude-opus-4-7"
 
@@ -670,7 +724,7 @@ async def test_dispatch_login_calls_run_repl() -> None:
         run_repl_mod,
         "do_login",
     ) as mock:
-        _ = await _dispatch(a, SlashLogin(), p)
+        _ = await _dispatch(a, sagent.repl.slash.Login(), p)
     assert mock.called
 
 
@@ -683,7 +737,12 @@ async def test_dispatch_login_flushes_local_deferred_queue() -> None:
         run_repl_mod,
         "do_login",
     ):
-        _ = await _dispatch(a, SlashLogin(), None, queues=queues)
+        _ = await _dispatch(
+            a,
+            sagent.repl.slash.Login(),
+            None,
+            queues=queues,
+        )
     assert not queues.has_any()
     assert any(
         isinstance(item, UserDeferredMessage) and item.text == "retry after login"
@@ -699,7 +758,7 @@ def test_repl_pump_key_is_stable() -> None:
 
 def test_dispatch_module_exports() -> None:
     # Coverage for the public ``__all__`` keeping discovery clean.
-    exports: list[str] = list(repl_input_mod.__all__)
+    exports: list[str] = list(sagent.repl.input_pane.__all__)
     assert "REPL_PUMP_KEY" in exports
     assert "InputSource" in exports
     assert "StubInputSource" in exports
@@ -821,7 +880,11 @@ async def test_dispatch_halt_routes_to_registered_persistent_agent() -> None:
         "sagent.repl.input_pane.agent_registry",
         new={"Other": other},
     ):
-        _ = await _dispatch(a, SlashHalt(target="Other"), None)
+        _ = await _dispatch(
+            a,
+            sagent.repl.slash.Halt(target="Other"),
+            None,
+        )
     assert other.halted == 1
 
 
@@ -833,7 +896,11 @@ async def test_dispatch_halt_no_printer_swallows_unknown_agent() -> None:
         "sagent.repl.input_pane.agent_registry",
         new=empty,
     ):
-        exit_ = await _dispatch(a, SlashHalt(target="ghost"), None)
+        exit_ = await _dispatch(
+            a,
+            sagent.repl.slash.Halt(target="ghost"),
+            None,
+        )
     assert exit_ is False
 
 
@@ -845,7 +912,7 @@ async def test_dispatch_halt_no_printer_swallows_unknown_agent() -> None:
 class _FakeRuntime:
     cohort: set[str] = field(default_factory=set)
     _mid_stream_queue: list[UserMessage | AgentSendMessage] = field(
-        default_factory=list
+        default_factory=list,
     )
 
     def pending_mid_stream(self) -> tuple[UserMessage | AgentSendMessage, ...]:
@@ -858,8 +925,8 @@ class _FakeAgent:
     runtime: _FakeRuntime = field(default_factory=_FakeRuntime)
 
 
-def _as_real_agent(a: _FakeAgent) -> _RealAgent:
-    return cast(_RealAgent, a)
+def _as_real_agent(a: _FakeAgent) -> Agent:
+    return cast(Agent, a)
 
 
 def test_render_input_pane_empty_queue_renders_only_sigil() -> None:
@@ -1158,7 +1225,7 @@ def test_quit_without_console_swallows_preview() -> None:
     src = PromptToolkitInputSource(session, queues=queues, console=None)
     line = asyncio.run(src.next_line())
     assert line is None
-    # buffer left alone when there's no console to surface to.
+    # The buffer stays unchanged when there is no console to surface it.
     assert queues.deferred is not None
     assert queues.deferred.text == "queued"
 

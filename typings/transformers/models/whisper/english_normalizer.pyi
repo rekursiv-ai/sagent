@@ -9,7 +9,9 @@ def remove_symbols(s: str):  # -> str:
 
 class BasicTextNormalizer:
     def __init__(
-        self, remove_diacritics: bool = ..., split_letters: bool = ...
+        self,
+        remove_diacritics: bool = ...,
+        split_letters: bool = ...,
     ) -> None: ...
     def __call__(self, s: str):  # -> str:
         ...

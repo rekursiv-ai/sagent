@@ -7,18 +7,25 @@ from .rigid_utils import Rigid
 
 @overload
 def pseudo_beta_fn(
-    aatype: torch.Tensor, all_atom_positions: torch.Tensor, all_atom_masks: None
+    aatype: torch.Tensor,
+    all_atom_positions: torch.Tensor,
+    all_atom_masks: None,
 ) -> torch.Tensor: ...
 @overload
 def pseudo_beta_fn(
-    aatype: torch.Tensor, all_atom_positions: torch.Tensor, all_atom_masks: torch.Tensor
+    aatype: torch.Tensor,
+    all_atom_positions: torch.Tensor,
+    all_atom_masks: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 def pseudo_beta_fn(
-    aatype, all_atom_positions, all_atom_masks
+    aatype,
+    all_atom_positions,
+    all_atom_masks,
 ):  # -> tuple[Tensor, Tensor] | Tensor:
     ...
 def atom14_to_atom37(
-    atom14: torch.Tensor, batch: dict[str, torch.Tensor]
+    atom14: torch.Tensor,
+    batch: dict[str, torch.Tensor],
 ) -> torch.Tensor: ...
 def build_template_angle_feat(
     template_feats: dict[str, torch.Tensor],
@@ -34,7 +41,10 @@ def build_template_pair_feat(
 ) -> torch.Tensor: ...
 def build_extra_msa_feat(batch: dict[str, torch.Tensor]) -> torch.Tensor: ...
 def torsion_angles_to_frames(
-    r: Rigid, alpha: torch.Tensor, aatype: torch.Tensor, rrgdf: torch.Tensor
+    r: Rigid,
+    alpha: torch.Tensor,
+    aatype: torch.Tensor,
+    rrgdf: torch.Tensor,
 ) -> Rigid: ...
 def frames_and_literature_positions_to_atom14_pos(
     r: Rigid,

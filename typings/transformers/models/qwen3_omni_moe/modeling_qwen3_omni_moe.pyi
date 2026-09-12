@@ -57,7 +57,10 @@ class Qwen3OmniMoePreTrainedModelForConditionalGeneration(Qwen3OmniMoePreTrained
     ):  # -> Tensor:
         ...
     def get_chunked_index(
-        self, token_indices: torch.Tensor, tokens_per_chunk: int, remove_index: int
+        self,
+        token_indices: torch.Tensor,
+        tokens_per_chunk: int,
+        remove_index: int,
     ) -> list[tuple[int, int]]: ...
     def get_rope_index(
         self,
@@ -93,7 +96,9 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class Qwen3OmniMoeAudioEncoderLayer(GradientCheckpointingLayer):
@@ -124,18 +129,28 @@ class Qwen3OmniMoeAudioEncoder(Qwen3OmniMoePreTrainedModel):
         ...
     @auto_docstring
     def forward(
-        self, input_features, feature_lens=..., aftercnn_lens=...
+        self,
+        input_features,
+        feature_lens=...,
+        aftercnn_lens=...,
     ):  # -> BaseModelOutput:
         ...
     def padded_and_mask_function(
-        self, tensor_list, tensor_len, padding_value=..., padding_side=...
+        self,
+        tensor_list,
+        tensor_len,
+        padding_value=...,
+        padding_side=...,
     ):  # -> tuple[Tensor, Tensor, Tensor]:
         ...
 
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb_vision(
-    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class Qwen3OmniMoeVisionAttention(nn.Module):
@@ -152,7 +167,9 @@ class Qwen3OmniMoeVisionAttention(nn.Module):
 
 class Qwen3OmniMoeVisionPatchMerger(nn.Module):
     def __init__(
-        self, config: Qwen3OmniMoeVisionEncoderConfig, use_postshuffle_norm=...
+        self,
+        config: Qwen3OmniMoeVisionEncoderConfig,
+        use_postshuffle_norm=...,
     ) -> None: ...
     def forward(self, hidden: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -193,7 +210,10 @@ class Qwen3OmniMoeVisionEncoder(Qwen3OmniMoePreTrainedModel):
     def fast_pos_embed_interpolate(self, grid_thw):  # -> Tensor:
         ...
     def forward(
-        self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, **kwargs
+        self,
+        hidden_states: torch.Tensor,
+        grid_thw: torch.Tensor,
+        **kwargs,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
     @property
@@ -227,7 +247,12 @@ class Qwen3OmniMoeThinkerTextRMSNorm(nn.Module):
         ...
 
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 
@@ -316,7 +341,8 @@ def load_balancing_loss_func(
 
 @auto_docstring(custom_intro=...)
 class Qwen3OmniMoeThinkerForConditionalGeneration(
-    Qwen3OmniMoePreTrainedModelForConditionalGeneration, GenerationMixin
+    Qwen3OmniMoePreTrainedModelForConditionalGeneration,
+    GenerationMixin,
 ):
     config: Qwen3OmniMoeThinkerConfig
     base_model_prefix = ...
@@ -483,7 +509,8 @@ class Qwen3OmniMoeTalkerCodePredictorModel(Qwen3OmniMoePreTrainedModel):
 
 @auto_docstring
 class Qwen3OmniMoeTalkerCodePredictorModelForConditionalGeneration(
-    Qwen3OmniMoePreTrainedModel, GenerationMixin
+    Qwen3OmniMoePreTrainedModel,
+    GenerationMixin,
 ):
     _tied_weights_keys = ...
     _tp_plan = ...
@@ -568,7 +595,8 @@ class Qwen3OmniMoeTalkerModel(Qwen3OmniMoePreTrainedModel):
 
 @auto_docstring
 class Qwen3OmniMoeTalkerForConditionalGeneration(
-    Qwen3OmniMoeThinkerTextPreTrainedModel, GenerationMixin
+    Qwen3OmniMoeThinkerTextPreTrainedModel,
+    GenerationMixin,
 ):
     _tied_weights_keys = ...
     _tp_plan = ...
@@ -709,12 +737,16 @@ class Qwen3OmniMoeCode2WavTransformerLayer(GradientCheckpointingLayer):
         cache_position: torch.LongTensor | None = ...,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring
@@ -753,12 +785,16 @@ class Qwen3OmniMoeCode2Wav(Qwen3OmniMoePreTrainedModel):
     def forward(self, codes):  # -> Any:
         ...
     def chunked_decode(
-        self, codes, chunk_size=..., left_context_size=...
+        self,
+        codes,
+        chunk_size=...,
+        left_context_size=...,
     ):  # -> Tensor:
         ...
 
 class Qwen3OmniMoeForConditionalGeneration(
-    Qwen3OmniMoePreTrainedModel, GenerationMixin
+    Qwen3OmniMoePreTrainedModel,
+    GenerationMixin,
 ):
     config_class = Qwen3OmniMoeConfig
     def __init__(self, config: Qwen3OmniMoeConfig) -> None: ...

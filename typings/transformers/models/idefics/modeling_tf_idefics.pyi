@@ -49,7 +49,9 @@ def expand_inputs_for_generation(
     ...
 def update_model_kwargs_for_generation(outputs, model_kwargs): ...
 def prepare_inputs_for_generation(
-    input_ids, past_key_values=..., **kwargs
+    input_ids,
+    past_key_values=...,
+    **kwargs,
 ):  # -> dict[str, Any | None]:
     ...
 def freeze_model(model, module_exceptions=...): ...
@@ -94,7 +96,11 @@ class TFIdeficsRMSNorm(tf.keras.layers.Layer):
 
 class TFIdeficsEmbedding(tf.keras.layers.Layer):
     def __init__(
-        self, dim, max_position_embeddings=..., base=..., **kwargs
+        self,
+        dim,
+        max_position_embeddings=...,
+        base=...,
+        **kwargs,
     ) -> None: ...
     def call(self, x, seq_len=...):  # -> tuple[Any, Any]:
         ...
@@ -105,7 +111,11 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids):  # -> tuple[Any, Any]:
 
 class TFIdeficsMLP(tf.keras.layers.Layer):
     def __init__(
-        self, hidden_size: int, intermediate_size: int, hidden_act: str, **kwargs
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        **kwargs,
     ) -> None: ...
     def call(self, x): ...
     def build(self, input_shape=...):  # -> None:
@@ -188,7 +198,10 @@ LLAMA_INPUTS_DOCSTRING = ...
 class TFIdeficsMainLayer(tf.keras.layers.Layer):
     config_class = IdeficsConfig
     def __init__(
-        self, config: IdeficsConfig, add_pooling_year: bool = ..., **kwargs
+        self,
+        config: IdeficsConfig,
+        add_pooling_year: bool = ...,
+        **kwargs,
     ) -> None: ...
     def freeze_relevant_params(self, config=...):  # -> None:
         ...
@@ -252,7 +265,8 @@ class TFIdeficsForVisionText2Text(TFPreTrainedModel, TFCausalLanguageModelingLos
     @unpack_inputs
     @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFIdeficsCausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC
+        output_type=TFIdeficsCausalLMOutputWithPast,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -274,7 +288,10 @@ class TFIdeficsForVisionText2Text(TFPreTrainedModel, TFCausalLanguageModelingLos
         training=...,
     ) -> TFIdeficsCausalLMOutputWithPast | tuple[tf.Tensor]: ...
     def prepare_inputs_for_generation(
-        self, input_ids, past=..., **kwargs
+        self,
+        input_ids,
+        past=...,
+        **kwargs,
     ):  # -> dict[str, Any | None]:
         ...
     def build(self, input_shape=...):  # -> None:

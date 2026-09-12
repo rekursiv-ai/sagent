@@ -70,7 +70,8 @@ def maybe_disable_comprehensive_padding(
     example_inputs: Sequence[InputType],
 ) -> AbstractContextManager[None, None]: ...
 def maybe_disable_graph_partition(
-    cpp_wrapper: bool, aot_mode: bool
+    cpp_wrapper: bool,
+    aot_mode: bool,
 ) -> AbstractContextManager[None, None]: ...
 def fake_tensor_prop(
     gm: GraphModule,
@@ -141,7 +142,8 @@ def fx_codegen_and_compile(
     **graph_kwargs: Unpack[_CompileFxKwargs],
 ) -> OutputCode: ...
 def get_input_idxs_to_check(
-    inputs: Sequence[InputType], static_input_idxs: Sequence[int]
+    inputs: Sequence[InputType],
+    static_input_idxs: Sequence[int],
 ) -> Sequence[int]: ...
 def cudagraphify(
     model: Callable[..., Any],
@@ -157,7 +159,9 @@ def cudagraphify(
 ) -> Callable[..., Any]: ...
 def static_input(x: torch.Tensor) -> torch.Tensor: ...
 def index_expanded_dims_and_copy_(
-    dst: torch.Tensor, src: torch.Tensor, expanded_dims: list[int]
+    dst: torch.Tensor,
+    src: torch.Tensor,
+    expanded_dims: list[int],
 ) -> None: ...
 def cudagraphify_impl(
     model: Callable[..., Any],
@@ -188,7 +192,9 @@ def get_cuda_device_context(
     gm: torch.fx.GraphModule,
 ) -> AbstractContextManager[None]: ...
 def partition_fn(
-    gm: GraphModule, joint_inputs: Sequence[object], **kwargs: object
+    gm: GraphModule,
+    joint_inputs: Sequence[object],
+    **kwargs: object,
 ) -> tuple[GraphModule, GraphModule]: ...
 def get_num_model_outputs(model: GraphModule) -> int: ...
 
@@ -215,7 +221,8 @@ def compile_fx_backward(
     inner_compile: Callable[..., OutputCode] = ...,
 ) -> OutputCode: ...
 def run_pre_grad_passes(
-    model_: GraphModule, example_inputs_: Sequence[InputType]
+    model_: GraphModule,
+    example_inputs_: Sequence[InputType],
 ) -> GraphModule: ...
 def compile_fx(
     model_: GraphModule,
@@ -227,8 +234,12 @@ def compile_fx(
 ) -> Callable[[list[object]], Sequence[torch.Tensor]] | str | list[str] | Weights: ...
 def graph_returns_tuple(gm: GraphModule) -> bool: ...
 def make_graph_return_tuple(
-    gm: GraphModule, inputs: Sequence[InputType], compile_gm: Callable[..., Any]
+    gm: GraphModule,
+    inputs: Sequence[InputType],
+    compile_gm: Callable[..., Any],
 ) -> Callable[..., Any]: ...
 def handle_dynamo_export_graph(
-    gm: GraphModule, inputs: Sequence[InputType], compile_gm: Callable[..., Any]
+    gm: GraphModule,
+    inputs: Sequence[InputType],
+    compile_gm: Callable[..., Any],
 ) -> Callable[..., Any]: ...

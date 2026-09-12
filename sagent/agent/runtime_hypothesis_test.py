@@ -115,7 +115,7 @@ def _message_history(draw: DrawFn) -> list[ModelContextEvent]:
     """Random history mixing user/agent/assistant; tool_results paired by call_id."""
     n = draw(integers(min_value=0, max_value=12))
     history: list[ModelContextEvent] = []
-    pending: list[str] = []  # tool_call ids awaiting results
+    pending: list[str] = []  # tool_call ids awaiting results.
     for _ in range(n):
         choice = draw(sampled_from(["user", "agent", "assistant", "tool_result"]))
         if choice == "user":
@@ -314,7 +314,7 @@ def test_last_assistant_result_picks_most_recent_send(
     # should win. Find it.
     sends = [tc for tc in last.tool_calls if tc.name == "AgentSend"]
     if not sends:
-        return  # composite always produces at least one but defensive
+        return  # `composite` always produces at least one but defensive.
     expected = sends[-1].args["content"]
     typed_history: list[ModelContextEvent] = list(history)
     r = _last_assistant_result(typed_history)
@@ -335,14 +335,11 @@ def test_last_assistant_result_picks_most_recent_send(
 # caught by a counterexample rather than a live HTTP 400.
 
 
+# Independent re-implementation of the pairing half of :func:`validate_context` (no
+# role-alternation check), so the property asserts against a second witness rather than
+# the function under test's own logic.
 def _tool_pairing_violation(entries: Sequence[ModelContextEvent]) -> str | None:
-    """Return a description of the first tool-pairing violation, or ``None``.
-
-    Independent re-implementation of the pairing half of
-    :func:`validate_context` (no role-alternation check), so the property
-    asserts against a second witness rather than the function under test's
-    own logic.
-    """
+    """Return a description of the first tool-pairing violation, or ``None``."""
     pending: set[str] = set()
     seen: set[str] = set()
     for entry in entries:
@@ -364,20 +361,17 @@ def _tool_pairing_violation(entries: Sequence[ModelContextEvent]) -> str | None:
     return None
 
 
+# The runtime mints a fresh id per ``ToolCall``; an id is never reused across two
+# ``AssistantMessage`` turns. The generic ``_message_history`` strategy can collide ids
+# (``f"tc-{i}-{rand}"``), which would let the same id be "unpaired" twice and make
+# ``_sanitize_for_send`` synthesize two ``[interrupted]`` results for it -- a duplicate
+# that the real id scheme makes impossible. This strategy re-stamps every call id from a
+# single counter so the pairing properties test the input shape the runtime actually
+# produces. Tool results, orphans, and unpaired calls are all still emitted (the rescue
+# path's job) -- only id-collision is excluded.
 @composite
 def _unique_id_history(draw: DrawFn) -> list[ModelContextEvent]:
-    """Random history with GLOBALLY-UNIQUE tool-call ids, like real tape.
-
-    The runtime mints a fresh id per ``ToolCall``; an id is never reused
-    across two ``AssistantMessage`` turns. The generic ``_message_history``
-    strategy can collide ids (``f"tc-{i}-{rand}"``), which would let the same
-    id be "unpaired" twice and make ``_sanitize_for_send`` synthesize two
-    ``[interrupted]`` results for it -- a duplicate that the real id scheme
-    makes impossible. This strategy re-stamps every call id from a single
-    counter so the pairing properties test the input shape the runtime
-    actually produces. Tool results, orphans, and unpaired calls are all
-    still emitted (the rescue path's job) -- only id-collision is excluded.
-    """
+    """Random history with GLOBALLY-UNIQUE tool-call ids, like real tape."""
     counter = 0
     history: list[ModelContextEvent] = []
     pending: list[str] = []
@@ -406,17 +400,14 @@ def _unique_id_history(draw: DrawFn) -> list[ModelContextEvent]:
     return history
 
 
+# Mirrors the real tape the runtime builds (it never appends assistant-after-assistant
+# or user-after-user). Tool results always immediately follow their declaring assistant,
+# before the next turn -- the shape a wire-valid context requires -- so
+# ``_sanitize_for_send`` on this input should produce fully
+# :func:`validate_context`-clean output, not merely pairing-clean output.
 @composite
 def _alternating_history(draw: DrawFn) -> list[ModelContextEvent]:
-    """Random history that never emits two consecutive same-wire-role turns.
-
-    Mirrors the real tape the runtime builds (it never appends
-    assistant-after-assistant or user-after-user). Tool results always
-    immediately follow their declaring assistant, before the next turn --
-    the shape a wire-valid context requires -- so ``_sanitize_for_send`` on
-    this input should produce fully :func:`validate_context`-clean output,
-    not merely pairing-clean output.
-    """
+    """Random history that never emits two consecutive same-wire-role turns."""
     n = draw(integers(min_value=0, max_value=10))
     history: list[ModelContextEvent] = []
     prev_role: str | None = None
@@ -427,7 +418,7 @@ def _alternating_history(draw: DrawFn) -> list[ModelContextEvent]:
             history.append(
                 draw(_user_message())
                 if draw(booleans())
-                else draw(_agent_send_message())
+                else draw(_agent_send_message()),
             )
             prev_role = "user"
         elif prev_role != "assistant":
@@ -447,7 +438,7 @@ def _alternating_history(draw: DrawFn) -> list[ModelContextEvent]:
                 # ``draw`` (drop-or-keep) and a fresh ``draw`` for content.
                 if draw(booleans()):
                     history.append(  # noqa: PERF401
-                        ToolResult(call_id=tc.id, content=draw(_TEXT))
+                        ToolResult(call_id=tc.id, content=draw(_TEXT)),
                     )
             prev_role = None if calls else "assistant"
     return history
@@ -552,7 +543,7 @@ def test_sanitize_of_alternating_history_fully_validates(
         roles = [wire_role(m) for m in out]
         raise AssertionError(
             f"sanitized alternating history failed validate_context: {exc}\n"
-            f"roles={roles}\nout={out!r}"
+            f"roles={roles}\nout={out!r}",
         ) from exc
 
 

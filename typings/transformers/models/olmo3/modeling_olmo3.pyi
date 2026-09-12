@@ -36,7 +36,12 @@ def eager_attention_forward(
 ):  # -> tuple[Tensor, Tensor]:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def rotate_half(x):  # -> Tensor:
@@ -78,7 +83,10 @@ class Olmo3DecoderLayer(GradientCheckpointingLayer):
 class Olmo3RotaryEmbedding(nn.Module):
     inv_freq: torch.Tensor
     def __init__(
-        self, config: Olmo3Config, device=..., rope_type: str | None = ...
+        self,
+        config: Olmo3Config,
+        device=...,
+        rope_type: str | None = ...,
     ) -> None: ...
     @torch.no_grad()
     @dynamic_rope_update
