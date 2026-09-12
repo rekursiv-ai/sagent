@@ -26,6 +26,25 @@ All notable sagent changes are documented here. This project follows
   `CostTracker.cache_misses` (bounded to 500 entries); roll them up with
   `summarize_cache_waste`.
 
+### Fixed
+
+- `detect_cache_miss` no longer reports a miss on a model with no prompt
+  cache (`cache_ttl_sec == 0`) or after the prompt shrank (compaction,
+  `clear`); both flagged every such turn's full request as wasted.
+- A hot (`frozen_system`) persistent child now resumes frozen: its
+  lifecycle record carries `frozen_system`, so a resumed child no longer
+  re-appends its own tools' prompt contributions onto the already-rendered
+  parent snapshot.
+
+### Removed
+
+- `AgentSpawn(session_root_dir=...)`, `AgentSpawn.on_persistent_spawn`,
+  `AgentSpawn.on_persistent_stop`, and `Agent.rebuild`. All served only
+  the retired slack v1 router; child session dirs now always derive from
+  the parent's `session_dir`. Removing the `session_root_dir` rebuild
+  branch also fixes a resumed persistent child receiving the IPC rule
+  twice.
+
 ## 0.1.17 - 2026-08-19
 
 ### Added

@@ -48,6 +48,41 @@ def test_detect_cache_miss_none_on_model_change() -> None:
     )
 
 
+def test_detect_cache_miss_none_when_model_has_no_cache() -> None:
+    """``cache_ttl_sec=0.0`` means the provider offers no prompt cache.
+
+    Nothing was ever cacheable, so a zero ``cache_read`` is not a miss;
+    without this guard every turn on such a model would report its whole
+    request as wasted.
+    """
+    assert (
+        detect_cache_miss(
+            TokenCount(request=20_000),
+            TokenCount(request=20_000),
+            idle_sec=2.0,
+            cache_ttl_sec=0.0,
+            model_changed=False,
+            spend=_spend,
+        )
+        is None
+    )
+
+
+def test_detect_cache_miss_none_when_prompt_shrank() -> None:
+    """A shorter prompt (compaction, ``clear``) cannot have missed the old prefix."""
+    assert (
+        detect_cache_miss(
+            TokenCount(cache_read=150_000, request=500),
+            TokenCount(request=20_000),
+            idle_sec=2.0,
+            cache_ttl_sec=300.0,
+            model_changed=False,
+            spend=_spend,
+        )
+        is None
+    )
+
+
 def test_detect_cache_miss_none_below_noise_floor() -> None:
     """A delta at or below the breakpoint-granularity noise floor is ignored."""
     assert (

@@ -2097,8 +2097,30 @@ def test_append_session_writes_persistent_agent_lifecycle(tmp_path: Path) -> Non
         "service_tier": "auto",
         "max_budget_usd": None,
         "persistent_retry": False,
+        "frozen_system": False,
         "timestamp": record["timestamp"],
     }
+
+
+def test_persistent_agent_record_round_trips_frozen_system(tmp_path: Path) -> None:
+    """A hot child's frozen flag must survive the parent's session.jsonl."""
+    session_file = tmp_path / "session.jsonl"
+    hot = PersistentAgentRecord(
+        label="hot-child",
+        run_id="run-1",
+        session_dir=str(tmp_path / "children" / "run-1"),
+        state="running",
+        provider="OpenAISubscription",
+        auth="credentials",
+        account=None,
+        model_id="gpt-5.5",
+        tools=("Read",),
+        system="rendered parent prompt",
+        notify_on_asleep=True,
+        frozen_system=True,
+    )
+    append_session(session_file, persistent_agents=[hot])
+    assert load_persistent_agents(tmp_path) == [hot]
 
 
 def test_load_persistent_agents_returns_latest_running_records(tmp_path: Path) -> None:
