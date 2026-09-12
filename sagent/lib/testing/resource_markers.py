@@ -41,7 +41,16 @@ def resource_marker_family(
         "network",
     ),
 ) -> str:
-    """Return the selector family encoded by a resource marker prefix."""
+    """Return the selector family encoded by a resource marker prefix.
+
+    Args:
+      marker: Marker.
+      resource_families: Resource families.
+
+    Returns:
+      family: The str.
+
+    """
     family, separator, _specific = marker.partition("_")
     assert separator
     assert family in resource_families
@@ -53,7 +62,13 @@ def pytest_collection_modifyitems(
     config: pytest.Config,
     items: list[pytest.Item],
 ) -> None:
-    """Derive timeouts and skips from concrete resource markers."""
+    """Derive timeouts and skips from concrete resource markers.
+
+    Args:
+      config: Config.
+      items: Items.
+
+    """
     apply_resource_markers(
         items,
         resource_markers=registered_resource_markers(config),
@@ -204,7 +219,17 @@ def resource_marker_timeout(
         ("network_together", 4800),
     ),
 ) -> int:
-    """Return a marker's specific timeout, falling back to its category."""
+    """Return a marker's specific timeout, falling back to its category.
+
+    Args:
+      marker: Marker.
+      category_timeouts: Category timeouts.
+      specific_timeouts: Specific timeouts.
+
+    Returns:
+      result: The int.
+
+    """
     specific = dict(specific_timeouts)
     if marker in specific:
         return specific[marker]

@@ -142,14 +142,24 @@ class Deque[T]:
         return item
 
     async def get_all(self) -> list[T]:
-        """Wait for at least one item, then drain everything available."""
+        """Wait for at least one item, then drain everything available.
+
+        Returns:
+          result: The list[T].
+
+        """
         while not self._dq:
             self._not_empty.clear()
             await self._not_empty.wait()
         return self.drain()
 
     def drain(self) -> list[T]:
-        """Pop all items in FIFO order. Non-blocking."""
+        """Pop all items in FIFO order. Non-blocking.
+
+        Returns:
+          out: The list[T].
+
+        """
         out = list(self._dq)
         self._dq.clear()
         self._empty.set()
