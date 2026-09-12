@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import override
+from typing import cast, override
 from unittest.mock import MagicMock, patch
 
 import asyncio
@@ -41,6 +41,7 @@ from sagent.tools.agent_spawn import (
 from sagent.tools.background_task import BackgroundTask
 from sagent.types.capability import ThinkingEffort
 from sagent.types.model import (
+    Model,
     ModelRecipe,
     ModelRequest,
     ModelResponse,
@@ -62,6 +63,7 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
+from sagent.types.tools import Tool
 
 
 _AGENT_SPAWN_LOGGER = _agent_spawn_mod.__name__
@@ -586,6 +588,140 @@ def test_resolve_tools_bundle_when_parent_lacks_background_task() -> None:
     out = spawn._resolve_tools(["AgentSpawn"], parent)
     assert isinstance(out, list)
     assert {t.name for t in out} == {"AgentSpawn", "BackgroundTask"}
+
+
+def test_build_child_hot_freezes_system_to_parent_snapshot() -> None:
+    """``hot=True`` yields a child whose rendered prompt is byte-identical to
+    the parent's -- the fix for #361.
+
+    Deliberately does NOT skip ``BackgroundTask`` auto-bundling here: a hot
+    child still gets it (same as cold), because ``frozen_system`` short-
+    circuits ``_build_system`` before it ever looks at the child's own tool
+    list (see ``Agent._build_system``). Bundling costs nothing on the cache
+    side and keeps the cancel-capability guarantee intact for a hot child
+    that itself has ``AgentSpawn``.
+    """
+    spawn = AgentSpawn()
+    parent = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
+        system="You are the root agent.",
+        tools=[spawn],
+    )
+    child_tools = spawn._resolve_tools(None, parent)
+    assert isinstance(child_tools, list)
+    assert {t.name for t in child_tools} == {"AgentSpawn", "BackgroundTask"}
+    child = spawn._build_child(
+        system=None,
+        child_model=StubProviderModel(),
+        child_spec=None,
+        child_tools=child_tools,
+        max_rounds=None,
+        model_options={},
+        parent_agent=parent,
+        hot=True,
+    )
+    assert child.system == parent.system
+
+
+def test_build_child_cold_diverges_from_parent_via_bundled_tool() -> None:
+    """Regression pin for the DEFAULT (``hot=False``) path: a cold child still
+    gets the auto-bundled ``BackgroundTask``, so it diverges from the
+    parent's prompt right after the shared base -- the #361 failure mode,
+    kept intentionally on cold spawns for backward compatibility.
+    """
+    spawn = AgentSpawn()
+    parent = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
+        system="You are the root agent.",
+        tools=[spawn],
+    )
+    child_tools = spawn._resolve_tools(None, parent)
+    assert isinstance(child_tools, list)
+    child = spawn._build_child(
+        system=None,
+        child_model=StubProviderModel(),
+        child_spec=None,
+        child_tools=child_tools,
+        max_rounds=None,
+        model_options={},
+        parent_agent=parent,
+        hot=False,
+    )
+    assert child.system != parent.system
+    assert child.system.startswith(parent.system)
+
+
+def test_build_child_hot_materializes_callable_factory_system_once() -> None:
+    """Hot mode commits a callable factory ``system`` to ONE evaluation.
+
+    Re-invoking it per request (the normal, live behavior) would reopen
+    the exact drift hot mode exists to close -- e.g. a factory reading
+    mutable cwd/env state would render differently each time.
+    """
+    calls = 0
+
+    def factory() -> str:
+        nonlocal calls
+        calls += 1
+        return f"call-{calls}"
+
+    spawn = AgentSpawn(system=factory)
+    parent = _make_parent()
+    child = spawn._build_child(
+        system=None,
+        child_model=StubProviderModel(),
+        child_spec=None,
+        child_tools=[],
+        max_rounds=None,
+        model_options={},
+        parent_agent=parent,
+        hot=True,
+    )
+    assert calls == 1
+    assert child.system == "call-1"
+    assert child.system_prompt() == "call-1"
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_run_threads_hot_flag_into_build_child() -> None:
+    """The ``hot`` directive field parses and reaches ``_build_child``."""
+    parent = _make_parent()
+    original = AgentSpawn._build_child
+    captured: dict[str, object] = {}
+
+    def spy(
+        self: AgentSpawn,
+        *,
+        system: str | None,
+        child_model: Model,
+        child_spec: ModelRecipe | None,
+        child_tools: list[Tool],
+        max_rounds: int | None,
+        model_options: Mapping[str, object],
+        parent_agent: Agent | None,
+        hot: bool = False,
+    ) -> Agent:
+        captured["hot"] = hot
+        return original(
+            self,
+            system=system,
+            child_model=child_model,
+            child_spec=child_spec,
+            child_tools=child_tools,
+            max_rounds=max_rounds,
+            model_options=model_options,
+            parent_agent=parent_agent,
+            hot=hot,
+        )
+
+    with (
+        _parent_context(parent),
+        patch.object(AgentSpawn, "_build_child", spy),
+    ):
+        result = await AgentSpawn().run({"prompt": "p", "hot": True})
+    assert captured.get("hot") is True
+    assert not result.is_error
 
 
 def test_resolve_system_llm_wins() -> None:
@@ -1550,6 +1686,79 @@ async def test_persistent_spawn_model_error_reaches_parent_inbox() -> None:
         )
 
         child.shutdown(force=True)
+        try:
+            await asyncio.wait_for(task, timeout=2.0)
+        except (TimeoutError, Exception):  # noqa: BLE001
+            _ = task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_spawn_serviced_hot_child_keeps_frozen_system_after_ipc_augment() -> None:
+    """Persistent spawn (no ``session_root_dir``) mutates ``_system_spec``
+    directly to add the serviced-agent IPC rule. A hot child's frozen
+    prompt must end up as parent-prefix + IPC rule, not silently un-frozen
+    or dropped -- this path is separate from ``_build_child`` and wasn't
+    exercised by the hot/cold tests there.
+    """
+    parent = _make_parent()
+    child = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="done")]),
+        name="child",
+        system="You are the root agent.",
+        tools=[],
+        frozen_system=True,
+    )
+    t = AgentSpawn()
+    with _parent_context(parent, label="Root"):
+        result = t._spawn_serviced(
+            child, "hot-persist-1", "do work", notify_on_asleep=False
+        )
+    assert not result.is_error
+    assert child._frozen_system is True
+    assert child.system_prompt() == (
+        "You are the root agent.\n\n"
+        "You are a persistent agent whose output is only known to your"
+        " creator via AgentSend(to='Root', ...). Any other output is"
+        " invisible to the parent and unless you AgentSend them, they will"
+        " be stuck indefinitely."
+    )
+    task = _persistent_tasks.get("hot-persist-1")
+    child.shutdown(force=True)
+    if task is not None:
+        try:
+            await asyncio.wait_for(task, timeout=2.0)
+        except (TimeoutError, Exception):  # noqa: BLE001
+            _ = task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_spawn_serviced_with_session_root_dir_rebuild_keeps_frozen_system(
+    tmp_path: Path,
+) -> None:
+    """The rebuild branch (``session_root_dir`` set) must carry
+    ``frozen_system`` through ``Agent.rebuild`` via its default carry-over
+    (``rebuild`` doesn't receive ``frozen_system`` explicitly here).
+    """
+    parent = _make_parent()
+    child = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="done")]),
+        name="child",
+        system="You are the root agent.",
+        tools=[],
+        frozen_system=True,
+    )
+    t = AgentSpawn(session_root_dir=tmp_path)
+    with _parent_context(parent, label="Root"):
+        result = t._spawn_serviced(
+            child, "hot-persist-2", "do work", notify_on_asleep=False
+        )
+    assert not result.is_error
+    rebuilt = cast(Agent, agent_registry["hot-persist-2"])
+    assert rebuilt._frozen_system is True
+    assert rebuilt.system_prompt().startswith("You are the root agent.")
+    task = _persistent_tasks.get("hot-persist-2")
+    rebuilt.shutdown(force=True)
+    if task is not None:
         try:
             await asyncio.wait_for(task, timeout=2.0)
         except (TimeoutError, Exception):  # noqa: BLE001

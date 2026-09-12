@@ -263,6 +263,14 @@ def _build_directive_schema(allow_providers: tuple[str, ...]) -> JSON:
                         " routing). Auto-generated if omitted."
                     ),
                 },
+                "hot": {
+                    "type": "boolean",
+                    "description": (
+                        "Set true. Cuts cost and latency by reusing your"
+                        " cached prompt. Omit or set false only if this"
+                        " child must know its own live depth/tool state."
+                    ),
+                },
             },
             "required": ["prompt"],
         }
@@ -456,6 +464,7 @@ class AgentSpawn:
             )
         persistent = BoolCodec.coerce(args.get("persistent"), False)
         notify_on_asleep = BoolCodec.coerce(args.get("notify_on_asleep"), True)
+        hot = BoolCodec.coerce(args.get("hot"), False)
         custom_label = opt_str(args, "label")
         parent_agent = _current_agent()
         if parent_agent is None:
@@ -514,6 +523,7 @@ class AgentSpawn:
             max_rounds=max_rounds,
             model_options=options,
             parent_agent=parent_agent,
+            hot=hot,
         )
 
         parent_path = agent_path_var.get("")
@@ -544,6 +554,7 @@ class AgentSpawn:
         max_rounds: int | None,
         model_options: Mapping[str, object],
         parent_agent: _Agent | None,
+        hot: bool = False,
     ) -> _Agent:
         """Build a child Agent with inherited knobs and explicit options.
 
@@ -551,8 +562,31 @@ class AgentSpawn:
         there rather than passed to the constructor: the child adopts the
         parent's whole selection, then ``model_options`` (already validated
         against ``child_model``) overrides individual axes.
+
+        Args:
+          system: LLM-supplied system-prompt override, or ``None`` to
+              fall through to the factory/parent.
+          child_model: Resolved model backend for the child.
+          child_spec: Resolved model recipe, or ``None`` when the child
+              reuses the parent's raw ``Model`` (no rebuildable spec).
+          child_tools: Resolved tool list for the child.
+          max_rounds: Cap on the child's tool-call rounds, or ``None``.
+          model_options: Provider/model serving knobs already validated
+              against ``child_model``.
+          parent_agent: Spawning agent, for knob fallthrough.
+          hot: Freeze the child's system prompt to a byte-identical
+              snapshot instead of letting it re-derive one from its own
+              tools each request. See ``Agent.__init__``'s ``frozen_system``
+              and #361 for why: a "cold" child's OWN ``AgentSpawn``/
+              ``BackgroundTask`` prompt contributions (spawn-depth text,
+              bundled-tool descriptions) diverge from the parent's from the
+              very first request, which guarantees a provider prefix-cache
+              miss even when the child's task doesn't need that dynamism.
+
         """
         child_system = self._resolve_system(system, parent_agent)
+        if hot and not isinstance(child_system, str):
+            child_system = child_system()
         child_max_rounds = (
             max_rounds if max_rounds is not None else self._max_tool_call_rounds
         )
@@ -588,6 +622,7 @@ class AgentSpawn:
                 tools=child_tools,
                 compactor=self._inherit_compactor(parent_agent),
                 max_tool_call_rounds=child_max_rounds,
+                frozen_system=hot,
                 session_dir=self._child_session_dir(parent_agent),
             )
         return agent_class(
@@ -597,6 +632,7 @@ class AgentSpawn:
             tools=child_tools,
             compactor=self._inherit_compactor(parent_agent),
             max_tool_call_rounds=child_max_rounds,
+            frozen_system=hot,
             session_dir=self._child_session_dir(parent_agent),
             max_attempts=inherited_attempts,
         )
@@ -1081,7 +1117,12 @@ class AgentSpawn:
         ``AgentSpawn`` is granted. Any agent that can create
         persistent / background work must be able to list, cancel,
         and foreground that work -- decoupling the two is how
-        runaway children become uncancellable.
+        runaway children become uncancellable. This applies to hot
+        spawns too: a hot child's rendered prompt never reflects its
+        own tool list anyway (``frozen_system`` skips that loop
+        entirely, see #361), so bundling ``BackgroundTask`` here costs
+        nothing on the cache side while keeping the cancel-capability
+        guarantee intact.
         """
         available: list[Tool]
         if self._tools is not None:

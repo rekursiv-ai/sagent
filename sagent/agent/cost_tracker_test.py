@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from sagent.agent.cache_waste import CacheMiss
 from sagent.agent.cost_tracker import CostTracker
 from sagent.types.cost import TokenCost, TokenCount
 from sagent.types.model import ModelResponse
@@ -63,6 +64,35 @@ def test_cost_tracker_record_tokens_updates_last_request() -> None:
     r = _make_response(total_cost=0.5)
     t.record_tokens(r, model_id="m")
     assert t.last_request is r.tokens
+
+
+def test_cost_tracker_record_tokens_updates_last_model_id() -> None:
+    t = CostTracker()
+    t.record_tokens(_make_response(), model_id="claude-opus-4-8")
+    assert t.last_model_id == "claude-opus-4-8"
+
+
+def test_cost_tracker_record_cache_miss_appends() -> None:
+    t = CostTracker()
+    miss = CacheMiss(
+        missed_tokens=1_000, wasted_cost_usd=9.0, idle_sec=1.0, cause="prefix_mutated"
+    )
+    t.record_cache_miss(miss)
+    assert t.cache_misses == [miss]
+
+
+def test_cost_tracker_record_cache_miss_trims_to_retention_bound() -> None:
+    """The list must not grow without bound across a long session."""
+    t = CostTracker()
+    for i in range(510):
+        t.record_cache_miss(
+            CacheMiss(
+                missed_tokens=i, wasted_cost_usd=0.0, idle_sec=0.0, cause="ttl_expired"
+            )
+        )
+    assert len(t.cache_misses) == 500
+    # Oldest entries are dropped first; the most recent survive.
+    assert t.cache_misses[-1].missed_tokens == 509
 
 
 def test_cost_tracker_record_tokens_updates_last_response_time() -> None:

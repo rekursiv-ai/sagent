@@ -5,6 +5,27 @@ All notable sagent changes are documented here. This project follows
 
 ## Unreleased
 
+### Added
+
+- `AgentSpawn` accepts `hot: bool` (default `false`). A hot spawn freezes
+  the child's system prompt to a byte-identical snapshot of the parent's
+  current one instead of letting the child rebuild a dynamic prompt from
+  its own tools (which auto-gains `BackgroundTask` and shows its own
+  spawn-depth text), so the child's first request can land on the
+  provider's already-warmed prompt cache instead of a guaranteed miss
+  (#361).
+- `Agent` accepts `frozen_system: bool` (default `false`); when set,
+  `system_prompt()` returns the configured system spec verbatim, skipping
+  per-tool prompt contributions and the detached-activity note. Backs
+  `AgentSpawn`'s hot mode.
+- `sagent.agent.cache_waste`: per-turn prompt-cache miss detection.
+  `Agent.record_response` now flags an avoidable miss whenever a turn's
+  `cache_read` tokens fall short of what the prior turn's prefix should
+  have made servable from cache, distinguishing an expected TTL expiry
+  from a mutated prefix. Detected misses accumulate on
+  `CostTracker.cache_misses` (bounded to 500 entries); roll them up with
+  `summarize_cache_waste`.
+
 ## 0.1.17 - 2026-08-19
 
 ### Added

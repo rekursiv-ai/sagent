@@ -1422,6 +1422,40 @@ def test_record_response_anchors_on_disjoint_token_pools() -> None:
     assert a._last_input_tokens == 500_000
 
 
+def test_record_response_detects_cache_miss_within_ttl_window() -> None:
+    """``record_response`` wires cache-miss detection: a within-TTL miss on
+    the same model records as ``prefix_mutated`` -- the #361 scenario, where
+    a subagent spawn (or other drift) mutates the request bytes rather than
+    the provider's cache simply expiring.
+    """
+    a = _build_agent(model=StubModel(supports_cache_control=True))
+    a.record_response(
+        ModelResponse(
+            message=AssistantMessage(text="x"), tokens=TokenCount(cache_read=10_000)
+        )
+    )
+    a.record_response(
+        ModelResponse(
+            message=AssistantMessage(text="y"), tokens=TokenCount(request=10_000)
+        )
+    )
+    assert len(a.cost_tracker.cache_misses) == 1
+    miss = a.cost_tracker.cache_misses[0]
+    assert miss.cause == "prefix_mutated"
+    assert miss.missed_tokens == 10_000
+
+
+def test_record_response_skips_cache_miss_on_first_response() -> None:
+    """No prior turn means nothing could have been cached yet."""
+    a = _build_agent(model=StubModel(supports_cache_control=True))
+    a.record_response(
+        ModelResponse(
+            message=AssistantMessage(text="x"), tokens=TokenCount(request=5_000)
+        )
+    )
+    assert a.cost_tracker.cache_misses == []
+
+
 def test_record_response_surfaces_usage_warning_once() -> None:
     model = StubModel()
     a = Agent(model=model, tools=[])
@@ -2987,6 +3021,30 @@ def test_build_system_appends_tool_contributions() -> None:
     out = a.system_prompt()
     assert "root" in out
     assert "(extra-tool-prompt)" in out
+
+
+def test_build_system_frozen_returns_spec_verbatim() -> None:
+    """``frozen_system=True`` skips tool ``prompt()`` contributions entirely.
+
+    This is what lets a hot ``AgentSpawn`` child (#361) keep a byte-identical
+    copy of its parent's rendered prompt: re-appending the child's OWN tools'
+    contributions on top of an already-rendered snapshot would reintroduce
+    the exact divergence hot spawning exists to avoid.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class _PromptingTool(StubTool):
+        @override
+        def prompt(self) -> str:
+            return "(extra-tool-prompt)"
+
+    a = Agent(
+        model=StubModel(),
+        system="root",
+        tools=[_PromptingTool()],
+        frozen_system=True,
+    )
+    assert a.system_prompt() == "root"
 
 
 @pytest.mark.asyncio

@@ -160,6 +160,8 @@ Paper tools use Semantic Scholar, OpenAlex, arXiv, and open-access PDF metadata.
 
 `AgentSpawn` creates child agents. Children can inherit the parent model/tools or override provider, auth, model ID, account, tools, max tool-call rounds, and max depth. With `persistent=true`, a child stays alive and can receive messages through `AgentSend`.
 
+By default (`hot=false`, "cold"), a child rebuilds its own system prompt from its own tools each request -- it auto-gains `BackgroundTask` alongside `AgentSpawn` and shows its own spawn-depth text, both of which differ from the parent's prompt from the first request and defeat provider prompt caching. Pass `hot=true` to instead freeze the child's system prompt to a byte-identical snapshot of the parent's current one, letting the child's first request land on the same cached prefix the parent already warmed. Trade-off: a hot child's prompt won't reflect its own live depth budget or a freshly bundled tool. Prefer hot for cheap, frequent, or parallel children (lookups, reviews) that don't need that dynamism.
+
 Persistent subagents have a durable lifecycle. The parent session
 records each child's `kind=persistent_subagent` entry with a stable
 `run_id` and `session_dir`. Terminal states (`completed`, `failed`,

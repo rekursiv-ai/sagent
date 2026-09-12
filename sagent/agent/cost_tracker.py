@@ -29,8 +29,15 @@ from __future__ import annotations
 import dataclasses
 import time
 
+from sagent.agent.cache_waste import CacheMiss
 from sagent.types.cost import TokenCost, TokenCount
 from sagent.types.model import ModelResponse
+
+
+_CACHE_MISS_RETENTION: int = 500
+"""Cap on ``CostTracker.cache_misses``; a long session must not grow this
+list without bound. 500 entries far outlasts any plausible turn count
+between a user checking the diagnostic."""
 
 
 @dataclasses.dataclass(kw_only=True, slots=True)
@@ -48,6 +55,22 @@ class CostTracker:
 
     calls_by_model: dict[str, int] = dataclasses.field(default_factory=dict)
     """Map from model id to number of recorded calls."""
+
+    last_model_id: str = ""
+    """Tagged model id of the most recently recorded response.
+
+    Read by :meth:`Agent.record_response` BEFORE the next
+    :meth:`record_tokens` call overwrites it, so a model/provider swap
+    between two responses can be detected for cache-miss attribution
+    (``sagent.agent.cache_waste``) -- token counts aren't comparable
+    across a tokenizer change, so that path must know a swap happened.
+    """
+
+    cache_misses: list[CacheMiss] = dataclasses.field(default_factory=list)
+    """Detected avoidable prompt-cache misses, most recent last.
+
+    Bounded to :data:`_CACHE_MISS_RETENTION` entries. See
+    ``sagent.agent.cache_waste.summarize_cache_waste`` for the rollup."""
 
     last_response_time: float = dataclasses.field(default_factory=time.time)
     """Wall-clock seconds of the last recorded response.
@@ -74,6 +97,18 @@ class CostTracker:
         self.last_response_time = time.time()
         self.total = self.total + response.tokens
         self.calls_by_model[model_id] = self.calls_by_model.get(model_id, 0) + 1
+        self.last_model_id = model_id
+
+    def record_cache_miss(self, miss: CacheMiss) -> None:
+        """Append a detected cache miss, trimming to the retention bound.
+
+        Args:
+          miss: Miss detected by ``cache_waste.detect_cache_miss``.
+
+        """
+        self.cache_misses.append(miss)
+        if len(self.cache_misses) > _CACHE_MISS_RETENTION:
+            del self.cache_misses[:-_CACHE_MISS_RETENTION]
 
     def record_cost(self, response: ModelResponse) -> None:
         """Add one response's cost to the cumulative USD total.

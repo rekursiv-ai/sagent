@@ -52,6 +52,7 @@ from sagent.agent.background import (
     BackgroundTaskEntry,
     split_bg_args,
 )
+from sagent.agent.cache_waste import detect_cache_miss
 from sagent.agent.compaction import (
     CompactionState,
     post_compact_enrich,
@@ -227,6 +228,14 @@ class Agent:
           forces ``types.runtime.ModelResponseError``.
       max_budget_usd: Hard USD cap; ``record_response`` raises when hit.
       persistent_retry: Enable persistent-mode backoff for 429/529.
+      frozen_system: Skip per-tool prompt contributions and the detached-
+          activity note in :meth:`_build_system`, returning ``system``
+          verbatim instead. Trades the liveness ``_build_system`` normally
+          gives (fresh depth/budget reminders, newly-bundled tools, the
+          detached note) for a byte-stable prompt a provider's prefix cache
+          can reuse across otherwise-divergent agents. Set by ``AgentSpawn``
+          hot spawns (see ``tools.agent_spawn``); not meant to be toggled by
+          general callers mid-session.
 
     Side effects:
       Constructing with a non-``None`` ``model_recipe`` (and
@@ -255,6 +264,7 @@ class Agent:
         max_tool_call_rounds: int | None = None,
         max_budget_usd: float | None = None,
         persistent_retry: bool = False,
+        frozen_system: bool = False,
     ) -> None:
         if max_attempts < 1:
             # ``send_with_retry``'s loop ``break``s on ``attempt >=
@@ -272,6 +282,7 @@ class Agent:
             last_models.record(model_recipe.provider, model_recipe.model_id)
         self._base_system_spec: SystemPromptArg = system
         self._system_spec: SystemPromptArg = system
+        self._frozen_system = frozen_system
         self._tools_list: list[Tool] = list(tools or [])
         self.compactor = compactor
         if budget is None:
@@ -662,8 +673,21 @@ class Agent:
         system: SystemPromptArg,
         session_dir: str | Path | None,
         lifecycle: Literal["oneshot", "serviced"],
+        frozen_system: bool | None = None,
     ) -> Agent:
-        """Recreate this agent with construction-time identity fields changed."""
+        """Recreate this agent with construction-time identity fields changed.
+
+        Args:
+          name: New agent name.
+          system: New system-prompt spec.
+          session_dir: New session directory, or ``None`` to disable
+              persistence.
+          lifecycle: New lifecycle policy for the rebuilt agent.
+          frozen_system: Overrides this agent's own ``_frozen_system`` on
+              the rebuilt copy; ``None`` (the default) carries it over
+              unchanged, so a hot spawn stays frozen through a rebuild.
+
+        """
         rebuilt = Agent(
             model=self.model,
             model_recipe=self.model_recipe,
@@ -678,6 +702,9 @@ class Agent:
             max_tool_call_rounds=self.max_tool_call_rounds,
             max_budget_usd=self.max_budget_usd,
             persistent_retry=self.persistent_retry,
+            frozen_system=(
+                self._frozen_system if frozen_system is None else frozen_system
+            ),
         )
         # The knobs ride ``model.settings``, and the rebuild shares the same
         # model object, so they need no copying here.
@@ -1528,9 +1555,21 @@ class Agent:
         (cwd, registered subagents, persistent IPC peers) that must stay
         live across ``cd`` and registry mutations. Caching here would
         freeze that state on the next provider call.
+
+        Exception: ``self._frozen_system`` (set by a hot ``AgentSpawn``)
+        opts OUT of that liveness on purpose -- ``_system_spec`` already
+        holds a complete, pre-rendered snapshot (typically the parent's own
+        ``system`` at spawn time), and re-appending this agent's own tools'
+        ``prompt()`` contributions on top would immediately reintroduce the
+        prefix drift hot spawning exists to avoid (see #361: a bundled
+        ``BackgroundTask`` or a different spawn-depth line the parent never
+        had). Returned verbatim, with no tool contributions or detached-note
+        injection.
         """
         spec = self._system_spec
         base = spec if isinstance(spec, str) else spec()
+        if self._frozen_system:
+            return base
         parts: list[str] = [base] if base else []
         for tool in self._tools_map.values():
             contribution = tool.prompt()
@@ -1583,9 +1622,19 @@ class Agent:
           BudgetExhaustedError: This agent's own cost reached ``max_budget_usd``.
 
         """
-        self.cost_tracker.record_tokens(response, model_id=self.model.tagged_model_id)
+        previous_tokens = self.cost_tracker.last_request
+        previous_model_id = self.cost_tracker.last_model_id
+        previous_response_time = self.cost_tracker.last_response_time
+        model_id = self.model.tagged_model_id
+        self.cost_tracker.record_tokens(response, model_id=model_id)
         cost_sink = cost_root_var.get(None) or self.cost_tracker
         cost_sink.record_cost(response)
+        self._record_cache_waste(
+            previous=previous_tokens,
+            current=response.tokens,
+            idle_sec=time.time() - previous_response_time,
+            model_changed=bool(previous_model_id) and previous_model_id != model_id,
+        )
         self._own_spend = self._own_spend + response.spend
         # Anchor the proactive compaction trigger on the provider's exact
         # input usage. The three token pools are disjoint by the
@@ -1605,6 +1654,42 @@ class Agent:
                 max_budget_usd=self._max_budget_usd,
             )
         self._surface_usage_warning()
+
+    def _record_cache_waste(
+        self,
+        *,
+        previous: TokenCount,
+        current: TokenCount,
+        idle_sec: float,
+        model_changed: bool,
+    ) -> None:
+        """Detect and record an avoidable prompt-cache miss for this turn.
+
+        Best-effort: a diagnostic must never break the turn it observes, so
+        any failure here is swallowed rather than propagated.
+
+        Args:
+          previous: Token counts from this agent's prior recorded response.
+          current: Token counts from the response just recorded.
+          idle_sec: Wall-clock seconds since the prior response.
+          model_changed: Whether ``current`` was served by a different
+              model/provider than ``previous``.
+
+        """
+        try:
+            miss = detect_cache_miss(
+                previous,
+                current,
+                idle_sec=idle_sec,
+                cache_ttl_sec=self.model.settings.cache_ttl_sec,
+                model_changed=model_changed,
+                spend=self.model.spend,
+            )
+        except Exception:
+            logger.debug("cache-waste detection failed", exc_info=True)
+            return
+        if miss is not None:
+            self.cost_tracker.record_cache_miss(miss)
 
     def _surface_usage_warning(self) -> None:
         """Publish an advisory ``NoticeMessage`` when a usage window is high.
