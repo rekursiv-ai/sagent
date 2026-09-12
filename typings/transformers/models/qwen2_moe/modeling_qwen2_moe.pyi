@@ -46,7 +46,12 @@ class Qwen2MoeRotaryEmbedding(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 
@@ -125,7 +130,8 @@ class Qwen2MoeDecoderLayer(GradientCheckpointingLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring
@@ -182,13 +188,16 @@ class Qwen2MoeForCausalLM(Qwen2MoePreTrainedModel, GenerationMixin):
     ) -> MoeCausalLMOutputWithPast: ...
 
 class Qwen2MoeForSequenceClassification(
-    GenericForSequenceClassification, Qwen2MoePreTrainedModel
+    GenericForSequenceClassification,
+    Qwen2MoePreTrainedModel,
 ): ...
 class Qwen2MoeForTokenClassification(
-    GenericForTokenClassification, Qwen2MoePreTrainedModel
+    GenericForTokenClassification,
+    Qwen2MoePreTrainedModel,
 ): ...
 class Qwen2MoeForQuestionAnswering(
-    GenericForQuestionAnswering, Qwen2MoePreTrainedModel
+    GenericForQuestionAnswering,
+    Qwen2MoePreTrainedModel,
 ): ...
 
 __all__ = [

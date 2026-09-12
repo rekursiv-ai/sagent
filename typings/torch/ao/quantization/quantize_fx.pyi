@@ -12,7 +12,8 @@ from .qconfig_mapping import QConfigMapping
 from .utils import DEPRECATION_WARNING
 
 def attach_preserved_attrs_to_model(
-    model: GraphModule | torch.nn.Module, preserved_attrs: dict[str, Any]
+    model: GraphModule | torch.nn.Module,
+    preserved_attrs: dict[str, Any],
 ) -> None: ...
 def fuse_fx(
     model: torch.nn.Module,

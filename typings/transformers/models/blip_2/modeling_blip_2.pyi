@@ -69,10 +69,15 @@ class Blip2VisionModelOutput(ModelOutput):
 class Blip2VisionEmbeddings(nn.Module):
     def __init__(self, config: Blip2VisionConfig) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
-        self, pixel_values: torch.FloatTensor, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values: torch.FloatTensor,
+        interpolate_pos_encoding: bool = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -97,7 +102,9 @@ class Blip2Attention(nn.Module):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class Blip2MLP(nn.Module):
@@ -177,7 +184,9 @@ class Blip2QFormerMultiHeadAttention(nn.Module):
 class Blip2QFormerSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -204,7 +213,9 @@ class Blip2QFormerIntermediate(nn.Module):
 class Blip2QFormerOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -254,7 +265,7 @@ class Blip2TextEmbeddings(nn.Module):
 @auto_docstring(
     custom_intro="""
     BLIP-2 Querying Transformer (Q-Former).
-    """
+    """,
 )
 class Blip2QFormerModel(Blip2PreTrainedModel):
     _supports_attention_backend = ...
@@ -333,7 +344,9 @@ class Blip2Model(Blip2PreTrainedModel):
         legacy_output: bool = ...,
     ) -> torch.FloatTensor | BaseModelOutputWithPooling: ...
     def get_placeholder_mask(
-        self, input_ids: torch.LongTensor, inputs_embeds: torch.FloatTensor
+        self,
+        input_ids: torch.LongTensor,
+        inputs_embeds: torch.FloatTensor,
     ):  # -> Any:
         ...
     @can_return_tuple
@@ -412,7 +425,9 @@ class Blip2ForConditionalGeneration(Blip2PreTrainedModel, GenerationMixin):
     ):  # -> tuple[Any, Any, Any] | Any:
         ...
     def get_placeholder_mask(
-        self, input_ids: torch.LongTensor, inputs_embeds: torch.FloatTensor
+        self,
+        input_ids: torch.LongTensor,
+        inputs_embeds: torch.FloatTensor,
     ):  # -> Any:
         ...
     @can_return_tuple

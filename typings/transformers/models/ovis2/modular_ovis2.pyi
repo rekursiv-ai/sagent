@@ -52,7 +52,10 @@ class Ovis2VisionTransformer(nn.Module):
     def __init__(self, config: Ovis2VisionConfig) -> None: ...
     @can_return_tuple
     def forward(
-        self, pixel_values, attention_mask: torch.Tensor | None = ..., **kwargs
+        self,
+        pixel_values,
+        attention_mask: torch.Tensor | None = ...,
+        **kwargs,
     ):  # -> BaseModelOutput:
         ...
 
@@ -77,17 +80,22 @@ class Ovis2VisionModel(Ovis2PreTrainedModel):
     config: Ovis2VisionConfig
     def __init__(self, config: Ovis2VisionConfig) -> None: ...
     def forward(
-        self, pixel_values: torch.FloatTensor, **kwargs
+        self,
+        pixel_values: torch.FloatTensor,
+        **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class Ovis2Model(LlavaModel):
     _checkpoint_conversion_mapping = ...
     def __init__(self, config: Ovis2Config) -> None: ...
     def get_image_features(
-        self, pixel_values: torch.FloatTensor
+        self,
+        pixel_values: torch.FloatTensor,
     ) -> torch.FloatTensor: ...
     @can_return_tuple
     @auto_docstring
@@ -116,7 +124,8 @@ class Ovis2ForConditionalGeneration(LlavaForConditionalGeneration, GenerationMix
     @property
     def multi_modal_projector(self): ...
     def get_image_features(
-        self, pixel_values: torch.FloatTensor
+        self,
+        pixel_values: torch.FloatTensor,
     ):  # -> tuple[Tensor, ...] | list[Any]:
         ...
     @can_return_tuple

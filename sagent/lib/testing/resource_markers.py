@@ -22,7 +22,10 @@ class MarkedItem(Protocol):
         ...
 
     def add_marker(
-        self, marker: str | pytest.MarkDecorator, *, append: bool = ...
+        self,
+        marker: str | pytest.MarkDecorator,
+        *,
+        append: bool = ...,
     ) -> None:
         """Add marker."""
         ...
@@ -318,8 +321,8 @@ def _apply_skip_policy(
                     reason=(
                         f"{mark} test skipped"
                         f" (set {live_llm_env_var}=1 to run live model CLIs)"
-                    )
-                )
+                    ),
+                ),
             )
             return
     if os.environ.get("CI") and not os.environ.get("RUN_INTEGRATION"):
@@ -331,8 +334,8 @@ def _apply_skip_policy(
                             f"{mark} test skipped in CI"
                             " (no live credentials/services/devices;"
                             " set RUN_INTEGRATION=1 to opt in)"
-                        )
-                    )
+                        ),
+                    ),
                 )
                 return
 

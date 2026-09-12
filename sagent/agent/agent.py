@@ -46,7 +46,6 @@ import time
 import uuid
 
 from sagent import agents_md, providers
-from sagent.agent import runtime as agent_runtime
 from sagent.agent.background import (
     BackgroundAwareTool,
     BackgroundTaskEntry,
@@ -126,6 +125,8 @@ from sagent.types.tools import (
     ToolResultPolicy,
 )
 
+import sagent.agent.runtime
+
 
 logger = logging.getLogger(__name__)
 
@@ -144,19 +145,12 @@ _USAGE_WARN_FRACTION = 0.75  # config-globals: ignore -- UI advisory warn thresh
 _USAGE_CLEAR_FRACTION = 0.60  # config-globals: ignore -- UI advisory clear threshold
 
 
+# Mirrors the ``max_request_tokens`` / ``max_response_tokens`` setters, which are the
+# only other way to change these. Raises here rather than clamping: a caller who named a
+# window the model cannot serve has a wrong belief, and silently shrinking it hides that
+# until the numbers stop adding up somewhere else.
 def _reject_budget_over_model(budget: AgentSettings, model: Model) -> None:
-    """Reject an explicit budget that exceeds the model's own limits.
-
-    Mirrors the ``max_request_tokens`` / ``max_response_tokens`` setters,
-    which are the only other way to change these. Raises here rather than
-    clamping: a caller who named a window the model cannot serve has a
-    wrong belief, and silently shrinking it hides that until the numbers
-    stop adding up somewhere else.
-
-    Raises:
-      ValueError: When either window exceeds the model's ceiling.
-
-    """
+    """Reject an explicit budget that exceeds the model's own limits."""
     limits = model.limits
     for name, requested, ceiling in (
         ("max_request_tokens", budget.max_request_tokens, limits.max_request_tokens),
@@ -204,11 +198,11 @@ class ActivityTracker:
 # registry without bound while still outliving any plausible detached
 # call: one entry is ~100 bytes, and 10k covers far more rounds than a
 # session sustains between compactions.
-_TOOL_REGISTRY_MAX: Final = 10_000  # config-globals: ignore -- retention bound
+_TOOL_REGISTRY_MAX: Final = 10_000
 
 
 class Agent:
-    """Conversation agent: composes :class:`agent_runtime.AgentRuntime` with wrappers.
+    """Conversation agent: composes :class:`sagent.agent.runtime.AgentRuntime` with wrappers.
 
     Args:
       model: Rich provider model the agent calls.
@@ -366,14 +360,14 @@ class Agent:
         self._tools_version: int = 0
         self._live_tools_cache: tuple[int, list[Tool]] | None = None
         self._persist_budget_cache: tuple[int, int] | None = None
-        agent_tools: list[agent_runtime.Tool] = []
+        agent_tools: list[sagent.agent.runtime.Tool] = []
         for t in self._tools_list:
             self._tools_map[t.name] = t
             agent_tools.append(_AgentTool(t, self))
         self._agent_compactor = (
             _AgentCompactor(compactor, self) if compactor is not None else None
         )
-        self.runtime = agent_runtime.AgentRuntime(
+        self.runtime = sagent.agent.runtime.AgentRuntime(
             model=self._agent_model,
             tools=agent_tools,
             compactor=self._agent_compactor,
@@ -548,7 +542,9 @@ class Agent:
         return self.runtime.context().messages
 
     @property
-    def inbox(self) -> agent_runtime.GatedDeque[runtime.RuntimeEvent]:
+    def inbox(
+        self,
+    ) -> sagent.agent.runtime.GatedDeque[runtime.RuntimeEvent]:
         """The runtime's inbox."""
         return self.runtime.inbox
 
@@ -576,6 +572,10 @@ class Agent:
         else that mutates the registry. Returns a fresh list each call
         so downstream consumers may mutate without invalidating the
         cached wrappers.
+
+        Returns:
+          tools: Fresh provider-visible tool wrappers in registration order.
+
         """
         cached = self._live_tools_cache
         if cached is None or cached[0] != self._tools_version:
@@ -648,6 +648,10 @@ class Agent:
         Cached against ``runtime.context().version`` (monotonic tape
         length); each new tape record invalidates the cache so the next
         call rewalks the resolved history.
+
+        Returns:
+          tokens: Estimated live result tokens occupying the persist budget.
+
         """
         resolved = self.runtime.context()
         cached = self._persist_budget_cache
@@ -758,24 +762,19 @@ class Agent:
         _schedule_close(old)
         self._compact_if_history_exceeds_budget()
 
+    # Called after :meth:`swap_model` rescales the budget: if the resolved view's token
+    # estimate still crosses the compactor's own threshold, the next provider call would
+    # overflow before the user even types. Push a ``Compact()`` so the agent layer's
+    # bridge (which now wraps the producer in scrunch) can fit history before resuming.
+    # No-op when no compactor is configured or history is small.
+    #
+    # Routed through the compactor's ``should_compact`` rather than comparing against an
+    # inline expression: a swap must fire on exactly the condition a turn fires on.
+    # While the two were separate expressions they disagreed by 137k tokens on a 1M
+    # window, so a session could pass every turn and then compact on a swap that changed
+    # no limit at all.
     def _compact_if_history_exceeds_budget(self) -> None:
-        """Push ``Compact()`` when current history exceeds the active budget.
-
-        Called after :meth:`swap_model` rescales the budget: if the
-        resolved view's token estimate still crosses the compactor's own
-        threshold, the next provider call would overflow before the user
-        even types. Push a ``Compact()`` so the agent layer's bridge
-        (which now wraps the producer in scrunch) can fit history before
-        resuming. No-op when no compactor is configured or history is
-        small.
-
-        Routed through the compactor's ``should_compact`` rather than
-        comparing against an inline expression: a swap must fire on
-        exactly the condition a turn fires on. While the two were separate
-        expressions they disagreed by 137k tokens on a 1M window, so a
-        session could pass every turn and then compact on a swap that
-        changed no limit at all.
-        """
+        """Push ``Compact()`` when current history exceeds the active budget."""
         if self._agent_compactor is None:
             return
         request = ModelRequest(
@@ -792,7 +791,9 @@ class Agent:
             )
         except Exception as exc:  # noqa: BLE001 -- token estimator may invoke provider classification
             log_exception_or_warning(
-                logger, "swap_model: token estimate failed; skipping compact", exc
+                logger,
+                "swap_model: token estimate failed; skipping compact",
+                exc,
             )
             return
         target = self._agent_compactor.largest_context(self.budget)
@@ -957,17 +958,15 @@ class Agent:
         """
         return self._build_system()
 
+    # Publishes ``BudgetReset`` when the prior budget couldn't fit the new model -- the
+    # reset is destructive of any ``AgentSettings`` customisation, so renderers surface
+    # a notification.
     def _apply_model_change(
         self,
         model: Model,
         spec: ModelRecipe,
     ) -> None:
-        """Apply a high-level model change, resetting stale derived budgets.
-
-        Publishes ``BudgetReset`` when the prior budget couldn't fit the
-        new model -- the reset is destructive of any ``AgentSettings``
-        customisation, so renderers surface a notification.
-        """
+        """Apply a high-level model change, resetting stale derived budgets."""
         if (
             self._budget.max_request_tokens > model.limits.max_request_tokens
             or self._budget.max_response_tokens > model.limits.max_response_tokens
@@ -981,7 +980,7 @@ class Agent:
                     prior_max_response_tokens=prior.max_response_tokens,
                     new_max_request_tokens=self._budget.max_request_tokens,
                     new_max_response_tokens=self._budget.max_response_tokens,
-                )
+                ),
             )
         self.swap_model(model, spec=spec)
 
@@ -1065,7 +1064,15 @@ class Agent:
         server_supplied: bool,
         error: Exception,
     ) -> None:
-        """Publish a durable event for a recoverable model-service block."""
+        """Publish a durable event for a recoverable model-service block.
+
+        Args:
+          retry_at: Monotonic timestamp when retry may resume.
+          delay_sec: Delay before retrying the suspended service.
+          server_supplied: Whether the delay came from the provider.
+          error: Exception that caused the service suspension.
+
+        """
         spec = self.model_recipe
         self.runtime.service_suspended_until = retry_at
         self.runtime.publish(
@@ -1078,7 +1085,7 @@ class Agent:
                 delay_sec=delay_sec,
                 server_supplied=server_supplied,
                 error=service_error_snapshot(error),
-            )
+            ),
         )
 
     def shutdown(self, *, force: bool = False) -> None:
@@ -1233,19 +1240,18 @@ class Agent:
         if agent_registry.get(label) is self:
             _ = agent_registry.pop(label, None)
 
+    # Both lifecycles register under their stable label (``self.name`` for a spawned
+    # child, or the inherited ``agent_label_var``). A numeric suffix is appended only on
+    # collision so ``AgentSend`` can still address a specific agent when several share a
+    # base name.
     def _dedup_label(self) -> str:
-        """Return the stable spawn label, de-duplicated against collisions.
-
-        Both lifecycles register under their stable label (``self.name``
-        for a spawned child, or the inherited ``agent_label_var``). A
-        numeric suffix is appended only on collision so ``AgentSend`` can
-        still address a specific agent when several share a base name.
-        """
+        """Return the stable spawn label, de-duplicated against collisions."""
         base_label = self.name or agent_label_var.get("") or "Agent"
         return unique_registry_label(base_label)
 
     async def run(
-        self, msg: runtime.UserMessage
+        self,
+        msg: runtime.UserMessage,
     ) -> AsyncGenerator[runtime.RuntimeEvent, None]:
         """Process one inbound message; drive rounds until idle.
 
@@ -1276,7 +1282,7 @@ class Agent:
             raise RuntimeError(
                 f"Agent.run is not reentrant; another caller already drives this agent"
                 f" (session_id={self._session_id}). Use serve_forever + observer for"
-                f" concurrent drivers, or await the existing run() to completion."
+                f" concurrent drivers, or await the existing run() to completion.",
             )
         # DO NOT add an ``await`` between the ``_run_active`` check above and
         # the assignment below: the guard is a synchronous check-and-set that
@@ -1376,7 +1382,7 @@ class Agent:
         if self._run_active:
             raise RuntimeError(
                 "Agent.drive_until_first_idle is not reentrant; another caller"
-                f" already drives this agent (session_id={self._session_id})."
+                f" already drives this agent (session_id={self._session_id}).",
             )
         self._run_active = True
         first_idle: asyncio.Event = asyncio.Event()
@@ -1430,29 +1436,20 @@ class Agent:
 
     # -- Internal helpers ---------------------------------------------
 
+    # Every child inherits the root's cost tracker via ``cost_root_var`` so the root
+    # sees the full spawn-tree spend (and ``max_budget_usd`` caps each agent against its
+    # own ``_own_spend``, not the shared sink). Tool-state depth is incremented from the
+    # parent so ``AgentSpawn`` depth caps actually fire.
+    #
+    # Registry ownership is NOT held here -- :meth:`register` / :meth:`deregister` own
+    # the ``agent_registry`` entry with a lifetime decoupled from any one driver task.
+    # When ``label`` is None (direct callers, tests) this CM registers and deregisters
+    # itself so the registry entry still exists for the block; when ``label`` is passed
+    # (``serve_forever``) the caller owns the registry and this CM only binds the
+    # ContextVars.
     @contextlib.contextmanager
     def _install_contextvars(self, *, label: str | None = None):
-        """Install per-agent ContextVars for the lifetime of the block.
-
-        Every child inherits the root's cost tracker via ``cost_root_var``
-        so the root sees the full spawn-tree spend (and ``max_budget_usd``
-        caps each agent against its own ``_own_spend``, not the shared
-        sink). Tool-state depth is incremented from the parent so
-        ``AgentSpawn`` depth caps actually fire.
-
-        Registry ownership is NOT held here -- :meth:`register` /
-        :meth:`deregister` own the ``agent_registry`` entry with a lifetime
-        decoupled from any one driver task. When ``label`` is None (direct
-        callers, tests) this CM registers and deregisters itself so the
-        registry entry still exists for the block; when ``label`` is passed
-        (``serve_forever``) the caller owns the registry and this CM only
-        binds the ContextVars.
-
-        Args:
-          label: Deduplicated registry label already owned by the caller,
-              or ``None`` to have this CM dedup and own the entry itself.
-
-        """
+        """Install per-agent ContextVars for the lifetime of the block."""
         agent_token = current_agent_var.set(self)
         parent_root = cost_root_var.get(None)
         # Every child inherits the root cost sink so cost rolls up to one
@@ -1507,25 +1504,20 @@ class Agent:
             if resolver in self.runtime.observers:
                 self.runtime.observers.remove(resolver)
 
+    # Intentionally rebuilt per request: ``_system_spec`` and each tool's ``prompt()``
+    # may be callable and capture mutable state (cwd, registered subagents, persistent
+    # IPC peers) that must stay live across ``cd`` and registry mutations. Caching here
+    # would freeze that state on the next provider call.
+    #
+    # Exception: ``self._frozen_system`` (set by a hot ``AgentSpawn``) opts OUT of that
+    # liveness on purpose -- ``_system_spec`` already holds a complete, pre-rendered
+    # snapshot (typically the parent's own ``system`` at spawn time), and re-appending
+    # this agent's own tools' ``prompt()`` contributions on top would immediately
+    # reintroduce the prefix drift hot spawning exists to avoid (see #361: a bundled
+    # ``BackgroundTask`` or a different spawn-depth line the parent never had). Returned
+    # verbatim, with no tool contributions or detached-note injection.
     def _build_system(self) -> str:
-        """Assemble the system prompt from base spec + tool contributions.
-
-        Intentionally rebuilt per request: ``_system_spec`` and each
-        tool's ``prompt()`` may be callable and capture mutable state
-        (cwd, registered subagents, persistent IPC peers) that must stay
-        live across ``cd`` and registry mutations. Caching here would
-        freeze that state on the next provider call.
-
-        Exception: ``self._frozen_system`` (set by a hot ``AgentSpawn``)
-        opts OUT of that liveness on purpose -- ``_system_spec`` already
-        holds a complete, pre-rendered snapshot (typically the parent's own
-        ``system`` at spawn time), and re-appending this agent's own tools'
-        ``prompt()`` contributions on top would immediately reintroduce the
-        prefix drift hot spawning exists to avoid (see #361: a bundled
-        ``BackgroundTask`` or a different spawn-depth line the parent never
-        had). Returned verbatim, with no tool contributions or detached-note
-        injection.
-        """
+        """Assemble the system prompt from base spec + tool contributions."""
         spec = self._system_spec
         base = spec if isinstance(spec, str) else spec()
         if self._frozen_system:
@@ -1546,14 +1538,12 @@ class Agent:
             parts.append(runtime.DETACHED_ARRIVED_SYSTEM_NOTE)
         return "\n\n".join(parts)
 
+    # Proactive: a live ``runtime.detached`` task means a ``[detached]`` stub is already
+    # in context and a forward delivery is pending, so the note must appear now. The
+    # history check covers the window after the task completed but its synthesized pair
+    # still resolves into context.
     def _has_detached_activity(self) -> bool:
-        """Return True when a tool is detached or a ``DetachedArrived`` turn is present.
-
-        Proactive: a live ``runtime.detached`` task means a ``[detached]`` stub
-        is already in context and a forward delivery is pending, so the note
-        must appear now. The history check covers the window after the task
-        completed but its synthesized pair still resolves into context.
-        """
+        """Return True when a tool is detached or a ``DetachedArrived`` turn is present."""
         if self.runtime.detached:
             return True
         return any(
@@ -1615,6 +1605,8 @@ class Agent:
             )
         self._surface_usage_warning()
 
+    # Best-effort: a diagnostic must never break the turn it observes, so any failure
+    # here is swallowed rather than propagated.
     def _record_cache_waste(
         self,
         *,
@@ -1623,19 +1615,7 @@ class Agent:
         idle_sec: float,
         model_changed: bool,
     ) -> None:
-        """Detect and record an avoidable prompt-cache miss for this turn.
-
-        Best-effort: a diagnostic must never break the turn it observes, so
-        any failure here is swallowed rather than propagated.
-
-        Args:
-          previous: Token counts from this agent's prior recorded response.
-          current: Token counts from the response just recorded.
-          idle_sec: Wall-clock seconds since the prior response.
-          model_changed: Whether ``current`` was served by a different
-              model/provider than ``previous``.
-
-        """
+        """Detect and record an avoidable prompt-cache miss for this turn."""
         try:
             miss = detect_cache_miss(
                 previous,
@@ -1651,14 +1631,12 @@ class Agent:
         if miss is not None:
             self.cost_tracker.record_cache_miss(miss)
 
+    # Reads the provider's normalized :class:`UsageSnapshot` after a response and warns
+    # once per window each time it crosses the warning threshold, so a near-limit window
+    # is surfaced before it blocks. Providers without telemetry return ``None`` and this
+    # is a no-op.
     def _surface_usage_warning(self) -> None:
-        """Publish an advisory ``NoticeMessage`` when a usage window is high.
-
-        Reads the provider's normalized :class:`UsageSnapshot` after a
-        response and warns once per window each time it crosses the warning
-        threshold, so a near-limit window is surfaced before it blocks.
-        Providers without telemetry return ``None`` and this is a no-op.
-        """
+        """Publish an advisory ``NoticeMessage`` when a usage window is high."""
         snapshot = self.model.usage_snapshot()
         if snapshot is None:
             return
@@ -1684,19 +1662,16 @@ class Agent:
                 runtime.NoticeMessage(
                     text=f"[usage: {window.label} window {state}]",
                     tier="advisory",
-                )
+                ),
             )
 
+    # A round chain spans from the first ``types.runtime.ModelCallStarted`` of a user
+    # turn through ``types.runtime.ModelIdle`` (or terminal cancel). Mid-chain
+    # ``types.runtime.ModelResponseComplete`` events with ``tool_calls`` do not reset
+    # ``active`` so the status-pane spinner keeps ticking through tool execution windows
+    # -- the user sees continuous activity until the agent truly idles.
     def _track_activity(self, event: runtime.RuntimeEvent) -> None:
-        """Bracket round-chain elapsed time + count streamed chars.
-
-        A round chain spans from the first ``types.runtime.ModelCallStarted`` of a
-        user turn through ``types.runtime.ModelIdle`` (or terminal cancel). Mid-chain
-        ``types.runtime.ModelResponseComplete`` events with ``tool_calls`` do not
-        reset ``active`` so the status-pane spinner keeps ticking
-        through tool execution windows -- the user sees continuous
-        activity until the agent truly idles.
-        """
+        """Bracket round-chain elapsed time + count streamed chars."""
         if isinstance(event, runtime.ModelCallStarted):
             now = asyncio.get_running_loop().time()
             # Restamp ``current_call_start`` on every call so the status
@@ -1762,15 +1737,12 @@ class Agent:
         ):
             self.activity.current_compact_start = 0.0
 
+    # Entries must outlive their turn -- the renderer resolves a result back to its
+    # tool, and a detached one can land many rounds later -- so the registry is bounded
+    # by age rather than pruned per call. Without a bound it grows one entry per tool
+    # call for the entire session.
     def _track_tool_registry(self, event: runtime.RuntimeEvent) -> None:
-        """Populate the cohort id → (tool_name, started) registry.
-
-        Entries must outlive their turn -- the renderer resolves a result
-        back to its tool, and a detached one can land many rounds later
-        -- so the registry is bounded by age rather than pruned per call.
-        Without a bound it grows one entry per tool call for the entire
-        session.
-        """
+        """Populate the cohort id → (tool_name, started) registry."""
         if isinstance(event, runtime.ModelResponseComplete):
             now = time.time()
             for tc in event.message.tool_calls:
@@ -1779,13 +1751,11 @@ class Agent:
                 self.activity.num_tool_call_rounds += 1
             self._prune_tool_registry()
 
+    # Detached and still-running calls are kept whatever their age: their results have
+    # not arrived yet, so forgetting them would leave the renderer unable to attribute
+    # the late arrival.
     def _prune_tool_registry(self) -> None:
-        """Drop the oldest completed entries once the registry is large.
-
-        Detached and still-running calls are kept whatever their age:
-        their results have not arrived yet, so forgetting them would
-        leave the renderer unable to attribute the late arrival.
-        """
+        """Drop the oldest completed entries once the registry is large."""
         if len(self._tool_registry) <= _TOOL_REGISTRY_MAX:
             return
         live = set(self.runtime.detached) | {
@@ -1815,19 +1785,17 @@ class Agent:
             and event.message.tool_calls
         ):
             self.runtime.inbox.push_back(
-                runtime.ModelResponseError(self._tool_round_limit_error())
+                runtime.ModelResponseError(self._tool_round_limit_error()),
             )
 
+    # Runs pre-increment: ``num_tool_call_rounds`` reflects completed rounds, so this
+    # response would be round ``num + 1``. Block when that next round would exceed
+    # ``max_tool_call_rounds``.
     def _before_tool_spawn(
         self,
         message: runtime.AssistantMessage,
     ) -> runtime.RuntimeEvent | None:
-        """Reject capped tool rounds before runtime spawns tool tasks.
-
-        Runs pre-increment: ``num_tool_call_rounds`` reflects completed
-        rounds, so this response would be round ``num + 1``. Block when
-        that next round would exceed ``max_tool_call_rounds``.
-        """
+        """Reject capped tool rounds before runtime spawns tool tasks."""
         if (
             message.tool_calls
             and self.max_tool_call_rounds is not None
@@ -1841,7 +1809,7 @@ class Agent:
         return RuntimeError(
             "Tool-call-round limit reached"
             f" ({self.max_tool_call_rounds} rounds)."
-            f" [{ERROR_MAX_TOOL_CALL_ROUNDS}]"
+            f" [{ERROR_MAX_TOOL_CALL_ROUNDS}]",
         )
 
     def cancel_background(self, job_id: str) -> None:
@@ -1896,7 +1864,15 @@ class Agent:
         return self._tool_registry.get(call_id, ("", 0.0))
 
     def job_id_for_call(self, call_id: str) -> str:
-        """Return the stable human job id for a provider call id."""
+        """Return the stable human job id for a provider call id.
+
+        Args:
+          call_id: Provider call id to map to a stable job id.
+
+        Returns:
+          job_id: Stable human-readable job id for the call.
+
+        """
         job_id = self._job_ids_by_call_id.get(call_id)
         if job_id is not None:
             return job_id
@@ -1931,25 +1907,21 @@ class Agent:
         """
         self._bg[job_id] = entry
 
+    # Feeds the runtime's ``_fully_drained`` gate (and thus ``AgentIdle`` / one-shot
+    # ``Agent.run`` termination). Only ``kind="tool"``, non-hidden, not-yet-done jobs
+    # count -- the same taxonomy ``_should_cancel_background`` uses to decide what a
+    # turn owns. Subagents (``kind="subagent"``) and hidden infra (REPL pump, watchdogs)
+    # live past the turn by design, so counting them would wedge ``Agent.run`` on work
+    # that never ends.
+    #
+    # Do NOT bound a tool's duration here. Boundedness is the tool's responsibility, not
+    # the agent's: ``Bash`` self-caps its timeout, and truly unbounded work uses the
+    # tool's own fire-and-forget path. Adding a grace-timeout at this gate would reap
+    # slow-but-finite tools mid-flight and silently drop their results -- the exact bug
+    # this background tracking was added to fix. A tool that never returns is a tool
+    # defect; fix it at the tool.
     def _has_pending_background(self) -> bool:
-        """Return True iff a turn-scoped background tool is still running.
-
-        Feeds the runtime's ``_fully_drained`` gate (and thus ``AgentIdle``
-        / one-shot ``Agent.run`` termination). Only ``kind="tool"``,
-        non-hidden, not-yet-done jobs count -- the same taxonomy
-        ``_should_cancel_background`` uses to decide what a turn owns.
-        Subagents (``kind="subagent"``) and hidden infra (REPL pump,
-        watchdogs) live past the turn by design, so counting them would
-        wedge ``Agent.run`` on work that never ends.
-
-        Do NOT bound a tool's duration here. Boundedness is the tool's
-        responsibility, not the agent's: ``Bash`` self-caps its timeout,
-        and truly unbounded work uses the tool's own fire-and-forget path.
-        Adding a grace-timeout at this gate would reap slow-but-finite
-        tools mid-flight and silently drop their results -- the exact bug
-        this background tracking was added to fix. A tool that never
-        returns is a tool defect; fix it at the tool.
-        """
+        """Return True iff a turn-scoped background tool is still running."""
         return any(
             job.kind == "tool" and not job.hidden and not job.task.done()
             for job in self._bg.values()
@@ -2002,9 +1974,9 @@ class Agent:
               proactive vs reactive path.
 
         """
-        if not 0.0 < byte_compact_trigger <= 1.0:
+        if byte_compact_trigger <= 0.0 or byte_compact_trigger > 1.0:
             raise ValueError(
-                f"byte_compact_trigger must be in (0, 1], got {byte_compact_trigger!r}"
+                f"byte_compact_trigger must be in (0, 1], got {byte_compact_trigger!r}",
             )
         if self._agent_compactor is None:
             return True
@@ -2023,7 +1995,7 @@ class Agent:
                         tools=self.live_tools() or None,
                     ),
                     tool_result_budget_tokens=self.tool_results.message_budget_tokens,
-                )
+                ),
             )
         else:
             # ``_last_input_tokens`` is the provider's count for the LAST
@@ -2047,7 +2019,8 @@ class Agent:
         # non-positive ``max_request_bytes`` means "no wire limit" (offline /
         # self-hosted), disabling the byte gate.
         byte_gate = model.limits.max_request_bytes > 0 and self._compactable_wire_bytes(
-            history, model
+            history,
+            model,
         ) >= int(model.limits.max_request_bytes * byte_compact_trigger)
         if not token_gate and not byte_gate:
             self.compaction_state.compact_failures = 0
@@ -2073,20 +2046,17 @@ class Agent:
             return False
         return await self.compact_now()
 
+    # ``_last_input_tokens`` covers the prompt as of the last ``AssistantMessage`` (the
+    # response the provider counted). Entries after it -- this turn's tool results and
+    # any interleaved user messages -- are not yet reflected. Estimate just those, with
+    # no system/tools (already in the anchor), so the proactive gate sees the full
+    # request about to be sent rather than the previous one.
     def _tokens_appended_since_last_response(
         self,
         history: Sequence[runtime.ModelContextEvent],
         model: Model,
     ) -> int:
-        """Estimate tokens of entries appended after the last model response.
-
-        ``_last_input_tokens`` covers the prompt as of the last
-        ``AssistantMessage`` (the response the provider counted). Entries
-        after it -- this turn's tool results and any interleaved user
-        messages -- are not yet reflected. Estimate just those, with no
-        system/tools (already in the anchor), so the proactive gate sees
-        the full request about to be sent rather than the previous one.
-        """
+        """Estimate tokens of entries appended after the last model response."""
         last_assistant = _last_assistant_index(history)
         if last_assistant is None:
             return 0
@@ -2097,30 +2067,27 @@ class Agent:
             materialize_request(
                 ModelRequest(messages=list(since)),
                 tool_result_budget_tokens=self.tool_results.message_budget_tokens,
-            )
+            ),
         )
 
+    # Counts only the prefix up to and including the last ``AssistantMessage`` -- the
+    # already-sent history compaction can summarize. Bytes appended *since* that
+    # response are this turn's own input (the user's fresh message, this turn's tool
+    # results); ``_strip_attachments`` would destroy them before the model sees them, so
+    # gating on them is both useless (nothing prior to shed) and harmful (strips the
+    # user's request). A single fresh read is instead bounded at the source by the read
+    # tool's rendered-byte cap.
+    #
+    # Measured over the materialized prefix so attachments on tool results that
+    # ``materialize_request`` drops are not counted, and via
+    # :func:`_wire_attachment_bytes` so the estimate matches the base64, post-resize
+    # payload that actually ships.
     def _compactable_wire_bytes(
         self,
         history: Sequence[runtime.ModelContextEvent],
         model: Model,
     ) -> int:
-        """Wire bytes of attachments compaction can shed, as they will ship.
-
-        Counts only the prefix up to and including the last
-        ``AssistantMessage`` -- the already-sent history compaction can
-        summarize. Bytes appended *since* that response are this turn's own
-        input (the user's fresh message, this turn's tool results);
-        ``_strip_attachments`` would destroy them before the model sees them,
-        so gating on them is both useless (nothing prior to shed) and harmful
-        (strips the user's request). A single fresh read is instead bounded at
-        the source by the read tool's rendered-byte cap.
-
-        Measured over the materialized prefix so attachments on tool results
-        that ``materialize_request`` drops are not counted, and via
-        :func:`_wire_attachment_bytes` so the estimate matches the base64,
-        post-resize payload that actually ships.
-        """
+        """Wire bytes of attachments compaction can shed, as they will ship."""
         last_assistant = _last_assistant_index(history)
         if last_assistant is None:
             return 0
@@ -2189,7 +2156,10 @@ class Agent:
             # rejection escaped the method entirely: no ``CompactFailed``, no
             # ``last_compact_error``, and overflow recovery's ``assert`` on
             # that field fired instead of the real error.
-            override = agent_runtime.widen_barrier_mask(override, self.runtime.tape)
+            override = sagent.agent.runtime.widen_barrier_mask(
+                override,
+                self.runtime.tape,
+            )
             # A summary replaces the region it masks, so it is expected to be
             # shorter; the payload-carry check governs merging producers.
             self.runtime.adopt_record(override, discards_content=True)
@@ -2220,45 +2190,27 @@ class Agent:
 def _latest_service_retry_at(
     events: Sequence[runtime.RuntimeEvent],
 ) -> float | None:
-    """Return the latest ``ModelServiceSuspended.retry_at`` in ``events``.
-
-    Args:
-      events: Persisted runtime metadata events as returned by
-          ``load_session``.
-
-    Returns:
-      retry_at: Wall-clock timestamp of the most recent suspension, or
-          ``None`` when no suspension event is present.
-
-    """
+    """Return the latest ``ModelServiceSuspended.retry_at`` in ``events``."""
     for event in reversed(events):
         if isinstance(event, runtime.ModelServiceSuspended):
             return event.retry_at
     return None
 
 
+# The renderer treats ``UserFacingError`` specially -- no ``ClassName:`` prefix, no
+# traceback -- so this message is what the user actually reads after recovery exhausts.
+# Keep it actionable: name the verbs (``/clear``, ``/compact``, ``/model``) so the halt
+# screen tells the user what to do, not just what went wrong.
+#
+# Structured ``attempts`` / ``final_tokens`` ride along on the exception object for
+# operators inspecting logs; the user-facing message stays the polished remediation
+# text. The underlying provider exception travels via ``__cause__`` at the raise site.
 def _context_overflow_error(
-    *, attempts: int = 0, final_tokens: int | None = None
+    *,
+    attempts: int = 0,
+    final_tokens: int | None = None,
 ) -> ContextOverflowError:
-    """Build the user-facing exhaustion error.
-
-    The renderer treats ``UserFacingError`` specially -- no ``ClassName:``
-    prefix, no traceback -- so this message is what the user actually
-    reads after recovery exhausts. Keep it actionable: name the verbs
-    (``/clear``, ``/compact``, ``/model``) so the halt screen tells the
-    user what to do, not just what went wrong.
-
-    Structured ``attempts`` / ``final_tokens`` ride along on the
-    exception object for operators inspecting logs; the user-facing
-    message stays the polished remediation text. The underlying provider
-    exception travels via ``__cause__`` at the raise site.
-
-    Args:
-      attempts: Number of overflow-recovery iterations that elapsed.
-      final_tokens: Estimated input token count after the last failed
-          recovery attempt, or ``None`` if unknown.
-
-    """
+    """Build the user-facing exhaustion error."""
     return ContextOverflowError(
         "Context window exhausted after auto-compaction. "
         "Use /clear to wipe history, /compact <hints> to retry with custom "
@@ -2268,49 +2220,34 @@ def _context_overflow_error(
     )
 
 
+# The runtime publishes its first ``AgentIdle`` at the top of the first ``run_forever``
+# iteration -- before the agent has done any work. An empty history is the unambiguous
+# marker of that boot edge. Shared by :meth:`Agent.drive_until_first_idle` (which must
+# not return on boot) and the persistent-child forwarder (which must not spam a boot
+# ping).
 def _is_work_idle(history: list[runtime.ModelContextEvent]) -> bool:
-    """Return True when an ``AgentIdle`` reflects real work, not the boot transition.
-
-    The runtime publishes its first ``AgentIdle`` at the top of the first
-    ``run_forever`` iteration -- before the agent has done any work. An
-    empty history is the unambiguous marker of that boot edge. Shared by
-    :meth:`Agent.drive_until_first_idle` (which must not return on boot)
-    and the persistent-child forwarder (which must not spam a boot ping).
-
-    Args:
-      history: The agent's resolved history at idle time.
-
-    Returns:
-      is_work: True when history is non-empty (post-work idle).
-
-    """
+    """Return True when an ``AgentIdle`` reflects real work, not the boot transition."""
     return bool(history)
 
 
+# The default result extractor for :meth:`Agent.drive_until_first_idle` when the caller
+# supplies none. ``AgentSpawn`` passes its own ``AgentSend``-aware extractor instead.
 def _default_last_assistant_result(
     history: list[runtime.ModelContextEvent],
 ) -> runtime.ToolResult:
-    """Return the last ``AssistantMessage``'s text as a ``ToolResult``.
-
-    The default result extractor for :meth:`Agent.drive_until_first_idle`
-    when the caller supplies none. ``AgentSpawn`` passes its own
-    ``AgentSend``-aware extractor instead.
-    """
+    """Return the last ``AssistantMessage``'s text as a ``ToolResult``."""
     for entry in reversed(history):
         if isinstance(entry, runtime.AssistantMessage):
             return runtime.ToolResult(call_id="", content=entry.text)
     return runtime.ToolResult(call_id="", content="")
 
 
+# The boundary between already-sent history (compactable) and this turn's fresh, un-
+# sheddable entries: both the token-delta estimate and the byte gate split history here.
 def _last_assistant_index(
     history: Sequence[runtime.ModelContextEvent],
 ) -> int | None:
-    """Index of the last ``AssistantMessage`` in ``history``, or ``None``.
-
-    The boundary between already-sent history (compactable) and this turn's
-    fresh, un-sheddable entries: both the token-delta estimate and the byte
-    gate split history here.
-    """
+    """Index of the last ``AssistantMessage`` in ``history``, or ``None``."""
     return next(
         (
             idx
@@ -2321,25 +2258,22 @@ def _last_assistant_index(
     )
 
 
+# The wire carries base64 (``ceil(4/3)`` expansion), and the provider serializer resizes
+# images to ``max_image_bytes`` before encoding while leaving PDFs/documents un-resized
+# (see ``providers/*._attachment_block`` and ``sagent.lib.image.resize``). So per
+# attachment the wire cost is:
+#
+# - image: ``4/3 * min(len(data), max_image_bytes)`` - PDF/other: ``4/3 * len(data)``
+#
+# Counting raw bytes (as the first cut did) both under-counts (ignores base64) and over-
+# counts (ignores resize); this mirrors what actually ships so the byte gate compares
+# wire-bytes to a wire-byte ceiling.
 def _wire_attachment_bytes(
     messages: Sequence[runtime.ModelContextEvent],
     *,
     max_image_bytes: int,
 ) -> int:
-    """Estimate the on-the-wire byte size of all attachments in ``messages``.
-
-    The wire carries base64 (``ceil(4/3)`` expansion), and the provider
-    serializer resizes images to ``max_image_bytes`` before encoding while
-    leaving PDFs/documents un-resized (see ``providers/*._attachment_block``
-    and ``sagent.lib.image.resize``). So per attachment the wire cost is:
-
-    - image: ``4/3 * min(len(data), max_image_bytes)``
-    - PDF/other: ``4/3 * len(data)``
-
-    Counting raw bytes (as the first cut did) both under-counts (ignores
-    base64) and over-counts (ignores resize); this mirrors what actually
-    ships so the byte gate compares wire-bytes to a wire-byte ceiling.
-    """
+    """Estimate the on-the-wire byte size of all attachments in ``messages``."""
     total = 0
     for entry in messages:
         if not isinstance(
@@ -2369,28 +2303,24 @@ def _wire_attachment_bytes(
     return total
 
 
+# Sums attachment wire bytes (:func:`_wire_attachment_bytes`) and the UTF-8 byte length
+# of every text surface that ships on the wire: the system prompt, each message's text /
+# tool-result content, and -- for an ``AssistantMessage`` -- its ``thinking_blocks`` and
+# ``tool_calls`` arguments (both serialized inline by the provider transports). Only
+# tool-schema and JSON-framing bytes are omitted: they are bounded and roughly constant,
+# so the estimate stays a conservative LOWER bound that never false-rejects a request
+# the provider would accept.
+#
+# Callers must pass the MATERIALIZED messages (post :func:`materialize_request`), so
+# elided tool results are sized at their wire placeholder rather than their pre-elision
+# length -- otherwise the guard over-counts bytes the request never carries.
 def _wire_request_bytes(
     messages: Sequence[runtime.ModelContextEvent],
     *,
     system: str,
     max_image_bytes: int,
 ) -> int:
-    """Estimate the whole request body's wire byte size.
-
-    Sums attachment wire bytes (:func:`_wire_attachment_bytes`) and the UTF-8
-    byte length of every text surface that ships on the wire: the system prompt,
-    each message's text / tool-result content, and -- for an ``AssistantMessage``
-    -- its ``thinking_blocks`` and ``tool_calls`` arguments (both serialized
-    inline by the provider transports). Only tool-schema and JSON-framing bytes
-    are omitted: they are bounded and roughly constant, so the estimate stays a
-    conservative LOWER bound that never false-rejects a request the provider
-    would accept.
-
-    Callers must pass the MATERIALIZED messages (post
-    :func:`materialize_request`), so elided tool results are sized at their wire
-    placeholder rather than their pre-elision length -- otherwise the guard
-    over-counts bytes the request never carries.
-    """
+    """Estimate the whole request body's wire byte size."""
     total = _wire_attachment_bytes(messages, max_image_bytes=max_image_bytes)
     total += len(system.encode("utf-8"))
     for entry in messages:
@@ -2410,59 +2340,32 @@ def _wire_request_bytes(
     return total
 
 
+# When the underlying compactor failure is itself classified as context overflow (true
+# exhaustion: ``PromptTooLongError`` or a provider-specific overflow exception), return
+# the polished :func:`_context_overflow_error` so the halt screen surfaces the
+# ``/clear`` / ``/compact`` / ``/model`` remediation. Otherwise return the underlying
+# exception verbatim so transport drops, auth failures, and other unrelated errors don't
+# masquerade as context exhaustion -- the failure mode that misled session ``bc528d70``.
 def _compact_failure_error(last_err: Exception, model: Model) -> Exception:
-    """Pick the user-facing error after a failed ``compact_now``.
-
-    When the underlying compactor failure is itself classified as
-    context overflow (true exhaustion: ``PromptTooLongError`` or a
-    provider-specific overflow exception), return the polished
-    :func:`_context_overflow_error` so the halt screen surfaces the
-    ``/clear`` / ``/compact`` / ``/model`` remediation. Otherwise
-    return the underlying exception verbatim so transport drops,
-    auth failures, and other unrelated errors don't masquerade as
-    context exhaustion -- the failure mode that misled session
-    ``bc528d70``.
-
-    Args:
-      last_err: The exception swallowed by ``compact_now``. Callers
-          only invoke this helper after ``compact_now()`` returned
-          ``False`` -- the only path that stashes
-          ``last_compact_error`` -- so the value is always present.
-      model: Active model; its ``is_context_overflow`` classifier
-          decides the dispatch.
-
-    Returns:
-      err: Exception to raise at the call site.
-
-    """
+    """Pick the user-facing error after a failed ``compact_now``."""
     if model.is_context_overflow(last_err):
         return _context_overflow_error()
     return last_err
 
 
+# The budget follows the model rather than persisting across swaps: a budget left at the
+# old model's ceiling (the "use the whole window" default) snaps to the new ceiling,
+# while an explicitly pinned smaller value is preserved and only clamped down when it
+# overflows the new model.
 def _rescaled_window(current: int, *, old_max: int, new_max: int) -> int:
-    """Rescale one budget window to a model swap.
-
-    The budget follows the model rather than persisting across swaps: a
-    budget left at the old model's ceiling (the "use the whole window"
-    default) snaps to the new ceiling, while an explicitly pinned smaller
-    value is preserved and only clamped down when it overflows the new
-    model.
-
-    Args:
-      current: Active budget window before the swap.
-      old_max: Outgoing model's ceiling for this window.
-      new_max: Incoming model's ceiling for this window.
-
-    Returns:
-      window: Budget window sized for the new model.
-
-    """
+    """Rescale one budget window to a model swap."""
     if current >= old_max:
         return new_max
     return min(current, new_max)
 
 
+# ``None`` kwargs inherit from ``spec``. The model-id branch implements the cross-
+# provider preservation rule documented on :meth:`Agent.change_model`.
 def _resolve_target_spec(
     spec: ModelRecipe,
     *,
@@ -2471,12 +2374,7 @@ def _resolve_target_spec(
     model_id: str | None,
     account: str | None,
 ) -> ModelRecipe:
-    """Resolve a ``change_model`` kwargs payload to a complete ``types.model.ModelRecipe``.
-
-    ``None`` kwargs inherit from ``spec``. The model-id branch implements
-    the cross-provider preservation rule documented on
-    :meth:`Agent.change_model`.
-    """
+    """Resolve a ``change_model`` kwargs payload to a complete ``types.model.ModelRecipe``."""
     prov_name = provider or spec.provider
     if auth is not None:
         final_auth = auth
@@ -2499,14 +2397,11 @@ def _resolve_target_spec(
     )
 
 
+# Reads ``cls.CAPABILITIES`` without instantiating so the probe is side-effect-free (no
+# credential lookup). Option tags ride on catalog ids and are stripped before the
+# membership check, mirroring the providers' own lookup rule.
 def _provider_knows_model(prov_name: str, model_id: str) -> bool:
-    """Return True when the provider class's catalog includes ``model_id``.
-
-    Reads ``cls.CAPABILITIES`` without instantiating so the probe is
-    side-effect-free (no credential lookup). Option tags ride on catalog
-    ids and are stripped before the membership check, mirroring the
-    providers' own lookup rule.
-    """
+    """Return True when the provider class's catalog includes ``model_id``."""
     cls = getattr(providers, prov_name, None)
     if cls is None:
         return False
@@ -2527,18 +2422,14 @@ def _default_model_for(prov_name: str) -> str:
     return default
 
 
+# ``Model.close()`` is a required contract method: CLI-style providers
+# (``AnthropicCLI``, ``GoogleCLI``) tear down their subprocess pools; API providers
+# close their SDK/HTTP client; resource-free models no-op. Schedule the teardown on the
+# running loop so the prior subprocess and its warming-spare task don't outlive the
+# swap. No-op when no event loop is running (e.g. ``Agent.resume`` before
+# ``serve_forever``): the model hasn't been used yet so there is nothing to close.
 def _schedule_close(model: Model) -> None:
-    """Fire-and-forget async teardown for a swapped-out model.
-
-    ``Model.close()`` is a required contract method: CLI-style providers
-    (``AnthropicCLI``, ``GoogleCLI``) tear down their subprocess pools;
-    API providers close their SDK/HTTP client; resource-free models
-    no-op. Schedule the teardown on the running loop so the prior
-    subprocess and its warming-spare task don't outlive the swap. No-op
-    when no event loop is running (e.g. ``Agent.resume`` before
-    ``serve_forever``): the model hasn't been used yet so there is
-    nothing to close.
-    """
+    """Fire-and-forget async teardown for a swapped-out model."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -2616,7 +2507,7 @@ class _AgentModel:
         # to the runtime tape; we refetch the resolved view below.
         if not await self._agent.compact_if_needed(history, self._inner):
             last_err = self._agent.last_compact_error
-            assert last_err is not None  # compact_now sets this on every False return
+            assert last_err is not None  # compact_now sets this on every False return.
             raise _compact_failure_error(last_err, self._inner) from last_err
         # Compaction may have appended a barrier override; refetch the
         # resolved view so subsequent attempts in this call see it.
@@ -2667,7 +2558,7 @@ class _AgentModel:
                     f"Request payload ({wire_bytes:,} bytes) exceeds the provider "
                     f"limit ({max_request_bytes:,} bytes) and cannot be compacted "
                     "away (it is this turn's own input). Attach a smaller file, send "
-                    "less text, or read large PDFs/images in smaller page ranges."
+                    "less text, or read large PDFs/images in smaller page ranges.",
                 )
 
         # Wrap every rich tool with ``BackgroundAwareTool`` so the
@@ -2712,7 +2603,8 @@ class _AgentModel:
                     max_attempts=self._agent.max_attempts,
                     persistent_retry=self._agent.persistent_retry,
                     publish_recoverable=lambda text: logger.info(
-                        "recoverable: %s", text
+                        "recoverable: %s",
+                        text,
                     ),
                     on_discarded_response=self._agent.record_response,
                     on_service_suspended=self._agent.publish_service_suspended,
@@ -2744,7 +2636,7 @@ class _AgentModel:
                             "Request exceeds the provider byte limit even after"
                             " auto-compaction. Use /clear to wipe history, or"
                             " re-read large PDFs/images in smaller page ranges"
-                            " so fewer attachment bytes ship at once."
+                            " so fewer attachment bytes ship at once.",
                         ) from exc
                     raise _context_overflow_error(attempts=attempt) from exc
                 logger.info(
@@ -2761,7 +2653,7 @@ class _AgentModel:
                     last_err = self._agent.last_compact_error
                     assert (
                         last_err is not None
-                    )  # compact_now sets this on every False return
+                    )  # compact_now sets this on every False return.
                     raise _compact_failure_error(last_err, self._inner) from last_err
                 # Refetch resolved view: ``compact_now`` appended a
                 # barrier override.
@@ -2868,10 +2760,12 @@ class _AgentTool:
         # Production callers always have a non-empty id, so emitted
         # ``ToolLabel`` / ``ToolResult`` records correlate to the
         # originating assistant tool_use.
-        call_id = agent_runtime.current_call_id_var.get("")
+        call_id = sagent.agent.runtime.current_call_id_var.get("")
         bg_requested, delay_sec, clean_args = split_bg_args(args)
         validation_error = validate_tool_input(
-            self._inner.name, self._inner.directive_schema, clean_args
+            self._inner.name,
+            self._inner.directive_schema,
+            clean_args,
         )
         if validation_error is not None:
             # Publish a label even on validation failure so scrollback stays
@@ -2909,7 +2803,8 @@ class _AgentTool:
             )
             task.add_done_callback(
                 log_task_exception(
-                    logger, f"background tool {self._inner.name!r} crashed"
+                    logger,
+                    f"background tool {self._inner.name!r} crashed",
                 ),
             )
             self._agent.register_background(
@@ -3083,6 +2978,13 @@ class _AgentCompactor:
         are one heuristic, so a wrapper exposing only the predicate would
         let a caller sizing against the scalar reach a different strategy
         than the caller asking the question.
+
+        Args:
+          budget: Agent settings used to calculate the largest context.
+
+        Returns:
+          tokens: Largest context size supported by the budget.
+
         """
         return self._inner.largest_context(budget)
 
@@ -3100,6 +3002,15 @@ class _AgentCompactor:
         Agent layer's :class:`_AgentModel` invokes this on the wrapper
         directly to gate proactive compaction ahead of each provider
         call.
+
+        Args:
+          current_tokens: Estimated tokens currently in the request.
+          largest_context: Maximum context accepted by the budget.
+          system_tokens: Estimated system-prompt token count.
+
+        Returns:
+          should_compact: Whether the current context needs compaction.
+
         """
         return self._inner.should_compact(
             current_tokens=current_tokens,
@@ -3111,7 +3022,7 @@ class _AgentCompactor:
         self,
         tape: Sequence[TapeRecord],
         context: Sequence[runtime.ModelContextEvent],
-        model: agent_runtime.Model,
+        model: sagent.agent.runtime.Model,
         mint_ref: Callable[[], TapeRef],
         custom_instructions: str | None = None,
     ) -> ContextSplice:
@@ -3130,7 +3041,7 @@ class _AgentCompactor:
               ready for the runtime to append to ``runtime.tape``.
 
         """
-        del model  # _AgentCompactor uses the agent's rich model directly
+        del model  # _AgentCompactor uses the agent's rich model directly.
         override = await self._inner.compact(
             tape=tape,
             context=context,
@@ -3163,13 +3074,15 @@ class _AgentCompactor:
             )
         except Exception as exc:  # noqa: BLE001 -- token estimator may invoke provider classification; catch-all routes UserFacingError to warning, others to exception
             log_exception_or_warning(
-                logger, "post-compact token estimate failed; skipping enrich", exc
+                logger,
+                "post-compact token estimate failed; skipping enrich",
+                exc,
             )
         else:
             # The complement of ``largest_context``: what the strategy holds
             # back is exactly what enrich may not spend.
             headroom = self._agent.max_request_tokens - self._inner.largest_context(
-                self._agent.budget
+                self._agent.budget,
             )
             try:
                 await post_compact_enrich(
@@ -3184,7 +3097,9 @@ class _AgentCompactor:
                 )
             except Exception as exc:  # noqa: BLE001 -- post_compact_enrich calls the model; catch-all routes UserFacingError to warning, others to exception
                 log_exception_or_warning(
-                    logger, "post_compact_enrich failed; continuing", exc
+                    logger,
+                    "post_compact_enrich failed; continuing",
+                    exc,
                 )
         # Carry the producer's external-pair declaration into the repair: a
         # preserved parent whose tool is still detached is answered by the
@@ -3222,7 +3137,9 @@ class _AgentCompactor:
                 )
             except Exception as exc:  # noqa: BLE001 -- token estimator may invoke provider classification
                 log_exception_or_warning(
-                    logger, "pre-scrunch token estimate failed; skipping scrunch", exc
+                    logger,
+                    "pre-scrunch token estimate failed; skipping scrunch",
+                    exc,
                 )
             else:
                 if payload_tokens_for_scrunch > target:
@@ -3233,7 +3150,8 @@ class _AgentCompactor:
                     # whose messages already fit produces no reduction and the
                     # next provider call re-overflows on the same overhead.
                     overhead = payload_tokens_for_scrunch - estimate_entry_tokens(
-                        self._agent.model, payload
+                        self._agent.model,
+                        payload,
                     )
                     scrunch_target = max(1, target - max(0, overhead))
                     payload = await self._scrunch_payload(
@@ -3250,7 +3168,8 @@ class _AgentCompactor:
                     # with no real external partner and the next provider
                     # call would 400.
                     payload = _repair_compact_payload(
-                        payload, override.paired_externally
+                        payload,
+                        override.paired_externally,
                     )
                     if not payload or isinstance(payload[-1], runtime.AssistantMessage):
                         payload.append(runtime.UserMessage(text="[continuation]"))
@@ -3294,7 +3213,9 @@ class _AgentCompactor:
                 )
         except Exception as exc:  # noqa: BLE001 -- token estimator may invoke provider classification; a failed retrigger probe must not abort an otherwise-successful compaction (matches the sibling estimate blocks above)
             log_exception_or_warning(
-                logger, "willRetriggerNextTurn estimate skipped; continuing", exc
+                logger,
+                "willRetriggerNextTurn estimate skipped; continuing",
+                exc,
             )
 
         if (
@@ -3318,6 +3239,11 @@ class _AgentCompactor:
             paired_externally=unpaired_call_ids(payload),
         )
 
+    # The bridge runs scrunch as an internal rescue: scrunch's per- partition splices
+    # land in a throwaway tape, the final resolved view is extracted, and the bridge
+    # folds it into a single return payload. The runtime sees one combined splice, not
+    # the per-pass audit trail -- scrunch's structured-summary calls already log per-
+    # pass diagnostics.
     async def _scrunch_payload(
         self,
         *,
@@ -3325,25 +3251,7 @@ class _AgentCompactor:
         mint_ref: Callable[[], TapeRef],
         target_input_tokens: int,
     ) -> list[runtime.ModelContextEvent]:
-        """Apply the scrunch maneuver to ``payload`` until it fits.
-
-        The bridge runs scrunch as an internal rescue: scrunch's per-
-        partition splices land in a throwaway tape, the final resolved
-        view is extracted, and the bridge folds it into a single
-        return payload. The runtime sees one combined splice, not the
-        per-pass audit trail -- scrunch's structured-summary calls
-        already log per-pass diagnostics.
-
-        Args:
-          payload: Producer's compacted payload, still over target.
-          mint_ref: Factory for splice refs scrunch will burn.
-          target_input_tokens: Budget the resolved view must fit.
-
-        Returns:
-          fitted: Final payload after scrunch passes have applied.
-              Returned unchanged when scrunch is a no-op or fails.
-
-        """
+        """Apply the scrunch maneuver to ``payload`` until it fits."""
         # Build a throwaway tape mirroring ``payload`` so scrunch can
         # reference its entries by ordinal. The runtime never sees these
         # refs: ``scratch_tape`` is local and never escapes, so the
@@ -3391,38 +3299,27 @@ def _repair_compact_payload(
     payload: Sequence[runtime.ModelContextEvent],
     paired_externally: frozenset[str] = frozenset(),
 ) -> list[runtime.ModelContextEvent]:
-    """List-wrap :func:`tape.splice_safe_repair` so the caller can append.
-
-    Args:
-      payload: Compactor output to repair.
-      paired_externally: Ids the producer declared as answered outside the
-          payload -- a preserved parent whose tool is still detached. Passing
-          them through is what stops the repair reporting a running tool as
-          ``[interrupted]``.
-
-    """
+    """List-wrap :func:`tape.splice_safe_repair` so the caller can append."""
     return list(splice_safe_repair(payload, paired_externally=paired_externally))
 
 
+# Two cancel callers differ in scope:
+#
+# - ``tools_only`` -- ``Agent._cancel_all_background`` (called from ``clear()`` and
+# ``kill_all_tools()``). Drops only user-scheduled ``background: true`` tool jobs;
+# ``detached`` (cohort-decayed) and ``subagent`` survive because those have their own
+# lifecycle owners. - ``all`` -- ``Agent.shutdown``. Drops every visible job whose owner
+# is the exiting process; a serviced subagent owns its own ``serve_forever`` and shuts
+# itself down, so it is exempt. A oneshot subagent has self-stopped after its first
+# result, so it is effectively gone already.
+#
+# Both modes skip ``hidden=True`` infra (REPL pump, watchdogs).
 def _should_cancel_background(
-    job: BackgroundTaskEntry, *, mode: Literal["tools_only", "all"]
+    job: BackgroundTaskEntry,
+    *,
+    mode: Literal["tools_only", "all"],
 ) -> bool:
-    """Decide whether a background ``job`` should be cancelled.
-
-    Two cancel callers differ in scope:
-
-    - ``tools_only`` -- ``Agent._cancel_all_background`` (called from
-      ``clear()`` and ``kill_all_tools()``). Drops only user-scheduled
-      ``background: true`` tool jobs; ``detached`` (cohort-decayed) and
-      ``subagent`` survive because those have their own lifecycle owners.
-    - ``all`` -- ``Agent.shutdown``. Drops every visible job whose owner
-      is the exiting process; a serviced subagent owns its own
-      ``serve_forever`` and shuts itself down, so it is exempt. A oneshot
-      subagent has self-stopped after its first result, so it is
-      effectively gone already.
-
-    Both modes skip ``hidden=True`` infra (REPL pump, watchdogs).
-    """
+    """Decide whether a background ``job`` should be cancelled."""
     if job.hidden:
         return False
     if mode == "tools_only":

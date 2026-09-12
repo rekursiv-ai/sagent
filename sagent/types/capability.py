@@ -90,7 +90,7 @@ class ModelCapability:
     """The id the vendor accepts on the wire, without option tags."""
 
     context: Mapping[ContextTag, ModelLimits] = field(
-        default_factory=lambda: MappingProxyType({"": ModelLimits()})
+        default_factory=lambda: MappingProxyType({"": ModelLimits()}),
     )
     """Limits per selectable context tag; its KEYS are the allowed set."""
 
@@ -267,7 +267,7 @@ class ModelSettings:
                 f.name: getattr(other, f.name)
                 for f in fields(self)
                 if f.name not in ("capability", "context")
-            }
+            },
         )
 
     def take(self, **choices: object) -> None:
@@ -297,7 +297,10 @@ class ModelSettings:
 
     @classmethod
     def narrowest(
-        cls, capability: ModelCapability, *, context: ContextTag = ""
+        cls,
+        capability: ModelCapability,
+        *,
+        context: ContextTag = "",
     ) -> Self:
         """Return the least-committing selection ``capability`` offers.
 
@@ -321,16 +324,24 @@ class ModelSettings:
             capability=capability,
             context=context,
             thinking_effort=_lowest(
-                "thinking_effort", capability.thinking_effort, _ladder(ThinkingEffort)
+                "thinking_effort",
+                capability.thinking_effort,
+                _ladder(ThinkingEffort),
             ),
             thinking_budget=_lowest(
-                "thinking_budget", capability.thinking_budget, _ladder(ThinkingBudget)
+                "thinking_budget",
+                capability.thinking_budget,
+                _ladder(ThinkingBudget),
             ),
             thinking_output=_lowest(
-                "thinking_output", capability.thinking_output, _ladder(ThinkingOutput)
+                "thinking_output",
+                capability.thinking_output,
+                _ladder(ThinkingOutput),
             ),
             service_tier=_lowest(
-                "service_tier", capability.service_tier, _ladder(ServiceTier)
+                "service_tier",
+                capability.service_tier,
+                _ladder(ServiceTier),
             ),
             cache_ttl_sec=_lowest(
                 "cache_ttl_sec",
@@ -363,7 +374,7 @@ def _reject_unoffered(capability: ModelCapability, name: str, value: object) -> 
     # ``repr`` before ``sorted``: these sets mix strings, floats, and bools,
     # which do not order against each other.
     offered = ", ".join(
-        sorted(repr(v) for v in cast(Collection[object], getattr(capability, name)))
+        sorted(repr(v) for v in cast(Collection[object], getattr(capability, name))),
     )
     raise ValueError(f"{name}={value!r} is not offered by {model}; allowed: {offered}")
 

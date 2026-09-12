@@ -10,7 +10,11 @@ def set_field(config, name, value) -> None: ...
 
 class CoordescTuner:
     def __init__(
-        self, is_mm=..., name=..., size_hints=..., inductor_meta=...
+        self,
+        is_mm=...,
+        name=...,
+        size_hints=...,
+        inductor_meta=...,
     ) -> None: ...
     def get_config_max(self, prefix: str) -> int: ...
     def get_warpsmax(self) -> Literal[32]: ...
@@ -21,15 +25,26 @@ class CoordescTuner:
     def tunable_fields(self) -> list[str]: ...
     def value_too_large(self, name: str, val: int) -> bool: ...
     def get_neighbour_values(
-        self, name, orig_val, radius=..., include_self=...
+        self,
+        name,
+        orig_val,
+        radius=...,
+        include_self=...,
     ) -> list[Any]: ...
     @staticmethod
     def has_improvement(baseline, test) -> Literal[False]: ...
     def check_all_tuning_directions(
-        self, func: Callable[[triton.Config], float], best_config, best_timing
+        self,
+        func: Callable[[triton.Config], float],
+        best_config,
+        best_timing,
     ) -> tuple[bool, Any, Any | float]: ...
     def compare_config(
-        self, func, candidate_config, best_config, best_timing
+        self,
+        func,
+        candidate_config,
+        best_config,
+        best_timing,
     ) -> (
         tuple[Literal[False], float]
         | tuple[Literal[True], Any]

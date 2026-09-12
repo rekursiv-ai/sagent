@@ -44,7 +44,10 @@ class Qwen2VLImageProcessorFast(BaseImageProcessorFast):
         **kwargs: Unpack[Qwen2VLFastImageProcessorKwargs],
     ) -> BatchFeature: ...
     def get_number_of_image_patches(
-        self, height: int, width: int, images_kwargs=...
+        self,
+        height: int,
+        width: int,
+        images_kwargs=...,
     ): ...
 
 __all__ = ["Qwen2VLImageProcessorFast"]

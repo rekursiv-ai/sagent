@@ -80,7 +80,8 @@ class VariableBuilder:
     def wrap_mapping_proxy(self, value): ...
     def wrap_user_defined(self, value: Any) -> UserDefinedObjectVariable: ...
     def wrap_listlike(
-        self, value: Union[tuple, list, odict_values, NamedTuple]
+        self,
+        value: Union[tuple, list, odict_values, NamedTuple],
     ) -> (
         VariableTracker
         | TupleVariable
@@ -93,11 +94,13 @@ class VariableBuilder:
     def wrap_tuple_iterator(self, value: tuple_iterator): ...
     def wrap_range_iterator(self, value: range_iterator): ...
     def wrap_slice_range(
-        self, value: slice | range
+        self,
+        value: slice | range,
     ) -> SliceVariable | RangeVariable: ...
     def mark_static_input(self, value: torch.Tensor, guard: bool) -> None: ...
     def wrap_module(
-        self, value: torch.nn.Module
+        self,
+        value: torch.nn.Module,
     ) -> (
         DelayGraphBreakVariable
         | FSDPManagedNNModuleVariable
@@ -118,22 +121,43 @@ class VariableBuilder:
     def wrap_unspecialized_primitive(self, value) -> ConstantVariable: ...
 
 def wrap_fx_proxy(
-    tx, proxy, example_value=..., subclass_type=..., **options
+    tx,
+    proxy,
+    example_value=...,
+    subclass_type=...,
+    **options,
 ) -> VariableTracker: ...
 def cache_real_value_when_export(tx, proxy, example_value) -> None: ...
 def wrap_fx_proxy_cls(
-    target_cls, tx, proxy, example_value=..., subclass_type=..., **options
+    target_cls,
+    tx,
+    proxy,
+    example_value=...,
+    subclass_type=...,
+    **options,
 ): ...
 def handle_traced_output(
-    example_value, tx, proxy, options, subclass_type, target_cls
+    example_value,
+    tx,
+    proxy,
+    options,
+    subclass_type,
+    target_cls,
 ): ...
 def infer_subclass_type(value) -> type[Any] | None: ...
 def get_specialized_props(target_cls, tx, example_value, subclass_type): ...
 def construct_tensor_variable(
-    target_cls, tx, proxy, example_value, subclass_type, options
+    target_cls,
+    tx,
+    proxy,
+    example_value,
+    subclass_type,
+    options,
 ): ...
 def get_automatic_dynamic_shapes_mark_as() -> Literal[
-    DimDynamic.DYNAMIC, DimDynamic.SIZE_LIKE_UNBACKED, DimDynamic.OBLIVIOUS_SIZE
+    DimDynamic.DYNAMIC,
+    DimDynamic.SIZE_LIKE_UNBACKED,
+    DimDynamic.OBLIVIOUS_SIZE,
 ]: ...
 
 _DYNAMIC_SOURCES: set[str] | None = ...
@@ -142,7 +166,9 @@ _DYNAMIC_SOURCES_CONFIG_HASH: int | None = ...
 def get_dynamic_sources() -> set[str]: ...
 def is_dynamic_source(source_name: str) -> bool: ...
 def record_automatic_dynamic(
-    tx: InstructionTranslator, name: str, e: torch.Tensor
+    tx: InstructionTranslator,
+    name: str,
+    e: torch.Tensor,
 ) -> FrameStateSizeEntry: ...
 
 _UNBACKED_SOURCES: set[str] | None = ...
@@ -151,7 +177,12 @@ _UNBACKED_SOURCES_CONFIG_HASH: int | None = ...
 def get_unbacked_sources() -> set[str]: ...
 def is_unbacked_source(source_name: str) -> bool: ...
 def wrap_to_fake_tensor_and_record(
-    e, tx, *, source: Source | None, is_tensor: bool, parent_context=...
+    e,
+    tx,
+    *,
+    source: Source | None,
+    is_tensor: bool,
+    parent_context=...,
 ) -> Tensor | TensorWithFlatten | FakeTensor | Any: ...
 
 class SourcelessBuilder:

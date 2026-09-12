@@ -33,7 +33,9 @@ class UdopProcessor(ProcessorMixin):
         **kwargs: Unpack[UdopProcessorKwargs],
     ) -> BatchFeature: ...
     def get_overflowing_images(
-        self, images, overflow_to_sample_mapping
+        self,
+        images,
+        overflow_to_sample_mapping,
     ):  # -> list[Any]:
         ...
     @property

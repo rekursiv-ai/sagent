@@ -38,11 +38,14 @@ class TFLayoutLMv3TextEmbeddings(keras.layers.Layer):
     def __init__(self, config: LayoutLMv3Config, **kwargs) -> None: ...
     def calculate_spatial_position_embeddings(self, bbox: tf.Tensor) -> tf.Tensor: ...
     def create_position_ids_from_inputs_embeds(
-        self, inputs_embds: tf.Tensor
+        self,
+        inputs_embds: tf.Tensor,
     ) -> tf.Tensor: ...
     def create_position_ids_from_input_ids(self, input_ids: tf.Tensor) -> tf.Tensor: ...
     def create_position_ids(
-        self, input_ids: tf.Tensor, inputs_embeds: tf.Tensor
+        self,
+        input_ids: tf.Tensor,
+        inputs_embeds: tf.Tensor,
     ) -> tf.Tensor: ...
     def call(
         self,
@@ -76,7 +79,10 @@ class TFLayoutLMv3SelfAttention(keras.layers.Layer):
 class TFLayoutLMv3SelfOutput(keras.layers.Layer):
     def __init__(self, config: LayoutLMv3Config, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -105,7 +111,10 @@ class TFLayoutLMv3Intermediate(keras.layers.Layer):
 class TFLayoutLMv3Output(keras.layers.Layer):
     def __init__(self, config: LayoutLMv3Config, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -128,7 +137,10 @@ class TFLayoutLMv3Layer(keras.layers.Layer):
 class TFLayoutLMv3Encoder(keras.layers.Layer):
     def __init__(self, config: LayoutLMv3Config, **kwargs) -> None: ...
     def relative_position_bucket(
-        self, relative_positions: tf.Tensor, num_buckets: int, max_distance: int
+        self,
+        relative_positions: tf.Tensor,
+        num_buckets: int,
+        max_distance: int,
     ): ...
     def call(
         self,
@@ -160,14 +172,17 @@ class TFLayoutLMv3MainLayer(keras.layers.Layer):
     def set_input_embeddings(self, value: tf.Variable):  # -> None:
         ...
     def init_visual_bbox(
-        self, image_size: tuple[int, int], max_len: int = ...
+        self,
+        image_size: tuple[int, int],
+        max_len: int = ...,
     ):  # -> None:
         ...
     def calculate_visual_bbox(self, batch_size: int, dtype: tf.DType): ...
     def embed_image(self, pixel_values: tf.Tensor) -> tf.Tensor: ...
     def get_extended_attention_mask(self, attention_mask: tf.Tensor) -> tf.Tensor: ...
     def get_head_mask(
-        self, head_mask: tf.Tensor | None
+        self,
+        head_mask: tf.Tensor | None,
     ) -> tf.Tensor | list[tf.Tensor | None]: ...
     @unpack_inputs
     def call(
@@ -211,7 +226,8 @@ class TFLayoutLMv3Model(TFLayoutLMv3PreTrainedModel):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(LAYOUTLMV3_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFBaseModelOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFBaseModelOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -247,14 +263,16 @@ class TFLayoutLMv3ClassificationHead(keras.layers.Layer):
     LAYOUTLMV3_START_DOCSTRING,
 )
 class TFLayoutLMv3ForSequenceClassification(
-    TFLayoutLMv3PreTrainedModel, TFSequenceClassificationLoss
+    TFLayoutLMv3PreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config: LayoutLMv3Config, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(LAYOUTLMV3_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFSequenceClassifierOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFSequenceClassifierOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -286,14 +304,16 @@ class TFLayoutLMv3ForSequenceClassification(
     LAYOUTLMV3_START_DOCSTRING,
 )
 class TFLayoutLMv3ForTokenClassification(
-    TFLayoutLMv3PreTrainedModel, TFTokenClassificationLoss
+    TFLayoutLMv3PreTrainedModel,
+    TFTokenClassificationLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config: LayoutLMv3Config, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(LAYOUTLMV3_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFTokenClassifierOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFTokenClassifierOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -325,14 +345,16 @@ class TFLayoutLMv3ForTokenClassification(
     LAYOUTLMV3_START_DOCSTRING,
 )
 class TFLayoutLMv3ForQuestionAnswering(
-    TFLayoutLMv3PreTrainedModel, TFQuestionAnsweringLoss
+    TFLayoutLMv3PreTrainedModel,
+    TFQuestionAnsweringLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config: LayoutLMv3Config, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(LAYOUTLMV3_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFQuestionAnsweringModelOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFQuestionAnsweringModelOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,

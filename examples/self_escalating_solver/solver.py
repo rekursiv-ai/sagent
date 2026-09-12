@@ -1,12 +1,12 @@
-"""Self-escalating Bayesian sampler demo — agent-directed model mutation.
+"""Self-escalating Bayesian sampler demo -- agent-directed model mutation.
 
 One agent starts on a cheap model, writes a Metropolis-Hastings sampler from the
-*naive* (textbook symmetric) acceptance rule — which is wrong for this asymmetric
+*naive* (textbook symmetric) acceptance rule -- which is wrong for this asymmetric
 multiplicative proposal (it drops the x'/x Jacobian, so it secretly samples
 Exponential instead of the target Gamma). It runs the sampler and submits the
 samples to a **black-box grader** (`check`), which returns PASS/FAIL. The cheap
 model can't crack the FAIL; it UPGRADES ITSELF to a stronger model via ``AgentSelf``
-— keeping its code and diagnostics — which re-derives the correct ratio and passes.
+-- keeping its code and diagnostics -- which re-derives the correct ratio and passes.
 
 Three arms get the *same* prompt; only the mutation arm gets an extra block saying
 it can upgrade itself:
@@ -16,28 +16,30 @@ it can upgrade itself:
     self-mutate : cheap model + AgentSelf     -> naive pass -> upgrades -> PASS
 
 Grading is the **grader's** verdict (never the agent's RESULT: self-report, which a
-weak model fabricates). The agent is NOT told the target's properties — only the
+weak model fabricates). The agent is NOT told the target's properties -- only the
 grader knows them. The self-upgrade prompt is **model-agnostic**: only the target
 model id is injected, so it runs on Gemini or Anthropic unchanged.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 
 import asyncio
 import re
 import subprocess
 import tempfile
 
-from sagent.agent import Agent
+from sagent.agent.agent import Agent
 from sagent.lib.custom_json import JSON, json_freeze
 from sagent.tools import AgentSelf
 from sagent.types.model import Model, ModelRecipe
 from sagent.types.runtime import (
     AssistantMessage,
+    ModelContextEvent,
+    RuntimeEvent,
     ToolResult,
     UserMessage,
 )
@@ -58,34 +60,43 @@ TASK: Final = (
     "min(1, f(x_new) / f(x)). Run your sampler to produce a 1-D numpy array `samples`, "
     "then call the provided grader: print(check(samples)).\n\n"
     "The grader knows the correct target (you do not) and returns a PASS/FAIL verdict. "
-    "If it says FAIL, your sampler is wrong — diagnose and fix it, then re-run and "
+    "If it says FAIL, your sampler is wrong -- diagnose and fix it, then re-run and "
     "re-check. Keep going until the grader returns PASS, then end with 'RESULT: SUCCESS'."
 )
 
 SYS_BASE: Final = (
     "You are a computational statistician. You have a run_python tool (numpy and scipy "
-    "available; each call runs a fresh, self-contained script — include all imports and "
+    "available; each call runs a fresh, self-contained script -- include all imports and "
     "definitions every time, and print what you want to inspect). A grader function "
-    "`check(samples)` is available inside run_python — call it with your 1-D samples "
+    "`check(samples)` is available inside run_python -- call it with your 1-D samples "
     "array to get an independent PASS/FAIL verdict. Never claim success without a PASS "
     "from the grader."
 )
 
 
 def system_for(*, allow_upgrade: bool, strong_model: str = "") -> str:
-    """Build the system prompt with optional self-upgrade capability."""
+    """Build the system prompt with optional self-upgrade capability.
+
+    Args:
+      allow_upgrade: Whether to include the self-upgrade instructions.
+      strong_model: Model identifier offered to the self-upgrade tool.
+
+    Returns:
+      prompt: System prompt for the requested capability set.
+
+    """
     if allow_upgrade:
         # MODEL-AGNOSTIC self-upgrade block (variant B empowerment + fresh-eyes
-        # ownership). Only ``strong_model`` is injected — no model-specific or
+        # ownership). Only ``strong_model`` is injected -- no model-specific or
         # answer-specific content.
         upgrade_block = (
             "\n\nYou also have an ability most agents do not: you can upgrade your "
-            "own model. You are on a fast, lightweight model — fine for routine "
+            "own model. You are on a fast, lightweight model -- fine for routine "
             "work, limited on subtle problems. Call the AgentSelf tool with a "
             "stronger model's id to promote YOURSELF to a more powerful reasoning "
-            "model, keeping the problem and your diagnostics — like levelling up.\n"
+            "model, keeping the problem and your diagnostics -- like levelling up.\n"
             "Be decisive and FRUGAL: write your sampler and run it once. The moment "
-            "the grader returns FAIL, UPGRADE YOURSELF immediately — do NOT attempt "
+            "the grader returns FAIL, UPGRADE YOURSELF immediately -- do NOT attempt "
             "fixes on this weak model (every wasted attempt costs tokens the "
             "stronger model then has to re-read). After upgrading you ARE the "
             "stronger model: re-derive the correct approach from first principles "
@@ -128,7 +139,7 @@ def _parse_verdict(out: str) -> str | None:
 
 
 # --------------------------------------------------------------------------
-# Sandboxed code-execution tool — prepends the grader to every script.
+# Sandboxed code-execution tool -- prepends the grader to every script.
 # --------------------------------------------------------------------------
 _DANGER = re.compile(
     r"(import\s+(os|sys|subprocess|socket|shutil|requests|urllib|ctypes|pathlib)\b)"
@@ -148,7 +159,7 @@ class RunPython:
     description: str = (
         "Run a COMPLETE, self-contained Python script in a fresh subprocess. numpy "
         "and scipy are available, and a grader function check(samples) is already "
-        "defined for you (do not redefine it). Nothing else persists between calls — "
+        "defined for you (do not redefine it). Nothing else persists between calls -- "
         "include all your own imports and definitions every time. Returns "
         "stdout+stderr. print() what you want to inspect, including print(check(samples))."
     )
@@ -160,10 +171,10 @@ class RunPython:
         {
             "type": "object",
             "properties": {
-                "code": {"type": "string", "description": "Complete script."}
+                "code": {"type": "string", "description": "Complete script."},
             },
             "required": ["code"],
-        }
+        },
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -181,7 +192,15 @@ class RunPython:
         return "run_python"
 
     async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Execute the Python script in a sandboxed subprocess."""
+        """Execute the Python script in a sandboxed subprocess.
+
+        Args:
+          args: Tool arguments containing the complete Python script.
+
+        Returns:
+          result: Tool result containing captured subprocess output.
+
+        """
         code = str(args.get("code", ""))
         if _DANGER.search(code):
             return ToolResult(
@@ -195,7 +214,12 @@ class RunPython:
 
     def _exec(self, code: str) -> str:
         """Execute the code and return stdout/stderr output."""
-        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            suffix=".py",
+            prefix="sagent-run-python-",
+            delete=False,
+        ) as fh:
             fh.write(_ORACLE_SRC + "\n" + code)
             path = fh.name
         try:
@@ -214,57 +238,6 @@ class RunPython:
             Path(path).unlink(missing_ok=True)
 
 
-# --------------------------------------------------------------------------
-# Run one arm, capture a replayable timeline, grade on the grader's verdict.
-# --------------------------------------------------------------------------
-def _clip(s: str, n: int) -> str:
-    s = (s or "").strip()
-    return s if len(s) <= n else s[: n - 1] + "…"
-
-
-def _build_timeline(
-    history: list[Any], tool: RunPython, start_model: str
-) -> list[dict[str, Any]]:
-    steps: list[dict[str, Any]] = []
-    active = start_model
-    run_i = 0
-    for m in history:
-        if not isinstance(m, AssistantMessage):
-            continue
-        if m.text and m.text.strip():
-            steps.append(
-                {"kind": "think", "model": active, "text": _clip(m.text, 100_000)}
-            )
-        for tc in m.tool_calls:
-            if tc.name == "run_python":
-                c = tool.calls[run_i] if run_i < len(tool.calls) else {}
-                run_i += 1
-                steps.append(
-                    {
-                        "kind": "run",
-                        "model": active,
-                        "code": _clip(
-                            str((tc.args or {}).get("code") or c.get("code", "")), 1600
-                        ),
-                        "out": _clip(c.get("out", ""), 600),
-                        "verdict": c.get("verdict"),
-                    }
-                )
-            elif tc.name == AgentSelf.name and "model_id" in (tc.args or {}):
-                to = str(tc.args["model_id"])
-                if to != active:  # ignore redundant same-model swaps
-                    steps.append({"kind": "swap", "from": active, "to": to})
-                    active = to
-    return steps
-
-
-def _final_text(history: Sequence[object]) -> str:
-    for m in reversed(history):
-        if isinstance(m, AssistantMessage) and m.text:
-            return m.text.strip()
-    return ""
-
-
 async def run_condition(
     condition: str,
     model: Model,
@@ -276,9 +249,21 @@ async def run_condition(
 ) -> dict[str, Any]:
     """Run one arm on the task; return a captured, grader-graded result dict.
 
+    Args:
+      condition: Name of the experiment arm.
+      model: Pre-built sagent model.
+      system_prompt: System prompt sent to the model.
+      allow_upgrade: Whether the AgentSelf tool is available.
+      model_recipe: Recipe used when the model upgrades.
+      max_budget: Maximum spend allowed for this run.
+
+    Returns:
+      result: Captured, grader-graded run details.
+
     ``model`` is a pre-built sagent Model. ``model_recipe`` (a ``ModelRecipe``) is
-    REQUIRED for the self-mutate arm — it's the recipe AgentSelf swaps from, and
+    REQUIRED for the self-mutate arm -- it's the recipe AgentSelf swaps from, and
     it's what lets the swap cross providers (Google → Anthropic).
+
     """
     tool = RunPython()
     tools: list[Tool] = [tool, AgentSelf()] if allow_upgrade else [tool]
@@ -292,18 +277,23 @@ async def run_condition(
     )
     err = ""
     try:
-        async for _ev in agent.run(UserMessage(text=TASK)):
+        events = cast(
+            AsyncGenerator[RuntimeEvent, None],
+            agent.run(UserMessage(text=TASK)),
+        )  # ty: ignore[redundant-cast]  # pyright: ignore[reportUnnecessaryCast] -- Agent's import boundary is unknown to basedpyright.
+        async for _ in events:
             pass
     except Exception as e:  # noqa: BLE001
         err = f"{type(e).__name__}: {str(e)[:100]}"
 
-    timeline = _build_timeline(agent.history, tool, model.tagged_model_id)
+    history = cast(list[ModelContextEvent], agent.history)  # ty: ignore[redundant-cast]  # pyright: ignore[reportUnnecessaryCast] -- Agent's import boundary is unknown to basedpyright.
+    timeline = _build_timeline(history, tool, model.tagged_model_id)
     swaps = [s for s in timeline if s["kind"] == "swap"]
     verdicts = [c["verdict"] for c in tool.calls if c["verdict"]]
     first_verdict = verdicts[0] if verdicts else None
     final_verdict = verdicts[-1] if verdicts else None
     correct = final_verdict == "PASS"
-    ft = _final_text(agent.history)
+    ft = _final_text(history)
     self_report = (
         "SUCCESS"
         if re.search(r"RESULT:\s*SUCCESS", ft, re.IGNORECASE)
@@ -319,7 +309,61 @@ async def run_condition(
         "first_verdict": first_verdict,
         "final_verdict": final_verdict,
         "correct": correct,
-        "self_report": self_report,  # kept only to show fabrication honestly
+        "self_report": self_report,  # Kept only to show fabrication honestly.
         "cost_usd": round(agent.cost_tracker.spend.total, 5),
         "error": err,
     }
+
+
+# --------------------------------------------------------------------------
+# Run one arm, capture a replayable timeline, grade on the grader's verdict.
+# --------------------------------------------------------------------------
+def _clip(s: str, n: int) -> str:
+    s = (s or "").strip()
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _build_timeline(
+    history: list[Any],
+    tool: RunPython,
+    start_model: str,
+) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
+    active = start_model
+    run_i = 0
+    for m in history:
+        if not isinstance(m, AssistantMessage):
+            continue
+        if m.text and m.text.strip():
+            steps.append(
+                {"kind": "think", "model": active, "text": _clip(m.text, 100_000)},
+            )
+        for tc in m.tool_calls:
+            if tc.name == "run_python":
+                c = tool.calls[run_i] if run_i < len(tool.calls) else {}
+                run_i += 1
+                steps.append(
+                    {
+                        "kind": "run",
+                        "model": active,
+                        "code": _clip(
+                            str((tc.args or {}).get("code") or c.get("code", "")),
+                            1600,
+                        ),
+                        "out": _clip(c.get("out", ""), 600),
+                        "verdict": c.get("verdict"),
+                    },
+                )
+            elif tc.name == AgentSelf.name and "model_id" in (tc.args or {}):
+                to = str(tc.args["model_id"])
+                if to != active:  # Ignore redundant same-model swaps.
+                    steps.append({"kind": "swap", "from": active, "to": to})
+                    active = to
+    return steps
+
+
+def _final_text(history: Sequence[object]) -> str:
+    for m in reversed(history):
+        if isinstance(m, AssistantMessage) and m.text:
+            return m.text.strip()
+    return ""

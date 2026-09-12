@@ -37,7 +37,10 @@ def decompose_bmm(match: Match, mat1: torch.fx.Node, mat2: torch.fx.Node) -> Non
     pass_dict=construct_pattern_matcher_pass("decompose_mm_pass"),
 )
 def decompose_addmm(
-    match: Match, mat1: torch.fx.Node, mat2: torch.fx.Node, mat3: torch.fx.Node
+    match: Match,
+    mat1: torch.fx.Node,
+    mat2: torch.fx.Node,
+    mat3: torch.fx.Node,
 ) -> None: ...
 @register_graph_pattern(
     CallFunction(aten.mm, Arg(), Arg()),

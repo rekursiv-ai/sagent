@@ -271,7 +271,7 @@ class Qwen3OmniMoeConfig(PretrainedConfig):
 class Qwen3OmniMoePreTrainedModel(Qwen2_5OmniPreTrainedModel): ...
 
 class Qwen3OmniMoePreTrainedModelForConditionalGeneration(
-    Qwen2_5OmniPreTrainedModelForConditionalGeneration
+    Qwen2_5OmniPreTrainedModelForConditionalGeneration,
 ):
     def get_llm_pos_ids_for_vision(
         self,
@@ -300,7 +300,10 @@ class Qwen3OmniMoeAudioAttention(Qwen2_5OmniAudioAttention):
 class Qwen3OmniMoeAudioEncoder(Qwen2_5OmniAudioEncoder):
     def __init__(self, config: Qwen3OmniMoeAudioEncoderConfig) -> None: ...
     def forward(
-        self, input_features, feature_lens=..., aftercnn_lens=...
+        self,
+        input_features,
+        feature_lens=...,
+        aftercnn_lens=...,
     ):  # -> BaseModelOutput:
         ...
 
@@ -309,7 +312,9 @@ class Qwen3OmniMoeVisionAttention(Qwen3VLMoeVisionAttention):
 
 class Qwen3OmniMoeVisionPatchMerger(nn.Module):
     def __init__(
-        self, config: Qwen3OmniMoeVisionEncoderConfig, use_postshuffle_norm=...
+        self,
+        config: Qwen3OmniMoeVisionEncoderConfig,
+        use_postshuffle_norm=...,
     ) -> None: ...
     def forward(self, hidden: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -344,7 +349,7 @@ class Qwen3OmniMoeThinkerCausalLMOutputWithPast(MoeCausalLMOutputWithPast):
     rope_deltas: torch.LongTensor | None = ...
 
 class Qwen3OmniMoeThinkerForConditionalGeneration(
-    Qwen2_5OmniThinkerForConditionalGeneration
+    Qwen2_5OmniThinkerForConditionalGeneration,
 ):
     _no_split_modules = ...
     _can_record_outputs = ...
@@ -565,12 +570,16 @@ class Qwen3OmniMoeCode2WavTransformerLayer(GradientCheckpointingLayer):
         cache_position: torch.LongTensor | None = ...,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class Qwen3OmniMoeCode2WavTransformerModel(Qwen3Model):
@@ -605,12 +614,16 @@ class Qwen3OmniMoeCode2Wav(Qwen3OmniMoePreTrainedModel):
     def forward(self, codes):  # -> Any:
         ...
     def chunked_decode(
-        self, codes, chunk_size=..., left_context_size=...
+        self,
+        codes,
+        chunk_size=...,
+        left_context_size=...,
     ):  # -> Tensor:
         ...
 
 class Qwen3OmniMoeForConditionalGeneration(
-    Qwen3OmniMoePreTrainedModel, GenerationMixin
+    Qwen3OmniMoePreTrainedModel,
+    GenerationMixin,
 ):
     config_class = Qwen3OmniMoeConfig
     def __init__(self, config: Qwen3OmniMoeConfig) -> None: ...
@@ -663,7 +676,10 @@ class Qwen3OmniMoeProcessor(Qwen2_5OmniProcessor, ProcessorMixin):
     ):  # -> BatchFeature:
         ...
     def apply_chat_template(
-        self, conversations, chat_template=..., **kwargs
+        self,
+        conversations,
+        chat_template=...,
+        **kwargs,
     ):  # -> str:
         ...
 

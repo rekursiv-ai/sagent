@@ -27,7 +27,12 @@ class ChameleonRMSNorm(nn.Module):
 class ChameleonRotaryEmbedding(nn.Module):
     inv_freq: torch.Tensor
     def __init__(
-        self, dim, max_position_embeddings=..., base=..., device=..., scaling_factor=...
+        self,
+        dim,
+        max_position_embeddings=...,
+        base=...,
+        device=...,
+        scaling_factor=...,
     ) -> None: ...
     @torch.no_grad()
     def forward(self, x, position_ids):  # -> tuple[Tensor, Tensor]:
@@ -44,7 +49,12 @@ class ChameleonDynamicNTKScalingRotaryEmbedding(ChameleonRotaryEmbedding):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 
@@ -73,7 +83,9 @@ def eager_attention_forward(
 
 class ChameleonAttention(nn.Module):
     def __init__(
-        self, config: ChameleonConfig, layer_idx: int | None = ...
+        self,
+        config: ChameleonConfig,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -102,7 +114,8 @@ class ChameleonDecoderLayer(GradientCheckpointingLayer):
         cache_position: torch.LongTensor | None = ...,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class ChameleonSwinDecoderLayer(GradientCheckpointingLayer):
@@ -119,13 +132,15 @@ class ChameleonSwinDecoderLayer(GradientCheckpointingLayer):
         cache_position: torch.LongTensor | None = ...,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class ChameleonVQVAEVectorQuantizer(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_state: torch.Tensor
+        self,
+        hidden_state: torch.Tensor,
     ):  # -> tuple[Any, Any | Tensor, Tensor]:
         ...
 
@@ -136,7 +151,11 @@ class ChameleonVQVAEEncoderConvDownsample(nn.Module):
 
 class ChameleonVQVAEEncoderResnetBlock(nn.Module):
     def __init__(
-        self, config, in_channels, out_channels=..., conv_shortcut=...
+        self,
+        config,
+        in_channels,
+        out_channels=...,
+        conv_shortcut=...,
     ) -> None: ...
     def forward(self, hidden_states):  # -> Any:
         ...

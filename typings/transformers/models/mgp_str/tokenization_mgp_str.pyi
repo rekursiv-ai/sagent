@@ -20,7 +20,9 @@ class MgpstrTokenizer(PreTrainedTokenizer):
     def get_vocab(self):  # -> dict[Any, Any]:
         ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
 
 __all__ = ["MgpstrTokenizer"]

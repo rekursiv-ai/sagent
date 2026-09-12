@@ -25,7 +25,9 @@ class LazyVariableTracker(VariableTracker):
     __repr__ = ...
     @classmethod
     def realize_all(
-        cls, value: Any, cache: dict[int, tuple[Any, Any]] | None = ...
+        cls,
+        value: Any,
+        cache: dict[int, tuple[Any, Any]] | None = ...,
     ) -> Any: ...
     def is_hashable(self) -> bool: ...
     def original_value(self) -> Any: ...
@@ -33,5 +35,7 @@ class LazyVariableTracker(VariableTracker):
 
 class LazySymNodeFormatString:
     def __init__(
-        self, sym_node_variable: SymNodeVariable, fmt_spec_var: VariableTracker
+        self,
+        sym_node_variable: SymNodeVariable,
+        fmt_spec_var: VariableTracker,
     ) -> None: ...

@@ -6,6 +6,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import cast, override
 
+import inspect
+
 from sagent.compaction import scrunch, summary
 from sagent.compaction.history import (
     append_to_first_user,
@@ -29,8 +31,12 @@ def test_estimate_entry_tokens_shared_across_compaction_modules() -> None:
     # ``estimate_entry_tokens`` is the canonical token estimator; ``summary``
     # and ``scrunch`` must reuse it, not keep private copies that silently
     # drift from one another (one rule everywhere).
-    assert summary.estimate_entry_tokens is estimate_entry_tokens
-    assert scrunch.estimate_entry_tokens is estimate_entry_tokens
+    for module in (summary, scrunch):
+        source = inspect.getsource(module)
+        assert "def estimate_entry_tokens" not in source
+        assert "import estimate_entry_tokens" in source or (
+            "    estimate_entry_tokens,\n" in source
+        )
 
 
 def test_estimate_entry_tokens_delegates_to_wire_walker() -> None:
@@ -106,8 +112,8 @@ def test_estimate_entry_tokens_tokenizes_real_text_not_a_sample_probe() -> None:
     """
     model = _NonLinearModel()
     entries: list[ModelContextEvent] = [
-        UserMessage(text="abcde"),  # 5 distinct -> 5 tokens
-        AssistantMessage(text="wxyz"),  # 4 distinct -> 4 tokens
+        UserMessage(text="abcde"),  # 5 distinct -> 5 tokens.
+        AssistantMessage(text="wxyz"),  # 4 distinct -> 4 tokens.
     ]
     got = estimate_entry_tokens(model, entries)
     # Real per-entry tokenization: 5 + 4 = 9. The old sample-probe approach
@@ -144,7 +150,7 @@ def test_estimate_entry_tokens_counts_every_wire_surface() -> None:
     ]
     via_history = estimate_entry_tokens(model, entries)
     via_request = model.approx_request_tokens(
-        ModelRequest(messages=entries, system=None, tools=None)
+        ModelRequest(messages=entries, system=None, tools=None),
     )
     assert via_history == via_request
 

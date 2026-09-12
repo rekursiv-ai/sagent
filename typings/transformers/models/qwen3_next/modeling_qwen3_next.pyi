@@ -55,7 +55,9 @@ class Qwen3NextDynamicCache:
         ...
     def get_seq_length(self, layer_idx: int | None = ...) -> int: ...
     def get_mask_sizes(
-        self, cache_position: torch.Tensor, layer_idx: int
+        self,
+        cache_position: torch.Tensor,
+        layer_idx: int,
     ) -> tuple[int, int]: ...
     @property
     def has_previous_state(self):  # -> bool:
@@ -78,7 +80,12 @@ class Qwen3NextRMSNorm(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Tensor, Tensor]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -112,7 +119,11 @@ def apply_mask_to_padding_states(hidden_states, attention_mask): ...
 is_fast_path_available = ...
 
 def torch_causal_conv1d_update(
-    hidden_states, conv_state, weight, bias=..., activation=...
+    hidden_states,
+    conv_state,
+    weight,
+    bias=...,
+    activation=...,
 ):  # -> Tensor:
     ...
 def l2norm(x: torch.FloatTensor, dim: int = ..., eps: float = ...):  # -> Tensor:
@@ -144,7 +155,9 @@ def torch_recurrent_gated_delta_rule(
 class Qwen3NextGatedDeltaNet(nn.Module):
     def __init__(self, config: Qwen3NextConfig, layer_idx: int) -> None: ...
     def fix_query_key_value_ordering(
-        self, mixed_qkvz, mixed_ba
+        self,
+        mixed_qkvz,
+        mixed_ba,
     ):  # -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         ...
     def forward(
@@ -239,14 +252,17 @@ class Qwen3NextForCausalLM(Qwen3NextPreTrainedModel, GenerationMixin):
     ) -> MoeCausalLMOutputWithPast: ...
 
 class Qwen3NextForSequenceClassification(
-    GenericForSequenceClassification, Qwen3NextPreTrainedModel
+    GenericForSequenceClassification,
+    Qwen3NextPreTrainedModel,
 ): ...
 class Qwen3NextForTokenClassification(
-    GenericForTokenClassification, Qwen3NextPreTrainedModel
+    GenericForTokenClassification,
+    Qwen3NextPreTrainedModel,
 ): ...
 
 class Qwen3NextForQuestionAnswering(
-    GenericForQuestionAnswering, Qwen3NextPreTrainedModel
+    GenericForQuestionAnswering,
+    Qwen3NextPreTrainedModel,
 ):
     base_model_prefix = ...
 

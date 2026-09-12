@@ -49,7 +49,10 @@ def eager_attention_forward(
 
 class OPTAttention(nn.Module):
     def __init__(
-        self, config: OPTConfig, layer_idx: int | None = ..., **kwargs
+        self,
+        config: OPTConfig,
+        layer_idx: int | None = ...,
+        **kwargs,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -78,7 +81,8 @@ class OPTDecoderLayer(GradientCheckpointingLayer):
         cache_position: torch.Tensor | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring

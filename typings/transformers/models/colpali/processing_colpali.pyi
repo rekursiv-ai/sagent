@@ -12,7 +12,11 @@ IMAGE_TOKEN = ...
 EXTRA_TOKENS = ...
 
 def build_string_from_input(
-    prompt, bos_token, image_seq_len, image_token, num_images
+    prompt,
+    bos_token,
+    image_seq_len,
+    image_token,
+    num_images,
 ):  # -> str:
     ...
 

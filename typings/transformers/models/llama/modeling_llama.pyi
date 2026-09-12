@@ -40,7 +40,12 @@ class LlamaRotaryEmbedding(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 
@@ -144,14 +149,16 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
     ) -> CausalLMOutputWithPast: ...
 
 class LlamaForSequenceClassification(
-    GenericForSequenceClassification, LlamaPreTrainedModel
+    GenericForSequenceClassification,
+    LlamaPreTrainedModel,
 ): ...
 
 class LlamaForQuestionAnswering(GenericForQuestionAnswering, LlamaPreTrainedModel):
     base_model_prefix = ...
 
 class LlamaForTokenClassification(
-    GenericForTokenClassification, LlamaPreTrainedModel
+    GenericForTokenClassification,
+    LlamaPreTrainedModel,
 ): ...
 
 __all__ = [

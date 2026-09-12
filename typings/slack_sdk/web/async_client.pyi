@@ -111,7 +111,10 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_apps_config_lookup(
-        self, *, app_ids: str | Sequence[str], **kwargs: Any
+        self,
+        *,
+        app_ids: str | Sequence[str],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_apps_config_set(
         self,
@@ -155,10 +158,19 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_linkObjects(
-        self, *, channel: str, record_id: str, salesforce_org_id: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        record_id: str,
+        salesforce_org_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_unlinkObjects(
-        self, *, channel: str, new_name: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        new_name: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_barriers_create(
         self,
@@ -169,7 +181,10 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_barriers_delete(
-        self, *, barrier_id: str, **kwargs: Any
+        self,
+        *,
+        barrier_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_barriers_update(
         self,
@@ -181,7 +196,11 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_barriers_list(
-        self, *, cursor: str | None = ..., limit: int | None = ..., **kwargs: Any
+        self,
+        *,
+        cursor: str | None = ...,
+        limit: int | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_create(
         self,
@@ -194,19 +213,36 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_delete(
-        self, *, channel_id: str, **kwargs: Any
+        self,
+        *,
+        channel_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_invite(
-        self, *, channel_id: str, user_ids: str | Sequence[str], **kwargs: Any
+        self,
+        *,
+        channel_id: str,
+        user_ids: str | Sequence[str],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_archive(
-        self, *, channel_id: str, **kwargs: Any
+        self,
+        *,
+        channel_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_unarchive(
-        self, *, channel_id: str, **kwargs: Any
+        self,
+        *,
+        channel_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_rename(
-        self, *, channel_id: str, name: str, **kwargs: Any
+        self,
+        *,
+        channel_id: str,
+        name: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_search(
         self,
@@ -221,16 +257,29 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_convertToPrivate(
-        self, *, channel_id: str, **kwargs: Any
+        self,
+        *,
+        channel_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_convertToPublic(
-        self, *, channel_id: str, **kwargs: Any
+        self,
+        *,
+        channel_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_setConversationPrefs(
-        self, *, channel_id: str, prefs: str | dict[str, str], **kwargs: Any
+        self,
+        *,
+        channel_id: str,
+        prefs: str | dict[str, str],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_getConversationPrefs(
-        self, *, channel_id: str, **kwargs: Any
+        self,
+        *,
+        channel_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_disconnectShared(
         self,
@@ -267,10 +316,19 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_restrictAccess_listGroups(
-        self, *, channel_id: str, team_id: str | None = ..., **kwargs: Any
+        self,
+        *,
+        channel_id: str,
+        team_id: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_restrictAccess_removeGroup(
-        self, *, channel_id: str, group_id: str, team_id: str, **kwargs: Any
+        self,
+        *,
+        channel_id: str,
+        group_id: str,
+        team_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_setTeams(
         self,
@@ -290,37 +348,76 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_getCustomRetention(
-        self, *, channel_id: str, **kwargs: Any
+        self,
+        *,
+        channel_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_removeCustomRetention(
-        self, *, channel_id: str, **kwargs: Any
+        self,
+        *,
+        channel_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_setCustomRetention(
-        self, *, channel_id: str, duration_days: int, **kwargs: Any
+        self,
+        *,
+        channel_id: str,
+        duration_days: int,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_bulkArchive(
-        self, *, channel_ids: Sequence[str] | str, **kwargs: Any
+        self,
+        *,
+        channel_ids: Sequence[str] | str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_bulkDelete(
-        self, *, channel_ids: Sequence[str] | str, **kwargs: Any
+        self,
+        *,
+        channel_ids: Sequence[str] | str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_conversations_bulkMove(
-        self, *, channel_ids: Sequence[str] | str, target_team_id: str, **kwargs: Any
+        self,
+        *,
+        channel_ids: Sequence[str] | str,
+        target_team_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_emoji_add(
-        self, *, name: str, url: str, **kwargs: Any
+        self,
+        *,
+        name: str,
+        url: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_emoji_addAlias(
-        self, *, alias_for: str, name: str, **kwargs: Any
+        self,
+        *,
+        alias_for: str,
+        name: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_emoji_list(
-        self, *, cursor: str | None = ..., limit: int | None = ..., **kwargs: Any
+        self,
+        *,
+        cursor: str | None = ...,
+        limit: int | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_emoji_remove(
-        self, *, name: str, **kwargs: Any
+        self,
+        *,
+        name: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_emoji_rename(
-        self, *, name: str, new_name: str, **kwargs: Any
+        self,
+        *,
+        name: str,
+        new_name: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_functions_list(
         self,
@@ -332,7 +429,10 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_functions_permissions_lookup(
-        self, *, function_ids: str | Sequence[str], **kwargs: Any
+        self,
+        *,
+        function_ids: str | Sequence[str],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_functions_permissions_set(
         self,
@@ -385,7 +485,11 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_users_session_invalidate(
-        self, *, session_id: str, team_id: str, **kwargs: Any
+        self,
+        *,
+        session_id: str,
+        team_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_users_session_list(
         self,
@@ -397,10 +501,17 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_teams_settings_setDefaultChannels(
-        self, *, team_id: str, channel_ids: str | Sequence[str], **kwargs: Any
+        self,
+        *,
+        team_id: str,
+        channel_ids: str | Sequence[str],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_users_session_getSettings(
-        self, *, user_ids: str | Sequence[str], **kwargs: Any
+        self,
+        *,
+        user_ids: str | Sequence[str],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_users_session_setSettings(
         self,
@@ -411,7 +522,10 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_users_session_clearSettings(
-        self, *, user_ids: str | Sequence[str], **kwargs: Any
+        self,
+        *,
+        user_ids: str | Sequence[str],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_users_unsupportedVersions_export(
         self,
@@ -421,7 +535,11 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_inviteRequests_approve(
-        self, *, invite_request_id: str, team_id: str | None = ..., **kwargs: Any
+        self,
+        *,
+        invite_request_id: str,
+        team_id: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_inviteRequests_approved_list(
         self,
@@ -440,7 +558,11 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_inviteRequests_deny(
-        self, *, invite_request_id: str, team_id: str | None = ..., **kwargs: Any
+        self,
+        *,
+        invite_request_id: str,
+        team_id: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_inviteRequests_list(self, **kwargs: Any) -> AsyncSlackResponse: ...
     async def admin_teams_admins_list(
@@ -461,7 +583,11 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_teams_list(
-        self, *, cursor: str | None = ..., limit: int | None = ..., **kwargs: Any
+        self,
+        *,
+        cursor: str | None = ...,
+        limit: int | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_teams_owners_list(
         self,
@@ -472,19 +598,38 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_teams_settings_info(
-        self, *, team_id: str, **kwargs: Any
+        self,
+        *,
+        team_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_teams_settings_setDescription(
-        self, *, team_id: str, description: str, **kwargs: Any
+        self,
+        *,
+        team_id: str,
+        description: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_teams_settings_setDiscoverability(
-        self, *, team_id: str, discoverability: str, **kwargs: Any
+        self,
+        *,
+        team_id: str,
+        discoverability: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_teams_settings_setIcon(
-        self, *, team_id: str, image_url: str, **kwargs: Any
+        self,
+        *,
+        team_id: str,
+        image_url: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_teams_settings_setName(
-        self, *, team_id: str, name: str, **kwargs: Any
+        self,
+        *,
+        team_id: str,
+        name: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_usergroups_addChannels(
         self,
@@ -511,7 +656,11 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_usergroups_removeChannels(
-        self, *, usergroup_id: str, channel_ids: str | Sequence[str], **kwargs: Any
+        self,
+        *,
+        usergroup_id: str,
+        channel_ids: str | Sequence[str],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_users_assign(
         self,
@@ -549,10 +698,18 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_users_remove(
-        self, *, team_id: str, user_id: str, **kwargs: Any
+        self,
+        *,
+        team_id: str,
+        user_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_users_setAdmin(
-        self, *, team_id: str, user_id: str, **kwargs: Any
+        self,
+        *,
+        team_id: str,
+        user_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_users_setExpiration(
         self,
@@ -563,10 +720,18 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_users_setOwner(
-        self, *, team_id: str, user_id: str, **kwargs: Any
+        self,
+        *,
+        team_id: str,
+        user_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_users_setRegular(
-        self, *, team_id: str, user_id: str, **kwargs: Any
+        self,
+        *,
+        team_id: str,
+        user_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_workflows_search(
         self,
@@ -605,13 +770,22 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def admin_workflows_unpublish(
-        self, *, workflow_ids: str | Sequence[str], **kwargs: Any
+        self,
+        *,
+        workflow_ids: str | Sequence[str],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def api_test(
-        self, *, error: str | None = ..., **kwargs: Any
+        self,
+        *,
+        error: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def apps_connections_open(
-        self, *, app_token: str, **kwargs: Any
+        self,
+        *,
+        app_token: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def apps_event_authorizations_list(
         self,
@@ -622,28 +796,56 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def apps_uninstall(
-        self, *, client_id: str, client_secret: str, **kwargs: Any
+        self,
+        *,
+        client_id: str,
+        client_secret: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def apps_manifest_create(
-        self, *, manifest: str | dict[str, Any], **kwargs: Any
+        self,
+        *,
+        manifest: str | dict[str, Any],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def apps_manifest_delete(
-        self, *, app_id: str, **kwargs: Any
+        self,
+        *,
+        app_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def apps_manifest_export(
-        self, *, app_id: str, **kwargs: Any
+        self,
+        *,
+        app_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def apps_manifest_update(
-        self, *, app_id: str, manifest: str | dict[str, Any], **kwargs: Any
+        self,
+        *,
+        app_id: str,
+        manifest: str | dict[str, Any],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def apps_manifest_validate(
-        self, *, manifest: str | dict[str, Any], app_id: str | None = ..., **kwargs: Any
+        self,
+        *,
+        manifest: str | dict[str, Any],
+        app_id: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def apps_user_connection_update(
-        self, *, user_id: str, status: str, **kwargs: Any
+        self,
+        *,
+        user_id: str,
+        status: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def tooling_tokens_rotate(
-        self, *, refresh_token: str, **kwargs: Any
+        self,
+        *,
+        refresh_token: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def assistant_threads_setStatus(
         self,
@@ -655,7 +857,12 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def assistant_threads_setTitle(
-        self, *, channel_id: str, thread_ts: str, title: str, **kwargs: Any
+        self,
+        *,
+        channel_id: str,
+        thread_ts: str,
+        title: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def assistant_threads_setSuggestedPrompts(
         self,
@@ -667,7 +874,10 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def auth_revoke(
-        self, *, test: bool | None = ..., **kwargs: Any
+        self,
+        *,
+        test: bool | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def auth_test(self, **kwargs: Any) -> AsyncSlackResponse: ...
     async def auth_teams_list(
@@ -700,13 +910,24 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def bookmarks_list(
-        self, *, channel_id: str, **kwargs: Any
+        self,
+        *,
+        channel_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def bookmarks_remove(
-        self, *, bookmark_id: str, channel_id: str, **kwargs: Any
+        self,
+        *,
+        bookmark_id: str,
+        channel_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def bots_info(
-        self, *, bot: str | None = ..., team_id: str | None = ..., **kwargs: Any
+        self,
+        *,
+        bot: str | None = ...,
+        team_id: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def calls_add(
         self,
@@ -722,14 +943,26 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def calls_end(
-        self, *, id: str, duration: int | None = ..., **kwargs: Any
+        self,
+        *,
+        id: str,
+        duration: int | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def calls_info(self, *, id: str, **kwargs: Any) -> AsyncSlackResponse: ...
     async def calls_participants_add(
-        self, *, id: str, users: str | Sequence[dict[str, str]], **kwargs: Any
+        self,
+        *,
+        id: str,
+        users: str | Sequence[dict[str, str]],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def calls_participants_remove(
-        self, *, id: str, users: str | Sequence[dict[str, str]], **kwargs: Any
+        self,
+        *,
+        id: str,
+        users: str | Sequence[dict[str, str]],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def calls_update(
         self,
@@ -748,10 +981,17 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def canvases_edit(
-        self, *, canvas_id: str, changes: Sequence[dict[str, Any]], **kwargs: Any
+        self,
+        *,
+        canvas_id: str,
+        changes: Sequence[dict[str, Any]],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def canvases_delete(
-        self, *, canvas_id: str, **kwargs: Any
+        self,
+        *,
+        canvas_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def canvases_access_set(
         self,
@@ -771,50 +1011,103 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def canvases_sections_lookup(
-        self, *, canvas_id: str, criteria: dict[str, Any], **kwargs: Any
+        self,
+        *,
+        canvas_id: str,
+        criteria: dict[str, Any],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def channels_archive(
-        self, *, channel: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def channels_create(
-        self, *, name: str, **kwargs: Any
+        self,
+        *,
+        name: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def channels_history(
-        self, *, channel: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def channels_info(
-        self, *, channel: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def channels_invite(
-        self, *, channel: str, user: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        user: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def channels_join(
-        self, *, name: str, **kwargs: Any
+        self,
+        *,
+        name: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def channels_kick(
-        self, *, channel: str, user: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        user: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def channels_leave(
-        self, *, channel: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def channels_list(self, **kwargs: Any) -> AsyncSlackResponse: ...
     async def channels_mark(
-        self, *, channel: str, ts: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        ts: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def channels_rename(
-        self, *, channel: str, name: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        name: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def channels_replies(
-        self, *, channel: str, thread_ts: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        thread_ts: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def channels_setPurpose(
-        self, *, channel: str, purpose: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        purpose: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def channels_setTopic(
-        self, *, channel: str, topic: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        topic: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def channels_unarchive(
-        self, *, channel: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def chat_appendStream(
         self,
@@ -826,7 +1119,12 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def chat_delete(
-        self, *, channel: str, ts: str, as_user: bool | None = ..., **kwargs: Any
+        self,
+        *,
+        channel: str,
+        ts: str,
+        as_user: bool | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def chat_deleteScheduledMessage(
         self,
@@ -837,10 +1135,18 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def chat_getPermalink(
-        self, *, channel: str, message_ts: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        message_ts: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def chat_meMessage(
-        self, *, channel: str, text: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        text: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def chat_postEphemeral(
         self,
@@ -991,13 +1297,23 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def conversations_approveSharedInvite(
-        self, *, invite_id: str, target_team: str | None = ..., **kwargs: Any
+        self,
+        *,
+        invite_id: str,
+        target_team: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def conversations_archive(
-        self, *, channel: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def conversations_close(
-        self, *, channel: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def conversations_create(
         self,
@@ -1008,10 +1324,19 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def conversations_declineSharedInvite(
-        self, *, invite_id: str, target_team: str | None = ..., **kwargs: Any
+        self,
+        *,
+        invite_id: str,
+        target_team: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def conversations_externalInvitePermissions_set(
-        self, *, action: str, channel: str, target_team: str, **kwargs: Any
+        self,
+        *,
+        action: str,
+        channel: str,
+        target_team: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def conversations_history(
         self,
@@ -1050,13 +1375,23 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def conversations_join(
-        self, *, channel: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def conversations_kick(
-        self, *, channel: str, user: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        user: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def conversations_leave(
-        self, *, channel: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def conversations_list(
         self,
@@ -1077,7 +1412,11 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def conversations_mark(
-        self, *, channel: str, ts: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        ts: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def conversations_members(
         self,
@@ -1096,7 +1435,11 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def conversations_rename(
-        self, *, channel: str, name: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        name: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def conversations_replies(
         self,
@@ -1121,7 +1464,11 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def conversations_requestSharedInvite_deny(
-        self, *, invite_id: str, message: str | None = ..., **kwargs: Any
+        self,
+        *,
+        invite_id: str,
+        message: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def conversations_requestSharedInvite_list(
         self,
@@ -1136,33 +1483,64 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def conversations_setPurpose(
-        self, *, channel: str, purpose: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        purpose: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def conversations_setTopic(
-        self, *, channel: str, topic: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        topic: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def conversations_unarchive(
-        self, *, channel: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def conversations_canvases_create(
-        self, *, channel_id: str, document_content: dict[str, str], **kwargs: Any
+        self,
+        *,
+        channel_id: str,
+        document_content: dict[str, str],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def dialog_open(
-        self, *, dialog: dict[str, Any], trigger_id: str, **kwargs: Any
+        self,
+        *,
+        dialog: dict[str, Any],
+        trigger_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def dnd_endDnd(self, **kwargs: Any) -> AsyncSlackResponse: ...
     async def dnd_endSnooze(self, **kwargs: Any) -> AsyncSlackResponse: ...
     async def dnd_info(
-        self, *, team_id: str | None = ..., user: str | None = ..., **kwargs: Any
+        self,
+        *,
+        team_id: str | None = ...,
+        user: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def dnd_setSnooze(
-        self, *, num_minutes: int | str, **kwargs: Any
+        self,
+        *,
+        num_minutes: int | str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def dnd_teamInfo(
-        self, users: str | Sequence[str], team_id: str | None = ..., **kwargs: Any
+        self,
+        users: str | Sequence[str],
+        team_id: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def emoji_list(
-        self, include_categories: bool | None = ..., **kwargs: Any
+        self,
+        include_categories: bool | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def entity_presentDetails(
         self,
@@ -1174,7 +1552,11 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def files_comments_delete(
-        self, *, file: str, id: str, **kwargs: Any
+        self,
+        *,
+        file: str,
+        id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def files_delete(self, *, file: str, **kwargs: Any) -> AsyncSlackResponse: ...
     async def files_info(
@@ -1202,7 +1584,11 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def files_remote_info(
-        self, *, external_id: str | None = ..., file: str | None = ..., **kwargs: Any
+        self,
+        *,
+        external_id: str | None = ...,
+        file: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def files_remote_list(
         self,
@@ -1238,7 +1624,11 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def files_remote_remove(
-        self, *, external_id: str | None = ..., file: str | None = ..., **kwargs: Any
+        self,
+        *,
+        external_id: str | None = ...,
+        file: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def files_remote_share(
         self,
@@ -1249,10 +1639,16 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def files_revokePublicURL(
-        self, *, file: str, **kwargs: Any
+        self,
+        *,
+        file: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def files_sharedPublicURL(
-        self, *, file: str, **kwargs: Any
+        self,
+        *,
+        file: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def files_upload(
         self,
@@ -1304,68 +1700,139 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def functions_completeSuccess(
-        self, *, function_execution_id: str, outputs: dict[str, Any], **kwargs: Any
+        self,
+        *,
+        function_execution_id: str,
+        outputs: dict[str, Any],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def functions_completeError(
-        self, *, function_execution_id: str, error: str, **kwargs: Any
+        self,
+        *,
+        function_execution_id: str,
+        error: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def groups_archive(
-        self, *, channel: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def groups_create(
-        self, *, name: str, **kwargs: Any
+        self,
+        *,
+        name: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def groups_createChild(
-        self, *, channel: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def groups_history(
-        self, *, channel: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def groups_info(
-        self, *, channel: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def groups_invite(
-        self, *, channel: str, user: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        user: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def groups_kick(
-        self, *, channel: str, user: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        user: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def groups_leave(
-        self, *, channel: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def groups_list(self, **kwargs: Any) -> AsyncSlackResponse: ...
     async def groups_mark(
-        self, *, channel: str, ts: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        ts: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def groups_open(
-        self, *, channel: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def groups_rename(
-        self, *, channel: str, name: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        name: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def groups_replies(
-        self, *, channel: str, thread_ts: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        thread_ts: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def groups_setPurpose(
-        self, *, channel: str, purpose: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        purpose: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def groups_setTopic(
-        self, *, channel: str, topic: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        topic: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def groups_unarchive(
-        self, *, channel: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def im_close(self, *, channel: str, **kwargs: Any) -> AsyncSlackResponse: ...
     async def im_history(
-        self, *, channel: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def im_list(self, **kwargs: Any) -> AsyncSlackResponse: ...
     async def im_mark(
-        self, *, channel: str, ts: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        ts: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def im_open(self, *, user: str, **kwargs: Any) -> AsyncSlackResponse: ...
     async def im_replies(
-        self, *, channel: str, thread_ts: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        thread_ts: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def migration_exchange(
         self,
@@ -1376,20 +1843,37 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def mpim_close(
-        self, *, channel: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def mpim_history(
-        self, *, channel: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def mpim_list(self, **kwargs: Any) -> AsyncSlackResponse: ...
     async def mpim_mark(
-        self, *, channel: str, ts: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        ts: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def mpim_open(
-        self, *, users: str | Sequence[str], **kwargs: Any
+        self,
+        *,
+        users: str | Sequence[str],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def mpim_replies(
-        self, *, channel: str, thread_ts: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        thread_ts: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def oauth_v2_access(
         self,
@@ -1412,7 +1896,12 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def oauth_v2_exchange(
-        self, *, token: str, client_id: str, client_secret: str, **kwargs: Any
+        self,
+        *,
+        token: str,
+        client_id: str,
+        client_secret: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def openid_connect_token(
         self,
@@ -1426,14 +1915,27 @@ class AsyncWebClient(AsyncBaseClient):
     ) -> AsyncSlackResponse: ...
     async def openid_connect_userInfo(self, **kwargs: Any) -> AsyncSlackResponse: ...
     async def pins_add(
-        self, *, channel: str, timestamp: str | None = ..., **kwargs: Any
+        self,
+        *,
+        channel: str,
+        timestamp: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def pins_list(self, *, channel: str, **kwargs: Any) -> AsyncSlackResponse: ...
     async def pins_remove(
-        self, *, channel: str, timestamp: str | None = ..., **kwargs: Any
+        self,
+        *,
+        channel: str,
+        timestamp: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def reactions_add(
-        self, *, channel: str, name: str, timestamp: str, **kwargs: Any
+        self,
+        *,
+        channel: str,
+        name: str,
+        timestamp: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def reactions_get(
         self,
@@ -1478,16 +1980,31 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def reminders_complete(
-        self, *, reminder: str, team_id: str | None = ..., **kwargs: Any
+        self,
+        *,
+        reminder: str,
+        team_id: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def reminders_delete(
-        self, *, reminder: str, team_id: str | None = ..., **kwargs: Any
+        self,
+        *,
+        reminder: str,
+        team_id: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def reminders_info(
-        self, *, reminder: str, team_id: str | None = ..., **kwargs: Any
+        self,
+        *,
+        reminder: str,
+        team_id: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def reminders_list(
-        self, *, team_id: str | None = ..., **kwargs: Any
+        self,
+        *,
+        team_id: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def rtm_connect(
         self,
@@ -1574,10 +2091,18 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def slackLists_download_get(
-        self, *, list_id: str, job_id: str, **kwargs: Any
+        self,
+        *,
+        list_id: str,
+        job_id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def slackLists_download_start(
-        self, *, list_id: str, include_archived: bool | None = ..., **kwargs: Any
+        self,
+        *,
+        list_id: str,
+        include_archived: bool | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def slackLists_items_create(
         self,
@@ -1589,10 +2114,18 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def slackLists_items_delete(
-        self, *, list_id: str, id: str, **kwargs: Any
+        self,
+        *,
+        list_id: str,
+        id: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def slackLists_items_deleteMultiple(
-        self, *, list_id: str, ids: list[str], **kwargs: Any
+        self,
+        *,
+        list_id: str,
+        ids: list[str],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def slackLists_items_info(
         self,
@@ -1612,7 +2145,11 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def slackLists_items_update(
-        self, *, list_id: str, cells: list[dict[str, Any]], **kwargs: Any
+        self,
+        *,
+        list_id: str,
+        cells: list[dict[str, Any]],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def slackLists_update(
         self,
@@ -1663,11 +2200,18 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def team_billableInfo(
-        self, *, team_id: str | None = ..., user: str | None = ..., **kwargs: Any
+        self,
+        *,
+        team_id: str | None = ...,
+        user: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def team_billing_info(self, **kwargs: Any) -> AsyncSlackResponse: ...
     async def team_externalTeams_disconnect(
-        self, *, target_team: str, **kwargs: Any
+        self,
+        *,
+        target_team: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def team_externalTeams_list(
         self,
@@ -1682,7 +2226,11 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def team_info(
-        self, *, team: str | None = ..., domain: str | None = ..., **kwargs: Any
+        self,
+        *,
+        team: str | None = ...,
+        domain: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def team_integrationLogs(
         self,
@@ -1697,7 +2245,10 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def team_profile_get(
-        self, *, visibility: str | None = ..., **kwargs: Any
+        self,
+        *,
+        visibility: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def team_preferences_list(self, **kwargs: Any) -> AsyncSlackResponse: ...
     async def usergroups_create(
@@ -1778,11 +2329,18 @@ class AsyncWebClient(AsyncBaseClient):
     ) -> AsyncSlackResponse: ...
     async def users_deletePhoto(self, **kwargs: Any) -> AsyncSlackResponse: ...
     async def users_getPresence(
-        self, *, user: str, **kwargs: Any
+        self,
+        *,
+        user: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def users_identity(self, **kwargs: Any) -> AsyncSlackResponse: ...
     async def users_info(
-        self, *, user: str, include_locale: bool | None = ..., **kwargs: Any
+        self,
+        *,
+        user: str,
+        include_locale: bool | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def users_list(
         self,
@@ -1794,7 +2352,10 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def users_lookupByEmail(
-        self, *, email: str, **kwargs: Any
+        self,
+        *,
+        email: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def users_setPhoto(
         self,
@@ -1806,10 +2367,15 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def users_setPresence(
-        self, *, presence: str, **kwargs: Any
+        self,
+        *,
+        presence: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def users_discoverableContacts_lookup(
-        self, email: str, **kwargs: Any
+        self,
+        email: str,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def users_profile_get(
         self,
@@ -1853,19 +2419,39 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def views_publish(
-        self, *, user_id: str, view: dict | View, hash: str | None = ..., **kwargs: Any
+        self,
+        *,
+        user_id: str,
+        view: dict | View,
+        hash: str | None = ...,
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def workflows_featured_add(
-        self, *, channel_id: str, trigger_ids: str | Sequence[str], **kwargs: Any
+        self,
+        *,
+        channel_id: str,
+        trigger_ids: str | Sequence[str],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def workflows_featured_list(
-        self, *, channel_ids: str | Sequence[str], **kwargs: Any
+        self,
+        *,
+        channel_ids: str | Sequence[str],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def workflows_featured_remove(
-        self, *, channel_id: str, trigger_ids: str | Sequence[str], **kwargs: Any
+        self,
+        *,
+        channel_id: str,
+        trigger_ids: str | Sequence[str],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def workflows_featured_set(
-        self, *, channel_id: str, trigger_ids: str | Sequence[str], **kwargs: Any
+        self,
+        *,
+        channel_id: str,
+        trigger_ids: str | Sequence[str],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def workflows_stepCompleted(
         self,
@@ -1875,7 +2461,11 @@ class AsyncWebClient(AsyncBaseClient):
         **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def workflows_stepFailed(
-        self, *, workflow_step_execute_id: str, error: dict[str, str], **kwargs: Any
+        self,
+        *,
+        workflow_step_execute_id: str,
+        error: dict[str, str],
+        **kwargs: Any,
     ) -> AsyncSlackResponse: ...
     async def workflows_updateStep(
         self,

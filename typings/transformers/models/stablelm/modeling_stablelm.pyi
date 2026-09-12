@@ -32,7 +32,12 @@ class StableLmRotaryEmbedding(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 
@@ -108,12 +113,16 @@ class StableLmDecoderLayer(GradientCheckpointingLayer):
         cache_position: torch.LongTensor | None = ...,
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring
@@ -167,10 +176,12 @@ class StableLmForCausalLM(StableLmPreTrainedModel, GenerationMixin):
     ) -> CausalLMOutputWithPast: ...
 
 class StableLmForSequenceClassification(
-    GenericForSequenceClassification, StableLmPreTrainedModel
+    GenericForSequenceClassification,
+    StableLmPreTrainedModel,
 ): ...
 class StableLmForTokenClassification(
-    GenericForTokenClassification, StableLmPreTrainedModel
+    GenericForTokenClassification,
+    StableLmPreTrainedModel,
 ): ...
 
 __all__ = [

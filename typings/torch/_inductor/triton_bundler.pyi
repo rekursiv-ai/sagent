@@ -55,7 +55,8 @@ class TritonBundler:
     ) -> tuple[list[StaticallyLaunchedAutotuner], list[str]]: ...
     @classmethod
     def load_autotuners(
-        cls, static_autotuners: list[StaticallyLaunchedAutotuner] | None
+        cls,
+        static_autotuners: list[StaticallyLaunchedAutotuner] | None,
     ) -> list[str]: ...
     @classmethod
     def collect(cls) -> tuple[TritonBundle, TritonBundlerMetadata | None]: ...

@@ -39,13 +39,20 @@ class TransfoXLTokenizer(PreTrainedTokenizer):
     def count_sents(self, sents, verbose=...):  # -> None:
         ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
     def build_vocab(self):  # -> None:
         ...
     @torch_only_method
     def encode_file(
-        self, path, ordered=..., verbose=..., add_eos=..., add_double_eos=...
+        self,
+        path,
+        ordered=...,
+        verbose=...,
+        add_eos=...,
+        add_double_eos=...,
     ):  # -> Tensor | list[Any]:
         ...
     @torch_only_method
@@ -76,11 +83,16 @@ class LMOrderedIterator:
     def get_batch(self, i, bptt=...):  # -> tuple[Any, Any, Any]:
         ...
     def get_fixlen_iter(
-        self, start=...
+        self,
+        start=...,
     ):  # -> Generator[tuple[Any, Any, Any], Any, None]:
         ...
     def get_varlen_iter(
-        self, start=..., std=..., min_len=..., max_deviation=...
+        self,
+        start=...,
+        std=...,
+        min_len=...,
+        max_deviation=...,
     ):  # -> Generator[tuple[Any, Any, Any], Any, None]:
         ...
     def __iter__(self):  # -> Generator[tuple[Any, Any, Any], Any, None]:
@@ -88,13 +100,20 @@ class LMOrderedIterator:
 
 class LMShuffledIterator:
     def __init__(
-        self, data, bsz, bptt, device=..., ext_len=..., shuffle=...
+        self,
+        data,
+        bsz,
+        bptt,
+        device=...,
+        ext_len=...,
+        shuffle=...,
     ) -> None: ...
     def get_sent_stream(self):  # -> Generator[Any, Any, None]:
         ...
     @torch_only_method
     def stream_iterator(
-        self, sent_stream
+        self,
+        sent_stream,
     ):  # -> Generator[tuple[Tensor, Tensor, Any], Any, None]:
         ...
     def __iter__(self):  # -> Generator[Any, Any, None]:
@@ -102,7 +121,14 @@ class LMShuffledIterator:
 
 class LMMultiFileIterator(LMShuffledIterator):
     def __init__(
-        self, paths, vocab, bsz, bptt, device=..., ext_len=..., shuffle=...
+        self,
+        paths,
+        vocab,
+        bsz,
+        bptt,
+        device=...,
+        ext_len=...,
+        shuffle=...,
     ) -> None: ...
     def get_sent_stream(self, path): ...
     def __iter__(self):  # -> Generator[Any, Any, None]:
@@ -112,14 +138,21 @@ class TransfoXLCorpus:
     @classmethod
     @torch_only_method
     def from_pretrained(
-        cls, pretrained_model_name_or_path, cache_dir=..., *inputs, **kwargs
+        cls,
+        pretrained_model_name_or_path,
+        cache_dir=...,
+        *inputs,
+        **kwargs,
     ):  # -> Self | None:
         ...
     def __init__(self, *args, **kwargs) -> None: ...
     def build_corpus(self, path, dataset):  # -> None:
         ...
     def get_iterator(
-        self, split, *args, **kwargs
+        self,
+        split,
+        *args,
+        **kwargs,
     ):  # -> LMOrderedIterator | LMMultiFileIterator | LMShuffledIterator:
         ...
 

@@ -7,7 +7,11 @@ __all__ = ["FileWriter", "SummaryWriter"]
 
 class FileWriter:
     def __init__(
-        self, log_dir, max_queue=..., flush_secs=..., filename_suffix=...
+        self,
+        log_dir,
+        max_queue=...,
+        flush_secs=...,
+        filename_suffix=...,
     ) -> None: ...
     def get_logdir(self): ...
     def add_event(self, event, step=..., walltime=...) -> None: ...
@@ -47,11 +51,21 @@ class SummaryWriter:
         double_precision=...,
     ) -> None: ...
     def add_scalars(
-        self, main_tag, tag_scalar_dict, global_step=..., walltime=...
+        self,
+        main_tag,
+        tag_scalar_dict,
+        global_step=...,
+        walltime=...,
     ) -> None: ...
     def add_tensor(self, tag, tensor, global_step=..., walltime=...) -> None: ...
     def add_histogram(
-        self, tag, values, global_step=..., bins=..., walltime=..., max_bins=...
+        self,
+        tag,
+        values,
+        global_step=...,
+        bins=...,
+        walltime=...,
+        max_bins=...,
     ) -> None: ...
     def add_histogram_raw(
         self,
@@ -67,10 +81,20 @@ class SummaryWriter:
         walltime=...,
     ) -> None: ...
     def add_image(
-        self, tag, img_tensor, global_step=..., walltime=..., dataformats=...
+        self,
+        tag,
+        img_tensor,
+        global_step=...,
+        walltime=...,
+        dataformats=...,
     ) -> None: ...
     def add_images(
-        self, tag, img_tensor, global_step=..., walltime=..., dataformats=...
+        self,
+        tag,
+        img_tensor,
+        global_step=...,
+        walltime=...,
+        dataformats=...,
     ) -> None: ...
     def add_image_with_boxes(
         self,
@@ -92,15 +116,29 @@ class SummaryWriter:
         walltime: float | None = ...,
     ) -> None: ...
     def add_video(
-        self, tag, vid_tensor, global_step=..., fps=..., walltime=...
+        self,
+        tag,
+        vid_tensor,
+        global_step=...,
+        fps=...,
+        walltime=...,
     ) -> None: ...
     def add_audio(
-        self, tag, snd_tensor, global_step=..., sample_rate=..., walltime=...
+        self,
+        tag,
+        snd_tensor,
+        global_step=...,
+        sample_rate=...,
+        walltime=...,
     ) -> None: ...
     def add_text(self, tag, text_string, global_step=..., walltime=...) -> None: ...
     def add_onnx_graph(self, prototxt) -> None: ...
     def add_graph(
-        self, model, input_to_model=..., verbose=..., use_strict_trace=...
+        self,
+        model,
+        input_to_model=...,
+        verbose=...,
+        use_strict_trace=...,
     ) -> None: ...
     def add_embedding(
         self,
@@ -136,7 +174,10 @@ class SummaryWriter:
         walltime=...,
     ) -> None: ...
     def add_custom_scalars_multilinechart(
-        self, tags, category=..., title=...
+        self,
+        tags,
+        category=...,
+        title=...,
     ) -> None: ...
     def add_custom_scalars_marginchart(self, tags, category=..., title=...) -> None: ...
     def add_custom_scalars(self, layout) -> None: ...

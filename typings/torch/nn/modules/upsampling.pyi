@@ -30,10 +30,14 @@ class Upsample(Module):
 
 class UpsamplingNearest2d(Upsample):
     def __init__(
-        self, size: _size_2_t | None = ..., scale_factor: _ratio_2_t | None = ...
+        self,
+        size: _size_2_t | None = ...,
+        scale_factor: _ratio_2_t | None = ...,
     ) -> None: ...
 
 class UpsamplingBilinear2d(Upsample):
     def __init__(
-        self, size: _size_2_t | None = ..., scale_factor: _ratio_2_t | None = ...
+        self,
+        size: _size_2_t | None = ...,
+        scale_factor: _ratio_2_t | None = ...,
     ) -> None: ...

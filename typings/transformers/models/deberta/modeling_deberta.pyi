@@ -44,12 +44,17 @@ def scaled_size_sqrt(query_layer: torch.Tensor, scale_factor: int):  # -> Tensor
 def build_rpos(query_layer: torch.Tensor, key_layer: torch.Tensor, relative_pos): ...
 @torch.jit.script
 def compute_attention_span(
-    query_layer: torch.Tensor, key_layer: torch.Tensor, max_relative_positions: int
+    query_layer: torch.Tensor,
+    key_layer: torch.Tensor,
+    max_relative_positions: int,
 ):  # -> Tensor:
     ...
 @torch.jit.script
 def uneven_size_corrected(
-    p2c_att, query_layer: torch.Tensor, key_layer: torch.Tensor, relative_pos
+    p2c_att,
+    query_layer: torch.Tensor,
+    key_layer: torch.Tensor,
+    relative_pos,
 ):  # -> Tensor:
     ...
 
@@ -66,7 +71,9 @@ class DisentangledSelfAttention(nn.Module):
         rel_embeddings: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def disentangled_att_bias(
         self,
@@ -102,7 +109,9 @@ class DebertaAttention(nn.Module):
         rel_embeddings=...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class DebertaIntermediate(nn.Module):
@@ -127,7 +136,9 @@ class DebertaLayer(GradientCheckpointingLayer):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class DebertaEncoder(nn.Module):
@@ -136,7 +147,10 @@ class DebertaEncoder(nn.Module):
         ...
     def get_attention_mask(self, attention_mask): ...
     def get_rel_pos(
-        self, hidden_states, query_states=..., relative_pos=...
+        self,
+        hidden_states,
+        query_states=...,
+        relative_pos=...,
     ):  # -> None:
         ...
     def forward(

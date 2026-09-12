@@ -56,7 +56,8 @@ class MkldnnPrelu(torch.jit.ScriptModule):
     def forward(self, x) -> Tensor: ...
 
 def to_mkldnn(
-    module, dtype=...
+    module,
+    dtype=...,
 ) -> (
     MkldnnLinear
     | MkldnnConv1d

@@ -91,7 +91,11 @@ class SpeculationLog:
     def restart(self) -> None: ...
     def clear(self) -> None: ...
     def next(
-        self, filename: str, lineno: int, instruction_pointer: int, inst: Instruction
+        self,
+        filename: str,
+        lineno: int,
+        instruction_pointer: int,
+        inst: Instruction,
     ) -> SpeculationEntry: ...
 
 @dataclasses.dataclass
@@ -151,12 +155,15 @@ def log_graph_break(
     user_stack: StackSummary | None = ...,
 ) -> None: ...
 def generic_jump(
-    truth_fn: Callable[[object], bool], push: bool
+    truth_fn: Callable[[object], bool],
+    push: bool,
 ) -> Callable[[InstructionTranslatorBase, Instruction], None]: ...
 def break_graph_if_unsupported(
-    *, push: int
+    *,
+    push: int,
 ) -> Callable[
-    [Callable[..., None]], Callable[[InstructionTranslatorBase, Instruction], None]
+    [Callable[..., None]],
+    Callable[[InstructionTranslatorBase, Instruction], None],
 ]: ...
 
 class BytecodeDistpatchTableMeta(type):
@@ -216,10 +223,16 @@ class InstructionTranslatorBase(metaclass=BytecodeDistpatchTableMeta):
         kwargs: dict[str, VariableTracker],
     ) -> None: ...
     def inline_generator_function(
-        self, fn: VariableTracker, args: Sequence[Any], kwargs: dict[str, Any]
+        self,
+        fn: VariableTracker,
+        args: Sequence[Any],
+        kwargs: dict[str, Any],
     ) -> Any: ...
     def inline_user_function_return(
-        self, fn: VariableTracker, args: Sequence[Any], kwargs: dict[str, Any]
+        self,
+        fn: VariableTracker,
+        args: Sequence[Any],
+        kwargs: dict[str, Any],
     ) -> Any: ...
     def get_line_of_code_header(self, lineno: int | None = ...) -> str: ...
     def get_log_starts_line_log_str(self) -> str: ...
@@ -429,7 +442,8 @@ class InstructionTranslatorBase(metaclass=BytecodeDistpatchTableMeta):
     def FORMAT_WITH_SPEC(self, inst: Instruction) -> None: ...
     def is_non_empty_graph(self) -> bool: ...
     def format_frame_summary(
-        self, additional_stack_frames: list[Any] | None = ...
+        self,
+        additional_stack_frames: list[Any] | None = ...,
     ) -> str: ...
     def frame_summary(self) -> traceback.FrameSummary: ...
     def is_co_filename_from_nn_modules(self) -> bool: ...
@@ -438,7 +452,8 @@ class InstructionTranslatorBase(metaclass=BytecodeDistpatchTableMeta):
     def fake_mode(self) -> FakeTensorMode | None: ...
     @contextlib.contextmanager
     def strict_translation_mode(
-        self, check_fn: Callable[[VariableTracker], bool]
+        self,
+        check_fn: Callable[[VariableTracker], bool],
     ) -> Any: ...
     def speculate(self) -> SpeculationEntry: ...
     def __init__(
@@ -504,7 +519,10 @@ class InliningInstructionTranslator(InstructionTranslatorBase):
     def check_inlineable(func: Any) -> trace_rules.SkipResult: ...
     @staticmethod
     def build_inline_tracer(
-        parent: Any, func: VariableTracker, args: list[VariableTracker], kwargs: Any
+        parent: Any,
+        func: VariableTracker,
+        args: list[VariableTracker],
+        kwargs: Any,
     ) -> InliningInstructionTranslator: ...
     def inline_call_(self) -> VariableTracker: ...
     def __init__(
@@ -529,7 +547,8 @@ class InliningInstructionTranslator(InstructionTranslatorBase):
     def RETURN_VALUE(self, inst: Instruction) -> None: ...
     def RETURN_CONST(self, inst: Instruction) -> None: ...
     def get_globals_source_and_value(
-        self, name: str
+        self,
+        name: str,
     ) -> tuple[Any, VariableTracker, Source]: ...
     def STORE_GLOBAL(self, inst: Instruction) -> None: ...
 

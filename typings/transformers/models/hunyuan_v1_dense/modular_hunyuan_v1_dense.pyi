@@ -27,7 +27,10 @@ class HunYuanDenseV1RMSNorm(LlamaRMSNorm): ...
 
 class HunYuanDenseV1MLP(LlamaMLP):
     def __init__(
-        self, config: HunYuanDenseV1Config, layer_idx=..., is_shared_mlp=...
+        self,
+        config: HunYuanDenseV1Config,
+        layer_idx=...,
+        is_shared_mlp=...,
     ) -> None: ...
 
 class HunYuanDenseV1Attention(LlamaAttention):
@@ -42,7 +45,9 @@ class HunYuanDenseV1Attention(LlamaAttention):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class HunYuanDenseV1DecoderLayer(LlamaDecoderLayer):

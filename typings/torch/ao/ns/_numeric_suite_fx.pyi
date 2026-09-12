@@ -116,7 +116,9 @@ class OutputLogger(nn.Module):
     ) -> None: ...
     def forward(self, x) -> Tensor | tuple[Any, Any] | tuple[Any, ...]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> Tensor | tuple[Any, Any] | tuple[Any, ...]: ...
 
 class OutputComparisonLogger(OutputLogger):
@@ -126,7 +128,9 @@ class OutputComparisonLogger(OutputLogger):
 
 class NSTracer(quantize_fx.QuantizationTracer):
     def is_leaf_module(
-        self, m: torch.nn.Module, module_qualified_name: str
+        self,
+        m: torch.nn.Module,
+        module_qualified_name: str,
     ) -> bool: ...
 
 def extract_weights(
@@ -189,7 +193,8 @@ def prepare_n_shadows_model(
 ) -> GraphModule: ...
 def loggers_set_enabled(model: torch.nn.Module, enabled: bool) -> None: ...
 def loggers_set_save_activations(
-    model: torch.nn.Module, save_activations: bool
+    model: torch.nn.Module,
+    save_activations: bool,
 ) -> None: ...
 def convert_n_shadows_model(
     model: GraphModule,

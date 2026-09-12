@@ -8,7 +8,7 @@ import pytest
 
 from sagent.agent.state import agent_label_var, agent_registry
 from sagent.testing import FakeAgent, with_fake_agent
-from sagent.tools import agent_send as send_module
+from sagent.tools import agent_send
 from sagent.tools.agent_send import AgentSend
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -147,14 +147,14 @@ async def test_run_delay_schedules_call_later(monkeypatch: pytest.MonkeyPatch) -
     assert calls
     assert calls[0][0] == 5
     # ``_deliver`` is the scheduled callable.
-    assert calls[0][1] is send_module._deliver
+    assert calls[0][1] is agent_send._deliver
 
 
 def test_deliver_into_live_inbox() -> None:
     target = FakeAgent()
     agent_registry["DelayTarget"] = target
     try:
-        send_module._deliver("DelayTarget", "Me", "ping", 7)
+        agent_send._deliver("DelayTarget", "Me", "ping", 7)
     finally:
         agent_registry.pop("DelayTarget", None)
     drained = asyncio.new_event_loop().run_until_complete(target.runtime.inbox.drain())
@@ -182,7 +182,7 @@ def test_deliver_dead_target_is_noop(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level("WARNING"):
         # ``"Ghost"`` is not in ``agent_registry``; delivery must
         # log a warning rather than silently push into thin air.
-        send_module._deliver("Ghost", "Me", "x", 3)
+        agent_send._deliver("Ghost", "Me", "x", 3)
     assert any("Delayed message to dead agent" in rec.message for rec in caplog.records)
 
 
@@ -201,7 +201,7 @@ def test_deliver_reresolves_target_at_delivery_time() -> None:
     # ``call_later`` and the timer callback.
     agent_registry["Rebind"] = replacement
     try:
-        send_module._deliver("Rebind", "Me", "after-rebind", 1)
+        agent_send._deliver("Rebind", "Me", "after-rebind", 1)
     finally:
         agent_registry.pop("Rebind", None)
     # ``drain()`` blocks on an empty queue; inspect the underlying

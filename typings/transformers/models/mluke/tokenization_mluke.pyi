@@ -60,7 +60,8 @@ class MLukeTokenizer(PreTrainedTokenizer):
     def __setstate__(self, d):  # -> None:
         ...
     @add_end_docstrings(
-        ENCODE_KWARGS_DOCSTRING, ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING
+        ENCODE_KWARGS_DOCSTRING,
+        ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING,
     )
     def __call__(
         self,
@@ -90,7 +91,8 @@ class MLukeTokenizer(PreTrainedTokenizer):
         **kwargs,
     ) -> BatchEncoding: ...
     @add_end_docstrings(
-        ENCODE_KWARGS_DOCSTRING, ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING
+        ENCODE_KWARGS_DOCSTRING,
+        ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING,
     )
     def prepare_for_model(
         self,
@@ -136,10 +138,14 @@ class MLukeTokenizer(PreTrainedTokenizer):
         verbose: bool = ...,
     ) -> BatchEncoding: ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str, str]: ...
     def build_inputs_with_special_tokens(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = ...
+        self,
+        token_ids_0: list[int],
+        token_ids_1: list[int] | None = ...,
     ) -> list[int]: ...
     def get_special_tokens_mask(
         self,
@@ -148,7 +154,9 @@ class MLukeTokenizer(PreTrainedTokenizer):
         already_has_special_tokens: bool = ...,
     ) -> list[int]: ...
     def create_token_type_ids_from_sequences(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = ...
+        self,
+        token_ids_0: list[int],
+        token_ids_1: list[int] | None = ...,
     ) -> list[int]: ...
 
 __all__ = ["MLukeTokenizer"]

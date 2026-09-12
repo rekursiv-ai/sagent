@@ -26,7 +26,9 @@ _rnn_impls = ...
     category=FutureWarning,
 )
 def apply_permutation(
-    tensor: Tensor, permutation: Tensor, dim: int = ...
+    tensor: Tensor,
+    permutation: Tensor,
+    dim: int = ...,
 ) -> Tensor: ...
 
 class RNNBase(Module):
@@ -60,13 +62,21 @@ class RNNBase(Module):
     def reset_parameters(self) -> None: ...
     def check_input(self, input: Tensor, batch_sizes: Tensor | None) -> None: ...
     def get_expected_hidden_size(
-        self, input: Tensor, batch_sizes: Tensor | None
+        self,
+        input: Tensor,
+        batch_sizes: Tensor | None,
     ) -> tuple[int, int, int]: ...
     def check_hidden_size(
-        self, hx: Tensor, expected_hidden_size: tuple[int, int, int], msg: str = ...
+        self,
+        hx: Tensor,
+        expected_hidden_size: tuple[int, int, int],
+        msg: str = ...,
     ) -> None: ...
     def check_forward_args(
-        self, input: Tensor, hidden: Tensor, batch_sizes: Tensor | None
+        self,
+        input: Tensor,
+        hidden: Tensor,
+        batch_sizes: Tensor | None,
     ) -> None: ...
     def permute_hidden(self, hx: Tensor, permutation: Tensor | None) -> Tensor: ...
     def extra_repr(self) -> str: ...
@@ -96,15 +106,21 @@ class RNN(RNNBase):
     @overload
     @torch._jit_internal._overload_method
     def forward(
-        self, input: Tensor, hx: Tensor | None = ...
+        self,
+        input: Tensor,
+        hx: Tensor | None = ...,
     ) -> tuple[Tensor, Tensor]: ...
     @overload
     @torch._jit_internal._overload_method
     def forward(
-        self, input: PackedSequence, hx: Tensor | None = ...
+        self,
+        input: PackedSequence,
+        hx: Tensor | None = ...,
     ) -> tuple[PackedSequence, Tensor]: ...
     def forward(
-        self, input, hx=...
+        self,
+        input,
+        hx=...,
     ) -> tuple[PackedSequence, Tensor] | tuple[Any, Tensor]: ...
 
 class LSTM(RNNBase):
@@ -126,26 +142,39 @@ class LSTM(RNNBase):
     def __init__(self, *args, **kwargs) -> None: ...
     def __init__(self, *args, **kwargs) -> None: ...
     def get_expected_cell_size(
-        self, input: Tensor, batch_sizes: Tensor | None
+        self,
+        input: Tensor,
+        batch_sizes: Tensor | None,
     ) -> tuple[int, int, int]: ...
     def check_forward_args(
-        self, input: Tensor, hidden: tuple[Tensor, Tensor], batch_sizes: Tensor | None
+        self,
+        input: Tensor,
+        hidden: tuple[Tensor, Tensor],
+        batch_sizes: Tensor | None,
     ) -> None: ...
     def permute_hidden(
-        self, hx: tuple[Tensor, Tensor], permutation: Tensor | None
+        self,
+        hx: tuple[Tensor, Tensor],
+        permutation: Tensor | None,
     ) -> tuple[Tensor, Tensor]: ...
     @overload
     @torch._jit_internal._overload_method
     def forward(
-        self, input: Tensor, hx: tuple[Tensor, Tensor] | None = ...
+        self,
+        input: Tensor,
+        hx: tuple[Tensor, Tensor] | None = ...,
     ) -> tuple[Tensor, tuple[Tensor, Tensor]]: ...
     @overload
     @torch._jit_internal._overload_method
     def forward(
-        self, input: PackedSequence, hx: tuple[Tensor, Tensor] | None = ...
+        self,
+        input: PackedSequence,
+        hx: tuple[Tensor, Tensor] | None = ...,
     ) -> tuple[PackedSequence, tuple[Tensor, Tensor]]: ...
     def forward(
-        self, input, hx=...
+        self,
+        input,
+        hx=...,
     ) -> (
         tuple[PackedSequence, tuple[Tensor, Tensor]] | tuple[Any, tuple[Tensor, Tensor]]
     ): ...
@@ -170,15 +199,21 @@ class GRU(RNNBase):
     @overload
     @torch._jit_internal._overload_method
     def forward(
-        self, input: Tensor, hx: Tensor | None = ...
+        self,
+        input: Tensor,
+        hx: Tensor | None = ...,
     ) -> tuple[Tensor, Tensor]: ...
     @overload
     @torch._jit_internal._overload_method
     def forward(
-        self, input: PackedSequence, hx: Tensor | None = ...
+        self,
+        input: PackedSequence,
+        hx: Tensor | None = ...,
     ) -> tuple[PackedSequence, Tensor]: ...
     def forward(
-        self, input, hx=...
+        self,
+        input,
+        hx=...,
     ) -> tuple[PackedSequence, Tensor] | tuple[Any, Tensor]: ...
 
 class RNNCellBase(Module):
@@ -217,16 +252,28 @@ class RNNCell(RNNCellBase):
 
 class LSTMCell(RNNCellBase):
     def __init__(
-        self, input_size: int, hidden_size: int, bias: bool = ..., device=..., dtype=...
+        self,
+        input_size: int,
+        hidden_size: int,
+        bias: bool = ...,
+        device=...,
+        dtype=...,
     ) -> None: ...
     def forward(
-        self, input: Tensor, hx: tuple[Tensor, Tensor] | None = ...
+        self,
+        input: Tensor,
+        hx: tuple[Tensor, Tensor] | None = ...,
     ) -> tuple[Tensor, Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> tuple[Tensor, Tensor]: ...
 
 class GRUCell(RNNCellBase):
     def __init__(
-        self, input_size: int, hidden_size: int, bias: bool = ..., device=..., dtype=...
+        self,
+        input_size: int,
+        hidden_size: int,
+        bias: bool = ...,
+        device=...,
+        dtype=...,
     ) -> None: ...
     def forward(self, input: Tensor, hx: Tensor | None = ...) -> Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...

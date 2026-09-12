@@ -35,77 +35,6 @@ from sagent.types.model import base_model_id
 
 logger = logging.getLogger(__name__)
 
-_GIT = shutil.which("git") or "git"
-
-
-def _load_static() -> str:
-    """Load the recipe's base static prompt with placeholders substituted.
-
-    Not cached here -- ``set_recipe`` swaps the underlying yaml, and the
-    asset reader is already fast enough that an extra read per request
-    is cheaper than reasoning about cache invalidation.
-    """
-    sp = recipe_dict("system_prompt")
-    base = sp.get("base", "")
-    if not base:
-        return ""
-    return read_asset(base)
-
-
-def _is_git_repo(cwd: str) -> bool:
-    """Check if cwd is inside a git repo (uncached: ``git init`` flips this)."""
-    try:
-        result = subprocess.run(  # noqa: S603 -- trusted fixed argv, not user input
-            [_GIT, "rev-parse", "--is-inside-work-tree"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-            cwd=cwd,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return result.returncode == 0
-
-
-def _is_git_worktree(cwd: str) -> bool:
-    """Return True if cwd is a git worktree (not the primary checkout)."""
-    try:
-        # In a worktree, `.git` is a file (gitdir: …); in the main
-        # repo, `.git` is a directory.
-        result = subprocess.run(  # noqa: S603 -- trusted fixed argv, not user input
-            [_GIT, "rev-parse", "--git-common-dir", "--git-dir"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-            cwd=cwd,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    if result.returncode != 0:
-        return False
-    parts = result.stdout.strip().splitlines()
-    if len(parts) != 2:
-        return False
-    # common_dir != git_dir → this is a worktree.
-    return Path(parts[0]).resolve() != Path(parts[1]).resolve()
-
-
-def _load_env_template() -> str:
-    """Load the environment template from the active recipe."""
-    sp = recipe_dict("system_prompt")
-    if "env" in sp:
-        return read_asset(sp["env"])
-    return ""
-
-
-def _shell_name(shell_path: str) -> str:
-    """Extract 'bash' from $SHELL, else return as-is."""
-    if "bash" in shell_path:
-        return "bash"
-    return shell_path
-
 
 def environment(model_id: str) -> str:
     """Build the environment section with current runtime info.
@@ -120,27 +49,27 @@ def environment(model_id: str) -> str:
     cwd = get_tool_state().bash_cwd
     is_git = _is_git_repo(cwd)
     model_info: dict[str, tuple[str, str]] = {
-        # 2026-08-28
+        # 2026-08-28.
         "claude-fable-5-1": ("Claude Fable 5.1", "June 2026"),
-        # 2026-07-24
+        # 2026-07-24.
         "claude-opus-5": ("Claude Opus 5", "May 2026"),
-        # 2026-06-29
+        # 2026-06-29.
         "claude-sonnet-5": ("Claude Sonnet 5", "January 2026"),
-        # 2026-06-07
+        # 2026-06-07.
         "claude-fable-5": ("Claude Fable 5", "January 2026"),
-        # 2026-05-28
+        # 2026-05-28.
         "claude-opus-4-8": ("Claude Opus 4.8", "January 2026"),
-        # 2026-04-14
+        # 2026-04-14.
         "claude-opus-4-7": ("Claude Opus 4.7", "January 2026"),
-        # 2026-02-17
+        # 2026-02-17.
         "claude-sonnet-4-6": ("Claude Sonnet 4.6", "August 2025"),
-        # 2026-02-04
+        # 2026-02-04.
         "claude-opus-4-6": ("Claude Opus 4.6", "May 2025"),
-        # 2025-11-24
+        # 2025-11-24.
         "claude-opus-4-5": ("Claude Opus 4.5", "May 2025"),
-        # 2025-10-15
+        # 2025-10-15.
         "claude-haiku-4-5": ("Claude Haiku 4.5", "February 2025"),
-        # 2025-09-29
+        # 2025-09-29.
         "claude-sonnet-4-5": ("Claude Sonnet 4.5", "January 2025"),
     }
     # Context-window variants share their base model's metadata; key the
@@ -151,14 +80,14 @@ def environment(model_id: str) -> str:
     on_windows = platform.system() == "Windows"
     # On Windows, tell the model to use Unix shell syntax (assumes Git Bash / WSL).
     windows_suffix = (
-        " (prefer Unix shell conventions — /dev/null, forward slashes)"
+        " (prefer Unix shell conventions -- /dev/null, forward slashes)"
         if on_windows
         else ""
     )
     shell_line = shell_name + windows_suffix
     worktree_line = (
         "\nThis working directory is a git worktree (not the primary"
-        " checkout). Stay in this directory — do not `cd` to the"
+        " checkout). Stay in this directory -- do not `cd` to the"
         " main repository."
         if is_git and _is_git_worktree(cwd)
         else ""
@@ -198,20 +127,6 @@ def build_system(
     """
     d = build_system_dict(model_id, custom=custom, include_memory=include_memory)
     return "\n\n".join(v() for v in d.values())
-
-
-def _enabled_sections() -> set[str]:
-    """Return the section names the active recipe says to include.
-
-    Recipes may declare ``system_prompt.sections`` (a list of names) to
-    restrict assembly. Absent ⇒ default = all five sections.
-    """
-    listed = recipe_list("system_prompt", "sections")
-    return (
-        set(listed)
-        if listed
-        else {"static", "environment", "agents_md", "memory", "user_instructions"}
-    )
 
 
 def build_system_dict(
@@ -266,8 +181,92 @@ def build_system_dict(
         )
     if include_memory and "memory" in enabled:
         sections["memory"] = lambda: memory.build_system_section(
-            get_tool_state().bash_cwd
+            get_tool_state().bash_cwd,
         )
     if custom and "user_instructions" in enabled:
         sections["user_instructions"] = lambda: f"# User instructions\n{custom}"
     return sections
+
+
+# Not cached here -- ``set_recipe`` swaps the underlying yaml, and the asset reader is
+# already fast enough that an extra read per request is cheaper than reasoning about
+# cache invalidation.
+def _load_static() -> str:
+    """Load the recipe's base static prompt with placeholders substituted."""
+    sp = recipe_dict("system_prompt")
+    base = sp.get("base", "")
+    if not base:
+        return ""
+    return read_asset(base)
+
+
+def _is_git_repo(cwd: str) -> bool:
+    """Check if cwd is inside a git repo (uncached: ``git init`` flips this)."""
+    try:
+        result = subprocess.run(  # noqa: S603 -- trusted fixed argv, not user input
+            [shutil.which("git") or "git", "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            cwd=cwd,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _is_git_worktree(cwd: str) -> bool:
+    """Return True if cwd is a git worktree (not the primary checkout)."""
+    try:
+        # In a worktree, `.git` is a file (gitdir: …); in the main
+        # repo, `.git` is a directory.
+        result = subprocess.run(  # noqa: S603 -- trusted fixed argv, not user input
+            [
+                shutil.which("git") or "git",
+                "rev-parse",
+                "--git-common-dir",
+                "--git-dir",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            cwd=cwd,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    parts = result.stdout.strip().splitlines()
+    if len(parts) != 2:
+        return False
+    # common_dir != git_dir → this is a worktree.
+    return Path(parts[0]).resolve() != Path(parts[1]).resolve()
+
+
+def _load_env_template() -> str:
+    """Load the environment template from the active recipe."""
+    sp = recipe_dict("system_prompt")
+    if "env" in sp:
+        return read_asset(sp["env"])
+    return ""
+
+
+def _shell_name(shell_path: str) -> str:
+    """Extract 'bash' from $SHELL, else return as-is."""
+    if "bash" in shell_path:
+        return "bash"
+    return shell_path
+
+
+# Recipes may declare ``system_prompt.sections`` (a list of names) to restrict assembly.
+# Absent ⇒ default = all five sections.
+def _enabled_sections() -> set[str]:
+    """Return the section names the active recipe says to include."""
+    listed = recipe_list("system_prompt", "sections")
+    return (
+        set(listed)
+        if listed
+        else {"static", "environment", "agents_md", "memory", "user_instructions"}
+    )

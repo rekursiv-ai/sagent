@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 
 import pytest
 
 from sagent.agent.state import ToolState
 from sagent.lib.userdirs import data_dir
 from sagent.testing import with_fake_agent
-from sagent.tools import skill as sk
+from sagent.tools import skill
 from sagent.tools.skill import (
     Skill,
     SkillInfo,
@@ -20,6 +21,9 @@ from sagent.types.runtime import (
     ModelContextEvent,
     UserMessage,
 )
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def _write_skill(
@@ -50,13 +54,14 @@ def isolate_user_skills() -> None:
     needed. This guard fails loudly if that resolution regresses to an
     import-time constant, which would silently reintroduce the flake.
     """
-    assert not sk.user_skill_roots()[0].exists(), (
+    assert not skill.user_skill_roots()[0].exists(), (
         "user skill discovery escaped XDG isolation; tests would see real skills"
     )
 
 
 def test_user_skill_root_follows_xdg_data_home(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """User-skill discovery must resolve XDG at call time, not import time.
 
@@ -68,7 +73,7 @@ def test_user_skill_root_follows_xdg_data_home(
     """
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
     expected = data_dir() / "rekursiv-ai" / "sagent" / "skills"
-    assert sk.user_skill_roots() == (expected,), (
+    assert skill.user_skill_roots() == (expected,), (
         "user skill roots must follow a late XDG_DATA_HOME"
     )
 
@@ -96,7 +101,8 @@ def test_discover_dedupes_by_name(tmp_path: Path) -> None:
 
 
 def test_discover_skips_invalid_name(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     _write_skill(tmp_path, "ok-name", metadata_name="Bad!Name")
     with caplog.at_level("WARNING"):
@@ -303,7 +309,10 @@ async def test_post_compact_restore_noop_without_invoked(tmp_path: Path) -> None
     state.bash_cwd = str(tmp_path)
     history: list[ModelContextEvent] = [UserMessage(text="hi")]
     await t.post_compact_restore(
-        history, state, budget_tokens=0, estimate_tokens=_estimate
+        history,
+        state,
+        budget_tokens=0,
+        estimate_tokens=_estimate,
     )
     entry = history[0]
     assert isinstance(entry, UserMessage)
@@ -319,7 +328,10 @@ async def test_post_compact_restore_default_disabled(tmp_path: Path) -> None:
     state.invoked_skills.add("alpha")
     history: list[ModelContextEvent] = [UserMessage(text="hi")]
     await Skill().post_compact_restore(
-        history, state, budget_tokens=0, estimate_tokens=_estimate
+        history,
+        state,
+        budget_tokens=0,
+        estimate_tokens=_estimate,
     )
     entry = history[0]
     assert isinstance(entry, UserMessage)
@@ -334,7 +346,10 @@ async def test_post_compact_restore_reattaches_into_first_user(tmp_path: Path) -
     state.invoked_skills.add("alpha")
     history: list[ModelContextEvent] = [UserMessage(text="hi")]
     await Skill(restore_after_compact=True).post_compact_restore(
-        history, state, budget_tokens=0, estimate_tokens=_estimate
+        history,
+        state,
+        budget_tokens=0,
+        estimate_tokens=_estimate,
     )
     entry = history[0]
     assert isinstance(entry, UserMessage)
@@ -350,7 +365,10 @@ async def test_post_compact_restore_skips_when_cwd_unset(tmp_path: Path) -> None
     state.invoked_skills.add("alpha")
     history: list[ModelContextEvent] = [UserMessage(text="hi")]
     await Skill(restore_after_compact=True).post_compact_restore(
-        history, state, budget_tokens=0, estimate_tokens=_estimate
+        history,
+        state,
+        budget_tokens=0,
+        estimate_tokens=_estimate,
     )
     entry = history[0]
     assert isinstance(entry, UserMessage)
@@ -367,7 +385,10 @@ async def test_post_compact_restore_keeps_huge_body_whole(tmp_path: Path) -> Non
     state.invoked_skills.add("alpha")
     history: list[ModelContextEvent] = [UserMessage(text="hi")]
     await Skill(restore_after_compact=True).post_compact_restore(
-        history, state, budget_tokens=0, estimate_tokens=_estimate
+        history,
+        state,
+        budget_tokens=0,
+        estimate_tokens=_estimate,
     )
     entry = history[0]
     assert isinstance(entry, UserMessage)
@@ -385,7 +406,10 @@ async def test_post_compact_restore_keeps_every_skill(tmp_path: Path) -> None:
     state.invoked_skills.update({"alpha", "beta"})
     history: list[ModelContextEvent] = [UserMessage(text="hi")]
     await Skill(restore_after_compact=True).post_compact_restore(
-        history, state, budget_tokens=0, estimate_tokens=_estimate
+        history,
+        state,
+        budget_tokens=0,
+        estimate_tokens=_estimate,
     )
     entry = history[0]
     assert isinstance(entry, UserMessage)
@@ -410,7 +434,10 @@ async def test_post_compact_restore_honors_the_budget(tmp_path: Path) -> None:
     state.invoked_skills.update({"alpha", "beta"})
     history: list[ModelContextEvent] = [UserMessage(text="hi")]
     await Skill(restore_after_compact=True).post_compact_restore(
-        history, state, budget_tokens=150, estimate_tokens=_estimate
+        history,
+        state,
+        budget_tokens=150,
+        estimate_tokens=_estimate,
     )
     entry = history[0]
     assert isinstance(entry, UserMessage)

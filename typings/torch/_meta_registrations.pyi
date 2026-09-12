@@ -16,7 +16,8 @@ _meta_lib_dont_use_me_use_register_meta = ...
 
 def register_meta(op) -> Callable[[Callable[_P, _T]], Callable[_P, _T]]: ...
 def elementwise_meta(
-    *args, type_promotion: ELEMENTWISE_TYPE_PROMOTION_KIND
+    *args,
+    type_promotion: ELEMENTWISE_TYPE_PROMOTION_KIND,
 ) -> FakeTensor: ...
 def toRealValueType(dtype) -> dtype | None: ...
 def check_inplace_broadcast(self_shape, *args_shape) -> None: ...
@@ -43,7 +44,7 @@ def linalg_cross(self, other, *, dim=...): ...
 @out_wrapper()
 def linalg_matrix_exp(self) -> Tensor: ...
 @register_meta(
-    [aten.cummax.default, aten.cummax.out, aten.cummin.default, aten.cummin.out]
+    [aten.cummax.default, aten.cummax.out, aten.cummin.default, aten.cummin.out],
 )
 @out_wrapper("values", "indices")
 def cummaxmin(self, dim) -> tuple[Tensor, Tensor]: ...
@@ -64,27 +65,53 @@ def meta_fft_r2c(self, dim, normalization, onesided): ...
 def meta_randperm(n, *, generator=..., out) -> Tensor: ...
 @register_meta(aten.randperm.default)
 def meta_randperm_default(
-    n, *, dtype=..., layout=..., device=..., pin_memory=...
+    n,
+    *,
+    dtype=...,
+    layout=...,
+    device=...,
+    pin_memory=...,
 ) -> Tensor: ...
 @register_meta([aten.randint.default, aten.randint.out])
 @out_wrapper()
 def meta_randint(
-    high, size, *, dtype=..., layout=..., device=..., pin_memory=...
+    high,
+    size,
+    *,
+    dtype=...,
+    layout=...,
+    device=...,
+    pin_memory=...,
 ) -> Tensor: ...
 @register_meta([aten.randint.low, aten.randint.low_out])
 @out_wrapper()
 def meta_randint_low(
-    low, high, size, *, dtype=..., layout=..., device=..., pin_memory=...
+    low,
+    high,
+    size,
+    *,
+    dtype=...,
+    layout=...,
+    device=...,
+    pin_memory=...,
 ) -> Tensor: ...
 @register_meta([aten.rand.default, aten.rand.out])
 @out_wrapper()
 def meta_rand_default(
-    size, *, dtype=..., layout=..., device=..., pin_memory=...
+    size,
+    *,
+    dtype=...,
+    layout=...,
+    device=...,
+    pin_memory=...,
 ) -> Tensor: ...
 @register_meta([aten._fft_c2r.default, aten._fft_c2r.out])
 @out_wrapper()
 def meta_fft_c2r(
-    self: Tensor, dim: list[int], normalization: int, lastdim: int
+    self: Tensor,
+    dim: list[int],
+    normalization: int,
+    lastdim: int,
 ) -> Tensor: ...
 @register_meta(aten.copy_.default)
 def meta_copy_(self, src, non_blocking=...): ...
@@ -102,7 +129,10 @@ def meta_sparse_structured_linear(
 ) -> Tensor: ...
 @register_meta(aten._sparse_semi_structured_mm)
 def meta_sparse_structured_mm(
-    mat1: Tensor, mat1_meta: Tensor, mat2: Tensor, out_dtype: torch.dtype | None = ...
+    mat1: Tensor,
+    mat1_meta: Tensor,
+    mat2: Tensor,
+    out_dtype: torch.dtype | None = ...,
 ) -> Tensor: ...
 @register_meta(aten._sparse_semi_structured_addmm)
 def meta_sparse_structured_addmm(
@@ -184,7 +214,12 @@ def assert_async_meta(val, assert_msg) -> None: ...
 def print_meta(s) -> None: ...
 @register_meta(aten._make_dep_token.default)
 def make_dep_token(
-    *, dtype=..., layout=..., device=..., pin_memory=..., memory_format=...
+    *,
+    dtype=...,
+    layout=...,
+    device=...,
+    pin_memory=...,
+    memory_format=...,
 ) -> Tensor: ...
 @register_meta(aten.sym_constrain_range.default)
 def sym_constrain_range(size, min=..., max=...) -> None: ...
@@ -199,18 +234,25 @@ def functional_assert_async_meta(val, assert_msg, dep_token): ...
 def squareCheckInputs(self: Tensor, f_name: str) -> None: ...
 def linearSolveCheckInputs(self: Tensor, A: Tensor, name: str) -> None: ...
 def checkFloatingOrComplex(
-    t: Tensor, f_name: str, allow_low_precision_dtypes: bool = ...
+    t: Tensor,
+    f_name: str,
+    allow_low_precision_dtypes: bool = ...,
 ) -> None: ...
 def checkIsMatrix(A: Tensor, f_name: str, arg_name: str = ...) -> None: ...
 def checkInputsSolver(A: Tensor, B: Tensor, left: bool, f_name: str) -> None: ...
 def checkSameDevice(
-    fn_name: str, result: Tensor, input: Tensor, result_name: str = ...
+    fn_name: str,
+    result: Tensor,
+    input: Tensor,
+    result_name: str = ...,
 ) -> None: ...
 def checkUplo(UPLO: str) -> None: ...
 @register_meta([aten._linalg_eigh.default, aten._linalg_eigh.eigenvalues])
 @out_wrapper("eigenvalues", "eigenvectors")
 def meta__linalg_eigh(
-    A: Tensor, UPLO: str = ..., compute_v: bool = ...
+    A: Tensor,
+    UPLO: str = ...,
+    compute_v: bool = ...,
 ) -> tuple[Tensor, Tensor]: ...
 @register_meta([aten._linalg_eigvals.default, aten.linalg_eigvals.out])
 @out_wrapper()
@@ -230,46 +272,69 @@ def cholesky(self: Tensor, upper: bool = ...) -> Tensor: ...
 def cholesky_inverse(self: Tensor, upper: bool = ...) -> Tensor: ...
 @register_meta(aten.linalg_cholesky_ex.default)
 def linalg_cholesky_ex(
-    A: Tensor, upper: bool = ..., check_errors: bool = ...
+    A: Tensor,
+    upper: bool = ...,
+    check_errors: bool = ...,
 ) -> tuple[Tensor, Tensor]: ...
 @register_meta(
-    [aten.linalg_householder_product.default, aten.linalg_householder_product.out]
+    [aten.linalg_householder_product.default, aten.linalg_householder_product.out],
 )
 @out_wrapper()
 def linalg_householder_product(input: Tensor, tau: Tensor) -> Tensor: ...
 @register_meta(aten.linalg_inv_ex.default)
 def linalg_inv_ex_meta(
-    A: Tensor, check_errors: bool = ...
+    A: Tensor,
+    check_errors: bool = ...,
 ) -> tuple[Tensor, Tensor]: ...
 @register_meta([aten.linalg_ldl_factor_ex.default, aten.linalg_ldl_factor_ex.out])
 @out_wrapper("LD", "pivots", "info")
 def linalg_ldl_factor_ex_meta(
-    self: Tensor, *, hermitian: bool = ..., check_errors: bool = ...
+    self: Tensor,
+    *,
+    hermitian: bool = ...,
+    check_errors: bool = ...,
 ) -> tuple[Tensor, Tensor, Tensor]: ...
 @register_meta([aten.linalg_ldl_solve.default, aten.linalg_ldl_solve.out])
 @out_wrapper()
 def linalg_ldl_solve_meta(
-    LD: Tensor, pivots: Tensor, B: Tensor, *, hermitian: bool = ...
+    LD: Tensor,
+    pivots: Tensor,
+    B: Tensor,
+    *,
+    hermitian: bool = ...,
 ) -> Tensor: ...
 @register_meta([aten.linalg_lu.default, aten.linalg_lu.out])
 @out_wrapper("P", "L", "U")
 def linalg_lu_meta(
-    A: Tensor, *, pivot: bool = ...
+    A: Tensor,
+    *,
+    pivot: bool = ...,
 ) -> tuple[Tensor, Tensor, Tensor]: ...
 @register_meta([aten.linalg_lu_factor_ex.default, aten.linalg_lu_factor_ex.out])
 @out_wrapper("LU", "pivots", "info")
 def linalg_lu_factor_ex_meta(
-    A: Tensor, *, pivot: bool = ..., check_errors: bool = ...
+    A: Tensor,
+    *,
+    pivot: bool = ...,
+    check_errors: bool = ...,
 ) -> tuple[Tensor, Tensor, Tensor]: ...
 @register_meta([aten.linalg_lu_solve.default, aten.linalg_lu_solve.out])
 @out_wrapper()
 def linalg_lu_solve_meta(
-    LU: Tensor, pivots: Tensor, B: Tensor, *, left: bool = ..., adjoint: bool = ...
+    LU: Tensor,
+    pivots: Tensor,
+    B: Tensor,
+    *,
+    left: bool = ...,
+    adjoint: bool = ...,
 ) -> Tensor: ...
 @register_meta(aten.lu_unpack)
 @out_wrapper("P", "L", "U")
 def lu_unpack_meta(
-    LU: Tensor, pivots: Tensor, unpack_data: bool = ..., unpack_pivots: bool = ...
+    LU: Tensor,
+    pivots: Tensor,
+    unpack_data: bool = ...,
+    unpack_pivots: bool = ...,
 ) -> tuple[Tensor, Tensor, Tensor]: ...
 @register_meta([aten.linalg_qr.default, aten.linalg_qr.out])
 @out_wrapper("Q", "R")
@@ -297,7 +362,11 @@ def triangular_solve_meta(
 @register_meta(aten.ormqr)
 @out_wrapper()
 def ormqr(
-    input: Tensor, tau: Tensor, other: Tensor, left: bool = ..., transpose: bool = ...
+    input: Tensor,
+    tau: Tensor,
+    other: Tensor,
+    left: bool = ...,
+    transpose: bool = ...,
 ) -> Tensor: ...
 @register_meta(aten.reflection_pad1d)
 @out_wrapper()
@@ -323,7 +392,7 @@ def meta_replication_pad2d(input, padding): ...
         aten.reflection_pad2d_backward.grad_input,
         aten.replication_pad2d_backward.default,
         aten.replication_pad2d_backward.grad_input,
-    ]
+    ],
 )
 @out_wrapper("grad_input")
 def meta_pad2d_backward(grad_output, self, padding): ...
@@ -339,7 +408,7 @@ def meta_replication_pad3d(input, padding): ...
         aten.reflection_pad3d_backward.grad_input,
         aten.replication_pad3d_backward.default,
         aten.replication_pad3d_backward.grad_input,
-    ]
+    ],
 )
 @out_wrapper("grad_input")
 def meta_pad3d_backward(grad_output, input, padding): ...
@@ -349,7 +418,10 @@ def meta__pdist_forward(self: Tensor, p: float = ...) -> Tensor: ...
 @register_meta(aten._pdist_backward)
 @out_wrapper()
 def meta__pdist_backward(
-    grad: Tensor, self: Tensor, p: float, pdist: Tensor
+    grad: Tensor,
+    self: Tensor,
+    p: float,
+    pdist: Tensor,
 ) -> Tensor: ...
 @register_meta([aten.baddbmm.default, aten.baddbmm.out])
 @out_wrapper(exact_dtype=True)
@@ -436,7 +508,12 @@ if torch._C._has_mkldnn:
     ): ...
     @register_meta(torch.ops.mkldnn._linear_pointwise.default)
     def meta_linear_pointwise_default(
-        input_tensor, weight, bias, attr, scalars, algorithm
+        input_tensor,
+        weight,
+        bias,
+        attr,
+        scalars,
+        algorithm,
     ): ...
 
     _meta_lib_dont_use_me_use_register_meta_for_onednn = ...
@@ -532,7 +609,12 @@ if torch._C._has_mkldnn:
     _meta_lib_dont_use_me_use_register_meta_for_quantized = ...
     @register_meta(torch.ops.quantized.max_pool2d)
     def meta_quantized_max_pool2d(
-        input, kernel_size, stride=..., padding=..., dilation=..., ceil_mode=...
+        input,
+        kernel_size,
+        stride=...,
+        padding=...,
+        dilation=...,
+        ceil_mode=...,
     ) -> Tensor: ...
     @register_meta(torch.ops.quantized.int4mm_packed_weight_cpu)
     def meta_int4mm_packed_weight_cpu(x, w, q_group_size, q_scale_and_zeros): ...
@@ -705,11 +787,20 @@ def kai_roundup(a: int, b: int) -> int: ...
 def get_kai_packed_weight_size(n_bits, N, K, groupsize) -> None: ...
 @register_meta([aten._dyn_quant_pack_4bit_weight])
 def meta__dyn_quant_pack_4bit_weight(
-    weights, scales_zeros, bias: Tensor | None, block_size, in_features, out_features
+    weights,
+    scales_zeros,
+    bias: Tensor | None,
+    block_size,
+    in_features,
+    out_features,
 ): ...
 @register_meta([aten._dyn_quant_matmul_4bit])
 def meta__dyn_quant_matmul_4bit(
-    inp, packed_weights, block_size, in_features, out_features
+    inp,
+    packed_weights,
+    block_size,
+    in_features,
+    out_features,
 ): ...
 @register_meta([aten._weight_int8pack_mm])
 def meta__weight_int8pack_mm(x, w, q_scales): ...
@@ -732,7 +823,10 @@ def meta_embedding_bag(
 ) -> tuple[Any, Any, Any, Any]: ...
 @register_meta(aten._embedding_bag_forward_only.default)
 def meta_embedding_bag_forward_only(
-    weight, indices, offsets, *args
+    weight,
+    indices,
+    offsets,
+    *args,
 ) -> tuple[Any, Any, Any, Any]: ...
 @register_meta([aten.nansum.default, aten.nansum.out])
 @out_wrapper()
@@ -747,7 +841,7 @@ def meta_median(input): ...
         aten.nanmedian.dim_values,
         aten.mode.default,
         aten.mode.values,
-    ]
+    ],
 )
 @out_wrapper("values", "indices")
 def meta_median_mode_dim(input, dim=..., keepdim=...) -> tuple[Any, Any]: ...
@@ -766,7 +860,7 @@ def meta_zero_(self): ...
         aten.logical_and_.default,
         aten.logical_or_.default,
         aten.logical_xor_.default,
-    ]
+    ],
 )
 def meta_binop_inplace(self, other): ...
 @register_meta([aten.add_.Scalar, aten.sub_.Scalar, aten.add_.Tensor, aten.sub_.Tensor])
@@ -794,11 +888,21 @@ def meta__add_relu(self, other, alpha=...) -> Tensor: ...
 @register_meta([aten.rrelu_with_noise])
 @out_wrapper()
 def meta_rrelu_with_noise(
-    self, noise, lower=..., upper=..., training=..., generator=...
+    self,
+    noise,
+    lower=...,
+    upper=...,
+    training=...,
+    generator=...,
 ) -> Tensor: ...
 @register_meta([aten.rrelu_with_noise_functional])
 def meta_rrelu_with_noise_functional(
-    self, noise, lower=..., upper=..., training=..., generator=...
+    self,
+    noise,
+    lower=...,
+    upper=...,
+    training=...,
+    generator=...,
 ) -> tuple[Tensor, Tensor]: ...
 @register_meta([aten.rrelu_with_noise_])
 def meta_rrelu_with_noise_(self, lower=..., upper=..., training=..., generator=...): ...
@@ -818,7 +922,11 @@ def meta_masked_scatter_backward(self, mask, sizes): ...
 @register_meta(aten.index_put_.default)
 def meta_index_put_(self, indices, values, accumulate=...): ...
 def common_meta_baddbmm_bmm(
-    batch1, batch2, is_bmm, self_baddbmm=..., out_dtype=...
+    batch1,
+    batch2,
+    is_bmm,
+    self_baddbmm=...,
+    out_dtype=...,
 ): ...
 @register_meta(aten.bmm.default)
 def meta_bmm(self, mat2): ...
@@ -826,7 +934,13 @@ def meta_bmm(self, mat2): ...
 def meta_bmm_dtype(self, mat2, out_dtype): ...
 def div_rtn(x, y): ...
 def pooling_output_shape_pad_lr(
-    inputSize, kernelSize, pad_l, pad_r, stride, dilation, ceil_mode
+    inputSize,
+    kernelSize,
+    pad_l,
+    pad_r,
+    stride,
+    dilation,
+    ceil_mode,
 ): ...
 def pooling_output_shape(inputSize, kernelSize, pad, stride, dilation, ceil_mode): ...
 def pool2d_shape_check(
@@ -917,29 +1031,61 @@ def avg_pool3d_backward_shape_check(
     fn_name: str,
 ) -> None: ...
 def max_pool2d_checks_and_compute_shape(
-    input, kernel_size, stride, padding, dilation, ceil_mode
+    input,
+    kernel_size,
+    stride,
+    padding,
+    dilation,
+    ceil_mode,
 ) -> tuple[Any, Any, Any]: ...
 @register_meta(aten.max_pool2d_with_indices_backward.default)
 def meta_max_pool2d_with_indices_backward(
-    grad_output, self, kernel_size, stride, padding, dilation, ceil_mode, indices
+    grad_output,
+    self,
+    kernel_size,
+    stride,
+    padding,
+    dilation,
+    ceil_mode,
+    indices,
 ) -> Tensor: ...
 @register_meta(aten.max_pool2d_with_indices.default)
 def meta_max_pool2d_with_indices(
-    input, kernel_size, stride=..., padding=..., dilation=..., ceil_mode=...
+    input,
+    kernel_size,
+    stride=...,
+    padding=...,
+    dilation=...,
+    ceil_mode=...,
 ) -> tuple[Tensor, Tensor]: ...
 @register_meta(aten.fractional_max_pool2d.default)
 def meta_fractional_max_pool2d(
-    self, kernel_size, output_size, random_samples
+    self,
+    kernel_size,
+    output_size,
+    random_samples,
 ) -> tuple[Tensor, Tensor]: ...
 @register_meta(aten.max_pool3d_with_indices)
 @out_wrapper("out", "indices")
 def meta_max_pool3d_with_indices(
-    input, kernel_size, stride=..., padding=..., dilation=..., ceil_mode=...
+    input,
+    kernel_size,
+    stride=...,
+    padding=...,
+    dilation=...,
+    ceil_mode=...,
 ) -> tuple[Any, Any]: ...
 @register_meta(aten.max_pool3d_with_indices_backward)
 @out_wrapper("grad_input")
 def meta_max_pool3d_with_indices_backward(
-    grad_output, input, kernel_size, stride, padding, dilation, ceil_mode, indices
+    grad_output,
+    input,
+    kernel_size,
+    stride,
+    padding,
+    dilation,
+    ceil_mode,
+    indices,
 ): ...
 def check_grid_sampler_common(input: Tensor, grid: Tensor) -> None: ...
 
@@ -949,7 +1095,9 @@ class GridSamplerInterpolation(Enum):
     BICUBIC = ...
 
 def check_grid_sampler_3d(
-    input: Tensor, grid: Tensor, interpolation_mode: int
+    input: Tensor,
+    grid: Tensor,
+    interpolation_mode: int,
 ) -> None: ...
 @register_meta(aten.grid_sampler_2d_backward.default)
 def grid_sampler_2d_backward_meta(
@@ -979,17 +1127,34 @@ def grid_sampler_3d_backward(
 def full(size, fill_value, *args, **kwargs) -> Tensor: ...
 @register_meta(aten.zeros_like.default)
 def zeros_like(
-    self, dtype=..., layout=..., device=..., pin_memory=..., memory_format=...
+    self,
+    dtype=...,
+    layout=...,
+    device=...,
+    pin_memory=...,
+    memory_format=...,
 ) -> Tensor | Any: ...
 @register_meta([aten.ones.default, aten.ones.out])
 @out_wrapper()
 def meta_ones(
-    size, *, dtype=..., layout=..., device=..., pin_memory=..., requires_grad=...
+    size,
+    *,
+    dtype=...,
+    layout=...,
+    device=...,
+    pin_memory=...,
+    requires_grad=...,
 ) -> Tensor: ...
 @register_meta([aten.zeros.default, aten.zeros.out])
 @out_wrapper()
 def meta_zeros(
-    size, *, dtype=..., layout=..., device=..., pin_memory=..., requires_grad=...
+    size,
+    *,
+    dtype=...,
+    layout=...,
+    device=...,
+    pin_memory=...,
+    requires_grad=...,
 ) -> Tensor: ...
 @register_meta(aten.select_scatter.default)
 def meta_select_scatter(self, src, dim, index) -> Tensor: ...
@@ -1001,7 +1166,8 @@ def gather_shape_check(self, dim, index) -> None: ...
 @register_meta(aten.gather.default)
 def meta_gather(self, dim, index, sparse_grad=...): ...
 def get_operator_enum(
-    reduce_, use_new_options=...
+    reduce_,
+    use_new_options=...,
 ) -> (
     Literal[REDUCE_ADD, REDUCE_MULTIPLY, REDUCE_MEAN, REDUCE_MAXIMUM, REDUCE_MINIMUM]
     | None
@@ -1010,7 +1176,12 @@ def scatter_gather_dtype_check(method_name, self, index, src_opt=...) -> None: .
 def ensure_nonempty_dim(dim) -> int: ...
 def scatter_shape_check(self, dim, index, src_opt=...) -> None: ...
 def scatter_meta_impl(
-    self, dim, index, src=..., reduce_=..., use_new_options=...
+    self,
+    dim,
+    index,
+    src=...,
+    reduce_=...,
+    use_new_options=...,
 ) -> None: ...
 @register_meta(aten.scatter_add.default)
 def meta_scatter_add(self, dim, index, src): ...
@@ -1022,7 +1193,7 @@ def meta_scatter_add_(self, dim, index, src): ...
         aten.scatter.value,
         aten.scatter.reduce,
         aten.scatter.value_reduce,
-    ]
+    ],
 )
 @out_wrapper()
 def meta_scatter(self, dim, index, src_or_value, reduce=...): ...
@@ -1032,7 +1203,7 @@ def meta_scatter(self, dim, index, src_or_value, reduce=...): ...
         aten.scatter_.value,
         aten.scatter_.reduce,
         aten.scatter_.value_reduce,
-    ]
+    ],
 )
 def meta_scatter_(self, dim, index, src_or_value, reduce=...): ...
 @register_meta([aten._scaled_dot_product_flash_attention])
@@ -1263,25 +1434,31 @@ def meta_scatter_reduce__two(self, dim, index, src, reduce, include_self=...): .
 @register_meta([aten.multinomial.default, aten.multinomial.out])
 @out_wrapper()
 def meta_multinomial(
-    input, num_samples, replacement=..., *, generator=...
+    input,
+    num_samples,
+    replacement=...,
+    *,
+    generator=...,
 ) -> Tensor: ...
 def multiply_integers(vs) -> Literal[1]: ...
 def upsample_common_check(
-    input_size, output_size, num_spatial_dims
+    input_size,
+    output_size,
+    num_spatial_dims,
 ) -> tuple[Any, Any, *tuple[Any, ...]]: ...
 @register_meta(
-    [aten.upsample_nearest1d.default, aten._upsample_nearest_exact1d.default]
+    [aten.upsample_nearest1d.default, aten._upsample_nearest_exact1d.default],
 )
 def upsample_nearest1d(input, output_size, scales=...): ...
 @register_meta(
-    [aten.upsample_nearest2d.default, aten._upsample_nearest_exact2d.default]
+    [aten.upsample_nearest2d.default, aten._upsample_nearest_exact2d.default],
 )
 def upsample_nearest2d(input, output_size, scales_h=..., scales_w=...): ...
 @register_meta(
     [
         aten.upsample_nearest2d_backward.default,
         aten._upsample_nearest_exact2d_backward.default,
-    ]
+    ],
 )
 def upsample_nearest2d_backward(
     grad_output: Tensor,
@@ -1291,19 +1468,33 @@ def upsample_nearest2d_backward(
     scales_w: float | None = ...,
 ) -> Tensor: ...
 @register_meta(
-    [aten.upsample_nearest3d.default, aten._upsample_nearest_exact3d.default]
+    [aten.upsample_nearest3d.default, aten._upsample_nearest_exact3d.default],
 )
 def upsample_nearest3d(
-    input, output_size, scales_d=..., scales_h=..., scales_w=...
+    input,
+    output_size,
+    scales_d=...,
+    scales_h=...,
+    scales_w=...,
 ): ...
 @register_meta(
-    [aten.sort.default, aten.sort.stable, aten.sort.values, aten.sort.values_stable]
+    [aten.sort.default, aten.sort.stable, aten.sort.values, aten.sort.values_stable],
 )
 def meta_sort(
-    self, stable=..., dim=..., descending=..., values=..., indices=...
+    self,
+    stable=...,
+    dim=...,
+    descending=...,
+    values=...,
+    indices=...,
 ) -> tuple[Tensor, Tensor]: ...
 def rnn_cell_checkSizes(
-    input_gates, hidden_gates, input_bias, hidden_bias, factor, prev_hidden
+    input_gates,
+    hidden_gates,
+    input_bias,
+    hidden_bias,
+    factor,
+    prev_hidden,
 ) -> None: ...
 @register_meta(aten.mkldnn_rnn_layer.default)
 def mkldnn_rnn_layer(
@@ -1335,7 +1526,14 @@ def topk_meta(self, k, dim=..., largest=..., sorted=...) -> tuple[Any, Any]: ...
 @register_meta(aten._segment_reduce_backward)
 @out_wrapper()
 def meta__segment_reduce_backward(
-    grad, output, data, reduce, lengths=..., offsets=..., axis=..., initial=...
+    grad,
+    output,
+    data,
+    reduce,
+    lengths=...,
+    offsets=...,
+    axis=...,
+    initial=...,
 ) -> Tensor: ...
 @register_meta([aten.kthvalue.default, aten.kthvalue.values])
 @out_wrapper("values", "indices")
@@ -1346,7 +1544,10 @@ legacy_contiguous_memory_format = ...
 def checkLSTMBackwardSizes(grad_hy, grad_cy, cx, cy, workspace) -> None: ...
 @register_meta(aten.linear_backward.default)
 def linear_backward(
-    input_, grad_output_, weight_, output_mask
+    input_,
+    grad_output_,
+    weight_,
+    output_mask,
 ) -> tuple[Any | None, Any | None, Any | None]: ...
 @register_meta(aten.pixel_shuffle.default)
 def meta_pixel_shuffle(self, upscale_factor): ...
@@ -1383,14 +1584,23 @@ def meta_bucketize(self, boundaries, *, out_int32=..., right=...) -> Tensor: ...
 @out_wrapper()
 def meta_histc(input, bins=..., min=..., max=...) -> Tensor: ...
 @register_meta(
-    [aten._upsample_bilinear2d_aa.default, aten._upsample_bicubic2d_aa.default]
+    [aten._upsample_bilinear2d_aa.default, aten._upsample_bicubic2d_aa.default],
 )
 def meta_upsample_bimode2d_aa(
-    input, output_size, align_corners, scales_h=..., scales_w=...
+    input,
+    output_size,
+    align_corners,
+    scales_h=...,
+    scales_w=...,
 ): ...
 @register_meta([aten._upsample_bilinear2d_aa_backward.default])
 def meta_upsample_bimode2d_aa_backward(
-    grad_output, output_size, input_size, align_corners, scales_h=..., scales_w=...
+    grad_output,
+    output_size,
+    input_size,
+    align_corners,
+    scales_h=...,
+    scales_w=...,
 ): ...
 @register_meta([aten.nan_to_num.default, aten.nan_to_num.out])
 @out_wrapper()
@@ -1402,11 +1612,21 @@ def t_(self): ...
 @register_meta(aten.searchsorted)
 @out_wrapper()
 def meta_searchsorted(
-    sorted_sequence, self, *, out_int32=..., right=..., side=..., sorter=...
+    sorted_sequence,
+    self,
+    *,
+    out_int32=...,
+    right=...,
+    side=...,
+    sorter=...,
 ) -> Tensor: ...
 @register_meta(aten.embedding_dense_backward)
 def meta_embedding_dense_backward(
-    grad_output, indices, num_weights, padding_idx, scale_grad_by_freq
+    grad_output,
+    indices,
+    num_weights,
+    padding_idx,
+    scale_grad_by_freq,
 ): ...
 @register_meta(aten._embedding_bag_backward)
 def meta_embedding_bag_backward(
@@ -1438,7 +1658,13 @@ def meta_embedding_bag_dense_backward(
 ): ...
 @register_meta(aten._embedding_bag_per_sample_weights_backward)
 def meta_embedding_bag_per_sample_weights_backward(
-    grad, weight, indices, offsets, offset2bag, mode, padding_idx=...
+    grad,
+    weight,
+    indices,
+    offsets,
+    offset2bag,
+    mode,
+    padding_idx=...,
 ): ...
 @register_meta(aten.isin)
 @out_wrapper()

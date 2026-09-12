@@ -13,8 +13,12 @@ def tp_convolution_backward(
     local_tensor_kwargs: dict[str, object],
 ) -> object: ...
 def convolution_handler(
-    op_call: torch._ops.OpOverload, args: tuple[object, ...], kwargs: dict[str, object]
+    op_call: torch._ops.OpOverload,
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
 ) -> object: ...
 def convolution_backward_handler(
-    op_call: torch._ops.OpOverload, args: tuple[object, ...], kwargs: dict[str, object]
+    op_call: torch._ops.OpOverload,
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
 ) -> object: ...

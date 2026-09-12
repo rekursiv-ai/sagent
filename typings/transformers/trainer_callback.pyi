@@ -39,7 +39,11 @@ class TrainerState:
     def compute_steps(self, args, max_steps):  # -> None:
         ...
     def init_training_references(
-        self, trainer, max_steps, num_train_epochs, trial
+        self,
+        trainer,
+        max_steps,
+        num_train_epochs,
+        trial,
     ):  # -> None:
         ...
 
@@ -183,7 +187,12 @@ class TrainerCallback:
 
 class CallbackHandler(TrainerCallback):
     def __init__(
-        self, callbacks, model, processing_class, optimizer, lr_scheduler
+        self,
+        callbacks,
+        model,
+        processing_class,
+        optimizer,
+        lr_scheduler,
     ) -> None: ...
     def add_callback(self, callback):  # -> None:
         ...
@@ -195,43 +204,73 @@ class CallbackHandler(TrainerCallback):
     def callback_list(self):  # -> LiteralString:
         ...
     def on_init_end(
-        self, args: TrainingArguments, state: TrainerState, control: TrainerControl
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
     ):  # -> Any:
         ...
     def on_train_begin(
-        self, args: TrainingArguments, state: TrainerState, control: TrainerControl
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
     ):  # -> Any:
         ...
     def on_train_end(
-        self, args: TrainingArguments, state: TrainerState, control: TrainerControl
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
     ):  # -> Any:
         ...
     def on_epoch_begin(
-        self, args: TrainingArguments, state: TrainerState, control: TrainerControl
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
     ):  # -> Any:
         ...
     def on_epoch_end(
-        self, args: TrainingArguments, state: TrainerState, control: TrainerControl
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
     ):  # -> Any:
         ...
     def on_step_begin(
-        self, args: TrainingArguments, state: TrainerState, control: TrainerControl
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
     ):  # -> Any:
         ...
     def on_pre_optimizer_step(
-        self, args: TrainingArguments, state: TrainerState, control: TrainerControl
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
     ):  # -> Any:
         ...
     def on_optimizer_step(
-        self, args: TrainingArguments, state: TrainerState, control: TrainerControl
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
     ):  # -> Any:
         ...
     def on_substep_end(
-        self, args: TrainingArguments, state: TrainerState, control: TrainerControl
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
     ):  # -> Any:
         ...
     def on_step_end(
-        self, args: TrainingArguments, state: TrainerState, control: TrainerControl
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
     ):  # -> Any:
         ...
     def on_evaluate(
@@ -251,7 +290,10 @@ class CallbackHandler(TrainerCallback):
     ):  # -> Any:
         ...
     def on_save(
-        self, args: TrainingArguments, state: TrainerState, control: TrainerControl
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
     ):  # -> Any:
         ...
     def on_log(
@@ -263,7 +305,10 @@ class CallbackHandler(TrainerCallback):
     ):  # -> Any:
         ...
     def on_prediction_step(
-        self, args: TrainingArguments, state: TrainerState, control: TrainerControl
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
     ):  # -> Any:
         ...
     def call_event(self, event, args, state, control, **kwargs):  # -> Any:
@@ -294,7 +339,12 @@ class ProgressCallback(TrainerCallback):
     def on_step_end(self, args, state, control, **kwargs):  # -> None:
         ...
     def on_prediction_step(
-        self, args, state, control, eval_dataloader=..., **kwargs
+        self,
+        args,
+        state,
+        control,
+        eval_dataloader=...,
+        **kwargs,
     ):  # -> None:
         ...
     def on_evaluate(self, args, state, control, **kwargs):  # -> None:

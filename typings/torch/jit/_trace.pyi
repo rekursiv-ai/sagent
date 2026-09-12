@@ -32,10 +32,13 @@ class ONNXTracedModule(torch.nn.Module):
         return_inputs_states=...,
     ) -> None: ...
     def forward(
-        self, *args: torch.Tensor
+        self,
+        *args: torch.Tensor,
     ) -> tuple[Graph, Any, Any] | tuple[Graph, Any]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[Graph, Any, Any] | tuple[Graph, Any]: ...
 
 _JIT_TIME = ...
@@ -47,7 +50,10 @@ def indent(s) -> LiteralString: ...
 
 class TracingCheckError(Exception):
     def __init__(
-        self, graph_diff_error, tensor_compare_error, extra_msg=...
+        self,
+        graph_diff_error,
+        tensor_compare_error,
+        extra_msg=...,
     ) -> None: ...
 
 class TracerWarning(Warning):
@@ -56,7 +62,9 @@ class TracerWarning(Warning):
 
 def make_tuple(example_inputs) -> tuple[Tensor | dict[Any, Any]] | tuple[Any, ...]: ...
 def make_module(
-    mod, _module_class, _compilation_unit
+    mod,
+    _module_class,
+    _compilation_unit,
 ) -> ScriptModule | TopLevelTracedModule: ...
 def wrap_check_inputs(check_inputs) -> list[dict[str, Any]] | None: ...
 def analyze_ts_result_with_export_result(export, trace) -> bool: ...

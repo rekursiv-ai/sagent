@@ -26,15 +26,16 @@ def _opus() -> ModelCapability:
             {
                 "": ModelLimits(max_request_tokens=200_000, max_image_bytes=5_000_000),
                 "+1m": ModelLimits(
-                    max_request_tokens=1_000_000, max_image_bytes=5_000_000
+                    max_request_tokens=1_000_000,
+                    max_image_bytes=5_000_000,
                 ),
-            }
+            },
         ),
         prices=PriceCatalog(
             {
                 PriceCatalogProduct(): TokenPrice(request=5.0),
                 PriceCatalogProduct(service_tier="priority"): TokenPrice(request=15.0),
-            }
+            },
         ),
         thinking_effort={"none", "max"},
         service_tier={"auto", "default", "priority"},
@@ -91,7 +92,7 @@ def test_resolve_never_grants_what_the_row_lacks() -> None:
         models={"claude-opus-4-8": _opus()},
         roles={},
         transport=ModelCapability(
-            thinking_effort={"none", "min", "low", "medium", "high", "max"}
+            thinking_effort={"none", "min", "low", "medium", "high", "max"},
         ),
     )
     assert capability.thinking_effort == frozenset({"none", "max"})

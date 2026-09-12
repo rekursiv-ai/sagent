@@ -37,7 +37,9 @@ def fn_input_mutations_to_outputs(
 @contextmanager
 def disable_autocast() -> Generator[None, Any]: ...
 def fn_prepped_for_autograd(
-    fn: TraceFn, args_descs: list[AOTInput], meta: ViewAndMutationMeta
+    fn: TraceFn,
+    args_descs: list[AOTInput],
+    meta: ViewAndMutationMeta,
 ) -> PreppedForAutogradTraceFn: ...
 
 @dataclass
@@ -45,19 +47,29 @@ class JointFnHandle:
     post_forward: Callable | None = ...
 
 def create_joint(
-    fn: Any, primals_descs: list[AOTInput] | None = ..., *, aot_config: AOTConfig
+    fn: Any,
+    primals_descs: list[AOTInput] | None = ...,
+    *,
+    aot_config: AOTConfig,
 ) -> Any: ...
 def create_functionalized_rng_ops_wrapper(
-    func, args, args_descs, trace_joint=...
+    func,
+    args,
+    args_descs,
+    trace_joint=...,
 ) -> Any: ...
 @contextmanager
 def set_partitioner_tag(tag: str) -> Generator[None, Any]: ...
 def set_partitioner_tag_is_backward() -> _GeneratorContextManager[None, None, None]: ...
 def set_partitioner_tag_must_be_in_backward() -> _GeneratorContextManager[
-    None, None, None
+    None,
+    None,
+    None,
 ]: ...
 def set_partitioner_tag_must_be_in_forward() -> _GeneratorContextManager[
-    None, None, None
+    None,
+    None,
+    None,
 ]: ...
 
 @dataclass
@@ -69,7 +81,10 @@ class MutationCounters:
 T = TypeVar("T")
 
 def sc_visit(
-    t, fn: Callable[[Tensor], T], reduce_fn: Callable[[T, T], T], accum_init: T
+    t,
+    fn: Callable[[Tensor], T],
+    reduce_fn: Callable[[T, T], T],
+    accum_init: T,
 ) -> T: ...
 def apply_in_graph_mutations(
     input_info,
@@ -108,5 +123,9 @@ def aot_dispatch_subclass(
     fw_only: Callable,
 ) -> SubclassTracingInfo: ...
 def create_functional_call(
-    mod, params_spec, params_len, store_orig_mod=..., strict_out_tuple=...
+    mod,
+    params_spec,
+    params_len,
+    store_orig_mod=...,
+    strict_out_tuple=...,
 ) -> Callable[..., Any | tuple[Any, ...] | list[Any]]: ...

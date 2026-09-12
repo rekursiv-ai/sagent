@@ -117,7 +117,7 @@ def test_run_cached_existing(tmp_path: Path) -> None:
     _ = cache_file.write_bytes(_FAKE_PDF)
     with patch("sagent.tools.paper_fetch.download") as download:
         result = asyncio.run(
-            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.56789"]})
+            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.56789"]}),
         )
     download.assert_not_called()
     assert not result.is_error
@@ -133,7 +133,7 @@ def test_run_cache_too_small_refetches(tmp_path: Path) -> None:
         return_value=(_FAKE_PDF, "arxiv"),
     ) as download:
         result = asyncio.run(
-            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.56789"]})
+            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.56789"]}),
         )
     download.assert_called_once()
     assert result.content == f"Downloaded via arxiv: {cache_file}"
@@ -148,7 +148,7 @@ def test_run_cache_garbage_refetches(tmp_path: Path) -> None:
         return_value=(_FAKE_PDF, "arxiv"),
     ) as download:
         result = asyncio.run(
-            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.56789"]})
+            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.56789"]}),
         )
     download.assert_called_once()
     assert "Downloaded via arxiv" in result.content
@@ -167,14 +167,17 @@ def test_run_single_download_writes_cache(tmp_path: Path) -> None:
         return_value=(_FAKE_PDF, "arxiv"),
     ) as download:
         result = asyncio.run(
-            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.56789"]})
+            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.56789"]}),
         )
     assert not result.is_error
     assert result.content == f"Downloaded via arxiv: {cache_file}"
     assert cache_file.read_bytes() == _FAKE_PDF
     # Single id: no OA pre-resolve, and no completed lookup claimed.
     download.assert_called_once_with(
-        "arxiv", "1234.56789", oa_url=None, oa_looked_up=False
+        "arxiv",
+        "1234.56789",
+        oa_url=None,
+        oa_looked_up=False,
     )
 
 
@@ -194,7 +197,7 @@ def test_run_single_error_maps_to_tool_error(tmp_path: Path) -> None:
     err = NotFoundError("No source returned a PDF for arxiv:1234.56789.")
     with patch("sagent.tools.paper_fetch.download", side_effect=err):
         result = asyncio.run(
-            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.56789"]})
+            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.56789"]}),
         )
     assert result.is_error
     assert result.content == "No source returned a PDF for arxiv:1234.56789."
@@ -211,7 +214,11 @@ def test_run_multi_batches_oa_then_fetches(tmp_path: Path) -> None:
     urls = ["https://oa.example/a.pdf", "https://oa.example/b.pdf"]
 
     def fake_download(
-        kind: str, canonical: str, *, oa_url: str | None, oa_looked_up: bool
+        kind: str,
+        canonical: str,
+        *,
+        oa_url: str | None,
+        oa_looked_up: bool,
     ) -> tuple[bytes, str]:
         del kind, canonical, oa_url, oa_looked_up
         return _FAKE_PDF, "open_access"
@@ -227,7 +234,7 @@ def test_run_multi_batches_oa_then_fetches(tmp_path: Path) -> None:
         ) as download,
     ):
         result = asyncio.run(
-            PaperFetch(cache_dir=tmp_path).run({"ids": ["10.1234/aa", "10.1234/bb"]})
+            PaperFetch(cache_dir=tmp_path).run({"ids": ["10.1234/aa", "10.1234/bb"]}),
         )
 
     batch.assert_called_once_with(["DOI:10.1234/aa", "DOI:10.1234/bb"])
@@ -254,7 +261,7 @@ def test_run_multi_batch_failure_falls_back(tmp_path: Path) -> None:
         ) as download,
     ):
         result = asyncio.run(
-            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.11111", "1234.22222"]})
+            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.11111", "1234.22222"]}),
         )
     assert not result.is_error
     for c in download.call_args_list:
@@ -267,7 +274,11 @@ def test_run_multi_joined_output_order(tmp_path: Path) -> None:
     sources = {"1234.11111": "arxiv", "10.1234/bb": "open_access"}
 
     def fake_download(
-        kind: str, canonical: str, *, oa_url: str | None, oa_looked_up: bool
+        kind: str,
+        canonical: str,
+        *,
+        oa_url: str | None,
+        oa_looked_up: bool,
     ) -> tuple[bytes, str]:
         del kind
         del oa_url, oa_looked_up
@@ -284,7 +295,7 @@ def test_run_multi_joined_output_order(tmp_path: Path) -> None:
         ),
     ):
         result = asyncio.run(
-            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.11111", "10.1234/bb"]})
+            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.11111", "10.1234/bb"]}),
         )
     line_a = f"Downloaded via arxiv: {tmp_path / 'arxiv_1234.11111.pdf'}"
     line_b = f"Downloaded via open_access: {tmp_path / 'doi_10.1234_bb.pdf'}"
@@ -296,7 +307,11 @@ def test_run_multi_error_if_any_id_fails(tmp_path: Path) -> None:
     err = NotFoundError("No source returned a PDF for doi:10.1234/bb.")
 
     def fake_download(
-        kind: str, canonical: str, *, oa_url: str | None, oa_looked_up: bool
+        kind: str,
+        canonical: str,
+        *,
+        oa_url: str | None,
+        oa_looked_up: bool,
     ) -> tuple[bytes, str]:
         del kind
         del oa_url, oa_looked_up
@@ -315,7 +330,7 @@ def test_run_multi_error_if_any_id_fails(tmp_path: Path) -> None:
         ),
     ):
         result = asyncio.run(
-            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.11111", "10.1234/bb"]})
+            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.11111", "10.1234/bb"]}),
         )
     assert result.is_error
     assert "Downloaded via arxiv" in result.content
@@ -333,7 +348,7 @@ def test_run_multi_all_fail(tmp_path: Path) -> None:
         patch("sagent.tools.paper_fetch.download", side_effect=err),
     ):
         result = asyncio.run(
-            PaperFetch(cache_dir=tmp_path).run({"ids": ["10.1234/a", "10.1234/b"]})
+            PaperFetch(cache_dir=tmp_path).run({"ids": ["10.1234/a", "10.1234/b"]}),
         )
     assert result.is_error
     assert result.content.count("No source returned a PDF.") == 2

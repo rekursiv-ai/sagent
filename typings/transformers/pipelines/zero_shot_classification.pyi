@@ -5,7 +5,10 @@ logger = ...
 
 class ZeroShotClassificationArgumentHandler(ArgumentHandler):
     def __call__(
-        self, sequences, labels, hypothesis_template
+        self,
+        sequences,
+        labels,
+        hypothesis_template,
     ):  # -> tuple[list[Any], list[str] | Any]:
         ...
 
@@ -20,14 +23,22 @@ class ZeroShotClassificationPipeline(ChunkPipeline):
     def entailment_id(self):  # -> int:
         ...
     def __call__(
-        self, sequences: str | list[str], *args, **kwargs
+        self,
+        sequences: str | list[str],
+        *args,
+        **kwargs,
     ):  # -> list[Any] | PipelineIterator | Generator[Any, Any, None] | Tensor | Any | None:
         ...
     def preprocess(
-        self, inputs, candidate_labels=..., hypothesis_template=...
+        self,
+        inputs,
+        candidate_labels=...,
+        hypothesis_template=...,
     ):  # -> Generator[dict[str | Any, Any | str | bool | Encoding], Any, None]:
         ...
     def postprocess(
-        self, model_outputs, multi_label=...
+        self,
+        model_outputs,
+        multi_label=...,
     ):  # -> dict[str, Any | list[Any]]:
         ...

@@ -14,7 +14,9 @@ from ...utils import ModelOutput, auto_docstring
 logger = ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class MgpstrDropPath(nn.Module):

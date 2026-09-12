@@ -35,14 +35,20 @@ class VisualBertEmbeddings(nn.Module):
 class VisualBertSelfAttention(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states, attention_mask=..., head_mask=..., output_attentions=...
+        self,
+        hidden_states,
+        attention_mask=...,
+        head_mask=...,
+        output_attentions=...,
     ):  # -> tuple[Tensor, Any] | tuple[Tensor]:
         ...
 
 class VisualBertSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -51,7 +57,11 @@ class VisualBertAttention(nn.Module):
     def prune_heads(self, heads):  # -> None:
         ...
     def forward(
-        self, hidden_states, attention_mask=..., head_mask=..., output_attentions=...
+        self,
+        hidden_states,
+        attention_mask=...,
+        head_mask=...,
+        output_attentions=...,
     ):  # -> Any:
         ...
 
@@ -63,14 +73,20 @@ class VisualBertIntermediate(nn.Module):
 class VisualBertOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class VisualBertLayer(GradientCheckpointingLayer):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states, attention_mask=..., head_mask=..., output_attentions=...
+        self,
+        hidden_states,
+        attention_mask=...,
+        head_mask=...,
+        output_attentions=...,
     ):  # -> Any:
         ...
     def feed_forward_chunk(self, attention_output):  # -> Any:

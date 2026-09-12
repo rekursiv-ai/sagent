@@ -23,7 +23,7 @@ import pytest
 # slack_sdk ships only in the optional `slack` extra; skip when it is absent.
 pytest.importorskip("slack_sdk")
 
-from sagent.agent import Agent as RealAgent
+from sagent.agent import Agent
 from sagent.agent.state import agent_registry
 from sagent.bin.slack import (
     SlackAdapter,
@@ -687,7 +687,7 @@ class TestRouteReactions:
         _ = _register("Sara")
         # No item.
         await adapter._route(
-            {"type": "reaction_added", "user": "UHUMAN", "reaction": "heart"}
+            {"type": "reaction_added", "user": "UHUMAN", "reaction": "heart"},
         )
         # No reaction.
         await adapter._route(
@@ -695,7 +695,7 @@ class TestRouteReactions:
                 "type": "reaction_added",
                 "user": "UHUMAN",
                 "item": {"type": "message", "channel": "C123", "ts": "1.0"},
-            }
+            },
         )
         # No user.
         await adapter._route(
@@ -703,7 +703,7 @@ class TestRouteReactions:
                 "type": "reaction_added",
                 "reaction": "heart",
                 "item": {"type": "message", "channel": "C123", "ts": "1.0"},
-            }
+            },
         )
 
     @pytest.mark.anyio
@@ -960,7 +960,9 @@ class TestResolveRouterLogChannel:
         adapter, _ = _make_adapter()
         adapter._router_log_channel = "router-log"
         with patch.object(
-            SlackAdapter, "_find_channel", new=AsyncMock(return_value="C_FOUND")
+            SlackAdapter,
+            "_find_channel",
+            new=AsyncMock(return_value="C_FOUND"),
         ):
             await adapter._resolve_router_log_channel()
         assert adapter._router_log_channel == "C_FOUND"
@@ -971,7 +973,9 @@ class TestResolveRouterLogChannel:
         adapter._router_log_channel = "router-log"
         spy.channel_maker = AsyncMock(return_value="id=C_NEW")
         with patch.object(
-            SlackAdapter, "_find_channel", new=AsyncMock(return_value=None)
+            SlackAdapter,
+            "_find_channel",
+            new=AsyncMock(return_value=None),
         ):
             await adapter._resolve_router_log_channel()
         assert adapter._router_log_channel == "C_NEW"
@@ -984,7 +988,9 @@ class TestResolveRouterLogChannel:
             return_value=ToolResult(call_id="", content="forbidden", is_error=True),
         )
         with patch.object(
-            SlackAdapter, "_find_channel", new=AsyncMock(return_value=None)
+            SlackAdapter,
+            "_find_channel",
+            new=AsyncMock(return_value=None),
         ):
             await adapter._resolve_router_log_channel()
         assert adapter._router_log_channel == ""
@@ -995,7 +1001,9 @@ class TestResolveRouterLogChannel:
         adapter._router_log_channel = "router-log"
         spy.channel_maker = AsyncMock(return_value="weird")
         with patch.object(
-            SlackAdapter, "_find_channel", new=AsyncMock(return_value=None)
+            SlackAdapter,
+            "_find_channel",
+            new=AsyncMock(return_value=None),
         ):
             await adapter._resolve_router_log_channel()
         assert adapter._router_log_channel == ""
@@ -1047,7 +1055,9 @@ class TestHandle:
         req.envelope_id = "env1"
         req.payload = {"event": {"type": "message", "text": "hi"}}
         with patch.object(
-            SlackAdapter, "_route", new=AsyncMock(side_effect=RuntimeError("nope"))
+            SlackAdapter,
+            "_route",
+            new=AsyncMock(side_effect=RuntimeError("nope")),
         ):
             await adapter._handle(client, req)  # No crash; exception swallowed.
 
@@ -1064,7 +1074,9 @@ class TestEnsureLogChannel:
     async def test_creates_new(self) -> None:
         adapter, _ = _make_adapter()
         with patch.object(
-            Slack, "create_channel", new=AsyncMock(return_value="id=C_NEW")
+            Slack,
+            "create_channel",
+            new=AsyncMock(return_value="id=C_NEW"),
         ):
             cid = await adapter.ensure_log_channel("sara")
         assert cid == "C_NEW"
@@ -1077,7 +1089,9 @@ class TestEnsureLogChannel:
         with (
             patch.object(Slack, "create_channel", new=AsyncMock(return_value=err)),
             patch.object(
-                SlackAdapter, "_find_channel", new=AsyncMock(return_value="C_FOUND")
+                SlackAdapter,
+                "_find_channel",
+                new=AsyncMock(return_value="C_FOUND"),
             ),
         ):
             cid = await adapter.ensure_log_channel("sara")
@@ -1091,7 +1105,9 @@ class TestEnsureLogChannel:
         with (
             patch.object(Slack, "create_channel", new=AsyncMock(return_value=err)),
             patch.object(
-                SlackAdapter, "_find_channel", new=AsyncMock(return_value=None)
+                SlackAdapter,
+                "_find_channel",
+                new=AsyncMock(return_value=None),
             ),
         ):
             cid = await adapter.ensure_log_channel("sara")
@@ -1110,7 +1126,9 @@ class TestEnsureLogChannel:
         sync_mock = AsyncMock()
         with (
             patch.object(
-                Slack, "create_channel", new=AsyncMock(return_value="id=C_NEW")
+                Slack,
+                "create_channel",
+                new=AsyncMock(return_value="id=C_NEW"),
             ),
             patch.object(SlackAdapter, "_sync_members", new=sync_mock),
         ):
@@ -1469,7 +1487,7 @@ class TestAdapterConstruction:
     @pytest.mark.anyio
     async def test_stop_agent_shuts_down_real_agent(self, tmp_path: Path) -> None:
         adapter, _ = _make_adapter(tmp_path=tmp_path)
-        fake = MagicMock(spec=RealAgent)
+        fake = MagicMock(spec=Agent)
         agent_registry["Sara"] = fake
         adapter._active_agents["Sara"] = {"persona": "x", "system": "y"}
         adapter.stop_agent("Sara")
@@ -1556,7 +1574,10 @@ class TestFlushLogSplitting:
         sent: list[str] = []
 
         async def _capture(
-            self: Slack, channel: str, text: str, thread_ts: str = ""
+            self: Slack,
+            channel: str,
+            text: str,
+            thread_ts: str = "",
         ) -> str:
             del self
             del channel, thread_ts

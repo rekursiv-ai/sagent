@@ -44,7 +44,10 @@ class ConstDictVariable(VariableTracker):
         def __eq__(self, other: ConstDictVariable._HashableTracker) -> bool: ...
 
     def __init__(
-        self, items: dict[VariableTracker, VariableTracker], user_cls=..., **kwargs
+        self,
+        items: dict[VariableTracker, VariableTracker],
+        user_cls=...,
+        **kwargs,
     ) -> None: ...
     def as_proxy(self) -> dict[Any, Any]: ...
     def debug_repr(self) -> str: ...
@@ -58,17 +61,25 @@ class ConstDictVariable(VariableTracker):
     def reconstruct_kvs_into_new_dict(self, codegen) -> None: ...
     def reconstruct(self, codegen: PyCodegen) -> None: ...
     def getitem_const_raise_exception_if_absent(
-        self, tx: InstructionTranslator, arg: VariableTracker
+        self,
+        tx: InstructionTranslator,
+        arg: VariableTracker,
     ) -> VariableTracker: ...
     def getitem_const(
-        self, tx: InstructionTranslator, arg: VariableTracker
+        self,
+        tx: InstructionTranslator,
+        arg: VariableTracker,
     ) -> VariableTracker: ...
     def maybe_getitem_const(self, arg: VariableTracker) -> VariableTracker | None: ...
     def realize_key_vt(self, arg: VariableTracker) -> None: ...
     def install_dict_keys_match_guard(self) -> None: ...
     def install_dict_contains_guard(self, tx, args) -> None: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def unpack_var_sequence(self, tx) -> list[Any]: ...
     def call_obj_hasattr(self, tx, name) -> VariableTracker: ...
@@ -80,7 +91,11 @@ class MappingProxyVariable(VariableTracker):
     def unpack_var_sequence(self, tx) -> list[Any]: ...
     def reconstruct(self, codegen: PyCodegen) -> None: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
 
 class NNModuleHooksDictVariable(ConstDictVariable):
@@ -94,7 +109,11 @@ class DefaultDictVariable(ConstDictVariable):
     @staticmethod
     def is_supported_arg(arg) -> bool: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def reconstruct(self, codegen) -> None: ...
 
@@ -109,7 +128,11 @@ class SetVariable(ConstDictVariable):
     def as_python_constant(self) -> set[Any]: ...
     def reconstruct(self, codegen: PyCodegen) -> None: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def getitem_const(self, tx: InstructionTranslator, arg: VariableTracker): ...
     def install_dict_keys_match_guard(self) -> None: ...
@@ -130,7 +153,11 @@ class FrozensetVariable(SetVariable):
     def as_python_constant(self) -> frozenset[Any]: ...
     def reconstruct(self, codegen: PyCodegen) -> None: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
 
 class DictKeySetVariable(SetVariable):
@@ -149,7 +176,11 @@ class DictKeySetVariable(SetVariable):
     def python_type(self) -> type[KeysView[Any]]: ...
     def as_python_constant(self) -> dict_keys[Any, Any | None]: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
 
 class DictViewVariable(VariableTracker):
@@ -163,7 +194,11 @@ class DictViewVariable(VariableTracker):
     def reconstruct(self, codegen: PyCodegen) -> None: ...
     def call_obj_hasattr(self, tx, name) -> VariableTracker: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
 
 class DictKeysVariable(DictViewVariable):
@@ -173,7 +208,11 @@ class DictKeysVariable(DictViewVariable):
     def view_items_vt(self) -> list[Any]: ...
     def python_type(self) -> type[KeysView[Any]]: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
 
 class DictValuesVariable(DictViewVariable):

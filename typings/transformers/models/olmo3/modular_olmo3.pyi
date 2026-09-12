@@ -59,14 +59,19 @@ class Olmo3Attention(Olmo2Attention):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class Olmo3DecoderLayer(Olmo2DecoderLayer): ...
 
 class Olmo3RotaryEmbedding(Olmo2RotaryEmbedding):
     def __init__(
-        self, config: Olmo3Config, device=..., rope_type: str | None = ...
+        self,
+        config: Olmo3Config,
+        device=...,
+        rope_type: str | None = ...,
     ) -> None: ...
 
 class Olmo3PreTrainedModel(Olmo2PreTrainedModel): ...

@@ -22,7 +22,9 @@ class Unflatten(Module):
     dim: int | str
     unflattened_size: _size | NamedShape
     def __init__(
-        self, dim: int | str, unflattened_size: _size | NamedShape
+        self,
+        dim: int | str,
+        unflattened_size: _size | NamedShape,
     ) -> None: ...
     def forward(self, input: Tensor) -> Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...

@@ -17,7 +17,10 @@ from ...utils import TransformersKwargs, auto_docstring
 class IJepaEmbeddings(ViTEmbeddings):
     def __init__(self, config: IJepaConfig, use_mask_token: bool = ...) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
         self,

@@ -25,7 +25,10 @@ class ShardedTensorBase(torch.Tensor):
     _metadata: ShardedTensorMetadata
     _local_shards: list[Shard]
     def __new__(
-        cls, sharding_spec: shard_spec.ShardingSpec, *size, **kwargs
+        cls,
+        sharding_spec: shard_spec.ShardingSpec,
+        *size,
+        **kwargs,
     ) -> Self: ...
     def metadata(self) -> ShardedTensorMetadata: ...
     def local_shards(self) -> list[Shard]: ...
@@ -34,7 +37,10 @@ class ShardedTensorBase(torch.Tensor):
 
 class ShardedTensor(ShardedTensorBase):
     def __new__(
-        cls, sharding_spec: shard_spec.ShardingSpec, *size, **kwargs
+        cls,
+        sharding_spec: shard_spec.ShardingSpec,
+        *size,
+        **kwargs,
     ) -> Self: ...
     def __init__(
         self,
@@ -58,7 +64,11 @@ class ShardedTensor(ShardedTensorBase):
     ) -> None: ...
     def cpu(self, memory_format=..., process_group=...) -> ShardedTensor: ...
     def cuda(
-        self, device=..., non_blocking=..., memory_format=..., process_group=...
+        self,
+        device=...,
+        non_blocking=...,
+        memory_format=...,
+        process_group=...,
     ) -> ShardedTensor: ...
     def to(self, *args, **kwargs) -> ShardedTensor: ...
     def sharding_spec(self) -> shard_spec.ShardingSpec: ...
@@ -82,6 +92,10 @@ class ShardedTensor(ShardedTensorBase):
     def __getstate__(
         self,
     ) -> tuple[
-        list[Shard], ShardedTensorMetadata, ProcessGroupState, ShardingSpec, bool | Any
+        list[Shard],
+        ShardedTensorMetadata,
+        ProcessGroupState,
+        ShardingSpec,
+        bool | Any,
     ]: ...
     def __setstate__(self, state) -> None: ...

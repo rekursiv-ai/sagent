@@ -56,20 +56,31 @@ class MarkupLMTokenizer(PreTrainedTokenizer):
     def convert_tokens_to_string(self, tokens):  # -> str:
         ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
     def prepare_for_tokenization(
-        self, text, is_split_into_words=..., **kwargs
+        self,
+        text,
+        is_split_into_words=...,
+        **kwargs,
     ):  # -> tuple[str, dict[str, Any]]:
         ...
     def build_inputs_with_special_tokens(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = ...
+        self,
+        token_ids_0: list[int],
+        token_ids_1: list[int] | None = ...,
     ) -> list[int]: ...
     def build_xpath_tags_with_special_tokens(
-        self, xpath_tags_0: list[int], xpath_tags_1: list[int] | None = ...
+        self,
+        xpath_tags_0: list[int],
+        xpath_tags_1: list[int] | None = ...,
     ) -> list[int]: ...
     def build_xpath_subs_with_special_tokens(
-        self, xpath_subs_0: list[int], xpath_subs_1: list[int] | None = ...
+        self,
+        xpath_subs_0: list[int],
+        xpath_subs_1: list[int] | None = ...,
     ) -> list[int]: ...
     def get_special_tokens_mask(
         self,
@@ -78,10 +89,13 @@ class MarkupLMTokenizer(PreTrainedTokenizer):
         already_has_special_tokens: bool = ...,
     ) -> list[int]: ...
     def create_token_type_ids_from_sequences(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = ...
+        self,
+        token_ids_0: list[int],
+        token_ids_1: list[int] | None = ...,
     ) -> list[int]: ...
     @add_end_docstrings(
-        ENCODE_KWARGS_DOCSTRING, MARKUPLM_ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING
+        ENCODE_KWARGS_DOCSTRING,
+        MARKUPLM_ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING,
     )
     def __call__(
         self,
@@ -107,7 +121,8 @@ class MarkupLMTokenizer(PreTrainedTokenizer):
         **kwargs,
     ) -> BatchEncoding: ...
     @add_end_docstrings(
-        ENCODE_KWARGS_DOCSTRING, MARKUPLM_ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING
+        ENCODE_KWARGS_DOCSTRING,
+        MARKUPLM_ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING,
     )
     def batch_encode_plus(
         self,
@@ -159,7 +174,8 @@ class MarkupLMTokenizer(PreTrainedTokenizer):
         **kwargs,
     ) -> list[int]: ...
     @add_end_docstrings(
-        ENCODE_KWARGS_DOCSTRING, MARKUPLM_ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING
+        ENCODE_KWARGS_DOCSTRING,
+        MARKUPLM_ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING,
     )
     def encode_plus(
         self,
@@ -185,7 +201,8 @@ class MarkupLMTokenizer(PreTrainedTokenizer):
         **kwargs,
     ) -> BatchEncoding: ...
     @add_end_docstrings(
-        ENCODE_KWARGS_DOCSTRING, MARKUPLM_ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING
+        ENCODE_KWARGS_DOCSTRING,
+        MARKUPLM_ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING,
     )
     def prepare_for_model(
         self,

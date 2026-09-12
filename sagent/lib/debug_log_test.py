@@ -49,7 +49,8 @@ def test_trace_gated_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_trace_writes_when_enabled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     target = tmp_path / "debug.log"
     monkeypatch.setenv("SAGENT_DEBUG_LOG", str(target))
@@ -65,7 +66,8 @@ def test_trace_writes_when_enabled(
 
 
 def test_trace_error_always_writes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     target = tmp_path / "debug.log"
     monkeypatch.setenv("SAGENT_DEBUG_LOG", str(target))
@@ -78,7 +80,8 @@ def test_trace_error_always_writes(
 
 
 def test_write_drops_reserved_key_collisions(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """User payload must not overwrite the reserved ``ts``/``event`` keys."""
     target = tmp_path / "debug.log"
@@ -91,7 +94,8 @@ def test_write_drops_reserved_key_collisions(
 
 
 def test_trace_does_not_raise_on_unserializable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     target = tmp_path / "debug.log"
     monkeypatch.setenv("SAGENT_DEBUG_LOG", str(target))
@@ -110,12 +114,12 @@ def test_summarize_messages_text_truncates() -> None:
     long = "a" * 500
     out = summarize_messages([{"role": "user", "content": long}])
     assert isinstance(out[0]["text"], str)
-    assert len(out[0]["text"]) == 200  # _MAX_PREVIEW
+    assert len(out[0]["text"]) == 200  # _MAX_PREVIEW.
 
 
 def test_summarize_messages_block_text() -> None:
     out = summarize_messages(
-        [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+        [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
     )
     assert out == [{"role": "user", "blocks": [{"type": "text", "preview": "hi"}]}]
 
@@ -128,8 +132,8 @@ def test_summarize_messages_block_tool_use() -> None:
                 "content": [
                     {"type": "tool_use", "name": "Bash", "id": "abc"},
                 ],
-            }
-        ]
+            },
+        ],
     )
     assert out[0]["blocks"] == [{"type": "tool_use", "name": "Bash", "id": "abc"}]
 
@@ -142,8 +146,8 @@ def test_summarize_messages_block_tool_result_string() -> None:
                 "content": [
                     {"type": "tool_result", "content": "ok", "is_error": False},
                 ],
-            }
-        ]
+            },
+        ],
     )
     block = out[0]["blocks"]
     assert isinstance(block, list)
@@ -164,10 +168,10 @@ def test_summarize_messages_block_tool_result_complex() -> None:
                         "type": "tool_result",
                         "content": [{"x": 1}],
                         "is_error": True,
-                    }
+                    },
                 ],
-            }
-        ]
+            },
+        ],
     )
     block = out[0]["blocks"]
     assert isinstance(block, list)

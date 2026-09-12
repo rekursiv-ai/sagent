@@ -10,7 +10,9 @@ class AltCLIPProcessor(ProcessorMixin):
     image_processor_class = ...
     tokenizer_class = ...
     @deprecate_kwarg(
-        old_name="feature_extractor", version="5.0.0", new_name="image_processor"
+        old_name="feature_extractor",
+        version="5.0.0",
+        new_name="image_processor",
     )
     def __init__(self, image_processor=..., tokenizer=...) -> None: ...
 

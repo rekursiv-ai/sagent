@@ -62,11 +62,17 @@ def input_processing(func, config, **kwargs): ...
 def strip_model_name_and_prefix(name, _prefix=...):  # -> str:
     ...
 def tf_shard_checkpoint(
-    weights, max_shard_size=..., weights_name: str = ...
+    weights,
+    max_shard_size=...,
+    weights_name: str = ...,
 ):  # -> tuple[dict[str, Any], None] | tuple[dict[Any, Any], dict[str, dict[str, Any | int]]]:
     ...
 def load_tf_sharded_weights(
-    model, shard_files, ignore_mismatched_sizes=..., strict=..., _prefix=...
+    model,
+    shard_files,
+    ignore_mismatched_sizes=...,
+    strict=...,
+    _prefix=...,
 ):  # -> tuple[set[Any], set[Any], set[Any]]:
     ...
 def load_tf_shard(
@@ -78,26 +84,42 @@ def load_tf_shard(
 ):  # -> tuple[set[Any], set[Any], set[Any]]:
     ...
 def load_tf_sharded_weights_from_safetensors(
-    model, shard_files, ignore_mismatched_sizes=..., strict=..., _prefix=...
+    model,
+    shard_files,
+    ignore_mismatched_sizes=...,
+    strict=...,
+    _prefix=...,
 ):  # -> tuple[set[Any], set[Any], set[Any]]:
     ...
 def load_tf_weights(
-    model, resolved_archive_file, ignore_mismatched_sizes=..., _prefix=...
+    model,
+    resolved_archive_file,
+    ignore_mismatched_sizes=...,
+    _prefix=...,
 ):  # -> tuple[list[str | Any], list[Any], list[Any]] | tuple[list[Any], list[Any], list[Any]]:
     ...
 def load_tf_weights_from_h5(
-    model, resolved_archive_file, ignore_mismatched_sizes=..., _prefix=...
+    model,
+    resolved_archive_file,
+    ignore_mismatched_sizes=...,
+    _prefix=...,
 ):  # -> tuple[list[Any], list[Any], list[Any]]:
     ...
 def load_tf_weights_from_safetensors(
-    model, resolved_archive_file, ignore_mismatched_sizes=..., _prefix=...
+    model,
+    resolved_archive_file,
+    ignore_mismatched_sizes=...,
+    _prefix=...,
 ):  # -> tuple[list[str | Any], list[Any], list[Any]]:
     ...
 def init_copy_embeddings(old_embeddings, new_num_tokens):  # -> tuple[Any, Any]:
     ...
 
 class TFPreTrainedModel(
-    keras.Model, TFModelUtilsMixin, TFGenerationMixin, PushToHubMixin
+    keras.Model,
+    TFModelUtilsMixin,
+    TFGenerationMixin,
+    PushToHubMixin,
 ):
     config_class = ...
     base_model_prefix = ...
@@ -135,7 +157,9 @@ class TFPreTrainedModel(
     def from_config(cls, config, **kwargs):  # -> Self:
         ...
     def get_head_mask(
-        self, head_mask: tf.Tensor | None, num_hidden_layers: int
+        self,
+        head_mask: tf.Tensor | None,
+        num_hidden_layers: int,
     ) -> tf.Tensor: ...
     @tf.function
     def serving(self, inputs):  # -> ModelOutput:
@@ -201,7 +225,8 @@ class TFPreTrainedModel(
         ...
     def get_lm_head(self) -> keras.layers.Layer: ...
     def resize_token_embeddings(
-        self, new_num_tokens: int | None = ...
+        self,
+        new_num_tokens: int | None = ...,
     ) -> keras.layers.Embedding | tf.Variable: ...
     def prune_heads(self, heads_to_prune): ...
     def save_pretrained(
@@ -272,7 +297,10 @@ class TFSharedEmbeddings(keras.layers.Layer):
 
 class TFSequenceSummary(keras.layers.Layer):
     def __init__(
-        self, config: PretrainedConfig, initializer_range: float = ..., **kwargs
+        self,
+        config: PretrainedConfig,
+        initializer_range: float = ...,
+        **kwargs,
     ) -> None: ...
     def call(self, inputs, cls_index=..., training=...): ...
     def build(self, input_shape):  # -> None:

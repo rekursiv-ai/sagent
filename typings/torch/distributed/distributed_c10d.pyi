@@ -122,7 +122,11 @@ class Backend(str):
     def __new__(cls, name: str) -> str | Any: ...
     @classmethod
     def register_backend(
-        cls, name, func, extended_api=..., devices: str | list[str] | None = ...
+        cls,
+        name,
+        func,
+        extended_api=...,
+        devices: str | list[str] | None = ...,
     ) -> None: ...
 
 class BackendConfig:
@@ -311,7 +315,10 @@ def all_reduce(
     async_op: bool = ...,
 ) -> Work | None: ...
 def all_reduce_coalesced(
-    tensors, op=..., group=..., async_op=...
+    tensors,
+    op=...,
+    group=...,
+    async_op=...,
 ) -> Future[Any] | None: ...
 @_exception_logger
 def reduce(
@@ -324,7 +331,9 @@ def reduce(
 ) -> Work | None: ...
 @_exception_logger
 def all_gather_object(
-    object_list: list[Any], obj: Any, group: ProcessGroup | None = ...
+    object_list: list[Any],
+    obj: Any,
+    group: ProcessGroup | None = ...,
 ) -> None: ...
 @_exception_logger
 def gather_object(
@@ -381,7 +390,10 @@ def all_gather_into_tensor(
     async_op: bool = ...,
 ) -> Work | None: ...
 def all_gather_coalesced(
-    output_tensor_lists, input_tensor_list, group=..., async_op=...
+    output_tensor_lists,
+    input_tensor_list,
+    group=...,
+    async_op=...,
 ) -> Future[Any] | None: ...
 @_exception_logger
 def gather(
@@ -403,7 +415,11 @@ def scatter(
 ) -> Work | None: ...
 @_exception_logger
 def reduce_scatter(
-    output, input_list, op=..., group=..., async_op=...
+    output,
+    input_list,
+    op=...,
+    group=...,
+    async_op=...,
 ) -> Work | None: ...
 def reduce_scatter_tensor(
     output: Tensor,
@@ -427,10 +443,14 @@ def all_to_all(
     async_op: bool = ...,
 ) -> Work | None: ...
 def barrier(
-    group: ProcessGroup | None = ..., async_op=..., device_ids=...
+    group: ProcessGroup | None = ...,
+    async_op=...,
+    device_ids=...,
 ) -> Work | None: ...
 def monitored_barrier(
-    group: ProcessGroup | None = ..., timeout=..., wait_all_ranks=...
+    group: ProcessGroup | None = ...,
+    timeout=...,
+    wait_all_ranks=...,
 ) -> None: ...
 @_time_logger
 def split_group(
@@ -451,8 +471,17 @@ def new_group(
     device_id: torch.device | None = ...,
 ) -> None: ...
 def new_subgroups(
-    group_size=..., group=..., timeout=..., backend=..., pg_options=..., group_desc=...
+    group_size=...,
+    group=...,
+    timeout=...,
+    backend=...,
+    pg_options=...,
+    group_desc=...,
 ) -> tuple[Any | None, list[Any]]: ...
 def new_subgroups_by_enumeration(
-    ranks_per_subgroup_list, timeout=..., backend=..., pg_options=..., group_desc=...
+    ranks_per_subgroup_list,
+    timeout=...,
+    backend=...,
+    pg_options=...,
+    group_desc=...,
 ) -> tuple[Any | None, list[Any]]: ...

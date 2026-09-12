@@ -29,7 +29,9 @@ class ConvNextImageProcessorFast(BaseImageProcessorFast):
     def __init__(self, **kwargs: Unpack[ConvNextFastImageProcessorKwargs]) -> None: ...
     @auto_docstring
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[ConvNextFastImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[ConvNextFastImageProcessorKwargs],
     ) -> BatchFeature: ...
     def resize(
         self,

@@ -35,7 +35,8 @@ class DeepseekVLHybridImageProcessorFast(BaseImageProcessorFast):
     high_res_resample = ...
     model_input_names = ...
     def __init__(
-        self, **kwargs: Unpack[DeepseekVLHybridFastImageProcessorKwargs]
+        self,
+        **kwargs: Unpack[DeepseekVLHybridFastImageProcessorKwargs],
     ) -> None: ...
     def resize(
         self,

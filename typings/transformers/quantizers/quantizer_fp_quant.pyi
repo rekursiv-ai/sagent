@@ -11,7 +11,9 @@ class FPQuantHfQuantizer(HfQuantizer):
     requires_parameters_quantization = ...
     required_packages = ...
     def __init__(
-        self, quantization_config: QuantizationConfigMixin, **kwargs
+        self,
+        quantization_config: QuantizationConfigMixin,
+        **kwargs,
     ) -> None: ...
     def validate_environment(self, device_map, **kwargs):  # -> None:
         ...
@@ -26,12 +28,18 @@ class FPQuantHfQuantizer(HfQuantizer):
     ):  # -> None:
         ...
     def update_missing_keys(
-        self, model, missing_keys: list[str], prefix: str
+        self,
+        model,
+        missing_keys: list[str],
+        prefix: str,
     ) -> list[str]: ...
     @property
     def is_trainable(self, model: PreTrainedModel | None = ...): ...  # noqa: PLR0206 -- mirrors upstream property definition
     def is_serializable(self, safe_serialization=...):  # -> Literal[True]:
         ...
     def param_needs_quantization(
-        self, model: PreTrainedModel, param_name: str, **kwargs
+        self,
+        model: PreTrainedModel,
+        param_name: str,
+        **kwargs,
     ) -> bool: ...

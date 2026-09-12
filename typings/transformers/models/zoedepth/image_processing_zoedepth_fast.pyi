@@ -35,7 +35,9 @@ class ZoeDepthImageProcessorFast(BaseImageProcessorFast):
     def __init__(self, **kwargs: Unpack[ZoeDepthFastImageProcessorKwargs]) -> None: ...
     @auto_docstring
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[ZoeDepthFastImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[ZoeDepthFastImageProcessorKwargs],
     ) -> BatchFeature: ...
     def resize(
         self,

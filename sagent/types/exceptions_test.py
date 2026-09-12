@@ -90,7 +90,8 @@ def test_stream_interrupted_names_tool_use_only_when_tools_were_announced() -> N
     assert "tool_use" in str(StreamInterruptedError(tool_turn))
 
     text_turn = ModelResponse(
-        message=AssistantMessage(text="partial"), stop_reason="model_finished"
+        message=AssistantMessage(text="partial"),
+        stop_reason="model_finished",
     )
     message = str(StreamInterruptedError(text_turn))
     assert "delivered no tool blocks" not in message, message
@@ -154,7 +155,8 @@ class TestLogExceptionOrWarning:
         raise RuntimeError("something broke")
 
     def test_user_facing_error_logs_at_warning_without_traceback(
-        self, caplog: pytest.LogCaptureFixture
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         logger = logging.getLogger("sagent.test.ufe")
         with caplog.at_level(logging.DEBUG, logger=logger.name):
@@ -173,7 +175,8 @@ class TestLogExceptionOrWarning:
         assert "model call failed" in rec.getMessage()
 
     def test_plain_exception_logs_at_error_with_traceback(
-        self, caplog: pytest.LogCaptureFixture
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         logger = logging.getLogger("sagent.test.plain")
         with caplog.at_level(logging.DEBUG, logger=logger.name):
@@ -190,7 +193,8 @@ class TestLogExceptionOrWarning:
         )
 
     def test_user_facing_subclass_treated_as_user_facing(
-        self, caplog: pytest.LogCaptureFixture
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Any subclass of ``UserFacingError`` follows the warning policy."""
 
@@ -241,7 +245,8 @@ class TestLogTaskException:
 
     @pytest.mark.asyncio
     async def test_plain_exception_logs_at_error_with_exc_info(
-        self, caplog: pytest.LogCaptureFixture
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         async def _boom() -> None:
             raise RuntimeError("kaboom")
@@ -265,7 +270,8 @@ class TestLogTaskException:
 
     @pytest.mark.asyncio
     async def test_user_facing_error_logs_at_warning_without_exc_info(
-        self, caplog: pytest.LogCaptureFixture
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         async def _boom() -> None:
             raise AuthRefreshError("expired; run /login")
@@ -290,7 +296,8 @@ class TestLogTaskException:
 
     @pytest.mark.asyncio
     async def test_cancelled_task_does_not_log(
-        self, caplog: pytest.LogCaptureFixture
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         async def _sleep() -> None:
             await asyncio.sleep(60)
@@ -309,7 +316,8 @@ class TestLogTaskException:
 
     @pytest.mark.asyncio
     async def test_clean_completion_does_not_log(
-        self, caplog: pytest.LogCaptureFixture
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         async def _ok() -> None:
             return None

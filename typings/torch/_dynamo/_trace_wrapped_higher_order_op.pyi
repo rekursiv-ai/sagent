@@ -42,7 +42,9 @@ __all__ = ["trace_wrapped"]
 
 @torch.library.custom_op("flex_lib::zeros_and_scatter", mutates_args=())
 def zeros_and_scatter(
-    shape: list[int], indices: list[Tensor], vals: Tensor
+    shape: list[int],
+    indices: list[Tensor],
+    vals: Tensor,
 ) -> Tensor: ...
 @zeros_and_scatter.register_fake
 def _(shape: list[int], indices: list[Tensor], vals: Tensor) -> Tensor: ...

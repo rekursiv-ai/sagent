@@ -41,7 +41,9 @@ class TFRobertaEmbeddings(keras.layers.Layer):
     def build(self, input_shape=...):  # -> None:
         ...
     def create_position_ids_from_input_ids(
-        self, input_ids, past_key_values_length=...
+        self,
+        input_ids,
+        past_key_values_length=...,
     ): ...
     def call(
         self,
@@ -79,7 +81,10 @@ class TFRobertaSelfAttention(keras.layers.Layer):
 class TFRobertaSelfOutput(keras.layers.Layer):
     def __init__(self, config: RobertaConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -110,7 +115,10 @@ class TFRobertaIntermediate(keras.layers.Layer):
 class TFRobertaOutput(keras.layers.Layer):
     def __init__(self, config: RobertaConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -193,7 +201,7 @@ class TFRobertaModel(TFRobertaPreTrainedModel):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -243,7 +251,7 @@ class TFRobertaForMaskedLM(TFRobertaPreTrainedModel, TFMaskedLanguageModelingLos
     def get_prefix_bias_name(self): ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -277,12 +285,16 @@ class TFRobertaForCausalLM(TFRobertaPreTrainedModel, TFCausalLanguageModelingLos
         ...
     def get_prefix_bias_name(self): ...
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=..., attention_mask=..., **model_kwargs
+        self,
+        input_ids,
+        past_key_values=...,
+        attention_mask=...,
+        **model_kwargs,
     ):  # -> dict[str, Any | None]:
         ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -321,13 +333,14 @@ class TFRobertaClassificationHead(keras.layers.Layer):
     ROBERTA_START_DOCSTRING,
 )
 class TFRobertaForSequenceClassification(
-    TFRobertaPreTrainedModel, TFSequenceClassificationLoss
+    TFRobertaPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="cardiffnlp/twitter-roberta-base-emotion",
@@ -363,7 +376,7 @@ class TFRobertaForMultipleChoice(TFRobertaPreTrainedModel, TFMultipleChoiceLoss)
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ROBERTA_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        ROBERTA_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -392,14 +405,15 @@ class TFRobertaForMultipleChoice(TFRobertaPreTrainedModel, TFMultipleChoiceLoss)
     ROBERTA_START_DOCSTRING,
 )
 class TFRobertaForTokenClassification(
-    TFRobertaPreTrainedModel, TFTokenClassificationLoss
+    TFRobertaPreTrainedModel,
+    TFTokenClassificationLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     _keys_to_ignore_on_load_missing = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="ydshieh/roberta-large-ner-english",
@@ -434,7 +448,7 @@ class TFRobertaForQuestionAnswering(TFRobertaPreTrainedModel, TFQuestionAnswerin
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ROBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="ydshieh/roberta-base-squad2",

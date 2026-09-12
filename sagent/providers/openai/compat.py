@@ -37,12 +37,12 @@ import os
 if TYPE_CHECKING:
     import httpx2
 
-    import sagent.lib.image as image_lib
+    from sagent.lib import image
 else:
     from wrapt import lazy_import
 
-    httpx2 = lazy_import("httpx2")  # 100ms cold
-    image_lib = lazy_import("sagent.lib.image")
+    httpx2 = lazy_import("httpx2")  # 100ms cold.
+    image = lazy_import("sagent.lib.image")
 
 from sagent.lib import debug_log
 from sagent.lib.custom_json import (
@@ -102,7 +102,8 @@ class OpenAICompat:
     BASE_URL: ClassVar[str] = ""
 
     CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = MappingProxyType[
-        str, ModelCapability
+        str,
+        ModelCapability,
     ]({})
     """Per-model capability; empty on the plain compat base."""
 
@@ -127,7 +128,7 @@ class OpenAICompat:
             {
                 "default": self.DEFAULT_MODEL,
                 "utility": self.DEFAULT_UTILITY_MODEL or self.DEFAULT_MODEL,
-            }
+            },
         )
 
     def __init__(self, *, api_key: str, base_url: str | None = None) -> None:
@@ -188,9 +189,16 @@ class OpenAICompat:
         """
         mid = model_id if model_id is not None else "default"
         capability, settings = resolve(
-            mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT
+            mid,
+            models=self.CAPABILITIES,
+            roles=self.ROLES,
+            transport=self.TRANSPORT,
         )
-        return self.MODEL_CLASS(
+        model_class = cast(
+            type[OpenAICompatModel],
+            getattr(self, "MODEL_CLASS", OpenAICompatModel),
+        )
+        return model_class(
             provider=self,
             capability=capability,
             settings=settings,
@@ -283,7 +291,9 @@ class OpenAICompatModel(ModelDefaults):
 
         """
         return token_count.approx_image_tokens(
-            data, model_id=self._wire_model_id, max_edge=self.limits.max_image_edge_px
+            data,
+            model_id=self._wire_model_id,
+            max_edge=self.limits.max_image_edge_px,
         )
 
     def is_context_overflow(self, error: Exception) -> bool:
@@ -343,13 +353,10 @@ class OpenAICompatModel(ModelDefaults):
         if client is not None:
             await client.aclose()
 
+    # Catalog-backed vendors answer from the row. A vendor whose reasoning ids are only
+    # recognizable by shape (DashScope) overrides this with a predicate.
     def _is_effort_model(self, model_id: str) -> bool:
-        """Whether ``model_id`` accepts a reasoning-effort knob.
-
-        Catalog-backed vendors answer from the row. A vendor whose
-        reasoning ids are only recognizable by shape (DashScope) overrides
-        this with a predicate.
-        """
+        """Whether ``model_id`` accepts a reasoning-effort knob."""
         del model_id
         return self.capability.thinking_effort != frozenset({"none"})
 
@@ -384,7 +391,7 @@ class OpenAICompatModel(ModelDefaults):
                     request,
                     self.limits.max_image_edge_px,
                     self.limits.max_image_bytes,
-                )
+                ),
             ],
             "temperature": request.temperature,
         }
@@ -561,11 +568,11 @@ def build_messages(
                     "role": "tool",
                     "tool_call_id": ids.map(entry.call_id),
                     "content": content,
-                }
+                },
             )
             for att in entry.attachments:
                 if _is_image_mime(att.descriptor):
-                    raw, mime_type = image_lib.resize(
+                    raw, mime_type = image.resize(
                         att.data,
                         max_dim=max_image_dim,
                         max_bytes=max_image_bytes,
@@ -575,7 +582,7 @@ def build_messages(
                         {
                             "type": "image_url",
                             "image_url": {"url": f"data:{mime_type};base64,{b64}"},
-                        }
+                        },
                     )
     _flush_images(messages, pending_images)
     return messages
@@ -607,7 +614,7 @@ def _build_user_message(
         return {"role": "user", "content": entry.text}
     blocks: list[MutableJSON] = []
     for att in image_atts:
-        raw, mime = image_lib.resize(
+        raw, mime = image.resize(
             att.data,
             max_dim=max_image_dim,
             max_bytes=max_image_bytes,
@@ -617,7 +624,7 @@ def _build_user_message(
             {
                 "type": "image_url",
                 "image_url": {"url": f"data:{mime};base64,{b64}"},
-            }
+            },
         )
     if entry.text:
         blocks.append({"type": "text", "text": entry.text})
@@ -756,7 +763,7 @@ async def consume_stream(
             call_id=tc_id,
         )
         tool_calls.append(
-            ToolCall(id=tc_id, name=tc_name, args=cast(Mapping[str, object], args))
+            ToolCall(id=tc_id, name=tc_name, args=cast(Mapping[str, object], args)),
         )
     asst = AssistantMessage(
         text="".join(text_parts),
@@ -832,7 +839,3 @@ def _parse_tool_arguments(
         call_id,
     )
     return {}
-
-
-# Wire default model class last so subclasses can also use the default.
-OpenAICompat.MODEL_CLASS = OpenAICompatModel

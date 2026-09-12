@@ -76,7 +76,12 @@ class Gemma3RotaryEmbedding(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -121,7 +126,8 @@ class Gemma3DecoderLayer(GradientCheckpointingLayer):
         cache_position: torch.LongTensor | None = ...,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring
@@ -332,7 +338,8 @@ class Gemma3ForSequenceClassification(Gemma3PreTrainedModel):
     ) -> SequenceClassifierOutputWithPast: ...
 
 class Gemma3TextForSequenceClassification(
-    GenericForSequenceClassification, Gemma3PreTrainedModel
+    GenericForSequenceClassification,
+    Gemma3PreTrainedModel,
 ):
     config: Gemma3TextConfig
 

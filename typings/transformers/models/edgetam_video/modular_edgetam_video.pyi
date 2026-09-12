@@ -103,7 +103,10 @@ class EdgeTamVideoVisionRotaryEmbedding(Sam2VideoVisionRotaryEmbedding):
 class EdgeTamVideoAttention(Sam2VideoAttention): ...
 
 def apply_rotary_pos_emb_2d_self_attn(
-    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 def apply_rotary_pos_emb_2d_cross_attn(
     q: torch.Tensor,
@@ -222,7 +225,9 @@ class EdgeTamVideoPerceiverResampler(nn.Module):
         positional_encoding: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 @auto_docstring

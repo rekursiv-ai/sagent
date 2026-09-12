@@ -16,9 +16,19 @@ aten_baddbmm = ...
 
 @L.register_lowering(aten.bmm)
 def tuned_bmm(
-    mat1, mat2, out_dtype=..., *, layout=...
+    mat1,
+    mat2,
+    out_dtype=...,
+    *,
+    layout=...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @L.register_lowering(aten.baddbmm)
 def tuned_baddbmm(
-    inp, mat1, mat2, *, alpha=..., beta=..., layout=...
+    inp,
+    mat1,
+    mat2,
+    *,
+    alpha=...,
+    beta=...,
+    layout=...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...

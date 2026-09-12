@@ -30,13 +30,22 @@ _CONFIG_FOR_DOC = ...
 def angle_defn(pos, i, d_model_size): ...
 def positional_encoding(position, d_model_size): ...
 def scaled_dot_product_attention(
-    q, k, v, mask, attention_mask=..., head_mask=...
+    q,
+    k,
+    v,
+    mask,
+    attention_mask=...,
+    head_mask=...,
 ):  # -> tuple[Any, Any]:
     ...
 
 class TFMultiHeadAttention(keras.layers.Layer):
     def __init__(
-        self, d_model_size, num_heads, output_attentions=..., **kwargs
+        self,
+        d_model_size,
+        num_heads,
+        output_attentions=...,
+        **kwargs,
     ) -> None: ...
     def split_into_heads(self, x, batch_size): ...
     def call(
@@ -171,7 +180,11 @@ class TFCTRLLMHeadModel(TFCTRLPreTrainedModel, TFCausalLanguageModelingLoss):
     def set_bias(self, value):  # -> None:
         ...
     def prepare_inputs_for_generation(
-        self, inputs, past_key_values=..., use_cache=..., **kwargs
+        self,
+        inputs,
+        past_key_values=...,
+        use_cache=...,
+        **kwargs,
     ):  # -> dict[str, Any | None]:
         ...
     @unpack_inputs
@@ -205,7 +218,8 @@ class TFCTRLLMHeadModel(TFCTRLPreTrainedModel, TFCausalLanguageModelingLoss):
     CTRL_START_DOCSTRING,
 )
 class TFCTRLForSequenceClassification(
-    TFCTRLPreTrainedModel, TFSequenceClassificationLoss
+    TFCTRLPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     def get_output_embeddings(self): ...

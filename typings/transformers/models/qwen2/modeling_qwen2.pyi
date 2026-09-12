@@ -31,7 +31,12 @@ class Qwen2MLP(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -145,10 +150,12 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
     ) -> CausalLMOutputWithPast: ...
 
 class Qwen2ForSequenceClassification(
-    GenericForSequenceClassification, Qwen2PreTrainedModel
+    GenericForSequenceClassification,
+    Qwen2PreTrainedModel,
 ): ...
 class Qwen2ForTokenClassification(
-    GenericForTokenClassification, Qwen2PreTrainedModel
+    GenericForTokenClassification,
+    Qwen2PreTrainedModel,
 ): ...
 
 class Qwen2ForQuestionAnswering(GenericForQuestionAnswering, Qwen2PreTrainedModel):

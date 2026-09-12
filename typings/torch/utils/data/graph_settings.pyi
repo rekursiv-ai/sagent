@@ -15,10 +15,14 @@ __all__ = [
 
 def get_all_graph_pipes(graph: DataPipeGraph) -> list[DataPipe]: ...
 def apply_sharding(
-    datapipe: DataPipe, num_of_instances: int, instance_id: int, sharding_group=...
+    datapipe: DataPipe,
+    num_of_instances: int,
+    instance_id: int,
+    sharding_group=...,
 ) -> DataPipe: ...
 def apply_shuffle_settings(
-    datapipe: DataPipe, shuffle: bool | None = ...
+    datapipe: DataPipe,
+    shuffle: bool | None = ...,
 ) -> DataPipe: ...
 @deprecated(
     "`apply_shuffle_seed` is deprecated since 1.12 and will be removed in the future releases. Please use `apply_random_seed` instead.",

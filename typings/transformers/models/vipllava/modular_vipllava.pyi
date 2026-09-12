@@ -78,7 +78,9 @@ class VipLlavaForConditionalGeneration(LlavaForConditionalGeneration):
         **lm_kwargs,
     ) -> tuple | VipLlavaCausalLMOutputWithPast: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | VipLlavaCausalLMOutputWithPast: ...
 
 __all__ = [

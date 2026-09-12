@@ -24,7 +24,9 @@ from ...utils.deprecation import deprecate_kwarg
 logger = ...
 
 def shift_tokens_right(
-    input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: torch.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ):  # -> Tensor:
     ...
 
@@ -78,7 +80,9 @@ class BlenderbotSmallAttention(nn.Module):
 
 class BlenderbotSmallEncoderLayer(GradientCheckpointingLayer):
     def __init__(
-        self, config: BlenderbotSmallConfig, layer_idx: int | None = ...
+        self,
+        config: BlenderbotSmallConfig,
+        layer_idx: int | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -88,12 +92,16 @@ class BlenderbotSmallEncoderLayer(GradientCheckpointingLayer):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
 
 class BlenderbotSmallDecoderLayer(GradientCheckpointingLayer):
     def __init__(
-        self, config: BlenderbotSmallConfig, layer_idx: int | None = ...
+        self,
+        config: BlenderbotSmallConfig,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -109,7 +117,8 @@ class BlenderbotSmallDecoderLayer(GradientCheckpointingLayer):
         use_cache: bool | None = ...,
         cache_position: torch.Tensor | None = ...,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring
@@ -127,7 +136,9 @@ class BlenderbotSmallPreTrainedModel(PreTrainedModel):
 
 class BlenderbotSmallEncoder(BlenderbotSmallPreTrainedModel):
     def __init__(
-        self, config: BlenderbotSmallConfig, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: BlenderbotSmallConfig,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -143,7 +154,9 @@ class BlenderbotSmallEncoder(BlenderbotSmallPreTrainedModel):
 
 class BlenderbotSmallDecoder(BlenderbotSmallPreTrainedModel):
     def __init__(
-        self, config: BlenderbotSmallConfig, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: BlenderbotSmallConfig,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -195,7 +208,8 @@ class BlenderbotSmallModel(BlenderbotSmallPreTrainedModel):
 
 @auto_docstring(custom_intro=...)
 class BlenderbotSmallForConditionalGeneration(
-    BlenderbotSmallPreTrainedModel, GenerationMixin
+    BlenderbotSmallPreTrainedModel,
+    GenerationMixin,
 ):
     base_model_prefix = ...
     _keys_to_ignore_on_load_missing = ...

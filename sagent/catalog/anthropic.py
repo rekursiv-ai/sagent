@@ -269,7 +269,11 @@ def subscription() -> ModelCapability:
 
 
 def _limits(
-    *, window: int, edge: int, response: int = 128_000, long: int = 1_000_000
+    *,
+    window: int,
+    edge: int,
+    response: int = 128_000,
+    long: int = 1_000_000,
 ) -> Mapping[ContextTag, ModelLimits]:
     """Both context tags; ``long=0`` offers no ``+1m`` variant."""
     limits = ModelLimits(
@@ -303,7 +307,7 @@ def _prices(
             response=response,
             cache_write=request * 1.25,
             cache_read=request * cache_read_multiple,
-        )
+        ),
     }
     if fast_multiple:
         fast_request = request * fast_multiple

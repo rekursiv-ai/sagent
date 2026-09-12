@@ -8,5 +8,8 @@ graph_code_log = ...
 
 @compatibility(is_backward_compatible=True)
 def insert_deferred_runtime_asserts(
-    gm: GraphModule, shape_env: ShapeEnv, name: str, export: bool = ...
+    gm: GraphModule,
+    shape_env: ShapeEnv,
+    name: str,
+    export: bool = ...,
 ) -> None: ...

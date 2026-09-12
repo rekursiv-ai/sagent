@@ -90,7 +90,10 @@ def reduce_tensor(
                 type[Any | NestedTensor],
                 TypedStorage | Any,
                 tuple[
-                    int | SymInt | Any, Size | Any, tuple[int, ...] | Any, Any | bool
+                    int | SymInt | Any,
+                    Size | Any,
+                    tuple[int, ...] | Any,
+                    Any | bool,
                 ],
             ],
             Any,
@@ -129,7 +132,10 @@ def reduce_tensor(
                 type[Any | NestedTensor],
                 TypedStorage | Any,
                 tuple[
-                    int | SymInt | Any, Size | Any, tuple[int, ...] | Any, Any | bool
+                    int | SymInt | Any,
+                    Size | Any,
+                    tuple[int, ...] | Any,
+                    Any | bool,
                 ],
             ],
             Any | Callable[..., Tensor] | Callable[..., Parameter | Any],
@@ -166,7 +172,10 @@ def reduce_tensor(
                 type[Any | NestedTensor],
                 TypedStorage | Any,
                 tuple[
-                    int | SymInt | Any, Size | Any, tuple[int, ...] | Any, Any | bool
+                    int | SymInt | Any,
+                    Size | Any,
+                    tuple[int, ...] | Any,
+                    Any | bool,
                 ],
             ],
         ],
@@ -369,7 +378,11 @@ def fd_id(fd) -> tuple[int, int]: ...
 def storage_from_cache(cls, key) -> UntypedStorage | None: ...
 def rebuild_storage_fd(cls, df, size) -> UntypedStorage: ...
 def rebuild_storage_filename(
-    cls, manager, handle, size, dtype=...
+    cls,
+    manager,
+    handle,
+    size,
+    dtype=...,
 ) -> _StorageBase | TypedStorage: ...
 def rebuild_storage_empty(cls): ...
 def rebuild_typed_storage(storage, dtype) -> TypedStorage: ...

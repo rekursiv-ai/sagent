@@ -45,13 +45,20 @@ def eager_attention_forward(
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_multimodal_rotary_pos_emb(
-    q, k, cos, sin, mrope_section, unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    mrope_section,
+    unsqueeze_dim=...,
 ):  # -> tuple[Tensor, Tensor]:
     ...
 
 class Glm4vMoeTextAttention(nn.Module):
     def __init__(
-        self, config: Glm4vMoeTextConfig, layer_idx: int | None = ...
+        self,
+        config: Glm4vMoeTextConfig,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -143,7 +150,11 @@ class Glm4vMoeVisionRotaryEmbedding(nn.Module):
 
 class Glm4vMoeVisionPatchMerger(nn.Module):
     def __init__(
-        self, dim: int, context_dim: int, hidden_act: str, bias: bool = ...
+        self,
+        dim: int,
+        context_dim: int,
+        hidden_act: str,
+        bias: bool = ...,
     ) -> None: ...
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -151,12 +162,20 @@ class Glm4vMoeVisionPatchMerger(nn.Module):
 class Glm4vMoeVisionEmbeddings(nn.Module):
     def __init__(self, config: Glm4vMoeVisionConfig) -> None: ...
     def forward(
-        self, embeddings, lengths, image_shapes, h_coords, w_coords
+        self,
+        embeddings,
+        lengths,
+        image_shapes,
+        h_coords,
+        w_coords,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 def apply_rotary_pos_emb_vision(
-    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class Glm4vMoeVisionAttention(nn.Module):
@@ -207,7 +226,9 @@ class Glm4vMoeVisionModel(Glm4vMoePreTrainedModel):
     def rot_pos_emb(self, grid_thw):  # -> tuple[Any, Tensor]:
         ...
     def forward(
-        self, hidden_states: torch.Tensor, grid_thw: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        grid_thw: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 

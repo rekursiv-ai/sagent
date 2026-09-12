@@ -37,9 +37,9 @@ ProviderKind = Literal["anthropic", "openai", "google"]
 # carry truncated input JSON.
 BENIGN_STOP_REASONS: frozenset[str] = frozenset(
     {
-        "model_finished",  # natural completion
-        "model_tool_use",  # model emitted tool call(s)
-        "model_continuing",  # long-running request, client should continue
+        "model_finished",  # Natural completion.
+        "model_tool_use",  # Model emitted tool call(s)
+        "model_continuing",  # long-running request, client should continue.
     },
 )
 
@@ -57,7 +57,7 @@ _OPENAI_MAP: Final[dict[str, str]] = {
     "stop": "model_finished",
     "length": "max_tokens",
     "tool_calls": "model_tool_use",
-    "function_call": "model_tool_use",  # legacy
+    "function_call": "model_tool_use",  # Legacy.
     "content_filter": "model_refusal",
 }
 

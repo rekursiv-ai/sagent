@@ -11,10 +11,14 @@ from ...utils import TensorType
 logger = ...
 
 def divide_to_patches(
-    image: np.ndarray, patch_size: int, input_data_format
+    image: np.ndarray,
+    patch_size: int,
+    input_data_format,
 ) -> list[np.ndarray]: ...
 def expand_to_square(
-    image: np.ndarray, background_color, input_data_format
+    image: np.ndarray,
+    background_color,
+    input_data_format,
 ) -> np.ndarray: ...
 
 class LlavaOnevisionImageProcessor(BaseImageProcessor):

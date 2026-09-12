@@ -54,11 +54,11 @@ async def test_stream_limit_kwarg_handles_record_larger_than_default_buffer(
     subprocess emits one NDJSON record per content block; reading a
     large file (the failure mode TL diagnosed live 2026-06-03 with
     back-to-back 41 KiB + 22 KiB worklog threads) easily exceeds
-    64 KiB on a single line — so the AnthropicCLI provider passes a
+    64 KiB on a single line -- so the AnthropicCLI provider passes a
     16 MiB ``stream_limit``. The default stays at asyncio's 64 KiB:
     existing callers see no behaviour change.
     """
-    payload = {"big": "x" * (250_000)}  # one record ~250 KiB
+    payload = {"big": "x" * (250_000)}  # One record ~250 KiB.
     proc = Subproc(
         ["python3", "-c", "import sys; sys.stdout.write(sys.stdin.read())"],
         stream_limit=16 * 1024 * 1024,
@@ -139,7 +139,7 @@ async def test_read_json_line_raises_transport_error_on_malformed_when_strict() 
             "python3",
             "-c",
             "import sys; sys.stdout.write('not json\\n'); sys.stdout.flush()",
-        ]
+        ],
     )
     await proc.start()
     with pytest.raises(SubprocessTransportError, match="non-JSON line"):
@@ -175,7 +175,11 @@ async def test_read_json_line_timeout_is_transport_error() -> None:
 async def test_stderr_tail_captures_diagnostics() -> None:
     """Stderr is drained into the bounded ring buffer for diagnostics."""
     proc = Subproc(
-        ["python3", "-c", "import sys; sys.stderr.write('boom\\n'); sys.stderr.flush()"]
+        [
+            "python3",
+            "-c",
+            "import sys; sys.stderr.write('boom\\n'); sys.stderr.flush()",
+        ],
     )
     await proc.start()
     # Wait for the child to exit so the drain task has fully consumed stderr.

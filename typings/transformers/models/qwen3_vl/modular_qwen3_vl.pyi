@@ -104,7 +104,9 @@ class Qwen3VLVisionRotaryEmbedding(VisionRotaryEmbedding): ...
 
 class Qwen3VLVisionPatchMerger(nn.Module):
     def __init__(
-        self, config: Qwen3VLVisionConfig, use_postshuffle_norm=...
+        self,
+        config: Qwen3VLVisionConfig,
+        use_postshuffle_norm=...,
     ) -> None: ...
     def forward(self, x: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -136,7 +138,9 @@ class Qwen3VLTextAttention(Qwen3Attention):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class Qwen3VLTextDecoderLayer(Qwen3DecoderLayer):
@@ -169,7 +173,10 @@ class Qwen3VLVisionModel(Qwen3VLPreTrainedModel):
     def fast_pos_embed_interpolate(self, grid_thw):  # -> Tensor:
         ...
     def forward(
-        self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, **kwargs
+        self,
+        hidden_states: torch.Tensor,
+        grid_thw: torch.Tensor,
+        **kwargs,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 

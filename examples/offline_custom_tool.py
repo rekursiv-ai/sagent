@@ -1,14 +1,22 @@
-"""Run an Agent with a custom tool and a scripted model."""
+#!/bin/sh
+# ruff: noqa: EXE003, D300, D205 -- Polyglot shell/Python script.
+# fmt: off
+'''' 2>/dev/null #
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
+Run an Agent with a custom tool and a scripted model.
+'''
+# fmt: on
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable, Sequence
 from types import MappingProxyType
+from typing import cast
 
 import asyncio
 import sys
 
-from sagent.agent import Agent
+from sagent.agent.agent import Agent
 from sagent.lib import token_count
 from sagent.tools import tool
 from sagent.types.capability import (
@@ -62,7 +70,7 @@ class ScriptedModel:
     capability = ModelCapability(
         model_id="scripted-offline",
         context=MappingProxyType(
-            {"": ModelLimits(max_request_tokens=16_384, max_response_tokens=1_024)}
+            {"": ModelLimits(max_request_tokens=16_384, max_response_tokens=1_024)},
         ),
         # An offline model bills nothing, but an empty catalog would raise.
         prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
@@ -202,18 +210,24 @@ async def run_example() -> str:
         tools=[echo],
         max_tool_call_rounds=3,
     )
-    async for _event in agent.run(UserMessage(text="Echo hello.")):
+    async for _ in cast(
+        AsyncGenerator[object, None],
+        agent.run(UserMessage(text="Echo hello.")),
+    ):
         pass
-    for m in reversed(agent.history):
+    history = cast(Sequence[object], agent.history)
+    for m in reversed(history):
         if isinstance(m, AssistantMessage) and m.text:
             return m.text
     return ""
 
 
-def main() -> None:
-    """Run the example from the command line."""
+def main() -> int:
+    """Run the example from the command line and return the exit code."""
     sys.stdout.write(f"{asyncio.run(run_example())}\n")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
+# vim: ft=python

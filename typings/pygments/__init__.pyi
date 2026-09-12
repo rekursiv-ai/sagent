@@ -20,9 +20,15 @@ def format(tokens, formatter: Formatter[_T], outfile: SupportsWrite[_T]) -> None
 def format(tokens, formatter: Formatter[_T], outfile: None = ...) -> _T: ...
 @overload
 def highlight(
-    code: str, lexer: Lexer, formatter: Formatter[_T], outfile: SupportsWrite[_T]
+    code: str,
+    lexer: Lexer,
+    formatter: Formatter[_T],
+    outfile: SupportsWrite[_T],
 ) -> None: ...
 @overload
 def highlight(
-    code: str, lexer: Lexer, formatter: Formatter[_T], outfile: None = ...
+    code: str,
+    lexer: Lexer,
+    formatter: Formatter[_T],
+    outfile: None = ...,
 ) -> _T: ...

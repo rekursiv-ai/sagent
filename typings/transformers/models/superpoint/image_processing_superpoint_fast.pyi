@@ -29,7 +29,8 @@ class SuperPointImageProcessorFast(BaseImageProcessorFast):
     do_normalize = ...
     valid_kwargs = SuperPointFastImageProcessorKwargs
     def __init__(
-        self, **kwargs: Unpack[SuperPointFastImageProcessorKwargs]
+        self,
+        **kwargs: Unpack[SuperPointFastImageProcessorKwargs],
     ) -> None: ...
     def post_process_keypoint_detection(
         self,

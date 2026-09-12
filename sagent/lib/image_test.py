@@ -265,7 +265,7 @@ class TestDecodeImagePil:
         assert arr.ndim == 3
         assert arr.shape[2] == 3
         assert arr.shape[0] == arr.shape[1]
-        assert arr.shape[0] <= 50  # never larger than requested crop.
+        assert arr.shape[0] <= 50  # Never larger than requested crop.
 
     def test_rgba_output_from_grayscale(self) -> None:
         # Grayscale → RGBA path: non-RGBA input + channels_format="rgba".
@@ -374,13 +374,13 @@ class TestResizeImage:
         """
         data = _png_bytes(size=(16, 16))
         out, _ = resize(data, max_dim=0, max_bytes=0)
-        assert out == data  # untouched: no dim cap, no byte cap.
+        assert out == data  # Untouched: no dim cap, no byte cap.
 
     def test_max_dim_zero_means_no_dim_cap(self) -> None:
         """``max_dim=0`` disables dimension-shrinking (0 = unlimited)."""
         data = _png_bytes(size=(4000, 16))
         out, _ = resize(data, max_dim=0, max_bytes=0)
-        assert max(Image.open(BytesIO(out)).size) == 4000  # not downscaled.
+        assert max(Image.open(BytesIO(out)).size) == 4000  # Not downscaled.
 
     def test_oversized_jpeg_input_is_quality_ramped(self) -> None:
         """An already-JPEG input over ``max_bytes``.

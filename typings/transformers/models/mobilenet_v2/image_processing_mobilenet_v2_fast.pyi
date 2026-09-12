@@ -29,7 +29,8 @@ class MobileNetV2ImageProcessorFast(BaseImageProcessorFast):
     do_reduce_labels = ...
     valid_kwargs = MobileNetV2FastImageProcessorKwargs
     def __init__(
-        self, **kwargs: Unpack[MobileNetV2FastImageProcessorKwargs]
+        self,
+        **kwargs: Unpack[MobileNetV2FastImageProcessorKwargs],
     ) -> None: ...
     def reduce_label(self, labels: list[torch.Tensor]):  # -> Tensor:
         ...
@@ -41,7 +42,9 @@ class MobileNetV2ImageProcessorFast(BaseImageProcessorFast):
         **kwargs: Unpack[MobileNetV2FastImageProcessorKwargs],
     ) -> BatchFeature: ...
     def post_process_semantic_segmentation(
-        self, outputs, target_sizes: list[tuple] | None = ...
+        self,
+        outputs,
+        target_sizes: list[tuple] | None = ...,
     ):  # -> list[Any]:
         ...
 

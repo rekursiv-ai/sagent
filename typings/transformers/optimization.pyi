@@ -11,15 +11,21 @@ logger = ...
 def get_constant_schedule(optimizer: Optimizer, last_epoch: int = ...):  # -> LambdaLR:
     ...
 def get_reduce_on_plateau_schedule(
-    optimizer: Optimizer, **kwargs
+    optimizer: Optimizer,
+    **kwargs,
 ):  # -> ReduceLROnPlateau:
     ...
 def get_constant_schedule_with_warmup(
-    optimizer: Optimizer, num_warmup_steps: int, last_epoch: int = ...
+    optimizer: Optimizer,
+    num_warmup_steps: int,
+    last_epoch: int = ...,
 ):  # -> LambdaLR:
     ...
 def get_linear_schedule_with_warmup(
-    optimizer, num_warmup_steps, num_training_steps, last_epoch=...
+    optimizer,
+    num_warmup_steps,
+    num_training_steps,
+    last_epoch=...,
 ):  # -> LambdaLR:
     ...
 def get_cosine_schedule_with_warmup(

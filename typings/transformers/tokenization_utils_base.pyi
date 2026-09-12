@@ -108,10 +108,14 @@ class BatchEncoding(UserDict):
     def words(self, batch_index: int = ...) -> list[int | None]: ...
     def word_ids(self, batch_index: int = ...) -> list[int | None]: ...
     def token_to_sequence(
-        self, batch_or_token_index: int, token_index: int | None = ...
+        self,
+        batch_or_token_index: int,
+        token_index: int | None = ...,
     ) -> int: ...
     def token_to_word(
-        self, batch_or_token_index: int, token_index: int | None = ...
+        self,
+        batch_or_token_index: int,
+        token_index: int | None = ...,
     ) -> int: ...
     def word_to_tokens(
         self,
@@ -120,7 +124,9 @@ class BatchEncoding(UserDict):
         sequence_index: int = ...,
     ) -> TokenSpan | None: ...
     def token_to_chars(
-        self, batch_or_token_index: int, token_index: int | None = ...
+        self,
+        batch_or_token_index: int,
+        token_index: int | None = ...,
     ) -> CharSpan | None: ...
     def char_to_token(
         self,
@@ -147,7 +153,10 @@ class BatchEncoding(UserDict):
     ):  # -> Self:
         ...
     def to(
-        self, device: str | torch.device, *, non_blocking: bool = ...
+        self,
+        device: str | torch.device,
+        *,
+        non_blocking: bool = ...,
     ) -> BatchEncoding: ...
 
 class _SpecialTokensMixin:
@@ -238,7 +247,9 @@ class PreTrainedTokenizerBase(_SpecialTokensMixin, PushToHubMixin):
         **kwargs,
     ) -> list[int]: ...
     def get_chat_template(
-        self, chat_template: str | None = ..., tools: list[dict] | None = ...
+        self,
+        chat_template: str | None = ...,
+        tools: list[dict] | None = ...,
     ) -> str: ...
     @classmethod
     def from_pretrained(
@@ -255,7 +266,10 @@ class PreTrainedTokenizerBase(_SpecialTokensMixin, PushToHubMixin):
     ): ...
     @classmethod
     def convert_added_tokens(
-        cls, obj: AddedToken | Any, save=..., add_type_field=...
+        cls,
+        obj: AddedToken | Any,
+        save=...,
+        add_type_field=...,
     ): ...
     def save_chat_templates(
         self,
@@ -274,7 +288,9 @@ class PreTrainedTokenizerBase(_SpecialTokensMixin, PushToHubMixin):
         **kwargs: object,
     ) -> tuple[str, ...]: ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str, ...]: ...
     def tokenize(
         self,
@@ -303,7 +319,8 @@ class PreTrainedTokenizerBase(_SpecialTokensMixin, PushToHubMixin):
     ) -> list[int]: ...
     def num_special_tokens_to_add(self, pair: bool = ...) -> int: ...
     @add_end_docstrings(
-        ENCODE_KWARGS_DOCSTRING, ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING
+        ENCODE_KWARGS_DOCSTRING,
+        ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING,
     )
     def __call__(
         self,
@@ -346,7 +363,8 @@ class PreTrainedTokenizerBase(_SpecialTokensMixin, PushToHubMixin):
         **kwargs,
     ) -> BatchEncoding: ...
     @add_end_docstrings(
-        ENCODE_KWARGS_DOCSTRING, ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING
+        ENCODE_KWARGS_DOCSTRING,
+        ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING,
     )
     def encode_plus(
         self,
@@ -371,7 +389,8 @@ class PreTrainedTokenizerBase(_SpecialTokensMixin, PushToHubMixin):
         **kwargs,
     ) -> BatchEncoding: ...
     @add_end_docstrings(
-        ENCODE_KWARGS_DOCSTRING, ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING
+        ENCODE_KWARGS_DOCSTRING,
+        ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING,
     )
     def batch_encode_plus(
         self,
@@ -416,13 +435,18 @@ class PreTrainedTokenizerBase(_SpecialTokensMixin, PushToHubMixin):
         verbose: bool = ...,
     ) -> BatchEncoding: ...
     def create_token_type_ids_from_sequences(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = ...
+        self,
+        token_ids_0: list[int],
+        token_ids_1: list[int] | None = ...,
     ) -> list[int]: ...
     def build_inputs_with_special_tokens(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = ...
+        self,
+        token_ids_0: list[int],
+        token_ids_1: list[int] | None = ...,
     ) -> list[int]: ...
     @add_end_docstrings(
-        ENCODE_KWARGS_DOCSTRING, ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING
+        ENCODE_KWARGS_DOCSTRING,
+        ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING,
     )
     def prepare_for_model(
         self,

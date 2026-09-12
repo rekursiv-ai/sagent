@@ -21,7 +21,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import ClassVar
 
-from sagent.catalog import minimax as minimax_catalog
+from sagent.catalog import minimax
 from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
@@ -37,7 +37,7 @@ class _MiniMaxModel(OpenAICompatModel):
 
 # MiniMax (OpenAI-compatible) publishes no per-image pixel or byte limit and no
 # request-body byte ceiling; images are preprocessed server-side. Use the
-# 0=unlimited sentinel rather than borrowing OpenAI's caps (verified Jun 2026;
+# 0=unlimited sentinel rather than borrowing OpenAI's caps (verified Jun 2026.
 # https://platform.minimax.io/docs/api-reference/text-openai-api).
 
 
@@ -57,7 +57,7 @@ class MiniMax(OpenAICompat):
     #
     # To add a new model: check the MiniMax platform docs for the
     # model's context window and max output tokens.
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = minimax_catalog.models()
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = minimax.models()
     """Per-model capability; transport limits live on ``TRANSPORT``."""
 
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _MiniMaxModel

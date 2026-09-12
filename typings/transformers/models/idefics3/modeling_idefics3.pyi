@@ -41,7 +41,9 @@ class Idefics3CausalLMOutputWithPast(ModelOutput):
 class Idefics3VisionEmbeddings(nn.Module):
     def __init__(self, config: Idefics3VisionConfig) -> None: ...
     def forward(
-        self, pixel_values: torch.FloatTensor, patch_attention_mask: torch.BoolTensor
+        self,
+        pixel_values: torch.FloatTensor,
+        patch_attention_mask: torch.BoolTensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -66,7 +68,9 @@ class Idefics3VisionAttention(nn.Module):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class Idefics3VisionMLP(nn.Module):
@@ -93,7 +97,9 @@ class Idefics3Encoder(nn.Module):
     def __init__(self, config: Idefics3Config) -> None: ...
     @auto_docstring
     def forward(
-        self, inputs_embeds, attention_mask: torch.Tensor | None = ...
+        self,
+        inputs_embeds,
+        attention_mask: torch.Tensor | None = ...,
     ) -> tuple | BaseModelOutput: ...
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...

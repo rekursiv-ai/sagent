@@ -23,7 +23,10 @@ from ...utils.deprecation import deprecate_kwarg
 logger = ...
 
 def build_mpt_alibi_tensor(
-    num_heads, sequence_length, alibi_bias_max=..., device=...
+    num_heads,
+    sequence_length,
+    alibi_bias_max=...,
+    device=...,
 ):  # -> Tensor:
     ...
 
@@ -43,7 +46,9 @@ class MptAttention(nn.Module):
 class MptMLP(nn.Module):
     def __init__(self, config: MptConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, residual: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -76,7 +81,11 @@ class MptModel(MptPreTrainedModel):
     def get_input_embeddings(self):  # -> Embedding | Tensor:
         ...
     def build_mpt_alibi_tensor(
-        self, num_heads, sequence_length, alibi_bias_max=..., device=...
+        self,
+        num_heads,
+        sequence_length,
+        alibi_bias_max=...,
+        device=...,
     ):  # -> Tensor:
         ...
     def set_input_embeddings(self, new_embeddings: torch.Tensor):  # -> None:

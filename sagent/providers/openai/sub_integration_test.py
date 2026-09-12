@@ -55,7 +55,7 @@ async def test_gpt_56_subscription_turn(model_id: str, effort: ThinkingEffort) -
     model._settings = ModelSettings(capability=model.capability, thinking_effort=effort)
     try:
         response = await model.buffer(
-            ModelRequest(messages=[UserMessage(text="Reply with exactly: OK")])
+            ModelRequest(messages=[UserMessage(text="Reply with exactly: OK")]),
         )
     finally:
         await model.close()

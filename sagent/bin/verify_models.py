@@ -45,10 +45,6 @@ from sagent.providers.openai.api import OpenAI
 from sagent.types.capability import ModelCapability
 
 
-def _out(msg: str) -> None:
-    sys.stdout.write(msg + "\n")
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
 class LiveLimits:
     """Token limits a live API reported for one model."""
@@ -120,20 +116,6 @@ async def fetch_openai(model_ids: list[str]) -> dict[str, LiveLimits]:
     return out
 
 
-def _parse_openai_page(html: str) -> LiveLimits | None:
-    """Extract context window and max output tokens from an OpenAI doc page."""
-    cleaned = re.sub(r"<!--.*?-->", " ", html)
-    cleaned = re.sub(r"<[^>]+>", " ", cleaned)
-    ctx = re.search(r"([\d,]+)\s+context\s+window", cleaned)
-    out = re.search(r"([\d,]+)\s+max\s+output\s+tokens", cleaned)
-    if ctx and out:
-        return LiveLimits(
-            max_request_tokens=_num(ctx.group(1)),
-            max_response_tokens=_num(out.group(1)),
-        )
-    return None
-
-
 # Source: GET /v1/models/{model_id}
 # Returns max_tokens (max output) and max_input_tokens.
 
@@ -181,11 +163,6 @@ async def fetch_anthropic(
     return out
 
 
-def _num(s: str) -> int:
-    """Parse a comma- or underscore-grouped integer literal."""
-    return int(s.replace(",", "").replace("_", ""))
-
-
 def compare(
     provider_name: str,
     known: Mapping[str, ModelCapability],
@@ -212,7 +189,7 @@ def compare(
             if lv:
                 _out(
                     f"    API: req={lv.max_request_tokens:,}"
-                    f" resp={lv.max_response_tokens:,}"
+                    f" resp={lv.max_response_tokens:,}",
                 )
             errors += 1
             continue
@@ -226,13 +203,13 @@ def compare(
         if k_req != lv.max_request_tokens:
             _out(
                 f"  {provider_name}.{mid}: max_request_tokens"
-                f" code={k_req:,} api={lv.max_request_tokens:,}"
+                f" code={k_req:,} api={lv.max_request_tokens:,}",
             )
             errors += 1
         if k_resp != lv.max_response_tokens:
             _out(
                 f"  {provider_name}.{mid}: max_response_tokens"
-                f" code={k_resp:,} api={lv.max_response_tokens:,}"
+                f" code={k_resp:,} api={lv.max_response_tokens:,}",
             )
             errors += 1
     if not errors:
@@ -279,13 +256,36 @@ def audit_catalogs() -> int:
     return errors
 
 
+def main() -> int:
+    """Run the program; return the process exit code."""
+    return asyncio.run(_run())
+
+
+def _out(msg: str) -> None:
+    sys.stdout.write(msg + "\n")
+
+
+def _parse_openai_page(html: str) -> LiveLimits | None:
+    """Extract context window and max output tokens from an OpenAI doc page."""
+    cleaned = re.sub(r"<!--.*?-->", " ", html)
+    cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+    ctx = re.search(r"([\d,]+)\s+context\s+window", cleaned)
+    out = re.search(r"([\d,]+)\s+max\s+output\s+tokens", cleaned)
+    if ctx and out:
+        return LiveLimits(
+            max_request_tokens=_num(ctx.group(1)),
+            max_response_tokens=_num(out.group(1)),
+        )
+    return None
+
+
+def _num(s: str) -> int:
+    """Parse a comma- or underscore-grouped integer literal."""
+    return int(s.replace(",", "").replace("_", ""))
+
+
 async def _run() -> int:
-    """Verify all providers' CAPABILITIES against live APIs.
-
-    Returns:
-      exit_code: 0 if all limits match, 1 otherwise.
-
-    """
+    """Verify all providers' CAPABILITIES against live APIs."""
     parser = argparse.ArgumentParser(
         description=(__doc__ or "").split("\n", 2)[2],
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -337,11 +337,6 @@ async def _run() -> int:
     else:
         _out("\nAll limits verified.")
     return 1 if total_errors else 0
-
-
-def main() -> int:
-    """Run the program; return the process exit code."""
-    return asyncio.run(_run())
 
 
 if __name__ == "__main__":

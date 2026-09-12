@@ -32,7 +32,7 @@ import difflib
 import itertools
 import logging
 
-from sagent.agent import runtime as agent_runtime
+from sagent.agent import runtime
 
 
 if TYPE_CHECKING:
@@ -272,7 +272,10 @@ class ToolState:
             return True
         prev_offset, prev_limit, prev_last_lines, _ = cached
         self.read_cache[resolved] = ReadCacheEntry(
-            prev_offset, prev_limit, prev_last_lines, current_mtime
+            prev_offset,
+            prev_limit,
+            prev_last_lines,
+            current_mtime,
         )
         return False
 
@@ -418,19 +421,23 @@ def tool_state_context(state: ToolState) -> Generator[None]:
 # aggregate cost into one shared ledger at the root.
 
 current_agent_var: contextvars.ContextVar[AgentLike | None] = contextvars.ContextVar(
-    "current_agent", default=None
+    "current_agent",
+    default=None,
 )
 
 max_depth_var: contextvars.ContextVar[int | None] = contextvars.ContextVar(
-    "max_depth", default=None
+    "max_depth",
+    default=None,
 )
 
 cost_root_var: contextvars.ContextVar[CostTracker | None] = contextvars.ContextVar(
-    "cost_root", default=None
+    "cost_root",
+    default=None,
 )
 
 agent_path_var: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "agent_path", default=""
+    "agent_path",
+    default="",
 )
 
 agent_counter_var: contextvars.ContextVar[itertools.count[int]] = (
@@ -438,7 +445,8 @@ agent_counter_var: contextvars.ContextVar[itertools.count[int]] = (
 )
 
 agent_label_var: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "agent_label", default=""
+    "agent_label",
+    default="",
 )
 
 
@@ -467,7 +475,7 @@ def approx_tokens(text: str) -> int:
 class AgentLike(Protocol):
     """Minimal agent surface for tools that route messages between agents."""
 
-    runtime: agent_runtime.AgentRuntime
+    runtime: runtime.AgentRuntime
     """The agent's ``AgentRuntime``; exposes ``inbox``, ``cohort``,
     ``model_call``, ``compact_task``, and ``detached`` for routing
     and liveness inspection."""
@@ -614,4 +622,4 @@ def unique_registry_label(base: str) -> str:
         candidate = f"{base}_{i}"
         if candidate not in agent_registry:
             return candidate
-    raise AssertionError("unreachable")  # itertools.count is infinite
+    raise AssertionError("unreachable")  # itertools.count is infinite.

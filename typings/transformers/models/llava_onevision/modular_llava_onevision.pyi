@@ -61,7 +61,11 @@ class LlavaOnevisionPreTrainedModel(LlavaNextVideoPreTrainedModel): ...
 class LlavaOnevisionModel(LlavaNextVideoModel):
     def __init__(self, config) -> None: ...
     def pack_image_features(
-        self, image_features, image_sizes, image_newline=..., vision_aspect_ratio=...
+        self,
+        image_features,
+        image_sizes,
+        image_newline=...,
+        vision_aspect_ratio=...,
     ):  # -> tuple[list[Any], Tensor]:
         ...
     def apply_pooling(self, image_features):  # -> Tensor:
@@ -106,7 +110,9 @@ class LlavaOnevisionModel(LlavaNextVideoModel):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple | LlavaOnevisionModelOutputWithPast: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | LlavaOnevisionModelOutputWithPast: ...
 
 class LlavaOnevisionForConditionalGeneration(LlavaNextVideoForConditionalGeneration):

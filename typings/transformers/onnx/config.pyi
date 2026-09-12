@@ -36,7 +36,9 @@ class OnnxConfig(ABC):
     ) -> None: ...
     @classmethod
     def from_model_config(
-        cls, config: PretrainedConfig, task: str = ...
+        cls,
+        config: PretrainedConfig,
+        task: str = ...,
     ) -> OnnxConfig: ...
     @property
     @abstractmethod
@@ -78,7 +80,8 @@ class OnnxConfig(ABC):
         tokenizer: PreTrainedTokenizerBase | None = ...,
     ) -> Mapping[str, Any]: ...
     def generate_dummy_inputs_onnxruntime(
-        self, reference_model_inputs: Mapping[str, Any]
+        self,
+        reference_model_inputs: Mapping[str, Any],
     ) -> Mapping[str, Any]: ...
     def patch_ops(self):  # -> None:
         ...
@@ -86,7 +89,9 @@ class OnnxConfig(ABC):
         ...
     @classmethod
     def flatten_output_collection_property(
-        cls, name: str, field: Iterable[Any]
+        cls,
+        name: str,
+        field: Iterable[Any],
     ) -> dict[str, Any]: ...
 
 class OnnxConfigWithPast(OnnxConfig, ABC):
@@ -99,7 +104,9 @@ class OnnxConfigWithPast(OnnxConfig, ABC):
     ) -> None: ...
     @classmethod
     def with_past(
-        cls, config: PretrainedConfig, task: str = ...
+        cls,
+        config: PretrainedConfig,
+        task: str = ...,
     ) -> OnnxConfigWithPast: ...
     @property
     def outputs(self) -> Mapping[str, Mapping[int, str]]: ...
@@ -125,7 +132,9 @@ class OnnxConfigWithPast(OnnxConfig, ABC):
     ):  # -> None:
         ...
     def flatten_output_collection_property(
-        self, name: str, field: Iterable[Any]
+        self,
+        name: str,
+        field: Iterable[Any],
     ) -> dict[str, Any]: ...
 
 class OnnxSeq2SeqConfigWithPast(OnnxConfigWithPast):
@@ -144,6 +153,8 @@ class OnnxSeq2SeqConfigWithPast(OnnxConfigWithPast):
         framework: TensorType | None = ...,
     ) -> Mapping[str, Any]: ...
     def fill_with_past_key_values_(
-        self, inputs_or_outputs: Mapping[str, Mapping[int, str]], direction: str
+        self,
+        inputs_or_outputs: Mapping[str, Mapping[int, str]],
+        direction: str,
     ):  # -> None:
         ...

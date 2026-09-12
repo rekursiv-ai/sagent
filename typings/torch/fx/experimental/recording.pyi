@@ -30,7 +30,9 @@ class ShapeEnvEvent:
 NEST = ...
 
 def record_shapeenv_event(
-    *, save_tracked_fakes: bool = ..., name: str | None = ...
+    *,
+    save_tracked_fakes: bool = ...,
+    name: str | None = ...,
 ) -> Callable: ...
 def replay_shape_env_events(events): ...
 
@@ -48,7 +50,10 @@ class FakeTensorMeta:
     def from_fake(fake) -> FakeTensorMeta: ...
 
 def shape_env_check_state_equal(
-    env1, env2, non_state_variable_names, map_value
+    env1,
+    env2,
+    non_state_variable_names,
+    map_value,
 ) -> None: ...
 
 class NotEqualError(Exception):

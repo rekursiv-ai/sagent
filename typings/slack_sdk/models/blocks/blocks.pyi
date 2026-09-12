@@ -164,7 +164,11 @@ class MarkdownBlock(Block):
     @property
     def attributes(self) -> set[str]: ...
     def __init__(
-        self, *, text: str, block_id: str | None = ..., **others: dict
+        self,
+        *,
+        text: str,
+        block_id: str | None = ...,
+        **others: dict,
     ) -> None: ...
 
 class VideoBlock(Block):

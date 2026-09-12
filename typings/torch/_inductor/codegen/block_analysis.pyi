@@ -9,7 +9,11 @@ class BlockPatternMatcher:
     def get_slice_numels(dims: list[Expr]) -> list[Expr]: ...
     @classmethod
     def match_mod_div_block_expr(
-        cls, index: Expr, index_var: Symbol, numel: Expr, num_dims: int
+        cls,
+        index: Expr,
+        index_var: Symbol,
+        numel: Expr,
+        num_dims: int,
     ) -> tuple[list[Expr], list[Expr], list[Expr]] | None: ...
     @classmethod
     def match_affine_block_expr(cls, index: Expr, index_var: Symbol) -> Expr | None: ...

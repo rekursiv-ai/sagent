@@ -17,7 +17,9 @@ class OutputProp:
     def propagate(self, *args) -> None: ...
 
 def create_submodule_from_subgraph(
-    model: torch.nn.Module, first_node: Node, last_node: Node
+    model: torch.nn.Module,
+    first_node: Node,
+    last_node: Node,
 ) -> GraphModule: ...
 def create_one_transformed_and_logged_copy_of_subgraph(
     mt: GraphModule,

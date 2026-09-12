@@ -31,7 +31,9 @@ type AllowedArgType = (
 
 class OpRecorder(evaluator.Evaluator):
     def __init__(
-        self, opset: onnxscript.values.Opset, constant_farm: dict[Any, ir.Value]
+        self,
+        opset: onnxscript.values.Opset,
+        constant_farm: dict[Any, ir.Value],
     ) -> None: ...
     def eval(
         self,

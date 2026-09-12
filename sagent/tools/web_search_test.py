@@ -204,14 +204,20 @@ def test_run_valid_backend_passes_through() -> None:
     captured: dict[str, object] = {}
 
     def fake_search(
-        q: str, *, backend: object, categories: object = "general"
+        q: str,
+        *,
+        backend: object,
+        categories: object = "general",
     ) -> list[SearchResult]:
         captured["q"] = q
         captured["backend"] = backend
         captured["categories"] = categories
         return []
 
-    with patch("sagent.tools.web_search.search", side_effect=fake_search):
+    with patch(
+        "sagent.tools.web_search.search",
+        side_effect=fake_search,
+    ):
         _ = asyncio.run(WebSearch().run({"query": "x", "backend": "duckduckgo"}))
     assert captured["backend"] == "duckduckgo"
     assert captured["categories"] == "general"
@@ -231,7 +237,10 @@ def test_run_explicit_transport_passes_through() -> None:
         captured["transport"] = transport
         return []
 
-    with patch("sagent.tools.web_search.search", side_effect=fake_search):
+    with patch(
+        "sagent.tools.web_search.search",
+        side_effect=fake_search,
+    ):
         result = asyncio.run(WebSearch().run({"query": "x", "transport": "stdlib"}))
     assert not result.is_error
     assert captured["transport"] == "stdlib"
@@ -247,20 +256,26 @@ def test_run_with_allowed_and_blocked_domains() -> None:
     captured: dict[str, object] = {}
 
     def fake_search(
-        q: str, *, backend: object, categories: object = "general"
+        q: str,
+        *,
+        backend: object,
+        categories: object = "general",
     ) -> list[SearchResult]:
         captured["q"] = q
         del backend, categories
         return []
 
-    with patch("sagent.tools.web_search.search", side_effect=fake_search):
+    with patch(
+        "sagent.tools.web_search.search",
+        side_effect=fake_search,
+    ):
         _ = asyncio.run(
             WebSearch().run(
                 {
                     "query": "ml",
                     "allowed_domains": ["arxiv.org"],
                     "blocked_domains": ["x.com"],
-                }
+                },
             ),
         )
     q = captured["q"]
@@ -280,14 +295,20 @@ def test_run_leaves_backend_resolution_to_the_library() -> None:
     captured: dict[str, object] = {}
 
     def fake_search(
-        q: str, *, backend: object, categories: object = "general"
+        q: str,
+        *,
+        backend: object,
+        categories: object = "general",
     ) -> list[SearchResult]:
         del q
         captured["backend"] = backend
         captured["categories"] = categories
         return []
 
-    with patch("sagent.tools.web_search.search", side_effect=fake_search):
+    with patch(
+        "sagent.tools.web_search.search",
+        side_effect=fake_search,
+    ):
         _ = asyncio.run(WebSearch().run({"query": "x", "categories": "science"}))
     assert captured["backend"] is None
     assert captured["categories"] == "science"
@@ -301,8 +322,8 @@ def test_run_does_not_overwrite_an_explicit_backend() -> None:
     """
     result = asyncio.run(
         WebSearch().run(
-            {"query": "x", "backend": "duckduckgo", "categories": "science"}
-        )
+            {"query": "x", "backend": "duckduckgo", "categories": "science"},
+        ),
     )
     assert result.is_error
     assert "only supported by the 'searxng' backend" in result.content

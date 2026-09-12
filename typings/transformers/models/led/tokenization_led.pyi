@@ -38,10 +38,14 @@ class LEDTokenizer(PreTrainedTokenizer):
     def convert_tokens_to_string(self, tokens):  # -> str:
         ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
     def build_inputs_with_special_tokens(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = ...
+        self,
+        token_ids_0: list[int],
+        token_ids_1: list[int] | None = ...,
     ) -> list[int]: ...
     def get_special_tokens_mask(
         self,
@@ -50,10 +54,15 @@ class LEDTokenizer(PreTrainedTokenizer):
         already_has_special_tokens: bool = ...,
     ) -> list[int]: ...
     def create_token_type_ids_from_sequences(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = ...
+        self,
+        token_ids_0: list[int],
+        token_ids_1: list[int] | None = ...,
     ) -> list[int]: ...
     def prepare_for_tokenization(
-        self, text, is_split_into_words=..., **kwargs
+        self,
+        text,
+        is_split_into_words=...,
+        **kwargs,
     ):  # -> tuple[str, dict[str, Any]]:
         ...
 

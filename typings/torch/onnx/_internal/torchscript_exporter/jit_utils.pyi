@@ -32,7 +32,11 @@ class GraphContext:
 
     at = ...
     def onnxscript_op(
-        self, onnx_fn, *raw_args: torch.Tensor | _C.Value, outputs: int = ..., **kwargs
+        self,
+        onnx_fn,
+        *raw_args: torch.Tensor | _C.Value,
+        outputs: int = ...,
+        **kwargs,
     ): ...
 
 def add_op_with_blocks(

@@ -18,7 +18,11 @@ class Phi4MultimodalProcessor(ProcessorMixin):
     image_processor_class = ...
     audio_processor_class = ...
     def __init__(
-        self, image_processor, audio_processor, tokenizer, **kwargs
+        self,
+        image_processor,
+        audio_processor,
+        tokenizer,
+        **kwargs,
     ) -> None: ...
     def __call__(
         self,

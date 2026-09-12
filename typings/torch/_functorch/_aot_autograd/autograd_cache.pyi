@@ -41,7 +41,8 @@ def check_cacheable(gm: torch.fx.GraphModule) -> None: ...
 
 class AOTAutogradCacheDetails(FxGraphHashDetails):
     def get_triton_source_codes_from_gm(
-        self, gm: torch.fx.GraphModule
+        self,
+        gm: torch.fx.GraphModule,
     ) -> list[Any]: ...
     def __init__(
         self,
@@ -81,7 +82,9 @@ class CompiledFxGraphLoadable(InductorOutput[CompiledFxGraph]):
     def pre_save(self) -> None: ...
     def load(self, example_inputs) -> CompiledFxGraph: ...
     def post_compile(
-        self, result: CompiledFxGraph, fx_config: _CompileFxKwargs
+        self,
+        result: CompiledFxGraph,
+        fx_config: _CompileFxKwargs,
     ) -> CompiledFxGraph: ...
 
 @dataclass
@@ -91,7 +94,9 @@ class FxGraphCacheLoadable(InductorOutput[CompiledFxGraph]):
     def pre_save(self) -> None: ...
     def load(self, example_inputs) -> CompiledFxGraph: ...
     def post_compile(
-        self, result: CompiledFxGraph, fx_config: _CompileFxKwargs
+        self,
+        result: CompiledFxGraph,
+        fx_config: _CompileFxKwargs,
     ) -> CompiledFxGraph: ...
 
 @dataclass
@@ -105,17 +110,22 @@ class GenericCompiledBackward(InductorOutput[TOut]):
 @dataclass
 class CompiledBackward(GenericCompiledBackward[CompiledFxGraph], FxGraphCacheLoadable):
     def post_compile(
-        self, result: CompiledFxGraph, fx_config: _CompileFxKwargs
+        self,
+        result: CompiledFxGraph,
+        fx_config: _CompileFxKwargs,
     ) -> CompiledFxGraph: ...
 
 class BundledCompiledForward(CompiledFxGraphLoadable): ...
 
 @dataclass
 class BundledCompiledBackward(
-    GenericCompiledBackward[CompiledFxGraph], CompiledFxGraphLoadable
+    GenericCompiledBackward[CompiledFxGraph],
+    CompiledFxGraphLoadable,
 ):
     def post_compile(
-        self, result: CompiledFxGraph, fx_config: _CompileFxKwargs
+        self,
+        result: CompiledFxGraph,
+        fx_config: _CompileFxKwargs,
     ) -> CompiledFxGraph: ...
 
 @dataclass
@@ -156,10 +166,10 @@ class GenericAOTAutogradCacheEntry(Generic[TForward, TBackward]):
     ) -> Callable: ...
 
 class AOTAutogradCacheEntry(
-    GenericAOTAutogradCacheEntry[CompiledForward, CompiledBackward]
+    GenericAOTAutogradCacheEntry[CompiledForward, CompiledBackward],
 ): ...
 class BundledAOTAutogradCacheEntry(
-    GenericAOTAutogradCacheEntry[BundledCompiledForward, BundledCompiledBackward]
+    GenericAOTAutogradCacheEntry[BundledCompiledForward, BundledCompiledBackward],
 ): ...
 
 @contextlib.contextmanager
@@ -196,11 +206,13 @@ class AOTAutogradCache(GuardedCache[GenericAOTAutogradCacheEntry]):
     ) -> Callable | None: ...
     @classmethod
     def generate_guards_expression(
-        cls: type[AOTAutogradCache], cache_info: AOTAutogradCacheInfo
+        cls: type[AOTAutogradCache],
+        cache_info: AOTAutogradCacheInfo,
     ) -> str | None: ...
     @staticmethod
     def evaluate_guards(
-        guard_expr: str, hints: list[int] | list[torch.SymInt]
+        guard_expr: str,
+        hints: list[int] | list[torch.SymInt],
     ) -> bool: ...
     @staticmethod
     def save(key: str, entry: GenericAOTAutogradCacheEntry, remote: bool) -> None: ...

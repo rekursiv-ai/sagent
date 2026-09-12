@@ -208,7 +208,7 @@ class TFMBartModel(TFMBartPreTrainedModel):
         ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        MBART_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MBART_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -250,7 +250,8 @@ class BiasLayer(keras.layers.Layer):
     MBART_START_DOCSTRING,
 )
 class TFMBartForConditionalGeneration(
-    TFMBartPreTrainedModel, TFCausalLanguageModelingLoss
+    TFMBartPreTrainedModel,
+    TFCausalLanguageModelingLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
@@ -268,7 +269,8 @@ class TFMBartForConditionalGeneration(
     @unpack_inputs
     @add_start_docstrings_to_model_forward(MBART_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFSeq2SeqLMOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFSeq2SeqLMOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     @add_end_docstrings(MBART_GENERATION_EXAMPLE)
     def call(

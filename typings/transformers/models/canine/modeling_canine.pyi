@@ -68,16 +68,22 @@ class CanineSelfAttention(nn.Module):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class CanineSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: tuple[torch.FloatTensor], input_tensor: torch.FloatTensor
+        self,
+        hidden_states: tuple[torch.FloatTensor],
+        input_tensor: torch.FloatTensor,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]: ...
 
 class CanineAttention(nn.Module):
@@ -102,7 +108,9 @@ class CanineAttention(nn.Module):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
 
 class CanineIntermediate(nn.Module):
@@ -113,7 +121,9 @@ class CanineIntermediate(nn.Module):
 class CanineOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: tuple[torch.FloatTensor], input_tensor: torch.FloatTensor
+        self,
+        hidden_states: tuple[torch.FloatTensor],
+        input_tensor: torch.FloatTensor,
     ) -> torch.FloatTensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
@@ -137,7 +147,9 @@ class CanineLayer(GradientCheckpointingLayer):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
     def feed_forward_chunk(self, attention_output):  # -> Any:
         ...

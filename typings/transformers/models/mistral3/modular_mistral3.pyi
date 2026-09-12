@@ -24,14 +24,18 @@ class Mistral3RMSNorm(MistralRMSNorm): ...
 class Mistral3PatchMerger(nn.Module):
     def __init__(self, config: Mistral3Config) -> None: ...
     def forward(
-        self, image_features: torch.Tensor, image_sizes: torch.Tensor
+        self,
+        image_features: torch.Tensor,
+        image_sizes: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class Mistral3MultiModalProjector(nn.Module):
     def __init__(self, config: Mistral3Config) -> None: ...
     def forward(
-        self, image_features: torch.Tensor, image_sizes: torch.Tensor
+        self,
+        image_features: torch.Tensor,
+        image_sizes: torch.Tensor,
     ):  # -> Any:
         ...
 
@@ -66,7 +70,9 @@ class Mistral3Model(LlavaModel):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | Mistral3ModelOutputWithPast: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | Mistral3ModelOutputWithPast: ...
 
 class Mistral3ForConditionalGeneration(LlavaForConditionalGeneration):
@@ -97,7 +103,9 @@ class Mistral3ForConditionalGeneration(LlavaForConditionalGeneration):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | Mistral3CausalLMOutputWithPast: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | Mistral3CausalLMOutputWithPast: ...
 
 __all__ = [

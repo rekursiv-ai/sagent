@@ -126,16 +126,22 @@ magic_methods = ...
 
 def sympy_is_contiguous(sizes, strides) -> BooleanFalse | BooleanTrue | Boolean: ...
 def sympy_is_contiguous_generic(
-    sizes, strides, dim_order
+    sizes,
+    strides,
+    dim_order,
 ) -> BooleanFalse | BooleanTrue | Boolean: ...
 def sympy_is_channels_last_contiguous_2d(
-    sizes, strides
+    sizes,
+    strides,
 ) -> BooleanFalse | BooleanTrue | Boolean: ...
 def sympy_is_channels_last_contiguous_3d(
-    sizes, strides
+    sizes,
+    strides,
 ) -> BooleanFalse | BooleanTrue | Boolean: ...
 def sympy_is_channels_last_strides_generic(
-    sizes, strides, dim_order
+    sizes,
+    strides,
+    dim_order,
 ) -> BooleanFalse | Boolean: ...
 def sympy_is_channels_last_strides_2d(sizes, strides) -> BooleanFalse | Boolean: ...
 def sympy_is_channels_last_strides_3d(sizes, strides) -> BooleanFalse | Boolean: ...

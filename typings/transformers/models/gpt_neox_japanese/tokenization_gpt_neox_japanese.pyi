@@ -5,7 +5,8 @@ logger = ...
 VOCAB_FILES_NAMES = ...
 
 def load_vocab_and_emoji(
-    vocab_file, emoji_file
+    vocab_file,
+    emoji_file,
 ):  # -> tuple[OrderedDict[Any, Any], OrderedDict[Any, Any], OrderedDict[Any, Any], Any]:
     ...
 
@@ -29,7 +30,9 @@ class GPTNeoXJapaneseTokenizer(PreTrainedTokenizer):
     def convert_tokens_to_string(self, tokens):  # -> str:
         ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
 
 class SubWordJapaneseTokenizer:

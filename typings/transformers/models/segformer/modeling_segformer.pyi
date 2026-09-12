@@ -23,7 +23,9 @@ class SegFormerImageClassifierOutput(ImageClassifierOutput):
     attentions: tuple[torch.FloatTensor] | None = ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class SegformerDropPath(nn.Module):
@@ -39,10 +41,18 @@ class SegformerOverlapPatchEmbeddings(nn.Module):
 
 class SegformerEfficientSelfAttention(nn.Module):
     def __init__(
-        self, config, hidden_size, num_attention_heads, sequence_reduction_ratio
+        self,
+        config,
+        hidden_size,
+        num_attention_heads,
+        sequence_reduction_ratio,
     ) -> None: ...
     def forward(
-        self, hidden_states, height, width, output_attentions=...
+        self,
+        hidden_states,
+        height,
+        width,
+        output_attentions=...,
     ):  # -> tuple[Tensor, Any] | tuple[Tensor]:
         ...
 
@@ -53,7 +63,11 @@ class SegformerSelfOutput(nn.Module):
 
 class SegformerAttention(nn.Module):
     def __init__(
-        self, config, hidden_size, num_attention_heads, sequence_reduction_ratio
+        self,
+        config,
+        hidden_size,
+        num_attention_heads,
+        sequence_reduction_ratio,
     ) -> None: ...
     def prune_heads(self, heads):  # -> None:
         ...
@@ -67,7 +81,11 @@ class SegformerDWConv(nn.Module):
 
 class SegformerMixFFN(nn.Module):
     def __init__(
-        self, config, in_features, hidden_features=..., out_features=...
+        self,
+        config,
+        in_features,
+        hidden_features=...,
+        out_features=...,
     ) -> None: ...
     def forward(self, hidden_states, height, width):  # -> Any:
         ...

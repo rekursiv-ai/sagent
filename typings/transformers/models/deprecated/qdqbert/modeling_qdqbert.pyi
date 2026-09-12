@@ -176,7 +176,7 @@ class QDQBertModel(QDQBertPreTrainedModel):
     def set_input_embeddings(self, value):  # -> None:
         ...
     @add_start_docstrings_to_model_forward(
-        QDQBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        QDQBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -212,10 +212,11 @@ class QDQBertLMHeadModel(QDQBertPreTrainedModel):
     def set_output_embeddings(self, new_embeddings):  # -> None:
         ...
     @add_start_docstrings_to_model_forward(
-        QDQBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        QDQBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=CausalLMOutputWithCrossAttentions, config_class=_CONFIG_FOR_DOC
+        output_type=CausalLMOutputWithCrossAttentions,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,
@@ -252,7 +253,7 @@ class QDQBertForMaskedLM(QDQBertPreTrainedModel):
     def set_output_embeddings(self, new_embeddings):  # -> None:
         ...
     @add_start_docstrings_to_model_forward(
-        QDQBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        QDQBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -289,10 +290,11 @@ class QDQBertForMaskedLM(QDQBertPreTrainedModel):
 class QDQBertForNextSentencePrediction(QDQBertPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(
-        QDQBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        QDQBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=NextSentencePredictorOutput, config_class=_CONFIG_FOR_DOC
+        output_type=NextSentencePredictorOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,
@@ -316,7 +318,7 @@ class QDQBertForNextSentencePrediction(QDQBertPreTrainedModel):
 class QDQBertForSequenceClassification(QDQBertPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(
-        QDQBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        QDQBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -344,7 +346,7 @@ class QDQBertForSequenceClassification(QDQBertPreTrainedModel):
 class QDQBertForMultipleChoice(QDQBertPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(
-        QDQBERT_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        QDQBERT_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -372,7 +374,7 @@ class QDQBertForMultipleChoice(QDQBertPreTrainedModel):
 class QDQBertForTokenClassification(QDQBertPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(
-        QDQBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        QDQBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -400,7 +402,7 @@ class QDQBertForTokenClassification(QDQBertPreTrainedModel):
 class QDQBertForQuestionAnswering(QDQBertPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(
-        QDQBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        QDQBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,

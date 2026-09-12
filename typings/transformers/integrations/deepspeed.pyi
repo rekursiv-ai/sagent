@@ -40,14 +40,22 @@ def is_deepspeed_zero3_enabled():  # -> Literal[False]:
 def deepspeed_config():  # -> None:
     ...
 def deepspeed_optim_sched(
-    trainer, hf_deepspeed_config, args, num_training_steps, model_parameters
+    trainer,
+    hf_deepspeed_config,
+    args,
+    num_training_steps,
+    model_parameters,
 ):  # -> tuple[Any, Any]:
     ...
 def deepspeed_init(
-    trainer, num_training_steps, inference=...
+    trainer,
+    num_training_steps,
+    inference=...,
 ):  # -> tuple[Any | None, Any | None]:
     ...
 def deepspeed_load_checkpoint(
-    deepspeed_engine, checkpoint_path, load_module_strict=...
+    deepspeed_engine,
+    checkpoint_path,
+    load_module_strict=...,
 ):  # -> None:
     ...

@@ -71,7 +71,11 @@ class Sam2ImageProcessorFast(BaseImageProcessorFast):
     ):  # -> list[Any]:
         ...
     def post_process_for_mask_generation(
-        self, all_masks, all_scores, all_boxes, crops_nms_thresh
+        self,
+        all_masks,
+        all_scores,
+        all_boxes,
+        crops_nms_thresh,
     ):  # -> tuple[list[Tensor], Any, list[Any], Any]:
         ...
     def pad_image(self): ...

@@ -21,14 +21,19 @@ class MLCDRotaryEmbedding(nn.Module):
     inv_freq: torch.Tensor
     def __init__(self, dim: int, theta: float = ...) -> None: ...
     def forward(
-        self, num_patches_height: int, num_patches_width: int
+        self,
+        num_patches_height: int,
+        num_patches_width: int,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class MLCDVisionEmbeddings(nn.Module):
     def __init__(self, config: MLCDVisionConfig) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(self, pixel_values: torch.FloatTensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -48,7 +53,10 @@ def rotate_half(x):  # -> Tensor:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
 def apply_rotary_pos_emb_vision(
-    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class MLCDAttention(nn.Module):
@@ -61,7 +69,9 @@ class MLCDAttention(nn.Module):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class MLCDEncoderLayer(GradientCheckpointingLayer):

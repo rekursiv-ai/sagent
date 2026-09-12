@@ -43,7 +43,11 @@ class Glm4vVisionRotaryEmbedding(nn.Module):
 
 class Glm4vVisionPatchMerger(nn.Module):
     def __init__(
-        self, dim: int, context_dim: int, hidden_act: str, bias: bool = ...
+        self,
+        dim: int,
+        context_dim: int,
+        hidden_act: str,
+        bias: bool = ...,
     ) -> None: ...
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -51,14 +55,22 @@ class Glm4vVisionPatchMerger(nn.Module):
 class Glm4vVisionEmbeddings(nn.Module):
     def __init__(self, config: Glm4vVisionConfig) -> None: ...
     def forward(
-        self, embeddings, lengths, image_shapes, h_coords, w_coords
+        self,
+        embeddings,
+        lengths,
+        image_shapes,
+        h_coords,
+        w_coords,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb_vision(
-    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
 def eager_attention_forward(
@@ -108,13 +120,20 @@ class Glm4vTextRotaryEmbedding(nn.Module):
 def rotate_half_llm(x):  # -> Tensor:
     ...
 def apply_multimodal_rotary_pos_emb(
-    q, k, cos, sin, mrope_section, unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    mrope_section,
+    unsqueeze_dim=...,
 ):  # -> tuple[Tensor, Tensor]:
     ...
 
 class Glm4vTextAttention(nn.Module):
     def __init__(
-        self, config: Glm4vTextConfig, layer_idx: int | None = ...
+        self,
+        config: Glm4vTextConfig,
+        layer_idx: int | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -127,7 +146,9 @@ class Glm4vTextAttention(nn.Module):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class Glm4vTextMLP(nn.Module):
@@ -149,12 +170,16 @@ class Glm4vTextDecoderLayer(GradientCheckpointingLayer):
         cache_position: torch.LongTensor | None = ...,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @dataclass
@@ -186,7 +211,9 @@ class Glm4vVisionModel(Glm4vPreTrainedModel):
     def rot_pos_emb(self, grid_thw):  # -> tuple[Any, Tensor]:
         ...
     def forward(
-        self, hidden_states: torch.Tensor, grid_thw: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        grid_thw: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 

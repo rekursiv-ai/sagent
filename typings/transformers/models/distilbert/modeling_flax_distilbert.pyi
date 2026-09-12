@@ -120,10 +120,13 @@ class FlaxDistilBertPreTrainedModel(FlaxPreTrainedModel):
         **kwargs,
     ) -> None: ...
     def init_weights(
-        self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...
+        self,
+        rng: jax.random.PRNGKey,
+        input_shape: tuple,
+        params: FrozenDict = ...,
     ) -> FrozenDict: ...
     @add_start_docstrings_to_model_forward(
-        DISTILBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        DISTILBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     def __call__(
         self,

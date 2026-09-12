@@ -16,14 +16,13 @@ import httpx2
 import openai
 import pytest
 
-from sagent.catalog import openai as openai_catalog
 from sagent.providers import OpenAI
 from sagent.providers.lib.errors import (
     PER_ITEM_STRING_CAP_BODY,
     StreamingResponseNotReadError,
     find_response_not_read,
 )
-from sagent.providers.openai import sub as openai_sub
+from sagent.providers.openai import sub
 from sagent.providers.openai.sub import (
     OpenAISubscription,
     _jwt_claim,
@@ -45,16 +44,19 @@ from sagent.types.runtime import (
     UserMessage,
 )
 
+import sagent.catalog.openai
+
 
 def test_subscription_context_clamps_request_tokens() -> None:
     cap = ModelCapability(
         context=MappingProxyType(
             {
                 "": ModelLimits(
-                    max_request_tokens=1_000_000, max_response_tokens=1_000_000
-                )
-            }
-        )
+                    max_request_tokens=1_000_000,
+                    max_response_tokens=1_000_000,
+                ),
+            },
+        ),
     )
     clamped = _subscription_context(cap)[""]
     # Wire contract is 272_000 / 32_000 -- see sub._SUBSCRIPTION_MAX_*.
@@ -65,8 +67,8 @@ def test_subscription_context_clamps_request_tokens() -> None:
 def test_subscription_context_keeps_small_windows() -> None:
     cap = ModelCapability(
         context=MappingProxyType(
-            {"": ModelLimits(max_request_tokens=100_000, max_response_tokens=10_000)}
-        )
+            {"": ModelLimits(max_request_tokens=100_000, max_response_tokens=10_000)},
+        ),
     )
     clamped = _subscription_context(cap)[""]
     assert clamped.max_request_tokens == 100_000
@@ -80,8 +82,8 @@ def test_subscription_context_drops_the_long_window_tag() -> None:
             {
                 "": ModelLimits(max_request_tokens=272_000),
                 "+1m": ModelLimits(max_request_tokens=1_050_000),
-            }
-        )
+            },
+        ),
     )
     assert _subscription_context(cap).keys() == {""}
 
@@ -99,9 +101,9 @@ def test_subscription_context_inherits_size_caps_from_parent() -> None:
                     max_image_edge_px=4096,
                     max_image_bytes=7_000_000,
                     max_request_bytes=33_000_000,
-                )
-            }
-        )
+                ),
+            },
+        ),
     )
     clamped = _subscription_context(cap)[""]
     assert clamped.max_image_edge_px == 4096
@@ -126,7 +128,7 @@ def test_login_manual_advertises_localhost_redirect_uri(
 
     ``127.0.0.1`` is rejected with ``authorize_hydra_invalid_request``.
     """
-    monkeypatch.setattr(openai_sub, "DEFAULT_CREDENTIALS_PATH", tmp_path / "auth.json")
+    monkeypatch.setattr(sub, "DEFAULT_CREDENTIALS_PATH", tmp_path / "auth.json")
     access = _make_jwt(
         {
             "exp": time.time() + 3600,
@@ -134,7 +136,7 @@ def test_login_manual_advertises_localhost_redirect_uri(
                 "chatgpt_account_id": "acct-123",
                 "chatgpt_plan_type": "pro",
             },
-        }
+        },
     )
     token_resp = MagicMock()
     token_resp.status_code = 200
@@ -160,7 +162,7 @@ def test_login_manual_advertises_localhost_redirect_uri(
             return_value=http_client,
         ),
         patch.object(
-            openai_sub,
+            sub,
             "parse_manual_auth_code",
             return_value="the-code",
         ),
@@ -201,7 +203,7 @@ def test_jwt_exp_missing_returns_zero() -> None:
 
 def test_jwt_claim_nested_value() -> None:
     token = _make_jwt(
-        {"https://api.openai.com/auth": {"chatgpt_account_id": "acc-123"}}
+        {"https://api.openai.com/auth": {"chatgpt_account_id": "acc-123"}},
     )
     assert _jwt_claim(token, "https://api.openai.com/auth", "chatgpt_account_id") == (
         "acc-123"
@@ -219,7 +221,9 @@ def _write_creds_file(path: Path, payload: dict[str, object]) -> None:
 
 
 def _make_creds(
-    access: str, *, expires_at: float = 0.0
+    access: str,
+    *,
+    expires_at: float = 0.0,
 ) -> OpenAISubscription.Credentials:
     return OpenAISubscription.Credentials(
         access_token=access,
@@ -529,7 +533,9 @@ def test_subscription_expired_property_false_when_far_future() -> None:
 
 
 def _create_kwargs_for(
-    *, model_id: str = "gpt-5.6-sol", effort: ThinkingEffort = "none"
+    *,
+    model_id: str = "gpt-5.6-sol",
+    effort: ThinkingEffort = "none",
 ) -> dict[str, object]:
     model = _make_provider().model(model_id)
     model.settings.thinking_effort = effort
@@ -572,8 +578,9 @@ def test_subscription_catalog_efforts_are_all_buildable() -> None:
     capability = _make_provider().model(model_id).capability
     for effort in capability.thinking_effort - {"none"}:
         assert _wire_effort_for(
-            model_id=model_id, effort=effort
-        ) == openai_catalog.reasoning_effort(effort, model_id=model_id)
+            model_id=model_id,
+            effort=effort,
+        ) == sagent.catalog.openai.reasoning_effort(effort, model_id=model_id)
 
 
 def test_subscription_stream_requests_reasoning_summary_when_thinking() -> None:
@@ -651,7 +658,8 @@ class TestHandleAuthError:
 
     @pytest.mark.anyio
     async def test_refreshes_when_adopted_disk_token_also_expired(
-        self, tmp_path: Path
+        self,
+        tmp_path: Path,
     ) -> None:
         """A DIFFERENT but already-expired disk token must still force a refresh.
 
@@ -699,7 +707,8 @@ class TestHandleAuthError:
 
     @pytest.mark.anyio
     async def test_force_refresh_when_disk_same_even_if_clock_valid(
-        self, tmp_path: Path
+        self,
+        tmp_path: Path,
     ) -> None:
         """A 401 on a clock-VALID token (same on disk) must STILL force a refresh.
 
@@ -711,7 +720,7 @@ class TestHandleAuthError:
         sibling's refresh) may be adopted without a network refresh.
         """
         cred_file = tmp_path / "auth.json"
-        # exp far in the future -> ``self.expired`` is False, yet the server 401'd.
+        # `exp` far in the future means ``self.expired`` is False, yet the server 401'd.
         clock_valid = _make_jwt({"exp": time.time() + 3600})
         OpenAISubscription.save(
             OpenAISubscription.Credentials(
@@ -723,7 +732,7 @@ class TestHandleAuthError:
             path=cred_file,
         )
         provider = OpenAISubscription(
-            access_token=clock_valid,  # SAME as disk
+            access_token=clock_valid,  # SAME as disk.
             refresh_token=_STALE_REFRESH,
             account_id=_FAKE_ACCOUNT,
             expires_at=time.time() + 3600,
@@ -847,7 +856,8 @@ class TestEnsureValidRace:
 
     @pytest.mark.anyio
     async def test_reloads_from_disk_when_sibling_refreshed(
-        self, tmp_path: Path
+        self,
+        tmp_path: Path,
     ) -> None:
         """Fresh disk creds preempt the network refresh entirely."""
         cred_file = tmp_path / "auth.json"
@@ -873,7 +883,7 @@ class TestEnsureValidRace:
         mock_http = AsyncMock()
         mock_http.post = AsyncMock(
             side_effect=AssertionError(
-                "_ensure_valid called _refresh instead of reloading from disk"
+                "_ensure_valid called _refresh instead of reloading from disk",
             ),
         )
         mock_http.__aenter__ = AsyncMock(return_value=mock_http)
@@ -962,7 +972,7 @@ class TestEnsureValidRace:
             path=cred_file,
         )
         provider = OpenAISubscription(
-            access_token=_make_jwt({"exp": 0.0}),  # expired -> triggers adopt
+            access_token=_make_jwt({"exp": 0.0}),  # `expired` -> triggers adopt.
             refresh_token=_STALE_REFRESH,
             account_id=_FAKE_ACCOUNT,
             expires_at=0.0,
@@ -992,7 +1002,7 @@ class TestStreamResponseNotRead:
         sdk = MagicMock()
         sdk.responses = MagicMock()
         sdk.responses.with_raw_response.create = AsyncMock(
-            side_effect=httpx2.ResponseNotRead()
+            side_effect=httpx2.ResponseNotRead(),
         )
 
         with patch.object(provider, "get_sdk", AsyncMock(return_value=sdk)):
@@ -1043,7 +1053,9 @@ class TestStreamAuthRetry:
         request = httpx2.Request("POST", "https://chatgpt.com/backend-api/codex")
         response = httpx2.Response(401, request=request)
         auth_err = openai.AuthenticationError(
-            "Unauthorized", response=response, body=None
+            "Unauthorized",
+            response=response,
+            body=None,
         )
         # Return DIFFERENT SDKs from get_sdk so the test can prove the
         # retry call landed on a freshly-built SDK (with a rotated
@@ -1110,7 +1122,8 @@ class TestRefreshErrors:
 
     @pytest.mark.anyio
     async def test_refresh_overwrites_missing_field_creds_file(
-        self, tmp_path: Path
+        self,
+        tmp_path: Path,
     ) -> None:
         """A creds file with valid JSON but missing fields must not crash refresh.
 
@@ -1147,7 +1160,7 @@ class TestRefreshErrors:
                 cred_file,
             ),
         ):
-            await provider._refresh()  # must not raise KeyError
+            await provider._refresh()  # Must not raise KeyError.
         assert provider._access_token == refreshed_access
         # The corrupt file was overwritten with a well-formed token set.
         reloaded = OpenAISubscription.load(path=cred_file)
@@ -1156,7 +1169,8 @@ class TestRefreshErrors:
     @pytest.mark.anyio
     @pytest.mark.parametrize("status", [500, 502, 503])
     async def test_refresh_5xx_does_not_raise_auth_refresh_error(
-        self, status: int
+        self,
+        status: int,
     ) -> None:
         """Server-side failures bubble as plain ``httpx2.HTTPStatusError``."""
         provider = _make_provider(expires_at=0.0)

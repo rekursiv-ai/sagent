@@ -27,7 +27,12 @@ def call_delegate_cpu(
     input_args: list[torch.Tensor],
 ) -> list[torch.Tensor]: ...
 def trace_aoti_call_delegate(
-    proxy_mode, func_overload, lowered_module, original_gm, weight_args, input_args
+    proxy_mode,
+    func_overload,
+    lowered_module,
+    original_gm,
+    weight_args,
+    input_args,
 ) -> list[Tensor]: ...
 @aoti_call_delegate.py_impl(ProxyTorchDispatchMode)
 def call_delegate_proxy_torch_dispatch_mode(

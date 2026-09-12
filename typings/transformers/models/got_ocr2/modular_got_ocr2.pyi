@@ -102,7 +102,9 @@ class GotOcr2Model(LlavaModel):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | GotOcr2ModelOutputWithPast: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | GotOcr2ModelOutputWithPast: ...
 
 class GotOcr2ForConditionalGeneration(LlavaForConditionalGeneration):

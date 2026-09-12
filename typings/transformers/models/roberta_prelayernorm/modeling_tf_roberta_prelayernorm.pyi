@@ -41,7 +41,9 @@ class TFRobertaPreLayerNormEmbeddings(keras.layers.Layer):
     def build(self, input_shape=...):  # -> None:
         ...
     def create_position_ids_from_input_ids(
-        self, input_ids, past_key_values_length=...
+        self,
+        input_ids,
+        past_key_values_length=...,
     ): ...
     def call(
         self,
@@ -79,7 +81,10 @@ class TFRobertaPreLayerNormSelfAttention(keras.layers.Layer):
 class TFRobertaPreLayerNormSelfOutput(keras.layers.Layer):
     def __init__(self, config: RobertaPreLayerNormConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -110,7 +115,10 @@ class TFRobertaPreLayerNormIntermediate(keras.layers.Layer):
 class TFRobertaPreLayerNormOutput(keras.layers.Layer):
     def __init__(self, config: RobertaPreLayerNormConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -193,7 +201,7 @@ class TFRobertaPreLayerNormModel(TFRobertaPreLayerNormPreTrainedModel):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ROBERTA_PRELAYERNORM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ROBERTA_PRELAYERNORM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -239,7 +247,8 @@ class TFRobertaPreLayerNormLMHead(keras.layers.Layer):
     ROBERTA_PRELAYERNORM_START_DOCSTRING,
 )
 class TFRobertaPreLayerNormForMaskedLM(
-    TFRobertaPreLayerNormPreTrainedModel, TFMaskedLanguageModelingLoss
+    TFRobertaPreLayerNormPreTrainedModel,
+    TFMaskedLanguageModelingLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
@@ -248,7 +257,7 @@ class TFRobertaPreLayerNormForMaskedLM(
     def get_prefix_bias_name(self): ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ROBERTA_PRELAYERNORM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ROBERTA_PRELAYERNORM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -276,22 +285,30 @@ class TFRobertaPreLayerNormForMaskedLM(
         ...
 
 class TFRobertaPreLayerNormForCausalLM(
-    TFRobertaPreLayerNormPreTrainedModel, TFCausalLanguageModelingLoss
+    TFRobertaPreLayerNormPreTrainedModel,
+    TFCausalLanguageModelingLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(
-        self, config: RobertaPreLayerNormConfig, *inputs, **kwargs
+        self,
+        config: RobertaPreLayerNormConfig,
+        *inputs,
+        **kwargs,
     ) -> None: ...
     def get_lm_head(self):  # -> TFRobertaPreLayerNormLMHead:
         ...
     def get_prefix_bias_name(self): ...
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=..., attention_mask=..., **model_kwargs
+        self,
+        input_ids,
+        past_key_values=...,
+        attention_mask=...,
+        **model_kwargs,
     ):  # -> dict[str, Any | None]:
         ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ROBERTA_PRELAYERNORM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ROBERTA_PRELAYERNORM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -330,13 +347,14 @@ class TFRobertaPreLayerNormClassificationHead(keras.layers.Layer):
     ROBERTA_PRELAYERNORM_START_DOCSTRING,
 )
 class TFRobertaPreLayerNormForSequenceClassification(
-    TFRobertaPreLayerNormPreTrainedModel, TFSequenceClassificationLoss
+    TFRobertaPreLayerNormPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ROBERTA_PRELAYERNORM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ROBERTA_PRELAYERNORM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -365,7 +383,8 @@ class TFRobertaPreLayerNormForSequenceClassification(
     ROBERTA_PRELAYERNORM_START_DOCSTRING,
 )
 class TFRobertaPreLayerNormForMultipleChoice(
-    TFRobertaPreLayerNormPreTrainedModel, TFMultipleChoiceLoss
+    TFRobertaPreLayerNormPreTrainedModel,
+    TFMultipleChoiceLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     _keys_to_ignore_on_load_missing = ...
@@ -373,8 +392,8 @@ class TFRobertaPreLayerNormForMultipleChoice(
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
         ROBERTA_PRELAYERNORM_INPUTS_DOCSTRING.format(
-            "batch_size, num_choices, sequence_length"
-        )
+            "batch_size, num_choices, sequence_length",
+        ),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -403,14 +422,15 @@ class TFRobertaPreLayerNormForMultipleChoice(
     ROBERTA_PRELAYERNORM_START_DOCSTRING,
 )
 class TFRobertaPreLayerNormForTokenClassification(
-    TFRobertaPreLayerNormPreTrainedModel, TFTokenClassificationLoss
+    TFRobertaPreLayerNormPreTrainedModel,
+    TFTokenClassificationLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     _keys_to_ignore_on_load_missing = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ROBERTA_PRELAYERNORM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ROBERTA_PRELAYERNORM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -439,13 +459,14 @@ class TFRobertaPreLayerNormForTokenClassification(
     ROBERTA_PRELAYERNORM_START_DOCSTRING,
 )
 class TFRobertaPreLayerNormForQuestionAnswering(
-    TFRobertaPreLayerNormPreTrainedModel, TFQuestionAnsweringLoss
+    TFRobertaPreLayerNormPreTrainedModel,
+    TFQuestionAnsweringLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ROBERTA_PRELAYERNORM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ROBERTA_PRELAYERNORM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,

@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from sagent import providers as providers_module
+from sagent import providers
 from sagent.agent.agent import Agent
 from sagent.agent.state import current_agent_var, tool_state_var
 from sagent.testing import MockModelCaps
@@ -286,27 +286,32 @@ async def test_exceeds_cap_suggests_window_variant_when_one_exists() -> None:
                 context=MappingProxyType(
                     {
                         "": ModelLimits(
-                            max_request_tokens=200_000, max_response_tokens=8_000
+                            max_request_tokens=200_000,
+                            max_response_tokens=8_000,
                         ),
                         "+1m": ModelLimits(
-                            max_request_tokens=1_000_000, max_response_tokens=8_000
+                            max_request_tokens=1_000_000,
+                            max_response_tokens=8_000,
                         ),
-                    }
+                    },
                 ),
             ),
-        }
+        },
     )
     agent = Agent(
         model=StubProviderModel(model_id="big-base"),
         tools=[],
         model_recipe=ModelRecipe(
-            provider="StubCat", auth="env", model_id="big-base", account=""
+            provider="StubCat",
+            auth="env",
+            model_id="big-base",
+            account="",
         ),
     )
     t = AgentSelf()
     with (
         _active(agent),
-        patch.object(providers_module, "StubCat", catalog, create=True),
+        patch.object(providers, "StubCat", catalog, create=True),
     ):
         result = await t.run({"max_request_tokens": 1_000_000})
     assert result.is_error
@@ -659,7 +664,8 @@ async def test_model_swap_shrinks_budget_to_new_model_window() -> None:
     assert agent.budget.max_request_tokens == 100_000
     fake_provider = MagicMock()
     fake_provider.model.return_value = StubProviderModel(
-        model_id="small", max_request_tokens=50_000
+        model_id="small",
+        max_request_tokens=50_000,
     )
     with patch(
         "sagent.tools.agent_self.build_provider",
@@ -687,7 +693,8 @@ async def test_model_swap_with_explicit_budget_lands_in_one_step() -> None:
     )
     fake_provider = MagicMock()
     fake_provider.model.return_value = StubProviderModel(
-        model_id="small", max_request_tokens=50_000
+        model_id="small",
+        max_request_tokens=50_000,
     )
     with patch(
         "sagent.tools.agent_self.build_provider",

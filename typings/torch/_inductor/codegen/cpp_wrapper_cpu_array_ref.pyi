@@ -46,11 +46,18 @@ class CppWrapperCpuArrayRef(CppWrapperCpu):
         is_pinned=...,
     ) -> str: ...
     def make_buffer_reuse(
-        self, old: BufferLike, new: BufferLike, delete_old: bool
+        self,
+        old: BufferLike,
+        new: BufferLike,
+        delete_old: bool,
     ) -> str: ...
     def is_safe_to_use_borrow_arrayref_tensor_as_tensor(self) -> bool: ...
     def generate_c_shim_extern_kernel_call(
-        self, kernel: str, args: list[str], device: str, **_
+        self,
+        kernel: str,
+        args: list[str],
+        device: str,
+        **_,
     ) -> None: ...
     def generate_scatter_fallback(
         self,
@@ -63,7 +70,12 @@ class CppWrapperCpuArrayRef(CppWrapperCpu):
         kwargs,
     ) -> None: ...
     def generate_index_put_fallback(
-        self, kernel, x, indices, values, accumulate
+        self,
+        kernel,
+        x,
+        indices,
+        values,
+        accumulate,
     ) -> None: ...
     def generate_fallback_kernel_with_runtime_lookup(
         self,
@@ -76,9 +88,19 @@ class CppWrapperCpuArrayRef(CppWrapperCpu):
     ) -> None: ...
     def codegen_device_copy(self, src, dst, non_blocking: bool | str) -> None: ...
     def codegen_reinterpret_view(
-        self, data, size, stride, offset, writeline: Callable[..., None], dtype=...
+        self,
+        data,
+        size,
+        stride,
+        offset,
+        writeline: Callable[..., None],
+        dtype=...,
     ) -> str: ...
     def val_to_arg_str(self, val, type_=...) -> str: ...
     def codegen_tensor_item(
-        self, dtype: torch.dtype, tensor: str, scalar: str, indented_buffer=...
+        self,
+        dtype: torch.dtype,
+        tensor: str,
+        scalar: str,
+        indented_buffer=...,
     ) -> None: ...

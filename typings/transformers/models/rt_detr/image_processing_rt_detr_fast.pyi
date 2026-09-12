@@ -80,7 +80,9 @@ class RTDetrImageProcessorFast(BaseImageProcessorFast):
     ):  # -> dict[Any, Any]:
         ...
     def normalize_annotation(
-        self, annotation: dict, image_size: tuple[int, int]
+        self,
+        annotation: dict,
+        image_size: tuple[int, int],
     ) -> dict: ...
     def pad(
         self,

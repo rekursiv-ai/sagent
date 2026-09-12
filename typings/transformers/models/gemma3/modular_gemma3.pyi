@@ -137,7 +137,8 @@ class Gemma3DecoderLayer(GradientCheckpointingLayer):
         cache_position: torch.LongTensor | None = ...,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 GEMMA3_START_DOCSTRING = ...
@@ -277,7 +278,8 @@ class Gemma3ForSequenceClassification(Gemma3PreTrainedModel):
     ) -> SequenceClassifierOutputWithPast: ...
 
 class Gemma3TextForSequenceClassification(
-    GenericForSequenceClassification, Gemma3PreTrainedModel
+    GenericForSequenceClassification,
+    Gemma3PreTrainedModel,
 ):
     config: Gemma3TextConfig
 

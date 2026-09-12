@@ -24,7 +24,9 @@ logger = ...
 _HIDDEN_STATES_START_POSITION = ...
 
 def shift_tokens_right(
-    input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: torch.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ):  # -> Tensor:
     ...
 def shift_spectrograms_right(
@@ -48,20 +50,30 @@ class SpeechT5GroupNormConvLayer(GradientCheckpointingLayer):
 
 class SpeechT5SinusoidalPositionalEmbedding(nn.Module):
     def __init__(
-        self, num_positions: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_positions: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ) -> None: ...
     def make_weights(
-        self, num_embeddings: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ):  # -> None:
         ...
     @staticmethod
     def get_embedding(
-        num_embeddings: int, embedding_dim: int, padding_idx: int | None = ...
+        num_embeddings: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ):  # -> Tensor:
         ...
     @torch.no_grad()
     def forward(
-        self, input_ids: torch.Tensor, past_key_values_length: int = ...
+        self,
+        input_ids: torch.Tensor,
+        past_key_values_length: int = ...,
     ):  # -> Tensor | Any:
         ...
     def create_position_ids_from_input_ids(
@@ -296,7 +308,9 @@ class SpeechT5Decoder(SpeechT5PreTrainedModel):
         cache_position: torch.Tensor | None = ...,
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
 
 class SpeechT5DecoderWithSpeechPrenet(SpeechT5PreTrainedModel):
@@ -318,7 +332,9 @@ class SpeechT5DecoderWithSpeechPrenet(SpeechT5PreTrainedModel):
         cache_position: torch.Tensor | None = ...,
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
 
 class SpeechT5DecoderWithTextPrenet(SpeechT5PreTrainedModel):
@@ -343,7 +359,9 @@ class SpeechT5DecoderWithTextPrenet(SpeechT5PreTrainedModel):
         cache_position: torch.Tensor | None = ...,
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
 
 class SpeechT5DecoderWithoutPrenet(SpeechT5PreTrainedModel):
@@ -364,7 +382,9 @@ class SpeechT5DecoderWithoutPrenet(SpeechT5PreTrainedModel):
         cache_position: torch.Tensor | None = ...,
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
 
 class SpeechT5GuidedMultiheadAttentionLoss(nn.Module):
@@ -565,7 +585,11 @@ class SpeechT5ForSpeechToSpeech(SpeechT5PreTrainedModel):
 
 class HifiGanResidualBlock(nn.Module):
     def __init__(
-        self, channels, kernel_size=..., dilation=..., leaky_relu_slope=...
+        self,
+        channels,
+        kernel_size=...,
+        dilation=...,
+        leaky_relu_slope=...,
     ) -> None: ...
     def get_padding(self, kernel_size, dilation=...): ...
     def apply_weight_norm(self):  # -> None:
@@ -577,7 +601,7 @@ class HifiGanResidualBlock(nn.Module):
 @auto_docstring(
     custom_intro="""
     HiFi-GAN vocoder.
-    """
+    """,
 )
 class SpeechT5HifiGan(PreTrainedModel):
     config: SpeechT5HifiGanConfig

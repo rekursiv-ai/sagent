@@ -18,7 +18,8 @@ import time
 import urllib.error
 import urllib.request
 
-from sagent.catalog import llamacpp as llamacpp_catalog
+from sagent.catalog import llamacpp
+from sagent.lib.userdirs import data_dir
 from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
@@ -33,7 +34,7 @@ class LlamaCpp(OpenAICompat):
     DEFAULT_UTILITY_MODEL: ClassVar[str] = "qwen3.6-27b-12gb"
     ENV_VAR: ClassVar[str] = "LLAMA_CPP_API_KEY"
     BASE_URL: ClassVar[str] = "http://127.0.0.1:8081/v1"
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = llamacpp_catalog.models()
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = llamacpp.models()
     """Per-model capability; transport limits live on ``TRANSPORT``."""
 
     def __init__(
@@ -78,7 +79,7 @@ class LlamaCpp(OpenAICompat):
 
         """
         return cls._from_values(
-            base_url=base_url or os.environ.get("LLAMA_CPP_BASE_URL")
+            base_url=base_url or os.environ.get("LLAMA_CPP_BASE_URL"),
         )
 
     @classmethod
@@ -165,7 +166,7 @@ class LlamaCpp(OpenAICompat):
             return
         if not self._model_path:
             raise RuntimeError(
-                "LLAMA_CPP_MODEL or --auth /path/to/model.gguf is required."
+                "LLAMA_CPP_MODEL or --auth /path/to/model.gguf is required.",
             )
         port = _free_port()
         self.base_url = f"http://127.0.0.1:{port}/v1"
@@ -206,7 +207,7 @@ class LlamaCpp(OpenAICompat):
                     self._spec_type,
                     "--spec-draft-n-max",
                     str(self._mtp_draft),
-                ]
+                ],
             )
         argv.extend(
             [
@@ -223,7 +224,7 @@ class LlamaCpp(OpenAICompat):
                 "--reasoning",
                 "off",
                 *self._extra_args,
-            ]
+            ],
         )
         return argv
 
@@ -240,17 +241,14 @@ class LlamaCpp(OpenAICompat):
                 return
             time.sleep(0.05)
         raise RuntimeError(
-            _startup_error("llama-server did not become ready", self._log)
+            _startup_error("llama-server did not become ready", self._log),
         )
 
+    # Keeps the HEAD as well as the tail: llama.cpp names the real startup failure in
+    # its first lines (a missing model file, an impossible GPU layer count), so a tail-
+    # only window reported the generic noise that followed and dropped the diagnosis.
     def _drain_log(self) -> None:
-        """Drain queued server log lines into the bounded buffer.
-
-        Keeps the HEAD as well as the tail: llama.cpp names the real
-        startup failure in its first lines (a missing model file, an
-        impossible GPU layer count), so a tail-only window reported the
-        generic noise that followed and dropped the diagnosis.
-        """
+        """Drain queued server log lines into the bounded buffer."""
         while True:
             try:
                 line = self._log_queue.get_nowait()
@@ -282,7 +280,7 @@ def _looks_like_path(value: str) -> bool:
 
 def _docker_server() -> str | None:
     """Return Docker Desktop's bundled llama-server path if present."""
-    path = Path.home() / ".docker/bin/inference/llama-server"  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)
+    path = data_dir().parents[1] / ".docker/bin/inference/llama-server"
     return str(path) if path.exists() else None
 
 
@@ -308,13 +306,11 @@ def _http_ok(url: str) -> bool:
         return False
 
 
+# ``lines`` is already bounded head-and-tail by :meth:`_drain_log`, so the whole buffer
+# is emitted: the cause is usually in the head and the symptom in the tail, and dropping
+# either loses the diagnosis.
 def _startup_error(prefix: str, lines: Sequence[str]) -> str:
-    """Format a startup-failure message with the captured log appended.
-
-    ``lines`` is already bounded head-and-tail by :meth:`_drain_log`, so
-    the whole buffer is emitted: the cause is usually in the head and
-    the symptom in the tail, and dropping either loses the diagnosis.
-    """
+    """Format a startup-failure message with the captured log appended."""
     if not lines:
         return prefix
     return f"{prefix}; recent log:\n" + "\n".join(lines)

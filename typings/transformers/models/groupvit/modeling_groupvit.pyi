@@ -23,7 +23,10 @@ def groupvit_loss(similarity: torch.Tensor) -> torch.Tensor: ...
 def hard_softmax(logits: torch.Tensor, dim: int):  # -> Tensor:
     ...
 def gumbel_softmax(
-    logits: torch.Tensor, tau: float = ..., hard: bool = ..., dim: int = ...
+    logits: torch.Tensor,
+    tau: float = ...,
+    hard: bool = ...,
+    dim: int = ...,
 ) -> torch.Tensor: ...
 def resize_attention_map(attentions, height, width, align_corners=...):  # -> Tensor:
     ...
@@ -43,7 +46,10 @@ class GroupViTAssignAttention(nn.Module):
 
 class GroupViTTokenAssign(nn.Module):
     def __init__(
-        self, config: GroupViTVisionConfig, num_group_token, num_output_group
+        self,
+        config: GroupViTVisionConfig,
+        num_group_token,
+        num_output_group,
     ) -> None: ...
     def project_group_token(self, group_tokens):  # -> Any:
         ...
@@ -72,17 +78,24 @@ class GroupViTPatchEmbeddings(nn.Module):
         embed_dim: int = ...,
     ) -> None: ...
     def forward(
-        self, pixel_values: torch.Tensor, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values: torch.Tensor,
+        interpolate_pos_encoding: bool = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class GroupViTVisionEmbeddings(nn.Module):
     def __init__(self, config: GroupViTVisionConfig) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
-        self, pixel_values: torch.Tensor, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values: torch.Tensor,
+        interpolate_pos_encoding: bool = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -111,7 +124,9 @@ class GroupViTStage(nn.Module):
     def split_x(self, x):  # -> tuple[Any, Any] | tuple[Any, None]:
         ...
     def concat_x(
-        self, x: torch.Tensor, group_token: torch.Tensor | None = ...
+        self,
+        x: torch.Tensor,
+        group_token: torch.Tensor | None = ...,
     ) -> torch.Tensor: ...
     def forward(
         self,
@@ -147,7 +162,9 @@ class GroupViTAttention(nn.Module):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class GroupViTEncoderLayer(GradientCheckpointingLayer):

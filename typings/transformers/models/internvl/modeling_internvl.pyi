@@ -61,7 +61,10 @@ class InternVLVisionPatchEmbeddings(nn.Module):
 class InternVLVisionEmbeddings(nn.Module):
     def __init__(self, config: InternVLVisionConfig) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
         self,
@@ -80,10 +83,13 @@ NORM2FN = ...
 class InternVLVisionLayer(GradientCheckpointingLayer):
     def __init__(self, config: InternVLVisionConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
 
 class InternVLVisionEncoder(nn.Module):
@@ -182,7 +188,9 @@ class InternVLModel(InternVLPreTrainedModel):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | InternVLModelOutputWithPast: ...
     def pixel_shuffle(
-        self, vision_features: torch.Tensor, scale_factor: float = ...
+        self,
+        vision_features: torch.Tensor,
+        scale_factor: float = ...,
     ):  # -> Tensor:
         ...
 

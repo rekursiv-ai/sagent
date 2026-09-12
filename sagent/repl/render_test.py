@@ -149,7 +149,7 @@ def test_budget_reset_emits_notification_line() -> None:
             prior_max_response_tokens=32_000,
             new_max_request_tokens=200_000,
             new_max_response_tokens=16_000,
-        )
+        ),
     )
     assert len(p.lines) == 1
     assert "claude-sonnet-4-6" in p.lines[0]
@@ -172,7 +172,7 @@ def test_compact_complete_emits_progress_dim_line() -> None:
             token_before=42,
             token_after=8,
             payload_entries=2,
-        )
+        ),
     )
     assert p.dim_lines == [
         "[compaction complete: ~42 → ~8 tokens, 2 entries]",
@@ -194,7 +194,7 @@ def test_compact_fallback_emits_progress_dim_line() -> None:
             payload_entries=1,
             fallback_reason="summary failed after 3 attempts",
             preserved_tail_count=1,
-        )
+        ),
     )
     assert p.dim_lines == [
         "[compaction fallback: summary failed after 3 attempts; preserved 1 tail entry]",
@@ -225,7 +225,7 @@ def test_model_response_complete_flushes_remaining() -> None:
     obs(
         ModelResponseComplete(
             message=AssistantMessage(text="hanging"),
-        )
+        ),
     )
     assert p.markdowns == ["hanging"]
 
@@ -275,7 +275,7 @@ def test_model_service_suspended_flushes_stream_and_renders_dim_line() -> None:
                 message="limited",
                 status=429,
             ),
-        )
+        ),
     )
 
     assert p.markdowns == ["pending"]
@@ -495,7 +495,7 @@ def test_dispatch_handles_unknown_events_silently() -> None:
         cast(
             RuntimeEvent,
             ToolCall(id="x", name="y", args={}),
-        )
+        ),
     )
     assert p.markdowns == []
     assert p.tool_errors == []
@@ -535,7 +535,7 @@ def test_child_event_streaming_partial_buffers_until_boundary() -> None:
         ChildEvent(
             label="Agent_0",
             inner=ModelResponsePartial(text="first\n\nsecond"),
-        )
+        ),
     )
     assert p.child_blocks
     label, items = p.child_blocks[0]
@@ -559,7 +559,7 @@ def test_child_event_atomic_tool_result_emits_block() -> None:
         ChildEvent(
             label="Agent_0",
             inner=ToolResult(call_id="c1", content="done"),
-        )
+        ),
     )
     label, items = p.child_blocks[0]
     assert label == "Agent_0"
@@ -573,7 +573,7 @@ def test_child_event_thinking_emits_block() -> None:
         ChildEvent(
             label="Agent_0",
             inner=ModelResponseThinking(text="thinking"),
-        )
+        ),
     )
     label, items = p.child_blocks[0]
     assert label == "Agent_0"
@@ -621,7 +621,7 @@ def test_child_event_unknown_inner_ignored() -> None:
         ChildEvent(
             label="Agent_0",
             inner=ModelResponseComplete(message=AssistantMessage(text="x")),
-        )
+        ),
     )
     # No matching atomic translator -> no child block.
     assert p.child_blocks == []
@@ -634,7 +634,7 @@ def test_child_event_switches_label_flushes_previous() -> None:
         ChildEvent(
             label="Agent_0",
             inner=ModelResponsePartial(text="first\n\nsecond"),
-        )
+        ),
     )
     p.child_blocks.clear()
     obs(ChildEvent(label="Agent_1", inner=ToolLabel(call_id="c1", text="Read")))
@@ -651,7 +651,7 @@ def test_child_done_event_flushes_pending() -> None:
         ChildEvent(
             label="Agent_0",
             inner=ModelResponsePartial(text="no boundary"),
-        )
+        ),
     )
     obs(ChildDoneEvent(label="Agent_0", elapsed=1.0, tokens=10, cost=0.0))
     # Flush picks up the buffered partial as an AssistantMessage.

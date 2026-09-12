@@ -35,7 +35,9 @@ class FlaxResNetEmbeddings(nn.Module):
     def setup(self):  # -> None:
         ...
     def __call__(
-        self, pixel_values: jnp.ndarray, deterministic: bool = ...
+        self,
+        pixel_values: jnp.ndarray,
+        deterministic: bool = ...,
     ) -> jnp.ndarray: ...
 
 class FlaxResNetShortCut(nn.Module):
@@ -53,7 +55,9 @@ class FlaxResNetBasicLayerCollection(nn.Module):
     def setup(self):  # -> None:
         ...
     def __call__(
-        self, hidden_state: jnp.ndarray, deterministic: bool = ...
+        self,
+        hidden_state: jnp.ndarray,
+        deterministic: bool = ...,
     ) -> jnp.ndarray: ...
 
 class FlaxResNetBasicLayer(nn.Module):
@@ -76,7 +80,9 @@ class FlaxResNetBottleNeckLayerCollection(nn.Module):
     def setup(self):  # -> None:
         ...
     def __call__(
-        self, hidden_state: jnp.ndarray, deterministic: bool = ...
+        self,
+        hidden_state: jnp.ndarray,
+        deterministic: bool = ...,
     ) -> jnp.ndarray: ...
 
 class FlaxResNetBottleNeckLayer(nn.Module):
@@ -89,7 +95,9 @@ class FlaxResNetBottleNeckLayer(nn.Module):
     def setup(self):  # -> None:
         ...
     def __call__(
-        self, hidden_state: jnp.ndarray, deterministic: bool = ...
+        self,
+        hidden_state: jnp.ndarray,
+        deterministic: bool = ...,
     ) -> jnp.ndarray: ...
 
 class FlaxResNetStageLayersCollection(nn.Module):
@@ -154,7 +162,10 @@ class FlaxResNetPreTrainedModel(FlaxPreTrainedModel):
         **kwargs,
     ) -> None: ...
     def init_weights(
-        self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...
+        self,
+        rng: jax.random.PRNGKey,
+        input_shape: tuple,
+        params: FrozenDict = ...,
     ) -> FrozenDict: ...
     @add_start_docstrings_to_model_forward(RESNET_INPUTS_DOCSTRING)
     def __call__(

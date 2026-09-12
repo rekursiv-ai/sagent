@@ -151,7 +151,7 @@ class _ScriptedModel(MockModelCaps):
 def _summary_resp(body: str) -> ModelResponse:
     """Wrap ``body`` in the ``<summary>...</summary>`` envelope."""
     return ModelResponse(
-        message=AssistantMessage(text=f"<summary>\n{body}\n</summary>")
+        message=AssistantMessage(text=f"<summary>\n{body}\n</summary>"),
     )
 
 
@@ -160,7 +160,7 @@ async def test_compact_strips_analysis_and_extracts_summary_tag() -> None:
     body = "structured 9-section summary here"
     text = f"<analysis>private scratch</analysis>\n<summary>\n{body}\n</summary>"
     model = _ScriptedModel(
-        stream_responses=[ModelResponse(message=AssistantMessage(text=text))]
+        stream_responses=[ModelResponse(message=AssistantMessage(text=text))],
     )
     compactor = SummaryCompactor()
     history: list[ModelContextEvent] = [UserMessage(text="orig")]
@@ -184,9 +184,9 @@ async def test_compact_no_summary_tag_routes_through_fallback() -> None:
     routes through ``fallback_splice`` so ``strategy='summary_fallback'``
     and ``fallback_reason='missing <summary>'`` are recorded.
     """
-    text = "x" * 12_000  # no <summary> envelope
+    text = "x" * 12_000  # No <summary> envelope.
     model = _ScriptedModel(
-        stream_responses=[ModelResponse(message=AssistantMessage(text=text))]
+        stream_responses=[ModelResponse(message=AssistantMessage(text=text))],
     )
     compactor = SummaryCompactor()
     history: list[ModelContextEvent] = [UserMessage(text="orig")]
@@ -400,7 +400,10 @@ async def test_compact_includes_custom_instructions_in_request() -> None:
     compactor = SummaryCompactor()
     history: list[ModelContextEvent] = [UserMessage(text="x")]
     _ = await _apply_compact(
-        compactor, history, model, custom_instructions="focus on errors"
+        compactor,
+        history,
+        model,
+        custom_instructions="focus on errors",
     )
     assert model.stream_calls == 1
     # The instruction text must actually reach the prompt the model saw.
@@ -505,11 +508,15 @@ async def test_compact_warns_when_keep_recent_dropped_by_unresolved_prefix(
     # Every boundary is unsafe: AMs with tool_calls, no matching ToolResults.
     history: list[ModelContextEvent] = [
         AssistantMessage(
-            text="", tool_calls=(ToolCall(id=f"t{i}", name="Bash", args={}),)
+            text="",
+            tool_calls=(ToolCall(id=f"t{i}", name="Bash", args={}),),
         )
         for i in range(5)
     ]
-    with caplog.at_level(logging.WARNING, logger="sagent.compaction.summary"):
+    with caplog.at_level(
+        logging.WARNING,
+        logger="sagent.compaction.summary",
+    ):
         await _apply_compact(compactor, history, model)
     assert any(
         "kept no" in r.getMessage() and "keep_recent" in r.getMessage()
@@ -529,7 +536,7 @@ async def test_safe_split_handles_large_unresolved_prefix_quickly() -> None:
             AssistantMessage(
                 text="",
                 tool_calls=(ToolCall(id=call_id, name="Bash", args={}),),
-            )
+            ),
         )
         if idx % 10:
             history.append(ToolResult(call_id=call_id, content="done"))
@@ -578,7 +585,7 @@ def test_strip_attachments_tool_result_image_and_document_markers() -> None:
     img = BytesMessage(data=b"\x89PNG", descriptor="image/png")
     pdf = BytesMessage(data=b"%PDF", descriptor="application/pdf")
     out = _strip_attachments(
-        [ToolResult(call_id="c1", content="ran", attachments=(img, pdf))]
+        [ToolResult(call_id="c1", content="ran", attachments=(img, pdf))],
     )
     assert len(out) == 1
     entry = out[0]
@@ -598,7 +605,7 @@ def test_strip_attachments_drops_empty_text_with_no_marker_attachments() -> None
         pass
 
     out = _strip_attachments(
-        [UserMessage(text="", attachments=cast(tuple[BytesMessage, ...], (_Weird(),)))]
+        [UserMessage(text="", attachments=cast(tuple[BytesMessage, ...], (_Weird(),)))],
     )
     assert out == []
 
@@ -707,7 +714,7 @@ async def test_compact_drops_groups_on_token_gap_unknown() -> None:
     and still leave content to summarize on the retry.
     """
     body = "post-shrink"
-    overflow = PromptTooLongError()  # actual/limit both unset → gap=None
+    overflow = PromptTooLongError()  # actual/limit both unset → gap=None.
     model = _ScriptedModel(stream_responses=[overflow, _summary_resp(body)])
     compactor = SummaryCompactor(max_attempts=3)
     tc = ToolCall(id="t1", name="Bash", args={"cmd": "ls"})
@@ -767,8 +774,8 @@ async def test_request_entries_drop_invalid_tool_ordering() -> None:
                 AssistantMessage(tool_calls=(call,)),
                 UserMessage(text="interrupts pending tool call"),
                 ToolResult(call_id="call_1", content="late"),
-            ]
-        ]
+            ],
+        ],
     )
 
     assert len(result) == 1
@@ -787,8 +794,8 @@ async def test_request_entries_drop_partial_multi_tool_turn() -> None:
                 AssistantMessage(tool_calls=(first, second)),
                 ToolResult(call_id="call_1", content="early"),
                 UserMessage(text="interrupts pending tool call"),
-            ]
-        ]
+            ],
+        ],
     )
 
     assert len(result) == 1
@@ -806,8 +813,8 @@ async def test_request_entries_drop_duplicate_tool_results() -> None:
                 AssistantMessage(tool_calls=(call,)),
                 ToolResult(call_id="call_1", content="first"),
                 ToolResult(call_id="call_1", content="second"),
-            ]
-        ]
+            ],
+        ],
     )
 
     assert len(result) == 3
@@ -840,8 +847,8 @@ async def test_request_entries_elides_skill_bodies() -> None:
                 ToolResult(call_id="call_s", content=skill_body),
                 AssistantMessage(tool_calls=(bash_call,)),
                 ToolResult(call_id="call_b", content="ls output"),
-            ]
-        ]
+            ],
+        ],
     )
 
     skill_results = [
@@ -867,7 +874,7 @@ async def test_request_entries_skill_elision_is_idempotent() -> None:
             UserMessage(text="seed"),
             AssistantMessage(tool_calls=(skill_call,)),
             ToolResult(call_id="call_s", content="real body"),
-        ]
+        ],
     ]
     once = _request_entries(groups)
     twice = _request_entries([list(once)])
@@ -956,7 +963,7 @@ async def test_compact_retries_on_transient_transport_error(
     monkeypatch.setattr(retry, "RETRY_BASE_SEC", 0.0)
     err = httpx2.RemoteProtocolError("peer closed connection")
     model = _ScriptedModel(
-        stream_responses=[err, _summary_resp("recovered after retry")]
+        stream_responses=[err, _summary_resp("recovered after retry")],
     )
     compactor = SummaryCompactor()
     history: list[ModelContextEvent] = [UserMessage(text="orig")]
@@ -1106,7 +1113,7 @@ async def test_verify_summary_true_uses_improved_summary() -> None:
         stream_responses=[
             _summary_resp(first),
             _summary_resp(improved),
-        ]
+        ],
     )
     compactor = SummaryCompactor(verify_summary=True)
     history: list[ModelContextEvent] = [UserMessage(text="x")]
@@ -1125,7 +1132,7 @@ async def test_verify_summary_identical_keeps_first_pass() -> None:
         stream_responses=[
             _summary_resp(body),
             ModelResponse(message=AssistantMessage(text="IDENTICAL")),
-        ]
+        ],
     )
     compactor = SummaryCompactor(verify_summary=True)
     history: list[ModelContextEvent] = [UserMessage(text="x")]
@@ -1151,7 +1158,7 @@ async def test_verify_summary_unparseable_keeps_first_pass() -> None:
         stream_responses=[
             _summary_resp(body),
             ModelResponse(message=AssistantMessage(text="Looks complete.")),
-        ]
+        ],
     )
     compactor = SummaryCompactor(verify_summary=True)
     history: list[ModelContextEvent] = [UserMessage(text="x")]
@@ -1167,7 +1174,7 @@ async def test_verify_summary_failure_keeps_first_pass() -> None:
     """Second call raising is logged and the first-pass summary survives."""
     body = "first pass"
     model = _ScriptedModel(
-        stream_responses=[_summary_resp(body), RuntimeError("verifier broke")]
+        stream_responses=[_summary_resp(body), RuntimeError("verifier broke")],
     )
     compactor = SummaryCompactor(verify_summary=True)
     history: list[ModelContextEvent] = [UserMessage(text="x")]
@@ -1186,7 +1193,7 @@ async def test_verify_summary_retries_with_shrunk_history_on_overflow() -> None:
             _summary_resp("first pass"),
             overflow,
             _summary_resp("verified after shrink"),
-        ]
+        ],
     )
     compactor = SummaryCompactor(verify_summary=True, max_attempts=3)
     history: list[ModelContextEvent] = [
@@ -1240,7 +1247,7 @@ def test_coalesce_demotes_cross_source_agent_sends_to_user() -> None:
         (
             AgentSendMessage(source="X", text="a"),
             AgentSendMessage(source="Y", text="b"),
-        )
+        ),
     )
     assert len(out) == 1
     only = out[0]
@@ -1255,7 +1262,7 @@ def test_coalesce_merges_same_source_agent_sends() -> None:
         (
             AgentSendMessage(source="X", text="a"),
             AgentSendMessage(source="X", text="b"),
-        )
+        ),
     )
     assert len(out) == 1
     only = out[0]
@@ -1276,7 +1283,7 @@ def test_coalesce_demotes_cross_type_to_user() -> None:
         (
             UserMessage(text="human"),
             AgentSendMessage(source="X", text="bot"),
-        )
+        ),
     )
     assert len(out) == 1
     assert type(out[0]) is UserMessage
@@ -1287,7 +1294,7 @@ def test_coalesce_demotes_cross_type_to_user() -> None:
         (
             AgentSendMessage(source="X", text="bot"),
             UserMessage(text="human"),
-        )
+        ),
     )
     assert len(out2) == 1
     assert type(out2[0]) is UserMessage
@@ -1305,7 +1312,7 @@ async def test_compact_empty_model_output_records_summary_fallback() -> None:
     shipped under ``strategy='summary'`` -- a silent observability gap.
     """
     model = _ScriptedModel(
-        stream_responses=[ModelResponse(message=AssistantMessage(text=""))]
+        stream_responses=[ModelResponse(message=AssistantMessage(text=""))],
     )
     compactor = SummaryCompactor()
     history: list[ModelContextEvent] = [UserMessage(text="orig")]
@@ -1324,8 +1331,8 @@ async def test_compact_missing_summary_tag_records_summary_fallback() -> None:
     """
     model = _ScriptedModel(
         stream_responses=[
-            ModelResponse(message=AssistantMessage(text="no envelope here"))
-        ]
+            ModelResponse(message=AssistantMessage(text="no envelope here")),
+        ],
     )
     compactor = SummaryCompactor()
     history: list[ModelContextEvent] = [UserMessage(text="orig")]
@@ -1434,7 +1441,7 @@ def test_drop_orphan_tool_results_drops_unmatched_call_id() -> None:
     """
     orphan_tr = ToolResult(call_id="ghost", content="nope")
     out = _drop_orphan_tool_results(
-        [UserMessage(text="hi"), orphan_tr, UserMessage(text="next")]
+        [UserMessage(text="hi"), orphan_tr, UserMessage(text="next")],
     )
     assert orphan_tr not in out
 

@@ -9,16 +9,23 @@ _QCONFIG_STYLE_TO_METHOD: dict[str, str] = ...
 class QConfigMultiMapping:
     def __init__(self) -> None: ...
     def set_global(
-        self, global_qconfig_list: list[QConfigAny]
+        self,
+        global_qconfig_list: list[QConfigAny],
     ) -> QConfigMultiMapping: ...
     def set_object_type(
-        self, object_type: Callable | str, qconfig_list: list[QConfigAny]
+        self,
+        object_type: Callable | str,
+        qconfig_list: list[QConfigAny],
     ) -> QConfigMultiMapping: ...
     def set_module_name_regex(
-        self, module_name_regex: str, qconfig_list: list[QConfigAny]
+        self,
+        module_name_regex: str,
+        qconfig_list: list[QConfigAny],
     ) -> QConfigMultiMapping: ...
     def set_module_name(
-        self, module_name: str, qconfig_list: list[QConfigAny]
+        self,
+        module_name: str,
+        qconfig_list: list[QConfigAny],
     ) -> QConfigMultiMapping: ...
     def set_module_name_object_type_order(
         self,
@@ -29,5 +36,6 @@ class QConfigMultiMapping:
     ) -> QConfigMultiMapping: ...
     @classmethod
     def from_list_qconfig_mapping(
-        cls, qconfig_mapping_list: list[QConfigMapping]
+        cls,
+        qconfig_mapping_list: list[QConfigMapping],
     ) -> QConfigMultiMapping: ...

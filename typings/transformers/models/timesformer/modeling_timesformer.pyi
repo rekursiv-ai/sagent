@@ -24,7 +24,9 @@ class TimesformerEmbeddings(nn.Module):
         ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class TimeSformerDropPath(nn.Module):
@@ -36,7 +38,9 @@ class TimeSformerDropPath(nn.Module):
 class TimesformerSelfAttention(nn.Module):
     def __init__(self, config: TimesformerConfig) -> None: ...
     def forward(
-        self, hidden_states, output_attentions: bool = ...
+        self,
+        hidden_states,
+        output_attentions: bool = ...,
     ):  # -> tuple[Any, Any] | tuple[Any]:
         ...
 
@@ -48,10 +52,14 @@ class TimesformerSelfOutput(nn.Module):
 class TimeSformerAttention(nn.Module):
     def __init__(self, config: TimesformerConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, output_attentions: bool = ...
+        self,
+        hidden_states: torch.Tensor,
+        output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
 
 class TimesformerIntermediate(nn.Module):
@@ -67,7 +75,9 @@ class TimesformerOutput(nn.Module):
 class TimesformerLayer(GradientCheckpointingLayer):
     def __init__(self, config: TimesformerConfig, layer_index: int) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, output_attentions: bool = ...
+        self,
+        hidden_states: torch.Tensor,
+        output_attentions: bool = ...,
     ):  # -> None:
         ...
 

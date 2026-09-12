@@ -195,12 +195,16 @@ class FlaxMBartPreTrainedModel(FlaxPreTrainedModel):
         **kwargs,
     ) -> None: ...
     def init_weights(
-        self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...
+        self,
+        rng: jax.random.PRNGKey,
+        input_shape: tuple,
+        params: FrozenDict = ...,
     ) -> FrozenDict: ...
     def init_cache(self, batch_size, max_length, encoder_outputs): ...
     @add_start_docstrings(MBART_ENCODE_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=FlaxBaseModelOutput, config_class=MBartConfig
+        output_type=FlaxBaseModelOutput,
+        config_class=MBartConfig,
     )
     def encode(
         self,
@@ -288,7 +292,8 @@ class FlaxMBartForConditionalGeneration(FlaxMBartPreTrainedModel):
     dtype: jnp.dtype = ...
     @add_start_docstrings(MBART_DECODE_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=FlaxCausalLMOutputWithCrossAttentions, config_class=MBartConfig
+        output_type=FlaxCausalLMOutputWithCrossAttentions,
+        config_class=MBartConfig,
     )
     def decode(
         self,

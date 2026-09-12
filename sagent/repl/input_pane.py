@@ -66,25 +66,8 @@ from sagent.agent.state import (
 from sagent.repl.input_queues import InputQueues
 from sagent.repl.slash import (
     QUIT_WORDS,
-    Clear as SlashClear,
-    Compact as SlashCompact,
     Controllable,
-    Defer as SlashDefer,
-    Effort as SlashEffort,
-    Halt as SlashHalt,
-    Help as SlashHelp,
-    Kill as SlashKill,
-    Login as SlashLogin,
-    ModelSwitch as SlashModelSwitch,
-    Quit as SlashQuit,
-    Recompact as SlashRecompact,
-    Send as SlashSend,
     SlashAction,
-    Tasks as SlashTasks,
-    Text as SlashText,
-    Thinking as SlashThinking,
-    Tool as SlashTool,
-    Unknown as SlashUnknown,
     parse_slash,
 )
 from sagent.tools.background_task import cancel_persistent_subagent
@@ -107,6 +90,8 @@ from sagent.types.runtime import (
     UserDeferredMessage,
     UserMessage,
 )
+
+import sagent.repl.slash
 
 
 # Cycle break: ``run_repl`` imports ``spawn_repl_pump`` from this module.
@@ -208,96 +193,6 @@ def spawn_repl_pump(
     return task
 
 
-async def _input_pump(
-    agent: Agent,
-    source: InputSource,
-    queues: InputQueues | None,
-    printer: Printer | None,
-) -> None:
-    """Read lines from ``source`` and dispatch the parsed action."""
-    while True:
-        try:
-            line = await source.next_line()
-            if line is None:
-                agent.shutdown(force=False)
-                return
-            action = parse_slash(line)
-            if action is None:
-                continue
-            should_exit = await _dispatch(agent, action, printer, queues=queues)
-            if should_exit:
-                return
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 -- pump catches any slash-handler exception; UserFacingError routed to warning, others to exception
-            log_exception_or_warning(
-                logger, "REPL input pump raised; surfacing as error", exc
-            )
-            if printer is not None:
-                # Polished message for UserFacingError; ClassName prefix
-                # for unexpected exceptions (helps the operator).
-                detail = (
-                    str(exc)
-                    if isinstance(exc, UserFacingError)
-                    else f"{type(exc).__name__}: {exc}"
-                )
-                printer.write_tool_error(f"[input pump] {detail}")
-
-
-def _dispatch_send(sender: Agent, action: SlashSend, printer: Printer | None) -> None:
-    """Dispatch ``/send`` content to matching persistent subagents.
-
-    Routed text lands as an ``AgentSendMessage`` attributed to ``sender``
-    so the child sees the message as a parent-to-child handoff rather
-    than anonymous human input -- mirroring the AgentSend tool path and
-    keeping renderer/replay attribution bars (`repl/render.py`,
-    `repl/replay.py`) consistent.
-    """
-    try:
-        targets = _resolve_targets(action.target)
-    except UserFacingError as exc:
-        if printer is not None:
-            printer.write_tool_error(f"[/send] {exc}")
-        return
-    if not targets:
-        if printer is not None:
-            printer.write_tool_error(f"[/send] no matching subagents: {action.target}")
-        return
-    source = sender.name or "user"
-    # Self-send guard (ported from ``agent_send.py``): a ``/send`` to the
-    # caller's own label is undelayed and almost certainly a mistake --
-    # ``_resolve_targets`` already filters the caller out, but drop any
-    # residual self-target and warn rather than push a message to self.
-    caller = agent_label_var.get("")
-    if caller and caller in targets:
-        targets = [label for label in targets if label != caller]
-        if printer is not None:
-            printer.write_tool_error(
-                f"[/send] refusing undelayed self-send to {caller!r}"
-            )
-    if not targets:
-        return
-    for label in targets:
-        target = agent_registry[label]
-        if action.content.startswith("/"):
-            # A registry sibling that routes but cannot swap a model is a
-            # real case (any AgentLike test double); say so rather than
-            # asserting the union holds.
-            if not isinstance(target, _TargetAgent):
-                if printer is not None:
-                    printer.write_tool_error(
-                        f"[/send {label}] target does not accept slash commands"
-                    )
-                continue
-            _dispatch_target_control(target, action.content, printer, label=label)
-        else:
-            target.runtime.inbox.push_back(
-                AgentSendMessage(source=source, text=action.content)
-            )
-            if printer is not None:
-                printer.write_slash_block(f"[/send {label}] sent")
-
-
 @runtime_checkable
 class _TargetAgent(AgentLike, Controllable, Protocol):
     """A registry sibling driven by the targeted slash commands.
@@ -307,304 +202,6 @@ class _TargetAgent(AgentLike, Controllable, Protocol):
     ``Controllable``. The intersection lives here rather than being merged
     into either, so a routing-only tool double stays routing-only.
     """
-
-
-def _dispatch_target_control(
-    target: _TargetAgent,
-    body: str,
-    printer: Printer | None,
-    *,
-    label: str,
-) -> None:
-    """Dispatch a slash command against one targeted subagent.
-
-    Supported controls mirror the agent-local pump: ``/model``,
-    ``/thinking``, ``/halt``, ``/quit``, ``/clear``, ``/compact``,
-    ``/kill``. Anything else surfaces as an error.
-    """
-    action = parse_slash(body)
-    if isinstance(action, SlashModelSwitch):
-        run_repl.do_switch_model(target, action.args, printer)
-        return
-    if isinstance(action, SlashThinking):
-        run_repl.do_switch_thinking(target, action.command, printer)
-        return
-    if isinstance(action, SlashEffort):
-        run_repl.do_switch_effort(target, action.value, printer)
-        return
-    if isinstance(action, SlashHalt):
-        target.halt()
-        return
-    if isinstance(action, SlashQuit):
-        target.runtime.inbox.push_back(Quit())
-        return
-    if isinstance(action, SlashClear):
-        target.runtime.inbox.push_back(Clear())
-        return
-    if isinstance(action, SlashCompact):
-        target.runtime.inbox.push_back(Compact(args=action.args))
-        return
-    if isinstance(action, SlashKill):
-        if action.target == "all":
-            target.kill_all_tools()
-        else:
-            target.kill_tool(action.target)
-        return
-    if printer is not None:
-        printer.write_tool_error(f"[/send {label}] unsupported control: {body}")
-
-
-def _resolve_targets(pattern: str) -> list[str]:
-    """Resolve an exact, glob, brace-list, or regex subagent target.
-
-    Only serviceable labels are eligible (see :func:`_is_serviceable`):
-    live subagents in the registry, never the caller itself or the root
-    agent. So ``/send``, ``/halt``, ``/kill`` -- and the ``*`` / glob /
-    regex / brace fan-outs built on this -- can never route to self or
-    the root.
-    """
-    caller = agent_label_var.get("")
-    labels = [
-        label
-        for label, agent in agent_registry.items()
-        if _is_serviceable(label, agent, caller=caller)
-    ]
-    if pattern.startswith("{") and pattern.endswith("}"):
-        wanted = [part.strip() for part in pattern[1:-1].split(",") if part.strip()]
-        return [label for label in wanted if label in labels]
-    if pattern.startswith("/") and pattern.endswith("/") and len(pattern) >= 3:
-        # ``len(pattern) >= 3`` rejects ``/`` and ``//``: an empty-body
-        # regex matches every label and would silently fan ``/halt /``
-        # out to every persistent subagent.
-        try:
-            regex = re.compile(pattern[1:-1])
-        except re.error as exc:
-            raise UserFacingError(f"invalid target regex: {exc}") from exc
-        return [label for label in labels if regex.search(label)]
-    if any(char in pattern for char in "*?["):
-        return [label for label in labels if fnmatch.fnmatchcase(label, pattern)]
-    return [pattern] if pattern in labels else []
-
-
-def _is_serviceable(label: str, agent: AgentLike, *, caller: str) -> bool:
-    """Return true when ``label`` is a targetable subagent for the caller.
-
-    Serviceable = a live subagent in the registry that is neither the
-    caller itself nor the root agent. This is the single gate behind
-    ``/send`` / ``/halt`` / ``/kill`` target resolution, so those verbs
-    can never route to self or to the root (``/halt all`` never halts
-    self).
-
-    Args:
-      label: The agent's registry label.
-      agent: The registered agent.
-      caller: The caller's own ``agent_label_var`` label (empty when the
-          caller has no established identity, e.g. the root REPL pump).
-
-    Returns:
-      serviceable: True when the agent is addressable by the caller.
-
-    """
-    if label == caller:
-        return False
-    return bool(getattr(agent, "is_subagent", False))
-
-
-def _dispatch_halt(
-    agent: Agent,
-    action: SlashHalt,
-    printer: Printer | None,
-) -> None:
-    """Halt the current agent, every persistent subagent, or matching labels.
-
-    ``/halt`` halts the current agent. ``/halt all`` mirrors ``/kill all``
-    and halts every persistent subagent. Any other target is resolved
-    against the persistent-subagent registry (exact, glob, brace-list,
-    or regex).
-    """
-    if not action.target:
-        agent.halt()
-        return
-    if action.target == "all":
-        caller = agent_label_var.get("")
-        for label, target in agent_registry.items():
-            if _is_serviceable(label, target, caller=caller):
-                target.halt()
-                if printer is not None:
-                    printer.write_slash_block(f"[/halt {label}] halted")
-        return
-    targets = _resolve_targets(action.target)
-    if not targets:
-        if printer is not None:
-            printer.write_tool_error(f"[/halt] no matching subagents: {action.target}")
-        return
-    for label in targets:
-        agent_registry[label].halt()
-        if printer is not None:
-            printer.write_slash_block(f"[/halt {label}] halted")
-
-
-def _dispatch_kill(
-    agent: Agent,
-    action: SlashKill,
-    printer: Printer | None,
-    *,
-    queues: InputQueues | None = None,
-) -> None:
-    """Cancel tool tasks or matching persistent subagents.
-
-    ``/kill all`` also clears any REPL-local urgent/deferred staging so
-    the user is not left with a "pending" pane that no longer matches
-    their intent.
-    """
-    if action.target == "all":
-        agent.kill_all_tools()
-        if queues is not None:
-            queues.clear()
-        if printer is not None:
-            printer.write_slash_block("[/kill] cancelled all tool tasks")
-        return
-    owner, sep, job_id = action.target.partition("/")
-    if sep:
-        target = agent_registry.get(owner)
-        if target is None:
-            if printer is not None:
-                printer.write_tool_error(f"[/kill] unknown owner: {owner}")
-            return
-        target.kill_tool(job_id)
-        if printer is not None:
-            printer.write_slash_block(f"[/kill {owner}/{job_id}] cancelled")
-        return
-    targets = _resolve_targets(action.target)
-    if targets:
-        for label in targets:
-            _kill_persistent_subagent(agent, label)
-            if printer is not None:
-                printer.write_slash_block(f"[/kill {label}] cancelled")
-        return
-    agent.kill_tool(action.target)
-    if printer is not None:
-        printer.write_slash_block(f"[/kill] cancelled {action.target}")
-
-
-def _kill_persistent_subagent(agent: Agent, label: str) -> None:
-    """Cancel one persistent subagent through the unified graceful path."""
-    _ = cancel_persistent_subagent(agent, label)
-
-
-def _dispatch_tool(agent: Agent, spec: str, printer: Printer | None) -> None:
-    """Reconfigure a live tool: ``/tool Bash.output=off``.
-
-    Same grammar as the ``--tool`` flag, applied to the constructed
-    instance so it takes effect on the next call. The tool's own
-    ``__init__`` signature is the contract, so an unknown key is
-    reported with the ones it accepts.
-    """
-    try:
-        overrides = parse_tool_overrides([spec])
-    except ToolSpecError as exc:
-        if printer is not None:
-            printer.write_tool_error(f"[/tool] {exc}")
-        return
-    for name, kv in overrides.items():
-        tool = agent.tools_map.get(name)
-        if tool is None:
-            if printer is not None:
-                loaded = ", ".join(sorted(agent.tools_map))
-                printer.write_tool_error(
-                    f"[/tool] unknown tool {name!r}. Loaded: {loaded}"
-                )
-            return
-        # ``is_dataclass`` also admits the CLASS, which ``replace``
-        # rejects; the registry only ever holds instances, so exclude the
-        # type case rather than widening what ``replace`` accepts.
-        if not dataclasses.is_dataclass(tool) or isinstance(tool, type):
-            if printer is not None:
-                printer.write_tool_error(
-                    f"[/tool] {name} is not reconfigurable at runtime"
-                )
-            return
-        try:
-            coerced = coerce_kwargs(type(tool), kv)
-            # ``replace`` rather than ``setattr``: tools are frozen
-            # dataclasses, and routing the swap through ``replace_tool``
-            # also bumps the version that invalidates the cached
-            # provider-facing tool list -- so the display view and the
-            # schema the model sees cannot drift apart.
-            agent.replace_tool(name, dataclasses.replace(tool, **coerced))
-        except (ToolSpecError, TypeError) as exc:
-            if printer is not None:
-                printer.write_tool_error(f"[/tool] {exc}")
-            return
-        if printer is not None:
-            shown = ", ".join(f"{k}={v}" for k, v in sorted(kv.items()))
-            printer.write_slash_block(f"[/tool] {name}: {shown}")
-
-
-async def _dispatch(
-    agent: Agent,
-    action: SlashAction,
-    printer: Printer | None,
-    *,
-    queues: InputQueues | None = None,
-) -> bool:
-    """Dispatch one parsed slash action; return True to exit the pump.
-
-    Exhaustive over :class:`SlashAction`; ``assert_never`` makes the
-    type checker flag any newly added variant that forgets a handler.
-    """
-    match action:
-        case SlashQuit():
-            agent.shutdown(force=False)
-            return True
-        case SlashHalt():
-            _dispatch_halt(agent, action, printer)
-        case SlashKill():
-            _dispatch_kill(agent, action, printer, queues=queues)
-        case SlashClear():
-            agent.runtime.inbox.push_back(Clear())
-            if printer is not None:
-                printer.write_slash_block("[/clear] history cleared")
-        case SlashCompact(args=args):
-            agent.runtime.inbox.push_back(Compact(args=args))
-            if printer is not None:
-                note = f" ({args})" if args else ""
-                printer.write_slash_block(f"[/compact] queued{note}")
-        case SlashRecompact(args=args):
-            agent.runtime.inbox.push_back(Recompact(args=args))
-            if printer is not None:
-                note = f" ({args})" if args else ""
-                printer.write_slash_block(f"[/recompact] queued{note}")
-        case SlashModelSwitch(args=args):
-            run_repl.do_switch_model(agent, args, printer)
-        case SlashThinking(command=command):
-            run_repl.do_switch_thinking(agent, command, printer)
-        case SlashEffort(value=value):
-            run_repl.do_switch_effort(agent, value, printer)
-        case SlashTool(spec=spec):
-            _dispatch_tool(agent, spec, printer)
-        case SlashLogin():
-            await run_repl.do_login(agent, printer)
-            if queues is not None:
-                queues.commit_deferred_on_idle(agent)
-        case SlashHelp():
-            if printer is not None:
-                printer.write_line(render.HELP_TEXT)
-        case SlashTasks():
-            if printer is not None:
-                printer.write_line(run_repl.format_tasks(agent))
-        case SlashText(content=content):
-            agent.runtime.inbox.push_back(UserMessage(text=content))
-        case SlashDefer(content=content):
-            agent.runtime.inbox.push_back(UserDeferredMessage(text=content))
-        case SlashSend():
-            _dispatch_send(agent, action, printer)
-        case SlashUnknown(text=text):
-            if printer is not None:
-                printer.write_tool_error(text)
-        case _:
-            assert_never(action)
-    return False
 
 
 class PromptToolkitInputSource(InputSource):
@@ -658,13 +255,11 @@ class PromptToolkitInputSource(InputSource):
             return None
         return text
 
+    # Shown whole: this is the operator's last sight of input that is about to be
+    # destroyed, so a preview clamp discarded exactly the text they might have wanted to
+    # re-type.
     def _surface_queued_input_on_quit(self) -> None:
-        """Surface the tail of ``queued_input`` before the loop ends.
-
-        Shown whole: this is the operator's last sight of input that is
-        about to be destroyed, so a preview clamp discarded exactly the
-        text they might have wanted to re-type.
-        """
+        """Surface the tail of ``queued_input`` before the loop ends."""
         if not self.queues.has_any() or self._console is None:
             return
         total = (self.queues.queue is not None) + (self.queues.deferred is not None)
@@ -719,3 +314,364 @@ def render_input_pane(agent: Agent, queues: InputQueues) -> FormattedText:
         parts.append(("", "\n"))
     parts.append(("class:input_pane", "> "))
     return FormattedText(parts)
+
+
+async def _input_pump(
+    agent: Agent,
+    source: InputSource,
+    queues: InputQueues | None,
+    printer: Printer | None,
+) -> None:
+    """Read lines from ``source`` and dispatch the parsed action."""
+    while True:
+        try:
+            line = await source.next_line()
+            if line is None:
+                agent.shutdown(force=False)
+                return
+            action = parse_slash(line)
+            if action is None:
+                continue
+            should_exit = await _dispatch(agent, action, printer, queues=queues)
+            if should_exit:
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- pump catches any slash-handler exception; UserFacingError routed to warning, others to exception
+            log_exception_or_warning(
+                logger,
+                "REPL input pump raised; surfacing as error",
+                exc,
+            )
+            if printer is not None:
+                # Polished message for UserFacingError; ClassName prefix
+                # for unexpected exceptions (helps the operator).
+                detail = (
+                    str(exc)
+                    if isinstance(exc, UserFacingError)
+                    else f"{type(exc).__name__}: {exc}"
+                )
+                printer.write_tool_error(f"[input pump] {detail}")
+
+
+# Routed text lands as an ``AgentSendMessage`` attributed to ``sender`` so the child
+# sees the message as a parent-to-child handoff rather than anonymous human input --
+# mirroring the AgentSend tool path and keeping renderer/replay attribution bars
+# (`repl/render.py`, `repl/replay.py`) consistent.
+def _dispatch_send(
+    sender: Agent,
+    action: sagent.repl.slash.Send,
+    printer: Printer | None,
+) -> None:
+    """Dispatch ``/send`` content to matching persistent subagents."""
+    try:
+        targets = _resolve_targets(action.target)
+    except UserFacingError as exc:
+        if printer is not None:
+            printer.write_tool_error(f"[/send] {exc}")
+        return
+    if not targets:
+        if printer is not None:
+            printer.write_tool_error(f"[/send] no matching subagents: {action.target}")
+        return
+    source = sender.name or "user"
+    # Self-send guard (ported from ``agent_send.py``): a ``/send`` to the
+    # caller's own label is undelayed and almost certainly a mistake --
+    # ``_resolve_targets`` already filters the caller out, but drop any
+    # residual self-target and warn rather than push a message to self.
+    caller = agent_label_var.get("")
+    if caller and caller in targets:
+        targets = [label for label in targets if label != caller]
+        if printer is not None:
+            printer.write_tool_error(
+                f"[/send] refusing undelayed self-send to {caller!r}",
+            )
+    if not targets:
+        return
+    for label in targets:
+        target = agent_registry[label]
+        if action.content.startswith("/"):
+            # A registry sibling that routes but cannot swap a model is a
+            # real case (any AgentLike test double); say so rather than
+            # asserting the union holds.
+            if not isinstance(target, _TargetAgent):
+                if printer is not None:
+                    printer.write_tool_error(
+                        f"[/send {label}] target does not accept slash commands",
+                    )
+                continue
+            _dispatch_target_control(target, action.content, printer, label=label)
+        else:
+            target.runtime.inbox.push_back(
+                AgentSendMessage(source=source, text=action.content),
+            )
+            if printer is not None:
+                printer.write_slash_block(f"[/send {label}] sent")
+
+
+# Supported controls mirror the agent-local pump: ``/model``, ``/thinking``, ``/halt``,
+# ``/quit``, ``/clear``, ``/compact``, ``/kill``. Anything else surfaces as an error.
+def _dispatch_target_control(
+    target: _TargetAgent,
+    body: str,
+    printer: Printer | None,
+    *,
+    label: str,
+) -> None:
+    """Dispatch a slash command against one targeted subagent."""
+    action = parse_slash(body)
+    if isinstance(action, sagent.repl.slash.ModelSwitch):
+        run_repl.do_switch_model(target, action.args, printer)
+        return
+    if isinstance(action, sagent.repl.slash.Thinking):
+        run_repl.do_switch_thinking(target, action.command, printer)
+        return
+    if isinstance(action, sagent.repl.slash.Effort):
+        run_repl.do_switch_effort(target, action.value, printer)
+        return
+    if isinstance(action, sagent.repl.slash.Halt):
+        target.halt()
+        return
+    if isinstance(action, sagent.repl.slash.Quit):
+        target.runtime.inbox.push_back(Quit())
+        return
+    if isinstance(action, sagent.repl.slash.Clear):
+        target.runtime.inbox.push_back(Clear())
+        return
+    if isinstance(action, sagent.repl.slash.Compact):
+        target.runtime.inbox.push_back(Compact(args=action.args))
+        return
+    if isinstance(action, sagent.repl.slash.Kill):
+        if action.target == "all":
+            target.kill_all_tools()
+        else:
+            target.kill_tool(action.target)
+        return
+    if printer is not None:
+        printer.write_tool_error(f"[/send {label}] unsupported control: {body}")
+
+
+# Only serviceable labels are eligible (see :func:`_is_serviceable`): live subagents in
+# the registry, never the caller itself or the root agent. So ``/send``, ``/halt``,
+# ``/kill`` -- and the ``*`` / glob / regex / brace fan-outs built on this -- can never
+# route to self or the root.
+def _resolve_targets(pattern: str) -> list[str]:
+    """Resolve an exact, glob, brace-list, or regex subagent target."""
+    caller = agent_label_var.get("")
+    labels = [
+        label
+        for label, agent in agent_registry.items()
+        if _is_serviceable(label, agent, caller=caller)
+    ]
+    if pattern.startswith("{") and pattern.endswith("}"):
+        wanted = [part.strip() for part in pattern[1:-1].split(",") if part.strip()]
+        return [label for label in wanted if label in labels]
+    if pattern.startswith("/") and pattern.endswith("/") and len(pattern) >= 3:
+        # ``len(pattern) >= 3`` rejects ``/`` and ``//``: an empty-body
+        # regex matches every label and would silently fan ``/halt /``
+        # out to every persistent subagent.
+        try:
+            regex = re.compile(pattern[1:-1])
+        except re.error as exc:
+            raise UserFacingError(f"invalid target regex: {exc}") from exc
+        return [label for label in labels if regex.search(label)]
+    if any(char in pattern for char in "*?["):
+        return [label for label in labels if fnmatch.fnmatchcase(label, pattern)]
+    return [pattern] if pattern in labels else []
+
+
+# Serviceable = a live subagent in the registry that is neither the caller itself nor
+# the root agent. This is the single gate behind ``/send`` / ``/halt`` / ``/kill``
+# target resolution, so those verbs can never route to self or to the root (``/halt
+# all`` never halts self).
+def _is_serviceable(label: str, agent: AgentLike, *, caller: str) -> bool:
+    """Return true when ``label`` is a targetable subagent for the caller."""
+    if label == caller:
+        return False
+    return bool(getattr(agent, "is_subagent", False))
+
+
+# ``/halt`` halts the current agent. ``/halt all`` mirrors ``/kill all`` and halts every
+# persistent subagent. Any other target is resolved against the persistent-subagent
+# registry (exact, glob, brace-list, or regex).
+def _dispatch_halt(
+    agent: Agent,
+    action: sagent.repl.slash.Halt,
+    printer: Printer | None,
+) -> None:
+    """Halt the current agent, every persistent subagent, or matching labels."""
+    if not action.target:
+        agent.halt()
+        return
+    if action.target == "all":
+        caller = agent_label_var.get("")
+        for label, target in agent_registry.items():
+            if _is_serviceable(label, target, caller=caller):
+                target.halt()
+                if printer is not None:
+                    printer.write_slash_block(f"[/halt {label}] halted")
+        return
+    targets = _resolve_targets(action.target)
+    if not targets:
+        if printer is not None:
+            printer.write_tool_error(f"[/halt] no matching subagents: {action.target}")
+        return
+    for label in targets:
+        agent_registry[label].halt()
+        if printer is not None:
+            printer.write_slash_block(f"[/halt {label}] halted")
+
+
+# ``/kill all`` also clears any REPL-local urgent/deferred staging so the user is not
+# left with a "pending" pane that no longer matches their intent.
+def _dispatch_kill(
+    agent: Agent,
+    action: sagent.repl.slash.Kill,
+    printer: Printer | None,
+    *,
+    queues: InputQueues | None = None,
+) -> None:
+    """Cancel tool tasks or matching persistent subagents."""
+    if action.target == "all":
+        agent.kill_all_tools()
+        if queues is not None:
+            queues.clear()
+        if printer is not None:
+            printer.write_slash_block("[/kill] cancelled all tool tasks")
+        return
+    owner, sep, job_id = action.target.partition("/")
+    if sep:
+        target = agent_registry.get(owner)
+        if target is None:
+            if printer is not None:
+                printer.write_tool_error(f"[/kill] unknown owner: {owner}")
+            return
+        target.kill_tool(job_id)
+        if printer is not None:
+            printer.write_slash_block(f"[/kill {owner}/{job_id}] cancelled")
+        return
+    targets = _resolve_targets(action.target)
+    if targets:
+        for label in targets:
+            _kill_persistent_subagent(agent, label)
+            if printer is not None:
+                printer.write_slash_block(f"[/kill {label}] cancelled")
+        return
+    agent.kill_tool(action.target)
+    if printer is not None:
+        printer.write_slash_block(f"[/kill] cancelled {action.target}")
+
+
+def _kill_persistent_subagent(agent: Agent, label: str) -> None:
+    """Cancel one persistent subagent through the unified graceful path."""
+    _ = cancel_persistent_subagent(agent, label)
+
+
+# Same grammar as the ``--tool`` flag, applied to the constructed instance so it takes
+# effect on the next call. The tool's own ``__init__`` signature is the contract, so an
+# unknown key is reported with the ones it accepts.
+def _dispatch_tool(agent: Agent, spec: str, printer: Printer | None) -> None:
+    """Reconfigure a live tool: ``/tool Bash.output=off``."""
+    try:
+        overrides = parse_tool_overrides([spec])
+    except ToolSpecError as exc:
+        if printer is not None:
+            printer.write_tool_error(f"[/tool] {exc}")
+        return
+    for name, kv in overrides.items():
+        tool = agent.tools_map.get(name)
+        if tool is None:
+            if printer is not None:
+                loaded = ", ".join(sorted(agent.tools_map))
+                printer.write_tool_error(
+                    f"[/tool] unknown tool {name!r}. Loaded: {loaded}",
+                )
+            return
+        # ``is_dataclass`` also admits the CLASS, which ``replace``
+        # rejects; the registry only ever holds instances, so exclude the
+        # type case rather than widening what ``replace`` accepts.
+        if not dataclasses.is_dataclass(tool) or isinstance(tool, type):
+            if printer is not None:
+                printer.write_tool_error(
+                    f"[/tool] {name} is not reconfigurable at runtime",
+                )
+            return
+        try:
+            coerced = coerce_kwargs(type(tool), kv)
+            # ``replace`` rather than ``setattr``: tools are frozen
+            # dataclasses, and routing the swap through ``replace_tool``
+            # also bumps the version that invalidates the cached
+            # provider-facing tool list -- so the display view and the
+            # schema the model sees cannot drift apart.
+            agent.replace_tool(name, dataclasses.replace(tool, **coerced))
+        except (ToolSpecError, TypeError) as exc:
+            if printer is not None:
+                printer.write_tool_error(f"[/tool] {exc}")
+            return
+        if printer is not None:
+            shown = ", ".join(f"{k}={v}" for k, v in sorted(kv.items()))
+            printer.write_slash_block(f"[/tool] {name}: {shown}")
+
+
+# Exhaustive over :class:`SlashAction`; ``assert_never`` makes the type checker flag any
+# newly added variant that forgets a handler.
+async def _dispatch(
+    agent: Agent,
+    action: SlashAction,
+    printer: Printer | None,
+    *,
+    queues: InputQueues | None = None,
+) -> bool:
+    """Dispatch one parsed slash action; return True to exit the pump."""
+    match action:
+        case sagent.repl.slash.Quit():
+            agent.shutdown(force=False)
+            return True
+        case sagent.repl.slash.Halt():
+            _dispatch_halt(agent, action, printer)
+        case sagent.repl.slash.Kill():
+            _dispatch_kill(agent, action, printer, queues=queues)
+        case sagent.repl.slash.Clear():
+            agent.runtime.inbox.push_back(Clear())
+            if printer is not None:
+                printer.write_slash_block("[/clear] history cleared")
+        case sagent.repl.slash.Compact(args=args):
+            agent.runtime.inbox.push_back(Compact(args=args))
+            if printer is not None:
+                note = f" ({args})" if args else ""
+                printer.write_slash_block(f"[/compact] queued{note}")
+        case sagent.repl.slash.Recompact(args=args):
+            agent.runtime.inbox.push_back(Recompact(args=args))
+            if printer is not None:
+                note = f" ({args})" if args else ""
+                printer.write_slash_block(f"[/recompact] queued{note}")
+        case sagent.repl.slash.ModelSwitch(args=args):
+            run_repl.do_switch_model(agent, args, printer)
+        case sagent.repl.slash.Thinking(command=command):
+            run_repl.do_switch_thinking(agent, command, printer)
+        case sagent.repl.slash.Effort(value=value):
+            run_repl.do_switch_effort(agent, value, printer)
+        case sagent.repl.slash.Tool(spec=spec):
+            _dispatch_tool(agent, spec, printer)
+        case sagent.repl.slash.Login():
+            await run_repl.do_login(agent, printer)
+            if queues is not None:
+                queues.commit_deferred_on_idle(agent)
+        case sagent.repl.slash.Help():
+            if printer is not None:
+                printer.write_line(render.HELP_TEXT)
+        case sagent.repl.slash.Tasks():
+            if printer is not None:
+                printer.write_line(run_repl.format_tasks(agent))
+        case sagent.repl.slash.Text(content=content):
+            agent.runtime.inbox.push_back(UserMessage(text=content))
+        case sagent.repl.slash.Defer(content=content):
+            agent.runtime.inbox.push_back(UserDeferredMessage(text=content))
+        case sagent.repl.slash.Send():
+            _dispatch_send(agent, action, printer)
+        case sagent.repl.slash.Unknown(text=text):
+            if printer is not None:
+                printer.write_tool_error(text)
+        case _:
+            assert_never(action)
+    return False

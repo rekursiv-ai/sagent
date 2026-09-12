@@ -31,7 +31,10 @@ class VoxtralEncoder(Qwen2AudioEncoder):
     _can_record_outputs = ...
     @check_model_inputs
     def forward(
-        self, input_features, attention_mask=..., **kwargs: Unpack[TransformersKwargs]
+        self,
+        input_features,
+        attention_mask=...,
+        **kwargs: Unpack[TransformersKwargs],
     ):  # -> BaseModelOutput:
         ...
 

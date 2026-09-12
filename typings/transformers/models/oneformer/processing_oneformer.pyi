@@ -17,10 +17,18 @@ class OneFormerProcessor(ProcessorMixin):
         **kwargs,
     ) -> None: ...
     def __call__(
-        self, images=..., task_inputs=..., segmentation_maps=..., **kwargs
+        self,
+        images=...,
+        task_inputs=...,
+        segmentation_maps=...,
+        **kwargs,
     ): ...
     def encode_inputs(
-        self, images=..., task_inputs=..., segmentation_maps=..., **kwargs
+        self,
+        images=...,
+        task_inputs=...,
+        segmentation_maps=...,
+        **kwargs,
     ): ...
     def post_process_semantic_segmentation(self, *args, **kwargs): ...
     def post_process_instance_segmentation(self, *args, **kwargs): ...

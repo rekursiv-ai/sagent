@@ -42,7 +42,7 @@ class LxmertForQuestionAnsweringOutput(ModelOutput):
 @auto_docstring(
     custom_intro="""
     Output type of [`LxmertForPreTraining`].
-    """
+    """,
 )
 class LxmertForPreTrainingOutput(ModelOutput):
     loss: torch.FloatTensor | None = ...
@@ -65,7 +65,11 @@ class LxmertEmbeddings(nn.Module):
 class LxmertAttention(nn.Module):
     def __init__(self, config, ctx_dim=...) -> None: ...
     def forward(
-        self, hidden_states, context, attention_mask=..., output_attentions=...
+        self,
+        hidden_states,
+        context,
+        attention_mask=...,
+        output_attentions=...,
     ):  # -> tuple[Tensor, Any] | tuple[Tensor]:
         ...
 
@@ -77,14 +81,21 @@ class LxmertAttentionOutput(nn.Module):
 class LxmertCrossAttentionLayer(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, input_tensor, ctx_tensor, ctx_att_mask=..., output_attentions=...
+        self,
+        input_tensor,
+        ctx_tensor,
+        ctx_att_mask=...,
+        output_attentions=...,
     ):  # -> tuple[Any, Any] | tuple[Any]:
         ...
 
 class LxmertSelfAttentionLayer(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, input_tensor, attention_mask, output_attentions=...
+        self,
+        input_tensor,
+        attention_mask,
+        output_attentions=...,
     ):  # -> tuple[Any, Any] | tuple[Any]:
         ...
 
@@ -100,7 +111,10 @@ class LxmertOutput(nn.Module):
 class LxmertLayer(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states, attention_mask=..., output_attentions=...
+        self,
+        hidden_states,
+        attention_mask=...,
+        output_attentions=...,
     ):  # -> Any:
         ...
 
@@ -116,7 +130,11 @@ class LxmertXLayer(nn.Module):
     ):  # -> tuple[Any, Any]:
         ...
     def self_att(
-        self, lang_input, lang_attention_mask, visual_input, visual_attention_mask
+        self,
+        lang_input,
+        lang_attention_mask,
+        visual_input,
+        visual_attention_mask,
     ):  # -> tuple[Any, Any]:
         ...
     def output_fc(self, lang_input, visual_input):  # -> tuple[Any, Any]:

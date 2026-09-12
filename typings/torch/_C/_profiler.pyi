@@ -181,7 +181,9 @@ class _OptimizerInfo:
         self,
     ) -> list[
         tuple[
-            _TensorMetadata, _TensorMetadata | None, list[tuple[str, _TensorMetadata]]
+            _TensorMetadata,
+            _TensorMetadata | None,
+            list[tuple[str, _TensorMetadata]],
         ]
     ]: ...
 

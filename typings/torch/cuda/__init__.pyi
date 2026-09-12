@@ -78,7 +78,10 @@ else:
     class _amdsmi_cdll_hook:
         def __init__(self) -> None: ...
         def hooked_CDLL(
-            self, name: str | Path | None, *args: Any, **kwargs: Any
+            self,
+            name: str | Path | None,
+            *args: Any,
+            **kwargs: Any,
         ) -> ctypes.CDLL: ...
         def __enter__(self) -> None: ...
         def __exit__(

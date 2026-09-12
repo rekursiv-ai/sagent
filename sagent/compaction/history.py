@@ -74,5 +74,13 @@ def estimate_entry_tokens(model: Model, entries: Sequence[ModelContextEvent]) ->
     can never drift from the request the provider actually receives.
     Counts tool-call id/name/args JSON, thinking blocks, and attachments,
     not just bare text.
+
+    Args:
+      model: Model whose tokenizer estimates each context event.
+      entries: Context events to estimate.
+
+    Returns:
+      token_count: Estimated tokens across all supplied events.
+
     """
     return sum(entry_tokens(e, model) for e in entries)

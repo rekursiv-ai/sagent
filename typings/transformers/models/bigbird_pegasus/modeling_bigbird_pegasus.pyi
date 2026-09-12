@@ -26,7 +26,9 @@ logger = ...
 _EXPECTED_OUTPUT_SHAPE = ...
 
 def shift_tokens_right(
-    input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: torch.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ):  # -> Tensor:
     ...
 
@@ -189,7 +191,9 @@ class BigBirdPegasusEncoderLayer(GradientCheckpointingLayer):
 
 class BigBirdPegasusDecoderLayer(GradientCheckpointingLayer):
     def __init__(
-        self, config: BigBirdPegasusConfig, layer_idx: int | None = ...
+        self,
+        config: BigBirdPegasusConfig,
+        layer_idx: int | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -208,7 +212,11 @@ class BigBirdPegasusDecoderLayer(GradientCheckpointingLayer):
 
 class BigBirdPegasusClassificationHead(nn.Module):
     def __init__(
-        self, input_dim: int, inner_dim: int, num_classes: int, pooler_dropout: float
+        self,
+        input_dim: int,
+        inner_dim: int,
+        num_classes: int,
+        pooler_dropout: float,
     ) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -228,7 +236,9 @@ class BigBirdPegasusPreTrainedModel(PreTrainedModel):
 
 class BigBirdPegasusEncoder(BigBirdPegasusPreTrainedModel):
     def __init__(
-        self, config: BigBirdPegasusConfig, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: BigBirdPegasusConfig,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -245,13 +255,16 @@ class BigBirdPegasusEncoder(BigBirdPegasusPreTrainedModel):
         ...
     @staticmethod
     def create_masks_for_block_sparse_attn(
-        attention_mask: torch.Tensor, block_size: int
+        attention_mask: torch.Tensor,
+        block_size: int,
     ):  # -> tuple[Tensor, Tensor, Tensor, Tensor]:
         ...
 
 class BigBirdPegasusDecoder(BigBirdPegasusPreTrainedModel):
     def __init__(
-        self, config: BigBirdPegasusConfig, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: BigBirdPegasusConfig,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -304,7 +317,8 @@ class BigBirdPegasusModel(BigBirdPegasusPreTrainedModel):
 
 @auto_docstring(custom_intro=...)
 class BigBirdPegasusForConditionalGeneration(
-    BigBirdPegasusPreTrainedModel, GenerationMixin
+    BigBirdPegasusPreTrainedModel,
+    GenerationMixin,
 ):
     base_model_prefix = ...
     _tied_weights_keys = ...

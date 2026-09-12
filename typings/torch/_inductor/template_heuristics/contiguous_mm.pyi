@@ -10,7 +10,9 @@ from ..kernel.mm import (
 
 @register_template_heuristic(mm_contiguous_subgraph_template.uid, None, op_name="mm")
 @register_template_heuristic(
-    addmm_contiguous_subgraph_template.uid, None, op_name="addmm"
+    addmm_contiguous_subgraph_template.uid,
+    None,
+    op_name="addmm",
 )
 class EmptyContiguousMMConfigHeuristics(TemplateConfigHeuristics): ...
 

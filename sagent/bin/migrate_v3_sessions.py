@@ -1,5 +1,9 @@
-#!/usr/bin/env python3
-"""One-shot migrator from v3 ``session.jsonl`` to v4.
+#!/bin/sh
+# ruff: noqa: EXE003, D300, D205 -- Polyglot shell/Python script.
+# fmt: off
+'''' 2>/dev/null #
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
+One-shot migrator from v3 ``session.jsonl`` to v4.
 
 Reads a v3 session file (or every ``session.jsonl`` under a directory
 tree) and writes a sibling ``session.v4.jsonl`` alongside. The v3 files
@@ -23,7 +27,8 @@ Translation rules:
 
 ``application/x-file-stat`` and ``application/x-bash-state`` parts are
 dropped; the v4 ``tool_state`` snapshot supersedes them.
-"""
+'''
+# fmt: on
 
 from __future__ import annotations
 
@@ -35,12 +40,125 @@ import argparse
 import base64
 import json
 import logging
-import sys
 
 from sagent.lib.custom_json import IntCodec
 
 
 logger = logging.getLogger(__name__)
+
+
+def iter_v4_records(lines: Iterable[str]) -> Iterable[dict[str, object]]:
+    """Translate an iterable of v3 JSONL lines into v4 records.
+
+    Args:
+      lines: Lines from a v3 ``session.jsonl``.
+
+    Yields:
+      record: One v4 ``TapeEvent`` / meta / clear dict per translatable input.
+
+    """
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            logger.warning("Skipping malformed v3 line.")
+            continue
+        if not isinstance(record, dict):
+            continue
+        rec = cast(Mapping[str, object], record)
+        kind = rec.get("kind")
+        if kind == "meta":
+            yield _convert_meta(rec)
+        elif kind == "message":
+            v4 = _convert_message(rec)
+            if v4 is not None:
+                yield v4
+        elif kind == "clear":
+            yield {"kind": "clear", "_timestamp": rec.get("_timestamp", 0)}
+        else:
+            logger.warning("Skipping unknown v3 kind: %r", kind)
+
+
+def migrate_file(src: Path, dst: Path) -> int:
+    """Translate one v3 session file to v4 alongside it.
+
+    Args:
+      src: Path to the v3 ``session.jsonl`` file to read.
+      dst: Path to the v4 output file to write (parents created).
+
+    Returns:
+      count: Number of v4 records written.
+
+    """
+    count = 0
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with src.open(encoding="utf-8") as fin, dst.open("w", encoding="utf-8") as fout:
+        for v4 in iter_v4_records(fin):
+            _ = fout.write(json.dumps(v4) + "\n")
+            count += 1
+    return count
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Entry point for the one-shot migrator.
+
+    Args:
+      argv: Optional CLI arguments; defaults to ``sys.argv[1:]``.
+
+    Returns:
+      exit_code: ``0`` on success, ``1`` if ``path`` does not exist.
+
+    """
+    parser = argparse.ArgumentParser(
+        description="Migrate v3 sagent session.jsonl files to v4.",
+    )
+    _add_arguments(parser)
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+    root: Path = cast(Path, args.path)
+    if not root.exists():
+        logger.error("path does not exist: %s", root)
+        return 1
+
+    targets = list(_iter_targets(root))
+    if not targets:
+        logger.info("No session.jsonl files under %s", root)
+        return 0
+
+    total = 0
+    for src in targets:
+        dst = src.with_name(f"session{args.suffix}")
+        if dst.exists() and not args.overwrite:
+            logger.info("skip (exists): %s", dst)
+            continue
+        n = migrate_file(src, dst)
+        total += n
+        logger.info("migrated %d records: %s -> %s", n, src, dst)
+    logger.info("done: %d records across %d files", total, len(targets))
+    return 0
+
+
+def _add_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register migrator command-line arguments."""
+    _ = parser.add_argument(
+        "path",
+        type=Path,
+        help="A v3 session.jsonl file, or a directory tree to scan.",
+    )
+    _ = parser.add_argument(
+        "--suffix",
+        default=".v4.jsonl",
+        help="Output suffix appended to ``session`` (default: .v4.jsonl).",
+    )
+    _ = parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite any existing v4 output files.",
+    )
 
 
 def _id(rec: Mapping[str, object]) -> int:
@@ -264,61 +382,6 @@ def _convert_meta(rec: Mapping[str, object]) -> dict[str, object]:
     return out
 
 
-def iter_v4_records(lines: Iterable[str]) -> Iterable[dict[str, object]]:
-    """Translate an iterable of v3 JSONL lines into v4 records.
-
-    Args:
-      lines: Lines from a v3 ``session.jsonl``.
-
-    Yields:
-      record: One v4 ``TapeEvent`` / meta / clear dict per translatable input.
-
-    """
-    for raw in lines:
-        line = raw.strip()
-        if not line:
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            logger.warning("Skipping malformed v3 line.")
-            continue
-        if not isinstance(record, dict):
-            continue
-        rec = cast(Mapping[str, object], record)
-        kind = rec.get("kind")
-        if kind == "meta":
-            yield _convert_meta(rec)
-        elif kind == "message":
-            v4 = _convert_message(rec)
-            if v4 is not None:
-                yield v4
-        elif kind == "clear":
-            yield {"kind": "clear", "_timestamp": rec.get("_timestamp", 0)}
-        else:
-            logger.warning("Skipping unknown v3 kind: %r", kind)
-
-
-def migrate_file(src: Path, dst: Path) -> int:
-    """Translate one v3 session file to v4 alongside it.
-
-    Args:
-      src: Path to the v3 ``session.jsonl`` file to read.
-      dst: Path to the v4 output file to write (parents created).
-
-    Returns:
-      count: Number of v4 records written.
-
-    """
-    count = 0
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    with src.open(encoding="utf-8") as fin, dst.open("w", encoding="utf-8") as fout:
-        for v4 in iter_v4_records(fin):
-            _ = fout.write(json.dumps(v4) + "\n")
-            count += 1
-    return count
-
-
 def _iter_targets(root: Path) -> Iterable[Path]:
     """Yield session.jsonl paths under ``root`` (or just ``root`` if a file)."""
     if root.is_file():
@@ -327,59 +390,6 @@ def _iter_targets(root: Path) -> Iterable[Path]:
     yield from sorted(root.rglob("session.jsonl"))
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Entry point for the one-shot migrator.
-
-    Args:
-      argv: Optional CLI arguments; defaults to ``sys.argv[1:]``.
-
-    Returns:
-      exit_code: ``0`` on success, ``1`` if ``path`` does not exist.
-
-    """
-    parser = argparse.ArgumentParser(
-        description="Migrate v3 sagent session.jsonl files to v4.",
-    )
-    _ = parser.add_argument(
-        "path",
-        type=Path,
-        help="A v3 session.jsonl file, or a directory tree to scan.",
-    )
-    _ = parser.add_argument(
-        "--suffix",
-        default=".v4.jsonl",
-        help="Output suffix appended to ``session`` (default: .v4.jsonl).",
-    )
-    _ = parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite any existing v4 output files.",
-    )
-    args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-
-    root: Path = cast(Path, args.path)
-    if not root.exists():
-        logger.error("path does not exist: %s", root)
-        return 1
-
-    targets = list(_iter_targets(root))
-    if not targets:
-        logger.info("No session.jsonl files under %s", root)
-        return 0
-
-    total = 0
-    for src in targets:
-        dst = src.with_name(f"session{args.suffix}")
-        if dst.exists() and not args.overwrite:
-            logger.info("skip (exists): %s", dst)
-            continue
-        n = migrate_file(src, dst)
-        total += n
-        logger.info("migrated %d records: %s -> %s", n, src, dst)
-    logger.info("done: %d records across %d files", total, len(targets))
-    return 0
-
-
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())
+# vim: ft=python

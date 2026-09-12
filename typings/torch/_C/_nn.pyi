@@ -7,10 +7,12 @@ from torch.types import _int, _size
 def adaptive_avg_pool2d(input: Tensor, output_size: _int | _size) -> Tensor: ...
 def adaptive_avg_pool3d(input: Tensor, output_size: _int | _size) -> Tensor: ...
 def adaptive_max_pool2d(
-    input: Tensor, output_size: _int | _size
+    input: Tensor,
+    output_size: _int | _size,
 ) -> tuple[Tensor, Tensor]: ...
 def adaptive_max_pool3d(
-    input: Tensor, output_size: _int | _size
+    input: Tensor,
+    output_size: _int | _size,
 ) -> tuple[Tensor, Tensor]: ...
 def avg_pool2d(
     input: Tensor,
@@ -31,7 +33,10 @@ def avg_pool3d(
     divisor_override: int | None = ...,
 ) -> Tensor: ...
 def binary_cross_entropy(
-    input: Tensor, target: Tensor, weight: Tensor | None = ..., reduction: str = ...
+    input: Tensor,
+    target: Tensor,
+    weight: Tensor | None = ...,
+    reduction: str = ...,
 ) -> Tensor: ...
 def col2im(
     input: Tensor,
@@ -50,7 +55,10 @@ def cross_entropy_loss(
     label_smoothing: float = ...,
 ) -> Tensor: ...
 def elu(
-    input: Tensor, alpha: float = ..., scale: float = ..., input_scale: float = ...
+    input: Tensor,
+    alpha: float = ...,
+    scale: float = ...,
+    input_scale: float = ...,
 ) -> Tensor: ...
 def elu_(input: Tensor, alpha: float = ...) -> Tensor: ...
 def fractional_max_pool2d(
@@ -80,10 +88,16 @@ def hardtanh(
 ) -> Tensor: ...
 def hardtanh_(input: Tensor, min_val: float = ..., max_val: float = ...) -> Tensor: ...
 def huber_loss(
-    input: Tensor, target: Tensor, reduction: str = ..., delta: float = ...
+    input: Tensor,
+    target: Tensor,
+    reduction: str = ...,
+    delta: float = ...,
 ) -> Tensor: ...
 def leaky_relu(
-    input: Tensor, negative_slope: float = ..., *, out: Tensor | None = ...
+    input: Tensor,
+    negative_slope: float = ...,
+    *,
+    out: Tensor | None = ...,
 ) -> Tensor: ...
 def leaky_relu_(input: Tensor, negative_slope: float = ...) -> Tensor: ...
 def linear(input: Tensor, weight: Tensor, bias: Tensor | None = ...) -> Tensor: ...
@@ -105,7 +119,9 @@ def max_pool3d_with_indices(
     ceil_mode: bool = ...,
 ) -> tuple[Tensor, Tensor]: ...
 def max_unpool2d(
-    input: Tensor, indices: Tensor, output_size: Sequence[int] | None
+    input: Tensor,
+    indices: Tensor,
+    output_size: Sequence[int] | None,
 ) -> Tensor: ...
 def max_unpool3d(
     input: Tensor,
@@ -116,7 +132,10 @@ def max_unpool3d(
 ) -> Tensor: ...
 def one_hot(tensor: Tensor, num_classes: int = ...) -> Tensor: ...
 def pad(
-    input: Tensor, pad: Sequence[int], mode: str = ..., value: float | None = ...
+    input: Tensor,
+    pad: Sequence[int],
+    mode: str = ...,
+    value: float | None = ...,
 ) -> Tensor: ...
 def scaled_dot_product_attention(
     query: Tensor,
@@ -132,10 +151,18 @@ def softplus(input: Tensor, beta: float = ..., threshold: float = ...) -> Tensor
 def softshrink(input: Tensor, lambd: float = ...) -> Tensor: ...
 def mkldnn_linear(input: Tensor, weight: Tensor, bias: Tensor | None) -> Tensor: ...
 def mkldnn_reorder_conv2d_weight(
-    self: Tensor, padding: list, stride: list, dilatation: list, groups: int
+    self: Tensor,
+    padding: list,
+    stride: list,
+    dilatation: list,
+    groups: int,
 ) -> Tensor: ...
 def mkldnn_reorder_conv3d_weight(
-    self: Tensor, padding: list, stride: list, dilatation: list, groups: int
+    self: Tensor,
+    padding: list,
+    stride: list,
+    dilatation: list,
+    groups: int,
 ) -> Tensor: ...
 def mkldnn_prelu(input: Tensor, weight: Tensor) -> Tensor: ...
 def pad_sequence(

@@ -37,7 +37,10 @@ class _BaseAutoBackboneClass(_BaseAutoModelClass):
     _model_mapping = ...
     @classmethod
     def from_pretrained(
-        cls, pretrained_model_name_or_path, *model_args, **kwargs
+        cls,
+        pretrained_model_name_or_path,
+        *model_args,
+        **kwargs,
     ):  # -> Any:
         ...
 
@@ -46,7 +49,8 @@ def auto_class_update(cls, checkpoint_for_example: str = ..., head_doc: str = ..
 def get_values(model_mapping):  # -> list[Any]:
     ...
 def getattribute_from_module(
-    module, attr
+    module,
+    attr,
 ):  # -> tuple[tuple[Any, ...] | Any | None, ...] | Any | tuple[Any, ...] | None:
     ...
 def add_generation_mixin_to_remote_model(model_class):  # -> Any:
@@ -58,7 +62,9 @@ class _LazyAutoMapping(OrderedDict[type[PretrainedConfig], _LazyAutoMappingValue
     def __getitem__(self, key: type[PretrainedConfig]) -> _LazyAutoMappingValue: ...
     def keys(self) -> list[type[PretrainedConfig]]: ...
     def get(
-        self, key: type[PretrainedConfig], default: _T
+        self,
+        key: type[PretrainedConfig],
+        default: _T,
     ) -> _LazyAutoMappingValue | _T: ...
     def __bool__(self) -> bool: ...
     def values(self) -> list[_LazyAutoMappingValue]: ...
@@ -66,7 +72,10 @@ class _LazyAutoMapping(OrderedDict[type[PretrainedConfig], _LazyAutoMappingValue
     def __iter__(self) -> Iterator[type[PretrainedConfig]]: ...
     def __contains__(self, item: type) -> bool: ...
     def register(
-        self, key: type[PretrainedConfig], value: _LazyAutoMappingValue, exist_ok=...
+        self,
+        key: type[PretrainedConfig],
+        value: _LazyAutoMappingValue,
+        exist_ok=...,
     ) -> None: ...
 
 __all__ = ["get_values"]

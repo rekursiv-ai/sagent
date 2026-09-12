@@ -93,7 +93,8 @@ def decode_dtype(dtype: int) -> int: ...
 def is_integer_type(x) -> bool: ...
 def is_boolean_type(x) -> bool: ...
 def get_promoted_dtype(
-    *args, type_promotion_kind: ELEMENTWISE_TYPE_PROMOTION_KIND
+    *args,
+    type_promotion_kind: ELEMENTWISE_TYPE_PROMOTION_KIND,
 ) -> dtype: ...
 def get_overloads(aten_fn) -> list[Any]: ...
 def in_namespace(op, namespace) -> bool: ...
@@ -114,7 +115,9 @@ def register_lowering(
 ) -> Callable[[Callable[_P, _T]], Callable[_P, _T]]: ...
 def broadcast_symbolic_shapes(a, b) -> tuple[Any, ...]: ...
 def promote_constants(
-    inputs, override_return_dtype=..., type_promotion_kind=...
+    inputs,
+    override_return_dtype=...,
+    type_promotion_kind=...,
 ) -> list[IndexingConstant | Constant] | list[Any]: ...
 def make_pointwise(
     fn,
@@ -126,13 +129,22 @@ def make_pointwise(
 ) -> Callable[..., Any | TensorBox | ShapeAsConstantBuffer]: ...
 def make_foreach_pointwise(pw_fn, allow_alpha=...) -> Callable[..., list[None]]: ...
 def to_dtype(
-    x: TensorBox | ShapeAsConstantBuffer, dtype: torch.dtype, copy: bool = ...
+    x: TensorBox | ShapeAsConstantBuffer,
+    dtype: torch.dtype,
+    copy: bool = ...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 def to_dtype_bitcast(
-    x: TensorBox, dtype: torch.dtype, *, copy=...
+    x: TensorBox,
+    dtype: torch.dtype,
+    *,
+    copy=...,
 ) -> TensorBox | ShapeAsConstantBuffer | PyTree: ...
 def to_device(
-    x: TensorBox, device: torch.device, *, copy=..., non_blocking=...
+    x: TensorBox,
+    device: torch.device,
+    *,
+    copy=...,
+    non_blocking=...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 def register_pointwise(
     aten_fn,
@@ -148,11 +160,14 @@ def register_pointwise(
 def register_frexp() -> Callable[
     ...,
     tuple[
-        Any | TensorBox | ShapeAsConstantBuffer, Any | TensorBox | ShapeAsConstantBuffer
+        Any | TensorBox | ShapeAsConstantBuffer,
+        Any | TensorBox | ShapeAsConstantBuffer,
     ],
 ]: ...
 def register_foreach_pointwise(
-    aten_fn, pointwise_lowering_fn, allow_alpha=...
+    aten_fn,
+    pointwise_lowering_fn,
+    allow_alpha=...,
 ) -> _Wrapped[..., Any, ..., Any]: ...
 @register_lowering(aten.where, broadcast=False, type_promotion_kind=None)
 def where(cond, a, b) -> TensorBox | ShapeAsConstantBuffer: ...
@@ -200,7 +215,10 @@ def as_strided(x, size, stride, storage_offset=...) -> TensorBox: ...
 def as_strided_(x, size, stride, storage_offset=...) -> TensorBox: ...
 @register_lowering(aten.as_strided_copy, type_promotion_kind=None)
 def as_strided_copy(
-    x, size, stride, storage_offset=...
+    x,
+    size,
+    stride,
+    storage_offset=...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 def pointwise_cat(inputs, dim=...) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(quantized_decomposed.quantize_per_channel, type_promotion_kind=None)
@@ -218,7 +236,8 @@ def lower_assert_async(cond, msg) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(aten._functional_assert_async.msg)
 def lower_assert_functional_async(cond, msg) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(
-    quantized_decomposed.dequantize_per_channel, type_promotion_kind=None
+    quantized_decomposed.dequantize_per_channel,
+    type_promotion_kind=None,
 )
 def quantized_decomposed_dequantize_per_channel(
     input: TensorBox,
@@ -232,7 +251,8 @@ def quantized_decomposed_dequantize_per_channel(
     out_dtype: torch.dtype | None = ...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(
-    quantized_decomposed.quantize_per_tensor.default, type_promotion_kind=None
+    quantized_decomposed.quantize_per_tensor.default,
+    type_promotion_kind=None,
 )
 def quantized_decomposed_quantize_per_tensor_default(
     input: TensorBox,
@@ -243,7 +263,8 @@ def quantized_decomposed_quantize_per_tensor_default(
     dtype: torch.dtype,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(
-    quantized_decomposed.dequantize_per_tensor.default, type_promotion_kind=None
+    quantized_decomposed.dequantize_per_tensor.default,
+    type_promotion_kind=None,
 )
 def quantized_decomposed_dequantize_per_tensor_default(
     input: TensorBox,
@@ -256,7 +277,8 @@ def quantized_decomposed_dequantize_per_tensor_default(
     out_dtype: torch.dtype | None = ...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(
-    quantized_decomposed.quantize_per_tensor.tensor, type_promotion_kind=None
+    quantized_decomposed.quantize_per_tensor.tensor,
+    type_promotion_kind=None,
 )
 def quantized_decomposed_quantize_per_tensor_tensor(
     input: TensorBox,
@@ -267,7 +289,8 @@ def quantized_decomposed_quantize_per_tensor_tensor(
     dtype: torch.dtype,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(
-    quantized_decomposed.dequantize_per_tensor.tensor, type_promotion_kind=None
+    quantized_decomposed.dequantize_per_tensor.tensor,
+    type_promotion_kind=None,
 )
 def quantized_decomposed_dequantize_per_tensor_tensor(
     input: TensorBox,
@@ -283,15 +306,25 @@ def quantized_decomposed_dequantize_per_tensor_tensor(
 def cat(inputs, dim=...) -> PyTree | TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(aten.diagonal, type_promotion_kind=None)
 def diagonal(
-    input, offset: int = ..., dim1: int = ..., dim2: int = ...
+    input,
+    offset: int = ...,
+    dim1: int = ...,
+    dim2: int = ...,
 ) -> TensorBox: ...
 @register_lowering(aten.diagonal_copy, type_promotion_kind=None)
 def diagonal_copy(
-    input, offset: int = ..., dim1: int = ..., dim2: int = ...
+    input,
+    offset: int = ...,
+    dim1: int = ...,
+    dim2: int = ...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(aten.diagonal_scatter, type_promotion_kind=None)
 def diagonal_scatter(
-    input, src, offset: int = ..., dim1: int = ..., dim2: int = ...
+    input,
+    src,
+    offset: int = ...,
+    dim1: int = ...,
+    dim2: int = ...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(aten.select, type_promotion_kind=None)
 def select(x, dim, idx) -> TensorBox: ...
@@ -313,13 +346,19 @@ def fallback_handler(kernel, add_to_fallback_set=...) -> Callable[..., PyTree]: 
 def unsupported_input_tensor(t: torch.Tensor, node=...) -> bool: ...
 def unsupported_output_tensor(t: torch.Tensor, node=...) -> bool: ...
 def fallback_node_due_to_unsupported_type(
-    node: torch.fx.Node, allow_cpu_inputs=...
+    node: torch.fx.Node,
+    allow_cpu_inputs=...,
 ) -> bool: ...
 def make_fallback(op, layout_constraint=..., warn=..., override_decomp=...) -> None: ...
 def philox_rand_offset(shape) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(torch.ops.rngprims.philox_rand, type_promotion_kind=None)
 def philox_rand(
-    size, seed, offset, stride, device, dtype
+    size,
+    seed,
+    offset,
+    stride,
+    device,
+    dtype,
 ) -> tuple[TensorBox | ShapeAsConstantBuffer, TensorBox | ShapeAsConstantBuffer]: ...
 @register_lowering(aten.native_dropout, type_promotion_kind=None)
 def native_dropout(x, p, train) -> PyTree: ...
@@ -348,11 +387,20 @@ def inductor_seeds(count, device) -> TensorBox | ShapeAsConstantBuffer: ...
 def inductor_lookup_seed(seeds, index) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(inductor_prims.random, type_promotion_kind=None)
 def inductor_random(
-    size: list[int], seed: TensorBox, mode: str, *, offset: int = ...
+    size: list[int],
+    seed: TensorBox,
+    mode: str,
+    *,
+    offset: int = ...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(inductor_prims.randint, type_promotion_kind=None)
 def inductor_randint(
-    low: int, high: int, size: list[int], seed: TensorBox, *, offset: int = ...
+    low: int,
+    high: int,
+    size: list[int],
+    seed: TensorBox,
+    *,
+    offset: int = ...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(aten.searchsorted.Tensor, type_promotion_kind=None)
 def searchsorted(
@@ -365,17 +413,23 @@ def searchsorted(
     sorter: TensorBox | None = ...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(
-    aten.bucketize, type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.NO_OPMATH
+    aten.bucketize,
+    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.NO_OPMATH,
 )
 def bucketize(
-    input: TensorBox, boundaries: TensorBox, *, out_int32: bool = ..., right: bool = ...
+    input: TensorBox,
+    boundaries: TensorBox,
+    *,
+    out_int32: bool = ...,
+    right: bool = ...,
 ) -> PyTree | TensorBox | ShapeAsConstantBuffer: ...
 def require_dense(_, *args, **kwargs) -> tuple[PyTree, PyTree]: ...
 def require_contiguous(_, *args, **kwargs) -> tuple[PyTree, PyTree]: ...
 def require_contiguous_strides(_, *args, **kwargs) -> tuple[PyTree, PyTree]: ...
 def require_channels_last(_, *args, **kwargs) -> tuple[PyTree, PyTree]: ...
 def constrain_to_fake_tensor(
-    arg, fake_arg
+    arg,
+    fake_arg,
 ) -> (
     Any
     | dict[
@@ -389,7 +443,10 @@ def constrain_to_fake_tensor(
     | tuple[Any, ...]
 ): ...
 def constrain_to_fake_tensors(
-    args, kwargs, fake_args, fake_kwargs
+    args,
+    kwargs,
+    fake_args,
+    fake_kwargs,
 ) -> tuple[
     tuple[
         Any
@@ -419,13 +476,17 @@ def constrain_to_fake_tensors(
     ],
 ]: ...
 def constrain_to_fx_strides(
-    fx_node, *args, **kwargs
+    fx_node,
+    *args,
+    **kwargs,
 ) -> tuple[
     tuple[Any | dict[Any, Any | dict[Any, Any | dict[Any, Any]]], ...],
     dict[str, Any | dict[Any, Any | dict[Any, Any | dict[Any, Any]]]],
 ]: ...
 def sdpa_constraint(
-    fx_node, *args, **kwargs
+    fx_node,
+    *args,
+    **kwargs,
 ) -> tuple[tuple[Any, ...], dict[str, Any]]: ...
 @register_lowering(aten.copy, type_promotion_kind=None)
 def copy(self, src, non_blocking=...) -> TensorBox | ShapeAsConstantBuffer: ...
@@ -434,19 +495,38 @@ def clone(x, *, memory_format=...) -> TensorBox | ShapeAsConstantBuffer: ...
 def clone_preserve_reinterpret_view(x) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(prims.iota)
 def iota(
-    length, *, start, step, dtype, device, requires_grad
+    length,
+    *,
+    start,
+    step,
+    dtype,
+    device,
+    requires_grad,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(aten.select_scatter, type_promotion_kind=None)
 def select_scatter(
-    x, src, dim: int, index: int
+    x,
+    src,
+    dim: int,
+    index: int,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(aten.slice_scatter, type_promotion_kind=None)
 def slice_scatter(
-    x, src, dim=..., start=..., end=..., step=...
+    x,
+    src,
+    dim=...,
+    start=...,
+    end=...,
+    step=...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering([torch.tensor, aten.scalar_tensor])
 def tensor(
-    data, *, dtype=..., device=..., layout=..., pin_memory=...
+    data,
+    *,
+    dtype=...,
+    device=...,
+    layout=...,
+    pin_memory=...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(torch.as_tensor)
 def as_tensor(data, dtype=..., device=...) -> TensorBox | ShapeAsConstantBuffer: ...
@@ -476,15 +556,34 @@ zeros_like = ...
 def new_constant(fill_value) -> Callable[..., TensorBox | ShapeAsConstantBuffer]: ...
 @register_lowering(aten.new_empty)
 def new_empty(
-    x, size, *, dtype=..., layout=..., device=..., pin_memory=...
+    x,
+    size,
+    *,
+    dtype=...,
+    layout=...,
+    device=...,
+    pin_memory=...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(aten.empty_strided)
 def empty_strided(
-    size, stride, *, dtype=..., layout=..., device=..., pin_memory=...
+    size,
+    stride,
+    *,
+    dtype=...,
+    layout=...,
+    device=...,
+    pin_memory=...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(aten.new_empty_strided)
 def new_empty_strided(
-    x, size, stride, *, dtype=..., layout=..., device=..., pin_memory=...
+    x,
+    size,
+    stride,
+    *,
+    dtype=...,
+    layout=...,
+    device=...,
+    pin_memory=...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(prims.copy_strided.default)
 def copy_strided(x, stride) -> Any: ...
@@ -494,7 +593,11 @@ def full(size, fill_value, **kwargs) -> TensorBox | ShapeAsConstantBuffer: ...
 def gather(x, dim, index, sparse_grad=...) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(aten.embedding, type_promotion_kind=None)
 def embedding(
-    weight, indices, padding_idx=..., scale_grad_by_freq=..., sparse=...
+    weight,
+    indices,
+    padding_idx=...,
+    scale_grad_by_freq=...,
+    sparse=...,
 ) -> PyTree | TensorBox | ShapeAsConstantBuffer: ...
 def check_and_broadcast_indices(indices, device) -> tuple[list[None], list[int]]: ...
 def index_output_size_and_inner_fn(
@@ -510,7 +613,10 @@ def index_output_size_and_inner_fn(
 ) -> tuple[Any, Callable[..., list[Any] | Any]]: ...
 def index_impl(x, indices, check) -> TensorBox | ShapeAsConstantBuffer: ...
 def index_impl_helper(
-    x, indices, check, wrap_neg=...
+    x,
+    indices,
+    check,
+    wrap_neg=...,
 ) -> tuple[Any, Callable[..., Any], Callable[..., list[Any] | Any]]: ...
 @register_lowering(aten.index, type_promotion_kind=None)
 def index(x, indices) -> TensorBox | ShapeAsConstantBuffer | PyTree: ...
@@ -521,7 +627,12 @@ def index_put_fallback(self, indices, values, accumulate): ...
 @register_lowering(aten.index_put_, type_promotion_kind=None)
 def index_put_(self, indices, values, accumulate=...) -> TensorBox: ...
 def index_put_impl_(
-    self, indices, values, accumulate, check, may_realize=...
+    self,
+    indices,
+    values,
+    accumulate,
+    check,
+    may_realize=...,
 ) -> TensorBox: ...
 
 fallback__unsafe_masked_index = ...
@@ -531,7 +642,11 @@ fallback__unsafe_masked_index_put_accumulate = ...
 def clamp(a, min, max) -> Any: ...
 @register_lowering(aten.as_strided_scatter, type_promotion_kind=None)
 def as_strided_scatter(
-    self, src, size, stride, storage_offset=...
+    self,
+    src,
+    size,
+    stride,
+    storage_offset=...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(aten.scatter, type_promotion_kind=None)
 def scatter(x, dim: int, index, src, **kwargs) -> TensorBox: ...
@@ -555,18 +670,33 @@ def scatter_add_(x, dim: int, index, src) -> TensorBox: ...
 def scatter_reduce(x, dim: int, index, src, reduction_type, **kwargs) -> TensorBox: ...
 @register_lowering(aten.scatter_reduce_, type_promotion_kind=None)
 def scatter_reduce_(
-    self, dim: int, index, src, reduce, *, include_self: bool = ...
+    self,
+    dim: int,
+    index,
+    src,
+    reduce,
+    *,
+    include_self: bool = ...,
 ) -> TensorBox: ...
 def upsample_nearestnd(
-    x, output_size, scales_x: tuple[float | None, ...], n: int = ..., exact: bool = ...
+    x,
+    output_size,
+    scales_x: tuple[float | None, ...],
+    n: int = ...,
+    exact: bool = ...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(aten.upsample_nearest1d.default)
 def upsample_nearest1d(
-    x, output_size, scales: float | None = ...
+    x,
+    output_size,
+    scales: float | None = ...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(aten.upsample_nearest2d.default)
 def upsample_nearest2d(
-    x, output_size, scales_h: float | None = ..., scales_w: float | None = ...
+    x,
+    output_size,
+    scales_h: float | None = ...,
+    scales_w: float | None = ...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(aten.upsample_nearest3d.default)
 def upsample_nearest3d(
@@ -579,43 +709,87 @@ def upsample_nearest3d(
 @register_lowering(prims.rev.default)
 def rev(x, dims) -> TensorBox | ShapeAsConstantBuffer: ...
 def inplace_constant_pad_nd(
-    x: TensorBox, padding: Sequence[int], fill_value: float
+    x: TensorBox,
+    padding: Sequence[int],
+    fill_value: float,
 ) -> TensorBox | None: ...
 @register_lowering(aten.constant_pad_nd, type_promotion_kind=None)
 def constant_pad_nd(
-    x, padding, fill_value=...
+    x,
+    padding,
+    fill_value=...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 def range_mask_low(i: sympy.Expr, low: sympy.Expr | int) -> Any: ...
 def range_mask_high(i: sympy.Expr, high: sympy.Expr) -> Any: ...
 def range_mask(i: sympy.Expr, high: sympy.Expr, low: sympy.Expr) -> Any: ...
 def constant_boundary_condition(
-    x, fill_value, padding=..., pad_fill_value=..., dim=...
+    x,
+    fill_value,
+    padding=...,
+    pad_fill_value=...,
+    dim=...,
 ) -> Callable[..., Any]: ...
 def pooling_size(
-    x, i, kernel_size, stride, padding, ceil_mode, *, dilation=...
+    x,
+    i,
+    kernel_size,
+    stride,
+    padding,
+    ceil_mode,
+    *,
+    dilation=...,
 ) -> tuple[type[AppliedUndef] | Any, Any | Literal[False]]: ...
 def should_fallback_max_pool_with_indices(kernel_size, *, n_dim) -> Any: ...
 def max_pool_checks(
-    x, kernel_size, stride, padding, dilation, n_dim, *, assert_fallback=...
+    x,
+    kernel_size,
+    stride,
+    padding,
+    dilation,
+    n_dim,
+    *,
+    assert_fallback=...,
 ) -> tuple[Sequence[int], Sequence[int], Sequence[int], Sequence[int], Any]: ...
 @register_lowering(aten.max_pool2d_with_indices, type_promotion_kind=None)
 def max_pool2d_with_indices(
-    x, kernel_size, stride=..., padding=..., dilation=..., ceil_mode=...
+    x,
+    kernel_size,
+    stride=...,
+    padding=...,
+    dilation=...,
+    ceil_mode=...,
 ) -> tuple[TensorBox | ShapeAsConstantBuffer, TensorBox | ShapeAsConstantBuffer]: ...
 @register_lowering(aten.max_pool3d_with_indices, type_promotion_kind=None)
 def max_pool3d_with_indices(
-    x, kernel_size, stride=..., padding=..., dilation=..., ceil_mode=...
+    x,
+    kernel_size,
+    stride=...,
+    padding=...,
+    dilation=...,
+    ceil_mode=...,
 ) -> tuple[TensorBox | ShapeAsConstantBuffer, TensorBox | ShapeAsConstantBuffer]: ...
 
 fallback_max_pool2d_with_indices_backward = ...
 
 @register_lowering(aten.max_pool2d_with_indices_backward, type_promotion_kind=None)
 def max_pool2d_with_indices_backward(
-    grad_output, x, kernel_size, stride, padding, dilation, ceil_mode, indices
+    grad_output,
+    x,
+    kernel_size,
+    stride,
+    padding,
+    dilation,
+    ceil_mode,
+    indices,
 ) -> PyTree | TensorBox | ShapeAsConstantBuffer: ...
 def pad_adaptive_loader(x, pad_val=...) -> Callable[..., Any]: ...
 def compute_indices_adaptive_pooling(
-    start_index, end_index, h_in, w_in, h_out, w_out
+    start_index,
+    end_index,
+    h_in,
+    w_in,
+    h_out,
+    w_out,
 ) -> tuple[partial[Any], partial[Any], partial[Any], partial[Any]]: ...
 
 fallback_adaptive_avg_pool2d = ...
@@ -623,21 +797,32 @@ fallback_adaptive_max_pool2d = ...
 
 @register_lowering(aten.adaptive_max_pool2d)
 def adaptive_max_pool2d(
-    x, output_size
+    x,
+    output_size,
 ) -> (
     tuple[TensorBox | ShapeAsConstantBuffer, TensorBox | ShapeAsConstantBuffer] | PyTree
 ): ...
 @register_lowering(aten.fractional_max_pool2d)
 def fractional_max_pool2d(
-    x, kernel_size, output_size, random_samples
+    x,
+    kernel_size,
+    output_size,
+    random_samples,
 ) -> tuple[TensorBox, TensorBox | ShapeAsConstantBuffer]: ...
 @register_lowering(aten.fractional_max_pool3d)
 def fractional_max_pool3d(
-    x, kernel_size, output_size, random_samples
+    x,
+    kernel_size,
+    output_size,
+    random_samples,
 ) -> tuple[TensorBox, TensorBox | ShapeAsConstantBuffer]: ...
 @register_lowering(aten.upsample_nearest2d_backward.default)
 def upsample_nearest2d_backward(
-    x, output_size=..., input_size=..., scales_h=..., scales_w=...
+    x,
+    output_size=...,
+    input_size=...,
+    scales_h=...,
+    scales_w=...,
 ) -> PyTree | TensorBox | ShapeAsConstantBuffer: ...
 
 fallback_avg_pool2d = ...
@@ -692,29 +877,49 @@ def avg_pool3d_backward(
     divisor_override=...,
 ) -> PyTree | TensorBox | ShapeAsConstantBuffer: ...
 def make_reduction(
-    reduction_type: ReductionType, override_return_dtype=...
+    reduction_type: ReductionType,
+    override_return_dtype=...,
 ) -> Callable[..., TensorBox | ShapeAsConstantBuffer]: ...
 @register_lowering(aten.mean)
 def mean(
-    x, axis=..., keepdim=..., *, dtype=...
+    x,
+    axis=...,
+    keepdim=...,
+    *,
+    dtype=...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 def var_mean_sum_(
-    x, axis, correction, keepdim, return_mean
+    x,
+    axis,
+    correction,
+    keepdim,
+    return_mean,
 ) -> (
     tuple[Any | TensorBox | ShapeAsConstantBuffer]
     | tuple[
-        Any | TensorBox | ShapeAsConstantBuffer, TensorBox | ShapeAsConstantBuffer | Any
+        Any | TensorBox | ShapeAsConstantBuffer,
+        TensorBox | ShapeAsConstantBuffer | Any,
     ]
 ): ...
 def use_two_step_variance(x, axis, keepdim) -> bool: ...
 def var_mean_welford_(
-    x, axis, *, correction, keepdim, return_mean
+    x,
+    axis,
+    *,
+    correction,
+    keepdim,
+    return_mean,
 ) -> (
     tuple[Any | TensorBox | ShapeAsConstantBuffer, TensorBox | ShapeAsConstantBuffer]
     | tuple[Any | TensorBox | ShapeAsConstantBuffer]
 ): ...
 def var_mean_helper_(
-    x, *, axis, correction, keepdim, return_mean
+    x,
+    *,
+    axis,
+    correction,
+    keepdim,
+    return_mean,
 ) -> (
     TensorBox
     | ShapeAsConstantBuffer
@@ -722,7 +927,11 @@ def var_mean_helper_(
 ): ...
 @register_lowering([aten.var, prims.var])
 def var_(
-    x, axis=..., *, correction=..., keepdim=...
+    x,
+    axis=...,
+    *,
+    correction=...,
+    keepdim=...,
 ) -> (
     TensorBox
     | ShapeAsConstantBuffer
@@ -730,7 +939,11 @@ def var_(
 ): ...
 @register_lowering(aten.var_mean)
 def var_mean(
-    x, axis=..., *, correction=..., keepdim=...
+    x,
+    axis=...,
+    *,
+    correction=...,
+    keepdim=...,
 ) -> (
     TensorBox
     | ShapeAsConstantBuffer
@@ -772,7 +985,11 @@ def div(a, b) -> TensorBox | ShapeAsConstantBuffer: ...
 def fmod(a, b) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering([aten.sum, prims.sum])
 def sum_(
-    x, axis=..., keepdims=..., *, dtype=...
+    x,
+    axis=...,
+    keepdims=...,
+    *,
+    dtype=...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 
 fallback_cumsum = ...
@@ -789,7 +1006,8 @@ def cumprod(x, axis=..., dtype=...) -> TensorBox | ShapeAsConstantBuffer | PyTre
 def logcumsumexp(x, dim) -> TensorBox | ShapeAsConstantBuffer | PyTree: ...
 @register_lowering(aten.cummax, type_promotion_kind=None)
 def cummax(
-    x, axis=...
+    x,
+    axis=...,
 ) -> (
     tuple[TensorBox | ShapeAsConstantBuffer, Any]
     | PyTree
@@ -797,7 +1015,8 @@ def cummax(
 ): ...
 @register_lowering(aten.cummin, type_promotion_kind=None)
 def cummin(
-    x, axis=...
+    x,
+    axis=...,
 ) -> (
     tuple[TensorBox | ShapeAsConstantBuffer, Any]
     | PyTree
@@ -805,13 +1024,19 @@ def cummin(
 ): ...
 @register_lowering(aten.prod)
 def prod(
-    x, axis=..., keepdims=..., *, dtype=...
+    x,
+    axis=...,
+    keepdims=...,
+    *,
+    dtype=...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(aten.any)
 def reduce_any(x, dim=..., keepdim=...) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(aten.max, type_promotion_kind=None)
 def reduce_max(
-    x, dim=..., keepdim=...
+    x,
+    dim=...,
+    keepdim=...,
 ) -> (
     tuple[TensorBox | ShapeAsConstantBuffer, TensorBox | ShapeAsConstantBuffer]
     | TensorBox
@@ -819,7 +1044,9 @@ def reduce_max(
 ): ...
 @register_lowering(aten.min, type_promotion_kind=None)
 def reduce_min(
-    x, dim=..., keepdim=...
+    x,
+    dim=...,
+    keepdim=...,
 ) -> (
     tuple[TensorBox | ShapeAsConstantBuffer, TensorBox | ShapeAsConstantBuffer]
     | TensorBox
@@ -835,7 +1062,11 @@ sort_fallback = ...
 
 @register_lowering(aten.sort.stable, type_promotion_kind=None)
 def sort_stable(
-    x, *, stable=..., dim=..., descending=...
+    x,
+    *,
+    stable=...,
+    dim=...,
+    descending=...,
 ) -> (
     tuple[TensorBox | ShapeAsConstantBuffer, TensorBox | ShapeAsConstantBuffer]
     | PyTree
@@ -843,14 +1074,18 @@ def sort_stable(
 ): ...
 @register_lowering(aten.sort.default, type_promotion_kind=None)
 def sort(
-    x, dim=..., descending=...
+    x,
+    dim=...,
+    descending=...,
 ) -> (
     tuple[TensorBox | ShapeAsConstantBuffer, TensorBox | ShapeAsConstantBuffer]
     | PyTree
     | tuple[TensorBox | ShapeAsConstantBuffer, TensorBox | ShapeAsConstantBuffer | Any]
 ): ...
 def register_pointwise_numeric(
-    op, name=..., triton_fallback=...
+    op,
+    name=...,
+    triton_fallback=...,
 ) -> Callable[..., Any]: ...
 def register_pointwise_numeric_ldf64(
     op: torch._ops.OpOverloadPacket,
@@ -919,33 +1154,53 @@ if hasattr(torch.ops.fsdp, "copy_"):
 def resize(x, size, *, memory_format=...) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(triton_kernel_wrapper_mutation)
 def triton_kernel_wrap_(
-    *, kernel_idx, constant_args_idx, grid, tma_descriptor_metadata, kwargs
+    *,
+    kernel_idx,
+    constant_args_idx,
+    grid,
+    tma_descriptor_metadata,
+    kwargs,
 ) -> dict[Any, TensorBox]: ...
 @register_lowering(torch.ops.higher_order.cond, type_promotion_kind=None)
 def cond(
-    pred, true_fn, false_fn, operands
+    pred,
+    true_fn,
+    false_fn,
+    operands,
 ) -> list[TensorBox | ShapeAsConstantBuffer]: ...
 @register_lowering(torch.ops.higher_order.while_loop, type_promotion_kind=None)
 def while_loop(
-    cond_fn, body_fn, carried_inputs, additional_inputs, stack_output=...
+    cond_fn,
+    body_fn,
+    carried_inputs,
+    additional_inputs,
+    stack_output=...,
 ) -> list[TensorBox | ShapeAsConstantBuffer]: ...
 @register_lowering(torch.ops.higher_order.invoke_subgraph, type_promotion_kind=None)
 def invoke_subgraph(
-    subgraph_fn: ir.Subgraph, identifier: str, *operands
+    subgraph_fn: ir.Subgraph,
+    identifier: str,
+    *operands,
 ) -> list[TensorBox | ShapeAsConstantBuffer]: ...
 @register_lowering(torch._higher_order_ops.invoke_quant, type_promotion_kind=None)
 def invoke_quant_tracer(subgraph_fn: ir.Subgraph, *operands, scheme=...) -> None: ...
 @register_lowering(associative_scan_op, type_promotion_kind=None)
 def associative_scan(
-    combine_fn: ir.Subgraph, xs, additional_inputs: tuple[torch.Tensor]
+    combine_fn: ir.Subgraph,
+    xs,
+    additional_inputs: tuple[torch.Tensor],
 ): ...
 @register_lowering(torch.ops.higher_order.with_effects, type_promotion_kind=None)
 def with_effects(
-    token, op, *args, **kwargs
+    token,
+    op,
+    *args,
+    **kwargs,
 ) -> tuple[Any] | tuple[Any, PyTree] | tuple[Any, *tuple[Any, ...]]: ...
 @register_lowering(inductor_prims.prepare_softmax_online, type_promotion_kind=None)
 def prepare_softmax_online(
-    x, dim
+    x,
+    dim,
 ) -> tuple[TensorBox | ShapeAsConstantBuffer, TensorBox | ShapeAsConstantBuffer]: ...
 @contextlib.contextmanager
 def force_fallback(op: torch._ops.OpOverload) -> Generator[None, Any]: ...

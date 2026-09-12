@@ -31,10 +31,15 @@ class EfficientNetImageProcessorFast(BaseImageProcessorFast):
     include_top = ...
     valid_kwargs = EfficientNetFastImageProcessorKwargs
     def __init__(
-        self, **kwargs: Unpack[EfficientNetFastImageProcessorKwargs]
+        self,
+        **kwargs: Unpack[EfficientNetFastImageProcessorKwargs],
     ) -> None: ...
     def rescale(
-        self, image: torch.Tensor, scale: float, offset: bool | None = ..., **kwargs
+        self,
+        image: torch.Tensor,
+        scale: float,
+        offset: bool | None = ...,
+        **kwargs,
     ) -> torch.Tensor: ...
     def rescale_and_normalize(
         self,
@@ -48,7 +53,9 @@ class EfficientNetImageProcessorFast(BaseImageProcessorFast):
     ) -> torch.Tensor: ...
     @auto_docstring
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[EfficientNetFastImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[EfficientNetFastImageProcessorKwargs],
     ) -> BatchFeature: ...
 
 __all__ = ["EfficientNetImageProcessorFast"]

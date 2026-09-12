@@ -38,10 +38,16 @@ class RTDetrV2MultiscaleDeformableAttention(nn.Module):
 
 class RTDetrV2MultiheadAttention(nn.Module):
     def __init__(
-        self, embed_dim: int, num_heads: int, dropout: float = ..., bias: bool = ...
+        self,
+        embed_dim: int,
+        num_heads: int,
+        dropout: float = ...,
+        bias: bool = ...,
     ) -> None: ...
     def with_pos_embed(
-        self, tensor: torch.Tensor, position_embeddings: Tensor | None
+        self,
+        tensor: torch.Tensor,
+        position_embeddings: Tensor | None,
     ):  # -> Tensor:
         ...
     def forward(
@@ -52,7 +58,9 @@ class RTDetrV2MultiheadAttention(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class RTDetrV2DecoderLayer(nn.Module):
@@ -145,7 +153,9 @@ def replace_batch_norm(model):  # -> None:
 class RTDetrV2ConvEncoder(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, pixel_values: torch.Tensor, pixel_mask: torch.Tensor
+        self,
+        pixel_values: torch.Tensor,
+        pixel_mask: torch.Tensor,
     ):  # -> list[Any]:
         ...
 
@@ -188,7 +198,11 @@ class RTDetrV2CSPRepLayer(nn.Module):
 class RTDetrV2Encoder(nn.Module):
     def __init__(self, config: RTDetrV2Config) -> None: ...
     def forward(
-        self, src, src_mask=..., pos_embed=..., output_attentions: bool = ...
+        self,
+        src,
+        src_mask=...,
+        pos_embed=...,
+        output_attentions: bool = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -196,7 +210,12 @@ class RTDetrV2HybridEncoder(nn.Module):
     def __init__(self, config: RTDetrV2Config) -> None: ...
     @staticmethod
     def build_2d_sincos_position_embedding(
-        width, height, embed_dim=..., temperature=..., device=..., dtype=...
+        width,
+        height,
+        embed_dim=...,
+        temperature=...,
+        device=...,
+        dtype=...,
     ):  # -> Tensor:
         ...
     def forward(
@@ -235,7 +254,11 @@ class RTDetrV2Model(RTDetrV2PreTrainedModel):
         ...
     @compile_compatible_method_lru_cache(maxsize=32)
     def generate_anchors(
-        self, spatial_shapes=..., grid_size=..., device=..., dtype=...
+        self,
+        spatial_shapes=...,
+        grid_size=...,
+        device=...,
+        dtype=...,
     ):  # -> tuple[Tensor, Tensor]:
         ...
     @auto_docstring

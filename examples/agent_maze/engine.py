@@ -2,8 +2,8 @@
 
 No global turn. Agents are autonomous sagent ``Agent``s that act through the
 ``WorldTool``; the Engine is a reactive feedback service that resolves one action at a
-time (under an async lock), advances a **logical interaction clock** — latency-
-independent and reproducible, unlike wall-clock — and appends an **event log** that
+time (under an async lock), advances a **logical interaction clock** -- latency-
+independent and reproducible, unlike wall-clock -- and appends an **event log** that
 drives both the metrics and the replay.
 
 The one coordination point is the lock-press. ``press(partner=<label>)`` arms the plate
@@ -25,33 +25,9 @@ from examples.agent_maze.world import PLATE_LETTERS, World
 
 
 # A press stays live this many LOGICAL interactions. Short enough that an un-signalled
-# partner's natural (staggered) arrival misses it — so you must coordinate "press now" —
+# partner's natural (staggered) arrival misses it -- so you must coordinate "press now" --
 # yet not wall-clock, so it's immune to model latency.
 PRESS_WINDOW = 8  # config-globals: ignore -- game-balance tuning dial
-
-
-def _local_map(world: World, aid: str) -> str:
-    """Return a small ASCII fog window centred on the agent (@)."""
-    a = world.agents[aid]
-    s = world.sight
-    occ = {o.xy for o in world.agents.values() if o.alive and o.id != aid}
-    lines: list[str] = []
-    for dy in range(-s, s + 1):
-        row = ""
-        for dx in range(-s, s + 1):
-            x, y = a.x + dx, a.y + dy
-            if (dx, dy) == (0, 0):
-                row += "@"
-            elif (x, y) in world._plate_lock:  # noqa: SLF001
-                row += PLATE_LETTERS[world._plate_lock[(x, y)]]  # noqa: SLF001
-            elif (x, y) in occ:
-                row += "o"
-            elif world.cell(x, y) == "wall":
-                row += "#"
-            else:
-                row += "."
-        lines.append(row)
-    return "\n".join(lines)
 
 
 class Engine:
@@ -61,11 +37,13 @@ class Engine:
         """Initialize the engine."""
         self.rows = rows
         self.world = World(rows, sight=sight)
-        self.t = 0  # logical interaction clock (advances one per decision)
-        self.seq = 0  # total event order
+        self.t = 0  # Logical interaction clock (advances one per decision)
+        self.seq = 0  # `total` event order.
         self.events: list[dict[str, Any]] = []
-        self.lock = asyncio.Lock()  # serialize state mutations across concurrent agents
-        # aid -> (expiry_t, partner_label, plate_xy the arm is bound to)
+        self.lock = (
+            asyncio.Lock()
+        )  # Serialize state mutations across concurrent agents.
+        # Aid -> (expiry_t, partner_label, plate_xy the arm is bound to).
         self.armed: dict[str, tuple[int, str, tuple[int, int]]] = {}
         self.solved_seq: int | None = None
         self.scene = self._build_scene(model)
@@ -75,7 +53,7 @@ class Engine:
     def emit(self, agent: str, kind: str, **payload: object) -> None:
         """Emit an event."""
         self.events.append(
-            {"seq": self.seq, "t": self.t, "agent": agent, "kind": kind, **payload}
+            {"seq": self.seq, "t": self.t, "agent": agent, "kind": kind, **payload},
         )
         self.seq += 1
 
@@ -96,7 +74,7 @@ class Engine:
                         "lock": li,
                         "letter": PLATE_LETTERS[li],
                         "partner_xy": list(partner) if partner else None,
-                    }
+                    },
                 )
         return {
             "grid": self.rows,
@@ -109,7 +87,10 @@ class Engine:
     # -- lifecycle ---------------------------------------------------------
 
     def add_agent(
-        self, aid: str, xy: tuple[int, int], parent: str | None = None
+        self,
+        aid: str,
+        xy: tuple[int, int],
+        parent: str | None = None,
     ) -> None:
         """Embody an agent; a spawn event is keyed to the PARENT (for genealogy)."""
         self.world.add_agent(aid, xy)
@@ -128,15 +109,25 @@ class Engine:
     def look(self, aid: str) -> str:
         """Return the agent's view of the surrounding maze."""
         if self._frozen():
-            return "the maze is already solved — stop."
+            return "the maze is already solved -- stop."
         self.t += 1
         self.emit(aid, "look")
         return "You look around."
 
     def move(self, aid: str, x: int, y: int) -> str:
-        """Walk the body along a shortest path toward (x,y); one move event per cell."""
+        """Walk the body toward a destination along a shortest path.
+
+        Args:
+          aid: Agent identifier whose body moves.
+          x: Destination column.
+          y: Destination row.
+
+        Returns:
+          result: Description of the arrival or movement failure.
+
+        """
         if self._frozen():
-            return "the maze is already solved — stop."
+            return "the maze is already solved -- stop."
         self.t += 1
         a = self.world.agents[aid]
         if not self.world.passable(x, y):
@@ -152,7 +143,7 @@ class Engine:
             a.x, a.y = nxt
             self.emit(aid, "move", **{"from": list(frm), "to": list(a.xy)})
             steps += 1
-        # An arm is bound to the exact plate it was pressed on; moving off it AT ALL
+        # An arm is bound to the exact plate it was pressed on; moving off it at all
         # (even onto another plate) drops it, so a press can't be relocated to a new lock.
         if aid in self.armed and self.armed[aid][2] != a.xy:
             del self.armed[aid]
@@ -162,9 +153,18 @@ class Engine:
         return f"{'arrived at' if arrived else 'stopped at'} ({a.x},{a.y})."
 
     def press(self, aid: str, partner: str) -> str:
-        """Arm the plate under you, naming a partner; latch the lock if the pair is live."""
+        """Arm the current plate and name the partner who must press.
+
+        Args:
+          aid: Agent identifier standing on the plate.
+          partner: Other agent identifier named by the press.
+
+        Returns:
+          result: Description of the press outcome.
+
+        """
         if self._frozen():
-            return "the maze is already solved — stop."
+            return "the maze is already solved -- stop."
         self.t += 1
         a = self.world.agents[aid]
         if a.xy not in self.world._plate_lock:  # noqa: SLF001
@@ -178,7 +178,7 @@ class Engine:
             return "press failed: name your PARTNER (a different agent), not yourself."
         a.presses_left -= 1
         until = self.t + PRESS_WINDOW
-        self.armed[aid] = (until, partner, a.xy)  # bound to THIS plate
+        self.armed[aid] = (until, partner, a.xy)  # Bound to THIS plate.
         li = self.world._plate_lock[a.xy]  # noqa: SLF001
         self.emit(
             aid,
@@ -218,7 +218,9 @@ class Engine:
         if len(holder) < 2 or any(t not in holder for t in tiles):
             return None
         (id1, p1), (id2, p2) = holder[tiles[0]], holder[tiles[1]]
-        if id1 != id2 and p1 == id2 and p2 == id1:  # two distinct, each names the other
+        if (
+            id1 != id2 and p1 == id2 and p2 == id1
+        ):  # Two distinct, each names the other.
             lk["open"] = True
             self.emit(
                 id1,
@@ -235,7 +237,16 @@ class Engine:
     # -- perception --------------------------------------------------------
 
     def feedback(self, aid: str, head: str = "") -> str:
-        """Render what ``aid`` perceives now (the tool's return payload)."""
+        """Render the current perception for an agent.
+
+        Args:
+          aid: Agent identifier whose view is rendered.
+          head: Optional text prepended to the rendered view.
+
+        Returns:
+          feedback: Tool payload describing the agent's local state.
+
+        """
         w = self.world
         a = w.agents[aid]
         v = w.view(aid)
@@ -247,7 +258,7 @@ class Engine:
             )
             or "none in sight"
         )
-        onp = f" — ON plate '{v['on_plate_letter']}'" if v["on_plate"] else ""
+        onp = f" -- ON plate '{v['on_plate_letter']}'" if v["on_plate"] else ""
         armed = ""
         if aid in self.armed:
             until, partner, _plate = self.armed[aid]
@@ -261,3 +272,27 @@ class Engine:
             f"{_local_map(w, aid)}\n"
             f"Plates in sight: {plates}"
         )
+
+
+def _local_map(world: World, aid: str) -> str:
+    """Return a small ASCII fog window centred on the agent (@)."""
+    a = world.agents[aid]
+    s = world.sight
+    occ = {o.xy for o in world.agents.values() if o.alive and o.id != aid}
+    lines: list[str] = []
+    for dy in range(-s, s + 1):
+        row = ""
+        for dx in range(-s, s + 1):
+            x, y = a.x + dx, a.y + dy
+            if (dx, dy) == (0, 0):
+                row += "@"
+            elif (x, y) in world._plate_lock:  # noqa: SLF001
+                row += PLATE_LETTERS[world._plate_lock[(x, y)]]  # noqa: SLF001
+            elif (x, y) in occ:
+                row += "o"
+            elif world.cell(x, y) == "wall":
+                row += "#"
+            else:
+                row += "."
+        lines.append(row)
+    return "\n".join(lines)

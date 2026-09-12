@@ -12,7 +12,11 @@ Time series distributional output classes and utilities.
 
 class AffineTransformed(TransformedDistribution):
     def __init__(
-        self, base_distribution: Distribution, loc=..., scale=..., event_dim=...
+        self,
+        base_distribution: Distribution,
+        loc=...,
+        scale=...,
+        event_dim=...,
     ) -> None: ...
     @property
     def mean(self):  # -> Tensor:
@@ -66,7 +70,10 @@ class StudentTOutput(DistributionOutput):
     distribution_class: type = ...
     @classmethod
     def domain_map(
-        cls, df: torch.Tensor, loc: torch.Tensor, scale: torch.Tensor
+        cls,
+        df: torch.Tensor,
+        loc: torch.Tensor,
+        scale: torch.Tensor,
     ):  # -> tuple[Tensor, Tensor, Tensor]:
         ...
 
@@ -75,7 +82,9 @@ class NormalOutput(DistributionOutput):
     distribution_class: type = ...
     @classmethod
     def domain_map(
-        cls, loc: torch.Tensor, scale: torch.Tensor
+        cls,
+        loc: torch.Tensor,
+        scale: torch.Tensor,
     ):  # -> tuple[Tensor, Tensor]:
         ...
 
@@ -84,7 +93,9 @@ class NegativeBinomialOutput(DistributionOutput):
     distribution_class: type = ...
     @classmethod
     def domain_map(
-        cls, total_count: torch.Tensor, logits: torch.Tensor
+        cls,
+        total_count: torch.Tensor,
+        logits: torch.Tensor,
     ):  # -> tuple[Tensor, Tensor]:
         ...
     def distribution(

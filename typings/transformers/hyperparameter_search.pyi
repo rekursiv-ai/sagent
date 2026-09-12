@@ -38,7 +38,8 @@ class SigOptBackend(HyperParamSearchBackendBase):
     def run(self, trainer, n_trials: int, direction: str, **kwargs):  # -> BestRun:
         ...
     def default_hp_space(
-        self, trial
+        self,
+        trial,
     ):  # -> list[dict[str, dict[str, float] | str] | dict[str, dict[str, int] | str] | dict[str, list[str] | str]]:
         ...
 

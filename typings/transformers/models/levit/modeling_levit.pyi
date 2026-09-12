@@ -55,7 +55,12 @@ class LevitSubsample(nn.Module):
 
 class LevitAttention(nn.Module):
     def __init__(
-        self, hidden_sizes, key_dim, num_attention_heads, attention_ratio, resolution
+        self,
+        hidden_sizes,
+        key_dim,
+        num_attention_heads,
+        attention_ratio,
+        resolution,
     ) -> None: ...
     @torch.no_grad()
     def train(self, mode=...):  # -> None:
@@ -116,7 +121,10 @@ class LevitStage(nn.Module):
 class LevitEncoder(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_state, output_hidden_states=..., return_dict=...
+        self,
+        hidden_state,
+        output_hidden_states=...,
+        return_dict=...,
     ):  # -> tuple[Any | tuple[Any, ...] | tuple[()], ...] | BaseModelOutputWithNoAttention:
         ...
 

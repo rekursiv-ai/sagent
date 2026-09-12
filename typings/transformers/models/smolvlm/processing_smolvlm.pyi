@@ -53,7 +53,10 @@ class SmolVLMProcessor(ProcessorMixin):
         **kwargs,
     ) -> None: ...
     def expand_text_with_image_tokens(
-        self, text, image_rows, image_cols
+        self,
+        text,
+        image_rows,
+        image_cols,
     ):  # -> list[Any]:
         ...
     def expand_text_with_video_tokens(self, text, video_inputs):  # -> list[Any]:

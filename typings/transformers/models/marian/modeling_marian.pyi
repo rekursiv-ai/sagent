@@ -25,13 +25,18 @@ from ...utils.deprecation import deprecate_kwarg
 logger = ...
 
 def shift_tokens_right(
-    input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: torch.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ):  # -> Tensor:
     ...
 
 class MarianSinusoidalPositionalEmbedding(nn.Embedding):
     def __init__(
-        self, num_positions: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_positions: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ) -> None: ...
     @torch.no_grad()
     def forward(
@@ -89,7 +94,9 @@ class MarianEncoderLayer(GradientCheckpointingLayer):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
 
 class MarianDecoderLayer(GradientCheckpointingLayer):
@@ -108,7 +115,8 @@ class MarianDecoderLayer(GradientCheckpointingLayer):
         use_cache: bool | None = ...,
         cache_position: torch.Tensor | None = ...,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring
@@ -126,7 +134,9 @@ class MarianPreTrainedModel(PreTrainedModel):
 
 class MarianEncoder(MarianPreTrainedModel):
     def __init__(
-        self, config: MarianConfig, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: MarianConfig,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -139,12 +149,16 @@ class MarianEncoder(MarianPreTrainedModel):
         return_dict: bool | None = ...,
     ) -> tuple[torch.Tensor] | BaseModelOutput: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | BaseModelOutput: ...
 
 class MarianDecoder(MarianPreTrainedModel):
     def __init__(
-        self, config: MarianConfig, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: MarianConfig,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -163,7 +177,9 @@ class MarianDecoder(MarianPreTrainedModel):
         cache_position: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
 
 @auto_docstring

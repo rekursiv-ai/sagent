@@ -104,7 +104,9 @@ class TFLongformerEmbeddings(keras.layers.Layer):
     def build(self, input_shape=...):  # -> None:
         ...
     def create_position_ids_from_input_ids(
-        self, input_ids, past_key_values_length=...
+        self,
+        input_ids,
+        past_key_values_length=...,
     ): ...
     def call(
         self,
@@ -125,7 +127,10 @@ class TFLongformerIntermediate(keras.layers.Layer):
 class TFLongformerOutput(keras.layers.Layer):
     def __init__(self, config: LongformerConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -139,7 +144,10 @@ class TFLongformerPooler(keras.layers.Layer):
 class TFLongformerSelfOutput(keras.layers.Layer):
     def __init__(self, config: LongformerConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -230,7 +238,7 @@ class TFLongformerModel(TFLongformerPreTrainedModel):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        LONGFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        LONGFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     def call(
         self,
@@ -254,7 +262,8 @@ class TFLongformerModel(TFLongformerPreTrainedModel):
     LONGFORMER_START_DOCSTRING,
 )
 class TFLongformerForMaskedLM(
-    TFLongformerPreTrainedModel, TFMaskedLanguageModelingLoss
+    TFLongformerPreTrainedModel,
+    TFMaskedLanguageModelingLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
@@ -263,7 +272,7 @@ class TFLongformerForMaskedLM(
     def get_prefix_bias_name(self): ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        LONGFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        LONGFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="allenai/longformer-base-4096",
@@ -296,13 +305,14 @@ class TFLongformerForMaskedLM(
     LONGFORMER_START_DOCSTRING,
 )
 class TFLongformerForQuestionAnswering(
-    TFLongformerPreTrainedModel, TFQuestionAnsweringLoss
+    TFLongformerPreTrainedModel,
+    TFQuestionAnsweringLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        LONGFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        LONGFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="allenai/longformer-large-4096-finetuned-triviaqa",
@@ -341,13 +351,14 @@ class TFLongformerClassificationHead(keras.layers.Layer):
     LONGFORMER_START_DOCSTRING,
 )
 class TFLongformerForSequenceClassification(
-    TFLongformerPreTrainedModel, TFSequenceClassificationLoss
+    TFLongformerPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        LONGFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        LONGFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -384,7 +395,7 @@ class TFLongformerForMultipleChoice(TFLongformerPreTrainedModel, TFMultipleChoic
         ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        LONGFORMER_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        LONGFORMER_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -414,14 +425,15 @@ class TFLongformerForMultipleChoice(TFLongformerPreTrainedModel, TFMultipleChoic
     LONGFORMER_START_DOCSTRING,
 )
 class TFLongformerForTokenClassification(
-    TFLongformerPreTrainedModel, TFTokenClassificationLoss
+    TFLongformerPreTrainedModel,
+    TFTokenClassificationLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     _keys_to_ignore_on_load_missing = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        LONGFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        LONGFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,

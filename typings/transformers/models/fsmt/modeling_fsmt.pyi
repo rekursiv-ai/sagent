@@ -32,7 +32,11 @@ def make_padding_mask(input_ids, padding_idx=...):  # -> None:
 class EncoderLayer(nn.Module):
     def __init__(self, config: FSMTConfig) -> None: ...
     def forward(
-        self, x, encoder_padding_mask, layer_head_mask, output_attentions=...
+        self,
+        x,
+        encoder_padding_mask,
+        layer_head_mask,
+        output_attentions=...,
     ):  # -> tuple[Any, Any]:
         ...
 

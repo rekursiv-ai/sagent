@@ -28,7 +28,8 @@ class Lit:
     def __repr__(self) -> Any: ...
 
 def make_crossref_functionalize(
-    op: torch._ops.OpOverload[_P, _T], final_key: DispatchKey
+    op: torch._ops.OpOverload[_P, _T],
+    final_key: DispatchKey,
 ) -> Callable[_P, _T] | DispatchKey: ...
 @contextmanager
 def enable_crossref_functionalize() -> Generator[None, Any]: ...

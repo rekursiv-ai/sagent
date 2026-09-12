@@ -38,7 +38,8 @@ class _MinimizerBase:
         module: torch.fx.GraphModule,
         sample_input: Tensors,
         compare_fn: Callable[
-            [TensorOrTensors, TensorOrTensors, Names], tuple[float, bool]
+            [TensorOrTensors, TensorOrTensors, Names],
+            tuple[float, bool],
         ],
         settings: _MinimizerSettingBase,
         module_exporter: Callable[[Tensors, torch.fx.GraphModule, str], None]
@@ -47,10 +48,16 @@ class _MinimizerBase:
     ) -> None: ...
     def run_shape_prop(self) -> None: ...
     def run_a(
-        self, mod: torch.fx.GraphModule, inputs: Tensors, report_idx: int = ...
+        self,
+        mod: torch.fx.GraphModule,
+        inputs: Tensors,
+        report_idx: int = ...,
     ) -> TensorOrTensors: ...
     def run_b(
-        self, mod: torch.fx.GraphModule, inputs: Tensors, report_idx: int = ...
+        self,
+        mod: torch.fx.GraphModule,
+        inputs: Tensors,
+        report_idx: int = ...,
     ) -> TensorOrTensors: ...
     def run_nodes(self, start: str | None = ..., end: str | None = ...) -> None: ...
     def print_report(self, report: list[str]) -> None: ...

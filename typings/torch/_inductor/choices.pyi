@@ -23,19 +23,30 @@ class Sortable(typing.Protocol):
 
 class InductorChoices:
     def get_config_heuristics(
-        self, device_type: str | None = ...
+        self,
+        device_type: str | None = ...,
     ) -> BaseConfigHeuristic: ...
     def get_conv_configs(
-        self, device_type: str | None = ...
+        self,
+        device_type: str | None = ...,
     ) -> partial[Generator[TritonConfig]]: ...
     def get_flex_attention_fwd_configs(
-        self, head_dim: int, dtype: torch.dtype, device_type: str | None = ...
+        self,
+        head_dim: int,
+        dtype: torch.dtype,
+        device_type: str | None = ...,
     ) -> list[Any]: ...
     def get_flex_attention_bwd_configs(
-        self, head_dim: int, dtype: torch.dtype, device_type: str | None = ...
+        self,
+        head_dim: int,
+        dtype: torch.dtype,
+        device_type: str | None = ...,
     ) -> list[Any]: ...
     def get_flex_decode_configs(
-        self, head_dim: int, dtype: torch.dtype, device_type: str | None = ...
+        self,
+        head_dim: int,
+        dtype: torch.dtype,
+        device_type: str | None = ...,
     ) -> list[Any]: ...
     def get_mm_configs(
         self,
@@ -56,7 +67,8 @@ class InductorChoices:
     def should_use_cooperative_reduction(features: SIMDKernelFeatures) -> bool: ...
     @staticmethod
     def should_use_persistent_reduction(
-        features: SIMDKernelFeatures, cooperative_reduction: bool
+        features: SIMDKernelFeatures,
+        cooperative_reduction: bool,
     ) -> bool: ...
     @staticmethod
     def reduction_split_factor(
@@ -88,5 +100,7 @@ class InductorChoices:
     ) -> bool: ...
     @staticmethod
     def score_fusion(
-        scheduler: Scheduler, node1: BaseSchedulerNode, node2: BaseSchedulerNode
+        scheduler: Scheduler,
+        node1: BaseSchedulerNode,
+        node2: BaseSchedulerNode,
     ) -> Sortable: ...

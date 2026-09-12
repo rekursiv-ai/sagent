@@ -69,7 +69,8 @@ def generate_compiler_repro_exported_program(
 ) -> str: ...
 def repro_load_args(load_args: Any, save_dir: str | None) -> tuple[Any]: ...
 def repro_common(
-    options: Any, exported_program: ExportedProgram
+    options: Any,
+    exported_program: ExportedProgram,
 ) -> tuple[torch.fx.GraphModule, Any, Any]: ...
 def repro_get_args(
     options: Any,

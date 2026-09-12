@@ -14,7 +14,7 @@ import logging
 import pytest
 
 from sagent.agent import (
-    runtime as agent_runtime,
+    runtime,
     session_io,
 )
 from sagent.agent.agent import Agent
@@ -86,6 +86,9 @@ from sagent.types.tape import (
 )
 
 
+# When ``tape`` is supplied, the mask covers every existing record so every alive splice
+# is absorbed and every HR is hidden. Without ``tape``, the splice has an empty mask
+# (used by tests that only care about the payload).
 def _summary_override(
     summary: list[ModelContextEvent],
     mint_ref: Callable[[], TapeRef],
@@ -95,13 +98,7 @@ def _summary_override(
     fallback_reason: str = "",
     preserved_tail_count: int = 0,
 ) -> ContextSplice:
-    """Build a barrier splice carrying ``summary`` as its payload.
-
-    When ``tape`` is supplied, the mask covers every existing record so
-    every alive splice is absorbed and every HR is hidden. Without
-    ``tape``, the splice has an empty mask (used by tests that only
-    care about the payload).
-    """
+    """Build a barrier splice carrying ``summary`` as its payload."""
     if tape:
         mask: tuple[MaskRange, ...] = (MaskRange.between(tape[0].ref, tape[-1].ref),)
     else:
@@ -210,24 +207,24 @@ class EventCollector:
 
 def make_agent(
     responses: list[AssistantMessage],
-    tools: list[agent_runtime.Tool] | None = None,
+    tools: list[runtime.Tool] | None = None,
     model_delay_sec: float = 0.0,
     fail_on_call: int | None = None,
-) -> tuple[agent_runtime.AgentRuntime, EventCollector]:
+) -> tuple[runtime.AgentRuntime, EventCollector]:
     """Build an AgentRuntime with a scripted model and event collector."""
     model = ScriptedModel(
         responses=responses,
         delay_sec=model_delay_sec,
         fail_on_call=fail_on_call,
     )
-    agent = agent_runtime.AgentRuntime(model=model, tools=tools or [])
+    agent = runtime.AgentRuntime(model=model, tools=tools or [])
     collector = EventCollector()
     agent.observers.append(collector)
     return agent, collector
 
 
 async def run_with_quit(
-    agent: agent_runtime.AgentRuntime,
+    agent: runtime.AgentRuntime,
     timeout_sec: float = 2.0,
 ) -> None:
     """Run run_forever, sending Quit after TapeEventComplete."""
@@ -246,7 +243,7 @@ async def run_with_quit(
 
 
 async def run_until_quit(
-    agent: agent_runtime.AgentRuntime,
+    agent: runtime.AgentRuntime,
     timeout_sec: float = 2.0,
 ) -> None:
     """Run run_forever expecting Quit to arrive externally."""
@@ -266,7 +263,7 @@ async def wait_until(predicate: Callable[[], bool], timeout_sec: float = 1.0) ->
         await asyncio.sleep(0)
 
 
-def _assistant_texts(agent: agent_runtime.AgentRuntime) -> list[str]:
+def _assistant_texts(agent: runtime.AgentRuntime) -> list[str]:
     """Return assistant text entries from runtime history."""
     return [
         entry.text
@@ -280,7 +277,7 @@ async def test_lazy_event_does_not_trigger_a_round_alone() -> None:
     """A ``LazyEvent`` alone fires no model round; it waits for a real turn."""
     agent, _ = make_agent([AssistantMessage(text="should not fire")])
     agent.inbox.push_back(
-        LazyEvent(payload=UserMessage(text="<system-reminder>x</system-reminder>"))
+        LazyEvent(payload=UserMessage(text="<system-reminder>x</system-reminder>")),
     )
     agent.inbox.push_back(Quit())
     await run_until_quit(agent, timeout_sec=2.0)
@@ -298,7 +295,7 @@ async def test_lazy_event_rides_next_real_turn() -> None:
     """A pending ``LazyEvent`` payload commits alongside the next real event."""
     agent, _ = make_agent([AssistantMessage(text="answer")])
     agent.inbox.push_back(
-        LazyEvent(payload=UserMessage(text="<system-reminder>nudge</system-reminder>"))
+        LazyEvent(payload=UserMessage(text="<system-reminder>nudge</system-reminder>")),
     )
     agent.inbox.push_back(UserMessage(text="hello"))
 
@@ -365,7 +362,7 @@ async def test_deferred_messages_wait_until_model_idle() -> None:
         [
             AssistantMessage(text="first"),
             AssistantMessage(text="deferred reply"),
-        ]
+        ],
     )
     deferred_sent = False
 
@@ -375,7 +372,7 @@ async def test_deferred_messages_wait_until_model_idle() -> None:
             deferred_sent = True
             agent.inbox.push_back(UserDeferredMessage(text="later"))
             agent.inbox.push_back(
-                AgentSendDeferredMessage(source="reviewer", text="agent later")
+                AgentSendDeferredMessage(source="reviewer", text="agent later"),
             )
 
     def _quit_on_second_idle(event: RuntimeEvent) -> None:
@@ -412,7 +409,7 @@ async def test_simple_text_response() -> None:
     agent, collector = make_agent(
         [
             AssistantMessage(text="hello back"),
-        ]
+        ],
     )
     agent.inbox.push_back(UserMessage(text="hello"))
 
@@ -641,9 +638,9 @@ async def test_halt_cancels_model_waits_for_user() -> None:
         responses=[
             AssistantMessage(text="first"),
             AssistantMessage(text="after halt"),
-        ]
+        ],
     )
-    agent = agent_runtime.AgentRuntime(model=model)
+    agent = runtime.AgentRuntime(model=model)
     collector = EventCollector()
     agent.observers.append(collector)
     agent.inbox.push_back(UserMessage(text="go"))
@@ -699,9 +696,9 @@ async def test_halt_with_pending_midstream_input_resumes_without_fresh_input() -
         responses=[
             AssistantMessage(text="cancelled"),
             AssistantMessage(text="answered redirect"),
-        ]
+        ],
     )
-    agent = agent_runtime.AgentRuntime(model=model)
+    agent = runtime.AgentRuntime(model=model)
     collector = EventCollector()
     agent.observers.append(collector)
     agent.inbox.push_back(UserMessage(text="go"))
@@ -778,7 +775,7 @@ async def test_halt_publishes_model_response_cancelled_immediately() -> None:
             await asyncio.sleep(10.0)
             return AssistantMessage(text="unreachable")
 
-    agent = agent_runtime.AgentRuntime(model=BlockingModel())
+    agent = runtime.AgentRuntime(model=BlockingModel())
     collector = EventCollector()
     agent.observers.append(collector)
     agent.inbox.push_back(UserMessage(text="go"))
@@ -816,7 +813,7 @@ async def test_clear_wipes_history() -> None:
         [
             AssistantMessage(text="before clear"),
             AssistantMessage(text="fresh start"),
-        ]
+        ],
     )
 
     def _on_first_turn(event: RuntimeEvent) -> None:
@@ -869,7 +866,7 @@ def test_rescue_context_partitions_mask_by_session_id() -> None:
         ReferrableTapeEvent(
             ref=TapeRef(session_id="", ordinal=0),
             event=UserMessage(text="legacy"),
-        )
+        ),
     )
     agent.tape.append(
         ReferrableTapeEvent(
@@ -878,7 +875,7 @@ def test_rescue_context_partitions_mask_by_session_id() -> None:
                 text="orphan",
                 tool_calls=(ToolCall(id="missing", name="x", args={}),),
             ),
-        )
+        ),
     )
     # Should not raise InvalidPayloadError; the mask is now per-session.
     agent._rescue_context()
@@ -944,7 +941,7 @@ def test_user_coalesce_absorbs_prior_mask_only_in_tail_session() -> None:
     # unrelated session-``sid`` records. The fix scopes the absorbed low to
     # same-session ranges only.
     for i in range(6):
-        agent.append_history(UserMessage(text=f"u{i}"))  # ordinals 0..5
+        agent.append_history(UserMessage(text=f"u{i}"))  # Ordinals 0..5.
     prior_ref = agent.append_splice(
         mask=(
             MaskRange(session_id="legacy", lo=1, hi=1),
@@ -1021,7 +1018,7 @@ def test_user_coalesce_does_not_resurrect_a_foreign_session_record() -> None:
                 payload=(UserMessage(text="summary"),),
                 strategy="user_coalesce",
             ),
-        ]
+        ],
     )
     assert [getattr(m, "text", "") for m in agent.context().messages] == ["summary"]
 
@@ -1420,8 +1417,8 @@ async def test_detached_result_delivered_with_tail_toolresult() -> None:
     agent.append_history(ToolResult(call_id="t1", content=DETACHED_PLACEHOLDER))
     agent.inbox.push_back(
         DetachedResult(
-            result=ToolResult(call_id="t1", content="late result", is_error=False)
-        )
+            result=ToolResult(call_id="t1", content="late result", is_error=False),
+        ),
     )
 
     await run_with_quit(agent, timeout_sec=3.0)
@@ -1701,16 +1698,16 @@ async def test_self_clear_does_not_wedge_deferred_repl_input() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class _Holder:
-        runtime: agent_runtime.AgentRuntime
+        runtime: runtime.AgentRuntime
 
     holder = _Holder(runtime=agent)
     agent.observers.append(_input_queue_committer_observer(cast(Agent, holder), queues))
     agent.inbox.push_back(UserMessage(text="go"))
 
     async def driver() -> None:
-        await started.wait()  # tool running: agent is busy, not idle
-        queues.stage_deferred("resumed")  # user hits Tab while busy
-        agent.inbox.push_back(Clear())  # model self-clears
+        await started.wait()  # `tool` running: agent is busy, not idle.
+        queues.stage_deferred("resumed")  # `user` hits Tab while busy.
+        agent.inbox.push_back(Clear())  # `model` self-clears.
         # ``AgentIdle`` never fires while ``AWAIT_USER`` is armed, so the
         # committer must release the staged block on ``ClearComplete``.
         await wait_until(
@@ -1820,7 +1817,7 @@ async def test_compact_rewrites_history() -> None:
         [
             AssistantMessage(text="old response"),
             AssistantMessage(text="post-compact"),
-        ]
+        ],
     )
     agent.compactor = StubCompactor()
 
@@ -1872,7 +1869,7 @@ def test_rescue_declares_that_it_replaces_what_it_sanitizes() -> None:
                 UserMessage(text="keep"),
             ),
             strategy="legacy",
-        )
+        ),
     )
 
     agent._rescue_context()
@@ -1900,7 +1897,7 @@ def test_widen_barrier_mask_preserves_mask_gaps() -> None:
         strategy="summary",
     )
 
-    widened = agent_runtime.widen_barrier_mask(override, tape)
+    widened = runtime.widen_barrier_mask(override, tape)
 
     assert widened.mask == (
         MaskRange.between(refs[0], refs[0]),
@@ -1935,7 +1932,7 @@ def test_widen_barrier_mask_partitions_cross_session_refs() -> None:
         strategy="summary",
     )
 
-    widened = agent_runtime.widen_barrier_mask(override, tape)
+    widened = runtime.widen_barrier_mask(override, tape)
 
     # Each session contributes its own single-session range (cross-session is
     # unconstructable; Issue#313). The legacy "" session widens 0..1; sess-2
@@ -2027,7 +2024,7 @@ async def test_user_facing_error_logged_without_traceback(
             del history, publish
             raise AuthRefreshError("session expired. Run /login.")
 
-    agent = agent_runtime.AgentRuntime(model=AuthFailingModel())
+    agent = runtime.AgentRuntime(model=AuthFailingModel())
     agent.inbox.push_back(UserMessage(text="go"))
 
     async def resume() -> None:
@@ -2077,7 +2074,7 @@ async def test_plain_exception_logged_with_traceback(
             del history, publish
             raise RuntimeError("unexpected")
 
-    agent = agent_runtime.AgentRuntime(model=BoomModel())
+    agent = runtime.AgentRuntime(model=BoomModel())
     agent.inbox.push_back(UserMessage(text="go"))
 
     async def resume() -> None:
@@ -2130,7 +2127,7 @@ async def test_self_pinging_tool_does_not_orphan_tool_use() -> None:
         """Tool that pushes a ``UserMessage`` to its host inbox + returns ok."""
 
         _name: str = "self_ping"
-        runtime: agent_runtime.AgentRuntime | None = None
+        host_runtime: runtime.AgentRuntime | None = None
 
         @property
         def name(self) -> str:
@@ -2142,8 +2139,8 @@ async def test_self_pinging_tool_does_not_orphan_tool_use() -> None:
 
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
-            assert self.runtime is not None
-            self.runtime.inbox.push_back(UserMessage(text=self_msg_text))
+            assert self.host_runtime is not None
+            self.host_runtime.inbox.push_back(UserMessage(text=self_msg_text))
             return ToolResult(call_id="", content="pinged")
 
     @dataclass(kw_only=True, slots=True)
@@ -2166,8 +2163,8 @@ async def test_self_pinging_tool_does_not_orphan_tool_use() -> None:
             return AssistantMessage(text="done")
 
     tool = SelfPingTool()
-    agent = agent_runtime.AgentRuntime(model=PingingModel(), tools=[tool])
-    tool.runtime = agent
+    agent = runtime.AgentRuntime(model=PingingModel(), tools=[tool])
+    tool.host_runtime = agent
     agent.inbox.push_back(UserMessage(text="go"))
 
     await run_with_quit(agent, timeout_sec=3.0)
@@ -2183,7 +2180,7 @@ async def test_self_pinging_tool_does_not_orphan_tool_use() -> None:
                     f"orphan tool_use(s) {pending}: an AssistantMessage "
                     f"with tool_calls was not followed by all its tool_results "
                     f"before the next entry. History: "
-                    f"{[type(m).__name__ for m in agent.context().messages]}"
+                    f"{[type(m).__name__ for m in agent.context().messages]}",
                 )
             pending = {tc.id for tc in entry.tool_calls}
         elif isinstance(entry, ToolResult):
@@ -2193,7 +2190,7 @@ async def test_self_pinging_tool_does_not_orphan_tool_use() -> None:
                 f"orphan tool_use(s) {pending}: a {type(entry).__name__} "
                 f"appeared before all tool_results for the prior "
                 f"AssistantMessage. History: "
-                f"{[type(m).__name__ for m in agent.context().messages]}"
+                f"{[type(m).__name__ for m in agent.context().messages]}",
             )
     assert not pending, (
         f"trailing orphan tool_use(s) {pending} at end of history: "
@@ -2308,7 +2305,7 @@ async def test_run_cancellation_removes_observer_and_stops_driver() -> None:
             await release_model.wait()
             return AssistantMessage(text="too late")
 
-    agent = agent_runtime.AgentRuntime(model=BlockingModel(), tools=[])
+    agent = runtime.AgentRuntime(model=BlockingModel(), tools=[])
     starting_observers = tuple(agent.observers)
     run_task = asyncio.create_task(agent.run(UserMessage(text="go")))
     await asyncio.wait_for(model_started.wait(), timeout=1.0)
@@ -2333,7 +2330,7 @@ async def test_streaming_chunks_published() -> None:
     agent, collector = make_agent(
         [
             AssistantMessage(text="hi"),
-        ]
+        ],
     )
     agent.inbox.push_back(UserMessage(text="go"))
 
@@ -2375,9 +2372,9 @@ async def test_model_waits_for_all_tools() -> None:
                 ),
             ),
             AssistantMessage(text="both in"),
-        ]
+        ],
     )
-    agent = agent_runtime.AgentRuntime(
+    agent = runtime.AgentRuntime(
         model=model,
         tools=[GatedTool(_name="a"), GatedTool(_name="b")],
     )
@@ -2413,7 +2410,7 @@ async def test_model_waits_for_all_tools() -> None:
 async def test_await_user_blocks_non_user_items() -> None:
     """AwaitUser blocks drain until a UserMessage arrives."""
     agent, _ = make_agent([AssistantMessage(text="after wait")])
-    agent.inbox.push_front(agent_runtime.AWAIT_USER)
+    agent.inbox.push_front(runtime.AWAIT_USER)
     agent.inbox.push_back(ModelSwitch(apply=lambda: None))
 
     async def send_user_later() -> None:
@@ -2444,7 +2441,7 @@ async def test_await_user_baseline_skips_preexisting_user() -> None:
     # Pre-existing user message in the queue.
     agent.inbox.push_back(UserMessage(text="pre-existing"))
     # Now arm the gate (push_front simulates Halt re-queuing).
-    agent.inbox.push_front(agent_runtime.AWAIT_USER)
+    agent.inbox.push_front(runtime.AWAIT_USER)
 
     async def send_new_user_later() -> None:
         await asyncio.sleep(0.05)
@@ -2476,7 +2473,7 @@ async def test_await_user_releases_on_agent_send_message() -> None:
     incoming inter-agent message. This test fails without the AWAIT_USER fix.
     """
     agent, _ = make_agent([AssistantMessage(text="after agent send")])
-    agent.inbox.push_front(agent_runtime.AWAIT_USER)
+    agent.inbox.push_front(runtime.AWAIT_USER)
 
     async def send_agent_message_later() -> None:
         await asyncio.sleep(0.05)
@@ -2507,7 +2504,7 @@ async def test_await_user_releases_on_user_deferred_message() -> None:
     the halt and nothing happens.
     """
     agent, _ = make_agent([AssistantMessage(text="after deferred")])
-    agent.inbox.push_front(agent_runtime.AWAIT_USER)
+    agent.inbox.push_front(runtime.AWAIT_USER)
 
     async def send_deferred_later() -> None:
         await asyncio.sleep(0.05)
@@ -2535,12 +2532,12 @@ async def test_await_user_releases_on_agent_send_deferred_message() -> None:
     arriving while the parent is halted must release the gate.
     """
     agent, _ = make_agent([AssistantMessage(text="after agent deferred")])
-    agent.inbox.push_front(agent_runtime.AWAIT_USER)
+    agent.inbox.push_front(runtime.AWAIT_USER)
 
     async def send_deferred_later() -> None:
         await asyncio.sleep(0.05)
         agent.inbox.push_back(
-            AgentSendDeferredMessage(source="Sender", text="agent deferred")
+            AgentSendDeferredMessage(source="Sender", text="agent deferred"),
         )
 
     await asyncio.gather(
@@ -2626,7 +2623,7 @@ async def test_queued_messages_coalesce() -> None:
     agent, _collector = make_agent(
         [
             AssistantMessage(text="got it"),
-        ]
+        ],
     )
     agent.inbox.push_back(UserMessage(text="go"))
     agent.inbox.push_back(UserQueuedMessage(text="first"))
@@ -2647,7 +2644,7 @@ async def test_clear_discards_queued_messages() -> None:
         [
             AssistantMessage(text="before"),
             AssistantMessage(text="fresh"),
-        ]
+        ],
     )
 
     def _on_first(event: RuntimeEvent) -> None:
@@ -2691,7 +2688,7 @@ async def test_clear_discards_deferred_messages() -> None:
         [
             AssistantMessage(text="before"),
             AssistantMessage(text="fresh"),
-        ]
+        ],
     )
 
     def _on_first(event: RuntimeEvent) -> None:
@@ -2764,7 +2761,7 @@ async def test_kill_all_tools(caplog: pytest.LogCaptureFixture) -> None:
         await asyncio.sleep(0)
         agent.inbox.push_back(Quit())
 
-    with caplog.at_level(logging.DEBUG, logger=agent_runtime.__name__):
+    with caplog.at_level(logging.DEBUG, logger=runtime.__name__):
         await asyncio.gather(
             run_until_quit(agent, timeout_sec=3.0),
             kill_all(),
@@ -2840,7 +2837,7 @@ async def test_tool_result_not_in_cohort_ignored() -> None:
     agent, _collector = make_agent(
         [
             AssistantMessage(text="hi"),
-        ]
+        ],
     )
     agent.inbox.push_back(UserMessage(text="go"))
     agent.inbox.push_back(ToolResult(call_id="bogus", content="orphan"))
@@ -2979,7 +2976,7 @@ async def test_no_cohort_complete_on_halt() -> None:
                     publish(ModelResponsePartial(ch))
             return msg
 
-    agent = agent_runtime.AgentRuntime(
+    agent = runtime.AgentRuntime(
         model=BlockingModel2(
             responses=[
                 AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),)),
@@ -3148,7 +3145,7 @@ async def test_compact_clears_queued_messages() -> None:
         [
             AssistantMessage(text="old"),
             AssistantMessage(text="post-compact"),
-        ]
+        ],
     )
     agent.compactor = StubCompactor2()
 
@@ -3190,7 +3187,7 @@ async def test_duplicate_tool_names_raises() -> None:
 
     model = ScriptedModel(responses=[AssistantMessage(text="hi")])
     with pytest.raises(ValueError, match="Duplicate tool name"):
-        agent_runtime.AgentRuntime(model=model, tools=[t1, t2])
+        runtime.AgentRuntime(model=model, tools=[t1, t2])
 
 
 @pytest.mark.asyncio
@@ -3216,7 +3213,7 @@ async def test_tool_result_call_id_stamped_when_empty() -> None:
                 call_id="",
                 content="body",
                 diff="--- old\n+++ new\n",
-                diff_file_path="/tmp/x",  # noqa: S108 — test placeholder string, not an fs path
+                diff_file_path="/tmp/x",  # noqa: S108 -- test placeholder string, not an fs path
                 hint="careful",
                 summary="1 line",
             )
@@ -3240,7 +3237,7 @@ async def test_tool_result_call_id_stamped_when_empty() -> None:
     assert r.call_id == "c1"
     assert r.content == "body"
     assert r.diff.startswith("--- old")
-    assert r.diff_file_path == "/tmp/x"  # noqa: S108 — test placeholder string
+    assert r.diff_file_path == "/tmp/x"  # noqa: S108 -- test placeholder string
     assert r.hint == "careful"
     assert r.summary == "1 line"
 
@@ -3577,7 +3574,7 @@ async def test_compact_while_compacting_is_dropped() -> None:
         [
             AssistantMessage(text="first"),
             AssistantMessage(text="post"),
-        ]
+        ],
     )
     agent.compactor = _SlowCompactor()
 
@@ -3840,7 +3837,7 @@ async def test_compact_cancels_running_model_call() -> None:
             del tape, context, tools, mint_ref
             return ()
 
-    agent = agent_runtime.AgentRuntime(
+    agent = runtime.AgentRuntime(
         model=_BlockingModel(responses=[AssistantMessage(text="x")]),
         compactor=_StubCompactor(),
     )
@@ -3857,7 +3854,7 @@ async def test_compact_cancels_running_model_call() -> None:
             lambda: any(
                 isinstance(item, UserMessage) and item.text == "[summary]"
                 for item in agent.context().messages
-            )
+            ),
         )
         agent.inbox.push_back(Quit())
 
@@ -3887,12 +3884,12 @@ async def test_undetach_all_re_gates_every_detached() -> None:
     fake_task = asyncio.create_task(_done())
     await asyncio.sleep(0)
     agent.detached["zzz"] = fake_task
-    agent.inbox.push_back(Undetach())  # all
+    agent.inbox.push_back(Undetach())  # `all`.
     agent.inbox.push_back(UserMessage(text="go"))
 
     await run_with_quit(agent)
 
-    # zzz was re-added to cohort; collect_detached prunes the completed
+    # Zzz was re-added to cohort; collect_detached prunes the completed
     # task so the next gate cycle proceeds.
     assert "zzz" not in agent.detached
 
@@ -3937,10 +3934,8 @@ def test_a_non_decimal_digit_suffix_is_not_a_mimic_index() -> None:
     or corrupted call id made the whole session unloadable. ``isdecimal`` is
     the predicate that matches what ``int`` accepts.
     """
-    assert (
-        agent_runtime._mimic_index_of(f"{DETACHED_ARRIVED_MIMIC_PREFIX}\u00b2") is None
-    )
-    assert agent_runtime._mimic_index_of(f"{DETACHED_ARRIVED_MIMIC_PREFIX}7") == 7
+    assert runtime._mimic_index_of(f"{DETACHED_ARRIVED_MIMIC_PREFIX}\u00b2") is None
+    assert runtime._mimic_index_of(f"{DETACHED_ARRIVED_MIMIC_PREFIX}7") == 7
 
 
 def test_widening_promotes_an_empty_compaction_mask_to_a_barrier() -> None:
@@ -3963,7 +3958,7 @@ def test_widening_promotes_an_empty_compaction_mask_to_a_barrier() -> None:
         strategy="summary",
     )
 
-    widened = agent_runtime.widen_barrier_mask(summary, agent.tape)
+    widened = runtime.widen_barrier_mask(summary, agent.tape)
 
     assert widened.mask == (MaskRange(session_id=agent.session_id, lo=0, hi=1),)
 
@@ -3987,7 +3982,9 @@ async def test_agent_idle_waits_for_a_waking_deferred_commit() -> None:
     )
     agent.append_history(
         ToolResult(
-            call_id="d1", content=DETACHED_PLACEHOLDER, kind=ToolResultKind.PENDING
+            call_id="d1",
+            content=DETACHED_PLACEHOLDER,
+            kind=ToolResultKind.PENDING,
         ),
     )
     agent._defer_detached_forward(ToolResult(call_id="d1", content="late"))
@@ -4179,7 +4176,7 @@ async def test_thinking_chunk_published() -> None:
             publish(ModelResponseThinking("step 1"))
             return AssistantMessage(text="ok")
 
-    agent = agent_runtime.AgentRuntime(model=_ThinkingModel())
+    agent = runtime.AgentRuntime(model=_ThinkingModel())
     collector = EventCollector()
     agent.observers.append(collector)
     agent.inbox.push_back(UserMessage(text="hi"))
@@ -4212,7 +4209,7 @@ async def test_tool_result_partial_published() -> None:
 
         async def run(self, args: Mapping[str, object]) -> ToolResult:
             del args
-            cid = agent_runtime.current_call_id_var.get("")
+            cid = runtime.current_call_id_var.get("")
             # Tools normally call runtime.publish; here we mimic by
             # pushing the event onto the inbox so the match block sees it.
             return ToolResult(call_id=cid, content="done")
@@ -4309,7 +4306,7 @@ def test_reset_id_counter_is_monotonic() -> None:
     reset_id_counter(200)
     first = UserMessage(text="post-A").id
     assert first >= 200
-    reset_id_counter(50)  # simulate B's resume seeding below current
+    reset_id_counter(50)  # Simulate B's resume seeding below current.
     second = UserMessage(text="post-B").id
     assert second > first, (
         f"reset_id_counter must be monotonic; first={first} second={second}"
@@ -4319,7 +4316,7 @@ def test_reset_id_counter_is_monotonic() -> None:
 @pytest.mark.asyncio
 async def test_gated_deque_push_front_preserves_existing_items() -> None:
     """push_front with prior items keeps them after the new prefix."""
-    dq: agent_runtime.GatedDeque[str] = agent_runtime.GatedDeque()
+    dq: runtime.GatedDeque[str] = runtime.GatedDeque()
     dq.push_back("a")
     dq.push_back("b")
     dq.push_front("X", "Y")
@@ -4337,18 +4334,18 @@ def test_gated_deque_push_front_rejects_items_before_await() -> None:
     item even though the early arg already satisfied the wait. Reject
     the misuse at the boundary.
     """
-    dq: agent_runtime.GatedDeque[object] = agent_runtime.GatedDeque()
+    dq: runtime.GatedDeque[object] = runtime.GatedDeque()
     user = UserMessage(text="oops")
     with pytest.raises(AssertionError, match="Await must be the first"):
-        dq.push_front(user, agent_runtime.Await((UserMessage,)))
+        dq.push_front(user, runtime.Await((UserMessage,)))
 
 
 @pytest.mark.asyncio
 async def test_gated_deque_drain_with_gate_waits_for_match() -> None:
     """A gated deque drains until the gated type or Quit appears."""
-    dq: agent_runtime.GatedDeque[object] = agent_runtime.GatedDeque()
-    dq.push_front(agent_runtime.Await((UserMessage,)))
-    dq.push_back(ModelSwitch(apply=lambda: None))  # not user-shaped
+    dq: runtime.GatedDeque[object] = runtime.GatedDeque()
+    dq.push_front(runtime.Await((UserMessage,)))
+    dq.push_back(ModelSwitch(apply=lambda: None))  # Not user-shaped.
     dq.push_back(UserMessage(text="ok"))
 
     items = await dq.drain()
@@ -4409,7 +4406,7 @@ async def test_user_message_mid_stream_fires_followup_round() -> None:
             return msg
 
     model = MidStreamModel()
-    agent = agent_runtime.AgentRuntime(model=model)
+    agent = runtime.AgentRuntime(model=model)
     agent.inbox.push_back(UserMessage(text="user1"))
 
     async def inject_and_release() -> None:
@@ -4488,13 +4485,13 @@ def _make_lifecycle_model() -> tuple[_LifecycleModel, asyncio.Event, asyncio.Eve
     )
 
 
+# Returns one of ``"pending"``, ``"history"``, ``"none"``.
 def _assert_exactly_one_surface(
-    agent: agent_runtime.AgentRuntime, text: str, published: list[str]
+    agent: runtime.AgentRuntime,
+    text: str,
+    published: list[str],
 ) -> str:
-    """Return which surface holds ``text``; assert exactly one does.
-
-    Returns one of ``"pending"``, ``"history"``, ``"none"``.
-    """
+    """Return which surface holds ``text``; assert exactly one does."""
     in_pending = any(m.text == text for m in agent.pending_mid_stream())
     in_history = any(
         isinstance(m, UserMessage) and text in m.text for m in agent.context().messages
@@ -4521,12 +4518,12 @@ def _assert_exactly_one_surface(
 @pytest.mark.asyncio
 async def test_lifecycle_idle_enter_commits_immediately() -> None:
     """Idle Enter: no pending state. Straight to committed."""
-    agent = agent_runtime.AgentRuntime(
-        model=ScriptedModel(responses=[AssistantMessage(text="ok")])
+    agent = runtime.AgentRuntime(
+        model=ScriptedModel(responses=[AssistantMessage(text="ok")]),
     )
     published: list[str] = []
     agent.observers.append(
-        lambda e: published.append(e.text) if isinstance(e, UserMessage) else None
+        lambda e: published.append(e.text) if isinstance(e, UserMessage) else None,
     )
     agent.inbox.push_back(UserMessage(text="hello"))
     await run_with_quit(agent, timeout_sec=3.0)
@@ -4538,10 +4535,10 @@ async def test_lifecycle_idle_enter_commits_immediately() -> None:
 async def test_lifecycle_mid_stream_enter_stays_pending_before_drain() -> None:
     """Mid-stream Enter: pending. Not in history, not published, in queue."""
     model, stream_started, release_stream = _make_lifecycle_model()
-    agent = agent_runtime.AgentRuntime(model=model)
+    agent = runtime.AgentRuntime(model=model)
     published: list[str] = []
     agent.observers.append(
-        lambda e: published.append(e.text) if isinstance(e, UserMessage) else None
+        lambda e: published.append(e.text) if isinstance(e, UserMessage) else None,
     )
     agent.inbox.push_back(UserMessage(text="first"))
 
@@ -4559,7 +4556,7 @@ async def test_lifecycle_mid_stream_enter_stays_pending_before_drain() -> None:
             lambda: any(
                 isinstance(item, AssistantMessage) and item.text == "resp1"
                 for item in agent.context().messages
-            )
+            ),
         )
         agent.inbox.push_back(Quit())
 
@@ -4570,10 +4567,10 @@ async def test_lifecycle_mid_stream_enter_stays_pending_before_drain() -> None:
 async def test_lifecycle_mid_stream_enter_commits_on_drain() -> None:
     """Mid-stream Enter: pending -> committed when model finishes."""
     model, stream_started, release_stream = _make_lifecycle_model()
-    agent = agent_runtime.AgentRuntime(model=model)
+    agent = runtime.AgentRuntime(model=model)
     published: list[str] = []
     agent.observers.append(
-        lambda e: published.append(e.text) if isinstance(e, UserMessage) else None
+        lambda e: published.append(e.text) if isinstance(e, UserMessage) else None,
     )
     agent.inbox.push_back(UserMessage(text="first"))
 
@@ -4602,10 +4599,10 @@ async def test_lifecycle_mid_stream_enter_commits_on_drain() -> None:
 async def test_lifecycle_multiple_mid_stream_enters_coalesce_on_drain() -> None:
     r"""N mid-stream Enters: all pending, then one coalesced commit + publish."""
     model, stream_started, release_stream = _make_lifecycle_model()
-    agent = agent_runtime.AgentRuntime(model=model)
+    agent = runtime.AgentRuntime(model=model)
     published: list[str] = []
     agent.observers.append(
-        lambda e: published.append(e.text) if isinstance(e, UserMessage) else None
+        lambda e: published.append(e.text) if isinstance(e, UserMessage) else None,
     )
     agent.inbox.push_back(UserMessage(text="first"))
 
@@ -4658,10 +4655,10 @@ async def test_lifecycle_tab_queued_stays_pending_until_model_idle() -> None:
     Enter) converge on the same committed state.
     """
     model, stream_started, release_stream = _make_lifecycle_model()
-    agent = agent_runtime.AgentRuntime(model=model)
+    agent = runtime.AgentRuntime(model=model)
     published: list[str] = []
     agent.observers.append(
-        lambda e: published.append(e.text) if isinstance(e, UserMessage) else None
+        lambda e: published.append(e.text) if isinstance(e, UserMessage) else None,
     )
     agent.inbox.push_back(UserMessage(text="first"))
 
@@ -4693,14 +4690,11 @@ async def test_lifecycle_tab_queued_stays_pending_until_model_idle() -> None:
     await asyncio.gather(run_until_quit(agent, timeout_sec=3.0), inject_and_observe())
 
 
-def _runtime_for_alternation_tests() -> agent_runtime.AgentRuntime:
-    """Bare runtime for direct ``_append_or_coalesce_user`` unit tests.
-
-    The model is never called; we only exercise the helper that mutates
-    history in place.
-    """
+# The model is never called; we only exercise the helper that mutates history in place.
+def _runtime_for_alternation_tests() -> runtime.AgentRuntime:
+    """Bare runtime for direct ``_append_or_coalesce_user`` unit tests."""
     model = ScriptedModel(responses=[])
-    return agent_runtime.AgentRuntime(model=model)
+    return runtime.AgentRuntime(model=model)
 
 
 class TestUserMessageAlternation:
@@ -4923,7 +4917,7 @@ class TestUserMessageAlternation:
             discards_content=True,
         )
         assert [getattr(m, "text", "") for m in agent.context().messages] == [
-            "[summary]"
+            "[summary]",
         ]
 
     def test_absorbing_a_splice_carrying_its_payload_is_allowed(self) -> None:
@@ -4996,7 +4990,7 @@ class TestUserMessageAlternation:
                     insert_after=None,
                     payload=(UserMessage(text="replacement"),),
                     strategy="careless_absorber",
-                )
+                ),
             )
 
     def test_coalescing_onto_a_legacy_unalternated_barrier_keeps_the_message(
@@ -5026,7 +5020,7 @@ class TestUserMessageAlternation:
                     UserMessage(text="u2"),
                 ),
                 strategy="summary",
-            )
+            ),
         )
 
         agent._append_or_coalesce_user(UserMessage(text="next"))
@@ -5108,7 +5102,7 @@ class TestUserMessageAlternation:
             [
                 AgentSendQueuedMessage(source="A", text="from-a"),
                 AgentSendQueuedMessage(source="B", text="from-b"),
-            ]
+            ],
         )
 
         tail = agent.context().messages[-1]
@@ -5184,7 +5178,7 @@ async def test_two_idle_messages_same_batch_do_not_stack_consecutively() -> None
             return AssistantMessage(text="ok")
 
     model = CapturingModel()
-    agent = agent_runtime.AgentRuntime(model=model)
+    agent = runtime.AgentRuntime(model=model)
 
     # Push BOTH before the runtime gets a chance to drain. With a single
     # event-loop tick between push and drain, they land in the same batch.
@@ -5197,7 +5191,7 @@ async def test_two_idle_messages_same_batch_do_not_stack_consecutively() -> None
     # in history. (One coalesced entry, or queued semantics that buffer
     # the second into a follow-up round, are both fine.)
     pairs = list(
-        zip(agent.context().messages, agent.context().messages[1:], strict=False)
+        zip(agent.context().messages, agent.context().messages[1:], strict=False),
     )
     consecutive_users = [
         (a, b)
@@ -5240,7 +5234,7 @@ async def test_user_messages_mid_stream_coalesce_into_one_followup() -> None:
         (matching :class:`UserQueuedMessage` semantics: joined on
         ``\n\n``). Two model calls total, not three.
 
-    Current bug: same as the single-message case — no follow-up round
+    Current bug: same as the single-message case -- no follow-up round
     fires at all, and each mid-stream ``UserMessage`` is appended as a
     separate history entry.
     """
@@ -5271,7 +5265,7 @@ async def test_user_messages_mid_stream_coalesce_into_one_followup() -> None:
             return msg
 
     model = MidStreamModel()
-    agent = agent_runtime.AgentRuntime(model=model)
+    agent = runtime.AgentRuntime(model=model)
     agent.inbox.push_back(UserMessage(text="user1"))
 
     async def inject_two_and_release() -> None:
@@ -5376,7 +5370,7 @@ async def test_user_message_mid_stream_detaches_new_tools_to_background() -> Non
             return msg
 
     model = MidStreamModel()
-    agent = agent_runtime.AgentRuntime(model=model, tools=[SlowTool()])
+    agent = runtime.AgentRuntime(model=model, tools=[SlowTool()])
     agent.inbox.push_back(UserMessage(text="user1"))
 
     snapshot: dict[str, int] = {"calls_before_tool_release": 0}
@@ -5463,7 +5457,7 @@ async def test_user_queued_message_mid_stream_fires_followup_round() -> None:
             return msg
 
     model = MidStreamModel()
-    agent = agent_runtime.AgentRuntime(model=model)
+    agent = runtime.AgentRuntime(model=model)
     agent.inbox.push_back(UserMessage(text="user1"))
 
     async def inject_queued_and_release() -> None:
@@ -5558,7 +5552,7 @@ async def test_user_queued_message_waits_for_model_idle_not_cohort_complete() ->
             return msg
 
     model = ThreeRoundModel()
-    agent = agent_runtime.AgentRuntime(model=model, tools=[FastEcho()])
+    agent = runtime.AgentRuntime(model=model, tools=[FastEcho()])
     agent.inbox.push_back(UserMessage(text="user1"))
 
     async def queue_during_cohort_and_drive() -> None:
@@ -5646,7 +5640,7 @@ async def test_halt_then_immediate_user_message_fires_followup_round() -> None:
             return msg
 
     model = HaltableModel()
-    agent = agent_runtime.AgentRuntime(model=model)
+    agent = runtime.AgentRuntime(model=model)
     agent.inbox.push_back(UserMessage(text="first"))
 
     async def halt_then_immediate_resume() -> None:
@@ -5707,7 +5701,7 @@ async def test_halt_then_queued_message_fires_followup_round() -> None:
             return AssistantMessage(text="answer to queued")
 
     model = HaltableModel()
-    agent = agent_runtime.AgentRuntime(model=model)
+    agent = runtime.AgentRuntime(model=model)
     agent.inbox.push_back(UserMessage(text="first"))
 
     async def halt_then_queue() -> None:
@@ -5806,7 +5800,7 @@ async def test_queued_message_drain_publishes_user_message() -> None:
 
 
 async def run_with_quit_on_agent_idle(
-    agent: agent_runtime.AgentRuntime,
+    agent: runtime.AgentRuntime,
     n: int = 1,
     timeout_sec: float = 2.0,
 ) -> None:
@@ -5826,7 +5820,7 @@ async def run_with_quit_on_agent_idle(
     except TimeoutError:
         pytest.fail(
             f"run_forever did not quit within {timeout_sec}s "
-            f"(saw {seen}/{n} AgentIdle events)"
+            f"(saw {seen}/{n} AgentIdle events)",
         )
     finally:
         agent.observers.remove(_watch)
@@ -5929,7 +5923,7 @@ async def test_agent_idle_re_arms_after_new_work() -> None:
         [
             AssistantMessage(text="first"),
             AssistantMessage(text="second"),
-        ]
+        ],
     )
 
     # Push the second user message after the first AgentIdle fires.
@@ -6121,7 +6115,7 @@ async def test_agent_idle_suppressed_while_compact_task_running() -> None:
         [
             AssistantMessage(text="pre-compact"),
             AssistantMessage(text="post-compact"),
-        ]
+        ],
     )
     agent.compactor = _SlowCompactor()
     agent.inbox.push_back(UserMessage(text="hi"))
@@ -6230,7 +6224,9 @@ async def test_clear_cancels_running_compaction_without_adopting_result() -> Non
             compact_started.set()
             await release_compact.wait()
             return _summary_override(
-                [UserMessage(text="stale summary")], mint_ref, tape=tape
+                [UserMessage(text="stale summary")],
+                mint_ref,
+                tape=tape,
             )
 
     agent, _collector = make_agent([AssistantMessage(text="post-clear")])
@@ -6281,7 +6277,7 @@ async def test_agent_idle_suppressed_while_gate_armed_after_halt() -> None:
             await release_model.wait()
             return AssistantMessage(text="never delivered")
 
-    agent = agent_runtime.AgentRuntime(model=BlockingModel(), tools=[])
+    agent = runtime.AgentRuntime(model=BlockingModel(), tools=[])
     collector = EventCollector()
     agent.observers.append(collector)
 
@@ -6353,7 +6349,7 @@ async def test_agent_idle_suppressed_while_mid_stream_queue_nonempty() -> None:
             publish(ModelResponsePartial("second response"))
             return AssistantMessage(text="second response")
 
-    agent = agent_runtime.AgentRuntime(model=_SlowFirstModel(), tools=[])
+    agent = runtime.AgentRuntime(model=_SlowFirstModel(), tools=[])
     collector = EventCollector()
     agent.observers.append(collector)
 
@@ -6407,7 +6403,7 @@ async def test_agent_idle_observer_pushback_does_not_loop() -> None:
             AssistantMessage(text="first"),
             AssistantMessage(text="second"),
             AssistantMessage(text="(no more)"),
-        ]
+        ],
     )
 
     pushes = 0
@@ -6452,7 +6448,7 @@ class TestGateRepairsInvalidContext:
         model = ScriptedModel(
             responses=[AssistantMessage(text="acknowledged")],
         )
-        agent = agent_runtime.AgentRuntime(model=model)
+        agent = runtime.AgentRuntime(model=model)
         # Seed history with a dangling tool_use: assistant declared
         # ``toolu_1`` but no result follows.
         agent.append_history(UserMessage(text="kick off"))
@@ -6497,7 +6493,7 @@ class TestGateRepairsInvalidContext:
         model = ScriptedModel(
             responses=[AssistantMessage(text="acknowledged")],
         )
-        agent = agent_runtime.AgentRuntime(model=model)
+        agent = runtime.AgentRuntime(model=model)
         agent.append_history(UserMessage(text="kick off"))
         # Orphan: ``ToolResult`` whose ``call_id`` has no preceding
         # assistant ``ToolCall``. ``repair_dangling_tool_calls`` would
@@ -6524,7 +6520,7 @@ class TestGateRepairsInvalidContext:
         model = ScriptedModel(
             responses=[AssistantMessage(text="acknowledged")],
         )
-        agent = agent_runtime.AgentRuntime(model=model)
+        agent = runtime.AgentRuntime(model=model)
         legacy_override = ContextSplice.replay(
             ref=agent.mint_ref(),
             mask=(),
@@ -6565,7 +6561,7 @@ class TestGateRepairsInvalidContext:
         model = ScriptedModel(
             responses=[AssistantMessage(text="acknowledged")],
         )
-        agent = agent_runtime.AgentRuntime(model=model)
+        agent = runtime.AgentRuntime(model=model)
         agent.append_history(UserMessage(text="dropped"))
         # The orphan ToolResult (`ghost`) and unpaired AM (`toolu_X`)
         # would each be rejected at construct. ``replay`` mimics a
@@ -6709,7 +6705,7 @@ def test_sanitize_for_send_pairs_every_tool_call_with_a_result() -> None:
     )
     # Only half the results show up; the rest must be filled.
     results = [ToolResult(call_id=f"c{idx}", content="ok") for idx in range(25)]
-    out = agent_runtime._sanitize_for_send([am, *results, UserMessage(text="done")])
+    out = runtime._sanitize_for_send([am, *results, UserMessage(text="done")])
     seen_ids = {e.call_id for e in out if isinstance(e, ToolResult)}
     assert seen_ids == {f"c{idx}" for idx in range(50)}
     interrupted = [
@@ -6725,7 +6721,7 @@ def test_sanitize_for_send_drops_duplicate_tool_results() -> None:
     am = AssistantMessage(tool_calls=(ToolCall(id="c1", name="x", args={}),))
     tr = ToolResult(call_id="c1", content="ok")
     dup = ToolResult(call_id="c1", content="other")
-    out = agent_runtime._sanitize_for_send([am, tr, dup])
+    out = runtime._sanitize_for_send([am, tr, dup])
     results = [e for e in out if isinstance(e, ToolResult)]
     assert len(results) == 1
     assert results[0].content == "ok"
@@ -6822,16 +6818,14 @@ async def test_same_file_rew_run_sequentially_others_parallel() -> None:
 # --------------------------------------------------------------------------
 
 
+# Option A delivers it as a ``ToolResult`` whose ``call_id`` is the arrival id derived
+# from the original, paired with a synthetic ``DetachedArrived`` tool_use. ``None`` when
+# no such forward delivery exists in the resolved context.
 def _detached_arrival_result(
-    agent: agent_runtime.AgentRuntime, original_call_id: str
+    agent: runtime.AgentRuntime,
+    original_call_id: str,
 ) -> ToolResult | None:
-    """Return the forward-delivered real result for ``original_call_id``.
-
-    Option A delivers it as a ``ToolResult`` whose ``call_id`` is the
-    arrival id derived from the original, paired with a synthetic
-    ``DetachedArrived`` tool_use. ``None`` when no such forward delivery
-    exists in the resolved context.
-    """
+    """Return the forward-delivered real result for ``original_call_id``."""
     arrival_id = f"{original_call_id}:detached"
     for entry in agent.context().messages:
         if isinstance(entry, ToolResult) and entry.call_id == arrival_id:
@@ -6839,7 +6833,7 @@ def _detached_arrival_result(
     return None
 
 
-def _stub_for(agent: agent_runtime.AgentRuntime, call_id: str) -> ToolResult | None:
+def _stub_for(agent: runtime.AgentRuntime, call_id: str) -> ToolResult | None:
     """Return the ``[detached]`` stub ``ToolResult`` for ``call_id``, if present."""
     for entry in agent.context().messages:
         if isinstance(entry, ToolResult) and entry.call_id == call_id:
@@ -6980,7 +6974,7 @@ async def test_detached_result_survives_compaction() -> None:
     # Two responses: one after the barrier (tail becomes ``[summary]``), one
     # after the forward delivery wakes the model to observe the arrival.
     agent, _ = make_agent(
-        [AssistantMessage(text="done"), AssistantMessage(text="saw it")]
+        [AssistantMessage(text="done"), AssistantMessage(text="saw it")],
     )
 
     @dataclass(kw_only=True, slots=True)
@@ -7006,7 +7000,7 @@ async def test_detached_result_survives_compaction() -> None:
     # Seed a detached, still-pending call: parent AM + stub + detached membership.
     agent.append_history(UserMessage(text="go"))
     agent.append_history(
-        AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),))
+        AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),)),
     )
     agent.append_history(ToolResult(call_id="t1", content=DETACHED_PLACEHOLDER))
 
@@ -7024,8 +7018,8 @@ async def test_detached_result_survives_compaction() -> None:
         await wait_until(lambda: "done" in _assistant_texts(agent), timeout_sec=2.0)
         agent.inbox.push_back(
             DetachedResult(
-                result=ToolResult(call_id="t1", content="REAL", is_error=False)
-            )
+                result=ToolResult(call_id="t1", content="REAL", is_error=False),
+            ),
         )
         await wait_until(
             lambda: _detached_arrival_result(agent, "t1") is not None,
@@ -7085,7 +7079,7 @@ async def test_clear_then_completion_is_not_delivered() -> None:
         agent.inbox.push_back(UserMessage(text="fresh"))
         await wait_until(lambda: "fresh" in _assistant_texts(agent), timeout_sec=2.0)
         release.set()
-        await asyncio.sleep(0.05)  # let any late completion process
+        await asyncio.sleep(0.05)  # Let any late completion process.
         agent.inbox.push_back(Quit())
 
     await asyncio.gather(run_until_quit(agent, timeout_sec=4.0), driver())
@@ -7276,8 +7270,8 @@ async def test_pending_lazy_pairing_survives_interleaved_detached_delivery() -> 
         # An unrelated detached tool completes while the mimic error is pending.
         agent.inbox.push_back(
             DetachedResult(
-                result=ToolResult(call_id="d1", content="real-d1", is_error=False)
-            )
+                result=ToolResult(call_id="d1", content="real-d1", is_error=False),
+            ),
         )
         agent.inbox.push_back(UserMessage(text="real follow-up"))
         await wait_until(lambda: "answer" in _assistant_texts(agent), timeout_sec=2.0)
@@ -7387,7 +7381,8 @@ async def test_model_forged_detached_arrived_id_collision_does_not_wedge() -> No
 
 
 def _detached_arrival_assistant_count(
-    agent: agent_runtime.AgentRuntime, original_call_id: str
+    agent: runtime.AgentRuntime,
+    original_call_id: str,
 ) -> int:
     """Count resolved ``AssistantMessage``s carrying the forward arrival id."""
     arrival_id = f"{original_call_id}{DETACHED_ARRIVAL_SUFFIX}"
@@ -7410,7 +7405,7 @@ def test_forward_delivery_is_idempotent_per_call_id() -> None:
     the arrival id, which ``validate_context`` rejects as a duplicate
     ``ToolResult`` and the gate's rescue path cannot repair.
     """
-    agent = agent_runtime.AgentRuntime(model=ScriptedModel(responses=[]))
+    agent = runtime.AgentRuntime(model=ScriptedModel(responses=[]))
     parent = AssistantMessage(tool_calls=(ToolCall(id="c1", name="x", args={}),))
     agent.append_history(parent)
     agent.append_history(
@@ -7438,7 +7433,7 @@ def test_detached_forward_skips_running_placeholder_keeps_real_result() -> None:
     ``PENDING`` stub must be skipped entirely (no forward, no id consumed) so
     the real result forwards normally. Keyed on ``kind``, not ``content``.
     """
-    agent = agent_runtime.AgentRuntime(model=ScriptedModel(responses=[]))
+    agent = runtime.AgentRuntime(model=ScriptedModel(responses=[]))
     placeholder = ToolResult(
         call_id="c1",
         content=f"{RUNNING_PREFIX}T]",
@@ -7469,7 +7464,7 @@ def test_cancelled_forward_skipped_when_answered_in_slot() -> None:
     in-slot answer is a ``PENDING`` running-stub, still forwards (its only
     delivery).
     """
-    agent = agent_runtime.AgentRuntime(model=ScriptedModel(responses=[]))
+    agent = runtime.AgentRuntime(model=ScriptedModel(responses=[]))
     parent = AssistantMessage(tool_calls=(ToolCall(id="c1", name="T", args={}),))
     agent.append_history(parent)
     # Cohort-kill: in-slot CANCELLED answer already present.
@@ -7528,7 +7523,7 @@ def test_inslot_terminal_through_splice_payload_skips_cancel_forward() -> None:
     terminal answer lived in a splice payload read as non-terminal and a
     duplicate cancellation forwarded. Both record shapes must be inspected.
     """
-    agent = agent_runtime.AgentRuntime(model=ScriptedModel(responses=[]))
+    agent = runtime.AgentRuntime(model=ScriptedModel(responses=[]))
     parent = AssistantMessage(tool_calls=(ToolCall(id="c1", name="T", args={}),))
     parent_ref = agent.append_history(parent)
     # The terminal CANCELLED answer lives inside a splice payload (as a
@@ -7599,7 +7594,7 @@ def test_sanitize_forged_arrivals_avoids_colliding_with_existing_id() -> None:
     The rewrite must advance past the taken id rather than mint a duplicate
     (which would fail ``AssistantMessage`` validation and lose the whole turn).
     """
-    agent = agent_runtime.AgentRuntime(model=ScriptedModel(responses=[]))
+    agent = runtime.AgentRuntime(model=ScriptedModel(responses=[]))
     msg = AssistantMessage(
         tool_calls=(
             ToolCall(id=f"{DETACHED_ARRIVED_MIMIC_PREFIX}0", name="Read", args={}),
@@ -7609,7 +7604,7 @@ def test_sanitize_forged_arrivals_avoids_colliding_with_existing_id() -> None:
     out = agent._sanitize_forged_arrivals(msg)
     ids = [tc.id for tc in out.tool_calls]
     assert len(set(ids)) == len(ids), f"rewrite produced a duplicate id: {ids}"
-    assert f"{DETACHED_ARRIVED_MIMIC_PREFIX}0" in ids  # the normal call kept its id
+    assert f"{DETACHED_ARRIVED_MIMIC_PREFIX}0" in ids  # The normal call kept its id.
 
 
 @pytest.mark.asyncio
@@ -7624,7 +7619,7 @@ async def test_gate_recovery_admits_clear_control_event(
     reach the loop until an ordinary message arrives. The recovery gate must
     admit ``Clear`` (and the other tape-mutating verbs) directly.
     """
-    agent = agent_runtime.AgentRuntime(model=ScriptedModel(responses=[]))
+    agent = runtime.AgentRuntime(model=ScriptedModel(responses=[]))
 
     def _raise() -> None:
         raise InvalidContextError("unrepairable context")
@@ -7662,7 +7657,7 @@ async def test_gate_recovery_arms_before_publish_so_observer_clear_releases(
     (``f43f811c9`` review, same baseline hazard the ``Clear`` arm documents).
     The arm must precede the publish.
     """
-    agent = agent_runtime.AgentRuntime(model=ScriptedModel(responses=[]))
+    agent = runtime.AgentRuntime(model=ScriptedModel(responses=[]))
 
     def _raise() -> None:
         raise InvalidContextError("unrepairable context")
@@ -7708,7 +7703,7 @@ async def test_two_detached_result_producers_one_call_id_single_forward() -> Non
     end-to-end through ``run_forever``: one ``DetachedArrived`` pair, wire-valid
     context, no wedge -- not just when the duplicate is injected synthetically.
     """
-    agent = agent_runtime.AgentRuntime(model=ScriptedModel(responses=[]))
+    agent = runtime.AgentRuntime(model=ScriptedModel(responses=[]))
     parent = AssistantMessage(tool_calls=(ToolCall(id="c1", name="x", args={}),))
     agent.append_history(parent)
     agent.append_history(
@@ -7758,7 +7753,7 @@ def test_sanitize_for_send_drops_duplicate_tool_call_ids() -> None:
     tr1 = ToolResult(call_id="c1:detached", content="first")
     am2 = AssistantMessage(tool_calls=(ToolCall(id="c1:detached", name="x", args={}),))
     tr2 = ToolResult(call_id="c1:detached", content="second")
-    out = agent_runtime._sanitize_for_send([am1, tr1, am2, tr2])
+    out = runtime._sanitize_for_send([am1, tr1, am2, tr2])
 
     assistant_ids = [
         tc.id for e in out if isinstance(e, AssistantMessage) for tc in e.tool_calls
@@ -7785,7 +7780,7 @@ def test_sanitize_for_send_coalesces_assistants_after_dropping_dup() -> None:
     dup_am = AssistantMessage(tool_calls=(ToolCall(id=dup_id, name="x", args={}),))
     dup_tr = ToolResult(call_id=dup_id, content="second")
     after = AssistantMessage(text="after the dup")
-    out = agent_runtime._sanitize_for_send([am0, tr0, before, dup_am, dup_tr, after])
+    out = runtime._sanitize_for_send([am0, tr0, before, dup_am, dup_tr, after])
 
     validate_context(list(out))
     assistant_ids = [
@@ -7809,7 +7804,7 @@ async def test_gate_failure_surfaces_model_response_error(
     on a frozen prompt (the ``Issue#294`` symptom), and never spin
     re-validating the same tape.
     """
-    agent = agent_runtime.AgentRuntime(model=ScriptedModel(responses=[]))
+    agent = runtime.AgentRuntime(model=ScriptedModel(responses=[]))
 
     def _raise() -> None:
         raise InvalidContextError("unrepairable context (simulated future producer)")
@@ -7946,7 +7941,7 @@ def test_runtime_has_no_dead_system_param() -> None:
     # ``AgentRuntime.system`` was write-only -- never read by any model call
     # (the system prompt threads live via ``Agent.system_prompt()``). Guard
     # against re-introducing the dead constructor parameter and field.
-    params = inspect.signature(agent_runtime.AgentRuntime.__init__).parameters
+    params = inspect.signature(runtime.AgentRuntime.__init__).parameters
     assert "system" not in params
 
 

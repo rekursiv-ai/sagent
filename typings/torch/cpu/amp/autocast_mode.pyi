@@ -13,7 +13,10 @@ class autocast(torch.amp.autocast_mode.autocast):
         category=FutureWarning,
     )
     def __init__(
-        self, enabled: bool = ..., dtype: torch.dtype = ..., cache_enabled: bool = ...
+        self,
+        enabled: bool = ...,
+        dtype: torch.dtype = ...,
+        cache_enabled: bool = ...,
     ) -> None: ...
     def __enter__(self) -> Self: ...
     def __exit__(

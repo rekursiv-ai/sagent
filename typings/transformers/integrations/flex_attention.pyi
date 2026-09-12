@@ -31,7 +31,11 @@ class WrappedFlexAttention:
         ...
 
 def compile_friendly_flex_attention(
-    query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, training=..., **kwargs
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    training=...,
+    **kwargs,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]: ...
 
 type Offset = torch.Tensor | int

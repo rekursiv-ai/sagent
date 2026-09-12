@@ -62,14 +62,23 @@ def is_swanlab_available():  # -> bool:
 def hp_params(trial):  # -> dict[Any, Any]:
     ...
 def run_hp_search_optuna(
-    trainer, n_trials: int, direction: str, **kwargs
+    trainer,
+    n_trials: int,
+    direction: str,
+    **kwargs,
 ) -> BestRun: ...
 def run_hp_search_ray(trainer, n_trials: int, direction: str, **kwargs) -> BestRun: ...
 def run_hp_search_sigopt(
-    trainer, n_trials: int, direction: str, **kwargs
+    trainer,
+    n_trials: int,
+    direction: str,
+    **kwargs,
 ) -> BestRun: ...
 def run_hp_search_wandb(
-    trainer, n_trials: int, direction: str, **kwargs
+    trainer,
+    n_trials: int,
+    direction: str,
+    **kwargs,
 ) -> BestRun: ...
 def get_available_reporting_integrations():  # -> list[Any]:
     ...
@@ -224,7 +233,12 @@ class NeptuneCallback(TrainerCallback):
     def get_run(cls, trainer):  # -> None:
         ...
     def on_log(
-        self, args, state, control, logs: dict[str, float] | None = ..., **kwargs
+        self,
+        args,
+        state,
+        control,
+        logs: dict[str, float] | None = ...,
+        **kwargs,
     ):  # -> None:
         ...
 
@@ -253,13 +267,26 @@ class ClearMLCallback(TrainerCallback):
     def setup(self, args, state, model, processing_class, **kwargs):  # -> None:
         ...
     def on_train_begin(
-        self, args, state, control, model=..., processing_class=..., **kwargs
+        self,
+        args,
+        state,
+        control,
+        model=...,
+        processing_class=...,
+        **kwargs,
     ):  # -> None:
         ...
     def on_train_end(self, args, state, control, **kwargs):  # -> None:
         ...
     def on_log(
-        self, args, state, control, model=..., processing_class=..., logs=..., **kwargs
+        self,
+        args,
+        state,
+        control,
+        model=...,
+        processing_class=...,
+        logs=...,
+        **kwargs,
     ):  # -> None:
         ...
     def on_save(self, args, state, control, **kwargs):  # -> None:
@@ -267,7 +294,9 @@ class ClearMLCallback(TrainerCallback):
 
 class FlyteCallback(TrainerCallback):
     def __init__(
-        self, save_log_history: bool = ..., sync_checkpoints: bool = ...
+        self,
+        save_log_history: bool = ...,
+        sync_checkpoints: bool = ...,
     ) -> None: ...
     def on_save(self, args, state, control, **kwargs):  # -> None:
         ...
@@ -299,7 +328,13 @@ class SwanLabCallback(TrainerCallback):
     def on_train_begin(self, args, state, control, model=..., **kwargs):  # -> None:
         ...
     def on_train_end(
-        self, args, state, control, model=..., processing_class=..., **kwargs
+        self,
+        args,
+        state,
+        control,
+        model=...,
+        processing_class=...,
+        **kwargs,
     ):  # -> None:
         ...
     def on_log(self, args, state, control, model=..., logs=..., **kwargs):  # -> None:

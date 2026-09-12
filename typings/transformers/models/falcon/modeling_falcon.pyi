@@ -29,7 +29,12 @@ class FalconLinear(nn.Linear):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 
@@ -42,10 +47,15 @@ class FalconRotaryEmbedding(nn.Module):
         ...
 
 def build_alibi_tensor(
-    attention_mask: torch.Tensor, num_heads: int, dtype: torch.dtype
+    attention_mask: torch.Tensor,
+    num_heads: int,
+    dtype: torch.dtype,
 ) -> torch.Tensor: ...
 def dropout_add(
-    x: torch.Tensor, residual: torch.Tensor, prob: float, training: bool
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    prob: float,
+    training: bool,
 ) -> torch.Tensor: ...
 
 class FalconAttention(nn.Module):

@@ -92,12 +92,18 @@ class LSHSelfAttention(nn.Module, EfficientAttentionMixin):
 class ReverseSort(Function):
     @staticmethod
     def forward(
-        ctx, out_vectors, logits, sorted_bucket_idx, undo_sorted_bucket_idx
+        ctx,
+        out_vectors,
+        logits,
+        sorted_bucket_idx,
+        undo_sorted_bucket_idx,
     ):  # -> tuple[Tensor, Tensor]:
         ...
     @staticmethod
     def backward(
-        ctx, grad_out_vectors, grad_logits
+        ctx,
+        grad_out_vectors,
+        grad_logits,
     ):  # -> tuple[Tensor, Tensor, None, None]:
         ...
 
@@ -200,7 +206,8 @@ class _ReversibleFunction(Function):
         ...
     @staticmethod
     def backward(
-        ctx, grad_hidden_states
+        ctx,
+        grad_hidden_states,
     ):  # -> tuple[Tensor, None, None, None, None, None, None, None, None, None, None, None]:
         ...
 
@@ -239,7 +246,7 @@ class ReformerPreTrainedModel(PreTrainedModel):
 @auto_docstring(
     custom_intro="""
     Output type of [`ReformerModel`].
-    """
+    """,
 )
 class ReformerModelOutput(ModelOutput):
     last_hidden_state: torch.FloatTensor
@@ -305,7 +312,12 @@ class ReformerModelWithLMHead(ReformerPreTrainedModel, GenerationMixin):
         **kwargs,
     ) -> tuple | CausalLMOutput: ...
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=..., use_cache=..., num_hashes=..., **kwargs
+        self,
+        input_ids,
+        past_key_values=...,
+        use_cache=...,
+        num_hashes=...,
+        **kwargs,
     ):  # -> dict[str, Any | None]:
         ...
 

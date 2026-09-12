@@ -94,7 +94,9 @@ class MoonshineEncoderLayer(LlamaDecoderLayer):
 
 class MoonshineDecoderLayer(GradientCheckpointingLayer):
     def __init__(
-        self, config: MoonshineConfig, layer_idx: int | None = ...
+        self,
+        config: MoonshineConfig,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -112,7 +114,8 @@ class MoonshineDecoderLayer(GradientCheckpointingLayer):
         encoder_position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring

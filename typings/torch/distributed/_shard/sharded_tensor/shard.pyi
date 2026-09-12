@@ -12,5 +12,8 @@ class Shard:
     def __post_init__(self) -> None: ...
     @classmethod
     def from_tensor_and_offsets(
-        cls, tensor: torch.Tensor, shard_offsets: list[int], rank: int
+        cls,
+        tensor: torch.Tensor,
+        shard_offsets: list[int],
+        rank: int,
     ) -> Shard: ...

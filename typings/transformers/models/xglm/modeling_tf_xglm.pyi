@@ -31,7 +31,9 @@ _CONFIG_FOR_DOC = ...
 LARGE_NEGATIVE = ...
 
 def create_sinusoidal_positions(
-    num_positions: int, embedding_dim: int, padding_idx: int | None
+    num_positions: int,
+    embedding_dim: int,
+    padding_idx: int | None,
 ) -> tf.Tensor: ...
 
 class TFXGLMAttention(keras.layers.Layer):
@@ -85,7 +87,8 @@ class TFXGLMMainLayer(keras.layers.Layer):
     def get_input_embeddings(self) -> TFSharedEmbeddings: ...
     def set_input_embeddings(self, value: TFSharedEmbeddings) -> None: ...
     def embed_positions(
-        self, position_ids: np.ndarray | tf.Tensor | None = ...
+        self,
+        position_ids: np.ndarray | tf.Tensor | None = ...,
     ) -> tf.Tensor: ...
     @unpack_inputs
     def call(
@@ -172,13 +175,18 @@ class TFXGLMForCausalLM(TFXGLMPreTrainedModel, TFCausalLanguageModelingLoss):
         **kwargs: Any,
     ) -> None: ...
     def prepare_inputs_for_generation(
-        self, inputs, past_key_values=..., use_cache=..., **kwargs
+        self,
+        inputs,
+        past_key_values=...,
+        use_cache=...,
+        **kwargs,
     ):  # -> dict[str, Any | None]:
         ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(XGLM_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFCausalLMOutputWithCrossAttentions, config_class=_CONFIG_FOR_DOC
+        output_type=TFCausalLMOutputWithCrossAttentions,
+        config_class=_CONFIG_FOR_DOC,
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -207,7 +215,8 @@ class TFXGLMForCausalLM(TFXGLMPreTrainedModel, TFCausalLanguageModelingLoss):
     def build(self, input_shape=...):  # -> None:
         ...
     def tf_to_pt_weight_rename(
-        self, tf_weight
+        self,
+        tf_weight,
     ):  # -> tuple[Literal['lm_head.weight'], Literal['model.embed_tokens.weight']] | tuple[Any]:
         ...
 

@@ -25,5 +25,6 @@ class _ContractFn(Protocol, Generic[_P, _T, _TState]):
 def contract(
     state_cls: type[_TState] = ...,
 ) -> Callable[
-    [Callable[Concatenate[_M, _P], _M]], _ContractFn[Concatenate[_M, _P], _M, _TState]
+    [Callable[Concatenate[_M, _P], _M]],
+    _ContractFn[Concatenate[_M, _P], _M, _TState],
 ]: ...

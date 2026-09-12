@@ -37,11 +37,17 @@ class CacheArtifactFactory:
     def register(cls, artifact_cls: type[CacheArtifact]) -> type[CacheArtifact]: ...
     @classmethod
     def create(
-        cls, artifact_type_key: str, key: str, content: bytes
+        cls,
+        artifact_type_key: str,
+        key: str,
+        content: bytes,
     ) -> CacheArtifact: ...
     @classmethod
     def encode_create(
-        cls, artifact_type_key: str, key: str, content: Any
+        cls,
+        artifact_type_key: str,
+        key: str,
+        content: Any,
     ) -> CacheArtifact: ...
 
 @dataclasses.dataclass

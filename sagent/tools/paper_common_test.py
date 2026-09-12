@@ -102,7 +102,7 @@ def test_format_record_full() -> None:
     assert "Attention Is All You Need" in out
     assert "doi:10.0/abc" in out
     assert "arXiv:1706.03762" in out
-    assert "Ashish, Noam, Niki +1" in out  # 4 authors, limit=3 default
+    assert "Ashish, Noam, Niki +1" in out  # 4 authors, limit=3 default.
     assert "cites:100000" in out
     assert "OA" in out
     assert "sources: s2" in out
@@ -129,8 +129,11 @@ def test_format_record_influential_marker() -> None:
 def test_format_record_no_meta() -> None:
     out = format_record(
         _make_record(
-            citation_count=None, reference_count=None, open_access_pdf=None, sources=()
-        )
+            citation_count=None,
+            reference_count=None,
+            open_access_pdf=None,
+            sources=(),
+        ),
     )
     assert " - cites:" not in out
 
@@ -281,13 +284,14 @@ def test_parse_optional_ids_list_wrapped_bundle_recovered() -> None:
     # The wire can deliver a bundle as a single LIST ELEMENT, not just a bare
     # string. Recover per-element too, using the author-id predicate.
     assert parse_optional_ids(
-        {"ids": ["1741101,2064160"]}, looks_like_id=str.isdigit
+        {"ids": ["1741101,2064160"]},
+        looks_like_id=str.isdigit,
     ) == ["1741101", "2064160"]
 
 
 def test_parse_optional_ids_list_wrapped_json_array_recovered() -> None:
     assert parse_optional_ids(
-        {"ids": ['["arXiv:2509.04439", "arXiv:2507.12821"]']}
+        {"ids": ['["arXiv:2509.04439", "arXiv:2507.12821"]']},
     ) == ["arXiv:2509.04439", "arXiv:2507.12821"]
 
 

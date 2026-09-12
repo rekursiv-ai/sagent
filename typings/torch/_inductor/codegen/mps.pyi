@@ -29,7 +29,9 @@ class MetalOverrides(OpOverrides):
     ) -> str: ...
     @staticmethod
     def to_dtype_bitcast(
-        x: CSEVariable, dtype: torch.dtype, src_dtype: torch.dtype
+        x: CSEVariable,
+        dtype: torch.dtype,
+        src_dtype: torch.dtype,
     ) -> str: ...
     @staticmethod
     def constant(val: bool | float, dtype: torch.dtype) -> str: ...
@@ -107,7 +109,10 @@ class MetalOverrides(OpOverrides):
     def randn(seed: CSEVariable, offset: CSEVariable) -> str: ...
     @staticmethod
     def randint64(
-        seed: CSEVariable, offset: CSEVariable, low: CSEVariable, high: CSEVariable
+        seed: CSEVariable,
+        offset: CSEVariable,
+        low: CSEVariable,
+        high: CSEVariable,
     ) -> str: ...
     @staticmethod
     def round(x: CSEVariable) -> str: ...
@@ -128,10 +133,17 @@ class MetalKernel(SIMDKernel):
     def dtype_to_str(self, dtype: torch.dtype) -> str: ...
     def load(self, name: str, index: sympy.Expr) -> CSEVariable: ...
     def store(
-        self, name: str, index: sympy.Expr, value: CSEVariable, mode: StoreMode = ...
+        self,
+        name: str,
+        index: sympy.Expr,
+        value: CSEVariable,
+        mode: StoreMode = ...,
     ) -> None: ...
     def store_reduction(
-        self, name: str, index: sympy.Expr, value: CSEVariable
+        self,
+        name: str,
+        index: sympy.Expr,
+        value: CSEVariable,
     ) -> None: ...
     def reduction(
         self,
@@ -145,11 +157,18 @@ class MetalKernel(SIMDKernel):
     def codegen_kernel(self, name: str | None = ...) -> str: ...
     def call_kernel(self, name: str, node: Any = ...) -> None: ...
     def check_bounds(
-        self, expr: sympy.Expr, size: sympy.Expr, lower: bool, upper: bool
+        self,
+        expr: sympy.Expr,
+        size: sympy.Expr,
+        lower: bool,
+        upper: bool,
     ) -> None: ...
 
 class MetalScheduling(SIMDScheduling):
     def __init__(self, scheduler: Scheduler | None) -> None: ...
     def define_kernel(
-        self, src_code: str, node_schedule: list[SchedulerNode], kernel: MetalKernel
+        self,
+        src_code: str,
+        node_schedule: list[SchedulerNode],
+        kernel: MetalKernel,
     ) -> str: ...

@@ -7,5 +7,8 @@ __all__ = ["register_rendezvous_handler", "rendezvous"]
 
 def register_rendezvous_handler(scheme, handler) -> None: ...
 def rendezvous(
-    url: str, rank: int = ..., world_size: int = ..., **kwargs
+    url: str,
+    rank: int = ...,
+    world_size: int = ...,
+    **kwargs,
 ) -> Iterator[tuple[Store, int, int]]: ...

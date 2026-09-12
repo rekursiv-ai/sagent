@@ -23,7 +23,9 @@ class ZeroShotObjectDetectionPipeline(ChunkPipeline):
     ) -> list[dict[str, Any]]: ...
     @overload
     def __call__(
-        self, image: list[dict[str, Any]], **kwargs: Any
+        self,
+        image: list[dict[str, Any]],
+        **kwargs: Any,
     ) -> list[list[dict[str, Any]]]: ...
     def __call__(
         self,
@@ -32,7 +34,9 @@ class ZeroShotObjectDetectionPipeline(ChunkPipeline):
         **kwargs: Any,
     ) -> list[dict[str, Any]] | list[list[dict[str, Any]]]: ...
     def preprocess(
-        self, inputs, timeout=...
+        self,
+        inputs,
+        timeout=...,
     ):  # -> Generator[dict[str | Any, bool | Tensor | str | Any | Encoding], Any, None]:
         ...
     def postprocess(self, model_outputs, threshold=..., top_k=...):  # -> list[Any]:

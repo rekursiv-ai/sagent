@@ -21,21 +21,6 @@ import os
 import uuid
 
 
-def _resolve_symlink(path: Path) -> Path:
-    """Follow symlinks so the atomic rename hits the target, not the link.
-
-    Symlinks pointing at a not-yet-existing target are left unresolved:
-    ``Path.resolve()`` would invent an absolute path under the link's
-    parent, which a subsequent ``mkdir(parents=True)`` would then
-    materialise -- creating foreign directories the caller never named.
-    """
-    if not path.is_symlink():
-        return path
-    if not path.exists():
-        return path
-    return path.resolve()
-
-
 def atomic_write_bytes(
     path: Path,
     data: bytes,
@@ -80,10 +65,21 @@ def _write_all(fd: int, data: bytes) -> None:
         view = view[written:]
 
 
+# Two coroutines writing to the same path in the same process would otherwise race on a
+# pid-only name.
 def _tmp_for(path: Path) -> Path:
-    """Sibling tmp path: pid + uuid token for per-writer uniqueness.
-
-    Two coroutines writing to the same path in the same process would
-    otherwise race on a pid-only name.
-    """
+    """Sibling tmp path: pid + uuid token for per-writer uniqueness."""
     return path.with_suffix(path.suffix + f".tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
+
+
+# Symlinks pointing at a not-yet-existing target are left unresolved: ``Path.resolve()``
+# would invent an absolute path under the link's parent, which a subsequent
+# ``mkdir(parents=True)`` would then materialise -- creating foreign directories the
+# caller never named.
+def _resolve_symlink(path: Path) -> Path:
+    """Follow symlinks so the atomic rename hits the target, not the link."""
+    if not path.is_symlink():
+        return path
+    if not path.exists():
+        return path
+    return path.resolve()

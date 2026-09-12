@@ -16,47 +16,75 @@ class FlaxLogitsWarper:
 class FlaxLogitsProcessorList(list):
     @add_start_docstrings(LOGITS_PROCESSOR_INPUTS_DOCSTRING)
     def __call__(
-        self, input_ids: jnp.ndarray, scores: jnp.ndarray, cur_len: int, **kwargs
+        self,
+        input_ids: jnp.ndarray,
+        scores: jnp.ndarray,
+        cur_len: int,
+        **kwargs,
     ) -> jnp.ndarray: ...
 
 class FlaxTemperatureLogitsWarper(FlaxLogitsWarper):
     def __init__(self, temperature: float) -> None: ...
     def __call__(
-        self, input_ids: jnp.ndarray, scores: jnp.ndarray, cur_len: int
+        self,
+        input_ids: jnp.ndarray,
+        scores: jnp.ndarray,
+        cur_len: int,
     ) -> jnp.ndarray: ...
 
 class FlaxTopPLogitsWarper(FlaxLogitsWarper):
     def __init__(
-        self, top_p: float, filter_value: float = ..., min_tokens_to_keep: int = ...
+        self,
+        top_p: float,
+        filter_value: float = ...,
+        min_tokens_to_keep: int = ...,
     ) -> None: ...
     def __call__(
-        self, input_ids: jnp.ndarray, scores: jnp.ndarray, cur_len: int
+        self,
+        input_ids: jnp.ndarray,
+        scores: jnp.ndarray,
+        cur_len: int,
     ) -> jnp.ndarray: ...
 
 class FlaxTopKLogitsWarper(FlaxLogitsWarper):
     def __init__(
-        self, top_k: int, filter_value: float = ..., min_tokens_to_keep: int = ...
+        self,
+        top_k: int,
+        filter_value: float = ...,
+        min_tokens_to_keep: int = ...,
     ) -> None: ...
     def __call__(
-        self, input_ids: jnp.ndarray, scores: jnp.ndarray, cur_len: int
+        self,
+        input_ids: jnp.ndarray,
+        scores: jnp.ndarray,
+        cur_len: int,
     ) -> jnp.ndarray: ...
 
 class FlaxForcedBOSTokenLogitsProcessor(FlaxLogitsProcessor):
     def __init__(self, bos_token_id: int) -> None: ...
     def __call__(
-        self, input_ids: jnp.ndarray, scores: jnp.ndarray, cur_len: int
+        self,
+        input_ids: jnp.ndarray,
+        scores: jnp.ndarray,
+        cur_len: int,
     ) -> jnp.ndarray: ...
 
 class FlaxForcedEOSTokenLogitsProcessor(FlaxLogitsProcessor):
     def __init__(self, max_length: int, eos_token_id: int) -> None: ...
     def __call__(
-        self, input_ids: jnp.ndarray, scores: jnp.ndarray, cur_len: int
+        self,
+        input_ids: jnp.ndarray,
+        scores: jnp.ndarray,
+        cur_len: int,
     ) -> jnp.ndarray: ...
 
 class FlaxMinLengthLogitsProcessor(FlaxLogitsProcessor):
     def __init__(self, min_length: int, eos_token_id: int) -> None: ...
     def __call__(
-        self, input_ids: jnp.ndarray, scores: jnp.ndarray, cur_len: int
+        self,
+        input_ids: jnp.ndarray,
+        scores: jnp.ndarray,
+        cur_len: int,
     ) -> jnp.ndarray: ...
 
 class FlaxSuppressTokensAtBeginLogitsProcessor(FlaxLogitsProcessor):
@@ -66,13 +94,19 @@ class FlaxSuppressTokensAtBeginLogitsProcessor(FlaxLogitsProcessor):
 class FlaxSuppressTokensLogitsProcessor(FlaxLogitsProcessor):
     def __init__(self, suppress_tokens: list) -> None: ...
     def __call__(
-        self, input_ids: jnp.ndarray, scores: jnp.ndarray, cur_len: int
+        self,
+        input_ids: jnp.ndarray,
+        scores: jnp.ndarray,
+        cur_len: int,
     ) -> jnp.ndarray: ...
 
 class FlaxForceTokensLogitsProcessor(FlaxLogitsProcessor):
     def __init__(self, force_token_map) -> None: ...
     def __call__(
-        self, input_ids: jnp.ndarray, scores: jnp.ndarray, cur_len: int
+        self,
+        input_ids: jnp.ndarray,
+        scores: jnp.ndarray,
+        cur_len: int,
     ) -> jnp.ndarray: ...
 
 class FlaxWhisperTimeStampLogitsProcessor(FlaxLogitsProcessor):
@@ -82,12 +116,20 @@ class FlaxWhisperTimeStampLogitsProcessor(FlaxLogitsProcessor):
 class FlaxNoRepeatNGramLogitsProcessor(FlaxLogitsProcessor):
     def __init__(self, ngram_size: int) -> None: ...
     def get_previous_ngrams(
-        self, input_ids: jnp.ndarray, vocab_size: int, cur_len: int
+        self,
+        input_ids: jnp.ndarray,
+        vocab_size: int,
+        cur_len: int,
     ):  # -> BCOO:
         ...
     def get_banned_tokens_mask(
-        self, latest_tokens: jnp.ndarray, previous_ngrams
+        self,
+        latest_tokens: jnp.ndarray,
+        previous_ngrams,
     ) -> jnp.ndarray: ...
     def __call__(
-        self, input_ids: jnp.ndarray, scores: jnp.ndarray, cur_len: int
+        self,
+        input_ids: jnp.ndarray,
+        scores: jnp.ndarray,
+        cur_len: int,
     ) -> jnp.ndarray: ...

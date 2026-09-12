@@ -26,7 +26,9 @@ from ...utils.deprecation import deprecate_kwarg
 logger = ...
 
 def shift_tokens_right(
-    input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: torch.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ):  # -> Tensor:
     ...
 
@@ -102,7 +104,9 @@ class BlenderbotEncoderLayer(GradientCheckpointingLayer):
 
 class BlenderbotDecoderLayer(GradientCheckpointingLayer):
     def __init__(
-        self, config: BlenderbotConfig, layer_idx: int | None = ...
+        self,
+        config: BlenderbotConfig,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -134,7 +138,9 @@ class BlenderbotPreTrainedModel(PreTrainedModel):
 
 class BlenderbotEncoder(BlenderbotPreTrainedModel):
     def __init__(
-        self, config: BlenderbotConfig, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: BlenderbotConfig,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -150,7 +156,9 @@ class BlenderbotEncoder(BlenderbotPreTrainedModel):
 
 class BlenderbotDecoder(BlenderbotPreTrainedModel):
     def __init__(
-        self, config: BlenderbotConfig, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: BlenderbotConfig,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     def forward(
         self,

@@ -15,7 +15,8 @@ logger = ...
 BASE_VIDEO_PROCESSOR_DOCSTRING = ...
 
 @add_start_docstrings(
-    "Constructs a base VideoProcessor.", BASE_VIDEO_PROCESSOR_DOCSTRING
+    "Constructs a base VideoProcessor.",
+    BASE_VIDEO_PROCESSOR_DOCSTRING,
 )
 @requires(backends=("vision", "torchvision"))
 class BaseVideoProcessor(BaseImageProcessorFast):
@@ -53,7 +54,9 @@ class BaseVideoProcessor(BaseImageProcessorFast):
         ...
     @add_start_docstrings(BASE_VIDEO_PROCESSOR_DOCSTRING)
     def preprocess(
-        self, videos: VideoInput, **kwargs: Unpack[VideosKwargs]
+        self,
+        videos: VideoInput,
+        **kwargs: Unpack[VideosKwargs],
     ) -> BatchFeature: ...
     @classmethod
     def from_pretrained(
@@ -68,16 +71,23 @@ class BaseVideoProcessor(BaseImageProcessorFast):
     ):  # -> tuple[Self, dict[str, Any]] | Self:
         ...
     def save_pretrained(
-        self, save_directory: str | os.PathLike, push_to_hub: bool = ..., **kwargs
+        self,
+        save_directory: str | os.PathLike,
+        push_to_hub: bool = ...,
+        **kwargs,
     ):  # -> list[str]:
         ...
     @classmethod
     def get_video_processor_dict(
-        cls, pretrained_model_name_or_path: str | os.PathLike, **kwargs
+        cls,
+        pretrained_model_name_or_path: str | os.PathLike,
+        **kwargs,
     ) -> tuple[dict[str, Any], dict[str, Any]]: ...
     @classmethod
     def from_dict(
-        cls, video_processor_dict: dict[str, Any], **kwargs
+        cls,
+        video_processor_dict: dict[str, Any],
+        **kwargs,
     ):  # -> tuple[Self, dict[str, Any]] | Self:
         ...
     def to_dict(self) -> dict[str, Any]: ...

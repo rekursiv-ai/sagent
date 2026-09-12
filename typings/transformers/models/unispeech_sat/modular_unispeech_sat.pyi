@@ -73,7 +73,9 @@ class UniSpeechSatModel(UniSpeechSatPreTrainedModel, Wav2Vec2Model):
         return_dict: bool | None = ...,
     ) -> tuple | UniSpeechSatBaseModelOutput: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | UniSpeechSatBaseModelOutput: ...
 
 @auto_docstring(custom_intro=...)

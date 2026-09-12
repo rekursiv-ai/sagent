@@ -79,7 +79,8 @@ class Cohere2DecoderLayer(CohereDecoderLayer):
         cache_position: torch.LongTensor | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class Cohere2PreTrainedModel(CoherePreTrainedModel):

@@ -70,10 +70,15 @@ class Owlv2ImageGuidedObjectDetectionOutput(ModelOutput):
 class Owlv2VisionEmbeddings(nn.Module):
     def __init__(self, config: Owlv2VisionConfig) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
-        self, pixel_values: torch.FloatTensor, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values: torch.FloatTensor,
+        interpolate_pos_encoding: bool = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -97,7 +102,9 @@ class Owlv2Attention(nn.Module):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class Owlv2MLP(nn.Module):
@@ -199,12 +206,16 @@ class Owlv2Model(Owlv2PreTrainedModel):
     @filter_out_non_signature_kwargs()
     @auto_docstring
     def get_text_features(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = ...
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = ...,
     ) -> torch.FloatTensor: ...
     @filter_out_non_signature_kwargs()
     @auto_docstring
     def get_image_features(
-        self, pixel_values: torch.Tensor, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values: torch.Tensor,
+        interpolate_pos_encoding: bool = ...,
     ) -> torch.FloatTensor: ...
     @auto_docstring
     def forward(
@@ -240,10 +251,12 @@ class Owlv2ForObjectDetection(Owlv2PreTrainedModel):
     def __init__(self, config: Owlv2Config) -> None: ...
     @staticmethod
     def normalize_grid_corner_coordinates(
-        num_patches_height: int, num_patches_width: int
+        num_patches_height: int,
+        num_patches_width: int,
     ) -> torch.Tensor: ...
     def objectness_predictor(
-        self, image_features: torch.FloatTensor
+        self,
+        image_features: torch.FloatTensor,
     ) -> torch.FloatTensor: ...
     @lru_cache(maxsize=2)  # noqa: B019 -- mirrors upstream @lru_cache on a method; not executed in a stub
     def compute_box_bias(

@@ -15,14 +15,17 @@ class DataCollatorMixin:
 
 def pad_without_fast_tokenizer_warning(tokenizer, *pad_args, **pad_kwargs): ...
 def default_data_collator(
-    features: list[InputDataClass], return_tensors=...
+    features: list[InputDataClass],
+    return_tensors=...,
 ) -> dict[str, Any]: ...
 
 @dataclass
 class DefaultDataCollator(DataCollatorMixin):
     return_tensors: str = ...
     def __call__(
-        self, features: list[dict[str, Any]], return_tensors=...
+        self,
+        features: list[dict[str, Any]],
+        return_tensors=...,
     ) -> dict[str, Any]: ...
 
 def torch_default_data_collator(features: list[InputDataClass]) -> dict[str, Any]: ...
@@ -51,7 +54,8 @@ class DataCollatorForTokenClassification(DataCollatorMixin):
     def tf_call(self, features):  # -> BatchEncoding | dict[Any, Any]:
         ...
     def numpy_call(
-        self, features
+        self,
+        features,
     ):  # -> BatchEncoding | dict[Any, NDArray[signedinteger[_64Bit]]]:
         ...
 
@@ -94,7 +98,8 @@ class DataCollatorForLanguageModeling(DataCollatorMixin):
     def __post_init__(self):  # -> None:
         ...
     def get_generator(
-        self, seed
+        self,
+        seed,
     ):  # -> torch._C.Generator | numpy.random._generator.Generator:
         ...
     def create_rng(self):  # -> None:
@@ -109,10 +114,12 @@ class DataCollatorForLanguageModeling(DataCollatorMixin):
         special_tokens_mask: Any | None = ...,
     ) -> tuple[Any, Any]: ...
     def tf_call(
-        self, examples: list[list[int] | Any | dict[str, Any]]
+        self,
+        examples: list[list[int] | Any | dict[str, Any]],
     ) -> dict[str, Any]: ...
     def torch_call(
-        self, examples: list[list[int] | Any | dict[str, Any]]
+        self,
+        examples: list[list[int] | Any | dict[str, Any]],
     ) -> dict[str, Any]: ...
     def torch_mask_tokens(
         self,
@@ -121,7 +128,8 @@ class DataCollatorForLanguageModeling(DataCollatorMixin):
         offset_mapping: Any | None = ...,
     ) -> tuple[Any, Any]: ...
     def numpy_call(
-        self, examples: list[list[int] | Any | dict[str, Any]]
+        self,
+        examples: list[list[int] | Any | dict[str, Any]],
     ) -> dict[str, Any]: ...
     def numpy_mask_tokens(
         self,
@@ -133,13 +141,16 @@ class DataCollatorForLanguageModeling(DataCollatorMixin):
 @dataclass
 class DataCollatorForWholeWordMask(DataCollatorForLanguageModeling):
     def torch_call(
-        self, examples: list[list[int] | Any | dict[str, Any]]
+        self,
+        examples: list[list[int] | Any | dict[str, Any]],
     ) -> dict[str, Any]: ...
     def tf_call(
-        self, examples: list[list[int] | Any | dict[str, Any]]
+        self,
+        examples: list[list[int] | Any | dict[str, Any]],
     ) -> dict[str, Any]: ...
     def numpy_call(
-        self, examples: list[list[int] | Any | dict[str, Any]]
+        self,
+        examples: list[list[int] | Any | dict[str, Any]],
     ) -> dict[str, Any]: ...
     def torch_mask_tokens(self, inputs: Any, mask_labels: Any) -> tuple[Any, Any]: ...
     def tf_mask_tokens(self, inputs: Any, mask_labels: Any) -> tuple[Any, Any]: ...
@@ -162,13 +173,16 @@ class DataCollatorForPermutationLanguageModeling(DataCollatorMixin):
     max_span_length: int = ...
     return_tensors: str = ...
     def torch_call(
-        self, examples: list[list[int] | Any | dict[str, Any]]
+        self,
+        examples: list[list[int] | Any | dict[str, Any]],
     ) -> dict[str, Any]: ...
     def tf_call(
-        self, examples: list[list[int] | Any | dict[str, Any]]
+        self,
+        examples: list[list[int] | Any | dict[str, Any]],
     ) -> dict[str, Any]: ...
     def numpy_call(
-        self, examples: list[list[int] | Any | dict[str, Any]]
+        self,
+        examples: list[list[int] | Any | dict[str, Any]],
     ) -> dict[str, Any]: ...
     def torch_mask_tokens(self, inputs: Any) -> tuple[Any, Any, Any, Any]: ...
     def tf_mask_tokens(self, inputs: Any) -> tuple[Any, Any, Any, Any]: ...
@@ -186,6 +200,9 @@ class DataCollatorWithFlattening(DefaultDataCollator):
         **kwargs,
     ) -> None: ...
     def __call__(
-        self, features, return_tensors=..., separator_id=...
+        self,
+        features,
+        return_tensors=...,
+        separator_id=...,
     ):  # -> dict[str, list[Any]]:
         ...

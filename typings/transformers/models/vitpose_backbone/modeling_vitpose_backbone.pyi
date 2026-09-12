@@ -45,16 +45,22 @@ def eager_attention_forward(
 class VitPoseBackboneSelfAttention(nn.Module):
     def __init__(self, config: VitPoseBackboneConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, head_mask: torch.Tensor | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        head_mask: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class VitPoseBackboneSelfOutput(nn.Module):
     def __init__(self, config: VitPoseBackboneConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -63,14 +69,18 @@ class VitPoseBackboneAttention(nn.Module):
     def prune_heads(self, heads: set[int]):  # -> None:
         ...
     def forward(
-        self, hidden_states: torch.Tensor, head_mask: torch.Tensor | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        head_mask: torch.Tensor | None = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class VitPoseBackboneMoeMLP(nn.Module):
     def __init__(self, config: VitPoseBackboneConfig) -> None: ...
     def forward(
-        self, hidden_state: torch.Tensor, indices: torch.Tensor
+        self,
+        hidden_state: torch.Tensor,
+        indices: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 

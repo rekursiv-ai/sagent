@@ -48,7 +48,8 @@ class Qwen3Model(Qwen2Model): ...
 
 class Qwen3ForCausalLM(Qwen2ForCausalLM):
     def forward(
-        self, **super_kwargs: Unpack[TransformersKwargs]
+        self,
+        **super_kwargs: Unpack[TransformersKwargs],
     ) -> CausalLMOutputWithPast: ...
     def __call__(self, *args: Any, **kwargs: Any) -> CausalLMOutputWithPast: ...
 

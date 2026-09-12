@@ -35,7 +35,8 @@ class CondAutogradOp(torch.autograd.Function):
     def forward(ctx, pred, true_fn, false_fn, *operands) -> None: ...
     @staticmethod
     def backward(
-        ctx, *flat_grads
+        ctx,
+        *flat_grads,
     ) -> tuple[None, None, None, *tuple[Tensor | None, ...]]: ...
 
 @cond_op.py_autograd_impl
@@ -45,11 +46,18 @@ def inner(mode, pred, true_fn, false_fn, operands): ...
 @cond_op.py_impl(FakeTensorMode)
 def cond_fake_tensor_mode(mode, pred, true_fn, false_fn, operands) -> PyTree: ...
 def check_tensor_meta_match(
-    t1: torch.Tensor, t2: torch.Tensor, attr_names: tuple[str, ...], msg_prefix: str
+    t1: torch.Tensor,
+    t2: torch.Tensor,
+    attr_names: tuple[str, ...],
+    msg_prefix: str,
 ) -> None: ...
 @cond_op.py_functionalize_impl
 def cond_func(ctx, pred, true_fn, false_fn, inputs): ...
 @cond_op.py_impl(torch._C._functorch.TransformType.Vmap)
 def cond_batch_rule(
-    interpreter, pred, true_fn, false_fn, inputs
+    interpreter,
+    pred,
+    true_fn,
+    false_fn,
+    inputs,
 ) -> tuple[Tensor, ...]: ...

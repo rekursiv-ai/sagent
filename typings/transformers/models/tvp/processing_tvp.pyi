@@ -13,7 +13,9 @@ class TvpProcessor(ProcessorMixin):
     tokenizer_class = ...
     def __init__(self, image_processor=..., tokenizer=..., **kwargs) -> None: ...
     def post_process_video_grounding(
-        self, logits, video_durations
+        self,
+        logits,
+        video_durations,
     ):  # -> tuple[Any, Any]:
         ...
 

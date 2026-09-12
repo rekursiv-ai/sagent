@@ -98,52 +98,6 @@ def post_process_result(
     return result
 
 
-def _should_persist(
-    content: str,
-    *,
-    persist_tokens: int,
-    message_budget_tokens: int,
-    used_message_tokens: int,
-) -> bool:
-    """Return True when result content should be off-loaded.
-
-    Nothing is exempt -- not a tool, not a failure.
-
-    ``Read`` was, on the stated grounds that its "output already bounded
-    by the tool's own internal cap" -- which became false when that cap
-    was re-expressed in lines, leaving the 11.1M-character result of
-    session ``190b6baec7ed`` with no bound at all.
-
-    Error results were too, but ``materialize_request`` elides any
-    over-budget result regardless, so the exemption did not keep a large
-    traceback whole: it only ensured the traceback was replaced by a
-    placeholder with no path, while the identical body as a SUCCESS was
-    written to disk and stayed readable. Exactly backwards, since the
-    failing case is the one whose detail is wanted.
-    """
-    tokens = approx_tokens(content)
-    # Never off-load a result the stub would not shrink. The stub is a
-    # tag, a path, a size line, and up to ``preview_chars`` of the content,
-    # so below about that size persisting COSTS tokens instead of saving
-    # them -- a 159-byte result came back as a ~600-byte preview. Only the
-    # aggregate branch makes that reachable for a small result: it charges
-    # the newest result for the size of everything before it, so once the
-    # aggregate is spent EVERY later result off-loads however tiny.
-    if tokens <= stub_cost_tokens(content):
-        return False
-    if persist_tokens > 0 and tokens > persist_tokens:
-        return True
-    # Aggregate pressure off-loads as well. It is the only thing standing
-    # between many mid-size results and the wire, where
-    # ``materialize_request`` replaces an over-budget result with a
-    # placeholder carrying no path back; off-loading here keeps the
-    # content reachable on disk instead.
-    return (
-        message_budget_tokens > 0
-        and used_message_tokens + tokens > message_budget_tokens
-    )
-
-
 def stub_cost_tokens(content: str, *, preview_chars: int = 2_000) -> int:
     """Tokens the persisted stub would occupy for ``content``.
 
@@ -166,7 +120,7 @@ def stub_cost_tokens(content: str, *, preview_chars: int = 2_000) -> int:
         f"({_format_size(len(content.encode('utf-8')))}). "
         f"Full output saved to: {_FALLBACK_STORAGE_DIR}/{'x' * 40}.txt\n\n"
         f"Preview (first {preview_chars:,} chars):\n"
-        f"{content[:preview_chars]}\n...\n</persisted-output>"
+        f"{content[:preview_chars]}\n...\n</persisted-output>",
     )
 
 
@@ -177,18 +131,7 @@ def _persist_oversized(
     session_dir: Path | None,
     preview_chars: int = 2_000,
 ) -> str | None:
-    """Write ``content`` to disk and return a preview replacement.
-
-    Args:
-      call_id: Originating call id; used to build a stable filename.
-      content: Full tool result content.
-      session_dir: Session directory (None falls back to OS tmp).
-      preview_chars: How much of ``content`` the in-history stub keeps.
-
-    Returns:
-      preview: Preview text with embedded path, or ``None`` on write failure.
-
-    """
+    """Write ``content`` to disk and return a preview replacement."""
     base = (session_dir / "tool-results") if session_dir else _FALLBACK_STORAGE_DIR
     try:
         base.mkdir(parents=True, exist_ok=True)
@@ -219,7 +162,7 @@ def _persist_oversized(
     )
 
 
-_MAX_STEM: Final = 96  # config-globals: ignore -- filename component bound
+_MAX_STEM: Final = 96
 """Longest call-id-derived filename stem kept verbatim.
 
 Filesystem name components cap near 255 bytes, so a long provider call id made
@@ -230,12 +173,10 @@ disabled by the id's length. Well under the limit, leaving room for the
 """
 
 
+# Truncating alone would collide two ids sharing a long prefix, so an over-long id keeps
+# a readable head AND a hash of the whole value.
 def _safe_stem(call_id: str) -> str:
-    """Return a filesystem-safe, length-bounded stem for ``call_id``.
-
-    Truncating alone would collide two ids sharing a long prefix, so an
-    over-long id keeps a readable head AND a hash of the whole value.
-    """
+    """Return a filesystem-safe, length-bounded stem for ``call_id``."""
     safe = "".join(c for c in call_id if c.isalnum() or c in "_-")
     digest = hashlib.sha256(call_id.encode()).hexdigest()[:16]
     if not safe:
@@ -248,20 +189,18 @@ def _safe_stem(call_id: str) -> str:
 _NUMBERED_LINE = re.compile(r"^ *(\d+)\t")
 
 
+# The stub tells the model to re-read the persisted path, so that read must be a fixed
+# point. ``Read`` renders a gutter, so the content arriving here is already numbered;
+# writing it verbatim means the next read numbers the numbers, growing the file ~2,555
+# chars per round on a 12,545-char source and re-spilling forever. The promised recovery
+# could never complete.
+#
+# Applied only when EVERY non-empty line carries a gutter whose numbers run
+# consecutively. A Bash dump or TSV payload with a stray ``1\\t`` prefix fails that test
+# and is written byte-for-byte, since stripping it would corrupt the data the file
+# exists to preserve.
 def _strip_line_numbers(content: str) -> str:
-    r"""Return ``content`` without a ``Read``-style ``<n>\t`` line-number gutter.
-
-    The stub tells the model to re-read the persisted path, so that read must
-    be a fixed point. ``Read`` renders a gutter, so the content arriving here
-    is already numbered; writing it verbatim means the next read numbers the
-    numbers, growing the file ~2,555 chars per round on a 12,545-char source
-    and re-spilling forever. The promised recovery could never complete.
-
-    Applied only when EVERY non-empty line carries a gutter whose numbers run
-    consecutively. A Bash dump or TSV payload with a stray ``1\\t`` prefix
-    fails that test and is written byte-for-byte, since stripping it would
-    corrupt the data the file exists to preserve.
-    """
+    r"""Return ``content`` without a ``Read``-style ``<n>\t`` line-number gutter."""
     lines = content.splitlines(keepends=True)
     prev: int | None = None
     for line in lines:
@@ -290,7 +229,8 @@ def _write_unique(filepath: Path, content: bytes) -> Path:
             return filepath
         suffix = hashlib.sha256(content).hexdigest()[:16]
         return _write_unique(
-            filepath.with_name(f"{filepath.stem}-{suffix}.txt"), content
+            filepath.with_name(f"{filepath.stem}-{suffix}.txt"),
+            content,
         )
     try:
         _write_all(fd, content)
@@ -316,3 +256,45 @@ def _format_size(n: int) -> str:
     if n < 1024 * 1024:
         return f"{n / 1024:.1f} KB"
     return f"{n / (1024 * 1024):.1f} MB"
+
+
+# Nothing is exempt -- not a tool, not a failure.
+#
+# ``Read`` was, on the stated grounds that its "output already bounded by the tool's own
+# internal cap" -- which became false when that cap was re-expressed in lines, leaving
+# the 11.1M-character result of session ``190b6baec7ed`` with no bound at all.
+#
+# Error results were too, but ``materialize_request`` elides any over-budget result
+# regardless, so the exemption did not keep a large traceback whole: it only ensured the
+# traceback was replaced by a placeholder with no path, while the identical body as a
+# SUCCESS was written to disk and stayed readable. Exactly backwards, since the failing
+# case is the one whose detail is wanted.
+def _should_persist(
+    content: str,
+    *,
+    persist_tokens: int,
+    message_budget_tokens: int,
+    used_message_tokens: int,
+) -> bool:
+    """Return True when result content should be off-loaded."""
+    tokens = approx_tokens(content)
+    # Never off-load a result the stub would not shrink. The stub is a
+    # tag, a path, a size line, and up to ``preview_chars`` of the content,
+    # so below about that size persisting COSTS tokens instead of saving
+    # them -- a 159-byte result came back as a ~600-byte preview. Only the
+    # aggregate branch makes that reachable for a small result: it charges
+    # the newest result for the size of everything before it, so once the
+    # aggregate is spent EVERY later result off-loads however tiny.
+    if tokens <= stub_cost_tokens(content):
+        return False
+    if persist_tokens > 0 and tokens > persist_tokens:
+        return True
+    # Aggregate pressure off-loads as well. It is the only thing standing
+    # between many mid-size results and the wire, where
+    # ``materialize_request`` replaces an over-budget result with a
+    # placeholder carrying no path back; off-loading here keeps the
+    # content reachable on disk instead.
+    return (
+        message_budget_tokens > 0
+        and used_message_tokens + tokens > message_budget_tokens
+    )

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from sagent.testing import with_fake_agent
-from sagent.tools import wiki as wm
+from sagent.tools import wiki
 from sagent.tools.wiki import Wiki
 
 
@@ -39,78 +39,78 @@ _GOOD_FRONTMATTER = (
 
 
 def test_valid_slug_accepts_simple() -> None:
-    assert wm.valid_slug("abc")
-    assert wm.valid_slug("a-b-c-1")
+    assert wiki.valid_slug("abc")
+    assert wiki.valid_slug("a-b-c-1")
 
 
 def test_valid_slug_rejects_uppercase_and_punct() -> None:
-    assert not wm.valid_slug("AbC")
-    assert not wm.valid_slug("a_b")
-    assert not wm.valid_slug("")
-    assert not wm.valid_slug("-abc")
+    assert not wiki.valid_slug("AbC")
+    assert not wiki.valid_slug("a_b")
+    assert not wiki.valid_slug("")
+    assert not wiki.valid_slug("-abc")
 
 
 def test_find_root_at_top(tmp_path: Path) -> None:
     _make_wiki(tmp_path)
-    assert wm.find_root(tmp_path) == tmp_path.resolve()
+    assert wiki.find_root(tmp_path) == tmp_path.resolve()
 
 
 def test_find_root_walks_up(tmp_path: Path) -> None:
-    wiki = _make_wiki(tmp_path / "wiki")
+    root = _make_wiki(tmp_path / "wiki")
     deep = tmp_path / "wiki" / "pages"
-    assert wm.find_root(deep) == wiki.resolve()
+    assert wiki.find_root(deep) == root.resolve()
 
 
 def test_find_root_via_wiki_subdir(tmp_path: Path) -> None:
-    wiki = _make_wiki(tmp_path / "wiki")
-    assert wm.find_root(tmp_path) == wiki.resolve()
+    root = _make_wiki(tmp_path / "wiki")
+    assert wiki.find_root(tmp_path) == root.resolve()
 
 
 def test_find_root_returns_none(tmp_path: Path) -> None:
-    assert wm.find_root(tmp_path) is None
+    assert wiki.find_root(tmp_path) is None
 
 
 def test_list_pages_sorted(tmp_path: Path) -> None:
     root = _make_wiki(tmp_path, {"b": "b", "a": "a", "c-d": "c"})
-    assert wm.list_pages(root) == ["a", "b", "c-d"]
+    assert wiki.list_pages(root) == ["a", "b", "c-d"]
 
 
 def test_list_pages_missing_dir(tmp_path: Path) -> None:
     (tmp_path / "SCHEMA.md").write_text("", encoding="utf-8")
-    assert wm.list_pages(tmp_path) == []
+    assert wiki.list_pages(tmp_path) == []
 
 
 def test_read_page_returns_text(tmp_path: Path) -> None:
     root = _make_wiki(tmp_path, {"hello": "hi"})
-    assert wm.read_page(root, "hello") == "hi"
+    assert wiki.read_page(root, "hello") == "hi"
 
 
 def test_read_page_invalid_slug_returns_none(tmp_path: Path) -> None:
     root = _make_wiki(tmp_path)
-    assert wm.read_page(root, "BAD!") is None
+    assert wiki.read_page(root, "BAD!") is None
 
 
 def test_read_page_missing_returns_none(tmp_path: Path) -> None:
     root = _make_wiki(tmp_path)
-    assert wm.read_page(root, "missing") is None
+    assert wiki.read_page(root, "missing") is None
 
 
 def test_lint_clean(tmp_path: Path) -> None:
     root = _make_wiki(tmp_path, {"a": _GOOD_FRONTMATTER + "Refs [[a]]\n"})
-    out = wm.lint(root)
+    out = wiki.lint(root)
     assert out == {"broken_links": [], "missing_frontmatter": []}
 
 
 def test_lint_detects_missing_frontmatter(tmp_path: Path) -> None:
     root = _make_wiki(tmp_path, {"a": "Just a body, no frontmatter.\n"})
-    out = wm.lint(root)
+    out = wiki.lint(root)
     assert out["missing_frontmatter"]
     assert "missing" in out["missing_frontmatter"][0]
 
 
 def test_lint_detects_broken_links(tmp_path: Path) -> None:
     root = _make_wiki(tmp_path, {"a": _GOOD_FRONTMATTER + "See [[absent]]\n"})
-    out = wm.lint(root)
+    out = wiki.lint(root)
     assert any("[[absent]]" in s for s in out["broken_links"])
 
 

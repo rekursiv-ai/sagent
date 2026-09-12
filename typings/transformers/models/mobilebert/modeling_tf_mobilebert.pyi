@@ -134,7 +134,11 @@ class TFOutputBottleneck(keras.layers.Layer):
 class TFMobileBertOutput(keras.layers.Layer):
     def __init__(self, config, **kwargs) -> None: ...
     def call(
-        self, hidden_states, residual_tensor_1, residual_tensor_2, training=...
+        self,
+        hidden_states,
+        residual_tensor_1,
+        residual_tensor_2,
+        training=...,
     ): ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -167,7 +171,12 @@ class TFFFNLayer(keras.layers.Layer):
 class TFMobileBertLayer(keras.layers.Layer):
     def __init__(self, config, **kwargs) -> None: ...
     def call(
-        self, hidden_states, attention_mask, head_mask, output_attentions, training=...
+        self,
+        hidden_states,
+        attention_mask,
+        head_mask,
+        output_attentions,
+        training=...,
     ): ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -269,7 +278,7 @@ class TFMobileBertModel(TFMobileBertPreTrainedModel):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        MOBILEBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MOBILEBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -297,7 +306,8 @@ class TFMobileBertModel(TFMobileBertPreTrainedModel):
     MOBILEBERT_START_DOCSTRING,
 )
 class TFMobileBertForPreTraining(
-    TFMobileBertPreTrainedModel, TFMobileBertPreTrainingLoss
+    TFMobileBertPreTrainedModel,
+    TFMobileBertPreTrainingLoss,
 ):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     def get_lm_head(self):  # -> TFMobileBertLMPredictionHead:
@@ -305,10 +315,11 @@ class TFMobileBertForPreTraining(
     def get_prefix_bias_name(self): ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        MOBILEBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MOBILEBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFMobileBertForPreTrainingOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFMobileBertForPreTrainingOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -328,7 +339,8 @@ class TFMobileBertForPreTraining(
     def build(self, input_shape=...):  # -> None:
         ...
     def tf_to_pt_weight_rename(
-        self, tf_weight
+        self,
+        tf_weight,
     ):  # -> tuple[Literal['cls.predictions.decoder.weight'], Literal['mobilebert.embeddings.word_embeddings.weight']] | tuple[Any]:
         ...
 
@@ -337,7 +349,8 @@ class TFMobileBertForPreTraining(
     MOBILEBERT_START_DOCSTRING,
 )
 class TFMobileBertForMaskedLM(
-    TFMobileBertPreTrainedModel, TFMaskedLanguageModelingLoss
+    TFMobileBertPreTrainedModel,
+    TFMaskedLanguageModelingLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
@@ -346,7 +359,7 @@ class TFMobileBertForMaskedLM(
     def get_prefix_bias_name(self): ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        MOBILEBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MOBILEBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -372,7 +385,8 @@ class TFMobileBertForMaskedLM(
     def build(self, input_shape=...):  # -> None:
         ...
     def tf_to_pt_weight_rename(
-        self, tf_weight
+        self,
+        tf_weight,
     ):  # -> tuple[Literal['cls.predictions.decoder.weight'], Literal['mobilebert.embeddings.word_embeddings.weight']] | tuple[Any]:
         ...
 
@@ -387,16 +401,18 @@ class TFMobileBertOnlyNSPHead(keras.layers.Layer):
     MOBILEBERT_START_DOCSTRING,
 )
 class TFMobileBertForNextSentencePrediction(
-    TFMobileBertPreTrainedModel, TFNextSentencePredictionLoss
+    TFMobileBertPreTrainedModel,
+    TFNextSentencePredictionLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        MOBILEBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MOBILEBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFNextSentencePredictorOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFNextSentencePredictorOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -420,14 +436,15 @@ class TFMobileBertForNextSentencePrediction(
     MOBILEBERT_START_DOCSTRING,
 )
 class TFMobileBertForSequenceClassification(
-    TFMobileBertPreTrainedModel, TFSequenceClassificationLoss
+    TFMobileBertPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     _keys_to_ignore_on_load_missing = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        MOBILEBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MOBILEBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_SEQUENCE_CLASSIFICATION,
@@ -458,13 +475,14 @@ class TFMobileBertForSequenceClassification(
     MOBILEBERT_START_DOCSTRING,
 )
 class TFMobileBertForQuestionAnswering(
-    TFMobileBertPreTrainedModel, TFQuestionAnsweringLoss
+    TFMobileBertPreTrainedModel,
+    TFQuestionAnsweringLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        MOBILEBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MOBILEBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_QA,
@@ -503,7 +521,7 @@ class TFMobileBertForMultipleChoice(TFMobileBertPreTrainedModel, TFMultipleChoic
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        MOBILEBERT_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        MOBILEBERT_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -532,14 +550,15 @@ class TFMobileBertForMultipleChoice(TFMobileBertPreTrainedModel, TFMultipleChoic
     MOBILEBERT_START_DOCSTRING,
 )
 class TFMobileBertForTokenClassification(
-    TFMobileBertPreTrainedModel, TFTokenClassificationLoss
+    TFMobileBertPreTrainedModel,
+    TFTokenClassificationLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     _keys_to_ignore_on_load_missing = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        MOBILEBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MOBILEBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_TOKEN_CLASSIFICATION,

@@ -37,46 +37,6 @@ from sagent.types.runtime import ToolResult
 _cache = cachetools.LRUCache[tuple[object, ...], str](maxsize=1024)
 
 
-def _validate_author_args(
-    q: str,
-    ids: list[str],
-    op: str,
-    *,
-    year_from: int | None,
-    year_to: int | None,
-) -> ToolResult | None:
-    """Return an error if author args are invalid, else None."""
-    if q and ids:
-        return ToolResult(
-            call_id="",
-            content="Set exactly one of 'query' or 'ids', not both.",
-            is_error=True,
-        )
-    if not q and not ids:
-        return ToolResult(
-            call_id="", content="'query' or 'ids' is required.", is_error=True
-        )
-    if op and op != "papers":
-        return ToolResult(
-            call_id="",
-            content=f"Unknown operation {op!r}. Valid: 'papers' (with id), or omit.",
-            is_error=True,
-        )
-    if op and len(ids) != 1:
-        return ToolResult(
-            call_id="",
-            content="'operation=papers' needs exactly one id in 'ids'.",
-            is_error=True,
-        )
-    if (q or not op) and (year_from is not None or year_to is not None):
-        return ToolResult(
-            call_id="",
-            content="'year_from' / 'year_to' only apply to operation='papers'.",
-            is_error=True,
-        )
-    return None
-
-
 class PaperAuthor:
     """Author search / metadata / papers via the Semantic Scholar API."""
 
@@ -150,11 +110,19 @@ class PaperAuthor:
                     ),
                 },
             },
-        }
+        },
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
-        """Return a short display label for this invocation."""
+        """Return a short display label for this invocation.
+
+        Args:
+          args: Parsed tool arguments.
+
+        Returns:
+          label: Compact invocation label.
+
+        """
         query = str(args.get("query", "")).strip()
         op = str(args.get("operation", "")).strip()
         if query:
@@ -176,7 +144,15 @@ class PaperAuthor:
         return None
 
     async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Execute an author search, metadata lookup, or papers listing."""
+        """Execute an author search, metadata lookup, or papers listing.
+
+        Args:
+          args: Parsed tool arguments.
+
+        Returns:
+          result: Author search, metadata, or papers listing result.
+
+        """
         query = str(args.get("query", ""))
         operation = str(args.get("operation", ""))
         limit = validate_limit(opt_int(args, "limit"))
@@ -313,3 +289,45 @@ class PaperAuthor:
         if not listing.complete:
             body += "\n... (more matches exist; raise 'limit' or narrow the years)"
         return body
+
+
+def _validate_author_args(
+    q: str,
+    ids: list[str],
+    op: str,
+    *,
+    year_from: int | None,
+    year_to: int | None,
+) -> ToolResult | None:
+    """Return an error if author args are invalid, else None."""
+    if q and ids:
+        return ToolResult(
+            call_id="",
+            content="Set exactly one of 'query' or 'ids', not both.",
+            is_error=True,
+        )
+    if not q and not ids:
+        return ToolResult(
+            call_id="",
+            content="'query' or 'ids' is required.",
+            is_error=True,
+        )
+    if op and op != "papers":
+        return ToolResult(
+            call_id="",
+            content=f"Unknown operation {op!r}. Valid: 'papers' (with id), or omit.",
+            is_error=True,
+        )
+    if op and len(ids) != 1:
+        return ToolResult(
+            call_id="",
+            content="'operation=papers' needs exactly one id in 'ids'.",
+            is_error=True,
+        )
+    if (q or not op) and (year_from is not None or year_to is not None):
+        return ToolResult(
+            call_id="",
+            content="'year_from' / 'year_to' only apply to operation='papers'.",
+            is_error=True,
+        )
+    return None

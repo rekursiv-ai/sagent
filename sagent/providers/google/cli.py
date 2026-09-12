@@ -40,7 +40,7 @@ import os
 import shutil
 import tempfile
 
-from sagent.catalog import google as google_catalog
+from sagent.catalog import google
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import JSON, FloatCodec, MutableJSON, validate_json_schema
 from sagent.providers.google.api import Google
@@ -82,17 +82,17 @@ from sagent.types.tape import TapeEvent
 
 
 if TYPE_CHECKING:
-    import sagent.lib.image as image_lib
+    from sagent.lib import image
 else:
     from wrapt import lazy_import
 
-    image_lib = lazy_import("sagent.lib.image")
+    image = lazy_import("sagent.lib.image")
 
 
 logger = logging.getLogger(__name__)
 
 
-_GEMINI_DIR = Path.home() / ".gemini"  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)
+_GEMINI_DIR = Path("~/.gemini")
 _CREDS_PATH = _GEMINI_DIR / "oauth_creds.json"
 _CREDENTIALS_SCHEMA: Final[JSON] = {
     "type": "object",
@@ -103,6 +103,11 @@ _CREDENTIALS_SCHEMA: Final[JSON] = {
         "expiry_date": {"type": "number"},
     },
 }
+
+
+def _resolved_creds_path() -> Path:
+    """Resolve Gemini CLI's vendor credential path."""
+    return _CREDS_PATH.expanduser()
 
 
 class GoogleCLICredentials(TypedDict):
@@ -126,7 +131,7 @@ class GoogleCLI(Google):
     does not surface per-turn usage on ``session/prompt`` responses.
     """
 
-    TRANSPORT: ClassVar[ModelCapability] = google_catalog.cli()
+    TRANSPORT: ClassVar[ModelCapability] = google.cli()
     """ACP exposes no effort knob and rolls its own history."""
 
     def __init__(self, *, account: str | None = None) -> None:
@@ -171,7 +176,7 @@ class GoogleCLI(Google):
           RuntimeError: If ``gemini`` is not on ``PATH``.
 
         """
-        path = credentials_path(_CREDS_PATH, account)
+        path = credentials_path(_CREDS_PATH.expanduser(), account)
         if not path.exists():
             raise FileNotFoundError(
                 f"GoogleCLI: no credentials at {path}; run `gemini` and authenticate.",
@@ -203,7 +208,10 @@ class GoogleCLI(Google):
         """
         mid = model_id if model_id is not None else "default"
         capability, settings = resolve(
-            mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT
+            mid,
+            models=self.CAPABILITIES,
+            roles=self.ROLES,
+            transport=self.TRANSPORT,
         )
         return _GoogleCLIModel(
             provider=self,
@@ -230,6 +238,253 @@ class _GoogleCLIProcState:
     session_id: str
     tmpdir: Path
     system_hash: str
+
+
+def save_cli_credentials_file(path: Path, creds: GoogleCLICredentials) -> None:
+    """Persist credentials in Gemini CLI-compatible format.
+
+    Args:
+      path: Credentials file to update.
+      creds: OAuth credentials to persist.
+
+    """
+    existing: MutableJSON = {}
+    if path.exists():
+        with contextlib.suppress(json.JSONDecodeError, OSError):
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                existing = cast(MutableJSON, raw)
+    existing["access_token"] = creds["access_token"]
+    existing["refresh_token"] = creds["refresh_token"]
+    existing["expiry_date"] = creds["expiry_date"]
+    for opt_key in ("project_id", "scope", "token_type"):
+        value = creds.get(opt_key)
+        if isinstance(value, str) and value:
+            existing[opt_key] = value
+    atomic_write_bytes(path, json.dumps(existing).encode(), file_mode=0o600)
+
+
+def _read_expiry(path: Path) -> float:
+    """Return the ``expiry_date`` (JS millis) in ``path``, or ``0`` on any error."""
+    with contextlib.suppress(OSError, json.JSONDecodeError, KeyError, ValueError):
+        return float(json.loads(path.read_text(encoding="utf-8"))["expiry_date"])
+    return 0.0
+
+
+def _populate_google_tmpdir(
+    tmpdir: Path,
+    account: str | None,
+    system_prompt: str,
+) -> None:
+    """Lay out the hermetic ``HOME`` the spawn recipe (§3.1) expects."""
+    dot_gemini = tmpdir / ".gemini"
+    workdir = tmpdir / "workdir"
+    dot_gemini.mkdir(parents=True, exist_ok=True)
+    workdir.mkdir(parents=True, exist_ok=True)
+    creds_src = credentials_path(_CREDS_PATH.expanduser(), account)
+    if _load_cli_credentials_file(creds_src) is None:
+        raise ValueError(f"Invalid credentials file: {creds_src}")
+    creds_dst = dot_gemini / "oauth_creds.json"
+    shutil.copyfile(creds_src, creds_dst)
+    creds_dst.chmod(
+        0o600,
+    )  # house-lint: ignore[mkdir-mode] -- Credential copy into a hermetic tmp HOME for the vendor CLI.
+    for name in ("google_accounts.json", "installation_id"):
+        src = _GEMINI_DIR.expanduser() / name
+        if src.exists():
+            shutil.copyfile(src, dot_gemini / name)
+    (dot_gemini / "settings.json").write_text(
+        json.dumps(_GEMINI_SETTINGS),
+        encoding="utf-8",
+    )
+    (tmpdir / "system.md").write_text(system_prompt, encoding="utf-8")
+
+
+def _google_subprocess_env(tmpdir: Path) -> dict[str, str]:
+    """Build the env for the ``gemini`` subprocess (hermetic + telemetry off)."""
+    drop = {
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GOOGLE_GENAI_USE_VERTEXAI",
+        "GOOGLE_GENAI_USE_GCA",
+        "GEMINI_CLI_USE_COMPUTE_ADC",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+    }
+    env = {k: v for k, v in os.environ.items() if k not in drop}
+    env.update(
+        {
+            "HOME": str(tmpdir),
+            "USERPROFILE": str(tmpdir),
+            "GEMINI_SYSTEM_MD": str(tmpdir / "system.md"),
+            "GEMINI_DEFAULT_AUTH_TYPE": "oauth-personal",
+            "GEMINI_FORCE_FILE_STORAGE": "true",
+            "GEMINI_YOLO_MODE": "true",
+            "GEMINI_FOLDER_TRUST": "true",
+            "GEMINI_CLI_TRUST_WORKSPACE": "true",
+            "GEMINI_CLI_NO_RELAUNCH": "true",
+            "GEMINI_STRICT_TELEMETRY_LIMITS": "true",
+        },
+    )
+    return env
+
+
+_GEMINI_SETTINGS: MutableJSON = {
+    "security": {"auth": {"selectedType": "oauth-personal"}},
+    "privacy": {"usageStatisticsEnabled": False},
+    "telemetry": {
+        "enabled": False,
+        "logPrompts": False,
+        "useCollector": False,
+    },
+    "general": {
+        "checkpointing": {"enabled": False},
+        "enableAutoUpdate": False,
+        "enableAutoUpdateNotification": False,
+        "enableNotifications": False,
+    },
+    "ui": {
+        "hideTips": True,
+        "hideBanner": True,
+        "hideContextSummary": True,
+        "hideSandboxStatus": True,
+        "hideModelInfo": True,
+        "showMemoryUsage": False,
+    },
+    "context": {
+        "loadMemoryFromIncludeDirectories": False,
+        "discoveryMaxDirs": 0,
+    },
+    "tools": {
+        "excludeTools": ["*"],
+        "useWriteTodos": False,
+        "toolSandboxing": False,
+        "blockGitExtensions": True,
+        "allowedExtensions": [],
+    },
+    "mcp": {"allowed": [], "excluded": ["*"]},
+    "advanced": {
+        "autoConfigureMemory": False,
+        "agentSessionNoninteractiveEnabled": False,
+        "agentSessionInteractiveEnabled": False,
+        "extensionManagement": False,
+        "extensionConfig": False,
+        "extensionRegistry": False,
+        "extensionReloading": False,
+        "jitContext": False,
+        "taskTracker": False,
+        "modelSteering": False,
+        "memoryV2": False,
+        "autoMemory": False,
+        "contextManagement": False,
+    },
+    "experimental": {"compressionThreshold": 1.0},
+}
+
+
+async def _rpc_call(
+    proc: Subproc,
+    request_id: int,
+    method: str,
+    params: dict[str, object],
+) -> MutableJSON:
+    """Send one JSON-RPC request and return the matching ``result`` payload."""
+    await _rpc_send(proc, request_id, method, params)
+    while True:
+        msg = await proc.read_json_line(skip_non_json=True)
+        if msg is None:
+            raise RuntimeError(f"GoogleCLI: stdout closed waiting for {method}")
+        if msg.get("id") == request_id:
+            if "error" in msg:
+                raise RuntimeError(f"GoogleCLI: {method} error: {msg['error']}")
+            return cast(MutableJSON, msg.get("result") or {})
+
+
+async def _rpc_send(
+    proc: Subproc,
+    request_id: int,
+    method: str,
+    params: dict[str, object],
+) -> None:
+    """Serialise one JSON-RPC request and write it to the subprocess stdin."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": method,
+        "params": params,
+    }
+    await proc.write_line(json.dumps(payload))
+
+
+def _serialize_prompt_blocks(
+    entry: TapeEvent,
+    max_image_dim: int,
+    max_image_bytes: int,
+) -> list[MutableJSON]:
+    """Translate one non-assistant ``TapeEvent`` into ACP prompt blocks."""
+    if isinstance(entry, (AgentSendMessage, UserMessage)):
+        return _user_prompt_blocks(entry, max_image_dim, max_image_bytes)
+    assert isinstance(entry, ToolResult)
+    raise RuntimeError(
+        "GoogleCLI: ToolResult in history -- tools must go through the MCP bridge",
+    )
+
+
+def _user_prompt_blocks(
+    entry: AgentSendMessage | UserMessage,
+    max_image_dim: int,
+    max_image_bytes: int,
+) -> list[MutableJSON]:
+    """Build ACP ``[{type:text}|{type:image}]`` blocks for a ``UserMessage``."""
+    blocks: list[MutableJSON] = []
+    if entry.text:
+        blocks.append({"type": "text", "text": entry.text})
+    for att in entry.attachments:
+        if not att.descriptor.startswith("image/"):
+            continue
+        raw, mime = image.resize(
+            att.data,
+            max_dim=max_image_dim,
+            max_bytes=max_image_bytes,
+        )
+        blocks.append(
+            {
+                "type": "image",
+                "data": base64.b64encode(raw).decode(),
+                "mimeType": mime,
+            },
+        )
+    if not blocks:
+        blocks.append({"type": "text", "text": ""})
+    return blocks
+
+
+def _dispatch_session_update(
+    params: MutableJSON,
+    text_parts: list[str],
+    thinking_parts: list[str],
+    publish: Callable[[RuntimeEvent], None] | None,
+) -> None:
+    """Route one ``session/update`` notification payload."""
+    update = cast(MutableJSON, params.get("update") or {})
+    kind = update.get("sessionUpdate")
+    if kind == "agent_message_chunk":
+        text = cast(
+            str,
+            cast(MutableJSON, update.get("content") or {}).get("text") or "",
+        )
+        if text:
+            text_parts.append(text)
+            if publish is not None:
+                publish(ModelResponsePartial(text))
+    elif kind == "agent_thought_chunk":
+        text = cast(
+            str,
+            cast(MutableJSON, update.get("content") or {}).get("text") or "",
+        )
+        if text:
+            thinking_parts.append(text)
+            if publish is not None:
+                publish(ModelResponseThinking(text))
 
 
 class _GoogleCLIModel(ModelDefaults):
@@ -289,7 +544,7 @@ class _GoogleCLIModel(ModelDefaults):
     @override
     def approx_image_tokens(self, data: bytes) -> int:
         """Local estimate via Gemini's tile heuristic."""
-        dims = image_lib.get_dimensions(data)
+        dims = image.get_dimensions(data)
         if dims is None:
             return 0
         # 258 tokens per 512x512 tile (matches `Google._GeminiModel`).
@@ -433,7 +688,9 @@ class _GoogleCLIModel(ModelDefaults):
         ]
         for entry in user_like_entries[:-1]:
             blocks = _serialize_prompt_blocks(
-                entry, self.limits.max_image_edge_px, self.limits.max_image_bytes
+                entry,
+                self.limits.max_image_edge_px,
+                self.limits.max_image_bytes,
             )
             _ = await self._send_prompt(
                 proc,
@@ -480,12 +737,12 @@ class _GoogleCLIModel(ModelDefaults):
             msg = await proc.read_json_line(skip_non_json=True)
             if msg is None:
                 raise SubprocessTransportError(
-                    "GoogleCLI: subprocess stdout closed before response"
+                    "GoogleCLI: subprocess stdout closed before response",
                 )
             if msg.get("id") == request_id:
                 if "error" in msg:
                     raise SubprocessTransportError(
-                        f"GoogleCLI: JSON-RPC error: {msg['error']}"
+                        f"GoogleCLI: JSON-RPC error: {msg['error']}",
                     )
                 result = cast(MutableJSON, msg.get("result") or {})
                 return cast(str | None, result.get("stopReason"))
@@ -622,14 +879,14 @@ class _GoogleCLIModel(ModelDefaults):
                         "type": "http",
                         "url": self._tools_bridge.url,
                         "headers": [],
-                    }
+                    },
                 ],
             },
         )
         session_id = cast(str | None, result.get("sessionId"))
         if not session_id:
             raise RuntimeError(
-                f"GoogleCLI: session/new returned no sessionId: {result}"
+                f"GoogleCLI: session/new returned no sessionId: {result}",
             )
         return session_id
 
@@ -639,23 +896,20 @@ class _GoogleCLIModel(ModelDefaults):
         self._next_rpc_id += 1
         return rid
 
+    # Skipped if the user's copy is newer than the tmpdir's, so stale in-flight
+    # refreshes never clobber a fresher token from a sibling process or an interactive
+    # ``/login``. Holds the cross-process credential lock around the read-expiry →
+    # compare → write so a concurrent sagent can't read the same stale target and both
+    # race to write back conflicting tokens.
     async def _writeback_credentials(self) -> None:
-        """Copy refreshed tmpdir creds back to the user's home (newer-wins).
-
-        Skipped if the user's copy is newer than the tmpdir's, so stale
-        in-flight refreshes never clobber a fresher token from a sibling
-        process or an interactive ``/login``. Holds the cross-process
-        credential lock around the read-expiry → compare → write so a
-        concurrent sagent can't read the same stale target and both
-        race to write back conflicting tokens.
-        """
+        """Copy refreshed tmpdir creds back to the user's home (newer-wins)."""
         if self._tmpdir is None:
             return
         async with self._writeback_lock:
             src = self._tmpdir / ".gemini" / "oauth_creds.json"
             if not src.exists():
                 return
-            target = credentials_path(_CREDS_PATH, self._provider.account)
+            target = credentials_path(_resolved_creds_path(), self._provider.account)
             async with credential_file_lock(target):
                 # Re-check expiry under the cross-process lock so a sibling
                 # that just wrote a fresher token won't get clobbered.
@@ -699,237 +953,3 @@ def _load_cli_credentials_file(path: Path) -> GoogleCLICredentials | None:
     if validate_json_schema(_CREDENTIALS_SCHEMA, raw):
         return None
     return _parse_cli_credentials(raw)
-
-
-def save_cli_credentials_file(path: Path, creds: GoogleCLICredentials) -> None:
-    """Persist credentials in Gemini CLI-compatible format."""
-    existing: MutableJSON = {}
-    if path.exists():
-        with contextlib.suppress(json.JSONDecodeError, OSError):
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                existing = cast(MutableJSON, raw)
-    existing["access_token"] = creds["access_token"]
-    existing["refresh_token"] = creds["refresh_token"]
-    existing["expiry_date"] = creds["expiry_date"]
-    for opt_key in ("project_id", "scope", "token_type"):
-        value = creds.get(opt_key)
-        if isinstance(value, str) and value:
-            existing[opt_key] = value
-    atomic_write_bytes(path, json.dumps(existing).encode(), file_mode=0o600)
-
-
-def _read_expiry(path: Path) -> float:
-    """Return the ``expiry_date`` (JS millis) in ``path``, or ``0`` on any error."""
-    with contextlib.suppress(OSError, json.JSONDecodeError, KeyError, ValueError):
-        return float(json.loads(path.read_text(encoding="utf-8"))["expiry_date"])
-    return 0.0
-
-
-def _populate_google_tmpdir(
-    tmpdir: Path,
-    account: str | None,
-    system_prompt: str,
-) -> None:
-    """Lay out the hermetic ``HOME`` the spawn recipe (§3.1) expects."""
-    dot_gemini = tmpdir / ".gemini"
-    workdir = tmpdir / "workdir"
-    dot_gemini.mkdir(parents=True, exist_ok=True)
-    workdir.mkdir(parents=True, exist_ok=True)
-    creds_src = credentials_path(_CREDS_PATH, account)
-    if _load_cli_credentials_file(creds_src) is None:
-        raise ValueError(f"Invalid credentials file: {creds_src}")
-    creds_dst = dot_gemini / "oauth_creds.json"
-    shutil.copyfile(creds_src, creds_dst)
-    creds_dst.chmod(0o600)
-    for name in ("google_accounts.json", "installation_id"):
-        src = _GEMINI_DIR / name
-        if src.exists():
-            shutil.copyfile(src, dot_gemini / name)
-    (dot_gemini / "settings.json").write_text(
-        json.dumps(_GEMINI_SETTINGS), encoding="utf-8"
-    )
-    (tmpdir / "system.md").write_text(system_prompt, encoding="utf-8")
-
-
-def _google_subprocess_env(tmpdir: Path) -> dict[str, str]:
-    """Build the env for the ``gemini`` subprocess (hermetic + telemetry off)."""
-    drop = {
-        "GEMINI_API_KEY",
-        "GOOGLE_API_KEY",
-        "GOOGLE_GENAI_USE_VERTEXAI",
-        "GOOGLE_GENAI_USE_GCA",
-        "GEMINI_CLI_USE_COMPUTE_ADC",
-        "GOOGLE_APPLICATION_CREDENTIALS",
-    }
-    env = {k: v for k, v in os.environ.items() if k not in drop}
-    env.update(
-        {
-            "HOME": str(tmpdir),
-            "USERPROFILE": str(tmpdir),
-            "GEMINI_SYSTEM_MD": str(tmpdir / "system.md"),
-            "GEMINI_DEFAULT_AUTH_TYPE": "oauth-personal",
-            "GEMINI_FORCE_FILE_STORAGE": "true",
-            "GEMINI_YOLO_MODE": "true",
-            "GEMINI_FOLDER_TRUST": "true",
-            "GEMINI_CLI_TRUST_WORKSPACE": "true",
-            "GEMINI_CLI_NO_RELAUNCH": "true",
-            "GEMINI_STRICT_TELEMETRY_LIMITS": "true",
-        }
-    )
-    return env
-
-
-_GEMINI_SETTINGS: MutableJSON = {
-    "security": {"auth": {"selectedType": "oauth-personal"}},
-    "privacy": {"usageStatisticsEnabled": False},
-    "telemetry": {
-        "enabled": False,
-        "logPrompts": False,
-        "useCollector": False,
-    },
-    "general": {
-        "checkpointing": {"enabled": False},
-        "enableAutoUpdate": False,
-        "enableAutoUpdateNotification": False,
-        "enableNotifications": False,
-    },
-    "ui": {
-        "hideTips": True,
-        "hideBanner": True,
-        "hideContextSummary": True,
-        "hideSandboxStatus": True,
-        "hideModelInfo": True,
-        "showMemoryUsage": False,
-    },
-    "context": {
-        "loadMemoryFromIncludeDirectories": False,
-        "discoveryMaxDirs": 0,
-    },
-    "tools": {
-        "excludeTools": ["*"],
-        "useWriteTodos": False,
-        "toolSandboxing": False,
-        "blockGitExtensions": True,
-        "allowedExtensions": [],
-    },
-    "mcp": {"allowed": [], "excluded": ["*"]},
-    "advanced": {
-        "autoConfigureMemory": False,
-        "agentSessionNoninteractiveEnabled": False,
-        "agentSessionInteractiveEnabled": False,
-        "extensionManagement": False,
-        "extensionConfig": False,
-        "extensionRegistry": False,
-        "extensionReloading": False,
-        "jitContext": False,
-        "taskTracker": False,
-        "modelSteering": False,
-        "memoryV2": False,
-        "autoMemory": False,
-        "contextManagement": False,
-    },
-    "experimental": {"compressionThreshold": 1.0},
-}
-
-
-async def _rpc_call(
-    proc: Subproc,
-    request_id: int,
-    method: str,
-    params: dict[str, object],
-) -> MutableJSON:
-    """Send one JSON-RPC request and return the matching ``result`` payload."""
-    await _rpc_send(proc, request_id, method, params)
-    while True:
-        msg = await proc.read_json_line(skip_non_json=True)
-        if msg is None:
-            raise RuntimeError(f"GoogleCLI: stdout closed waiting for {method}")
-        if msg.get("id") == request_id:
-            if "error" in msg:
-                raise RuntimeError(f"GoogleCLI: {method} error: {msg['error']}")
-            return cast(MutableJSON, msg.get("result") or {})
-
-
-async def _rpc_send(
-    proc: Subproc,
-    request_id: int,
-    method: str,
-    params: dict[str, object],
-) -> None:
-    """Serialise one JSON-RPC request and write it to the subprocess stdin."""
-    payload = {
-        "jsonrpc": "2.0",
-        "id": request_id,
-        "method": method,
-        "params": params,
-    }
-    await proc.write_line(json.dumps(payload))
-
-
-def _serialize_prompt_blocks(
-    entry: TapeEvent,
-    max_image_dim: int,
-    max_image_bytes: int,
-) -> list[MutableJSON]:
-    """Translate one non-assistant ``TapeEvent`` into ACP prompt blocks."""
-    if isinstance(entry, (AgentSendMessage, UserMessage)):
-        return _user_prompt_blocks(entry, max_image_dim, max_image_bytes)
-    assert isinstance(entry, ToolResult)
-    raise RuntimeError(
-        "GoogleCLI: ToolResult in history -- tools must go through the MCP bridge",
-    )
-
-
-def _user_prompt_blocks(
-    entry: AgentSendMessage | UserMessage,
-    max_image_dim: int,
-    max_image_bytes: int,
-) -> list[MutableJSON]:
-    """Build ACP ``[{type:text}|{type:image}]`` blocks for a ``UserMessage``."""
-    blocks: list[MutableJSON] = []
-    if entry.text:
-        blocks.append({"type": "text", "text": entry.text})
-    for att in entry.attachments:
-        if not att.descriptor.startswith("image/"):
-            continue
-        raw, mime = image_lib.resize(
-            att.data, max_dim=max_image_dim, max_bytes=max_image_bytes
-        )
-        blocks.append(
-            {
-                "type": "image",
-                "data": base64.b64encode(raw).decode(),
-                "mimeType": mime,
-            }
-        )
-    if not blocks:
-        blocks.append({"type": "text", "text": ""})
-    return blocks
-
-
-def _dispatch_session_update(
-    params: MutableJSON,
-    text_parts: list[str],
-    thinking_parts: list[str],
-    publish: Callable[[RuntimeEvent], None] | None,
-) -> None:
-    """Route one ``session/update`` notification payload."""
-    update = cast(MutableJSON, params.get("update") or {})
-    kind = update.get("sessionUpdate")
-    if kind == "agent_message_chunk":
-        text = cast(
-            str, cast(MutableJSON, update.get("content") or {}).get("text") or ""
-        )
-        if text:
-            text_parts.append(text)
-            if publish is not None:
-                publish(ModelResponsePartial(text))
-    elif kind == "agent_thought_chunk":
-        text = cast(
-            str, cast(MutableJSON, update.get("content") or {}).get("text") or ""
-        )
-        if text:
-            thinking_parts.append(text)
-            if publish is not None:
-                publish(ModelResponseThinking(text))

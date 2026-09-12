@@ -51,7 +51,11 @@ class Qwen2VLVideoProcessor(BaseVideoProcessor):
     ):  # -> Tensor:
         ...
     def get_num_of_video_patches(
-        self, num_frames: int, height: int, width: int, videos_kwargs=...
+        self,
+        num_frames: int,
+        height: int,
+        width: int,
+        videos_kwargs=...,
     ):  # -> int:
         ...
 

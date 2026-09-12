@@ -49,7 +49,9 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
         ...
 
 def get_anyres_image_grid_shape(
-    image_size, grid_pinpoints, patch_size
+    image_size,
+    grid_pinpoints,
+    patch_size,
 ):  # -> tuple[Any, Any]:
     ...
 def image_size_to_num_patches(image_size, grid_pinpoints, patch_size: int):  # -> int:
@@ -69,7 +71,11 @@ class LlavaOnevisionModel(LlavaOnevisionPreTrainedModel):
     def get_decoder(self):  # -> Any:
         ...
     def pack_image_features(
-        self, image_features, image_sizes, image_newline=..., vision_aspect_ratio=...
+        self,
+        image_features,
+        image_sizes,
+        image_newline=...,
+        vision_aspect_ratio=...,
     ):  # -> tuple[list[Any], Tensor]:
         ...
     def get_image_features(
@@ -126,7 +132,8 @@ class LlavaOnevisionModel(LlavaOnevisionPreTrainedModel):
 
 @auto_docstring(custom_intro=...)
 class LlavaOnevisionForConditionalGeneration(
-    LlavaOnevisionPreTrainedModel, GenerationMixin
+    LlavaOnevisionPreTrainedModel,
+    GenerationMixin,
 ):
     _checkpoint_conversion_mapping = ...
     _tied_weights_keys = ...

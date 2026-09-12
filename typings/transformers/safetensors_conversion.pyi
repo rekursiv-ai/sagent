@@ -3,7 +3,10 @@ from huggingface_hub import Discussion, HfApi
 logger = ...
 
 def previous_pr(
-    api: HfApi, model_id: str, pr_title: str, token: str
+    api: HfApi,
+    model_id: str,
+    pr_title: str,
+    token: str,
 ) -> Discussion | None: ...
 def spawn_conversion(token: str, private: bool, model_id: str):  # -> None:
     ...

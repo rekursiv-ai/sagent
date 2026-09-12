@@ -70,12 +70,15 @@ class _TensorsAccessed:
     def ensure_tensor_exists(self, data_ptr: DataPtr) -> None: ...
     def ensure_tensor_does_not_exist(self, data_ptr: DataPtr) -> None: ...
     def create_tensor(
-        self, data_ptr: DataPtr, stack_trace: traceback.StackSummary | None
+        self,
+        data_ptr: DataPtr,
+        stack_trace: traceback.StackSummary | None,
     ) -> None: ...
     def delete_tensor(self, data_ptr: DataPtr) -> None: ...
     def were_there_reads_since_last_write(self, data_ptr: DataPtr) -> bool: ...
     def get_allocation_stack_trace(
-        self, data_ptr: DataPtr
+        self,
+        data_ptr: DataPtr,
     ) -> traceback.StackSummary | None: ...
     def get_write(self, data_ptr: DataPtr) -> Access | None: ...
     def get_reads(self, data_ptr: DataPtr) -> list[Access]: ...
@@ -94,7 +97,10 @@ class StreamSynchronizations:
     def all_streams_wait_for_stream(self, stream: StreamId) -> None: ...
     def sync_all_streams(self) -> None: ...
     def is_ordered_after(
-        self, current_stream: StreamId, seq_num: SeqNum, other_stream: StreamId
+        self,
+        current_stream: StreamId,
+        seq_num: SeqNum,
+        other_stream: StreamId,
     ) -> bool: ...
 
 class EventHandler:
@@ -102,7 +108,9 @@ class EventHandler:
 
 def zip_by_key(a: dict[TK, TVa], b: dict[TK, TVb]) -> Iterator[tuple[TK, TVa, TVb]]: ...
 def zip_arguments(
-    schema: torch.FunctionSchema, args: tuple[Any, ...], kwargs: dict[str, Any]
+    schema: torch.FunctionSchema,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
 ) -> Iterator[tuple[torch.Argument, Any]]: ...
 
 class ArgumentHandler:
@@ -116,7 +124,11 @@ class ArgumentHandler:
         is_factory: bool,
     ) -> None: ...
     def parse_outputs(
-        self, schema: torch.FunctionSchema, outputs: Any, *, is_factory: bool
+        self,
+        schema: torch.FunctionSchema,
+        outputs: Any,
+        *,
+        is_factory: bool,
     ) -> None: ...
 
 class CUDASanitizerDispatchMode(TorchDispatchMode):

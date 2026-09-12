@@ -32,7 +32,12 @@ class PositionalEmbedding(nn.Module):
 
 class PositionwiseFF(nn.Module):
     def __init__(
-        self, d_model, d_inner, dropout, pre_lnorm=..., layer_norm_epsilon=...
+        self,
+        d_model,
+        d_inner,
+        dropout,
+        pre_lnorm=...,
+        layer_norm_epsilon=...,
     ) -> None: ...
     def forward(self, inp):  # -> Any:
         ...
@@ -51,7 +56,13 @@ class RelPartialLearnableMultiHeadAttn(nn.Module):
         layer_norm_epsilon=...,
     ) -> None: ...
     def forward(
-        self, w, r, attn_mask=..., mems=..., head_mask=..., output_attentions=...
+        self,
+        w,
+        r,
+        attn_mask=...,
+        mems=...,
+        head_mask=...,
+        output_attentions=...,
     ):  # -> list[Any]:
         ...
 
@@ -79,7 +90,13 @@ class RelPartialLearnableDecoderLayer(nn.Module):
 
 class AdaptiveEmbedding(nn.Module):
     def __init__(
-        self, n_token, d_embed, d_proj, cutoffs, div_val=..., sample_softmax=...
+        self,
+        n_token,
+        d_embed,
+        d_proj,
+        cutoffs,
+        div_val=...,
+        sample_softmax=...,
     ) -> None: ...
     def forward(self, inp):  # -> Tensor | Any:
         ...
@@ -89,7 +106,9 @@ class TransfoXLPreTrainedModel(PreTrainedModel):
     load_tf_weights = ...
     base_model_prefix = ...
     def resize_token_embeddings(
-        self, new_num_tokens: int | None = ..., layer: int | None = ...
+        self,
+        new_num_tokens: int | None = ...,
+        layer: int | None = ...,
     ):  # -> Module | Any:
         ...
 
@@ -189,7 +208,10 @@ class TransfoXLLMHeadModel(TransfoXLPreTrainedModel):
     def get_output_embeddings(self):  # -> Tensor | Module:
         ...
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=..., **model_kwargs
+        self,
+        input_ids,
+        past_key_values=...,
+        **model_kwargs,
     ):  # -> dict[Any, Any]:
         ...
 

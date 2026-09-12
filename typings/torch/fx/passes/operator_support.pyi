@@ -25,7 +25,9 @@ type SupportDict = t.Mapping[TargetTypeName, SupportedArgumentDTypes]
 class OperatorSupportBase(abc.ABC):
     @abc.abstractmethod
     def is_node_supported(
-        self, submodules: t.Mapping[str, torch.nn.Module], node: torch.fx.Node
+        self,
+        submodules: t.Mapping[str, torch.nn.Module],
+        node: torch.fx.Node,
     ) -> bool: ...
 
 @compatibility(is_backward_compatible=False)
@@ -33,11 +35,14 @@ class OperatorSupport(OperatorSupportBase):
     _support_dict: SupportDict
     def __init__(self, support_dict: SupportDict | None = ...) -> None: ...
     def is_node_supported(
-        self, submodules: t.Mapping[str, torch.nn.Module], node: torch.fx.Node
+        self,
+        submodules: t.Mapping[str, torch.nn.Module],
+        node: torch.fx.Node,
     ) -> bool: ...
 
 type IsNodeSupported = t.Callable[
-    [t.Mapping[str, torch.nn.Module], torch.fx.Node], bool
+    [t.Mapping[str, torch.nn.Module], torch.fx.Node],
+    bool,
 ]
 
 @compatibility(is_backward_compatible=False)
@@ -53,5 +58,6 @@ class OpSupports:
     def decline_if_input_dtype(cls, dtype: torch.dtype) -> OperatorSupportBase: ...
     @classmethod
     def decline_if_node_in_names(
-        cls, disallow_set: set[str]
+        cls,
+        disallow_set: set[str],
     ) -> OperatorSupportBase: ...

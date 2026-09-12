@@ -27,7 +27,10 @@ from ...utils.deprecation import deprecate_kwarg
 logger = ...
 
 def load_tf_weights_in_electra(
-    model, config, tf_checkpoint_path, discriminator_or_generator=...
+    model,
+    config,
+    tf_checkpoint_path,
+    discriminator_or_generator=...,
 ): ...
 
 class ElectraEmbeddings(nn.Module):
@@ -59,7 +62,9 @@ class ElectraSelfAttention(nn.Module):
 class ElectraSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -89,7 +94,9 @@ class ElectraIntermediate(nn.Module):
 class ElectraOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -127,7 +134,9 @@ class ElectraEncoder(nn.Module):
         cache_position: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
 
 class ElectraDiscriminatorPredictions(nn.Module):

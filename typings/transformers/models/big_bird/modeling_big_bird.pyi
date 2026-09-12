@@ -105,7 +105,9 @@ class BigBirdBlockSparseAttention(nn.Module):
 class BigBirdSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -140,7 +142,9 @@ class BigBirdIntermediate(nn.Module):
 class BigBirdOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -191,7 +195,9 @@ class BigBirdEncoder(nn.Module):
         cache_position=...,
     ) -> BaseModelOutputWithPastAndCrossAttentions | tuple: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> BaseModelOutputWithPastAndCrossAttentions | tuple: ...
 
 class BigBirdPredictionHeadTransform(nn.Module):
@@ -275,7 +281,8 @@ class BigBirdModel(BigBirdPreTrainedModel):
     ) -> BaseModelOutputWithPoolingAndCrossAttentions | tuple[torch.FloatTensor]: ...
     @staticmethod
     def create_masks_for_block_sparse_attn(
-        attention_mask: torch.Tensor, block_size: int
+        attention_mask: torch.Tensor,
+        block_size: int,
     ):  # -> tuple[Tensor, Tensor, Tensor, Tensor]:
         ...
 
@@ -327,7 +334,10 @@ class BigBirdForMaskedLM(BigBirdPreTrainedModel):
         return_dict: bool | None = ...,
     ) -> MaskedLMOutput | tuple[torch.FloatTensor]: ...
     def prepare_inputs_for_generation(
-        self, input_ids, attention_mask=..., **model_kwargs
+        self,
+        input_ids,
+        attention_mask=...,
+        **model_kwargs,
     ):  # -> dict[str, Tensor | Any]:
         ...
 

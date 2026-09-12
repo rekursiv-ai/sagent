@@ -154,15 +154,15 @@ def _limits(*, window: int, response: int) -> Mapping[ContextTag, ModelLimits]:
             "": ModelLimits(
                 max_request_tokens=window,
                 max_response_tokens=response,
-            )
-        }
+            ),
+        },
     )
 
 
 def _prices(*, request: float, response: float) -> PriceCatalog:
     """USD per million tokens; DashScope quotes one flat tier."""
     return PriceCatalog(
-        {PriceCatalogProduct(): TokenPrice(request=request, response=response)}
+        {PriceCatalogProduct(): TokenPrice(request=request, response=response)},
     )
 
 

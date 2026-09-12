@@ -60,7 +60,11 @@ class KyutaiSpeechToTextEmbeddings(nn.Module):
 
 class KyutaiSpeechToTextLinear(nn.Module):
     def __init__(
-        self, input_dim, output_dim, num_codebooks, use_flexible_linear=...
+        self,
+        input_dim,
+        output_dim,
+        num_codebooks,
+        use_flexible_linear=...,
     ) -> None: ...
     def forward(self, x, layer_idx=...):  # -> Any:
         ...
@@ -76,14 +80,21 @@ class KyutaiSpeechToTextRotaryEmbedding(nn.Module):
 class KyutaiSpeechToTextGatingMLP(nn.Module):
     def __init__(self, config, use_flexible_linear=...) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, layer_idx: int | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        layer_idx: int | None = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -158,7 +169,8 @@ class KyutaiSpeechToTextDecoderLayer(GradientCheckpointingLayer):
         cache_position: torch.LongTensor | None = ...,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring
@@ -181,7 +193,8 @@ class KyutaiSpeechToTextModel(KyutaiSpeechToTextPreTrainedModel):
 
 @auto_docstring
 class KyutaiSpeechToTextForConditionalGeneration(
-    KyutaiSpeechToTextPreTrainedModel, GenerationMixin
+    KyutaiSpeechToTextPreTrainedModel,
+    GenerationMixin,
 ):
     _tied_weights_keys = ...
     _tp_plan = ...

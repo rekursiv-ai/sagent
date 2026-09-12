@@ -41,7 +41,10 @@ class Actor:
     user: User | None
     unknown_fields: dict[str, Any]
     def __init__(
-        self, type: str | None = ..., user: User | dict[str, Any] | None = ..., **kwargs
+        self,
+        type: str | None = ...,
+        user: User | dict[str, Any] | None = ...,
+        **kwargs,
     ) -> None: ...
 
 class Location:
@@ -82,14 +85,22 @@ class RetentionPolicy:
     type: str | None
     duration_days: int | None
     def __init__(
-        self, *, type: str | None = ..., duration_days: int | None = ..., **kwargs
+        self,
+        *,
+        type: str | None = ...,
+        duration_days: int | None = ...,
+        **kwargs,
     ) -> None: ...
 
 class ConversationPref:
     type: list[str] | None
     user: list[str] | None
     def __init__(
-        self, *, type: list[str] | None = ..., user: list[str] | None = ..., **kwargs
+        self,
+        *,
+        type: list[str] | None = ...,
+        user: list[str] | None = ...,
+        **kwargs,
     ) -> None: ...
 
 class FeatureEnablement:
@@ -100,7 +111,11 @@ class SharedWith:
     channel_id: str | None
     access_level: str | None
     def __init__(
-        self, *, channel_id: str | None = ..., access_level: str | None = ..., **kwargs
+        self,
+        *,
+        channel_id: str | None = ...,
+        access_level: str | None = ...,
+        **kwargs,
     ) -> None: ...
 
 class Profile:
@@ -225,7 +240,11 @@ class AAARequest:
     id: str | None
     team_id: str | None
     def __init__(
-        self, *, id: str | None = ..., team_id: str | None = ..., **kwargs
+        self,
+        *,
+        id: str | None = ...,
+        team_id: str | None = ...,
+        **kwargs,
     ) -> None: ...
 
 class Details:
@@ -523,7 +542,11 @@ class Usergroup:
     name: str | None
     unknown_fields: dict[str, Any]
     def __init__(
-        self, *, id: str | None = ..., name: str | None = ..., **kwargs
+        self,
+        *,
+        id: str | None = ...,
+        name: str | None = ...,
+        **kwargs,
     ) -> None: ...
 
 class Message:
@@ -642,7 +665,11 @@ class AccountTypeRole:
     name: str | None
     unknown_fields: dict[str, Any]
     def __init__(
-        self, *, id: str | None = ..., name: str | None = ..., **kwargs
+        self,
+        *,
+        id: str | None = ...,
+        name: str | None = ...,
+        **kwargs,
     ) -> None: ...
 
 class SlackList:

@@ -85,7 +85,7 @@ class _StubModel:
     """Only the settings surface the resume footer reads."""
 
     settings: ModelSettings = field(
-        default_factory=lambda: ModelSettings.narrowest(_WIDE)
+        default_factory=lambda: ModelSettings.narrowest(_WIDE),
     )
 
 
@@ -179,9 +179,9 @@ def test_replay_assistant_thinking_blocks() -> None:
             thinking_blocks=(
                 {"thinking": "first block"},
                 {"text": "second block"},
-                {},  # empty -> skipped
+                {},  # Empty -> skipped.
             ),
-        )
+        ),
     ]
     p = RecordingPrinter()
     replay_messages(_agent(history=history), p)
@@ -191,7 +191,7 @@ def test_replay_assistant_thinking_blocks() -> None:
 def test_replay_assistant_thinking_blocks_can_be_hidden() -> None:
     """The printer owns the display flag, so replay reads it from there."""
     history: list[TapeEvent] = [
-        AssistantMessage(text="ok", thinking_blocks=({"thinking": "hidden"},))
+        AssistantMessage(text="ok", thinking_blocks=({"thinking": "hidden"},)),
     ]
     p = RecordingPrinter()
     p.show_thinking = False
@@ -204,7 +204,7 @@ def test_replay_tool_call_with_known_tool() -> None:
     history: list[TapeEvent] = [
         AssistantMessage(
             tool_calls=(ToolCall(id="c1", name="Echo", args={"x": 1}),),
-        )
+        ),
     ]
     p = RecordingPrinter()
     replay_messages(
@@ -218,7 +218,7 @@ def test_replay_tool_call_unknown_tool_falls_back_to_name() -> None:
     history: list[TapeEvent] = [
         AssistantMessage(
             tool_calls=(ToolCall(id="c1", name="MysteryTool", args={}),),
-        )
+        ),
     ]
     p = RecordingPrinter()
     replay_messages(_agent(history=history), p)
@@ -254,7 +254,7 @@ def test_replay_microcompacted_tool_call_renders_stored_summary() -> None:
 
 def test_replay_tool_result_summary() -> None:
     history: list[TapeEvent] = [
-        ToolResult(call_id="c1", content="ok", summary="one line")
+        ToolResult(call_id="c1", content="ok", summary="one line"),
     ]
     p = RecordingPrinter()
     replay_messages(_agent(history=history), p)
@@ -427,7 +427,7 @@ def test_resume_cost_is_linear_in_tool_calls() -> None:
                 AssistantMessage(
                     text="",
                     tool_calls=(ToolCall(id=f"c{i}", name="Echo", args={}),),
-                )
+                ),
             )
             history.append(ToolResult(call_id=f"c{i}", content="body"))
         agent = _agent(history=history)

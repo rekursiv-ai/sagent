@@ -51,7 +51,9 @@ class WhisperTokenizer(PreTrainedTokenizer):
     @property
     def prefix_tokens(self) -> list[int]: ...
     def build_inputs_with_special_tokens(
-        self, token_ids_0, token_ids_1=...
+        self,
+        token_ids_0,
+        token_ids_1=...,
     ) -> list[int]: ...
     def get_special_tokens_mask(
         self,
@@ -83,14 +85,22 @@ class WhisperTokenizer(PreTrainedTokenizer):
     def convert_tokens_to_string(self, tokens):  # -> str:
         ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
     def prepare_for_tokenization(
-        self, text, is_split_into_words=..., **kwargs
+        self,
+        text,
+        is_split_into_words=...,
+        **kwargs,
     ):  # -> tuple[str, dict[str, Any]]:
         ...
     def get_decoder_prompt_ids(
-        self, task=..., language=..., no_timestamps=...
+        self,
+        task=...,
+        language=...,
+        no_timestamps=...,
     ):  # -> list[tuple[int, int]]:
         ...
     def get_prompt_ids(self, text: str, return_tensors=...):  # -> Encoding:

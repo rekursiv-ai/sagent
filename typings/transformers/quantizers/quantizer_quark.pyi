@@ -12,10 +12,18 @@ class QuarkHfQuantizer(HfQuantizer):
     def validate_environment(self, *args, **kwargs):  # -> None:
         ...
     def param_needs_quantization(
-        self, model: PreTrainedModel, param_name: str, **kwargs
+        self,
+        model: PreTrainedModel,
+        param_name: str,
+        **kwargs,
     ) -> bool: ...
     def create_quantized_param(
-        self, model, param, param_name, param_device, **kwargs
+        self,
+        model,
+        param,
+        param_name,
+        param_device,
+        **kwargs,
     ):  # -> None:
         ...
     def is_serializable(self, safe_serialization=...):  # -> Literal[False]:

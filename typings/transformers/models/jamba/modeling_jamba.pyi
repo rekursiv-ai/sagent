@@ -130,10 +130,13 @@ class JambaMLP(nn.Module):
 class JambaSparseMoeBlock(nn.Module):
     def __init__(self, config: JambaConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class JambaAttentionDecoderLayer(GradientCheckpointingLayer):
@@ -150,7 +153,8 @@ class JambaAttentionDecoderLayer(GradientCheckpointingLayer):
         use_cache: bool | None = ...,
         cache_position: torch.LongTensor | None = ...,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class JambaMambaDecoderLayer(GradientCheckpointingLayer):
@@ -167,7 +171,8 @@ class JambaMambaDecoderLayer(GradientCheckpointingLayer):
         use_cache: bool | None = ...,
         cache_position: torch.LongTensor | None = ...,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring
@@ -239,7 +244,8 @@ class JambaForCausalLM(JambaPreTrainedModel, GenerationMixin):
         ...
 
 class JambaForSequenceClassification(
-    GenericForSequenceClassification, JambaPreTrainedModel
+    GenericForSequenceClassification,
+    JambaPreTrainedModel,
 ): ...
 
 __all__ = [

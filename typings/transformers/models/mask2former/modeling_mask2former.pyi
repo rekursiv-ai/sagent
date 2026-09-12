@@ -70,15 +70,21 @@ class Mask2FormerForUniversalSegmentationOutput(ModelOutput):
     attentions: tuple[torch.FloatTensor] | None = ...
 
 def sample_point(
-    input_features: torch.Tensor, point_coordinates: torch.Tensor, add_dim=..., **kwargs
+    input_features: torch.Tensor,
+    point_coordinates: torch.Tensor,
+    add_dim=...,
+    **kwargs,
 ) -> torch.Tensor: ...
 def dice_loss(inputs: Tensor, labels: Tensor, num_masks: int) -> Tensor: ...
 def sigmoid_cross_entropy_loss(
-    inputs: torch.Tensor, labels: torch.Tensor, num_masks: int
+    inputs: torch.Tensor,
+    labels: torch.Tensor,
+    num_masks: int,
 ) -> torch.Tensor: ...
 def pair_wise_dice_loss(inputs: Tensor, labels: Tensor) -> Tensor: ...
 def pair_wise_sigmoid_cross_entropy_loss(
-    inputs: torch.Tensor, labels: torch.Tensor
+    inputs: torch.Tensor,
+    labels: torch.Tensor,
 ) -> torch.Tensor: ...
 
 class Mask2FormerHungarianMatcher(nn.Module):
@@ -100,7 +106,9 @@ class Mask2FormerHungarianMatcher(nn.Module):
 
 class Mask2FormerLoss(nn.Module):
     def __init__(
-        self, config: Mask2FormerConfig, weight_dict: dict[str, float]
+        self,
+        config: Mask2FormerConfig,
+        weight_dict: dict[str, float],
     ) -> None: ...
     def loss_labels(
         self,
@@ -134,7 +142,9 @@ class Mask2FormerLoss(nn.Module):
     ) -> dict[str, torch.Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> dict[str, torch.Tensor]: ...
     def get_num_masks(
-        self, class_labels: torch.Tensor, device: torch.device
+        self,
+        class_labels: torch.Tensor,
+        device: torch.device,
     ) -> torch.Tensor: ...
 
 def multi_scale_deformable_attention(
@@ -163,10 +173,16 @@ class Mask2FormerSinePositionEmbedding(nn.Module):
 
 class Mask2FormerPixelDecoderEncoderMultiscaleDeformableAttention(nn.Module):
     def __init__(
-        self, embed_dim: int, num_heads: int, n_levels: int, n_points: int
+        self,
+        embed_dim: int,
+        num_heads: int,
+        n_levels: int,
+        n_points: int,
     ) -> None: ...
     def with_pos_embed(
-        self, tensor: torch.Tensor, position_embeddings: Tensor | None
+        self,
+        tensor: torch.Tensor,
+        position_embeddings: Tensor | None,
     ):  # -> Tensor:
         ...
     def forward(
@@ -232,10 +248,14 @@ class Mask2FormerPixelDecoder(nn.Module):
 class Mask2FormerPixelLevelModule(nn.Module):
     def __init__(self, config: Mask2FormerConfig) -> None: ...
     def forward(
-        self, pixel_values: Tensor, output_hidden_states: bool = ...
+        self,
+        pixel_values: Tensor,
+        output_hidden_states: bool = ...,
     ) -> Mask2FormerPixelLevelModuleOutput: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> Mask2FormerPixelLevelModuleOutput: ...
 
 class Mask2FormerAttention(nn.Module):
@@ -248,7 +268,9 @@ class Mask2FormerAttention(nn.Module):
         bias: bool = ...,
     ) -> None: ...
     def with_pos_embed(
-        self, tensor: torch.Tensor, position_embeddings: Tensor | None
+        self,
+        tensor: torch.Tensor,
+        position_embeddings: Tensor | None,
     ):  # -> Tensor:
         ...
     def forward(
@@ -261,7 +283,9 @@ class Mask2FormerAttention(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class Mask2FormerMaskedAttentionDecoderLayer(GradientCheckpointingLayer):
@@ -327,14 +351,21 @@ class Mask2FormerPredictionBlock(nn.Module):
 
 class Mask2FormerMLPPredictionHead(nn.Module):
     def __init__(
-        self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int = ...
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        output_dim: int,
+        num_layers: int = ...,
     ) -> None: ...
     def forward(self, input: Tensor) -> Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...
 
 class Mask2FormerMaskPredictor(nn.Module):
     def __init__(
-        self, hidden_size: int, num_heads: int, mask_feature_size: torch.Tensor
+        self,
+        hidden_size: int,
+        num_heads: int,
+        mask_feature_size: torch.Tensor,
     ) -> None: ...
     def forward(
         self,
@@ -354,7 +385,9 @@ class Mask2FormerTransformerModule(nn.Module):
         output_attentions: bool = ...,
     ) -> Mask2FormerMaskedAttentionDecoderOutput: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> Mask2FormerMaskedAttentionDecoderOutput: ...
 
 @auto_docstring
@@ -391,7 +424,9 @@ class Mask2FormerForUniversalSegmentation(Mask2FormerPreTrainedModel):
     ) -> dict[str, Tensor]: ...
     def get_loss(self, loss_dict: dict[str, Tensor]) -> Tensor: ...
     def get_auxiliary_logits(
-        self, classes: torch.Tensor, output_masks: torch.Tensor
+        self,
+        classes: torch.Tensor,
+        output_masks: torch.Tensor,
     ):  # -> list[dict[str, Tensor]]:
         ...
     @auto_docstring

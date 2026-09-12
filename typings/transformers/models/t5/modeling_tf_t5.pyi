@@ -173,7 +173,8 @@ class TFT5Model(TFT5PreTrainedModel):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(T5_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFSeq2SeqModelOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFSeq2SeqModelOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -197,7 +198,8 @@ class TFT5Model(TFT5PreTrainedModel):
         ...
 
 @add_start_docstrings(
-    """T5 Model with a `language modeling` head on top.""", T5_START_DOCSTRING
+    """T5 Model with a `language modeling` head on top.""",
+    T5_START_DOCSTRING,
 )
 class TFT5ForConditionalGeneration(TFT5PreTrainedModel, TFCausalLanguageModelingLoss):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
@@ -209,7 +211,8 @@ class TFT5ForConditionalGeneration(TFT5PreTrainedModel, TFCausalLanguageModeling
     @unpack_inputs
     @add_start_docstrings_to_model_forward(T5_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFSeq2SeqLMOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFSeq2SeqLMOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -260,7 +263,8 @@ class TFT5EncoderModel(TFT5PreTrainedModel):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(T5_ENCODER_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFBaseModelOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFBaseModelOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,

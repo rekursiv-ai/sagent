@@ -131,7 +131,7 @@ class XLNetPreTrainedModel(PreTrainedModel):
 @auto_docstring(
     custom_intro="""
     Output type of [`XLNetModel`].
-    """
+    """,
 )
 class XLNetModelOutput(ModelOutput):
     last_hidden_state: torch.FloatTensor
@@ -143,7 +143,7 @@ class XLNetModelOutput(ModelOutput):
 @auto_docstring(
     custom_intro="""
     Output type of [`XLNetLMHeadModel`].
-    """
+    """,
 )
 class XLNetLMHeadModelOutput(ModelOutput):
     loss: torch.FloatTensor | None = ...
@@ -246,7 +246,11 @@ class XLNetLMHeadModel(XLNetPreTrainedModel, GenerationMixin):
     def set_output_embeddings(self, new_embeddings):  # -> None:
         ...
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=..., use_mems=..., **kwargs
+        self,
+        input_ids,
+        past_key_values=...,
+        use_mems=...,
+        **kwargs,
     ):  # -> dict[str, Tensor | Any | None]:
         ...
     @auto_docstring

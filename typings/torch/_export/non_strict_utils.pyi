@@ -23,7 +23,8 @@ class _KeyPathTrie:
 
 def make_sourced_prefixes(nn_module, args, kwargs) -> _KeyPathTrie: ...
 def key_path_to_source(
-    kp: KeyPath, sourced_prefixes: _KeyPathTrie | None = ...
+    kp: KeyPath,
+    sourced_prefixes: _KeyPathTrie | None = ...,
 ) -> Source: ...
 def fakify(
     mode: FakeTensorMode,
@@ -40,7 +41,12 @@ def make_fake_inputs(
     dynamic_shapes,
     prefer_deferred_runtime_asserts_over_guards=...,
 ) -> tuple[
-    Any | FakeTensorMode, PyTree, PyTree, EqualityConstraint, Signature, Any
+    Any | FakeTensorMode,
+    PyTree,
+    PyTree,
+    EqualityConstraint,
+    Signature,
+    Any,
 ]: ...
 def produce_guards_and_solve_constraints(
     fake_mode: FakeTensorMode,
@@ -60,5 +66,9 @@ def make_constraints(
 
 class _NonStrictTorchFunctionHandler(torch.overrides.TorchFunctionMode):
     def __torch_function__(
-        self, func, types, args=..., kwargs=...
+        self,
+        func,
+        types,
+        args=...,
+        kwargs=...,
     ) -> Tensor | list[Tensor]: ...

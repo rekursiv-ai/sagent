@@ -19,7 +19,9 @@ class DataParallel(Module, Generic[T]):
     def forward(self, *inputs: Any, **kwargs: Any) -> Any: ...
     def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
     def replicate(
-        self, module: T, device_ids: Sequence[int | torch.device]
+        self,
+        module: T,
+        device_ids: Sequence[int | torch.device],
     ) -> list[T]: ...
     def scatter(
         self,
@@ -28,7 +30,10 @@ class DataParallel(Module, Generic[T]):
         device_ids: Sequence[int | torch.device],
     ) -> Any: ...
     def parallel_apply(
-        self, replicas: Sequence[T], inputs: Sequence[Any], kwargs: Any
+        self,
+        replicas: Sequence[T],
+        inputs: Sequence[Any],
+        kwargs: Any,
     ) -> list[Any]: ...
     def gather(self, outputs: Any, output_device: int | torch.device) -> Any: ...
 

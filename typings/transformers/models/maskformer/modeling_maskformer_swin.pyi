@@ -29,7 +29,7 @@ class MaskFormerSwinModelOutputWithPooling(ModelOutput):
 @auto_docstring(
     custom_intro="""
     Class for SwinEncoder's outputs.
-    """
+    """,
 )
 class MaskFormerSwinBaseModelOutput(ModelOutput):
     last_hidden_state: torch.FloatTensor | None = ...
@@ -40,13 +40,18 @@ class MaskFormerSwinBaseModelOutput(ModelOutput):
 def window_partition(input_feature, window_size): ...
 def window_reverse(windows, window_size, height, width): ...
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class MaskFormerSwinEmbeddings(nn.Module):
     def __init__(self, config) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(self, pixel_values, interpolate_pos_encoding):  # -> tuple[Any, Any]:
         ...
@@ -56,20 +61,28 @@ class MaskFormerSwinPatchEmbeddings(nn.Module):
     def maybe_pad(self, pixel_values, height, width):  # -> Tensor:
         ...
     def forward(
-        self, pixel_values: torch.FloatTensor | None
+        self,
+        pixel_values: torch.FloatTensor | None,
     ) -> tuple[torch.Tensor, tuple[int]]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, tuple[int]]: ...
 
 class MaskFormerSwinPatchMerging(nn.Module):
     def __init__(
-        self, input_resolution: tuple[int], dim: int, norm_layer: nn.Module = ...
+        self,
+        input_resolution: tuple[int],
+        dim: int,
+        norm_layer: nn.Module = ...,
     ) -> None: ...
     def maybe_pad(self, input_feature, height, width):  # -> Tensor:
         ...
     def forward(
-        self, input_feature: torch.Tensor, input_dimensions: tuple[int, int]
+        self,
+        input_feature: torch.Tensor,
+        input_dimensions: tuple[int, int],
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -93,7 +106,9 @@ class MaskFormerSwinSelfAttention(nn.Module):
 class MaskFormerSwinSelfOutput(nn.Module):
     def __init__(self, config, dim) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -133,17 +148,31 @@ class MaskFormerSwinLayer(nn.Module):
     def get_attn_mask(self, input_resolution):  # -> Tensor | None:
         ...
     def maybe_pad(
-        self, hidden_states, height, width
+        self,
+        hidden_states,
+        height,
+        width,
     ):  # -> tuple[Tensor, tuple[Literal[0], Literal[0], Literal[0], Any, Literal[0], Any]]:
         ...
     def forward(
-        self, hidden_states, input_dimensions, head_mask=..., output_attentions=...
+        self,
+        hidden_states,
+        input_dimensions,
+        head_mask=...,
+        output_attentions=...,
     ):  # -> Any:
         ...
 
 class MaskFormerSwinStage(GradientCheckpointingLayer):
     def __init__(
-        self, config, dim, input_resolution, depth, num_heads, drop_path, downsample
+        self,
+        config,
+        dim,
+        input_resolution,
+        depth,
+        num_heads,
+        drop_path,
+        downsample,
     ) -> None: ...
     def forward(
         self,

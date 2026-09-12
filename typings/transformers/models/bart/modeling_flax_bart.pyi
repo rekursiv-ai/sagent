@@ -30,7 +30,9 @@ BART_ENCODE_INPUTS_DOCSTRING = ...
 BART_DECODE_INPUTS_DOCSTRING = ...
 
 def shift_tokens_right(
-    input_ids: jnp.ndarray, pad_token_id: int, decoder_start_token_id: int
+    input_ids: jnp.ndarray,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ) -> jnp.ndarray: ...
 
 class FlaxBartAttention(nn.Module):
@@ -197,7 +199,10 @@ class FlaxBartPreTrainedModel(FlaxPreTrainedModel):
         **kwargs,
     ) -> None: ...
     def init_weights(
-        self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...
+        self,
+        rng: jax.random.PRNGKey,
+        input_shape: tuple,
+        params: FrozenDict = ...,
     ) -> FrozenDict: ...
     def init_cache(self, batch_size, max_length, encoder_outputs): ...
     @add_start_docstrings(BART_ENCODE_INPUTS_DOCSTRING)
@@ -288,7 +293,8 @@ class FlaxBartForConditionalGeneration(FlaxBartPreTrainedModel):
     dtype: jnp.dtype = ...
     @add_start_docstrings(BART_DECODE_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=FlaxCausalLMOutputWithCrossAttentions, config_class=BartConfig
+        output_type=FlaxCausalLMOutputWithCrossAttentions,
+        config_class=BartConfig,
     )
     def decode(
         self,
@@ -390,7 +396,10 @@ class FlaxBartDecoderPreTrainedModel(FlaxPreTrainedModel):
         **kwargs,
     ) -> None: ...
     def init_weights(
-        self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...
+        self,
+        rng: jax.random.PRNGKey,
+        input_shape: tuple,
+        params: FrozenDict = ...,
     ) -> FrozenDict: ...
     def init_cache(self, batch_size, max_length): ...
     @add_start_docstrings_to_model_forward(BART_DECODE_INPUTS_DOCSTRING)
@@ -416,7 +425,9 @@ class FlaxBartDecoderWrapper(nn.Module):
     def setup(self):  # -> None:
         ...
     def __call__(
-        self, *args, **kwargs
+        self,
+        *args,
+        **kwargs,
     ):  # -> tuple[Any | ndarray | tuple[Any | ndarray | None, ...] | tuple[()] | tuple[ndarray | None, ...], ...] | FlaxBaseModelOutputWithPastAndCrossAttentions:
         ...
 
@@ -446,7 +457,10 @@ class FlaxBartForCausalLMModule(nn.Module):
 )
 class FlaxBartForCausalLM(FlaxBartDecoderPreTrainedModel):
     def prepare_inputs_for_generation(
-        self, input_ids, max_length, attention_mask: jax.Array | None = ...
+        self,
+        input_ids,
+        max_length,
+        attention_mask: jax.Array | None = ...,
     ):  # -> dict[str, Any | Array]:
         ...
     def update_inputs_for_generation(self, model_outputs, model_kwargs): ...

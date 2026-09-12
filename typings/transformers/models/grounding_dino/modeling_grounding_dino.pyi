@@ -100,7 +100,9 @@ def replace_batch_norm(model):  # -> None:
 class GroundingDinoConvEncoder(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, pixel_values: torch.Tensor, pixel_mask: torch.Tensor
+        self,
+        pixel_values: torch.Tensor,
+        pixel_mask: torch.Tensor,
     ):  # -> list[Any]:
         ...
 
@@ -126,10 +128,15 @@ def build_position_encoding(
 
 class GroundingDinoMultiscaleDeformableAttention(nn.Module):
     def __init__(
-        self, config: GroundingDinoConfig, num_heads: int, n_points: int
+        self,
+        config: GroundingDinoConfig,
+        num_heads: int,
+        n_points: int,
     ) -> None: ...
     def with_pos_embed(
-        self, tensor: torch.Tensor, position_embeddings: Tensor | None
+        self,
+        tensor: torch.Tensor,
+        position_embeddings: Tensor | None,
     ):  # -> Tensor:
         ...
     def forward(
@@ -150,7 +157,9 @@ class GroundingDinoMultiscaleDeformableAttention(nn.Module):
 class GroundingDinoTextEnhancerLayer(nn.Module):
     def __init__(self, config) -> None: ...
     def with_pos_embed(
-        self, hidden_state: Tensor, position_embeddings: Tensor | None
+        self,
+        hidden_state: Tensor,
+        position_embeddings: Tensor | None,
     ):  # -> Tensor:
         ...
     def forward(
@@ -160,7 +169,9 @@ class GroundingDinoTextEnhancerLayer(nn.Module):
         position_embeddings: torch.FloatTensor | None = ...,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]: ...
 
 class GroundingDinoBiMultiHeadAttention(nn.Module):
@@ -176,14 +187,18 @@ class GroundingDinoBiMultiHeadAttention(nn.Module):
         tuple[torch.FloatTensor, torch.FloatTensor],
     ]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[
         tuple[torch.FloatTensor, torch.FloatTensor],
         tuple[torch.FloatTensor, torch.FloatTensor],
     ]: ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class GroundingDinoDropPath(nn.Module):
@@ -205,7 +220,9 @@ class GroundingDinoFusionLayer(nn.Module):
         tuple[torch.FloatTensor, torch.FloatTensor],
     ]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[
         tuple[torch.FloatTensor, torch.FloatTensor],
         tuple[torch.FloatTensor, torch.FloatTensor],
@@ -273,7 +290,9 @@ class GroundingDinoMultiheadAttention(nn.Module):
 class GroundingDinoDecoderLayer(nn.Module):
     def __init__(self, config: GroundingDinoConfig) -> None: ...
     def with_pos_embed(
-        self, tensor: torch.Tensor, position_embeddings: Tensor | None
+        self,
+        tensor: torch.Tensor,
+        position_embeddings: Tensor | None,
     ):  # -> Tensor:
         ...
     def forward(
@@ -370,7 +389,10 @@ class GroundingDinoModel(GroundingDinoPreTrainedModel):
     def get_valid_ratio(self, mask):  # -> Tensor:
         ...
     def generate_encoder_output_proposals(
-        self, enc_output, padding_mask, spatial_shapes
+        self,
+        enc_output,
+        padding_mask,
+        spatial_shapes,
     ):  # -> tuple[Any, Tensor]:
         ...
     @auto_docstring
@@ -394,7 +416,8 @@ class GroundingDinoMLPPredictionHead(nn.Module):
         ...
 
 def build_label_maps(
-    logits: torch.FloatTensor, input_ids: torch.LongTensor
+    logits: torch.FloatTensor,
+    input_ids: torch.LongTensor,
 ) -> tuple[torch.FloatTensor]: ...
 def build_text_mask(logits, attention_mask):  # -> Tensor:
     ...

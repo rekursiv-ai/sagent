@@ -56,20 +56,20 @@ class _MonokaiStyle(Style):
 
     styles = {  # noqa: RUF012 -- Pygments Style requires mutable class-level dict
         Token: "#f8f8f2",
-        Keyword: "#f92672",  # rgb(249,38,114) - pink
-        Keyword.Type: "#66d9ef",  # storage/type - cyan
-        Name.Builtin: "#a6e22e",  # rgb(166,226,46) - green
+        Keyword: "#f92672",  # rgb(249,38,114) - pink.
+        Keyword.Type: "#66d9ef",  # storage/type - cyan.
+        Name.Builtin: "#a6e22e",  # rgb(166,226,46) - green.
         Name.Class: "#a6e22e",
         Name.Function: "#a6e22e",
         Name.Attribute: "#a6e22e",
         Name.Decorator: "#a6e22e",
         Name.Variable: "#ffffff",
-        Number: "#ae84ff",  # rgb(190,132,255) - purple
-        String: "#e6db74",  # rgb(230,219,116) - yellow
+        Number: "#ae84ff",  # rgb(190,132,255) - purple.
+        String: "#e6db74",  # rgb(230,219,116) - yellow.
         String.Escape: "#ae84ff",
-        Comment: "#75715e",  # rgb(117,113,94) - gray
-        Operator: "#f92672",  # pink
-        Punctuation: "#f8f8f2",  # near-white
+        Comment: "#75715e",  # rgb(117,113,94) - gray.
+        Operator: "#f92672",  # Pink.
+        Punctuation: "#f8f8f2",  # near-white.
         Name.Namespace: "#f92672",
         Name.Tag: "#f92672",
     }
@@ -266,16 +266,14 @@ def _highlight(code: str, lexer: Lexer) -> Text:
     return Text.from_ansi(highlight(code, lexer, _DIFF_FORMATTER).rstrip("\n"))
 
 
+# Each tuple is ``(kind, text)`` where kind is ``"="`` (unchanged), ``"-"`` (in
+# removed), or ``"+"`` (in added). Returns None if the ratio of changed chars exceeds
+# the threshold.
 def _word_diff_pair(
     removed: str,
     added: str,
 ) -> list[tuple[str, str]] | None:
-    """Return word-level diff parts, or None if change is too large.
-
-    Each tuple is ``(kind, text)`` where kind is ``"="`` (unchanged),
-    ``"-"`` (in removed), or ``"+"`` (in added). Returns None if the
-    ratio of changed chars exceeds the threshold.
-    """
+    """Return word-level diff parts, or None if change is too large."""
     r_words = _WORD_RE.findall(removed)
     a_words = _WORD_RE.findall(added)
     matcher = difflib.SequenceMatcher(a=r_words, b=a_words, autojunk=False)
@@ -306,18 +304,15 @@ def _word_diff_pair(
     return parts
 
 
+# Uses :class:`difflib.SequenceMatcher` on the line sequences so a deletion in the
+# middle doesn't shift all subsequent pairings. Falls back to positional pairing inside
+# each ``replace`` region - once ``difflib`` has localized a block as "no shared lines",
+# word diff is our last shot at showing structure.
 def _align_blocks(
     removed: list[str],
     added: list[str],
 ) -> list[tuple[int, int]]:
-    """Return (removed_idx, added_idx) pairs aligned by similarity.
-
-    Uses :class:`difflib.SequenceMatcher` on the line sequences so a
-    deletion in the middle doesn't shift all subsequent pairings.
-    Falls back to positional pairing inside each ``replace`` region
-    - once ``difflib`` has localized a block as "no shared lines",
-    word diff is our last shot at showing structure.
-    """
+    """Return (removed_idx, added_idx) pairs aligned by similarity."""
     sm = difflib.SequenceMatcher(a=removed, b=added, autojunk=False)
     alignments: list[tuple[int, int]] = []
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
@@ -338,14 +333,12 @@ def _align_blocks(
     return alignments
 
 
+# Returns a map: diff index → (partner diff index, word parts). Only indices where word
+# diff is viable (below threshold).
 def _pair_word_diffs(
     diff_lines: list[str],
 ) -> dict[int, tuple[int, list[tuple[str, str]]]]:
-    """Pair adjacent -/+ blocks for word-level highlighting.
-
-    Returns a map: diff index → (partner diff index, word parts).
-    Only indices where word diff is viable (below threshold).
-    """
+    """Pair adjacent -/+ blocks for word-level highlighting."""
     pairs: dict[int, tuple[int, list[tuple[str, str]]]] = {}
     i = 0
     while i < len(diff_lines):

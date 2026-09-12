@@ -2,9 +2,16 @@ from collections.abc import Callable
 from typing import Any
 
 def make_fx_check(
-    func, args, kwargs, tracing_mode, assert_close=..., randomize_data=...
+    func,
+    args,
+    kwargs,
+    tracing_mode,
+    assert_close=...,
+    randomize_data=...,
 ) -> None: ...
 def handle_sizes_for_dynamic_shapes(
-    func, args, kwargs
+    func,
+    args,
+    kwargs,
 ) -> tuple[Callable[..., Any], Any, Any, list[Any], dict[Any, Any]]: ...
 def randomize(args) -> PyTree: ...

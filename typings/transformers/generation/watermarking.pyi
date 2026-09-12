@@ -41,7 +41,10 @@ class WatermarkDetector:
 
 class BayesianDetectorConfig(PretrainedConfig):
     def __init__(
-        self, watermarking_depth: int | None = ..., base_rate: float = ..., **kwargs
+        self,
+        watermarking_depth: int | None = ...,
+        base_rate: float = ...,
+        **kwargs,
     ) -> None: ...
     def set_detector_information(self, model_name, watermarking_config):  # -> None:
         ...
@@ -69,7 +72,9 @@ class BayesianDetectorModel(PreTrainedModel):
         return_dict=...,
     ) -> BayesianWatermarkDetectorModelOutput: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> BayesianWatermarkDetectorModelOutput: ...
 
 class SynthIDTextWatermarkDetector:

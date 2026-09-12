@@ -27,7 +27,9 @@ class XPathEmbeddings(nn.Module):
         ...
 
 def create_position_ids_from_input_ids(
-    input_ids, padding_idx, past_key_values_length=...
+    input_ids,
+    padding_idx,
+    past_key_values_length=...,
 ): ...
 
 class MarkupLMEmbeddings(nn.Module):
@@ -49,7 +51,9 @@ class MarkupLMEmbeddings(nn.Module):
 class MarkupLMSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -61,7 +65,9 @@ class MarkupLMIntermediate(nn.Module):
 class MarkupLMOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 

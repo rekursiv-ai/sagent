@@ -13,7 +13,9 @@ from ...utils import auto_docstring
 logger = ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class GLPNDropPath(nn.Module):
@@ -29,10 +31,18 @@ class GLPNOverlapPatchEmbeddings(nn.Module):
 
 class GLPNEfficientSelfAttention(nn.Module):
     def __init__(
-        self, config, hidden_size, num_attention_heads, sequence_reduction_ratio
+        self,
+        config,
+        hidden_size,
+        num_attention_heads,
+        sequence_reduction_ratio,
     ) -> None: ...
     def forward(
-        self, hidden_states, height, width, output_attentions=...
+        self,
+        hidden_states,
+        height,
+        width,
+        output_attentions=...,
     ):  # -> tuple[Tensor, Any] | tuple[Tensor]:
         ...
 
@@ -43,7 +53,11 @@ class GLPNSelfOutput(nn.Module):
 
 class GLPNAttention(nn.Module):
     def __init__(
-        self, config, hidden_size, num_attention_heads, sequence_reduction_ratio
+        self,
+        config,
+        hidden_size,
+        num_attention_heads,
+        sequence_reduction_ratio,
     ) -> None: ...
     def prune_heads(self, heads):  # -> None:
         ...
@@ -57,7 +71,11 @@ class GLPNDWConv(nn.Module):
 
 class GLPNMixFFN(nn.Module):
     def __init__(
-        self, config, in_features, hidden_features=..., out_features=...
+        self,
+        config,
+        in_features,
+        hidden_features=...,
+        out_features=...,
     ) -> None: ...
     def forward(self, hidden_states, height, width):  # -> Any:
         ...

@@ -19,7 +19,8 @@ class ExportStatus:
 
 def construct_report_file_name(timestamp: str, status: ExportStatus) -> str: ...
 def format_decomp_comparison(
-    pre_decomp_unique_ops: set[str], post_decomp_unique_ops: set[str]
+    pre_decomp_unique_ops: set[str],
+    post_decomp_unique_ops: set[str],
 ) -> str: ...
 def format_verification_infos(
     verification_infos: list[_verification.VerificationInfo],

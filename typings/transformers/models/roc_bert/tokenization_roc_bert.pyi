@@ -45,7 +45,8 @@ class RoCBertTokenizer(PreTrainedTokenizer):
     def get_vocab(self):  # -> dict[str, int]:
         ...
     @add_end_docstrings(
-        ENCODE_KWARGS_DOCSTRING, ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING
+        ENCODE_KWARGS_DOCSTRING,
+        ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING,
     )
     def prepare_for_model(
         self,
@@ -74,10 +75,12 @@ class RoCBertTokenizer(PreTrainedTokenizer):
         **kwargs,
     ) -> BatchEncoding: ...
     def convert_tokens_to_shape_ids(
-        self, tokens: str | list[str]
+        self,
+        tokens: str | list[str],
     ) -> int | list[int]: ...
     def convert_tokens_to_pronunciation_ids(
-        self, tokens: str | list[str]
+        self,
+        tokens: str | list[str],
     ) -> int | list[int]: ...
     def convert_tokens_to_string(self, tokens):  # -> str:
         ...
@@ -95,7 +98,9 @@ class RoCBertTokenizer(PreTrainedTokenizer):
         already_has_special_tokens: bool = ...,
     ) -> list[int]: ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str, str, str]: ...
 
 class RoCBertBasicTokenizer:

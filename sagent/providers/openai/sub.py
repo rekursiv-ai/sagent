@@ -86,17 +86,17 @@ if TYPE_CHECKING:
 else:
     from wrapt import lazy_import
 
-    httpx2 = lazy_import("httpx2")  # 100ms cold
-    openai = lazy_import("openai")  # 493ms cold
+    httpx2 = lazy_import("httpx2")  # 100ms cold.
+    openai = lazy_import("openai")  # 493ms cold.
 
 
-from sagent.catalog import openai as openai_catalog
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import (
     DictCodec,
     FloatCodec,
     MutableJSON,
 )
+from sagent.lib.userdirs import config_dir
 from sagent.providers.lib.oauth import (
     AuthCodeListener,
     credential_file_lock,
@@ -124,6 +124,8 @@ from sagent.types.runtime import (
     RuntimeEvent,
 )
 
+import sagent.catalog.openai
+
 
 logger = logging.getLogger(__name__)
 
@@ -133,12 +135,12 @@ logger = logging.getLogger(__name__)
 #   token URL:   codex-rs/login/src/auth/manager.rs:94
 #   issuer:      codex-rs/login/src/server.rs:51
 #   scope:       codex-rs/login/src/server.rs:493 (verbatim match)
-#   base URL:    codex-rs/model-provider-info/src/lib.rs:237
+#   base URL:    codex-rs/model-provider-info/src/lib.rs:237.
 _CLIENT_ID: Final = "app_EMoamEEZ73f0CkXaXp7hrann"
 _TOKEN_URL: Final = "https://auth.openai.com/oauth/token"  # noqa: S105 -- not a secret; OAuth endpoint URL
 _AUTHORIZE_URL: Final = "https://auth.openai.com/oauth/authorize"
 _BASE_URL: Final = "https://chatgpt.com/backend-api/codex"
-DEFAULT_CREDENTIALS_PATH = Path.home() / ".codex" / "auth.json"  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)
+DEFAULT_CREDENTIALS_PATH = Path(".codex") / "auth.json"
 _SCOPES: Final = (
     "openid profile email offline_access api.connectors.read api.connectors.invoke"
 )
@@ -166,32 +168,32 @@ def _default_credentials_path() -> Path:
     codex_home = os.environ.get("CODEX_HOME")
     if codex_home:
         return Path(codex_home).expanduser() / "auth.json"
-    return DEFAULT_CREDENTIALS_PATH
+    return config_dir().parent / DEFAULT_CREDENTIALS_PATH
 
 
 class _CredentialFileError(ValueError):
     """Stored credentials do not match the subscription OAuth schema."""
 
 
+# Only the default tag survives: ``+1m`` clamps to exactly the base id, so offering it
+# would mislead a caller expecting 1M.
 def _subscription_context(cap: ModelCapability) -> Mapping[ContextTag, ModelLimits]:
-    """Clamp the untagged window to the subscription wire contract.
-
-    Only the default tag survives: ``+1m`` clamps to exactly the base id,
-    so offering it would mislead a caller expecting 1M.
-    """
+    """Clamp the untagged window to the subscription wire contract."""
     base = cap.context[""]
     return MappingProxyType(
         {
             "": replace(
                 base,
                 max_request_tokens=min(
-                    base.max_request_tokens, _SUBSCRIPTION_MAX_REQUEST_TOKENS
+                    base.max_request_tokens,
+                    _SUBSCRIPTION_MAX_REQUEST_TOKENS,
                 ),
                 max_response_tokens=min(
-                    base.max_response_tokens, _SUBSCRIPTION_MAX_RESPONSE_TOKENS
+                    base.max_response_tokens,
+                    _SUBSCRIPTION_MAX_RESPONSE_TOKENS,
                 ),
-            )
-        }
+            ),
+        },
     )
 
 
@@ -220,12 +222,12 @@ class OpenAISubscription(OpenAI):
     CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = MappingProxyType(
         {
             name: replace(cap, context=_subscription_context(cap))
-            for name, cap in openai_catalog.models().items()
-        }
+            for name, cap in sagent.catalog.openai.models().items()
+        },
     )
     """The Responses wire: every advertised effort, clamped token windows."""
 
-    TRANSPORT: ClassVar[ModelCapability] = openai_catalog.subscription()
+    TRANSPORT: ClassVar[ModelCapability] = sagent.catalog.openai.subscription()
     """Codex subscription: account auth, ``/fast`` maps to the priority tier."""
 
     class Credentials(TypedDict):
@@ -250,7 +252,7 @@ class OpenAISubscription(OpenAI):
         self._access_token = access_token
         self._refresh_token = refresh_token
         self._account_id = account_id  # ChatGPT account id (from JWT)
-        self._account = account  # local credential slot name
+        self._account = account  # Local credential slot name.
         self._expires_at = expires_at
         self._refresh_buffer_sec = refresh_buffer_sec
         # Client and its token cached together, per loop: the client's
@@ -259,7 +261,7 @@ class OpenAISubscription(OpenAI):
         # exists. The guarding lock is per loop for the same reason -- it
         # binds to the loop that first contends on it.
         self._authed: PerLoop[tuple[openai.AsyncOpenAI, str] | None] = PerLoop(
-            lambda: None
+            lambda: None,
         )
         self._lock: PerLoop[asyncio.Lock] = PerLoop(asyncio.Lock)
 
@@ -504,7 +506,10 @@ class OpenAISubscription(OpenAI):
         # ``+1m`` id raises rather than silently clamping: the suffix buys
         # nothing under the subscription wire contract.
         capability, settings = resolve(
-            mid, models=self.CAPABILITIES, roles=self.ROLES, transport=self.TRANSPORT
+            mid,
+            models=self.CAPABILITIES,
+            roles=self.ROLES,
+            transport=self.TRANSPORT,
         )
         return _OpenAISubModel(
             provider=self,
@@ -578,40 +583,32 @@ class OpenAISubscription(OpenAI):
         if cached is not None:
             await cached[0].close()
 
+    # A concurrent process holding the same account may have refreshed and written newer
+    # creds to disk. Load them under the already-held file lock and adopt only when the
+    # on-disk access token (a) DIFFERS from ours and (b) is itself non-expired. The
+    # boolean answers exactly "did we just adopt a token we can use without a network
+    # refresh?" -- never "is our current token valid?".
+    #
+    # Two failure modes this guards, both of which return False so the caller refreshes:
+    # - disk token MATCHES ours: a sibling did not refresh; our token is the one that
+    # needs replacing (especially under ``handle_auth_error``, where the server already
+    # rejected it regardless of the local clock). - disk token DIFFERS but is itself
+    # already expired (its own refresh aged out, or clock skew): adopting it would 401
+    # again next call.
+    #
+    # ``load`` raises ``KeyError`` on a missing-field file and ``ValueError`` on
+    # malformed JSON; both mean "no usable disk creds", so both return False.
+    #
+    # Disk I/O runs in a worker thread so the event loop is not blocked on a slow/NFS
+    # read while the credential lock is held. Adopting a new token invalidates the
+    # cached SDK; the stale client is closed (not merely dropped) so its pooled HTTP
+    # connections are released immediately rather than orphaned until GC.
     async def _adopt_fresher_disk_creds(self) -> bool:
-        """Adopt a DIFFERENT, still-valid sibling-written disk token.
-
-        A concurrent process holding the same account may have refreshed and
-        written newer creds to disk. Load them under the already-held file lock
-        and adopt only when the on-disk access token (a) DIFFERS from ours and
-        (b) is itself non-expired. The boolean answers exactly "did we just adopt
-        a token we can use without a network refresh?" -- never "is our current
-        token valid?".
-
-        Two failure modes this guards, both of which return False so the caller
-        refreshes:
-          - disk token MATCHES ours: a sibling did not refresh; our token is the
-            one that needs replacing (especially under ``handle_auth_error``,
-            where the server already rejected it regardless of the local clock).
-          - disk token DIFFERS but is itself already expired (its own refresh
-            aged out, or clock skew): adopting it would 401 again next call.
-
-        ``load`` raises ``KeyError`` on a missing-field file and ``ValueError``
-        on malformed JSON; both mean "no usable disk creds", so both return False.
-
-        Disk I/O runs in a worker thread so the event loop is not blocked on a
-        slow/NFS read while the credential lock is held. Adopting a new token
-        invalidates the cached SDK; the stale client is closed (not merely
-        dropped) so its pooled HTTP connections are released immediately rather
-        than orphaned until GC.
-
-        Returns:
-          adopted: True iff a different, non-expired disk token is now in memory.
-
-        """
+        """Adopt a DIFFERENT, still-valid sibling-written disk token."""
         try:
             creds = await asyncio.to_thread(
-                OpenAISubscription.load, account=self._account
+                OpenAISubscription.load,
+                account=self._account,
             )
             disk_at = creds["access_token"]
         except (FileNotFoundError, ValueError, KeyError):
@@ -625,25 +622,20 @@ class OpenAISubscription(OpenAI):
         await self._discard_sdk()
         return not self.expired
 
+    # Idempotent. The caller must already hold ``self._lock``.
     async def _discard_sdk(self) -> None:
-        """Drop and close the cached SDK so its pooled connections release.
-
-        Idempotent. The caller must already hold ``self._lock``.
-        """
+        """Drop and close the cached SDK so its pooled connections release."""
         old = self._sdk
         self._sdk = None
         self._sdk_token = None
         if old is not None:
             await old.close()
 
+    # Holds a cross-process file lock around the read-disk → maybe- POST → write-disk
+    # sequence so concurrent processes can't both consume the same refresh_token and
+    # have one revoked by the OAuth endpoint's rotation rule.
     async def _ensure_valid(self) -> str:
-        """Return a valid access token, reloading from disk or refreshing.
-
-        Holds a cross-process file lock around the read-disk → maybe-
-        POST → write-disk sequence so concurrent processes can't both
-        consume the same refresh_token and have one revoked by the
-        OAuth endpoint's rotation rule.
-        """
+        """Return a valid access token, reloading from disk or refreshing."""
         if not self.expired:
             return self._access_token
         cred_path = credentials_path(_default_credentials_path(), self._account)
@@ -768,7 +760,7 @@ class OpenAISubscription(OpenAI):
         if not isinstance(decoded, dict):
             raise _CredentialFileError(
                 f"{p} must contain a JSON object with OpenAI subscription "
-                "OAuth credentials."
+                "OAuth credentials.",
             )
         raw = cast(MutableJSON, decoded)
         raw_tokens = raw.get("tokens")
@@ -779,11 +771,11 @@ class OpenAISubscription(OpenAI):
                     f"{p} contains OpenAI API-key credentials, not ChatGPT "
                     "subscription OAuth credentials. Use --provider OpenAI "
                     "--auth env, or run `sagent --provider OpenAISubscription "
-                    "login` first."
+                    "login` first.",
                 )
             raise _CredentialFileError(
                 f"{p} does not contain OpenAI subscription OAuth tokens. Run "
-                "`sagent --provider OpenAISubscription login`."
+                "`sagent --provider OpenAISubscription login`.",
             )
         tokens = cast(MutableJSON, raw_tokens)
         required = ("access_token", "refresh_token", "account_id")
@@ -795,7 +787,7 @@ class OpenAISubscription(OpenAI):
         if missing:
             raise _CredentialFileError(
                 f"{p} is missing required OAuth fields: {', '.join(missing)}. "
-                "Run `sagent --provider OpenAISubscription login`."
+                "Run `sagent --provider OpenAISubscription login`.",
             )
         access_token = cast(str, tokens.get("access_token"))
         expires_at = _jwt_exp(access_token)

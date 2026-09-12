@@ -36,7 +36,11 @@ class FlaxAlbertEmbeddings(nn.Module):
     def setup(self):  # -> None:
         ...
     def __call__(
-        self, input_ids, token_type_ids, position_ids, deterministic: bool = ...
+        self,
+        input_ids,
+        token_type_ids,
+        position_ids,
+        deterministic: bool = ...,
     ): ...
 
 class FlaxAlbertSelfAttention(nn.Module):
@@ -159,10 +163,13 @@ class FlaxAlbertPreTrainedModel(FlaxPreTrainedModel):
         **kwargs,
     ) -> None: ...
     def init_weights(
-        self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...
+        self,
+        rng: jax.random.PRNGKey,
+        input_shape: tuple,
+        params: FrozenDict = ...,
     ) -> FrozenDict: ...
     @add_start_docstrings_to_model_forward(
-        ALBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ALBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     def __call__(
         self,

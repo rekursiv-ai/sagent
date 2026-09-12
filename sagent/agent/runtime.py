@@ -321,7 +321,8 @@ from sagent.types.tape import (
 # Tools spawned by ``asyncio.create_task`` inherit the parent
 # context, so the var resolves correctly inside the spawned task.
 current_call_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "current_call_id", default=""
+    "current_call_id",
+    default="",
 )
 
 
@@ -351,9 +352,7 @@ def widen_barrier_mask(
       tape: Runtime tape at adopt time.
 
     Returns:
-      widened: ``override`` with its mask widened to current tape refs
-      while preserving gaps between the producer's original mask
-      ranges, per ``session_id``.
+      widened: ``override`` with its mask widened to current tape refs while preserving gaps between the producer's original mask ranges, per ``session_id``.
 
     """
     # Mask ranges are single-session by construction (``MaskRange``), so the
@@ -365,196 +364,12 @@ def widen_barrier_mask(
     return dataclasses.replace(override, mask=mask)
 
 
-def _widen_mask_ranges(
-    mask: tuple[MaskRange, ...],
-    tape: Sequence[TapeRecord],
-) -> tuple[MaskRange, ...]:
-    """Return ``mask`` widened over ``tape`` without filling existing gaps.
-
-    Tape refs are partitioned by ``session_id`` before widening; each emitted
-    :class:`MaskRange` is single-session by construction.
-    """
-    if not tape:
-        return mask
-    ordinals_by_session: dict[str, list[int]] = {}
-    for record in tape:
-        ordinals_by_session.setdefault(record.ref.session_id, []).append(
-            record.ref.ordinal
-        )
-    preserved_gaps_by_session = _preserved_mask_gaps_by_session(mask)
-    widened: list[MaskRange] = []
-    for sid, ordinals in ordinals_by_session.items():
-        ordinals.sort()
-        preserved_gaps = preserved_gaps_by_session.get(sid, ())
-        start: int | None = None
-        previous: int | None = None
-        for ordinal in ordinals:
-            if any(lo < ordinal < hi for lo, hi in preserved_gaps):
-                if start is not None and previous is not None:
-                    widened.append(MaskRange(session_id=sid, lo=start, hi=previous))
-                    start = None
-                continue
-            if start is None:
-                start = ordinal
-            previous = ordinal
-        if start is not None and previous is not None:
-            widened.append(MaskRange(session_id=sid, lo=start, hi=previous))
-    return tuple(widened)
-
-
-def _preserved_mask_gaps_by_session(
-    mask: tuple[MaskRange, ...],
-) -> dict[str, tuple[tuple[int, int], ...]]:
-    """Return ordinal gaps between sorted mask ranges, per session_id."""
-    per_session: dict[str, list[MaskRange]] = {}
-    for r in mask:
-        per_session.setdefault(r.session_id, []).append(r)
-    return {
-        sid: tuple(
-            (left.hi, right.lo)
-            for left, right in pairwise(sorted(ranges, key=lambda r: r.lo))
-            if left.hi + 1 < right.lo
-        )
-        for sid, ranges in per_session.items()
-    }
-
-
-def _entry_text(entry: ModelContextEvent) -> str:
-    """Return the provider-visible text of one context entry.
-
-    Containment is checked on text because a merge concatenates: a carried
-    entry survives inside a larger merged body, so equality would reject the
-    legitimate absorber while substring containment accepts it.
-    """
-    if isinstance(entry, ToolResult):
-        return entry.content
-    return entry.text
-
-
-def _sanitize_for_send(
-    entries: Sequence[ModelContextEvent],
-) -> tuple[ModelContextEvent, ...]:
-    """Return a wire-format-valid version of ``entries`` for the rescue path.
-
-    Used by the runtime gate when structural repair can't pair
-    tool_use / tool_result across overrides (e.g. accumulated microcompact
-    debt from a session predating the cache-warm gate fix).
-
-    A thin wrapper over the canonical :func:`tape.splice_safe_repair`, so the
-    rescue path shares one pair/dedup/synthesize/coalesce policy with the
-    compaction repair and cannot drift from it (the H2/F1 disease). The repair
-    detail lives at that canonical site. Idempotent.
-    """
-    return splice_safe_repair(entries)
-
-
-def _mimic_index_of(cid: str) -> int | None:
-    """Return the ``N`` of a ``DetachedArrived:mimic:N`` id, or ``None``.
-
-    ``isdecimal``, not ``isdigit``: the latter admits characters ``int()``
-    rejects (``"²".isdigit()`` is True), and this runs over persisted ids
-    during ``replay_tape`` -- so one such id made a whole session unloadable.
-    """
-    if not cid.startswith(DETACHED_ARRIVED_MIMIC_PREFIX):
-        return None
-    suffix = cid.removeprefix(DETACHED_ARRIVED_MIMIC_PREFIX)
-    return int(suffix) if suffix.isdecimal() else None
-
-
-def _mimic_indices(entry: object) -> list[int]:
-    """Return numeric indices of any ``DetachedArrived:mimic:N`` id in ``entry``.
-
-    Covers both sides of the mimic id namespace: an ``AssistantMessage``
-    contributes its ``tool_calls`` ids, a ``ToolResult`` its ``call_id``.
-    Scanning only one side would under-seed the counter when the tape
-    preserves a lone partner -- e.g. ``_commit_pairing`` splices a mimic
-    ``ToolResult`` whose parent ``AssistantMessage`` was compacted away.
-    """
-    if isinstance(entry, AssistantMessage):
-        ids = [tc.id for tc in entry.tool_calls]
-    elif isinstance(entry, ToolResult):
-        ids = [entry.call_id]
-    else:
-        return []
-    return [n for cid in ids if (n := _mimic_index_of(cid)) is not None]
-
-
-def _max_mimic_index(records: Sequence[TapeRecord]) -> int:
-    """Return the largest ``DetachedArrived:mimic:N`` index in ``records``.
-
-    Scans both ``ReferrableTapeEvent`` events and ``ContextSplice`` payloads,
-    on both sides of the id namespace (see :func:`_mimic_indices`). Masked
-    (dead) splice payloads are scanned too: undelete can resurrect them, so
-    their ids must still reserve namespace. A splice's ``paired_externally``
-    ids are also scanned: ``ContextSplice.replay`` (legacy on-disk load)
-    bypasses ``_validate_payload``, so a persisted record can declare a mimic
-    id whose local pair is absent from ``payload`` -- reading only ``payload``
-    would then under-seed. Returns ``-1`` when no mimic id is present, so the
-    caller can seed its counter to ``result + 1`` and start at ``0`` on a clean
-    tape.
-
-    Args:
-      records: Loaded tape records to scan.
-
-    Returns:
-      max_index: Largest mimic index found, or ``-1`` when none exist.
-
-    """
-    found = [-1]
-    for record in records:
-        if isinstance(record, ReferrableTapeEvent):
-            found.extend(_mimic_indices(record.event))
-        else:
-            for entry in record.payload:
-                found.extend(_mimic_indices(entry))
-            found.extend(
-                n
-                for cid in record.paired_externally
-                if (n := _mimic_index_of(cid)) is not None
-            )
-    return max(found)
-
-
-def _type_names(types: Sequence[type[object]]) -> tuple[str, ...]:
-    """Return class names for compact debug logging."""
-    return tuple(t.__name__ for t in types)
-
-
-def _item_names(items: Sequence[object]) -> tuple[str, ...]:
-    """Return event class names for compact debug logging."""
-    return tuple(type(item).__name__ for item in items)
-
-
 @dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
 class Await:
     """Drain gate: block until an item matching ``types`` arrives."""
 
     types: tuple[type, ...]
     """Event classes that satisfy the gate (``Quit`` always does)."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _PendingCommit:
-    """One deferred tape commit, flushed at the next gate (see ``_flush_pending``).
-
-    The single mechanism behind every "hold this, commit it on the next real
-    turn" need -- a mimicked-tool error pairing, a completed detached tool's
-    forward delivery, and ride-along system context all share it. ``kind``
-    selects the placement:
-
-    - ``"pairing"``: ``result`` answers an already-emitted ``tool_use`` whose
-      result was deferred (a mimicked ``DetachedArrived``). Committed adjacent
-      to its parent ``AssistantMessage`` so it pairs in-slot, never stranded.
-    - ``"forward"``: ``result`` is a completed detached tool's real output,
-      delivered as a synthetic ``DetachedArrived`` pair (the original stub
-      stays). A user-role separator precedes it after an assistant tail.
-    - ``"ride_along"``: ``user`` is system-injected context (e.g. a reminder)
-      coalesced onto the user side.
-    """
-
-    kind: Literal["pairing", "forward", "ride_along"]
-    result: ToolResult | None = None
-    user: UserMessage | None = None
 
 
 AWAIT_USER = Await(
@@ -566,7 +381,7 @@ AWAIT_USER = Await(
         AgentSendQueuedMessage,
         AgentSendDeferredMessage,
         Quit,
-    )
+    ),
 )
 
 
@@ -614,12 +429,16 @@ class GatedDeque[T]:
     def empty(self) -> bool:
         """Return True iff no items are queued. Snapshot at call time.
 
+        Returns:
+          empty: Whether the queue has no items at call time.
+
         Used by ``AgentRuntime._fully_drained`` to decide whether to
         publish ``AgentIdle`` before the next blocking ``drain()``.
         Safe against TOCTOU: callers must read this and act on it
         within the same synchronous block (no intervening ``await``),
         which asyncio's cooperative scheduling guarantees no other
         coroutine will run during.
+
         """
         return self._queue.empty()
 
@@ -633,7 +452,12 @@ class GatedDeque[T]:
         self._queue.put_nowait(item)
 
     def drain_nowait(self) -> list[T]:
-        """Return all currently queued items without waiting."""
+        """Return all currently queued items without waiting.
+
+        Returns:
+          items: All items currently queued at call time.
+
+        """
         items: list[T] = []
         while not self._queue.empty():
             try:
@@ -658,7 +482,8 @@ class GatedDeque[T]:
 
         """
         await_idx = next(
-            (i for i, item in enumerate(items) if isinstance(item, Await)), -1
+            (i for i, item in enumerate(items) if isinstance(item, Await)),
+            -1,
         )
         assert await_idx <= 0, (
             f"GatedDeque.push_front precondition violated: Await must be the "
@@ -749,38 +574,6 @@ class GatedDeque[T]:
             return True
         count = sum(1 for i in items if isinstance(i, gate) and not isinstance(i, Quit))
         return count > baseline
-
-
-def _message_from_queued(
-    item: UserQueuedMessage
-    | UserDeferredMessage
-    | AgentSendQueuedMessage
-    | AgentSendDeferredMessage,
-) -> UserMessage | AgentSendMessage:
-    if isinstance(item, (AgentSendQueuedMessage, AgentSendDeferredMessage)):
-        return AgentSendMessage(
-            source=item.source,
-            text=item.text,
-            attachments=item.attachments,
-        )
-    return UserMessage(text=item.text, attachments=item.attachments)
-
-
-def _coalesce_user_side(
-    items: Sequence[UserMessage | AgentSendMessage],
-) -> UserMessage | AgentSendMessage:
-    """Merge a user-side run into one entry via the canonical coalescer.
-
-    Delegates rather than re-joining text: stamping the run with the first
-    sender's ``source`` recorded every later peer's message as sent by the
-    first, and ``_merge_user`` already demotes a cross-source pair to a
-    ``UserMessage`` carrying each part's ``[from <source>]`` label.
-    """
-    merged = coalesce_roles(items)
-    assert len(merged) == 1
-    entry = merged[0]
-    assert isinstance(entry, (UserMessage, AgentSendMessage))
-    return entry
 
 
 class Tool(Protocol):
@@ -1057,38 +850,33 @@ class AgentRuntime:
         self.resume_retry_at: float | None = None
         self.service_suspended_until: float | None = None
 
+    # The one place the "engine has nothing actively running that a gate must wait
+    # behind" cluster is defined. Every per-iteration gate that used to spell out ``not
+    # self.cohort and self.model_call is None and self.compact_task is None`` reads this
+    # instead, so a future term can never be added at one gate and forgotten at another
+    # -- the scattered re-derivation that produced the deferral and wedge seam bugs.
+    #
+    # Deliberately excludes ``inbox.gate_armed`` (a gate that must also respect an armed
+    # ``AWAIT_USER`` composes via :attr:`_ready_to_advance`) and ``detached`` /
+    # ``running_tools`` (backgrounded work does not block the model-call gate -- it
+    # fires on ``not self.cohort``).
+    #
+    # Snapshot at call time; read within one synchronous block.
     @property
     def _engine_quiescent(self) -> bool:
-        """True when no streaming, compaction, or open tool batch is in flight.
-
-        The one place the "engine has nothing actively running that a gate
-        must wait behind" cluster is defined. Every per-iteration gate that
-        used to spell out ``not self.cohort and self.model_call is None and
-        self.compact_task is None`` reads this instead, so a future term can
-        never be added at one gate and forgotten at another -- the scattered
-        re-derivation that produced the deferral and wedge seam bugs.
-
-        Deliberately excludes ``inbox.gate_armed`` (a gate that must also
-        respect an armed ``AWAIT_USER`` composes via :attr:`_ready_to_advance`)
-        and ``detached`` / ``running_tools`` (backgrounded work does not block
-        the model-call gate -- it fires on ``not self.cohort``).
-
-        Snapshot at call time; read within one synchronous block.
-        """
+        """True when no streaming, compaction, or open tool batch is in flight."""
         return not self.cohort and self.model_call is None and self.compact_task is None
 
+    # :attr:`_engine_quiescent` plus ``not inbox.gate_armed``: the predicate the gates
+    # that advance the conversation (the deferred-commit flush and the model-call gate)
+    # require, since both must hold while a ``Halt`` / ``Clear`` /
+    # ``ModelResponseError`` has parked the inbox on ``AWAIT_USER`` waiting for the user
+    # to resume.
+    #
+    # Snapshot at call time; read within one synchronous block.
     @property
     def _ready_to_advance(self) -> bool:
-        """True when the engine is quiescent *and* no ``AWAIT_USER`` is armed.
-
-        :attr:`_engine_quiescent` plus ``not inbox.gate_armed``: the predicate
-        the gates that advance the conversation (the deferred-commit flush and
-        the model-call gate) require, since both must hold while a ``Halt`` /
-        ``Clear`` / ``ModelResponseError`` has parked the inbox on
-        ``AWAIT_USER`` waiting for the user to resume.
-
-        Snapshot at call time; read within one synchronous block.
-        """
+        """True when the engine is quiescent *and* no ``AWAIT_USER`` is armed."""
         return self._engine_quiescent and not self.inbox.gate_armed
 
     @property
@@ -1204,71 +992,56 @@ class AgentRuntime:
         """
         return self.accepts_user_dispatch and not self.cohort and not self.running_tools
 
+    # Companion to :attr:`is_idle` -- this is the strict ``AgentIdle``-publish gate;
+    # ``is_idle`` is the looser "REPL can push input now" predicate. See ``is_idle``'s
+    # docstring for the contract difference.
+    #
+    # Sources of work checked:
+    #
+    # * ``inbox`` non-empty -- items waiting to be drained. * ``model_call`` set -- LLM
+    # call in flight. * ``compact_task`` set -- compaction in progress. * ``cohort``
+    # non-empty -- tool batch in progress. * ``running_tools`` non-empty -- individual
+    # tool tasks live. * ``detached`` non-empty -- backgrounded tools whose results will
+    # land later. Treated as work-in-progress: the agent has unfinished business even if
+    # it can accept new input. * ``has_pending_background()`` true -- the Agent layer
+    # has live ``background: true`` / ``delay`` tool jobs in its ``_bg`` registry. The
+    # runtime cannot see ``_bg`` directly, so the Agent supplies this callback. Without
+    # it, ``AgentIdle`` fires while a backgrounded tool is still running and a one-shot
+    # ``Agent.run`` reaps the live job before its forward result lands. *
+    # ``_mid_stream_queue`` non-empty -- buffered ``UserMessage`` received while the
+    # model was streaming. * ``_has_waking_commit()`` -- a deferred commit that will
+    # itself drive a round (a forward ``DetachedResult``). Its ``tool_use`` is already
+    # taped, so idling first persists a context the provider rejects and lets a one-shot
+    # ``Agent.run`` reap mid-exchange. Only WAKING commits count: a non-waking one
+    # (mimic pairing, ride-along) flushes solely alongside a round real content drives,
+    # so gating idle on it would wedge the loop -- nothing would ever fire the round
+    # that drains it. * ``inbox.gate_armed`` -- the inbox is waiting for a specific
+    # event type (e.g. ``AWAIT_USER`` after ``Halt`` / ``ModelResponseError``).
+    # Semantically "parked on a particular event," not "idle." *
+    # ``_should_call_model()`` -- history tail wants a model turn. The end-of-iteration
+    # gate will fire one this pass; we are about to be busy, not idle. **This is the
+    # only source that resolves the tape** (via ``self.context()``). The cost is one
+    # cached lookup in the hot path because the gate sections below call
+    # ``self.context()`` already; a future change to ``_should_call_model`` that
+    # bypasses the cache (or to the tape resolver that invalidates per call) would shift
+    # this predicate from O(1) to O(tape).
+    #
+    # Local ``run_forever`` state (``awaiting_user``, ``queued``) is not consulted
+    # directly: ``awaiting_user`` correlates with ``inbox.gate_armed``, and ``queued``
+    # correlates with ``model_call`` being set (the only case a queued list can survive
+    # across iterations).
+    #
+    # Built on :attr:`is_idle` (the REPL-push predicate, itself
+    # :attr:`_ready_to_advance` + no half-consumed tool/stream work), adding the terms
+    # that distinguish "fully done" from "can accept input": an empty inbox, no
+    # backgrounded ``detached`` work, no live Agent-layer background tool
+    # (``has_pending_background``), and a tail that does not itself want a model turn.
+    #
+    # Snapshot at call time. The caller must read this and act on it within the same
+    # synchronous block (no intervening ``await``), which asyncio's cooperative
+    # scheduling guarantees no other coroutine will run during.
     def _fully_drained(self) -> bool:
-        """Return True iff the agent has no work to do and no gate is armed.
-
-        Companion to :attr:`is_idle` -- this is the strict
-        ``AgentIdle``-publish gate; ``is_idle`` is the looser
-        "REPL can push input now" predicate. See ``is_idle``'s
-        docstring for the contract difference.
-
-        Sources of work checked:
-
-        * ``inbox`` non-empty -- items waiting to be drained.
-        * ``model_call`` set -- LLM call in flight.
-        * ``compact_task`` set -- compaction in progress.
-        * ``cohort`` non-empty -- tool batch in progress.
-        * ``running_tools`` non-empty -- individual tool tasks live.
-        * ``detached`` non-empty -- backgrounded tools whose results
-          will land later. Treated as work-in-progress: the agent has
-          unfinished business even if it can accept new input.
-        * ``has_pending_background()`` true -- the Agent layer has live
-          ``background: true`` / ``delay`` tool jobs in its ``_bg``
-          registry. The runtime cannot see ``_bg`` directly, so the Agent
-          supplies this callback. Without it, ``AgentIdle`` fires while a
-          backgrounded tool is still running and a one-shot ``Agent.run``
-          reaps the live job before its forward result lands.
-        * ``_mid_stream_queue`` non-empty -- buffered ``UserMessage``
-          received while the model was streaming.
-        * ``_has_waking_commit()`` -- a deferred commit that will itself drive
-          a round (a forward ``DetachedResult``). Its ``tool_use`` is already
-          taped, so idling first persists a context the provider rejects and
-          lets a one-shot ``Agent.run`` reap mid-exchange. Only WAKING commits
-          count: a non-waking one (mimic pairing, ride-along) flushes solely
-          alongside a round real content drives, so gating idle on it would
-          wedge the loop -- nothing would ever fire the round that drains it.
-        * ``inbox.gate_armed`` -- the inbox is waiting for a specific
-          event type (e.g. ``AWAIT_USER`` after ``Halt`` /
-          ``ModelResponseError``). Semantically "parked on a particular
-          event," not "idle."
-        * ``_should_call_model()`` -- history tail wants a model turn.
-          The end-of-iteration gate will fire one this pass; we are
-          about to be busy, not idle. **This is the only source that
-          resolves the tape** (via ``self.context()``). The cost is
-          one cached lookup in the hot path because the gate sections
-          below call ``self.context()`` already; a future change to
-          ``_should_call_model`` that bypasses the cache (or to the
-          tape resolver that invalidates per call) would shift this
-          predicate from O(1) to O(tape).
-
-        Local ``run_forever`` state (``awaiting_user``, ``queued``) is
-        not consulted directly: ``awaiting_user`` correlates with
-        ``inbox.gate_armed``, and ``queued`` correlates with
-        ``model_call`` being set (the only case a queued list can
-        survive across iterations).
-
-        Built on :attr:`is_idle` (the REPL-push predicate, itself
-        :attr:`_ready_to_advance` + no half-consumed tool/stream work),
-        adding the terms that distinguish "fully done" from "can accept
-        input": an empty inbox, no backgrounded ``detached`` work, no live
-        Agent-layer background tool (``has_pending_background``), and a tail
-        that does not itself want a model turn.
-
-        Snapshot at call time. The caller must read this and act on it
-        within the same synchronous block (no intervening ``await``),
-        which asyncio's cooperative scheduling guarantees no other
-        coroutine will run during.
-        """
+        """Return True iff the agent has no work to do and no gate is armed."""
         return (
             self.is_idle
             and self.inbox.empty()
@@ -1325,7 +1098,7 @@ class AgentRuntime:
 
         """
         if self._cached_resolved is None or self._cached_resolved.version != len(
-            self.tape
+            self.tape,
         ):
             self._cached_resolved = resolve_context(self.tape)
         return self._cached_resolved
@@ -1426,31 +1199,19 @@ class AgentRuntime:
         self._invalidate_masked_anchors(record)
         return ref
 
+    # A splice is alive iff its record ref isn't covered by another alive splice's mask.
+    # The rule is: each tape ref has at most one editor at a time. The new splice may
+    # absorb (mask) existing alive splices -- their masking responsibilities lapse --
+    # but it may not double-claim a position from an alive splice it isn't absorbing.
     def _validate_no_alive_mask_overlap(self, new_mask: tuple[MaskRange, ...]) -> None:
-        """Reject ``new_mask`` if it shares any position with a live splice's mask.
-
-        A splice is alive iff its record ref isn't covered by another
-        alive splice's mask. The rule is: each tape ref has at most one
-        editor at a time. The new splice may absorb (mask) existing
-        alive splices — their masking responsibilities lapse — but it
-        may not double-claim a position from an alive splice it isn't
-        absorbing.
-
-        Args:
-          new_mask: Inclusive ``(from, to)`` ranges this splice claims.
-
-        Raises:
-          InvalidSpliceError: On overlap with an alive splice's mask
-              where the alive splice's ref is NOT in ``new_mask``.
-
-        """
+        """Reject ``new_mask`` if it shares any position with a live splice's mask."""
         alive = alive_splices(self.tape)
         for alive_ref in alive:
             splice = self._tape_by_ref.get(alive_ref)
             if not isinstance(splice, ContextSplice):
                 continue
             if mask_contains_ref(new_mask, alive_ref):
-                continue  # being absorbed by this splice
+                continue  # Being absorbed by this splice.
             if mask_ranges_overlap(new_mask, splice.mask):
                 raise InvalidSpliceError(
                     f"new splice mask overlaps alive splice {alive_ref};"
@@ -1458,42 +1219,31 @@ class AgentRuntime:
                     f" the mask to include the splice's own ref to absorb it",
                 )
 
+    # Absorbing an alive splice's ref kills it, so every entry its payload contributed
+    # stops rendering. This runs only for a producer that did NOT declare
+    # ``discards_content`` -- one that merges rather than replaces -- so losing entries
+    # here is content going missing, the shape that truncated a resumed 1642-message
+    # session to one message. It is caught at append, where the tape and the session
+    # file can still be saved.
+    #
+    # Length is only a sound measure under that declaration. A compaction summary is
+    # SUPPOSED to be shorter than what it replaces, so measuring alone can never
+    # separate "summarized" from "deleted"; the caller states which it means, and this
+    # check applies to the preserving half.
+    #
+    # Both sides are counted after ``coalesce_roles`` so the comparison is between
+    # equivalent renderings rather than raw entry counts. An absorber carrying a payload
+    # forward runs it through that merge, and a payload loaded via
+    # ``ContextSplice.replay`` -- which skips validation, so it may end in two user-side
+    # entries -- collapses by one there. Counting raw entries read that merge as a
+    # deleted message and refused the append, which the dispatch loop swallows: the
+    # user's message vanished silently.
     def _validate_absorbed_payloads_carried(
         self,
         new_mask: tuple[MaskRange, ...],
         payload: tuple[ModelContextEvent, ...],
     ) -> None:
-        """Reject a mask that absorbs a splice whose payload is not carried.
-
-        Absorbing an alive splice's ref kills it, so every entry its payload
-        contributed stops rendering. This runs only for a producer that did NOT
-        declare ``discards_content`` -- one that merges rather than replaces --
-        so losing entries here is content going missing, the shape that
-        truncated a resumed 1642-message session to one message. It is caught
-        at append, where the tape and the session file can still be saved.
-
-        Length is only a sound measure under that declaration. A compaction
-        summary is SUPPOSED to be shorter than what it replaces, so measuring
-        alone can never separate "summarized" from "deleted"; the caller states
-        which it means, and this check applies to the preserving half.
-
-        Both sides are counted after ``coalesce_roles`` so the comparison is
-        between equivalent renderings rather than raw entry counts. An absorber
-        carrying a payload forward runs it through that merge, and a payload
-        loaded via ``ContextSplice.replay`` -- which skips validation, so it may
-        end in two user-side entries -- collapses by one there. Counting raw
-        entries read that merge as a deleted message and refused the append,
-        which the dispatch loop swallows: the user's message vanished silently.
-
-        Args:
-          new_mask: Ranges the new splice claims.
-          payload: Entries the new splice injects.
-
-        Raises:
-          InvalidSpliceError: An absorbed splice's payload entries are
-              missing from ``payload`` while ``payload`` is non-empty.
-
-        """
+        """Reject a mask that absorbs a splice whose payload is not carried."""
         if not payload:
             return
         for alive_ref in alive_splices(self.tape):
@@ -1596,7 +1346,10 @@ class AgentRuntime:
         return ref
 
     def adopt_record(
-        self, record: TapeRecord, *, discards_content: bool = False
+        self,
+        record: TapeRecord,
+        *,
+        discards_content: bool = False,
     ) -> None:
         """Append a pre-built tape record (with a runtime-minted ref).
 
@@ -1634,19 +1387,15 @@ class AgentRuntime:
         self._placeholder_refs.clear()
         self._parent_assistant_refs.clear()
 
+    # A compaction barrier masks prior tape refs; any call_id anchor whose ref is now
+    # masked must be evicted unless the splice payload preserves it (``_index_record``
+    # already overwrote preserved anchors with the splice's own ref, so anchors still
+    # pointing at masked refs after indexing are the unrecovered ones). Without this
+    # eviction, a late ``DetachedResult`` would try to splice into a masked placeholder
+    # and the splice would either fail visibility checks or, worse, anchor on a ref the
+    # resolver no longer renders.
     def _invalidate_masked_anchors(self, splice: ContextSplice) -> None:
-        """Drop per-call anchors whose ref is masked by ``splice``.
-
-        A compaction barrier masks prior tape refs; any call_id anchor
-        whose ref is now masked must be evicted unless the splice
-        payload preserves it (``_index_record`` already overwrote
-        preserved anchors with the splice's own ref, so anchors still
-        pointing at masked refs after indexing are the unrecovered
-        ones). Without this eviction, a late ``DetachedResult`` would
-        try to splice into a masked placeholder and the splice would
-        either fail visibility checks or, worse, anchor on a ref the
-        resolver no longer renders.
-        """
+        """Drop per-call anchors whose ref is masked by ``splice``."""
         if not splice.mask:
             return
         for cid, ref in list(self._parent_assistant_refs.items()):
@@ -1656,16 +1405,13 @@ class AgentRuntime:
             if mask_contains_ref(splice.mask, ref):
                 del self._placeholder_refs[cid]
 
+    # ``ContextSplice`` payloads also contribute anchors: a compactor that preserves an
+    # ``AssistantMessage(tool_calls=...)`` paired externally (e.g. fallback mode keeping
+    # the parent assistant) registers its ``tool_calls`` ids against the splice ref so
+    # ``_parent_id_for_call`` still resolves the right ``parent_id`` for a detached
+    # tool's stub after the barrier.
     def _index_record(self, record: TapeRecord) -> None:
-        """Cache ref->record and call_id->anchor mappings after append.
-
-        ``ContextSplice`` payloads also contribute anchors: a compactor
-        that preserves an ``AssistantMessage(tool_calls=...)`` paired
-        externally (e.g. fallback mode keeping the parent assistant)
-        registers its ``tool_calls`` ids against the splice ref so
-        ``_parent_id_for_call`` still resolves the right ``parent_id`` for a
-        detached tool's stub after the barrier.
-        """
+        """Cache ref->record and call_id->anchor mappings after append."""
         self._tape_by_ref[record.ref] = record
         if isinstance(record, ReferrableTapeEvent):
             event = record.event
@@ -1683,35 +1429,31 @@ class AgentRuntime:
             elif isinstance(entry, ToolResult):
                 self._placeholder_refs[entry.call_id] = record.ref
 
+    # The original ``tool_use`` keeps its permanent ``[detached]`` stub; the real result
+    # is committed later as a synthetic ``DetachedArrived`` pair (``_flush_pending``),
+    # preserving full ``ToolResult`` structure.
+    #
+    # Idempotent per ``call_id``: a second delivery for an id already forwarded (or
+    # already queued) is dropped, so no two ``DetachedArrived`` pairs ever share an
+    # arrival id (the wedge in ``Issue#294``).
+    #
+    # A ``PENDING`` stub (``[detached]`` / ``[Running in background]``) is never
+    # forwarded and never marks the id delivered: it is not the tool's real output, and
+    # forwarding it would mark the id consumed and suppress the genuine result that
+    # arrives later via the background task's own ``DetachedResult`` (the regression in
+    # ``Issue#294``'s review). The real result then forwards normally. Keyed on
+    # ``ToolResult.kind``, never on ``content`` text, so a real output resembling a stub
+    # is never dropped.
+    #
+    # A ``CANCELLED`` result whose call is ALREADY answered in-slot by a terminal result
+    # (a cohort ``Kill``: ``_stop_tool`` wrote the ``CANCELLED`` answer, then the
+    # cancelled task's unwind posts a second ``CANCELLED``) is not forwarded -- the
+    # model already has the cancellation, and a forward pair would tell it the same
+    # thing twice (``f43f811c9`` review). A background job's cancellation, whose in-slot
+    # answer is a ``PENDING`` running-stub, still forwards (it is the only delivery of
+    # that outcome).
     def _defer_detached_forward(self, result: ToolResult) -> None:
-        """Queue a completed detached tool's real result for forward delivery.
-
-        The original ``tool_use`` keeps its permanent ``[detached]`` stub; the
-        real result is committed later as a synthetic ``DetachedArrived`` pair
-        (``_flush_pending``), preserving full ``ToolResult`` structure.
-
-        Idempotent per ``call_id``: a second delivery for an id already
-        forwarded (or already queued) is dropped, so no two
-        ``DetachedArrived`` pairs ever share an arrival id (the wedge in
-        ``Issue#294``).
-
-        A ``PENDING`` stub (``[detached]`` / ``[Running in background]``) is
-        never forwarded and never marks the id delivered: it is not the tool's
-        real output, and forwarding it would mark the id consumed and suppress
-        the genuine result that arrives later via the background task's own
-        ``DetachedResult`` (the regression in ``Issue#294``'s review). The real
-        result then forwards normally. Keyed on ``ToolResult.kind``, never on
-        ``content`` text, so a real output resembling a stub is never dropped.
-
-        A ``CANCELLED`` result whose call is ALREADY answered in-slot by a
-        terminal result (a cohort ``Kill``: ``_stop_tool`` wrote the
-        ``CANCELLED`` answer, then the cancelled task's unwind posts a second
-        ``CANCELLED``) is not forwarded -- the model already has the
-        cancellation, and a forward pair would tell it the same thing twice
-        (``f43f811c9`` review). A background job's cancellation, whose in-slot
-        answer is a ``PENDING`` running-stub, still forwards (it is the only
-        delivery of that outcome).
-        """
+        """Queue a completed detached tool's real result for forward delivery."""
         if result.kind is ToolResultKind.PENDING:
             logger.debug(
                 "runtime detached forward skipped (PENDING stub, not real result):"
@@ -1720,7 +1462,7 @@ class AgentRuntime:
             )
             return
         if result.kind is ToolResultKind.CANCELLED and self._inslot_result_is_terminal(
-            result.call_id
+            result.call_id,
         ):
             logger.debug(
                 "runtime detached forward skipped (cancellation already answered"
@@ -1737,19 +1479,16 @@ class AgentRuntime:
         self._forwarded_call_ids.add(result.call_id)
         self._pending_commits.append(_PendingCommit(kind="forward", result=result))
 
+    # Reads the call's existing placeholder/result record (O(1) via
+    # ``_placeholder_refs``). ``CANCELLED`` / ``FINAL`` are terminal (the model already
+    # has the answer); ``PENDING`` is not (a real result is still pending forward
+    # delivery). ``_index_record`` registers ``_placeholder_refs`` from both plain
+    # history records AND ``ContextSplice`` payloads (a result preserved across
+    # compaction), so both shapes are inspected -- otherwise a terminal result compacted
+    # into a splice would read as non-terminal and a duplicate cancellation would
+    # forward (``77bf1d67f`` review C3).
     def _inslot_result_is_terminal(self, call_id: str) -> bool:
-        """Return True when ``call_id``'s in-slot ``ToolResult`` is a final answer.
-
-        Reads the call's existing placeholder/result record (O(1) via
-        ``_placeholder_refs``). ``CANCELLED`` / ``FINAL`` are terminal (the
-        model already has the answer); ``PENDING`` is not (a real result is
-        still pending forward delivery). ``_index_record`` registers
-        ``_placeholder_refs`` from both plain history records AND
-        ``ContextSplice`` payloads (a result preserved across compaction), so
-        both shapes are inspected -- otherwise a terminal result compacted into
-        a splice would read as non-terminal and a duplicate cancellation would
-        forward (``77bf1d67f`` review C3).
-        """
+        """Return True when ``call_id``'s in-slot ``ToolResult`` is a final answer."""
         ref = self._placeholder_refs.get(call_id)
         if ref is None:
             return False
@@ -1769,36 +1508,31 @@ class AgentRuntime:
             )
         return False
 
+    # Used for a mimicked ``DetachedArrived`` call: its error is committed in-slot
+    # (adjacent to the parent assistant) on the next real turn, so the bogus call spends
+    # no round of its own.
     def _defer_pairing(self, result: ToolResult) -> None:
-        """Queue an error ``ToolResult`` pairing an already-emitted ``tool_use``.
-
-        Used for a mimicked ``DetachedArrived`` call: its error is committed
-        in-slot (adjacent to the parent assistant) on the next real turn, so
-        the bogus call spends no round of its own.
-        """
+        """Queue an error ``ToolResult`` pairing an already-emitted ``tool_use``."""
         self._pending_commits.append(_PendingCommit(kind="pairing", result=result))
 
     def _defer_ride_along(self, user: UserMessage) -> None:
         """Queue system-injected user-side context to ride the next real turn."""
         self._pending_commits.append(_PendingCommit(kind="ride_along", user=user))
 
+    # The single drain for all deferred tape commits. Called at the model gate once a
+    # round is confirmed firing (so nothing here wakes the model on its own) and
+    # immediately before ``_assert_alternation_invariant``, so the committed context is
+    # what the provider receives.
+    #
+    # Placement is by ``kind``:
+    #
+    # - ``pairing``: insert the result immediately after its parent ``AssistantMessage``
+    # (``insert_after``), so a mimicked ``tool_use`` pairs in-slot and can never be
+    # stranded by intervening turns. - ``forward``: append the synthetic
+    # ``DetachedArrived`` pair (a user-role separator first when the tail is an
+    # assistant turn). - ``ride_along``: coalesce onto the user side.
     def _flush_pending(self) -> None:
-        """Commit every queued :class:`_PendingCommit`, in arrival order, in-slot.
-
-        The single drain for all deferred tape commits. Called at the model
-        gate once a round is confirmed firing (so nothing here wakes the model
-        on its own) and immediately before ``_assert_alternation_invariant``,
-        so the committed context is what the provider receives.
-
-        Placement is by ``kind``:
-
-        - ``pairing``: insert the result immediately after its parent
-          ``AssistantMessage`` (``insert_after``), so a mimicked ``tool_use``
-          pairs in-slot and can never be stranded by intervening turns.
-        - ``forward``: append the synthetic ``DetachedArrived`` pair (a
-          user-role separator first when the tail is an assistant turn).
-        - ``ride_along``: coalesce onto the user side.
-        """
+        """Commit every queued :class:`_PendingCommit`, in arrival order, in-slot."""
         pending, self._pending_commits = self._pending_commits, []
         for commit in pending:
             if commit.kind == "pairing":
@@ -1811,23 +1545,18 @@ class AgentRuntime:
                 assert commit.user is not None
                 self.publish(self._append_or_coalesce_user(commit.user))
 
+    # Only ``forward`` (a completed detached tool's real result) wakes the model: a
+    # finished tool is worth surfacing promptly. ``pairing`` / ``ride_along`` are non-
+    # urgent and must ride a round driven by real content, never fire one alone.
     def _has_waking_commit(self) -> bool:
-        """Return True when a queued commit should itself drive a round.
-
-        Only ``forward`` (a completed detached tool's real result) wakes the
-        model: a finished tool is worth surfacing promptly. ``pairing`` /
-        ``ride_along`` are non-urgent and must ride a round driven by real
-        content, never fire one alone.
-        """
+        """Return True when a queued commit should itself drive a round."""
         return any(c.kind == "forward" for c in self._pending_commits)
 
+    # Slot placement (not tail append) is load-bearing: an intervening user turn or a
+    # forward detached delivery must not strand the ``tool_use`` and trip orphan-repair
+    # into an ``[interrupted]`` substitution.
     def _commit_pairing(self, result: ToolResult) -> None:
-        """Insert ``result`` after its ``AssistantMessage``, pairing the tool-use.
-
-        Slot placement (not tail append) is load-bearing: an intervening user
-        turn or a forward detached delivery must not strand the ``tool_use``
-        and trip orphan-repair into an ``[interrupted]`` substitution.
-        """
+        """Insert ``result`` after its ``AssistantMessage``, pairing the tool-use."""
         parent_ref = self._parent_assistant_refs.get(result.call_id)
         if parent_ref is None or parent_ref not in set(self.context().origins):
             # Parent assistant gone (compaction/Clear); nothing to pair. The
@@ -1842,14 +1571,12 @@ class AgentRuntime:
         )
         self.publish(result)
 
+    # A user-role separator precedes the synthetic ``AssistantMessage`` when the history
+    # tail is itself an assistant turn, since the provider forbids assistant->assistant.
+    # The separator names the arriving call so the model has a forward, in-band signal
+    # that the awaited tool finished.
     def _append_detached_arrival(self, result: ToolResult) -> None:
-        """Append the synthetic ``DetachedArrived`` tool pair for ``result``.
-
-        A user-role separator precedes the synthetic ``AssistantMessage`` when
-        the history tail is itself an assistant turn, since the provider
-        forbids assistant->assistant. The separator names the arriving call so
-        the model has a forward, in-band signal that the awaited tool finished.
-        """
+        """Append the synthetic ``DetachedArrived`` tool pair for ``result``."""
         messages = self.context().messages
         if messages and isinstance(messages[-1], AssistantMessage):
             self._append_or_coalesce_user(
@@ -1864,6 +1591,39 @@ class AgentRuntime:
             ),
         )
         self.append_history(dataclasses.replace(result, call_id=arrival_id))
+
+    def _apply_pending_switch(self, pending: ModelSwitch) -> None:
+        """Apply a queued model switch without stopping dispatch on failure."""
+        try:
+            pending.apply()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- surface swap errors without halting the engine
+            log_exception_or_warning(
+                logger,
+                f"model swap rejected ({pending.label})",
+                exc,
+            )
+            self.publish(
+                ModelSwitchRejected(
+                    exception=exc,
+                    label=pending.label,
+                ),
+            )
+        else:
+            self.publish(pending)
+
+    def _context_validation_error(self) -> Exception | None:
+        """Return an unrepaired context error, if the model-call gate finds one."""
+        try:
+            self._assert_alternation_invariant()
+        except (
+            InvalidContextError,
+            InvalidPayloadError,
+            InvalidSpliceError,
+        ) as exc:
+            return exc
+        return None
 
     async def run_forever(self) -> None:
         """Drain inbox, dispatch, repeat. The entire engine."""
@@ -2091,7 +1851,8 @@ class AgentRuntime:
                                 self.cohort.discard(cid)
                             else:
                                 logger.debug(
-                                    "runtime detach missed tool: call_id=%s", cid
+                                    "runtime detach missed tool: call_id=%s",
+                                    cid,
                                 )
                                 self.cohort.discard(cid)
 
@@ -2203,7 +1964,7 @@ class AgentRuntime:
                         case UserQueuedMessage() | AgentSendQueuedMessage():
                             if awaiting_user:
                                 committed = self._append_or_coalesce_user(
-                                    _message_from_queued(item)
+                                    _message_from_queued(item),
                                 )
                                 self.publish(committed)
                                 awaiting_user = False
@@ -2239,7 +2000,8 @@ class AgentRuntime:
                             if self.before_tool_spawn is not None:
                                 before_tool_spawn = self.before_tool_spawn(msg)
                             if before_tool_spawn is not None and not isinstance(
-                                before_tool_spawn, UserMessage
+                                before_tool_spawn,
+                                UserMessage,
                             ):
                                 self.inbox.push_front(
                                     before_tool_spawn,
@@ -2251,7 +2013,7 @@ class AgentRuntime:
                             if isinstance(before_tool_spawn, UserMessage):
                                 self._relegate_tool_calls_to_background(msg)
                                 committed = self._append_or_coalesce_user(
-                                    before_tool_spawn
+                                    before_tool_spawn,
                                 )
                                 self.publish(committed)
                             elif self._mid_stream_queue:
@@ -2287,7 +2049,8 @@ class AgentRuntime:
                                     names = "+".join(tc.name for tc in group)
                                     tool_task = asyncio.create_task(
                                         self._run_tool_group_and_post(
-                                            group, parent_id=msg.id
+                                            group,
+                                            parent_id=msg.id,
                                         ),
                                     )
                                     tool_task.add_done_callback(
@@ -2380,31 +2143,7 @@ class AgentRuntime:
                 ):
                     pending = self._pending_switch
                     self._pending_switch = None
-                    # ``apply`` runs slash-handler-supplied code
-                    # (``Agent.swap_model``), the only synchronous user-facing
-                    # raiser in the per-iteration gates. Isolate so a
-                    # rejected swap (e.g. new model's window < current
-                    # budget) doesn't skip the remaining gates -- the
-                    # model-call gate must still fire on this iteration
-                    # or the next drain blocks with no live state to wake
-                    # it. ``publish`` only on success: observers treat
-                    # ``ModelSwitch`` as "the swap landed."
-                    try:
-                        pending.apply()
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:  # noqa: BLE001 -- surface swap errors without halting the engine
-                        log_exception_or_warning(
-                            logger, f"model swap rejected ({pending.label})", exc
-                        )
-                        self.publish(
-                            ModelSwitchRejected(
-                                exception=exc,
-                                label=pending.label,
-                            ),
-                        )
-                    else:
-                        self.publish(pending)
+                    self._apply_pending_switch(pending)
 
                 if not self.cohort and self._cohort_seen:
                     logger.debug(
@@ -2468,13 +2207,8 @@ class AgentRuntime:
                     # ``UserMessage`` still at history.tail, treating the
                     # cancellation as a retry rather than waiting for the
                     # user's next input.
-                    try:
-                        self._assert_alternation_invariant()
-                    except (
-                        InvalidContextError,
-                        InvalidPayloadError,
-                        InvalidSpliceError,
-                    ) as exc:
+                    exc = self._context_validation_error()
+                    if exc is not None:
                         # The gate cannot fire against an invalid context that
                         # even rescue could not repair (rescue's own
                         # ``append_splice`` raises ``InvalidPayloadError`` /
@@ -2489,7 +2223,9 @@ class AgentRuntime:
                         # spawn below: firing the provider on the unrepaired
                         # context is the very failure this guard prevents.
                         log_exception_or_warning(
-                            logger, "model-call gate context unrepairable", exc
+                            logger,
+                            "model-call gate context unrepairable",
+                            exc,
                         )
                         # Arm ``AWAIT_RECOVERY`` BEFORE publishing: an observer
                         # that reacts to ``ModelResponseError`` by pushing a
@@ -2570,7 +2306,8 @@ class AgentRuntime:
             waiter = asyncio.ensure_future(done.wait())
             try:
                 _ = await asyncio.wait(
-                    (waiter, task), return_when=asyncio.FIRST_COMPLETED
+                    (waiter, task),
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
             finally:
                 waiter.cancel()
@@ -2612,36 +2349,23 @@ class AgentRuntime:
             return False
         return isinstance(messages[-1], (UserMessage, AgentSendMessage, ToolResult))
 
+    # The model-call gate's last guard before firing the provider:
+    #
+    # 1. Repair ReferrableTapeEvent-level orphans
+    # (:meth:`_repair_history_record_orphans`): pair unmatched ``tool_use`` ids with
+    # synthetic ``[interrupted]`` ``ToolResult`` records; suppress orphan ``ToolResult``
+    # from a ``ReferrableTapeEvent`` origin. 2. If validation still fails -- typically a
+    # legacy session reconstructed via :meth:`ContextSplice.replay` with invalid
+    # payloads predating the construct-time invariant -- rescue: append a single barrier
+    # override that suppresses every visible tape ref and re-injects a fully sanitized
+    # payload. Structural attribution is lost for the rescued section but the session
+    # stays live.
+    #
+    # Forward producers can no longer emit overrides with invalid payloads (the
+    # validator in :meth:`ContextSplice.__post_init__` rejects them at construct), so
+    # phase 1 of the prior implementation has been deleted.
     def _assert_alternation_invariant(self) -> None:
-        """Repair HR-level orphans, validate; rescue if still broken.
-
-        The model-call gate's last guard before firing the provider:
-
-        1. Repair ReferrableTapeEvent-level orphans
-           (:meth:`_repair_history_record_orphans`): pair unmatched
-           ``tool_use`` ids with synthetic ``[interrupted]``
-           ``ToolResult`` records; suppress orphan ``ToolResult`` from
-           a ``ReferrableTapeEvent`` origin.
-        2. If validation still fails -- typically a legacy session
-           reconstructed via :meth:`ContextSplice.replay` with
-           invalid payloads predating the construct-time invariant --
-           rescue: append a single barrier override that suppresses
-           every visible tape ref and re-injects a fully sanitized
-           payload. Structural attribution is lost for the rescued
-           section but the session stays live.
-
-        Forward producers can no longer emit overrides with invalid
-        payloads (the validator in
-        :meth:`ContextSplice.__post_init__` rejects them at
-        construct), so phase 1 of the prior implementation has been
-        deleted.
-
-        Raises:
-          InvalidContextError: When even the rescue path can't produce
-              a wire-format-valid context (should not happen in
-              practice; rescue's sanitizer is total).
-
-        """
+        """Repair HR-level orphans, validate; rescue if still broken."""
         self._repair_history_record_orphans()
         try:
             validate_context(self.context().messages)
@@ -2655,22 +2379,18 @@ class AgentRuntime:
         self._rescue_context()
         validate_context(self.context().messages)
 
+    # Last-resort repair, primarily for legacy sessions whose
+    # :meth:`ContextSplice.replay` reconstructions carry payloads the construct-time
+    # invariant would reject. Suppresses every currently-visible tape ref and re-injects
+    # the result of :func:`_sanitize_for_send` over the current resolved messages.
+    # Structural attribution is lost for the rescued section but the resolved view is
+    # guaranteed wire-format-valid by construction.
+    #
+    # ``paired_externally`` is computed from the sanitized payload via
+    # :func:`unpaired_call_ids` -- declaring only those call ids whose pair is genuinely
+    # missing locally keeps the declaration honest against the strict validator.
     def _rescue_context(self) -> None:
-        """Append a barrier override carrying a fully sanitized payload.
-
-        Last-resort repair, primarily for legacy sessions whose
-        :meth:`ContextSplice.replay` reconstructions carry payloads
-        the construct-time invariant would reject. Suppresses every
-        currently-visible tape ref and re-injects the result of
-        :func:`_sanitize_for_send` over the current resolved messages.
-        Structural attribution is lost for the rescued section but the
-        resolved view is guaranteed wire-format-valid by construction.
-
-        ``paired_externally`` is computed from the sanitized payload
-        via :func:`unpaired_call_ids` -- declaring only those call ids
-        whose pair is genuinely missing locally keeps the declaration
-        honest against the strict validator.
-        """
+        """Append a barrier override carrying a fully sanitized payload."""
         resolved = self.context()
         sanitized = _sanitize_for_send(resolved.messages)
         if not self.tape:
@@ -2689,23 +2409,19 @@ class AgentRuntime:
             discards_content=True,
         )
 
+    # For each ``AssistantMessage`` with unpaired ``tool_calls`` from a
+    # ``ReferrableTapeEvent`` origin, append an override injecting synth
+    # ``[interrupted]`` ``ToolResult`` records in its slot suffix. For each orphan
+    # ``ToolResult`` from a ``ReferrableTapeEvent`` origin, append a suppression
+    # override.
+    #
+    # Overrides from forward producers carry ``paired_externally`` declarations covering
+    # their own payload pairing, so anything the resolver flags as orphan after this
+    # method runs originates either in a legacy ``replay()`` payload (handled by rescue)
+    # or in a producer bug (which the construct-time validator should have caught).
+    # Idempotent: a second call on a repaired context is a no-op.
     def _repair_history_record_orphans(self) -> None:
-        """Pair / drop ReferrableTapeEvent-origin orphans in the resolved context.
-
-        For each ``AssistantMessage`` with unpaired ``tool_calls`` from
-        a ``ReferrableTapeEvent`` origin, append an override injecting synth
-        ``[interrupted]`` ``ToolResult`` records in its slot suffix.
-        For each orphan ``ToolResult`` from a ``ReferrableTapeEvent`` origin,
-        append a suppression override.
-
-        Overrides from forward producers carry ``paired_externally``
-        declarations covering their own payload pairing, so anything
-        the resolver flags as orphan after this method runs originates
-        either in a legacy ``replay()`` payload (handled by rescue) or
-        in a producer bug (which the construct-time validator should
-        have caught). Idempotent: a second call on a repaired context
-        is a no-op.
-        """
+        """Pair / drop ReferrableTapeEvent-origin orphans in the resolved context."""
         resolved = self.context()
         messages = resolved.messages
         origins = resolved.origins
@@ -2717,17 +2433,12 @@ class AgentRuntime:
         seen_results: set[str] = set()
         hr_orphan_refs: list[TapeRef] = []
 
-        def _flush_unmatched() -> None:
-            if pending:
-                unmatched_per_am.append((am_repair_anchor, list(pending)))
-            pending.clear()
-
         for idx, entry in enumerate(messages):
             origin = origins[idx]
             origin_record = self._tape_by_ref.get(origin)
             origin_is_hr = isinstance(origin_record, ReferrableTapeEvent)
             if isinstance(entry, AssistantMessage):
-                _flush_unmatched()
+                _flush_unmatched(pending, unmatched_per_am, am_repair_anchor)
                 am_repair_anchor = origin if origin_is_hr else None
                 pending.update(dict.fromkeys(tc.id for tc in entry.tool_calls))
             elif isinstance(entry, ToolResult):
@@ -2739,9 +2450,9 @@ class AgentRuntime:
                 del pending[entry.call_id]
                 seen_results.add(entry.call_id)
             else:
-                _flush_unmatched()
+                _flush_unmatched(pending, unmatched_per_am, am_repair_anchor)
                 am_repair_anchor = None
-        _flush_unmatched()
+        _flush_unmatched(pending, unmatched_per_am, am_repair_anchor)
 
         for anchor, missing_ids in unmatched_per_am:
             if anchor is None:
@@ -2796,7 +2507,7 @@ class AgentRuntime:
             message = _message_from_queued(item)
             if group and type(message) is not type(group[-1]):
                 committed.append(
-                    self._append_or_coalesce_user(_coalesce_user_side(group))
+                    self._append_or_coalesce_user(_coalesce_user_side(group)),
                 )
                 group = []
             group.append(message)
@@ -2804,36 +2515,31 @@ class AgentRuntime:
             committed.append(self._append_or_coalesce_user(_coalesce_user_side(group)))
         return committed
 
+    # Anthropic-style chat APIs require user/assistant turn alternation. Several runtime
+    # paths produce a ``UserMessage`` while the previous history entry is already a
+    # ``UserMessage`` (no assistant turn between -- the model was cancelled, errored, or
+    # simply never ran). Appending naively would generate back-to-back user turns and
+    # the next model call would 400.
+    #
+    # Sites that need this:
+    #
+    # - Idle/mid-cohort ``UserMessage`` branch (two rapid Enters land in one drain
+    # batch; the gate only sets ``model_call`` AFTER the per-item loop). - Halt-then-
+    # fresh-user (cancellation drops any partial assistant content; only the user's
+    # prior message is in history). - ``_drain_mid_stream_queue`` when invoked from a
+    # halt/compact/ error path (no assistant turn between the prior user input and the
+    # buffered mid-stream content). - ``UserQueuedMessage`` idle drain (Tab-staged
+    # content lands as a coalesced ``UserMessage``; history tail can already be a
+    # ``UserMessage`` from a same-batch race).
+    #
+    # Coalesce semantics: text joins with ``\n\n``; attachments concatenate in arrival
+    # order. The tail entry's ``id`` is preserved so downstream consumers keyed on ids
+    # remain stable.
     def _append_or_coalesce_user(
-        self, item: UserMessage | AgentSendMessage
+        self,
+        item: UserMessage | AgentSendMessage,
     ) -> UserMessage | AgentSendMessage:
-        r"""Append ``item`` to history; return the committed entry.
-
-        Anthropic-style chat APIs require user/assistant turn alternation.
-        Several runtime paths produce a ``UserMessage`` while the previous
-        history entry is already a ``UserMessage`` (no assistant turn
-        between -- the model was cancelled, errored, or simply never
-        ran). Appending naively would generate back-to-back user turns
-        and the next model call would 400.
-
-        Sites that need this:
-
-        - Idle/mid-cohort ``UserMessage`` branch (two rapid Enters land
-          in one drain batch; the gate only sets ``model_call`` AFTER
-          the per-item loop).
-        - Halt-then-fresh-user (cancellation drops any partial assistant
-          content; only the user's prior message is in history).
-        - ``_drain_mid_stream_queue`` when invoked from a halt/compact/
-          error path (no assistant turn between the prior user input
-          and the buffered mid-stream content).
-        - ``UserQueuedMessage`` idle drain (Tab-staged content lands as
-          a coalesced ``UserMessage``; history tail can already be a
-          ``UserMessage`` from a same-batch race).
-
-        Coalesce semantics: text joins with ``\n\n``; attachments
-        concatenate in arrival order. The tail entry's ``id`` is
-        preserved so downstream consumers keyed on ids remain stable.
-        """
+        r"""Append ``item`` to history; return the committed entry."""
         resolved = self.context()
         messages = resolved.messages
         if not messages or wire_role(messages[-1]) != wire_role(item):
@@ -2869,7 +2575,7 @@ class AgentRuntime:
         tail_origin = resolved.origins[-1]
         # When the visible tail is itself a coalesce splice's payload,
         # the new splice must absorb both that splice AND the original
-        # ref(s) the splice was masking — otherwise killing the splice
+        # ref(s) the splice was masking -- otherwise killing the splice
         # under undelete semantics would resurrect the originally-
         # masked content (causing both the merged tail AND the
         # originals to render side-by-side).
@@ -2904,7 +2610,9 @@ class AgentRuntime:
             # one message that coalesced onto it.
             prior_head = prior_record.payload[:-1]
         own_range = MaskRange(
-            session_id=sid, lo=tail_origin.ordinal, hi=tail_origin.ordinal
+            session_id=sid,
+            lo=tail_origin.ordinal,
+            hi=tail_origin.ordinal,
         )
         mask = merge_mask_ranges((*prior_ranges, own_range))
         # Anchor: the same-session tape ref immediately before the earliest
@@ -2941,6 +2649,15 @@ class AgentRuntime:
         )
         return combined
 
+    # Always appends a ``ToolResult`` placeholder so history alternation stays well-
+    # formed; always routes the task into ``self.detached`` so any late-arriving content
+    # splices into the placeholder via the ``DetachedResult`` path (the cohort gate no
+    # longer matches once cid leaves the cohort).
+    #
+    # ``mode="detach"`` lets the task complete naturally (``[detached]`` placeholder);
+    # ``mode="kill"`` cancels the task (``[cancelled]``, ``is_error=True``). The closed
+    # mode set is deliberate: any soft path that wants tools to keep running without
+    # leaving the cohort (Halt) must NOT call this.
     def _stop_tool(
         self,
         cid: str,
@@ -2948,20 +2665,7 @@ class AgentRuntime:
         *,
         mode: Literal["detach", "kill"],
     ) -> None:
-        """Transition one cohort tool out of the cohort, pairing its tool_use.
-
-        Always appends a ``ToolResult`` placeholder so history alternation
-        stays well-formed; always routes the task into ``self.detached``
-        so any late-arriving content splices into the placeholder via
-        the ``DetachedResult`` path (the cohort gate no longer matches
-        once cid leaves the cohort).
-
-        ``mode="detach"`` lets the task complete naturally
-        (``[detached]`` placeholder); ``mode="kill"`` cancels the task
-        (``[cancelled]``, ``is_error=True``). The closed mode set is
-        deliberate: any soft path that wants tools to keep running
-        without leaving the cohort (Halt) must NOT call this.
-        """
+        """Transition one cohort tool out of the cohort, pairing its tool_use."""
         placeholder, is_error, kind = (
             (CANCELLED_PLACEHOLDER, True, ToolResultKind.CANCELLED)
             if mode == "kill"
@@ -2985,15 +2689,12 @@ class AgentRuntime:
         if mode == "kill":
             task.cancel()
 
+    # A splice ref is a valid anchor: ``_index_record`` registers the tool_call ids
+    # inside a preserved payload against the splice's own ref so grouping survives a
+    # compaction barrier. Reading only ``ReferrableTapeEvent`` discarded exactly those,
+    # so every id the compactor took care to preserve came back orphaned.
     def _parent_id_for_call(self, call_id: str) -> int:
-        """Return the originating ``AssistantMessage.id`` for ``call_id``, or -1.
-
-        A splice ref is a valid anchor: ``_index_record`` registers the
-        tool_call ids inside a preserved payload against the splice's own ref
-        so grouping survives a compaction barrier. Reading only
-        ``ReferrableTapeEvent`` discarded exactly those, so every id the
-        compactor took care to preserve came back orphaned.
-        """
+        """Return the originating ``AssistantMessage.id`` for ``call_id``, or -1."""
         parent_ref = self._parent_assistant_refs.get(call_id)
         if parent_ref is None:
             return -1
@@ -3012,32 +2713,28 @@ class AgentRuntime:
             return -1
         return event.id
 
+    # The single choke point for the "preempt the cohort" semantic (Clear, Compact, mid-
+    # cohort UserMessage, Detach-all, Kill-all). Halt deliberately does NOT preempt the
+    # cohort; do not call from ``Halt`` -- results land via the normal cohort gate after
+    # Halt.
     def _stop_all_tools(self, *, mode: Literal["detach", "kill"]) -> None:
-        """Run :meth:`_stop_tool` for every cohort tool; reset cohort state.
-
-        The single choke point for the "preempt the cohort" semantic
-        (Clear, Compact, mid-cohort UserMessage, Detach-all, Kill-all).
-        Halt deliberately does NOT preempt the cohort; do not call from
-        ``Halt`` -- results land via the normal cohort gate after Halt.
-        """
+        """Run :meth:`_stop_tool` for every cohort tool; reset cohort state."""
         for cid, task in list(self.running_tools.items()):
             self._stop_tool(cid, task, mode=mode)
         self.running_tools.clear()
         self.cohort.clear()
         self._cohort_seen = False
 
+    # The shared preempt prologue of the hard-reset control events (``Halt`` /
+    # ``Clear``): cancel the streaming ``model_call`` and bump
+    # ``_model_call_generation`` so its late ``ModelResponseComplete`` is ignored as
+    # stale; cancel an in-flight ``compact_task`` and bump ``_compact_generation`` so
+    # ``_compact_and_post`` refuses to push a terminal event, publishing
+    # ``CompactFailed`` in its place. Idempotent when neither is live. Does NOT touch
+    # the cohort -- ``Halt`` preserves running tools, and ``Clear`` calls
+    # ``_stop_all_tools`` separately.
     def _cancel_model_and_compaction(self) -> None:
-        """Cancel any in-flight model call and compaction, bumping generations.
-
-        The shared preempt prologue of the hard-reset control events
-        (``Halt`` / ``Clear``): cancel the streaming ``model_call`` and bump
-        ``_model_call_generation`` so its late ``ModelResponseComplete`` is
-        ignored as stale; cancel an in-flight ``compact_task`` and bump
-        ``_compact_generation`` so ``_compact_and_post`` refuses to push a
-        terminal event, publishing ``CompactFailed`` in its place. Idempotent
-        when neither is live. Does NOT touch the cohort -- ``Halt`` preserves
-        running tools, and ``Clear`` calls ``_stop_all_tools`` separately.
-        """
+        """Cancel any in-flight model call and compaction, bumping generations."""
         if self.model_call:
             self.model_call.cancel()
             self.model_call = None
@@ -3055,21 +2752,18 @@ class AgentRuntime:
                 )
             self.compact_task = None
 
+    # The ``DetachedArrived`` name and the ``:detached`` arrival-id scheme belong to the
+    # runtime's synthetic forward-delivery turns. A model can emit its own
+    # ``DetachedArrived`` call carrying any id, including one equal to a real arrival id
+    # -- two ``AssistantMessage``s would then share a tool_call id, breaking wire
+    # validity and stranding one pairing (``Issue#297``). Rewriting each forged call's
+    # id into the ``DETACHED_ARRIVED_MIMIC_PREFIX`` namespace (keyed off a monotonic
+    # counter) restores global id uniqueness at the single entry boundary, so no
+    # downstream consumer -- history, cohort, ``_parent_assistant_refs``, the mimic
+    # pairing -- can be confused. Returns ``msg`` unchanged when it carries no forged
+    # ``DetachedArrived`` call (the common case).
     def _sanitize_forged_arrivals(self, msg: AssistantMessage) -> AssistantMessage:
-        """Rewrite model-forged ``DetachedArrived`` call ids into a safe namespace.
-
-        The ``DetachedArrived`` name and the ``:detached`` arrival-id scheme
-        belong to the runtime's synthetic forward-delivery turns. A model can
-        emit its own ``DetachedArrived`` call carrying any id, including one
-        equal to a real arrival id -- two ``AssistantMessage``s would then share
-        a tool_call id, breaking wire validity and stranding one pairing
-        (``Issue#297``). Rewriting each forged call's id into the
-        ``DETACHED_ARRIVED_MIMIC_PREFIX`` namespace (keyed off a monotonic
-        counter) restores global id uniqueness at the single entry boundary, so
-        no downstream consumer -- history, cohort, ``_parent_assistant_refs``,
-        the mimic pairing -- can be confused. Returns ``msg`` unchanged when it
-        carries no forged ``DetachedArrived`` call (the common case).
-        """
+        """Rewrite model-forged ``DetachedArrived`` call ids into a safe namespace."""
         if not any(tc.name == DETACHED_ARRIVED_TOOL for tc in msg.tool_calls):
             return msg
         # A model can also emit a non-forged tool call whose id already lies in
@@ -3096,25 +2790,21 @@ class AgentRuntime:
             rewritten.append(dataclasses.replace(tc, id=safe_id))
         return dataclasses.replace(msg, tool_calls=tuple(rewritten))
 
+    # The shared "the model produced tool calls but a user redirect cuts in line" path:
+    # append a ``[detached]`` placeholder answering each ``tool_use`` (so history stays
+    # wire-valid) and spawn the tool into ``self.detached``. Its real result later
+    # arrives forward via ``DetachedResult`` rather than gating the next model call.
+    # Used by both ``ModelResponseComplete`` redirect branches -- an external
+    # ``before_tool_spawn`` ``UserMessage`` and a buffered mid-stream user turn -- which
+    # differ only in how they commit the user content, not in how they background the
+    # tools.
+    #
+    # Grouping is the same ``_partition_cohort`` the foreground path uses:
+    # ``serialize_key`` says two calls contend for one resource, and that is a fact
+    # about the resource, not about which scheduler runs them. A task per call let two
+    # Edits to one file run concurrently the moment a user message cut in.
     def _relegate_tool_calls_to_background(self, msg: AssistantMessage) -> None:
-        """Stub every tool call in ``msg`` and spawn it as a detached task.
-
-        The shared "the model produced tool calls but a user redirect cuts in
-        line" path: append a ``[detached]`` placeholder answering each
-        ``tool_use`` (so history stays wire-valid) and spawn the tool into
-        ``self.detached``. Its real result later arrives forward via
-        ``DetachedResult`` rather than gating the next model call. Used by
-        both ``ModelResponseComplete`` redirect branches -- an external
-        ``before_tool_spawn`` ``UserMessage`` and a buffered mid-stream user
-        turn -- which differ only in how they commit the user content, not in
-        how they background the tools.
-
-        Grouping is the same ``_partition_cohort`` the foreground path uses:
-        ``serialize_key`` says two calls contend for one resource, and that is
-        a fact about the resource, not about which scheduler runs them. A task
-        per call let two Edits to one file run concurrently the moment a user
-        message cut in.
-        """
+        """Stub every tool call in ``msg`` and spawn it as a detached task."""
         for tc in msg.tool_calls:
             self.append_history(
                 ToolResult(
@@ -3140,47 +2830,34 @@ class AgentRuntime:
             for tc in group:
                 self.detached[tc.id] = detached_task
 
+    # Multiple ``UserMessage`` items received while ``model_call`` was in flight
+    # collapse into a single entry with ``\n\n``-joined text and attachments
+    # concatenated in arrival order -- mirroring :class:`UserQueuedMessage` coalescing
+    # semantics.
     def _drain_mid_stream_queue(self) -> UserMessage | AgentSendMessage | None:
-        r"""Append a coalesced ``UserMessage`` for any buffered mid-stream input.
-
-        Multiple ``UserMessage`` items received while ``model_call`` was in
-        flight collapse into a single entry with ``\n\n``-joined text
-        and attachments concatenated in arrival order -- mirroring
-        :class:`UserQueuedMessage` coalescing semantics.
-
-        Returns:
-          appended: The coalesced ``UserMessage`` (so callers can publish
-              it) when the buffer was non-empty; ``None`` otherwise.
-              The tape is mutated via ``_append_or_coalesce_user``.
-
-        """
+        r"""Append a coalesced ``UserMessage`` for any buffered mid-stream input."""
         if not self._mid_stream_queue:
             return None
         coalesced = _coalesce_user_side(self._mid_stream_queue)
         self._mid_stream_queue.clear()
         return self._append_or_coalesce_user(coalesced)
 
+    # Shared by the three verbs that mean "stop the background work too" (``Kill`` all,
+    # ``Clear``, ``Quit``). Once ``detached`` is empty, a cancelled task's completion
+    # matches neither cohort nor detached membership in ``_run_tool_and_post`` and is
+    # dropped at the inbox default -- which is what keeps a late result out of a wiped
+    # session.
     def _cancel_detached(self) -> None:
-        """Cancel and forget every detached task.
-
-        Shared by the three verbs that mean "stop the background work too"
-        (``Kill`` all, ``Clear``, ``Quit``). Once ``detached`` is empty, a
-        cancelled task's completion matches neither cohort nor detached
-        membership in ``_run_tool_and_post`` and is dropped at the inbox
-        default -- which is what keeps a late result out of a wiped session.
-        """
+        """Cancel and forget every detached task."""
         for task in self.detached.values():
             _ = task.cancel()
         self.detached.clear()
 
+    # Completed tasks already posted their result as DetachedResult from
+    # ``_run_tool_and_post`` and removed themselves from ``self.detached``. This handles
+    # cancelled tasks that never posted.
     def _collect_detached(self) -> None:
-        """Clean up detached tasks that completed or were cancelled.
-
-        Completed tasks already posted their result as DetachedResult
-        from ``_run_tool_and_post`` and removed themselves from
-        ``self.detached``. This handles cancelled tasks that never
-        posted.
-        """
+        """Clean up detached tasks that completed or were cancelled."""
         for cid in [c for c, t in self.detached.items() if t.done()]:
             del self.detached[cid]
 
@@ -3215,24 +2892,13 @@ class AgentRuntime:
             log_exception_or_warning(logger, "model call failed", exc)
             self.inbox.push_back(ModelResponseError(exc))
 
+    # Calls sharing a non-``None`` ``serialize_key`` (e.g. same-file Read/Edit/Write)
+    # collapse into one group run sequentially in submission order; every other call
+    # becomes a singleton group run in parallel. Iterating ``calls`` once and appending
+    # keeps each group in original order, which is what "sequential in submission order"
+    # requires.
     def _partition_cohort(self, calls: Sequence[ToolCall]) -> list[list[ToolCall]]:
-        """Split a cohort into serialized groups, preserving submission order.
-
-        Calls sharing a non-``None`` ``serialize_key`` (e.g. same-file
-        Read/Edit/Write) collapse into one group run sequentially in
-        submission order; every other call becomes a singleton group run
-        in parallel. Iterating ``calls`` once and appending keeps each
-        group in original order, which is what "sequential in submission
-        order" requires.
-
-        Args:
-          calls: The cohort's tool calls in submission order.
-
-        Returns:
-          groups: List of call groups; same-key calls coalesced, others
-              singleton. Group order follows first appearance.
-
-        """
+        """Split a cohort into serialized groups, preserving submission order."""
         groups: list[list[ToolCall]] = []
         by_key: dict[str, list[ToolCall]] = {}
         for call in calls:
@@ -3248,27 +2914,19 @@ class AgentRuntime:
             group.append(call)
         return groups
 
+    # Each call's ``ToolResult`` is posted as it completes (via ``_run_tool_and_post``),
+    # so the cohort gate and tool_use/ tool_result pairing still see one result per
+    # ``call_id``. A single coroutine awaiting each call in turn makes ordering
+    # deterministic -- no reliance on lock fairness. Cancellation (detach/kill)
+    # interrupts the in-flight call and skips the rest; their stubs are posted by the
+    # detach/preempt machinery.
     async def _run_tool_group_and_post(
         self,
         group: Sequence[ToolCall],
         *,
         parent_id: int = -1,
     ) -> None:
-        """Run a serialized group of calls one at a time, in order.
-
-        Each call's ``ToolResult`` is posted as it completes (via
-        ``_run_tool_and_post``), so the cohort gate and tool_use/
-        tool_result pairing still see one result per ``call_id``. A
-        single coroutine awaiting each call in turn makes ordering
-        deterministic -- no reliance on lock fairness. Cancellation
-        (detach/kill) interrupts the in-flight call and skips the rest;
-        their stubs are posted by the detach/preempt machinery.
-
-        Args:
-          group: Calls to run sequentially in submission order.
-          parent_id: Originating assistant message id.
-
-        """
+        """Run a serialized group of calls one at a time, in order."""
         for index, call in enumerate(group):
             if await self._run_tool_and_post(call, parent_id=parent_id):
                 continue
@@ -3295,32 +2953,18 @@ class AgentRuntime:
             ),
         )
 
+    # Tool authors return a fully-formed ``ToolResult``; the runtime stamps ``call_id``
+    # (and ``parent_id`` when unset) from the originating assistant message. Exceptions
+    # auto-convert to ``is_error=True``. If the tool was detached mid-flight, the
+    # runtime emits ``DetachedResult`` instead of ``ToolResult`` so the late completion
+    # arrives as context rather than being silently dropped by the cohort gate.
     async def _run_tool_and_post(
         self,
         call: ToolCall,
         *,
         parent_id: int = -1,
     ) -> bool:
-        """Run one tool invocation, post the ``ToolResult`` to the inbox.
-
-        Tool authors return a fully-formed ``ToolResult``; the runtime
-        stamps ``call_id`` (and ``parent_id`` when unset) from the
-        originating assistant message. Exceptions auto-convert to
-        ``is_error=True``. If the tool was detached mid-flight, the
-        runtime emits ``DetachedResult`` instead of ``ToolResult`` so
-        the late completion arrives as context rather than being
-        silently dropped by the cohort gate.
-
-        Args:
-          call: Tool invocation to run.
-          parent_id: Originating assistant message id.
-
-        Returns:
-          completed: False when the call was cancelled. The cancellation is
-              absorbed here to keep the tool_use paired, so a caller running a
-              serialized group has no other way to learn the group should stop.
-
-        """
+        """Run one tool invocation, post the ``ToolResult`` to the inbox."""
         if call.name == DETACHED_ARRIVED_TOOL:
             # ``DetachedArrived`` is not a real tool: the runtime synthesizes
             # turns with this name to deliver completed detached results. A
@@ -3450,20 +3094,16 @@ class AgentRuntime:
             self.inbox.push_back(result)
         return completed
 
+    # The compactor returns one :class:`ContextSplice` whose ref was minted via the
+    # ``mint_ref`` factory the runtime provided. The runtime is the sole appender: it
+    # stores the returned override on the tape and publishes ``CompactComplete``.
+    #
+    # Captures ``_compact_generation`` at spawn time and refuses to push terminal events
+    # when the generation has moved past it -- a Halt/Clear bumping the generation and
+    # publishing CompactFailed must not be followed by a stale CompactComplete from a
+    # compactor task whose synchronous tail beat the cancellation.
     async def _compact_and_post(self, args: str) -> None:
-        """Run compaction; the compactor's overrides land in the tape.
-
-        The compactor returns one :class:`ContextSplice` whose ref
-        was minted via the ``mint_ref`` factory the runtime provided.
-        The runtime is the sole appender: it stores the returned
-        override on the tape and publishes ``CompactComplete``.
-
-        Captures ``_compact_generation`` at spawn time and refuses to
-        push terminal events when the generation has moved past it --
-        a Halt/Clear bumping the generation and publishing CompactFailed
-        must not be followed by a stale CompactComplete from a
-        compactor task whose synchronous tail beat the cancellation.
-        """
+        """Run compaction; the compactor's overrides land in the tape."""
         generation = self._compact_generation
         if self.compactor is None:
             if generation == self._compact_generation:
@@ -3495,3 +3135,208 @@ class AgentRuntime:
         # check does not apply to it.
         self.adopt_record(override, discards_content=True)
         self.inbox.push_back(CompactComplete.from_override(override))
+
+
+# Tape refs are partitioned by ``session_id`` before widening; each emitted
+# :class:`MaskRange` is single-session by construction.
+def _widen_mask_ranges(
+    mask: tuple[MaskRange, ...],
+    tape: Sequence[TapeRecord],
+) -> tuple[MaskRange, ...]:
+    """Return ``mask`` widened over ``tape`` without filling existing gaps."""
+    if not tape:
+        return mask
+    ordinals_by_session: dict[str, list[int]] = {}
+    for record in tape:
+        ordinals_by_session.setdefault(record.ref.session_id, []).append(
+            record.ref.ordinal,
+        )
+    preserved_gaps_by_session = _preserved_mask_gaps_by_session(mask)
+    widened: list[MaskRange] = []
+    for sid, ordinals in ordinals_by_session.items():
+        ordinals.sort()
+        preserved_gaps = preserved_gaps_by_session.get(sid, ())
+        start: int | None = None
+        previous: int | None = None
+        for ordinal in ordinals:
+            if any(lo < ordinal < hi for lo, hi in preserved_gaps):
+                if start is not None and previous is not None:
+                    widened.append(MaskRange(session_id=sid, lo=start, hi=previous))
+                    start = None
+                continue
+            if start is None:
+                start = ordinal
+            previous = ordinal
+        if start is not None and previous is not None:
+            widened.append(MaskRange(session_id=sid, lo=start, hi=previous))
+    return tuple(widened)
+
+
+def _preserved_mask_gaps_by_session(
+    mask: tuple[MaskRange, ...],
+) -> dict[str, tuple[tuple[int, int], ...]]:
+    """Return ordinal gaps between sorted mask ranges, per session_id."""
+    per_session: dict[str, list[MaskRange]] = {}
+    for r in mask:
+        per_session.setdefault(r.session_id, []).append(r)
+    return {
+        sid: tuple(
+            (left.hi, right.lo)
+            for left, right in pairwise(sorted(ranges, key=lambda r: r.lo))
+            if left.hi + 1 < right.lo
+        )
+        for sid, ranges in per_session.items()
+    }
+
+
+# Containment is checked on text because a merge concatenates: a carried entry survives
+# inside a larger merged body, so equality would reject the legitimate absorber while
+# substring containment accepts it.
+def _entry_text(entry: ModelContextEvent) -> str:
+    """Return the provider-visible text of one context entry."""
+    if isinstance(entry, ToolResult):
+        return entry.content
+    return entry.text
+
+
+# Used by the runtime gate when structural repair can't pair tool_use / tool_result
+# across overrides (e.g. accumulated microcompact debt from a session predating the
+# cache-warm gate fix).
+#
+# A thin wrapper over the canonical :func:`tape.splice_safe_repair`, so the rescue path
+# shares one pair/dedup/synthesize/coalesce policy with the compaction repair and cannot
+# drift from it (the H2/F1 disease). The repair detail lives at that canonical site.
+# Idempotent.
+def _sanitize_for_send(
+    entries: Sequence[ModelContextEvent],
+) -> tuple[ModelContextEvent, ...]:
+    """Return a wire-format-valid version of ``entries`` for the rescue path."""
+    return splice_safe_repair(entries)
+
+
+# ``isdecimal``, not ``isdigit``: the latter admits characters ``int()`` rejects
+# (``"²".isdigit()`` is True), and this runs over persisted ids during ``replay_tape``
+# -- so one such id made a whole session unloadable.
+def _mimic_index_of(cid: str) -> int | None:
+    """Return the ``N`` of a ``DetachedArrived:mimic:N`` id, or ``None``."""
+    if not cid.startswith(DETACHED_ARRIVED_MIMIC_PREFIX):
+        return None
+    suffix = cid.removeprefix(DETACHED_ARRIVED_MIMIC_PREFIX)
+    return int(suffix) if suffix.isdecimal() else None
+
+
+# Covers both sides of the mimic id namespace: an ``AssistantMessage`` contributes its
+# ``tool_calls`` ids, a ``ToolResult`` its ``call_id``. Scanning only one side would
+# under-seed the counter when the tape preserves a lone partner -- e.g.
+# ``_commit_pairing`` splices a mimic ``ToolResult`` whose parent ``AssistantMessage``
+# was compacted away.
+def _mimic_indices(entry: object) -> list[int]:
+    """Return numeric indices of any ``DetachedArrived:mimic:N`` id in ``entry``."""
+    if isinstance(entry, AssistantMessage):
+        ids = [tc.id for tc in entry.tool_calls]
+    elif isinstance(entry, ToolResult):
+        ids = [entry.call_id]
+    else:
+        return []
+    return [n for cid in ids if (n := _mimic_index_of(cid)) is not None]
+
+
+# Scans both ``ReferrableTapeEvent`` events and ``ContextSplice`` payloads, on both
+# sides of the id namespace (see :func:`_mimic_indices`). Masked (dead) splice payloads
+# are scanned too: undelete can resurrect them, so their ids must still reserve
+# namespace. A splice's ``paired_externally`` ids are also scanned:
+# ``ContextSplice.replay`` (legacy on-disk load) bypasses ``_validate_payload``, so a
+# persisted record can declare a mimic id whose local pair is absent from ``payload`` --
+# reading only ``payload`` would then under-seed. Returns ``-1`` when no mimic id is
+# present, so the caller can seed its counter to ``result + 1`` and start at ``0`` on a
+# clean tape.
+def _max_mimic_index(records: Sequence[TapeRecord]) -> int:
+    """Return the largest ``DetachedArrived:mimic:N`` index in ``records``."""
+    found = [-1]
+    for record in records:
+        if isinstance(record, ReferrableTapeEvent):
+            found.extend(_mimic_indices(record.event))
+        else:
+            for entry in record.payload:
+                found.extend(_mimic_indices(entry))
+            found.extend(
+                n
+                for cid in record.paired_externally
+                if (n := _mimic_index_of(cid)) is not None
+            )
+    return max(found)
+
+
+def _type_names(types: Sequence[type[object]]) -> tuple[str, ...]:
+    """Return class names for compact debug logging."""
+    return tuple(t.__name__ for t in types)
+
+
+def _item_names(items: Sequence[object]) -> tuple[str, ...]:
+    """Return event class names for compact debug logging."""
+    return tuple(type(item).__name__ for item in items)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _PendingCommit:
+    """One deferred tape commit, flushed at the next gate (see ``_flush_pending``).
+
+    The single mechanism behind every "hold this, commit it on the next real
+    turn" need -- a mimicked-tool error pairing, a completed detached tool's
+    forward delivery, and ride-along system context all share it. ``kind``
+    selects the placement:
+
+    - ``"pairing"``: ``result`` answers an already-emitted ``tool_use`` whose
+      result was deferred (a mimicked ``DetachedArrived``). Committed adjacent
+      to its parent ``AssistantMessage`` so it pairs in-slot, never stranded.
+    - ``"forward"``: ``result`` is a completed detached tool's real output,
+      delivered as a synthetic ``DetachedArrived`` pair (the original stub
+      stays). A user-role separator precedes it after an assistant tail.
+    - ``"ride_along"``: ``user`` is system-injected context (e.g. a reminder)
+      coalesced onto the user side.
+    """
+
+    kind: Literal["pairing", "forward", "ride_along"]
+    result: ToolResult | None = None
+    user: UserMessage | None = None
+
+
+def _message_from_queued(
+    item: UserQueuedMessage
+    | UserDeferredMessage
+    | AgentSendQueuedMessage
+    | AgentSendDeferredMessage,
+) -> UserMessage | AgentSendMessage:
+    if isinstance(item, (AgentSendQueuedMessage, AgentSendDeferredMessage)):
+        return AgentSendMessage(
+            source=item.source,
+            text=item.text,
+            attachments=item.attachments,
+        )
+    return UserMessage(text=item.text, attachments=item.attachments)
+
+
+# Delegates rather than re-joining text: stamping the run with the first sender's
+# ``source`` recorded every later peer's message as sent by the first, and
+# ``_merge_user`` already demotes a cross-source pair to a ``UserMessage`` carrying each
+# part's ``[from <source>]`` label.
+def _coalesce_user_side(
+    items: Sequence[UserMessage | AgentSendMessage],
+) -> UserMessage | AgentSendMessage:
+    """Merge a user-side run into one entry via the canonical coalescer."""
+    merged = coalesce_roles(items)
+    assert len(merged) == 1
+    entry = merged[0]
+    assert isinstance(entry, (UserMessage, AgentSendMessage))
+    return entry
+
+
+def _flush_unmatched(
+    pending: dict[str, None],
+    unmatched: list[tuple[TapeRef | None, list[str]]],
+    anchor: TapeRef | None,
+) -> None:
+    """Move pending tool ids into the repair list and clear the pending map."""
+    if pending:
+        unmatched.append((anchor, list(pending)))
+    pending.clear()

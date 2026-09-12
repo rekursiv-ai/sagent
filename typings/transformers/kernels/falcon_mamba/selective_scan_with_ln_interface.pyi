@@ -24,7 +24,9 @@ class SelectiveScanFn(torch.autograd.Function):
         ...
     @staticmethod
     def backward(
-        ctx, dout, *args
+        ctx,
+        dout,
+        *args,
     ):  # -> tuple[Any, Any, Any, Any, Any, Any | None, Any | None, Any | None, None, None]:
         ...
 
@@ -86,7 +88,8 @@ class MambaInnerFn(torch.autograd.Function):
     @staticmethod
     @custom_bwd
     def backward(
-        ctx, dout
+        ctx,
+        dout,
     ):  # -> tuple[Tensor, Any, Any | None, Tensor, Tensor, Tensor, Any | None, Any, Any | None, Any | None, Any | None, Any | None, Any | None, Any | None, None, None, None, None, None, None]:
         ...
 

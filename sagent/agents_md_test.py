@@ -23,12 +23,16 @@ def cfg(tmp_path: Path) -> agents_md.AgentsMdConfig:
 
 class TestDiscovery:
     def test_empty_when_no_files(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         assert agents_md._discover(tmp_path, cfg) == []
 
     def test_finds_project_file(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         _ = (tmp_path / "AGENTS.md").write_text("# project rules\nrule 1\n")
         files = agents_md._discover(tmp_path, cfg)
@@ -37,7 +41,9 @@ class TestDiscovery:
         assert "rule 1" in files[0].content
 
     def test_walks_up_interleaves_project_and_local(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         parent = tmp_path / "parent"
         child = parent / "child"
@@ -53,7 +59,9 @@ class TestDiscovery:
         assert order.index("child-p") < order.index("child-l")
 
     def test_finds_dot_sagent_agents_md(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         dot = tmp_path / ".sagent"
         dot.mkdir()
@@ -62,7 +70,9 @@ class TestDiscovery:
         assert any("dotsagentmd" in f.content for f in files)
 
     def test_finds_rules_recursive(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         rules = tmp_path / ".sagent" / "rules"
         (rules / "sub").mkdir(parents=True)
@@ -113,20 +123,24 @@ class TestDiscovery:
 
 class TestFrontmatter:
     def test_strips_frontmatter_block(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         _ = (tmp_path / "AGENTS.md").write_text(
-            "---\npaths: ['**/*.py']\n---\nreal content\n"
+            "---\npaths: ['**/*.py']\n---\nreal content\n",
         )
         files = agents_md._discover(tmp_path, cfg)
         assert "real content" in files[0].content
         assert "---" not in files[0].content
 
     def test_parses_paths_list(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         _ = (tmp_path / "AGENTS.md").write_text(
-            "---\npaths:\n  - '**/*.py'\n  - 'src/**'\n---\nc\n"
+            "---\npaths:\n  - '**/*.py'\n  - 'src/**'\n---\nc\n",
         )
         files = agents_md._discover(tmp_path, cfg)
         # ``src/**`` is preserved verbatim; the recursive-glob suffix is
@@ -134,7 +148,9 @@ class TestFrontmatter:
         assert files[0].globs == ["**/*.py", "src/**"]
 
     def test_paths_star_star_dropped(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         """Bare ``**`` matches everything, so it's equivalent to no constraint."""
         _ = (tmp_path / "AGENTS.md").write_text("---\npaths:\n  - '**'\n---\nc\n")
@@ -142,7 +158,9 @@ class TestFrontmatter:
         assert files[0].globs == []
 
     def test_recursive_glob_preserved(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         """``src/**`` is preserved verbatim (regression: used to collapse to ``src``)."""
         _ = (tmp_path / "AGENTS.md").write_text("---\npaths:\n  - 'src/**'\n---\nc\n")
@@ -152,10 +170,12 @@ class TestFrontmatter:
 
 class TestHtmlComments:
     def test_block_comment_stripped(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         _ = (tmp_path / "AGENTS.md").write_text(
-            "rule 1\n\n<!-- note to self -->\n\nrule 2\n"
+            "rule 1\n\n<!-- note to self -->\n\nrule 2\n",
         )
         files = agents_md._discover(tmp_path, cfg)
         assert "note to self" not in files[0].content
@@ -163,10 +183,12 @@ class TestHtmlComments:
         assert "rule 2" in files[0].content
 
     def test_code_fence_comments_preserved(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         _ = (tmp_path / "AGENTS.md").write_text(
-            "before\n\n```html\n<!-- keep this -->\n```\n\nafter\n"
+            "before\n\n```html\n<!-- keep this -->\n```\n\nafter\n",
         )
         files = agents_md._discover(tmp_path, cfg)
         assert "keep this" in files[0].content
@@ -174,7 +196,9 @@ class TestHtmlComments:
 
 class TestIncludes:
     def test_include_relative(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         _ = (tmp_path / "AGENTS.md").write_text("main\n@./sub.md\n")
         _ = (tmp_path / "sub.md").write_text("sub-content\n")
@@ -185,7 +209,9 @@ class TestIncludes:
         assert files[1].parent == files[0].path
 
     def test_include_cycle_detected(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         _ = (tmp_path / "AGENTS.md").write_text("main\n@./other.md\n")
         _ = (tmp_path / "other.md").write_text("other\n@./AGENTS.md\n")
@@ -194,7 +220,9 @@ class TestIncludes:
         assert len(paths) == len(set(paths)) == 2
 
     def test_include_in_code_block_ignored(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         _ = (tmp_path / "AGENTS.md").write_text("main\n\n```\n@./sub.md\n```\n")
         _ = (tmp_path / "sub.md").write_text("should-not-load\n")
@@ -202,7 +230,9 @@ class TestIncludes:
         assert all("should-not-load" not in f.content for f in files)
 
     def test_include_depth_cap(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         for i in range(10):
             nxt = f"@./f{i + 1}.md\n" if i < 9 else ""
@@ -283,7 +313,9 @@ class TestAddDir:
 
 class TestConditionalFilter:
     def test_unconditional_only_drops_globbed(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         rules = tmp_path / ".sagent" / "rules"
         rules.mkdir(parents=True)
@@ -295,12 +327,14 @@ class TestConditionalFilter:
         assert all(f.content.strip() != "c" for f in kept)
 
     def test_conditional_rules_for_paths_matches_globs(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         rules = tmp_path / ".sagent" / "rules"
         rules.mkdir(parents=True)
         _ = (rules / "python.md").write_text(
-            "---\npaths: ['**/*.py']\n---\npython-rule\n"
+            "---\npaths: ['**/*.py']\n---\npython-rule\n",
         )
         _ = (rules / "text.md").write_text("---\npaths: ['**/*.txt']\n---\ntext-rule\n")
         out, matched = agents_md.conditional_rules_for_paths(
@@ -317,7 +351,9 @@ class TestConditionalFilter:
 
 class TestBuildSection:
     def test_empty_when_no_files(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         assert agents_md.build_section(tmp_path, config=cfg) == ""
 
@@ -327,12 +363,14 @@ class TestBuildSection:
         assert "my rules" in out
 
     def test_skips_conditional_rules_in_prompt(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         rules = tmp_path / ".sagent" / "rules"
         rules.mkdir(parents=True)
         _ = (rules / "python.md").write_text(
-            "---\npaths: ['**/*.py']\n---\npython-rule\n"
+            "---\npaths: ['**/*.py']\n---\npython-rule\n",
         )
         _ = (tmp_path / "AGENTS.md").write_text("always-loaded\n")
         out = agents_md.build_section(tmp_path, config=cfg)
@@ -346,14 +384,16 @@ class TestDefaultSystemDir:
         assert agents_md._default_system_dir() == Path("/etc/sagent")
 
     def test_windows_uses_programdata_env(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(platform, "system", lambda: "Windows")
         monkeypatch.setenv("PROGRAMDATA", "D:/Custom")
         assert agents_md._default_system_dir() == Path("D:/Custom") / "sagent"
 
     def test_windows_falls_back_when_env_unset(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(platform, "system", lambda: "Windows")
         monkeypatch.delenv("PROGRAMDATA", raising=False)
@@ -399,22 +439,36 @@ class TestProcessErrorPaths:
 
         monkeypatch.setattr(Path, "resolve", fake_resolve)
         out = agents_md._process(
-            target, "Project", set(), depth=0, parent=None, cfg=cfg
+            target,
+            "Project",
+            set(),
+            depth=0,
+            parent=None,
+            cfg=cfg,
         )
         assert out == []
 
     def test_unreadable_file_skipped(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         target = tmp_path / "AGENTS.md"
         _ = target.write_bytes(b"\xff\xfe\xfa not utf-8 \xc3\x28")
         out = agents_md._process(
-            target, "Project", set(), depth=0, parent=None, cfg=cfg
+            target,
+            "Project",
+            set(),
+            depth=0,
+            parent=None,
+            cfg=cfg,
         )
         assert out == []
 
     def test_empty_body_skipped(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         _ = (tmp_path / "AGENTS.md").write_text("---\npaths: ['x']\n---\n\n   \n")
         out = agents_md._discover(tmp_path, cfg)
@@ -433,7 +487,9 @@ class TestProcessErrorPaths:
         assert any("threshold" in record.message for record in caplog.records)
 
     def test_dedup_key_resolve_failure_uses_raw(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         target = tmp_path / "AGENTS.md"
         original_resolve = Path.resolve
@@ -497,17 +553,20 @@ class TestExpandIncludePath:
 
 class TestWalkTokensHtmlBlockIncludes:
     def test_include_inside_html_comment_residue_scanned(
-        self, tmp_path: Path, cfg: agents_md.AgentsMdConfig
+        self,
+        tmp_path: Path,
+        cfg: agents_md.AgentsMdConfig,
     ) -> None:
         _ = (tmp_path / "AGENTS.md").write_text(
-            "head\n\n<!-- ignore --> @./inc.md\n\nbody\n"
+            "head\n\n<!-- ignore --> @./inc.md\n\nbody\n",
         )
         _ = (tmp_path / "inc.md").write_text("inc-body\n")
         files = agents_md._discover(tmp_path, cfg)
         assert any("inc-body" in f.content for f in files)
 
     def test_extract_includes_from_html_block_with_comment(
-        self, tmp_path: Path
+        self,
+        tmp_path: Path,
     ) -> None:
         _ = (tmp_path / "inc.md").write_text("x\n")
         text = "<!-- note --> @./inc.md\n"
@@ -515,7 +574,8 @@ class TestWalkTokensHtmlBlockIncludes:
         assert out == [(tmp_path / "inc.md").resolve()]
 
     def test_extract_includes_html_block_only_comment_skipped(
-        self, tmp_path: Path
+        self,
+        tmp_path: Path,
     ) -> None:
         _ = (tmp_path / "inc.md").write_text("x\n")
         out = agents_md._extract_includes("<!-- @./inc.md -->\n", tmp_path)

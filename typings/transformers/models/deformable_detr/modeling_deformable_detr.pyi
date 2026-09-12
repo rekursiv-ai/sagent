@@ -89,7 +89,9 @@ def replace_batch_norm(model):  # -> None:
 class DeformableDetrConvEncoder(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, pixel_values: torch.Tensor, pixel_mask: torch.Tensor
+        self,
+        pixel_values: torch.Tensor,
+        pixel_mask: torch.Tensor,
     ):  # -> list[Any]:
         ...
 
@@ -100,7 +102,11 @@ class DeformableDetrConvModel(nn.Module):
 
 class DeformableDetrSinePositionEmbedding(nn.Module):
     def __init__(
-        self, embedding_dim=..., temperature=..., normalize=..., scale=...
+        self,
+        embedding_dim=...,
+        temperature=...,
+        normalize=...,
+        scale=...,
     ) -> None: ...
     def forward(self, pixel_values, pixel_mask):  # -> Tensor:
         ...
@@ -117,10 +123,15 @@ def build_position_encoding(
 
 class DeformableDetrMultiscaleDeformableAttention(nn.Module):
     def __init__(
-        self, config: DeformableDetrConfig, num_heads: int, n_points: int
+        self,
+        config: DeformableDetrConfig,
+        num_heads: int,
+        n_points: int,
     ) -> None: ...
     def with_pos_embed(
-        self, tensor: torch.Tensor, position_embeddings: Tensor | None
+        self,
+        tensor: torch.Tensor,
+        position_embeddings: Tensor | None,
     ):  # -> Tensor:
         ...
     def forward(
@@ -140,10 +151,16 @@ class DeformableDetrMultiscaleDeformableAttention(nn.Module):
 
 class DeformableDetrMultiheadAttention(nn.Module):
     def __init__(
-        self, embed_dim: int, num_heads: int, dropout: float = ..., bias: bool = ...
+        self,
+        embed_dim: int,
+        num_heads: int,
+        dropout: float = ...,
+        bias: bool = ...,
     ) -> None: ...
     def with_pos_embed(
-        self, tensor: torch.Tensor, position_embeddings: Tensor | None
+        self,
+        tensor: torch.Tensor,
+        position_embeddings: Tensor | None,
     ):  # -> Tensor:
         ...
     def forward(
@@ -154,7 +171,9 @@ class DeformableDetrMultiheadAttention(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class DeformableDetrEncoderLayer(GradientCheckpointingLayer):
@@ -248,7 +267,10 @@ class DeformableDetrModel(DeformableDetrPreTrainedModel):
     def get_proposal_pos_embed(self, proposals):  # -> Tensor:
         ...
     def gen_encoder_output_proposals(
-        self, enc_output, padding_mask, spatial_shapes
+        self,
+        enc_output,
+        padding_mask,
+        spatial_shapes,
     ):  # -> tuple[Any, Tensor]:
         ...
     @auto_docstring

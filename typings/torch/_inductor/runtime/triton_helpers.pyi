@@ -39,19 +39,34 @@ def max_with_index(value, index, dim): ...
 def exp(x, use_fast_math: tl.constexpr): ...
 @triton.jit
 def online_softmax_reduce(
-    lhs_max, lhs_sum, dim, use_fast_math: tl.constexpr
+    lhs_max,
+    lhs_sum,
+    dim,
+    use_fast_math: tl.constexpr,
 ) -> tuple[Any, Any]: ...
 @triton.jit
 def online_softmax_combine(
-    lhs_max, lhs_sum, rhs_max, use_fast_math: tl.constexpr
+    lhs_max,
+    lhs_sum,
+    rhs_max,
+    use_fast_math: tl.constexpr,
 ) -> tuple[Any, Any]: ...
 @triton.jit
 def welford_reduce(
-    value, mean, m2, weight, first_iteration
+    value,
+    mean,
+    m2,
+    weight,
+    first_iteration,
 ) -> tuple[Any, Any, Any]: ...
 @triton.jit
 def welford_combine(
-    mean_1, m2_1, weight_1, mean_2, m2_2, weight_2
+    mean_1,
+    m2_1,
+    weight_1,
+    mean_2,
+    m2_2,
+    weight_2,
 ) -> tuple[Any, Any, Any]: ...
 @triton.jit
 def welford(mean, m2, weight, dim): ...
@@ -77,7 +92,10 @@ def bucketize_binary_search(
 ): ...
 @triton.jit
 def pack_value_flag(
-    value, flag, DTYPE_VALUE_AS_UINT: tl.constexpr, DTYPE_PACK: tl.constexpr
+    value,
+    flag,
+    DTYPE_VALUE_AS_UINT: tl.constexpr,
+    DTYPE_PACK: tl.constexpr,
 ): ...
 @triton.jit
 def unpack_value(pack, DTYPE_VALUE, DTYPE_VALUE_AS_UINT): ...
@@ -94,7 +112,10 @@ def exclusive_scan_decoupled_lookback(
 ) -> Any: ...
 @triton.jit
 def exclusive_scan_decoupled_lookback_64(
-    scratch_base, block_value, index, combine_fn
+    scratch_base,
+    block_value,
+    index,
+    combine_fn,
 ): ...
 @triton.jit
 def frexp(x) -> tuple[Any, Any]: ...
@@ -114,7 +135,9 @@ def x_grid_barrier(sem) -> None: ...
 def triton_builtin(f: Callable[..., _T]) -> Callable[..., _T]: ...
 @triton_builtin
 def constexpr_next_power_of_2(
-    n: tl.constexpr, *, _builder: object = ...
+    n: tl.constexpr,
+    *,
+    _builder: object = ...,
 ) -> tl.constexpr: ...
 @triton_builtin
 def if_mask(mask: Any, val, *, _builder: object = ...) -> tl.constexpr: ...

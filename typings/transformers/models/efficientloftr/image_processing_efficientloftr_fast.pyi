@@ -34,7 +34,8 @@ class EfficientLoFTRImageProcessorFast(BaseImageProcessorFast):
     do_normalize = ...
     valid_kwargs = EfficientLoFTRFastImageProcessorKwargs
     def __init__(
-        self, **kwargs: Unpack[EfficientLoFTRFastImageProcessorKwargs]
+        self,
+        **kwargs: Unpack[EfficientLoFTRFastImageProcessorKwargs],
     ) -> None: ...
     @auto_docstring
     def preprocess(
@@ -49,7 +50,9 @@ class EfficientLoFTRImageProcessorFast(BaseImageProcessorFast):
         threshold: float = ...,
     ) -> list[dict[str, torch.Tensor]]: ...
     def visualize_keypoint_matching(
-        self, images, keypoint_matching_output: list[dict[str, torch.Tensor]]
+        self,
+        images,
+        keypoint_matching_output: list[dict[str, torch.Tensor]],
     ) -> list[Image.Image]: ...
 
 __all__ = ["EfficientLoFTRImageProcessorFast"]

@@ -2,14 +2,14 @@
 
 The session file is append-only JSONL. Each record carries a ``kind``:
 
-- ``{"kind": "meta", ...}`` — session metadata. Last record wins.
-- ``{"kind": "tool_state", ...}`` — ToolState snapshot. Last record
+- ``{"kind": "meta", ...}`` -- session metadata. Last record wins.
+- ``{"kind": "tool_state", ...}`` -- ToolState snapshot. Last record
   after the most recent structural barrier splice wins.
 - ``{"kind": "history", "ref": {...}, "type": "user|assistant|tool_result",
-  ...}`` — one ``ReferrableTapeEvent`` (entry + ref). Legacy records without
+  ...}`` -- one ``ReferrableTapeEvent`` (entry + ref). Legacy records without
   ``ref`` get a synthetic ref on load.
 - ``{"kind": "context_splice", "ref": {...}, "mask": [[from, to], ...],
-  "insert_after": ref | null, "payload": [...], ...}`` —
+  "insert_after": ref | null, "payload": [...], ...}`` --
   one ``ContextSplice``.
 
 Legacy formats (read-only; converter promotes them to ``ContextSplice``):
@@ -18,7 +18,7 @@ Legacy formats (read-only; converter promotes them to ``ContextSplice``):
   "inject_after": ... | null, "payload": [...], "barrier": bool, ...}``
 - ``{"kind": "context_clear", "ref": {...}}``
 - ``{"kind": "clear"}`` (legacy barrier shape from before the splice model)
-- ``{"kind": "update", "id": N, "content": "...", "is_error": false}`` —
+- ``{"kind": "update", "id": N, "content": "...", "is_error": false}`` --
   legacy splice patch; applied to the matching ``ReferrableTapeEvent.event``
   during load only.
 """
@@ -134,579 +134,6 @@ class PersistentAgentRecord:
     frozen_system: bool = False
     """A hot child's ``system`` is already the parent's rendered prompt;
     resuming it cold would re-append its own tools' contributions."""
-
-
-def _att_to_json(att: BytesMessage) -> dict[str, str]:
-    """Encode one ``BytesMessage`` as a ``{mime, data(base64)}`` dict."""
-    return {
-        "mime": att.descriptor,
-        "data": base64.b64encode(att.data).decode("ascii"),
-    }
-
-
-def _att_from_json(raw: object) -> BytesMessage | None:
-    """Decode one ``{mime, data(base64)}`` dict; return ``None`` on malformed input.
-
-    Only descriptors that match the wire-known media prefixes round-trip;
-    unknown descriptors are dropped silently rather than constructing a
-    ``BytesMessage`` the downstream provider would reject (or worse, mis-route
-    if a tampered session injects a non-attachment descriptor).
-    """
-    if not isinstance(raw, dict):
-        return None
-    d = cast(Mapping[str, object], raw)
-    mime = d.get("mime")
-    data = d.get("data")
-    if not isinstance(mime, str) or not isinstance(data, str):
-        return None
-    if not _is_known_attachment_descriptor(mime):
-        return None
-    try:
-        # ``validate=True`` or the drop path below is unreachable: the default
-        # discards non-alphabet bytes instead of raising, so garbage decodes to
-        # ``b""`` and reaches the provider as a real, empty attachment.
-        return BytesMessage(data=base64.b64decode(data, validate=True), descriptor=mime)
-    except (ValueError, TypeError):
-        return None
-
-
-def _is_known_attachment_descriptor(mime: str) -> bool:
-    """Return True when ``mime`` is a wire-allowed attachment descriptor.
-
-    The media families end in ``/`` and stay prefixes; the ``application/*``
-    entries are complete types and are matched exactly, optionally followed by
-    a MIME parameter. Prefix-matching them admitted ``application/pdf-malware``
-    and ``application/jsonevil`` -- precisely the descriptors an allowlist is
-    for excluding.
-    """
-    if mime.startswith(("image/", "audio/", "video/", "text/")):
-        return True
-    base = mime.split(";", 1)[0].strip()
-    return base in ("application/pdf", "application/json", "application/octet-stream")
-
-
-def _atts_to_json(atts: tuple[BytesMessage, ...]) -> list[dict[str, str]]:
-    """Encode an attachment tuple as a list of JSON-ready dicts."""
-    return [_att_to_json(a) for a in atts]
-
-
-def _atts_from_json(raw: object) -> tuple[BytesMessage, ...]:
-    """Decode a JSON list into an attachment tuple, dropping malformed entries."""
-    if not isinstance(raw, list):
-        return ()
-    out: list[BytesMessage] = []
-    for entry in cast(list[object], raw):
-        att = _att_from_json(entry)
-        if att is not None:
-            out.append(att)
-    return tuple(out)
-
-
-def _thinking_to_json(
-    blocks: tuple[Mapping[str, object], ...],
-) -> list[dict[str, object]]:
-    """Materialize each thinking block as a plain dict for JSON encoding."""
-    return [dict(b) for b in blocks]
-
-
-def _thinking_from_json(raw: object) -> tuple[Mapping[str, object], ...]:
-    """Decode a JSON list of thinking blocks; skip non-dict entries."""
-    if not isinstance(raw, list):
-        return ()
-    return tuple(
-        cast(Mapping[str, object], entry)
-        for entry in cast(list[object], raw)
-        if isinstance(entry, dict)
-    )
-
-
-def _entry_to_json(entry: TapeEvent) -> dict[str, object]:
-    """Encode one ``TapeEvent`` body (no ``kind`` / ``ref`` wrapping)."""
-    if isinstance(entry, CompactStarted):
-        return {"type": "compact_started"}
-    if isinstance(entry, CompactComplete):
-        return {
-            "type": "compact_complete",
-            "token_before": entry.token_before,
-            "token_after": entry.token_after,
-            "payload_entries": entry.payload_entries,
-            "fallback_reason": entry.fallback_reason,
-            "preserved_tail_count": entry.preserved_tail_count,
-        }
-    if isinstance(entry, CompactFailed):
-        return {
-            "type": "compact_failed",
-            "error_type": type(entry.exception).__name__,
-            "message": str(entry.exception),
-            "tape_len": entry.tape_len,
-        }
-    if isinstance(entry, UserMessage):
-        return {
-            "type": "user",
-            "text": entry.text,
-            "attachments": _atts_to_json(entry.attachments),
-            "id": entry.id,
-            "parent_id": entry.parent_id,
-            "timestamp": entry.timestamp,
-            "hidden": entry.hidden,
-        }
-    if isinstance(entry, AgentSendMessage):
-        return {
-            "type": "agent_send",
-            "source": entry.source,
-            "text": entry.text,
-            "attachments": _atts_to_json(entry.attachments),
-            "id": entry.id,
-            "parent_id": entry.parent_id,
-            "timestamp": entry.timestamp,
-            "hidden": entry.hidden,
-        }
-    if isinstance(entry, AssistantMessage):
-        return {
-            "type": "assistant",
-            "text": entry.text,
-            "thought_signature": entry.thought_signature,
-            "thinking_blocks": _thinking_to_json(entry.thinking_blocks),
-            "tool_calls": [
-                {
-                    "id": tc.id,
-                    "name": tc.name,
-                    "args": dict(tc.args),
-                    "thought_signature": tc.thought_signature,
-                }
-                for tc in entry.tool_calls
-            ],
-            "id": entry.id,
-            "parent_id": entry.parent_id,
-            "timestamp": entry.timestamp,
-            "hidden": entry.hidden,
-        }
-    return {
-        "type": "tool_result",
-        "call_id": entry.call_id,
-        "content": entry.content,
-        # ``result_kind``, not ``kind``: the history-record wrapper spreads this
-        # dict under its own ``"kind": "history"`` tag, so the lifecycle field
-        # must use a distinct JSON key.
-        "result_kind": entry.kind.value,
-        "is_error": entry.is_error,
-        "diff": entry.diff,
-        "diff_file_path": entry.diff_file_path,
-        "hint": entry.hint,
-        "summary": entry.summary,
-        "attachments": _atts_to_json(entry.attachments),
-        "id": entry.id,
-        "parent_id": entry.parent_id,
-        "timestamp": entry.timestamp,
-        "hidden": entry.hidden,
-    }
-
-
-def _ref_to_json(ref: TapeRef) -> dict[str, object]:
-    """Encode a ``TapeRef`` as ``{session_id, ordinal}``."""
-    return {"session_id": ref.session_id, "ordinal": ref.ordinal}
-
-
-def _ref_from_json(raw: object) -> TapeRef | None:
-    """Decode a ``{session_id, ordinal}`` dict; ``None`` on malformed input.
-
-    An ordinal is a 0-based tape position, so a bool (``isinstance(True, int)``
-    holds, and JSON ``true`` became position 1, colliding with a real record)
-    and a negative are both malformed. ``MaskRange`` already rejects a negative
-    endpoint; without the same check here a negative-ordinal record loads but
-    can never be masked, undeleted, or repaired.
-    """
-    if not isinstance(raw, dict):
-        return None
-    d = cast(Mapping[str, object], raw)
-    session_id = d.get("session_id")
-    ordinal = d.get("ordinal")
-    if not isinstance(session_id, str) or not isinstance(ordinal, int):
-        return None
-    if isinstance(ordinal, bool) or ordinal < 0:
-        return None
-    return TapeRef(session_id=session_id, ordinal=ordinal)
-
-
-def _mask_from_json(raw_mask: object) -> tuple[MaskRange, ...]:
-    """Decode a wire ``[[from_ref, to_ref], ...]`` mask into ``MaskRange``s.
-
-    This is the single boundary where legacy malformation is normalized
-    (Issue#313): a cross-session or inverted on-disk range -- representable in
-    the old two-independent-``TapeRef`` wire shape -- is dropped here rather
-    than guarded against at every downstream comparison.
-    """
-    if not isinstance(raw_mask, list):
-        return ()
-    ranges: list[MaskRange] = []
-    for item in cast(list[object], raw_mask):
-        if not isinstance(item, list) or len(cast(list[object], item)) != 2:
-            continue
-        pair = cast(list[object], item)
-        r_from = _ref_from_json(pair[0])
-        r_to = _ref_from_json(pair[1])
-        if r_from is None or r_to is None:
-            logger.warning(
-                "dropping malformed legacy mask range %s -> %s", pair[0], pair[1]
-            )
-            continue
-        try:
-            ranges.append(MaskRange.between(r_from, r_to))
-        except InvalidPayloadError:
-            # Cross-session or inverted legacy range: drop it (matches the
-            # historical C6 fix, now centralized at the deserialize boundary).
-            logger.warning(
-                "dropping malformed legacy mask range %s -> %s", r_from, r_to
-            )
-    return tuple(ranges)
-
-
-def _history_record_to_json(record: ReferrableTapeEvent) -> dict[str, object]:
-    """Encode a ``ReferrableTapeEvent`` as a ``kind=history`` JSON record."""
-    return {
-        "kind": "history",
-        "ref": _ref_to_json(record.ref),
-        **_entry_to_json(record.event),
-    }
-
-
-def _splice_to_json(splice: ContextSplice) -> dict[str, object]:
-    """Encode a ``ContextSplice`` as a ``kind=context_splice`` record."""
-    return {
-        "kind": "context_splice",
-        "ref": _ref_to_json(splice.ref),
-        # Wire format unchanged: ``[[from_ref, to_ref], ...]`` byte-identical to
-        # the pre-MaskRange tuple form (Issue#313). Old code parses new files.
-        "mask": [
-            [_ref_to_json(r.from_ref), _ref_to_json(r.to_ref)] for r in splice.mask
-        ],
-        "insert_after": (
-            _ref_to_json(splice.insert_after)
-            if splice.insert_after is not None
-            else None
-        ),
-        "payload": [_entry_to_json(e) for e in splice.payload],
-        "strategy": splice.strategy,
-        "token_before": splice.token_before,
-        "token_after": splice.token_after,
-        "fallback_reason": splice.fallback_reason,
-        "preserved_tail_count": splice.preserved_tail_count,
-        "paired_externally": sorted(splice.paired_externally),
-    }
-
-
-def _tape_record_to_json(record: TapeRecord) -> dict[str, object]:
-    """Dispatch by record type to the appropriate JSON encoder."""
-    if isinstance(record, ReferrableTapeEvent):
-        return _history_record_to_json(record)
-    return _splice_to_json(record)
-
-
-def _splice_from_json(
-    rec: Mapping[str, object],
-    ref: TapeRef,
-) -> ContextSplice | None:
-    """Decode a ``kind=context_splice`` record into a ``ContextSplice``."""
-    mask = _mask_from_json(rec.get("mask"))
-    raw_insert = rec.get("insert_after")
-    insert_after = _ref_from_json(raw_insert) if raw_insert is not None else None
-    raw_payload = rec.get("payload")
-    payload: list[ModelContextEvent] = []
-    if isinstance(raw_payload, list):
-        for item in cast(list[object], raw_payload):
-            if isinstance(item, dict):
-                entry = _entry_from_json(cast(Mapping[str, object], item))
-                if isinstance(
-                    entry,
-                    (AgentSendMessage, UserMessage, AssistantMessage, ToolResult),
-                ):
-                    payload.append(entry)
-    raw_paired = rec.get("paired_externally")
-    paired: frozenset[str] = frozenset[str]()
-    if isinstance(raw_paired, list):
-        paired = frozenset(
-            str(item)
-            for item in cast(list[object], raw_paired)
-            if isinstance(item, str)
-        )
-    # ``replay()`` skips both mask-disjointness and payload-pairing
-    # validation; legacy sessions converted to splice format may carry
-    # masks the validator would reject.
-    return ContextSplice.replay(
-        ref=ref,
-        mask=mask,
-        insert_after=insert_after,
-        payload=tuple(payload),
-        strategy=str(rec.get("strategy") or ""),
-        token_before=IntCodec.coerce(rec.get("token_before"), 0),
-        token_after=IntCodec.coerce(rec.get("token_after"), 0),
-        fallback_reason=str(rec.get("fallback_reason") or ""),
-        preserved_tail_count=IntCodec.coerce(rec.get("preserved_tail_count"), 0),
-        paired_externally=paired,
-    )
-
-
-def _legacy_override_to_splice(
-    rec: Mapping[str, object],
-    ref: TapeRef,
-) -> ContextSplice | None:
-    """Convert legacy ``kind=context_override`` to ``ContextSplice``.
-
-    The conversion:
-      - ``suppresses`` set → one mask range per contiguous ordinal run.
-      - ``inject_after`` → ``insert_after``.
-      - ``barrier=True`` with empty ``suppresses`` → mask range from
-        tape head up to (and including) ``inject_after``, or empty
-        mask if ``inject_after`` is None and the producer relied on
-        barrier semantics alone.
-
-    Args:
-      rec: Decoded legacy record.
-      ref: Synthetic or persisted ref for the new splice.
-
-    Returns:
-      splice: ``ContextSplice`` carrying the legacy producer's intent.
-
-    """
-    raw_suppresses = rec.get("suppresses")
-    suppresses: list[TapeRef] = []
-    if isinstance(raw_suppresses, list):
-        for item in cast(list[object], raw_suppresses):
-            decoded = _ref_from_json(item)
-            if decoded is not None:
-                suppresses.append(decoded)
-    raw_inject = rec.get("inject_after")
-    inject_after = _ref_from_json(raw_inject) if raw_inject is not None else None
-    barrier = _json_bool(rec.get("barrier"))
-    mask: tuple[MaskRange, ...]
-    if suppresses:
-        mask = _mask_runs(suppresses)
-    elif barrier and inject_after is not None:
-        mask = (
-            MaskRange(
-                session_id=inject_after.session_id, lo=0, hi=inject_after.ordinal
-            ),
-        )
-    elif barrier:
-        mask = (MaskRange(session_id=ref.session_id, lo=0, hi=max(0, ref.ordinal - 1)),)
-    else:
-        mask = ()
-    raw_payload = rec.get("payload")
-    payload: list[ModelContextEvent] = []
-    if isinstance(raw_payload, list):
-        for item in cast(list[object], raw_payload):
-            if isinstance(item, dict):
-                entry = _entry_from_json(cast(Mapping[str, object], item))
-                if isinstance(
-                    entry,
-                    (AgentSendMessage, UserMessage, AssistantMessage, ToolResult),
-                ):
-                    payload.append(entry)
-    raw_paired = rec.get("paired_externally")
-    paired: frozenset[str] = frozenset[str]()
-    if isinstance(raw_paired, list):
-        paired = frozenset(
-            str(item)
-            for item in cast(list[object], raw_paired)
-            if isinstance(item, str)
-        )
-    return ContextSplice.replay(
-        ref=ref,
-        mask=mask,
-        insert_after=inject_after,
-        payload=tuple(payload),
-        strategy=str(rec.get("strategy") or ""),
-        token_before=IntCodec.coerce(rec.get("token_before"), 0),
-        token_after=IntCodec.coerce(rec.get("token_after"), 0),
-        fallback_reason=str(rec.get("fallback_reason") or ""),
-        preserved_tail_count=IntCodec.coerce(rec.get("preserved_tail_count"), 0),
-        paired_externally=paired,
-    )
-
-
-def _mask_runs(refs: Sequence[TapeRef]) -> tuple[MaskRange, ...]:
-    if not refs:
-        return ()
-    ordered = sorted(refs, key=lambda item: (item.session_id, item.ordinal))
-    runs: list[MaskRange] = []
-    start = ordered[0]
-    prev = ordered[0]
-    for ref in ordered[1:]:
-        if ref.session_id == prev.session_id and ref.ordinal == prev.ordinal + 1:
-            prev = ref
-            continue
-        runs.append(
-            MaskRange(session_id=start.session_id, lo=start.ordinal, hi=prev.ordinal)
-        )
-        start = ref
-        prev = ref
-    runs.append(
-        MaskRange(session_id=start.session_id, lo=start.ordinal, hi=prev.ordinal)
-    )
-    return tuple(runs)
-
-
-def _legacy_clear_to_splice(ref: TapeRef, tape: Sequence[TapeRecord]) -> ContextSplice:
-    """Convert a legacy ``kind=context_clear`` / ``kind=clear`` to splice.
-
-    A clear was a full-prefix barrier with no payload, so the equivalent
-    splice masks every record read so far -- which is what
-    :func:`full_tape_mask` computes.
-
-    Deriving the mask from the tape rather than from one ordinal closes two
-    ways the old form under-masked. It ranged to ``tape[-1].ref.ordinal``, the
-    last record READ and not the highest (the load sorts afterwards), so an
-    out-of-order file left its highest-ordinal record visible; and it built the
-    range in the clear's own ``session_id``, so a resumed or forked tape kept
-    the other session's records after the user asked for a wipe.
-
-    Args:
-      ref: Synthetic or persisted ref for the new splice.
-      tape: Records read before this clear; empty yields an empty mask.
-
-    Returns:
-      splice: Equivalent ``ContextSplice``.
-
-    """
-    return ContextSplice.replay(
-        ref=ref,
-        mask=full_tape_mask(tape),
-        insert_after=None,
-        payload=(),
-        strategy="clear",
-    )
-
-
-def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
-    """Decode one ``kind: history`` record into a ``TapeEvent`` (or ``None``)."""
-    t = d.get("type")
-    if t == "compact_started":
-        return CompactStarted()
-    if t == "compact_complete":
-        return CompactComplete(
-            token_before=IntCodec.coerce(d.get("token_before"), 0),
-            token_after=IntCodec.coerce(d.get("token_after"), 0),
-            payload_entries=IntCodec.coerce(d.get("payload_entries"), 0),
-            fallback_reason=str(d.get("fallback_reason") or ""),
-            preserved_tail_count=IntCodec.coerce(d.get("preserved_tail_count"), 0),
-        )
-    if t == "compact_failed":
-        return CompactFailed(
-            exception=RuntimeError(str(d.get("message") or "")),
-            tape_len=IntCodec.coerce(d.get("tape_len"), 0),
-        )
-    entry_id = IntCodec.coerce(d.get("id"), 0)
-    parent_id = IntCodec.coerce(d.get("parent_id"), -1)
-    timestamp = FloatCodec.coerce(d.get("timestamp"), 0.0)
-    hidden = _json_bool(d.get("hidden"))
-    if t == "user":
-        return UserMessage(
-            text=str(d.get("text") or ""),
-            attachments=_atts_from_json(d.get("attachments")),
-            id=entry_id,
-            parent_id=parent_id,
-            timestamp=timestamp,
-            hidden=hidden,
-        )
-    if t == "agent_send":
-        return AgentSendMessage(
-            source=str(d.get("source") or ""),
-            text=str(d.get("text") or ""),
-            attachments=_atts_from_json(d.get("attachments")),
-            id=entry_id,
-            parent_id=parent_id,
-            timestamp=timestamp,
-            hidden=hidden,
-        )
-    if t == "assistant":
-        raw_tcs = d.get("tool_calls")
-        tcs: list[ToolCall] = []
-        if isinstance(raw_tcs, list):
-            for tc in cast(list[object], raw_tcs):
-                if not isinstance(tc, dict):
-                    continue
-                tcd = cast(Mapping[str, object], tc)
-                raw_args = tcd.get("args")
-                args: Mapping[str, object] = (
-                    cast(Mapping[str, object], raw_args)
-                    if isinstance(raw_args, dict)
-                    else {}
-                )
-                call_id = str(tcd.get("id") or "")
-                call_name = str(tcd.get("name") or "")
-                if not call_id or not call_name:
-                    # The runtime keys ``running_tools``, the cohort, and every
-                    # pairing map by ``call_id``, and dispatches by name -- so
-                    # a blank id is dispatchable under ``""`` and collides with
-                    # the next blank one. Drop the call; the message still
-                    # loads without it.
-                    logger.warning(
-                        "Dropping tool_call with empty id/name: id=%r name=%r",
-                        call_id,
-                        call_name,
-                    )
-                    continue
-                tcs.append(
-                    ToolCall(
-                        id=call_id,
-                        name=call_name,
-                        args=args,
-                        thought_signature=str(tcd.get("thought_signature") or ""),
-                    ),
-                )
-        return AssistantMessage(
-            text=str(d.get("text") or ""),
-            thought_signature=str(d.get("thought_signature") or ""),
-            thinking_blocks=_thinking_from_json(d.get("thinking_blocks")),
-            tool_calls=tuple(tcs),
-            id=entry_id,
-            parent_id=parent_id,
-            timestamp=timestamp,
-            hidden=hidden,
-        )
-    if t == "tool_result":
-        content = str(d.get("content") or "")
-        return ToolResult(
-            call_id=str(d.get("call_id") or ""),
-            content=content,
-            kind=_tool_result_kind_from_json(d.get("result_kind"), content),
-            is_error=_json_bool(d.get("is_error")),
-            attachments=_atts_from_json(d.get("attachments")),
-            diff=str(d.get("diff") or ""),
-            diff_file_path=str(d.get("diff_file_path") or ""),
-            hint=str(d.get("hint") or ""),
-            summary=str(d.get("summary") or ""),
-            id=entry_id,
-            parent_id=parent_id,
-            timestamp=timestamp,
-            hidden=hidden,
-        )
-    return None
-
-
-def _tool_result_kind_from_json(raw: object, content: str) -> ToolResultKind:
-    """Decode ``result_kind``; legacy records (no field) infer from content.
-
-    Sessions persisted before the ``kind`` discriminator carry no
-    ``result_kind``. For those, recover the lifecycle from the placeholder
-    content one last time so a resumed old session does not mis-forward a stub.
-    New records always carry the explicit field.
-
-    An unreadable value falls through to that same inference rather than to
-    ``FINAL``: ``FINAL`` means "the real, forward-deliverable answer", so
-    defaulting there promoted a still-pending ``[detached]`` stub to output
-    whenever the persisted enum was misspelled.
-    """
-    if isinstance(raw, str):
-        try:
-            return ToolResultKind(raw)
-        except ValueError:
-            logger.warning("Unknown tool result_kind %r; inferring from content.", raw)
-    if content == DETACHED_PLACEHOLDER or content.startswith(RUNNING_PREFIX):
-        return ToolResultKind.PENDING
-    if content == CANCELLED_PLACEHOLDER:
-        return ToolResultKind.CANCELLED
-    return ToolResultKind.FINAL
 
 
 def serialize_tool_state(state: ToolState) -> dict[str, object]:
@@ -949,7 +376,8 @@ class SessionMeta:
             compact_count=IntCodec.coerce(d.get("compact_count"), 0),
             bash_cwd=str(d.get("bash_cwd") or ""),
             total_active_elapsed_seconds=FloatCodec.coerce(
-                d.get("total_active_elapsed_seconds"), 0.0
+                d.get("total_active_elapsed_seconds"),
+                0.0,
             ),
         )
 
@@ -987,277 +415,6 @@ def append_context_repair(
     )
     append_session(path, tape_delta=[repair])
     return repair
-
-
-def _runtime_event_to_json(event: RuntimeEvent) -> dict[str, object]:
-    """Encode persisted runtime metadata events."""
-    if isinstance(event, ModelServiceSuspended):
-        return {
-            "kind": "runtime_event",
-            "type": "model_service_suspended",
-            "timestamp": time.time(),
-            "provider": event.provider,
-            "auth": event.auth,
-            "account": event.account,
-            "model_id": event.model_id,
-            "retry_at": event.retry_at,
-            "delay_sec": event.delay_sec,
-            "server_supplied": event.server_supplied,
-            "error": _service_error_snapshot_to_json(event.error),
-        }
-    if isinstance(event, NoticeMessage):
-        return {
-            "kind": "runtime_event",
-            "type": "notice_message",
-            "timestamp": time.time(),
-            "text": event.text,
-            "tier": event.tier,
-            "error": _service_error_snapshot_to_json(event.error)
-            if event.error is not None
-            else None,
-        }
-    raise TypeError(
-        f"unsupported runtime event for persistence: {type(event).__name__}"
-    )
-
-
-def _runtime_event_from_json(record: Mapping[str, object]) -> RuntimeEvent | None:
-    """Decode persisted runtime metadata events."""
-    if record.get("kind") != "runtime_event":
-        return None
-    if record.get("type") == "model_service_suspended":
-        error = _service_error_snapshot_from_json(record.get("error"))
-        if error is None:
-            return None
-        return ModelServiceSuspended(
-            provider=str(record.get("provider") or ""),
-            auth=str(record.get("auth") or ""),
-            account=_optional_str(record.get("account")),
-            model_id=str(record.get("model_id") or ""),
-            retry_at=FloatCodec.coerce(record.get("retry_at"), 0.0),
-            delay_sec=FloatCodec.coerce(record.get("delay_sec"), 0.0),
-            server_supplied=_json_bool(record.get("server_supplied")),
-            error=error,
-        )
-    if record.get("type") == "notice_message":
-        raw_error = record.get("error")
-        return NoticeMessage(
-            text=str(record.get("text") or ""),
-            tier=_notice_tier(record.get("tier")),
-            error=_service_error_snapshot_from_json(raw_error)
-            if raw_error is not None
-            else None,
-        )
-    return None
-
-
-def _notice_tier(raw: object) -> NoticeTier:
-    """Decode a persisted notice tier. Only ``advisory`` exists today.
-
-    Legacy ``recoverable`` / ``fatal`` values (never produced in practice)
-    decode to ``advisory`` -- a dim notice -- rather than failing a resume.
-    """
-    del raw
-    return "advisory"
-
-
-def _service_error_snapshot_to_json(error: ServiceErrorSnapshot) -> dict[str, object]:
-    """Encode ``ServiceErrorSnapshot`` as JSON-ready primitives."""
-    return {
-        "type_name": error.type_name,
-        "message": error.message,
-        "status": error.status,
-        "headers": dict(error.headers),
-        "body": error.body,
-    }
-
-
-def _service_error_snapshot_from_json(raw: object) -> ServiceErrorSnapshot | None:
-    """Decode ``ServiceErrorSnapshot`` from JSON-ready primitives."""
-    if not isinstance(raw, Mapping):
-        return None
-    record = cast(Mapping[str, object], raw)
-    headers_raw = record.get("headers")
-    headers = (
-        {
-            str(key): str(value)
-            for key, value in cast(Mapping[object, object], headers_raw).items()
-        }
-        if isinstance(headers_raw, Mapping)
-        else {}
-    )
-    return ServiceErrorSnapshot(
-        type_name=str(record.get("type_name") or ""),
-        message=str(record.get("message") or ""),
-        status=_optional_int(record.get("status")),
-        headers=headers,
-        body=str(record.get("body") or ""),
-    )
-
-
-def _persistent_agent_from_json(
-    record: Mapping[str, object],
-) -> PersistentAgentRecord | None:
-    """Decode one persistent-subagent lifecycle record."""
-    if record.get("kind") != "persistent_agent":
-        return None
-    state = _persistent_state(record.get("state"))
-    if state is None:
-        return None
-    raw_tools = record.get("tools")
-    tools = (
-        tuple(
-            str(tool) for tool in cast(list[object], raw_tools) if isinstance(tool, str)
-        )
-        if isinstance(raw_tools, list)
-        else ()
-    )
-    budget, output, show = _thinking_axes(record)
-    return PersistentAgentRecord(
-        label=str(record.get("label") or ""),
-        run_id=str(record.get("run_id") or ""),
-        session_dir=str(record.get("session_dir") or ""),
-        state=state,
-        provider=str(record.get("provider") or ""),
-        auth=str(record.get("auth") or ""),
-        account=_optional_str(record.get("account")),
-        model_id=str(record.get("model_id") or ""),
-        tools=tools,
-        system=str(record.get("system") or ""),
-        notify_on_asleep=_json_bool(record.get("notify_on_asleep"), default=True),
-        max_tool_call_rounds=_optional_int(record.get("max_tool_call_rounds")),
-        max_request_tokens=_optional_int(record.get("max_request_tokens")),
-        max_response_tokens=_optional_int(record.get("max_response_tokens")),
-        thinking_budget=budget,
-        thinking_output=output,
-        show_thinking=show,
-        effort=str(record.get("effort") or "none"),
-        cache_ttl_sec=_cache_ttl_sec(record),
-        service_tier=str(record.get("service_tier") or "auto"),
-        max_budget_usd=_optional_float(record.get("max_budget_usd")),
-        persistent_retry=_json_bool(record.get("persistent_retry")),
-        frozen_system=_json_bool(record.get("frozen_system")),
-    )
-
-
-def _cache_ttl_sec(record: Mapping[str, object]) -> float:
-    """Read the cache lifetime, upgrading a record that spelled it ``"5m"``."""
-    raw = record.get("cache_ttl_sec")
-    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
-        return float(raw)
-    return 3600.0 if record.get("cache_ttl") == "1h" else 300.0
-
-
-def _thinking_axes(record: Mapping[str, object]) -> tuple[str, str, bool]:
-    """Read the three thinking axes, upgrading a pre-split record.
-
-    Sessions written before the split carry a fused ``thinking_state``
-    (and a ``thinking`` wire mode); both spell the same two axes plus the
-    display bit, so an old record is decoded rather than dropped.
-
-    Args:
-      record: One persisted persistent-agent record.
-
-    Returns:
-      axes: ``(thinking_budget, thinking_output, show_thinking)``.
-
-    """
-    if "thinking_budget" in record:
-        return (
-            str(record.get("thinking_budget") or "none"),
-            str(record.get("thinking_output") or "none"),
-            _json_bool(record.get("show_thinking"), default=True),
-        )
-    legacy = str(record.get("thinking_state") or "")
-    show = legacy.endswith("-show")
-    if legacy.startswith("adaptive-"):
-        return ("auto", "text", show)
-    if legacy.startswith("on-"):
-        return ("fixed", "text", show)
-    if legacy == "redact-hide":
-        return ("auto", "redacted", False)
-    if legacy == "off-hide":
-        return ("none", "none", False)
-    # No state: fall back to the wire mode the legacy ``thinking`` field
-    # carried, which is the only other place the budget was recorded.
-    match str(record.get("thinking") or ""):
-        case "adaptive":
-            return ("auto", "text", True)
-        case "enabled":
-            return ("fixed", "text", True)
-        case _:
-            return ("none", "none", True)
-
-
-def _persistent_state(raw: object) -> PersistentAgentState | None:
-    """Decode a persistent-agent state string."""
-    if raw in get_args(PersistentAgentState):
-        return cast(PersistentAgentState, raw)
-    return None
-
-
-def _json_bool(raw: object, *, default: bool = False) -> bool:
-    """Decode a persisted boolean; anything non-boolean takes ``default``.
-
-    ``bool()`` on a wire value is not a decode, it is a truthiness test: any
-    non-empty string is True, so a writer that stringified a flag turned
-    ``"false"`` into True. On the legacy ``barrier`` field that read a
-    non-barrier as a barrier and masked the conversation ahead of it.
-    """
-    return raw if isinstance(raw, bool) else default
-
-
-def _optional_str(raw: object) -> str | None:
-    """Decode an optional string field."""
-    return raw if isinstance(raw, str) else None
-
-
-def _optional_int(raw: object) -> int | None:
-    """Decode an optional integer field; a bool is not a number.
-
-    ``isinstance(True, int)`` holds, so a persisted ``true`` decoded to
-    ``True`` and behaved as ``1`` downstream -- a one-round tool budget the
-    operator never set. ``_ref_from_json`` rejects the same trap.
-    """
-    return raw if isinstance(raw, int) and not isinstance(raw, bool) else None
-
-
-def _optional_float(raw: object) -> float | None:
-    """Decode an optional float field; a bool is not a number."""
-    if isinstance(raw, bool):
-        return None
-    return raw if isinstance(raw, (float, int)) else None
-
-
-def _persistent_agent_to_json(record: PersistentAgentRecord) -> dict[str, object]:
-    """Encode a persistent-subagent lifecycle record."""
-    return {
-        "kind": "persistent_agent",
-        "label": record.label,
-        "run_id": record.run_id,
-        "session_dir": record.session_dir,
-        "state": record.state,
-        "provider": record.provider,
-        "auth": record.auth,
-        "account": record.account,
-        "model_id": record.model_id,
-        "tools": list(record.tools),
-        "system": record.system,
-        "notify_on_asleep": record.notify_on_asleep,
-        "max_tool_call_rounds": record.max_tool_call_rounds,
-        "max_request_tokens": record.max_request_tokens,
-        "max_response_tokens": record.max_response_tokens,
-        "thinking_budget": record.thinking_budget,
-        "thinking_output": record.thinking_output,
-        "show_thinking": record.show_thinking,
-        "effort": record.effort,
-        "cache_ttl_sec": record.cache_ttl_sec,
-        "service_tier": record.service_tier,
-        "max_budget_usd": record.max_budget_usd,
-        "persistent_retry": record.persistent_retry,
-        "frozen_system": record.frozen_system,
-        "timestamp": time.time(),
-    }
 
 
 def append_persistent_agent_lifecycle(
@@ -1315,7 +472,7 @@ def append_persistent_agent_lifecycle(
                 max_budget_usd=child.max_budget_usd,
                 persistent_retry=child.persistent_retry,
                 frozen_system=child.frozen_system,
-            )
+            ),
         ],
     )
 
@@ -1377,48 +534,6 @@ def append_session(
     restrict_path(path, 0o600)
 
 
-def _append_lines(path: Path, lines: Sequence[str]) -> None:
-    """Append ``lines`` to ``path`` in place, then ``fsync`` for durability.
-
-    Opens ``path`` with ``O_APPEND`` and writes the batch in one pass.
-    The tape is append-only, so an append never rewrites prior records:
-    a crash can only truncate the new tail, which the loader already
-    skips as a malformed trailing line. Appending in place (rather than
-    rewrite-to-tmp + rename) keeps the cost O(bytes appended) instead of
-    O(file size), and preserves the file's inode so ``tail -f`` and
-    inotify watchers keep following it rather than being orphaned on the
-    renamed-away inode.
-
-    Atomicity: ``O_APPEND`` makes one ``os.write`` atomic against other
-    appenders -- but not a LOOP of them. A short write leaves half a JSON line
-    on disk and releases the file offset, so a second appender lands its
-    records between the halves and the spliced line never parses again. The
-    whole batch therefore writes under :func:`session_file_lock`, and the
-    trailing-newline probe reads inside it too (its answer is only valid while
-    no one else can append).
-
-    Args:
-      path: Destination file (created if missing).
-      lines: Each becomes one JSONL record (newline appended here).
-
-    """
-    with session_file_lock(path):
-        # Close a torn tail before writing. A crash mid-append leaves a line
-        # with no newline, and appending straight after it concatenates the two
-        # into one unparseable record -- so the crash costs the record it
-        # interrupted AND the first one written afterwards.
-        prefix = b"\n" if _lacks_trailing_newline(path) else b""
-        payload = prefix + "".join(line + "\n" for line in lines).encode("utf-8")
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        try:
-            view = memoryview(payload)
-            while view:
-                view = view[os.write(fd, view) :]
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-
-
 _append_locks: dict[str, tuple[threading.RLock, list[int]]] = {}
 """Per-file reentrancy bookkeeping for :func:`session_file_lock`.
 
@@ -1451,6 +566,9 @@ def session_file_lock(path: Path) -> Generator[None]:
     Args:
       path: Session file to lock; created if missing.
 
+    Yields:
+      control: The lock-held body.
+
     """
     key = os.path.realpath(path)
     with _append_locks_guard:
@@ -1472,18 +590,6 @@ def session_file_lock(path: Path) -> Generator[None]:
             depth[0] = 0
             # Closing the descriptor releases the flock; no separate unlock.
             os.close(fd)
-
-
-def _lacks_trailing_newline(path: Path) -> bool:
-    """Whether ``path`` ends mid-line."""
-    try:
-        with path.open("rb") as handle:
-            if handle.seek(0, os.SEEK_END) == 0:
-                return False
-            _ = handle.seek(-1, os.SEEK_END)
-            return handle.read(1) != b"\n"
-    except OSError:
-        return False
 
 
 def install_session_persistence(agent: Agent, session_dir: Path) -> Callable[[], None]:
@@ -1575,6 +681,12 @@ def install_session_persistence(agent: Agent, session_dir: Path) -> Callable[[],
 def unpersisted_session_error(agent: Agent) -> str | None:
     """Return an error message if a non-empty session was never persisted.
 
+    Args:
+      agent: Agent whose persistence state to inspect.
+
+    Returns:
+      error: Human-facing error message, or ``None`` when persistence is valid.
+
     The persistence observer writes ``session.jsonl`` synchronously on the first
     ``SaveSession``/``StatusChanged`` event, so by shutdown a non-empty tape MUST
     have a backing file. A non-empty tape with no file means every persistence
@@ -1588,6 +700,7 @@ def unpersisted_session_error(agent: Agent) -> str | None:
     returns a human-facing message describing the data loss. The caller decides
     how to surface it; this function neither logs nor raises so it composes with
     the REPL's stderr-and-exit error convention.
+
     """
     session_dir = agent.session_dir
     if session_dir is None or not agent.runtime.tape:
@@ -1602,37 +715,16 @@ def unpersisted_session_error(agent: Agent) -> str | None:
     )
 
 
-def _persisted_refs(path: Path) -> set[TapeRef]:
-    if not path.exists():
-        return set()
-    refs: set[TapeRef] = set()
-    try:
-        with path.open(encoding="utf-8") as f:
-            for raw_line in f:
-                try:
-                    record = json.loads(raw_line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                ref = _ref_from_json(cast(Mapping[str, object], record).get("ref"))
-                if ref is not None:
-                    refs.add(ref)
-    except OSError:
-        # An existing-but-unreadable session file would otherwise return an
-        # empty set, making every tape record look new -- the next save then
-        # re-appends the whole tape, silently doubling the file. Warn loudly.
-        logger.warning(
-            "Could not read persisted refs from %s; persistence may duplicate"
-            " records on the next save.",
-            path,
-        )
-        return set()
-    return refs
-
-
 def load_persistent_agents(session_dir: Path) -> list[PersistentAgentRecord]:
-    """Return the latest lifecycle record for each persistent-agent run."""
+    """Return the latest lifecycle record for each persistent-agent run.
+
+    Args:
+      session_dir: Directory containing the session transcript.
+
+    Returns:
+      records: Latest running persistent-agent records with session directories.
+
+    """
     session_file = session_dir / "session.jsonl"
     if not session_file.exists():
         return []
@@ -1640,14 +732,11 @@ def load_persistent_agents(session_dir: Path) -> list[PersistentAgentRecord]:
     try:
         with session_file.open(encoding="utf-8") as f:
             for raw_line in f:
-                try:
-                    record = json.loads(raw_line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(record, dict):
+                record, valid = _decode_json_line(raw_line)
+                if not valid or not isinstance(record, dict):
                     continue
                 decoded = _persistent_agent_from_json(
-                    cast(Mapping[str, object], record)
+                    cast(Mapping[str, object], record),
                 )
                 if decoded is None or not decoded.run_id:
                     continue
@@ -1719,9 +808,8 @@ def load_session(
                 line = raw_line.strip()
                 if not line:
                     continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
+                record, valid = _decode_json_line(line)
+                if not valid:
                     if preserve_corrupt and not corrupt_preserved:
                         _preserve_corrupt_session(session_file)
                         corrupt_preserved = True
@@ -1744,16 +832,14 @@ def load_session(
                     snapshot = dict(rec)
                     snapshot_line = line_num
                     continue
-                try:
-                    _absorb_record(
-                        rec,
-                        tape=tape,
-                        barrier_candidates=barrier_candidates,
-                        runtime_events=runtime_events,
-                        next_synthetic_ref=_next_synthetic_ref,
-                        line_num=line_num,
-                    )
-                except (ValueError, TypeError, KeyError):
+                if not _absorb_record_safely(
+                    rec,
+                    tape=tape,
+                    barrier_candidates=barrier_candidates,
+                    runtime_events=runtime_events,
+                    next_synthetic_ref=_next_synthetic_ref,
+                    line_num=line_num,
+                ):
                     # One record's shape must not cost the conversation. The
                     # dataclasses validate at construction (duplicate tool_call
                     # ids, inverted mask ranges), and the whole point of this
@@ -1764,7 +850,6 @@ def load_session(
                         "Skipping malformed session record on line %s in %s.",
                         line_num,
                         session_file,
-                        exc_info=True,
                     )
                     continue
                 if kind in ("clear", "context_clear"):
@@ -1801,6 +886,975 @@ def load_session(
     return meta, tape, state
 
 
+def repair_dangling_tool_calls(
+    history: list[ModelContextEvent],
+) -> list[ModelContextEvent]:
+    """Synthesize ``[interrupted]`` results for orphan ``tool_use`` blocks.
+
+    Args:
+      history: Provider-facing context history to repair.
+
+    Returns:
+      repaired: History with orphan tool calls paired or dropped.
+
+    A session can be interrupted mid-tool (Ctrl+C during execution):
+    the assistant message with ``tool_use`` got persisted but its
+    matching ``ToolResult`` did not. Resuming such a session would send
+    the model history with orphan tool_use to the provider, which
+    rejects it (Anthropic 400 ``tool_use ids were found without
+    tool_result blocks``; Gemini has the analogous functionCall rule).
+
+    In-memory history never produces orphans: the runtime always pairs
+    tool_use with a result (``[detached]`` on halt, ``[cancelled]`` on
+    Kill, ``is_error=True`` on exception). So the corruption only ever
+    comes from disk loads, which is why the repair lives here -- next
+    to ``load_session``, the producer of the only history shape that
+    can have this defect.
+
+    A thin alias for the canonical :func:`pair_and_dedup_tool_calls` (one
+    shared pairing / cross-AM dedup / hollow-drop policy, so it cannot drift
+    from the compaction repair -- the H2/F1 disease). Repair-only, *not*
+    coalescing, so a valid multi-turn history loaded from disk is never
+    rewritten merely for adjacency. Idempotent.
+
+    """
+    return pair_and_dedup_tool_calls(history)
+
+
+def restore_model(
+    meta: SessionMeta,
+) -> tuple[Model, ModelRecipe] | None:
+    """Rebuild model + spec from persisted ``provider``/``auth``/``model_id``.
+
+    Args:
+      meta: Session metadata.
+
+    Returns:
+      result: ``(model, spec)`` on success, ``None`` if construction
+          fails for any reason (the caller keeps its default model).
+
+    """
+    if not meta.provider or not meta.model_id:
+        return None
+    try:
+        provider = providers_lib.build_provider(
+            meta.provider,
+            meta.auth,
+            account=meta.account or None,
+        )
+        model = provider.model(meta.model_id)
+        spec = ModelRecipe(
+            provider=meta.provider,
+            auth=meta.auth,
+            model_id=model.tagged_model_id,
+            account=meta.account or None,
+        )
+        logger.info("Restored model %s/%s", meta.provider, meta.model_id)
+        return model, spec
+    except Exception:
+        logger.warning(
+            "Failed to restore model %s/%s; keeping default",
+            meta.provider,
+            meta.model_id,
+            exc_info=True,
+        )
+        return None
+
+
+def _att_to_json(att: BytesMessage) -> dict[str, str]:
+    """Encode one ``BytesMessage`` as a ``{mime, data(base64)}`` dict."""
+    return {
+        "mime": att.descriptor,
+        "data": base64.b64encode(att.data).decode("ascii"),
+    }
+
+
+# Only descriptors that match the wire-known media prefixes round-trip; unknown
+# descriptors are dropped silently rather than constructing a ``BytesMessage`` the
+# downstream provider would reject (or worse, mis-route if a tampered session injects a
+# non-attachment descriptor).
+def _att_from_json(raw: object) -> BytesMessage | None:
+    """Decode one ``{mime, data(base64)}`` dict; return ``None`` on malformed input."""
+    if not isinstance(raw, dict):
+        return None
+    d = cast(Mapping[str, object], raw)
+    mime = d.get("mime")
+    data = d.get("data")
+    if not isinstance(mime, str) or not isinstance(data, str):
+        return None
+    if not _is_known_attachment_descriptor(mime):
+        return None
+    try:
+        # ``validate=True`` or the drop path below is unreachable: the default
+        # discards non-alphabet bytes instead of raising, so garbage decodes to
+        # ``b""`` and reaches the provider as a real, empty attachment.
+        return BytesMessage(data=base64.b64decode(data, validate=True), descriptor=mime)
+    except (ValueError, TypeError):
+        return None
+
+
+# The media families end in ``/`` and stay prefixes; the ``application/*`` entries are
+# complete types and are matched exactly, optionally followed by a MIME parameter.
+# Prefix-matching them admitted ``application/pdf-malware`` and ``application/jsonevil``
+# -- precisely the descriptors an allowlist is for excluding.
+def _is_known_attachment_descriptor(mime: str) -> bool:
+    """Return True when ``mime`` is a wire-allowed attachment descriptor."""
+    if mime.startswith(("image/", "audio/", "video/", "text/")):
+        return True
+    base = mime.split(";", 1)[0].strip()
+    return base in ("application/pdf", "application/json", "application/octet-stream")
+
+
+def _atts_to_json(atts: tuple[BytesMessage, ...]) -> list[dict[str, str]]:
+    """Encode an attachment tuple as a list of JSON-ready dicts."""
+    return [_att_to_json(a) for a in atts]
+
+
+def _atts_from_json(raw: object) -> tuple[BytesMessage, ...]:
+    """Decode a JSON list into an attachment tuple, dropping malformed entries."""
+    if not isinstance(raw, list):
+        return ()
+    out: list[BytesMessage] = []
+    for entry in cast(list[object], raw):
+        att = _att_from_json(entry)
+        if att is not None:
+            out.append(att)
+    return tuple(out)
+
+
+def _thinking_to_json(
+    blocks: tuple[Mapping[str, object], ...],
+) -> list[dict[str, object]]:
+    """Materialize each thinking block as a plain dict for JSON encoding."""
+    return [dict(b) for b in blocks]
+
+
+def _thinking_from_json(raw: object) -> tuple[Mapping[str, object], ...]:
+    """Decode a JSON list of thinking blocks; skip non-dict entries."""
+    if not isinstance(raw, list):
+        return ()
+    return tuple(
+        cast(Mapping[str, object], entry)
+        for entry in cast(list[object], raw)
+        if isinstance(entry, dict)
+    )
+
+
+def _entry_to_json(entry: TapeEvent) -> dict[str, object]:
+    """Encode one ``TapeEvent`` body (no ``kind`` / ``ref`` wrapping)."""
+    if isinstance(entry, CompactStarted):
+        return {"type": "compact_started"}
+    if isinstance(entry, CompactComplete):
+        return {
+            "type": "compact_complete",
+            "token_before": entry.token_before,
+            "token_after": entry.token_after,
+            "payload_entries": entry.payload_entries,
+            "fallback_reason": entry.fallback_reason,
+            "preserved_tail_count": entry.preserved_tail_count,
+        }
+    if isinstance(entry, CompactFailed):
+        return {
+            "type": "compact_failed",
+            "error_type": type(entry.exception).__name__,
+            "message": str(entry.exception),
+            "tape_len": entry.tape_len,
+        }
+    if isinstance(entry, UserMessage):
+        return {
+            "type": "user",
+            "text": entry.text,
+            "attachments": _atts_to_json(entry.attachments),
+            "id": entry.id,
+            "parent_id": entry.parent_id,
+            "timestamp": entry.timestamp,
+            "hidden": entry.hidden,
+        }
+    if isinstance(entry, AgentSendMessage):
+        return {
+            "type": "agent_send",
+            "source": entry.source,
+            "text": entry.text,
+            "attachments": _atts_to_json(entry.attachments),
+            "id": entry.id,
+            "parent_id": entry.parent_id,
+            "timestamp": entry.timestamp,
+            "hidden": entry.hidden,
+        }
+    if isinstance(entry, AssistantMessage):
+        return {
+            "type": "assistant",
+            "text": entry.text,
+            "thought_signature": entry.thought_signature,
+            "thinking_blocks": _thinking_to_json(entry.thinking_blocks),
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "name": tc.name,
+                    "args": dict(tc.args),
+                    "thought_signature": tc.thought_signature,
+                }
+                for tc in entry.tool_calls
+            ],
+            "id": entry.id,
+            "parent_id": entry.parent_id,
+            "timestamp": entry.timestamp,
+            "hidden": entry.hidden,
+        }
+    return {
+        "type": "tool_result",
+        "call_id": entry.call_id,
+        "content": entry.content,
+        # ``result_kind``, not ``kind``: the history-record wrapper spreads this
+        # dict under its own ``"kind": "history"`` tag, so the lifecycle field
+        # must use a distinct JSON key.
+        "result_kind": entry.kind.value,
+        "is_error": entry.is_error,
+        "diff": entry.diff,
+        "diff_file_path": entry.diff_file_path,
+        "hint": entry.hint,
+        "summary": entry.summary,
+        "attachments": _atts_to_json(entry.attachments),
+        "id": entry.id,
+        "parent_id": entry.parent_id,
+        "timestamp": entry.timestamp,
+        "hidden": entry.hidden,
+    }
+
+
+def _ref_to_json(ref: TapeRef) -> dict[str, object]:
+    """Encode a ``TapeRef`` as ``{session_id, ordinal}``."""
+    return {"session_id": ref.session_id, "ordinal": ref.ordinal}
+
+
+# An ordinal is a 0-based tape position, so a bool (``isinstance(True, int)`` holds, and
+# JSON ``true`` became position 1, colliding with a real record) and a negative are both
+# malformed. ``MaskRange`` already rejects a negative endpoint; without the same check
+# here a negative-ordinal record loads but can never be masked, undeleted, or repaired.
+def _ref_from_json(raw: object) -> TapeRef | None:
+    """Decode a ``{session_id, ordinal}`` dict; ``None`` on malformed input."""
+    if not isinstance(raw, dict):
+        return None
+    d = cast(Mapping[str, object], raw)
+    session_id = d.get("session_id")
+    ordinal = d.get("ordinal")
+    if not isinstance(session_id, str) or not isinstance(ordinal, int):
+        return None
+    if isinstance(ordinal, bool) or ordinal < 0:
+        return None
+    return TapeRef(session_id=session_id, ordinal=ordinal)
+
+
+# This is the single boundary where legacy malformation is normalized (Issue#313): a
+# cross-session or inverted on-disk range -- representable in the old two-
+# independent-``TapeRef`` wire shape -- is dropped here rather than guarded against at
+# every downstream comparison.
+def _mask_from_json(raw_mask: object) -> tuple[MaskRange, ...]:
+    """Decode a wire ``[[from_ref, to_ref], ...]`` mask into ``MaskRange``s."""
+    if not isinstance(raw_mask, list):
+        return ()
+    ranges: list[MaskRange] = []
+    for item in cast(list[object], raw_mask):
+        if not isinstance(item, list) or len(cast(list[object], item)) != 2:
+            continue
+        pair = cast(list[object], item)
+        r_from = _ref_from_json(pair[0])
+        r_to = _ref_from_json(pair[1])
+        if r_from is None or r_to is None:
+            logger.warning(
+                "dropping malformed legacy mask range %s -> %s",
+                pair[0],
+                pair[1],
+            )
+            continue
+        try:
+            ranges.append(MaskRange.between(r_from, r_to))
+        except InvalidPayloadError:
+            # Cross-session or inverted legacy range: drop it (matches the
+            # historical C6 fix, now centralized at the deserialize boundary).
+            logger.warning(
+                "dropping malformed legacy mask range %s -> %s",
+                r_from,
+                r_to,
+            )
+    return tuple(ranges)
+
+
+def _history_record_to_json(record: ReferrableTapeEvent) -> dict[str, object]:
+    """Encode a ``ReferrableTapeEvent`` as a ``kind=history`` JSON record."""
+    return {
+        "kind": "history",
+        "ref": _ref_to_json(record.ref),
+        **_entry_to_json(record.event),
+    }
+
+
+def _splice_to_json(splice: ContextSplice) -> dict[str, object]:
+    """Encode a ``ContextSplice`` as a ``kind=context_splice`` record."""
+    return {
+        "kind": "context_splice",
+        "ref": _ref_to_json(splice.ref),
+        # Wire format unchanged: ``[[from_ref, to_ref], ...]`` byte-identical to
+        # the pre-MaskRange tuple form (Issue#313). Old code parses new files.
+        "mask": [
+            [_ref_to_json(r.from_ref), _ref_to_json(r.to_ref)] for r in splice.mask
+        ],
+        "insert_after": (
+            _ref_to_json(splice.insert_after)
+            if splice.insert_after is not None
+            else None
+        ),
+        "payload": [_entry_to_json(e) for e in splice.payload],
+        "strategy": splice.strategy,
+        "token_before": splice.token_before,
+        "token_after": splice.token_after,
+        "fallback_reason": splice.fallback_reason,
+        "preserved_tail_count": splice.preserved_tail_count,
+        "paired_externally": sorted(splice.paired_externally),
+    }
+
+
+def _tape_record_to_json(record: TapeRecord) -> dict[str, object]:
+    """Dispatch by record type to the appropriate JSON encoder."""
+    if isinstance(record, ReferrableTapeEvent):
+        return _history_record_to_json(record)
+    return _splice_to_json(record)
+
+
+def _splice_from_json(
+    rec: Mapping[str, object],
+    ref: TapeRef,
+) -> ContextSplice | None:
+    """Decode a ``kind=context_splice`` record into a ``ContextSplice``."""
+    mask = _mask_from_json(rec.get("mask"))
+    raw_insert = rec.get("insert_after")
+    insert_after = _ref_from_json(raw_insert) if raw_insert is not None else None
+    raw_payload = rec.get("payload")
+    payload: list[ModelContextEvent] = []
+    if isinstance(raw_payload, list):
+        for item in cast(list[object], raw_payload):
+            if isinstance(item, dict):
+                entry = _entry_from_json(cast(Mapping[str, object], item))
+                if isinstance(
+                    entry,
+                    (AgentSendMessage, UserMessage, AssistantMessage, ToolResult),
+                ):
+                    payload.append(entry)
+    raw_paired = rec.get("paired_externally")
+    paired: frozenset[str] = frozenset[str]()
+    if isinstance(raw_paired, list):
+        paired = frozenset(
+            str(item)
+            for item in cast(list[object], raw_paired)
+            if isinstance(item, str)
+        )
+    # ``replay()`` skips both mask-disjointness and payload-pairing
+    # validation; legacy sessions converted to splice format may carry
+    # masks the validator would reject.
+    return ContextSplice.replay(
+        ref=ref,
+        mask=mask,
+        insert_after=insert_after,
+        payload=tuple(payload),
+        strategy=str(rec.get("strategy") or ""),
+        token_before=IntCodec.coerce(rec.get("token_before"), 0),
+        token_after=IntCodec.coerce(rec.get("token_after"), 0),
+        fallback_reason=str(rec.get("fallback_reason") or ""),
+        preserved_tail_count=IntCodec.coerce(rec.get("preserved_tail_count"), 0),
+        paired_externally=paired,
+    )
+
+
+# The conversion: - ``suppresses`` set → one mask range per contiguous ordinal run. -
+# ``inject_after`` → ``insert_after``. - ``barrier=True`` with empty ``suppresses`` →
+# mask range from tape head up to (and including) ``inject_after``, or empty mask if
+# ``inject_after`` is None and the producer relied on barrier semantics alone.
+def _legacy_override_to_splice(
+    rec: Mapping[str, object],
+    ref: TapeRef,
+) -> ContextSplice | None:
+    """Convert legacy ``kind=context_override`` to ``ContextSplice``."""
+    raw_suppresses = rec.get("suppresses")
+    suppresses: list[TapeRef] = []
+    if isinstance(raw_suppresses, list):
+        for item in cast(list[object], raw_suppresses):
+            decoded = _ref_from_json(item)
+            if decoded is not None:
+                suppresses.append(decoded)
+    raw_inject = rec.get("inject_after")
+    inject_after = _ref_from_json(raw_inject) if raw_inject is not None else None
+    barrier = _json_bool(rec.get("barrier"))
+    mask: tuple[MaskRange, ...]
+    if suppresses:
+        mask = _mask_runs(suppresses)
+    elif barrier and inject_after is not None:
+        mask = (
+            MaskRange(
+                session_id=inject_after.session_id,
+                lo=0,
+                hi=inject_after.ordinal,
+            ),
+        )
+    elif barrier:
+        mask = (MaskRange(session_id=ref.session_id, lo=0, hi=max(0, ref.ordinal - 1)),)
+    else:
+        mask = ()
+    raw_payload = rec.get("payload")
+    payload: list[ModelContextEvent] = []
+    if isinstance(raw_payload, list):
+        for item in cast(list[object], raw_payload):
+            if isinstance(item, dict):
+                entry = _entry_from_json(cast(Mapping[str, object], item))
+                if isinstance(
+                    entry,
+                    (AgentSendMessage, UserMessage, AssistantMessage, ToolResult),
+                ):
+                    payload.append(entry)
+    raw_paired = rec.get("paired_externally")
+    paired: frozenset[str] = frozenset[str]()
+    if isinstance(raw_paired, list):
+        paired = frozenset(
+            str(item)
+            for item in cast(list[object], raw_paired)
+            if isinstance(item, str)
+        )
+    return ContextSplice.replay(
+        ref=ref,
+        mask=mask,
+        insert_after=inject_after,
+        payload=tuple(payload),
+        strategy=str(rec.get("strategy") or ""),
+        token_before=IntCodec.coerce(rec.get("token_before"), 0),
+        token_after=IntCodec.coerce(rec.get("token_after"), 0),
+        fallback_reason=str(rec.get("fallback_reason") or ""),
+        preserved_tail_count=IntCodec.coerce(rec.get("preserved_tail_count"), 0),
+        paired_externally=paired,
+    )
+
+
+def _mask_runs(refs: Sequence[TapeRef]) -> tuple[MaskRange, ...]:
+    if not refs:
+        return ()
+    ordered = sorted(refs, key=lambda item: (item.session_id, item.ordinal))
+    runs: list[MaskRange] = []
+    start = ordered[0]
+    prev = ordered[0]
+    for ref in ordered[1:]:
+        if ref.session_id == prev.session_id and ref.ordinal == prev.ordinal + 1:
+            prev = ref
+            continue
+        runs.append(
+            MaskRange(session_id=start.session_id, lo=start.ordinal, hi=prev.ordinal),
+        )
+        start = ref
+        prev = ref
+    runs.append(
+        MaskRange(session_id=start.session_id, lo=start.ordinal, hi=prev.ordinal),
+    )
+    return tuple(runs)
+
+
+# A clear was a full-prefix barrier with no payload, so the equivalent splice masks
+# every record read so far -- which is what :func:`full_tape_mask` computes.
+#
+# Deriving the mask from the tape rather than from one ordinal closes two ways the old
+# form under-masked. It ranged to ``tape[-1].ref.ordinal``, the last record READ and not
+# the highest (the load sorts afterwards), so an out-of-order file left its highest-
+# ordinal record visible; and it built the range in the clear's own ``session_id``, so a
+# resumed or forked tape kept the other session's records after the user asked for a
+# wipe.
+def _legacy_clear_to_splice(ref: TapeRef, tape: Sequence[TapeRecord]) -> ContextSplice:
+    """Convert a legacy ``kind=context_clear`` / ``kind=clear`` to splice."""
+    return ContextSplice.replay(
+        ref=ref,
+        mask=full_tape_mask(tape),
+        insert_after=None,
+        payload=(),
+        strategy="clear",
+    )
+
+
+def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
+    """Decode one ``kind: history`` record into a ``TapeEvent`` (or ``None``)."""
+    t = d.get("type")
+    if t == "compact_started":
+        return CompactStarted()
+    if t == "compact_complete":
+        return CompactComplete(
+            token_before=IntCodec.coerce(d.get("token_before"), 0),
+            token_after=IntCodec.coerce(d.get("token_after"), 0),
+            payload_entries=IntCodec.coerce(d.get("payload_entries"), 0),
+            fallback_reason=str(d.get("fallback_reason") or ""),
+            preserved_tail_count=IntCodec.coerce(d.get("preserved_tail_count"), 0),
+        )
+    if t == "compact_failed":
+        return CompactFailed(
+            exception=RuntimeError(str(d.get("message") or "")),
+            tape_len=IntCodec.coerce(d.get("tape_len"), 0),
+        )
+    entry_id = IntCodec.coerce(d.get("id"), 0)
+    parent_id = IntCodec.coerce(d.get("parent_id"), -1)
+    timestamp = FloatCodec.coerce(d.get("timestamp"), 0.0)
+    hidden = _json_bool(d.get("hidden"))
+    if t == "user":
+        return UserMessage(
+            text=str(d.get("text") or ""),
+            attachments=_atts_from_json(d.get("attachments")),
+            id=entry_id,
+            parent_id=parent_id,
+            timestamp=timestamp,
+            hidden=hidden,
+        )
+    if t == "agent_send":
+        return AgentSendMessage(
+            source=str(d.get("source") or ""),
+            text=str(d.get("text") or ""),
+            attachments=_atts_from_json(d.get("attachments")),
+            id=entry_id,
+            parent_id=parent_id,
+            timestamp=timestamp,
+            hidden=hidden,
+        )
+    if t == "assistant":
+        raw_tcs = d.get("tool_calls")
+        tcs: list[ToolCall] = []
+        if isinstance(raw_tcs, list):
+            for tc in cast(list[object], raw_tcs):
+                if not isinstance(tc, dict):
+                    continue
+                tcd = cast(Mapping[str, object], tc)
+                raw_args = tcd.get("args")
+                args: Mapping[str, object] = (
+                    cast(Mapping[str, object], raw_args)
+                    if isinstance(raw_args, dict)
+                    else {}
+                )
+                call_id = str(tcd.get("id") or "")
+                call_name = str(tcd.get("name") or "")
+                if not call_id or not call_name:
+                    # The runtime keys ``running_tools``, the cohort, and every
+                    # pairing map by ``call_id``, and dispatches by name -- so
+                    # a blank id is dispatchable under ``""`` and collides with
+                    # the next blank one. Drop the call; the message still
+                    # loads without it.
+                    logger.warning(
+                        "Dropping tool_call with empty id/name: id=%r name=%r",
+                        call_id,
+                        call_name,
+                    )
+                    continue
+                tcs.append(
+                    ToolCall(
+                        id=call_id,
+                        name=call_name,
+                        args=args,
+                        thought_signature=str(tcd.get("thought_signature") or ""),
+                    ),
+                )
+        return AssistantMessage(
+            text=str(d.get("text") or ""),
+            thought_signature=str(d.get("thought_signature") or ""),
+            thinking_blocks=_thinking_from_json(d.get("thinking_blocks")),
+            tool_calls=tuple(tcs),
+            id=entry_id,
+            parent_id=parent_id,
+            timestamp=timestamp,
+            hidden=hidden,
+        )
+    if t == "tool_result":
+        content = str(d.get("content") or "")
+        return ToolResult(
+            call_id=str(d.get("call_id") or ""),
+            content=content,
+            kind=_tool_result_kind_from_json(d.get("result_kind"), content),
+            is_error=_json_bool(d.get("is_error")),
+            attachments=_atts_from_json(d.get("attachments")),
+            diff=str(d.get("diff") or ""),
+            diff_file_path=str(d.get("diff_file_path") or ""),
+            hint=str(d.get("hint") or ""),
+            summary=str(d.get("summary") or ""),
+            id=entry_id,
+            parent_id=parent_id,
+            timestamp=timestamp,
+            hidden=hidden,
+        )
+    return None
+
+
+# Sessions persisted before the ``kind`` discriminator carry no ``result_kind``. For
+# those, recover the lifecycle from the placeholder content one last time so a resumed
+# old session does not mis-forward a stub. New records always carry the explicit field.
+#
+# An unreadable value falls through to that same inference rather than to ``FINAL``:
+# ``FINAL`` means "the real, forward-deliverable answer", so defaulting there promoted a
+# still-pending ``[detached]`` stub to output whenever the persisted enum was
+# misspelled.
+def _tool_result_kind_from_json(raw: object, content: str) -> ToolResultKind:
+    """Decode ``result_kind``; legacy records (no field) infer from content."""
+    if isinstance(raw, str):
+        try:
+            return ToolResultKind(raw)
+        except ValueError:
+            logger.warning("Unknown tool result_kind %r; inferring from content.", raw)
+    if content == DETACHED_PLACEHOLDER or content.startswith(RUNNING_PREFIX):
+        return ToolResultKind.PENDING
+    if content == CANCELLED_PLACEHOLDER:
+        return ToolResultKind.CANCELLED
+    return ToolResultKind.FINAL
+
+
+def _runtime_event_to_json(event: RuntimeEvent) -> dict[str, object]:
+    """Encode persisted runtime metadata events."""
+    if isinstance(event, ModelServiceSuspended):
+        return {
+            "kind": "runtime_event",
+            "type": "model_service_suspended",
+            "timestamp": time.time(),
+            "provider": event.provider,
+            "auth": event.auth,
+            "account": event.account,
+            "model_id": event.model_id,
+            "retry_at": event.retry_at,
+            "delay_sec": event.delay_sec,
+            "server_supplied": event.server_supplied,
+            "error": _service_error_snapshot_to_json(event.error),
+        }
+    if isinstance(event, NoticeMessage):
+        return {
+            "kind": "runtime_event",
+            "type": "notice_message",
+            "timestamp": time.time(),
+            "text": event.text,
+            "tier": event.tier,
+            "error": _service_error_snapshot_to_json(event.error)
+            if event.error is not None
+            else None,
+        }
+    raise TypeError(
+        f"unsupported runtime event for persistence: {type(event).__name__}",
+    )
+
+
+def _runtime_event_from_json(record: Mapping[str, object]) -> RuntimeEvent | None:
+    """Decode persisted runtime metadata events."""
+    if record.get("kind") != "runtime_event":
+        return None
+    if record.get("type") == "model_service_suspended":
+        error = _service_error_snapshot_from_json(record.get("error"))
+        if error is None:
+            return None
+        return ModelServiceSuspended(
+            provider=str(record.get("provider") or ""),
+            auth=str(record.get("auth") or ""),
+            account=_optional_str(record.get("account")),
+            model_id=str(record.get("model_id") or ""),
+            retry_at=FloatCodec.coerce(record.get("retry_at"), 0.0),
+            delay_sec=FloatCodec.coerce(record.get("delay_sec"), 0.0),
+            server_supplied=_json_bool(record.get("server_supplied")),
+            error=error,
+        )
+    if record.get("type") == "notice_message":
+        raw_error = record.get("error")
+        return NoticeMessage(
+            text=str(record.get("text") or ""),
+            tier=_notice_tier(record.get("tier")),
+            error=_service_error_snapshot_from_json(raw_error)
+            if raw_error is not None
+            else None,
+        )
+    return None
+
+
+# Legacy ``recoverable`` / ``fatal`` values (never produced in practice) decode to
+# ``advisory`` -- a dim notice -- rather than failing a resume.
+def _notice_tier(raw: object) -> NoticeTier:
+    """Decode a persisted notice tier. Only ``advisory`` exists today."""
+    del raw
+    return "advisory"
+
+
+def _service_error_snapshot_to_json(error: ServiceErrorSnapshot) -> dict[str, object]:
+    """Encode ``ServiceErrorSnapshot`` as JSON-ready primitives."""
+    return {
+        "type_name": error.type_name,
+        "message": error.message,
+        "status": error.status,
+        "headers": dict(error.headers),
+        "body": error.body,
+    }
+
+
+def _service_error_snapshot_from_json(raw: object) -> ServiceErrorSnapshot | None:
+    """Decode ``ServiceErrorSnapshot`` from JSON-ready primitives."""
+    if not isinstance(raw, Mapping):
+        return None
+    record = cast(Mapping[str, object], raw)
+    headers_raw = record.get("headers")
+    headers = (
+        {
+            str(key): str(value)
+            for key, value in cast(Mapping[object, object], headers_raw).items()
+        }
+        if isinstance(headers_raw, Mapping)
+        else {}
+    )
+    return ServiceErrorSnapshot(
+        type_name=str(record.get("type_name") or ""),
+        message=str(record.get("message") or ""),
+        status=_optional_int(record.get("status")),
+        headers=headers,
+        body=str(record.get("body") or ""),
+    )
+
+
+def _persistent_agent_from_json(
+    record: Mapping[str, object],
+) -> PersistentAgentRecord | None:
+    """Decode one persistent-subagent lifecycle record."""
+    if record.get("kind") != "persistent_agent":
+        return None
+    state = _persistent_state(record.get("state"))
+    if state is None:
+        return None
+    raw_tools = record.get("tools")
+    tools = (
+        tuple(
+            str(tool) for tool in cast(list[object], raw_tools) if isinstance(tool, str)
+        )
+        if isinstance(raw_tools, list)
+        else ()
+    )
+    budget, output, show = _thinking_axes(record)
+    return PersistentAgentRecord(
+        label=str(record.get("label") or ""),
+        run_id=str(record.get("run_id") or ""),
+        session_dir=str(record.get("session_dir") or ""),
+        state=state,
+        provider=str(record.get("provider") or ""),
+        auth=str(record.get("auth") or ""),
+        account=_optional_str(record.get("account")),
+        model_id=str(record.get("model_id") or ""),
+        tools=tools,
+        system=str(record.get("system") or ""),
+        notify_on_asleep=_json_bool(record.get("notify_on_asleep"), default=True),
+        max_tool_call_rounds=_optional_int(record.get("max_tool_call_rounds")),
+        max_request_tokens=_optional_int(record.get("max_request_tokens")),
+        max_response_tokens=_optional_int(record.get("max_response_tokens")),
+        thinking_budget=budget,
+        thinking_output=output,
+        show_thinking=show,
+        effort=str(record.get("effort") or "none"),
+        cache_ttl_sec=_cache_ttl_sec(record),
+        service_tier=str(record.get("service_tier") or "auto"),
+        max_budget_usd=_optional_float(record.get("max_budget_usd")),
+        persistent_retry=_json_bool(record.get("persistent_retry")),
+        frozen_system=_json_bool(record.get("frozen_system")),
+    )
+
+
+def _cache_ttl_sec(record: Mapping[str, object]) -> float:
+    """Read the cache lifetime, upgrading a record that spelled it ``"5m"``."""
+    raw = record.get("cache_ttl_sec")
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return float(raw)
+    return 3600.0 if record.get("cache_ttl") == "1h" else 300.0
+
+
+# Sessions written before the split carry a fused ``thinking_state`` (and a ``thinking``
+# wire mode); both spell the same two axes plus the display bit, so an old record is
+# decoded rather than dropped.
+def _thinking_axes(record: Mapping[str, object]) -> tuple[str, str, bool]:
+    """Read the three thinking axes, upgrading a pre-split record."""
+    if "thinking_budget" in record:
+        return (
+            str(record.get("thinking_budget") or "none"),
+            str(record.get("thinking_output") or "none"),
+            _json_bool(record.get("show_thinking"), default=True),
+        )
+    legacy = str(record.get("thinking_state") or "")
+    show = legacy.endswith("-show")
+    if legacy.startswith("adaptive-"):
+        return ("auto", "text", show)
+    if legacy.startswith("on-"):
+        return ("fixed", "text", show)
+    if legacy == "redact-hide":
+        return ("auto", "redacted", False)
+    if legacy == "off-hide":
+        return ("none", "none", False)
+    # No state: fall back to the wire mode the legacy ``thinking`` field
+    # carried, which is the only other place the budget was recorded.
+    match str(record.get("thinking") or ""):
+        case "adaptive":
+            return ("auto", "text", True)
+        case "enabled":
+            return ("fixed", "text", True)
+        case _:
+            return ("none", "none", True)
+
+
+def _persistent_state(raw: object) -> PersistentAgentState | None:
+    """Decode a persistent-agent state string."""
+    if raw in get_args(PersistentAgentState):
+        return cast(PersistentAgentState, raw)
+    return None
+
+
+# ``bool()`` on a wire value is not a decode, it is a truthiness test: any non-empty
+# string is True, so a writer that stringified a flag turned ``"false"`` into True. On
+# the legacy ``barrier`` field that read a non-barrier as a barrier and masked the
+# conversation ahead of it.
+def _json_bool(raw: object, *, default: bool = False) -> bool:
+    """Decode a persisted boolean; anything non-boolean takes ``default``."""
+    return raw if isinstance(raw, bool) else default
+
+
+def _optional_str(raw: object) -> str | None:
+    """Decode an optional string field."""
+    return raw if isinstance(raw, str) else None
+
+
+# ``isinstance(True, int)`` holds, so a persisted ``true`` decoded to ``True`` and
+# behaved as ``1`` downstream -- a one-round tool budget the operator never set.
+# ``_ref_from_json`` rejects the same trap.
+def _optional_int(raw: object) -> int | None:
+    """Decode an optional integer field; a bool is not a number."""
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) else None
+
+
+def _optional_float(raw: object) -> float | None:
+    """Decode an optional float field; a bool is not a number."""
+    if isinstance(raw, bool):
+        return None
+    return raw if isinstance(raw, (float, int)) else None
+
+
+def _persistent_agent_to_json(record: PersistentAgentRecord) -> dict[str, object]:
+    """Encode a persistent-subagent lifecycle record."""
+    return {
+        "kind": "persistent_agent",
+        "label": record.label,
+        "run_id": record.run_id,
+        "session_dir": record.session_dir,
+        "state": record.state,
+        "provider": record.provider,
+        "auth": record.auth,
+        "account": record.account,
+        "model_id": record.model_id,
+        "tools": list(record.tools),
+        "system": record.system,
+        "notify_on_asleep": record.notify_on_asleep,
+        "max_tool_call_rounds": record.max_tool_call_rounds,
+        "max_request_tokens": record.max_request_tokens,
+        "max_response_tokens": record.max_response_tokens,
+        "thinking_budget": record.thinking_budget,
+        "thinking_output": record.thinking_output,
+        "show_thinking": record.show_thinking,
+        "effort": record.effort,
+        "cache_ttl_sec": record.cache_ttl_sec,
+        "service_tier": record.service_tier,
+        "max_budget_usd": record.max_budget_usd,
+        "persistent_retry": record.persistent_retry,
+        "frozen_system": record.frozen_system,
+        "timestamp": time.time(),
+    }
+
+
+# Opens ``path`` with ``O_APPEND`` and writes the batch in one pass. The tape is append-
+# only, so an append never rewrites prior records: a crash can only truncate the new
+# tail, which the loader already skips as a malformed trailing line. Appending in place
+# (rather than rewrite-to-tmp + rename) keeps the cost O(bytes appended) instead of
+# O(file size), and preserves the file's inode so ``tail -f`` and inotify watchers keep
+# following it rather than being orphaned on the renamed-away inode.
+#
+# Atomicity: ``O_APPEND`` makes one ``os.write`` atomic against other appenders -- but
+# not a LOOP of them. A short write leaves half a JSON line on disk and releases the
+# file offset, so a second appender lands its records between the halves and the spliced
+# line never parses again. The whole batch therefore writes under
+# :func:`session_file_lock`, and the trailing-newline probe reads inside it too (its
+# answer is only valid while no one else can append).
+def _append_lines(path: Path, lines: Sequence[str]) -> None:
+    """Append ``lines`` to ``path`` in place, then ``fsync`` for durability."""
+    with session_file_lock(path):
+        # Close a torn tail before writing. A crash mid-append leaves a line
+        # with no newline, and appending straight after it concatenates the two
+        # into one unparseable record -- so the crash costs the record it
+        # interrupted AND the first one written afterwards.
+        prefix = b"\n" if _lacks_trailing_newline(path) else b""
+        payload = prefix + "".join(line + "\n" for line in lines).encode("utf-8")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            view = memoryview(payload)
+            while view:
+                view = view[os.write(fd, view) :]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def _lacks_trailing_newline(path: Path) -> bool:
+    """Whether ``path`` ends mid-line."""
+    try:
+        with path.open("rb") as handle:
+            if handle.seek(0, os.SEEK_END) == 0:
+                return False
+            _ = handle.seek(-1, os.SEEK_END)
+            return handle.read(1) != b"\n"
+    except OSError:
+        return False
+
+
+def _persisted_refs(path: Path) -> set[TapeRef]:
+    if not path.exists():
+        return set()
+    refs: set[TapeRef] = set()
+    try:
+        with path.open(encoding="utf-8") as f:
+            for raw_line in f:
+                record, valid = _decode_json_line(raw_line)
+                if not valid or not isinstance(record, dict):
+                    continue
+                ref = _ref_from_json(cast(Mapping[str, object], record).get("ref"))
+                if ref is not None:
+                    refs.add(ref)
+    except OSError:
+        # An existing-but-unreadable session file would otherwise return an
+        # empty set, making every tape record look new -- the next save then
+        # re-appends the whole tape, silently doubling the file. Warn loudly.
+        logger.warning(
+            "Could not read persisted refs from %s; persistence may duplicate"
+            " records on the next save.",
+            path,
+        )
+        return set()
+    return refs
+
+
+def _absorb_record_safely(
+    rec: Mapping[str, object],
+    *,
+    tape: list[TapeRecord],
+    barrier_candidates: list[tuple[ContextSplice, int]],
+    runtime_events: list[RuntimeEvent],
+    next_synthetic_ref: Callable[[], TapeRef],
+    line_num: int,
+) -> bool:
+    """Absorb one record, returning False when its shape is malformed."""
+    try:
+        _absorb_record(
+            rec,
+            tape=tape,
+            barrier_candidates=barrier_candidates,
+            runtime_events=runtime_events,
+            next_synthetic_ref=next_synthetic_ref,
+            line_num=line_num,
+        )
+    except (ValueError, TypeError, KeyError):
+        return False
+    return True
+
+
+# Split out of ``load_session`` so a record that fails to construct can be skipped by
+# its caller without a ``try`` around the whole read loop.
 def _absorb_record(
     rec: Mapping[str, object],
     *,
@@ -1810,21 +1864,7 @@ def _absorb_record(
     next_synthetic_ref: Callable[[], TapeRef],
     line_num: int,
 ) -> None:
-    """Fold one decoded session record into the loading tape.
-
-    Split out of ``load_session`` so a record that fails to construct can be
-    skipped by its caller without a ``try`` around the whole read loop.
-
-    Args:
-      rec: One decoded JSONL record.
-      tape: Tape being built; appended in place.
-      barrier_candidates: Splices paired with their line, for snapshot
-          invalidation; appended in place.
-      runtime_events: Durable runtime events; appended in place.
-      next_synthetic_ref: Mints a ref for a legacy record carrying none.
-      line_num: Line this record came from, recorded with barriers.
-
-    """
+    """Fold one decoded session record into the loading tape."""
     kind = rec.get("kind")
     if kind == "clear":
         tape.append(_legacy_clear_to_splice(next_synthetic_ref(), tape))
@@ -1860,41 +1900,34 @@ def _absorb_record(
         _apply_update_in_place(tape, rec)
 
 
+# Two writers can mint the same ordinal against one session file -- an external tool
+# computing ``max + 1`` from a snapshot while the agent is live, for instance. The
+# resolver refuses a duplicate, and it must: keyed by ref, it would otherwise render the
+# later record twice and drop the earlier. Refusing at LOAD would strand a conversation
+# whose only copy is this file, so the duplicate is relocated instead -- but a ref names
+# a POSITION, and a position carries a masking fate, so relocation has to preserve it.
+#
+# Two claimant kinds, handled oppositely because their causes are opposite:
+#
+# - A duplicate ``ContextSplice`` on a MASKED position is a re-appended EDIT. Applying
+# it twice is meaningless, and moving it would lift its ref out of the mask that killed
+# it -- reviving a deletion and re-hiding real messages. Drop it. - Every other
+# duplicate is real work by a second writer and must survive: a plain record is
+# conversation, and a splice on a live position is a second agent's coalesce, whose
+# payload is the user's message and exists nowhere else. Both move past the high-water
+# mark, and every splice appended AFTER them carries its mask onto the new ordinal.
+# Splices appended BEFORE do not: a barrier cannot have meant to mask a record that did
+# not exist yet, and applying it retroactively deletes a delivered message.
+#
+# Two live agents resumed from one directory are the source of the second case. Each
+# seeds an in-memory ordinal cursor at load and mints from it without consulting the
+# file, so both claim the same next position -- and since every user message coalesces
+# through a splice, the blanket drop discarded whichever agent lost the race.
+#
+# Tape order is file order (records are appended as the loop reads), so the index
+# comparison below IS "written before / written after".
 def _renumber_duplicate_refs(tape: list[TapeRecord]) -> list[TapeRecord]:
-    """Give every record its own ref, relocating later claimants of one.
-
-    Two writers can mint the same ordinal against one session file -- an
-    external tool computing ``max + 1`` from a snapshot while the agent is
-    live, for instance. The resolver refuses a duplicate, and it must: keyed by
-    ref, it would otherwise render the later record twice and drop the earlier.
-    Refusing at LOAD would strand a conversation whose only copy is this file,
-    so the duplicate is relocated instead -- but a ref names a POSITION, and a
-    position carries a masking fate, so relocation has to preserve it.
-
-    Two claimant kinds, handled oppositely because their causes are opposite:
-
-    - A duplicate ``ContextSplice`` on a MASKED position is a re-appended EDIT.
-      Applying it twice is meaningless, and moving it would lift its ref out of
-      the mask that killed it -- reviving a deletion and re-hiding real
-      messages. Drop it.
-    - Every other duplicate is real work by a second writer and must survive:
-      a plain record is conversation, and a splice on a live position is a
-      second agent's coalesce, whose payload is the user's message and exists
-      nowhere else. Both move past the high-water mark, and every splice
-      appended AFTER them carries its mask onto the new ordinal. Splices
-      appended BEFORE do not: a barrier cannot have meant to mask a record that
-      did not exist yet, and applying it retroactively deletes a delivered
-      message.
-
-    Two live agents resumed from one directory are the source of the second
-    case. Each seeds an in-memory ordinal cursor at load and mints from it
-    without consulting the file, so both claim the same next position -- and
-    since every user message coalesces through a splice, the blanket
-    drop discarded whichever agent lost the race.
-
-    Tape order is file order (records are appended as the loop reads), so the
-    index comparison below IS "written before / written after".
-    """
+    """Give every record its own ref, relocating later claimants of one."""
     seen: set[TapeRef] = set()
     kept: list[TapeRecord] = []
     moved: list[tuple[TapeRef, TapeRef, int]] = []
@@ -1965,16 +1998,13 @@ def _mask_for_moved(
     )
 
 
+# Ordinal first, NEVER ``session_id`` first: the resolver anchors each splice against
+# the records emitted before it, so grouping by session hoists one session's whole run
+# ahead of another's and an anchor not yet emitted falls into HEAD -- reversing the
+# conversation on a resumed or forked tape. A same-ordinal tie across sessions keeps the
+# order the file recorded, which is the order the events actually happened in.
 def _sort_tape_by_ordinal(tape: list[TapeRecord]) -> list[TapeRecord]:
-    """Return loaded tape records in ordinal order, append order breaking ties.
-
-    Ordinal first, NEVER ``session_id`` first: the resolver anchors each splice
-    against the records emitted before it, so grouping by session hoists one
-    session's whole run ahead of another's and an anchor not yet emitted falls
-    into HEAD -- reversing the conversation on a resumed or forked tape. A
-    same-ordinal tie across sessions keeps the order the file recorded, which
-    is the order the events actually happened in.
-    """
+    """Return loaded tape records in ordinal order, append order breaking ties."""
     return sorted(tape, key=lambda record: record.ref.ordinal)
 
 
@@ -1991,15 +2021,12 @@ def _has_later_barrier(
     )
 
 
+# Membership is by full ``TapeRef`` identity (session_id + ordinal), not raw ordinal: on
+# a multi-session tape, distinct sessions can share an ordinal, so an ordinal-only test
+# would judge a splice masking only ``A:0`` as also masking ``B:0`` and wrongly classify
+# a non-barrier as a barrier (discarding a valid ``ToolState`` snapshot).
 def _is_barrier_splice(splice: ContextSplice, tape: Sequence[TapeRecord]) -> bool:
-    """Return True when ``splice`` masks every earlier tape record.
-
-    Membership is by full ``TapeRef`` identity (session_id + ordinal), not raw
-    ordinal: on a multi-session tape, distinct sessions can share an ordinal, so
-    an ordinal-only test would judge a splice masking only ``A:0`` as also
-    masking ``B:0`` and wrongly classify a non-barrier as a barrier (discarding
-    a valid ``ToolState`` snapshot).
-    """
+    """Return True when ``splice`` masks every earlier tape record."""
     earlier = [record.ref for record in tape if record.ref.ordinal < splice.ref.ordinal]
     if not earlier or splice.insert_after is not None:
         return False
@@ -2034,16 +2061,13 @@ def _seed_id_counter(tape: Sequence[TapeRecord]) -> None:
         reset_id_counter(max_id + 1)
 
 
+# The patch carries an entry ``id`` and the changed fields (``content`` / ``is_error``).
+# Only ``ToolResult`` splices are accepted; silently dropped if no match exists.
 def _apply_update_in_place(
     tape: list[TapeRecord],
     rec: Mapping[str, object],
 ) -> None:
-    """Apply a legacy ``kind=update`` patch to the matching ``ReferrableTapeEvent``.
-
-    The patch carries an entry ``id`` and the changed fields
-    (``content`` / ``is_error``). Only ``ToolResult`` splices are
-    accepted; silently dropped if no match exists.
-    """
+    """Apply a legacy ``kind=update`` patch to the matching ``ReferrableTapeEvent``."""
     target_id = IntCodec.coerce(rec.get("id"), -1)
     if target_id < 0:
         return
@@ -2068,30 +2092,18 @@ def _apply_update_in_place(
             return
 
 
+# Walks the loaded tape's resolved entries through :func:`repair_dangling_tool_calls`,
+# which:
+#
+# * Synthesizes ``[interrupted]`` ``ToolResult`` entries for orphan ``tool_use`` calls
+# (mid-tool interruption). * Drops ``ToolResult`` entries whose ``call_id`` has no
+# preceding ``AssistantMessage.tool_calls`` match (orphan results).
+#
+# Both shapes are materialized as one barrier splice whose payload is
+# :func:`repair_dangling_tool_calls`'s output, so repairs apply equally to
+# ``ReferrableTapeEvent`` entries and ``ContextSplice`` payloads.
 def _repair_dangling_tape(tape: list[TapeRecord]) -> tuple[list[TapeRecord], bool]:
-    """Repair orphan ``tool_use`` / ``ToolResult`` records loaded from disk.
-
-    Walks the loaded tape's resolved entries through
-    :func:`repair_dangling_tool_calls`, which:
-
-    * Synthesizes ``[interrupted]`` ``ToolResult`` entries for orphan
-      ``tool_use`` calls (mid-tool interruption).
-    * Drops ``ToolResult`` entries whose ``call_id`` has no preceding
-      ``AssistantMessage.tool_calls`` match (orphan results).
-
-    Both shapes are materialized as one barrier splice whose payload is
-    :func:`repair_dangling_tool_calls`'s output, so repairs apply equally
-    to ``ReferrableTapeEvent`` entries and ``ContextSplice`` payloads.
-
-    Args:
-      tape: Loaded tape records.
-
-    Returns:
-      repaired_tape: Possibly with appended overrides/records that bring
-          the resolved view into provider-valid shape.
-      repaired: True when a repair barrier was appended.
-
-    """
+    """Repair orphan ``tool_use`` / ``ToolResult`` records loaded from disk."""
     if not tape:
         return tape, False
     resolved = resolve_context(tape)
@@ -2127,42 +2139,12 @@ def _repair_dangling_tape(tape: list[TapeRecord]) -> tuple[list[TapeRecord], boo
     ], True
 
 
-def repair_dangling_tool_calls(
-    history: list[ModelContextEvent],
-) -> list[ModelContextEvent]:
-    """Synthesize ``[interrupted]`` results for orphan ``tool_use`` blocks.
-
-    A session can be interrupted mid-tool (Ctrl+C during execution):
-    the assistant message with ``tool_use`` got persisted but its
-    matching ``ToolResult`` did not. Resuming such a session would send
-    the model history with orphan tool_use to the provider, which
-    rejects it (Anthropic 400 ``tool_use ids were found without
-    tool_result blocks``; Gemini has the analogous functionCall rule).
-
-    In-memory history never produces orphans: the runtime always pairs
-    tool_use with a result (``[detached]`` on halt, ``[cancelled]`` on
-    Kill, ``is_error=True`` on exception). So the corruption only ever
-    comes from disk loads, which is why the repair lives here -- next
-    to ``load_session``, the producer of the only history shape that
-    can have this defect.
-
-    A thin alias for the canonical :func:`pair_and_dedup_tool_calls` (one
-    shared pairing / cross-AM dedup / hollow-drop policy, so it cannot drift
-    from the compaction repair -- the H2/F1 disease). Repair-only, *not*
-    coalescing, so a valid multi-turn history loaded from disk is never
-    rewritten merely for adjacency. Idempotent.
-    """
-    return pair_and_dedup_tool_calls(history)
-
-
+# The copy holds the same prompts, tool output, and secrets as the original, so it takes
+# the same owner-only mode. ``write_bytes`` creates under the umask, which on a default
+# ``022`` host published a full transcript at ``0644`` -- the forensic artifact leaking
+# what the live file protects.
 def _preserve_corrupt_session(session_file: Path) -> None:
-    """Copy corrupt session bytes to a timestamped sibling for forensics.
-
-    The copy holds the same prompts, tool output, and secrets as the original,
-    so it takes the same owner-only mode. ``write_bytes`` creates under the
-    umask, which on a default ``022`` host published a full transcript at
-    ``0644`` -- the forensic artifact leaking what the live file protects.
-    """
+    """Copy corrupt session bytes to a timestamped sibling for forensics."""
     backup = session_file.with_name(f"{session_file.name}.corrupt-{time.time_ns()}")
     try:
         backup.write_bytes(session_file.read_bytes())
@@ -2172,39 +2154,9 @@ def _preserve_corrupt_session(session_file: Path) -> None:
     restrict_path(backup, 0o600)
 
 
-def restore_model(
-    meta: SessionMeta,
-) -> tuple[Model, ModelRecipe] | None:
-    """Rebuild model + spec from persisted ``provider``/``auth``/``model_id``.
-
-    Args:
-      meta: Session metadata.
-
-    Returns:
-      result: ``(model, spec)`` on success, ``None`` if construction
-          fails for any reason (the caller keeps its default model).
-
-    """
-    if not meta.provider or not meta.model_id:
-        return None
+def _decode_json_line(raw_line: str) -> tuple[object, bool]:
+    """Decode one JSONL line and report whether parsing succeeded."""
     try:
-        provider = providers_lib.build_provider(
-            meta.provider, meta.auth, account=meta.account or None
-        )
-        model = provider.model(meta.model_id)
-        spec = ModelRecipe(
-            provider=meta.provider,
-            auth=meta.auth,
-            model_id=model.tagged_model_id,
-            account=meta.account or None,
-        )
-        logger.info("Restored model %s/%s", meta.provider, meta.model_id)
-        return model, spec
-    except Exception:
-        logger.warning(
-            "Failed to restore model %s/%s; keeping default",
-            meta.provider,
-            meta.model_id,
-            exc_info=True,
-        )
-        return None
+        return json.loads(raw_line), True
+    except json.JSONDecodeError:
+        return None, False

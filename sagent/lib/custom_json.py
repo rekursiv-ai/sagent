@@ -203,7 +203,8 @@ def decode_graph(
 
     """
     return _GraphDecoder(
-        hooks or {}, capabilities=capabilities or DecodeCapabilities()
+        hooks or {},
+        capabilities=capabilities or DecodeCapabilities(),
     ).decode(tree)
 
 
@@ -293,11 +294,12 @@ class _GraphEncoder:
         """
         index = len(self._seen)
         self._seen[id(value)] = index
-        self._alive.append(value)  # keep alive so id() is not reused.
+        self._alive.append(value)  # Keep alive so id() is not reused.
         return index
 
     def hook_for(
-        self, value: object
+        self,
+        value: object,
     ) -> tuple[Callable[..., object], Callable[..., object]] | None:
         """Return the custom hook registered for ``value``.
 
@@ -482,7 +484,7 @@ class _GraphEncoder:
         if id(argument) in held or not isinstance(argument, (list, dict, set)):
             return argument
         return copy.copy(
-            cast(list[object] | dict[object, object] | set[object], argument)
+            cast(list[object] | dict[object, object] | set[object], argument),
         )
 
     @classmethod
@@ -493,7 +495,8 @@ class _GraphEncoder:
         # lookups below would inherit.
         owner: object = held
         if isinstance(held, (Sequence, AbstractSet)) and not isinstance(
-            held, (str, bytes)
+            held,
+            (str, bytes),
         ):
             yield from cast(Iterable[object], held)
         elif isinstance(held, Mapping):
@@ -539,7 +542,8 @@ class _GraphDecoder:
         return resolve(path)
 
     def hook_for(
-        self, target: type
+        self,
+        target: type,
     ) -> tuple[Callable[..., object], Callable[..., object]]:
         """Return the custom hook registered for ``target``.
 
@@ -649,25 +653,33 @@ _FIELD_STATE_TAG: Final = "$__custom_json_fields__"
 
 @overload
 def json_freeze(
-    obj: JSONScalar, *, allow_nan: bool = True
+    obj: JSONScalar,
+    *,
+    allow_nan: bool = True,
 ) -> JSONScalar: ...  # pragma: no cover
 
 
 @overload
 def json_freeze(
-    obj: Mapping[str, object], *, allow_nan: bool = True
+    obj: Mapping[str, object],
+    *,
+    allow_nan: bool = True,
 ) -> JSON: ...  # pragma: no cover
 
 
 @overload
 def json_freeze(
-    obj: Sequence[object], *, allow_nan: bool = True
+    obj: Sequence[object],
+    *,
+    allow_nan: bool = True,
 ) -> Sequence[JSONValue]: ...  # pragma: no cover
 
 
 @overload
 def json_freeze(
-    obj: object, *, allow_nan: bool = True
+    obj: object,
+    *,
+    allow_nan: bool = True,
 ) -> JSONValue: ...  # pragma: no cover
 
 
@@ -702,25 +714,33 @@ def json_freeze(obj: object, *, allow_nan: bool = True) -> JSONValue:
 
 @overload
 def json_unfreeze(
-    obj: Mapping[str, object], *, allow_nan: bool = True
+    obj: Mapping[str, object],
+    *,
+    allow_nan: bool = True,
 ) -> dict[str, MutableJSONValue]: ...  # pragma: no cover
 
 
 @overload
 def json_unfreeze(
-    obj: JSONScalar, *, allow_nan: bool = True
+    obj: JSONScalar,
+    *,
+    allow_nan: bool = True,
 ) -> JSONScalar: ...  # pragma: no cover
 
 
 @overload
 def json_unfreeze(
-    obj: Sequence[object], *, allow_nan: bool = True
+    obj: Sequence[object],
+    *,
+    allow_nan: bool = True,
 ) -> list[MutableJSONValue]: ...  # pragma: no cover
 
 
 @overload
 def json_unfreeze(
-    obj: object, *, allow_nan: bool = True
+    obj: object,
+    *,
+    allow_nan: bool = True,
 ) -> MutableJSONValue: ...  # pragma: no cover
 
 
@@ -887,7 +907,7 @@ def residual(
                 "order": list(kept),
                 "states": {},
                 "residual": kept,
-            }
+            },
         }
     represented = {
         key: "null" if state is None else "value"
@@ -916,12 +936,13 @@ def residual(
                 if key in checked and _respelled(checked[key])
             },
             "residual": spare,
-        }
+        },
     }
 
 
 def replay(
-    stored: Mapping[str, object], values: Mapping[str, object]
+    stored: Mapping[str, object],
+    values: Mapping[str, object],
 ) -> dict[str, object]:
     """Rebuild a provider object from a residual and current semantic values.
 
@@ -993,7 +1014,10 @@ class Codec(Protocol):
 
     @classmethod
     def coercion_failure[T](
-        cls, value: object, target: type[T], default: T | None
+        cls,
+        value: object,
+        target: type[T],
+        default: T | None,
     ) -> T:
         """Return a typed fallback or raise when coercion has none.
 
@@ -1203,14 +1227,15 @@ class DataclassCodec(Codec):
         """
         if not is_dataclass(obj) or isinstance(obj, type):
             raise TypeError(
-                f"DataclassCodec.to_json expects a dataclass instance, got {obj!r}"
+                f"DataclassCodec.to_json expects a dataclass instance, got {obj!r}",
             )
         hints = get_type_hints(type(obj))
         result: dict[str, JSONValue] = {TYPE_TAG: _annotation_id(type(obj))}
         for field in fields(obj):
             if field.init:
                 result[field.name] = _encode(
-                    getattr(obj, field.name), hints.get(field.name)
+                    getattr(obj, field.name),
+                    hints.get(field.name),
                 )
         return result
 
@@ -1232,14 +1257,14 @@ class DataclassCodec(Codec):
         if unknown:
             raise SchemaError(
                 f"{target.__name__}: unknown field(s) {unknown}; "
-                f"valid: {sorted(settable)}"
+                f"valid: {sorted(settable)}",
             )
         return target(
             **{
                 name: decode(hints.get(name), raw)
                 for name, raw in data.items()
                 if name != TYPE_TAG
-            }
+            },
         )
 
     @classmethod
@@ -1285,7 +1310,10 @@ class _ArrayCodec(Codec, Protocol):
 
     @classmethod
     def element_annotations(
-        cls, annotation: object, *, count: int
+        cls,
+        annotation: object,
+        *,
+        count: int,
     ) -> tuple[object, ...]:
         """Return one annotation for each positional element.
 
@@ -1348,11 +1376,11 @@ class _ArrayCodec(Codec, Protocol):
         arity = TupleCodec.fixed_arity(annotation)
         if arity is not None and arity != len(items):
             raise TypeError(
-                f"cannot decode {raw!r} as {annotation}: expected {arity} items"
+                f"cannot decode {raw!r} as {annotation}: expected {arity} items",
             )
         hints = cls.element_annotations(annotation, count=len(items))
         return materialize(
-            [decode(hint, item) for item, hint in zip(items, hints, strict=True)]
+            [decode(hint, item) for item, hint in zip(items, hints, strict=True)],
         )
 
 
@@ -1454,8 +1482,9 @@ class _ReduceCodec(_ImportCodec):
         if isinstance(reduced, str):
             return {
                 cast(str, _TypeCodec.tag): cls.verified(
-                    f"{type(value).__module__}.{reduced}", value
-                )
+                    f"{type(value).__module__}.{reduced}",
+                    value,
+                ),
             }
         if not isinstance(reduced, tuple):
             return _GRAPH_DECLINED
@@ -1770,7 +1799,10 @@ class _UnionCodec(Codec):
             return all(
                 cls.matches_annotation(key_annotation, key, wire=wire, exact=exact)
                 and cls.matches_annotation(
-                    value_annotation, item, wire=wire, exact=exact
+                    value_annotation,
+                    item,
+                    wire=wire,
+                    exact=exact,
                 )
                 for key, item in cast(Mapping[object, object], value).items()
             )
@@ -1944,7 +1976,7 @@ class _UnionCodec(Codec):
                 ]
                 if len(matches) != 1:
                     raise TypeError(
-                        f"unknown or ambiguous union tag {tag!r} for {annotation}"
+                        f"unknown or ambiguous union tag {tag!r} for {annotation}",
                     )
                 return decode(matches[0], source[_VALUE_TAG])
             # A dataclass member writes no envelope, because its own
@@ -2596,7 +2628,7 @@ class DatetimeCodec(Codec):
             named_zone = ZoneInfo(zone.removesuffix("]"))
         except (ValueError, ZoneInfoNotFoundError) as exc:
             raise TypeError(
-                f"cannot decode {raw!r} as datetime: invalid named zone"
+                f"cannot decode {raw!r} as datetime: invalid named zone",
             ) from exc
         return moment.astimezone(named_zone)
 
@@ -2633,7 +2665,9 @@ class ListCodec(_ArrayCodec):
     def encode(cls, value: object, annotation: object, *, encode: _Encode) -> JSONValue:
         """Encode list elements against their annotation."""
         return cls.encode_items(
-            cast(Iterable[object], value), annotation, encode=encode
+            cast(Iterable[object], value),
+            annotation,
+            encode=encode,
         )
 
     @classmethod
@@ -2641,13 +2675,19 @@ class ListCodec(_ArrayCodec):
     def decode(cls, raw: object, annotation: object, *, decode: _Decode) -> object:
         """Decode an array into a list."""
         return cls.decode_items(
-            raw, annotation, materialize=lambda items: items, decode=decode
+            raw,
+            annotation,
+            materialize=lambda items: items,
+            decode=decode,
         )
 
     @overload
     @classmethod
     def coerce(
-        cls, value: object, *, default: Sequence[object] | None = ()
+        cls,
+        value: object,
+        *,
+        default: Sequence[object] | None = (),
     ) -> list[object]: ...
 
     @overload
@@ -2713,7 +2753,7 @@ class ListCodec(_ArrayCodec):
             if not isinstance(item, Mapping):
                 continue
             normalized = dict(
-                MappingCodec.normalized_items(cast(Mapping[object, object], item))
+                MappingCodec.normalized_items(cast(Mapping[object, object], item)),
             )
             if normalized:
                 result.append(normalized)
@@ -2792,7 +2832,9 @@ class TupleCodec(_ArrayCodec):
     def encode(cls, value: object, annotation: object, *, encode: _Encode) -> JSONValue:
         """Encode tuple elements with a container tag."""
         payload = cls.encode_items(
-            cast(Iterable[object], value), annotation, encode=encode
+            cast(Iterable[object], value),
+            annotation,
+            encode=encode,
         )
         return {cast(str, cls.tag): payload}
 
@@ -2801,7 +2843,10 @@ class TupleCodec(_ArrayCodec):
     def decode(cls, raw: object, annotation: object, *, decode: _Decode) -> object:
         """Decode an array into a tuple."""
         return cls.decode_items(
-            raw, annotation, materialize=tuple[object, ...], decode=decode
+            raw,
+            annotation,
+            materialize=tuple[object, ...],
+            decode=decode,
         )
 
     @classmethod
@@ -2842,7 +2887,9 @@ class SetCodec(_ArrayCodec):
         """Encode set elements deterministically with a container tag."""
         payload = sorted(
             cls.encode_items(
-                cast(AbstractSet[object], value), annotation, encode=encode
+                cast(AbstractSet[object], value),
+                annotation,
+                encode=encode,
             ),
             key=repr,
         )
@@ -2902,7 +2949,10 @@ class FrozenSetCodec(SetCodec):
     def decode(cls, raw: object, annotation: object, *, decode: _Decode) -> object:
         """Decode an array into a frozenset."""
         return cls.decode_items(
-            raw, annotation, materialize=frozenset[object], decode=decode
+            raw,
+            annotation,
+            materialize=frozenset[object],
+            decode=decode,
         )
 
 
@@ -2911,7 +2961,8 @@ class MappingCodec(Codec):
 
     @classmethod
     def normalized_items(
-        cls, value: Mapping[object, object]
+        cls,
+        value: Mapping[object, object],
     ) -> list[tuple[str, object]]:
         """Normalize mapping keys to distinct strings or reject a collision.
 
@@ -3004,12 +3055,12 @@ class MappingCodec(Codec):
         for key, item in source.items():
             if not isinstance(key, str):
                 raise TypeError(
-                    f"cannot decode mapping key {key!r} as {key_annotation}"
+                    f"cannot decode mapping key {key!r} as {key_annotation}",
                 )
             decoded_key = decode(key_annotation, key)
             if not isinstance(decoded_key, str):
                 raise TypeError(
-                    f"cannot decode mapping key {key!r} as {key_annotation}"
+                    f"cannot decode mapping key {key!r} as {key_annotation}",
                 )
             result[decoded_key] = decode(value_annotation, item)
         return result
@@ -3148,7 +3199,7 @@ class DictCodec(MappingCodec):
         kept = {
             key: member
             for key, member in MappingCodec.normalized_items(
-                cast(Mapping[object, object], value)
+                cast(Mapping[object, object], value),
             )
             if isinstance(member, item)
             and not (item is int and isinstance(member, bool))
@@ -3314,7 +3365,7 @@ class _HookCodec(_ImportCodec):
             cast(str, cls.tag): [
                 cls.path(type(value)),
                 graph.encode(graph.hook_payload(value, hook[0])),
-            ]
+            ],
         }
 
     @classmethod
@@ -3358,7 +3409,7 @@ class _InlineCodec(_ImportCodec):
                         key: graph.encode(member) for key, member in kwargs.items()
                     },
                 },
-            ]
+            ],
         }
 
     @classmethod
@@ -3393,7 +3444,7 @@ class _GraphObjectCodec(_ImportCodec):
         del cls, graph
         target = type(value)
         return bool(
-            hasattr(target, "__dataclass_fields__") or "__slots__" in target.__dict__
+            hasattr(target, "__dataclass_fields__") or "__slots__" in target.__dict__,
         )
 
     @classmethod
@@ -3494,10 +3545,10 @@ class _MappingProxyCodec:
                 {cast(str, _TypeCodec.tag): "types.MappingProxyType"},
                 {
                     cast(str, TupleCodec.tag): [
-                        MappingCodec.encode_graph(dict(proxy), graph)
-                    ]
+                        MappingCodec.encode_graph(dict(proxy), graph),
+                    ],
                 },
-            ]
+            ],
         }
 
 
@@ -3660,7 +3711,8 @@ class _Callable(Protocol):
 
 
 def _unwrapped(
-    envelope: Mapping[str, object], each: _Decode | None = None
+    envelope: Mapping[str, object],
+    each: _Decode | None = None,
 ) -> object | None:
     """Return a tagged value's contents, or ``None`` when untagged."""
     if len(envelope) != 1:
@@ -3726,7 +3778,8 @@ def decode(annotation: object, raw: object) -> object:
 def _is_json_sequence(value: object) -> TypeGuard[Sequence[object]]:
     """Return whether ``value`` is a non-string JSON array shape."""
     return isinstance(value, Sequence) and not isinstance(
-        value, (str, bytes, bytearray)
+        value,
+        (str, bytes, bytearray),
     )
 
 
@@ -3786,7 +3839,7 @@ _GRAPH_NATIVE_CODECS: Final[Mapping[type, type[_GraphDecodingCodec]]] = (
             float: FloatCodec,
             str: StrCodec,
             list: ListCodec,
-        }
+        },
     )
 )
 
@@ -3880,12 +3933,12 @@ _BY_TAG: Final[Mapping[str, type[Codec]]] = MappingProxyType(
     {
         **{codec.tag: codec for codec in _RUNTIME_CODECS if codec.tag is not None},
         cast(str, SetCodec.tag): FrozenSetCodec,
-    }
+    },
 )
 
 
 _TAGS: Final[frozenset[str]] = frozenset(
-    {*_BY_TAG, TYPE_TAG, _UNION_TAG, _VALUE_TAG, _RAW_OBJECT_TAG}
+    {*_BY_TAG, TYPE_TAG, _UNION_TAG, _VALUE_TAG, _RAW_OBJECT_TAG},
 )
 
 
@@ -3911,7 +3964,7 @@ _BY_ANNOTATION: Final[Mapping[object, type[Codec]]] = MappingProxyType(
         dict: DictCodec,
         Mapping: MappingCodec,
         MutableMapping: MutableMappingCodec,
-    }
+    },
 )
 
 
@@ -3953,7 +4006,7 @@ def _validate_json_schema(schema: object, value: object, path: str) -> list[str]
     # object/array children when the value is one.
     if isinstance(value, Mapping):
         issues.extend(
-            _validate_json_object(schema_map, cast(Mapping[str, object], value), path)
+            _validate_json_object(schema_map, cast(Mapping[str, object], value), path),
         )
     if _is_json_sequence(value_obj):
         items = schema_map.get("items")
@@ -3972,7 +4025,9 @@ def _validate_json_schema(schema: object, value: object, path: str) -> list[str]
 # "string"]``, standard JSON Schema): the value matches when it satisfies any listed
 # type.
 def _validate_json_schema_type(
-    schema_type: object, value: object, path: str
+    schema_type: object,
+    value: object,
+    path: str,
 ) -> list[str]:
     """Return JSON Schema type validation issues."""
     if isinstance(schema_type, str):
@@ -4022,12 +4077,14 @@ def _validate_json_enum(enum: object, value: object, path: str) -> list[str]:
         (
             f"Parameter `{path or '<root>'}` must be one of "
             f"{_json_enum_values(enum_values)}."
-        )
+        ),
     ]
 
 
 def _validate_json_range(
-    schema: Mapping[str, object], value: object, path: str
+    schema: Mapping[str, object],
+    value: object,
+    path: str,
 ) -> list[str]:
     """Return numeric range validation issues."""
     if not isinstance(value, (int, float)) or isinstance(value, bool):
@@ -4080,7 +4137,7 @@ def _validate_json_object(
                     child_schema,
                     item,
                     f"{path}.{key}" if path else key,
-                )
+                ),
             )
         elif additional_properties is not None:
             issues.extend(
@@ -4088,7 +4145,7 @@ def _validate_json_object(
                     additional_properties,
                     item,
                     f"{path}.{key}" if path else key,
-                )
+                ),
             )
     return issues
 

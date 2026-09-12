@@ -79,7 +79,9 @@ def get_segmentation_image(
 ):  # -> ndarray[Any, Any]:
     ...
 def get_mask_area(
-    seg_img: np.ndarray, target_size: tuple[int, int], n_classes: int
+    seg_img: np.ndarray,
+    target_size: tuple[int, int],
+    n_classes: int,
 ) -> np.ndarray: ...
 def score_labels_from_class_probabilities(
     logits: np.ndarray,
@@ -97,11 +99,19 @@ def binary_mask_to_rle(mask):  # -> list[Any]:
 def convert_segmentation_to_rle(segmentation):  # -> list[Any]:
     ...
 def remove_low_and_no_objects(
-    masks, scores, labels, object_mask_threshold, num_labels
+    masks,
+    scores,
+    labels,
+    object_mask_threshold,
+    num_labels,
 ):  # -> tuple[Any, Any, Any]:
     ...
 def check_segment_validity(
-    mask_labels, mask_probs, k, mask_threshold=..., overlap_mask_area_threshold=...
+    mask_labels,
+    mask_probs,
+    k,
+    mask_threshold=...,
+    overlap_mask_area_threshold=...,
 ):  # -> tuple[Any | Literal[False], Any]:
     ...
 def compute_segments(
@@ -136,7 +146,9 @@ class YolosImageProcessor(BaseImageProcessor):
     ) -> None: ...
     @classmethod
     def from_dict(
-        cls, image_processor_dict: dict[str, Any], **kwargs
+        cls,
+        image_processor_dict: dict[str, Any],
+        **kwargs,
     ):  # -> tuple[Self, dict[str, Any]] | Self:
         ...
     def prepare_annotation(
@@ -158,7 +170,11 @@ class YolosImageProcessor(BaseImageProcessor):
         **kwargs,
     ) -> np.ndarray: ...
     def resize_annotation(
-        self, annotation, orig_size, size, resample: PILImageResampling = ...
+        self,
+        annotation,
+        orig_size,
+        size,
+        resample: PILImageResampling = ...,
     ) -> dict: ...
     def rescale(
         self,
@@ -168,7 +184,9 @@ class YolosImageProcessor(BaseImageProcessor):
         input_data_format: str | ChannelDimension | None = ...,
     ) -> np.ndarray: ...
     def normalize_annotation(
-        self, annotation: dict, image_size: tuple[int, int]
+        self,
+        annotation: dict,
+        image_size: tuple[int, int],
     ) -> dict: ...
     def pad(
         self,

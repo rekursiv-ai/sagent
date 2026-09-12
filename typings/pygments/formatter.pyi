@@ -27,11 +27,19 @@ class Formatter(Generic[_T]):
     ) -> None: ...
     @overload
     def __init__(
-        self: Formatter[bytes], *, encoding: str, outencoding: None = ..., **options
+        self: Formatter[bytes],
+        *,
+        encoding: str,
+        outencoding: None = ...,
+        **options,
     ) -> None: ...
     @overload
     def __init__(
-        self: Formatter[bytes], *, encoding: None = ..., outencoding: str, **options
+        self: Formatter[bytes],
+        *,
+        encoding: None = ...,
+        outencoding: str,
+        **options,
     ) -> None: ...
     def get_style_defs(self, arg: str = ...): ...
     def format(self, tokensource, outfile): ...

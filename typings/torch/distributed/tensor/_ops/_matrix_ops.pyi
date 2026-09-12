@@ -18,7 +18,8 @@ def baddmm_strategy(op_schema: OpSchema) -> OpStrategy: ...
 @register_op_strategy(aten._scaled_mm.default)
 def scaled_mm_strategy(op_schema: OpSchema) -> OpStrategy: ...
 @register_op_strategy(
-    aten._scaled_dot_product_flash_attention.default, schema_info=RuntimeSchemaInfo(5)
+    aten._scaled_dot_product_flash_attention.default,
+    schema_info=RuntimeSchemaInfo(5),
 )
 def scaled_dot_product_flash_attention_strategy(op_schema: OpSchema) -> OpStrategy: ...
 @register_op_strategy(aten._scaled_dot_product_flash_attention_backward.default)
@@ -39,7 +40,8 @@ def scaled_dot_product_efficient_attention_backward_strategy(
     op_schema: OpSchema,
 ) -> OpStrategy: ...
 @register_op_strategy(
-    aten._scaled_dot_product_cudnn_attention.default, schema_info=RuntimeSchemaInfo(4)
+    aten._scaled_dot_product_cudnn_attention.default,
+    schema_info=RuntimeSchemaInfo(4),
 )
 def scaled_dot_product_cudnn_attention_strategy(op_schema: OpSchema) -> OpStrategy: ...
 @register_op_strategy(aten._scaled_dot_product_cudnn_attention_backward.default)

@@ -25,7 +25,9 @@ from ...utils.deprecation import deprecate_kwarg
 logger = ...
 
 def create_position_ids_from_input_ids(
-    input_ids, padding_idx, past_key_values_length=...
+    input_ids,
+    padding_idx,
+    past_key_values_length=...,
 ): ...
 
 @dataclass
@@ -56,10 +58,15 @@ class Kosmos2ForConditionalGenerationModelOutput(ModelOutput):
 class Kosmos2VisionEmbeddings(nn.Module):
     def __init__(self, config: Kosmos2VisionConfig) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
-        self, pixel_values: torch.FloatTensor, interpolate_pos_encoding=...
+        self,
+        pixel_values: torch.FloatTensor,
+        interpolate_pos_encoding=...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -85,7 +92,9 @@ class Kosmos2VisionAttention(nn.Module):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class Kosmos2VisionMLP(nn.Module):
@@ -128,20 +137,30 @@ class Kosmos2VisionTransformer(nn.Module):
         return_dict: bool | None = ...,
     ) -> tuple | BaseModelOutputWithPooling: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithPooling: ...
 
 class Kosmos2TextSinusoidalPositionalEmbedding(nn.Module):
     def __init__(
-        self, num_positions: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_positions: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ) -> None: ...
     def make_weights(
-        self, num_embeddings: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ):  # -> None:
         ...
     @staticmethod
     def get_embedding(
-        num_embeddings: int, embedding_dim: int, padding_idx: int | None = ...
+        num_embeddings: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ):  # -> Tensor:
         ...
     @torch.no_grad()
@@ -154,7 +173,9 @@ class Kosmos2TextSinusoidalPositionalEmbedding(nn.Module):
     ):  # -> Tensor | Any:
         ...
     def create_position_ids_from_inputs_embeds(
-        self, inputs_embeds, past_key_values_length
+        self,
+        inputs_embeds,
+        past_key_values_length,
     ): ...
 
 class KosmosTextAttention(nn.Module):
@@ -204,7 +225,8 @@ class Kosmos2TextBlock(GradientCheckpointingLayer):
         cache_position: torch.Tensor | None = ...,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class Kosmos2TextTransformer(nn.Module):
@@ -240,7 +262,9 @@ class Kosmos2TextTransformer(nn.Module):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
 
 @auto_docstring

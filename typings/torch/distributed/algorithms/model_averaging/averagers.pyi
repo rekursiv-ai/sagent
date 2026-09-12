@@ -13,7 +13,10 @@ class ModelAverager(ABC):
 
 class PeriodicModelAverager(ModelAverager):
     def __init__(
-        self, period, warmup_steps=..., process_group: dist.ProcessGroup | None = ...
+        self,
+        period,
+        warmup_steps=...,
+        process_group: dist.ProcessGroup | None = ...,
     ) -> None: ...
     def average_parameters(
         self,

@@ -43,7 +43,9 @@ class AriaCrossAttention(nn.Module):
 class AriaProjector(nn.Module):
     def __init__(self, config: AriaConfig) -> None: ...
     def forward(
-        self, key_value_states: torch.Tensor, attn_mask: torch.Tensor | None = ...
+        self,
+        key_value_states: torch.Tensor,
+        attn_mask: torch.Tensor | None = ...,
     ):  # -> Any:
         ...
 
@@ -53,7 +55,9 @@ class AriaSharedExpertsMLP(nn.Module):
         ...
 
 def sequential_experts_gemm(
-    token_states, expert_weights, tokens_per_expert
+    token_states,
+    expert_weights,
+    tokens_per_expert,
 ):  # -> Tensor:
     ...
 
@@ -75,7 +79,12 @@ class AriaTextMoELayer(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...

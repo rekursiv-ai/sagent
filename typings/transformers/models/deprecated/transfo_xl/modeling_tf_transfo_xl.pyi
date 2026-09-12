@@ -62,7 +62,14 @@ class TFRelPartialLearnableMultiHeadAttn(keras.layers.Layer):
     def build(self, input_shape):  # -> None:
         ...
     def call(
-        self, w, r, attn_mask, mems, head_mask, output_attentions, training=...
+        self,
+        w,
+        r,
+        attn_mask,
+        mems,
+        head_mask,
+        output_attentions,
+        training=...,
     ):  # -> list[Any]:
         ...
 
@@ -232,11 +239,15 @@ class TFTransfoXLLMHeadModel(TFTransfoXLPreTrainedModel):
         training: bool = ...,
     ) -> TFTransfoXLLMHeadModelOutput | tuple[tf.Tensor]: ...
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=..., **model_kwargs
+        self,
+        input_ids,
+        past_key_values=...,
+        **model_kwargs,
     ):  # -> dict[Any, Any]:
         ...
     def tf_to_pt_weight_rename(
-        self, tf_weight
+        self,
+        tf_weight,
     ):  # -> tuple[Any, Any] | tuple[Any] | None:
         ...
 
@@ -245,7 +256,8 @@ class TFTransfoXLLMHeadModel(TFTransfoXLPreTrainedModel):
     TRANSFO_XL_START_DOCSTRING,
 )
 class TFTransfoXLForSequenceClassification(
-    TFTransfoXLPreTrainedModel, TFSequenceClassificationLoss
+    TFTransfoXLPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     def get_output_embeddings(self):  # -> TFAdaptiveEmbedding:

@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 else:
     from wrapt import lazy_import
 
-    bashlex = lazy_import("bashlex")  # 88ms cold
+    bashlex = lazy_import("bashlex")  # 88ms cold.
     Node = object
 
 __all__ = [
@@ -182,54 +182,6 @@ def walk_commands(trees: Sequence[Node]) -> tuple[Invocation, ...]:
     return tuple(out)
 
 
-def _walk_node(
-    node: Node,
-    *,
-    cwd: str,
-    out: list[Invocation],
-    captured: bool = False,
-    sink: Invocation | None = None,
-) -> None:
-    """Recurse one AST node, appending every simple command found.
-
-    ``captured`` carries an ENCLOSING redirect down to the commands it
-    governs. bashlex hangs a compound's redirects off its own
-    ``redirects`` attribute, so ``(grep p f) > out`` gave the inner
-    command ``captures_stdout=False`` and every matcher nudged a fragment
-    that writes a file.
-    """
-    kind: str = node.kind
-    captured = captured or _redirects_stdout(node)
-    if kind == "command":
-        _walk_command(node, cwd=cwd, out=out, captured=captured, sink=sink)
-        return
-    if kind == "pipeline":
-        _walk_pipeline(node, cwd=cwd, out=out, captured=captured)
-        return
-    if kind == "list":
-        _walk_list(node, cwd=cwd, out=out, captured=captured)
-        return
-    # ``compound`` (loops, conditionals) and everything else: descend
-    # through whatever child collections the node carries. A loop body
-    # nudges even when its argument is a loop variable -- a command
-    # reaching for ``cat $f`` wants the tool regardless of whether the
-    # filename is knowable here.
-    for child in _child_nodes(node):
-        _walk_node(child, cwd=cwd, out=out, captured=captured, sink=sink)
-
-
-def _redirects_stdout(node: Node) -> bool:
-    """Whether a compound node carries a redirect that diverts fd 1."""
-    redirects: object = getattr(node, "redirects", None)
-    if not isinstance(redirects, list):
-        return False
-    return any(
-        cast(str, getattr(r, "type", "")) in (">", ">>", ">&", ">|")
-        and cast(int | None, getattr(r, "input", None)) in (None, 1)
-        for r in cast(list[object], redirects)
-    )
-
-
 # A ``cd`` whose destination the text does not reveal (``cd``, ``cd -``).
 # Distinct from ``""`` (no ``cd`` at all): a worked example must be
 # suppressed rather than resolved against the wrong directory.
@@ -239,157 +191,6 @@ _UNKNOWN_CWD: Final = "\0unknown-cwd"
 # subshell, a group, a loop. No tool claims this name, and no sink rule
 # treats it as shaping, so it correctly blocks the stages it separates.
 _OPAQUE_STAGE: Final = "\0compound"
-
-
-def _walk_list(
-    node: Node, *, cwd: str, out: list[Invocation], captured: bool = False
-) -> None:
-    """Walk an ``A && B ; C`` list, threading any ``cd`` through it.
-
-    A ``cd`` binds to everything after it in the same list, so
-    ``cd X && ls && cat f`` reports BOTH commands under ``X`` -- the
-    two-command-only unwrap missed the chain entirely.
-
-    Three ways the shell's own answer differs from "the last ``cd`` wins":
-
-    - ``cd`` COMPOSES. ``cd /srv && cd sub`` leaves the shell in
-      ``/srv/sub``, so the second is resolved against the first.
-    - ``||`` runs its tail only when the left side FAILED, so the ``cd``
-      immediately before it did not happen -- but any EARLIER one did.
-      Rewinding all the way to the incoming cwd discarded those.
-    - ``&`` backgrounds the ``cd`` in a subshell, so the parent's
-      directory is untouched and the prior one still stands.
-    """
-    inner_cwd = cwd
-    # The cwd in force before the most recent ``cd``, which is where an
-    # ``||`` tail runs: that ``cd`` is exactly the command that failed.
-    before_last_cd = cwd
-    for part in node.parts:
-        if part.kind == "operator":
-            if part.op == "||":
-                inner_cwd = before_last_cd
-            elif part.op == "&":
-                # The preceding command ran in a subshell; if it was a
-                # ``cd``, the parent never moved.
-                inner_cwd = before_last_cd
-            continue
-        if part.kind == "command":
-            cmd = _parse_command(part)
-            if cmd.exe == "cd" and not cmd.captures_stdout:
-                before_last_cd = inner_cwd
-                inner_cwd = _cd_target(inner_cwd, cmd.args)
-                continue
-        before_last_cd = inner_cwd
-        _walk_node(part, cwd=inner_cwd, out=out, captured=captured)
-
-
-def _cd_target(cwd: str, args: tuple[str, ...]) -> str:
-    """Where a ``cd`` leaves the shell, or ``_UNKNOWN_CWD`` when unknowable.
-
-    Only a literal path is knowable here. Bare ``cd`` goes to ``$HOME``
-    and ``cd -`` to ``$OLDPWD``; both were previously read as "no cd" or,
-    worse, as a directory literally named ``-`` -- which rendered
-    ``file_path='-/f'``. Option flags (``-P``, ``-L``, ``--``) carry no
-    destination and must not be mistaken for one.
-    """
-    paths = [a for a in args if not a.startswith("-") or a == "-"]
-    if not paths or paths[0] == "-":
-        # ``$HOME`` / ``$OLDPWD``: real, but not knowable from the text.
-        return _UNKNOWN_CWD
-    return resolve_cwd_path(cwd, paths[0])
-
-
-def _walk_pipeline(
-    node: Node, *, cwd: str, out: list[Invocation], captured: bool = False
-) -> None:
-    """Walk ``A | B | C``, linking each stage to its true neighbours.
-
-    Built back-to-front so each stage can hold a reference to the one it
-    feeds; the reverse links are then stitched in a second pass. Names
-    would not do: two pipelines on one line can both end in ``wc``, and
-    a matcher that searches for one by name reads the wrong pipeline.
-    """
-    stages = [p for p in node.parts if p.kind != "pipe"]
-    linked: list[Invocation | None] = [None] * len(stages)
-    for i in reversed(range(len(stages))):
-        if stages[i].kind != "command":
-            # A compound stage -- ``(sort)``, a loop -- is still a stage.
-            # Leaving it unlinked let its neighbours join across it as if
-            # it were absent, so ``grep p f | (sort)`` looked unpiped and
-            # nudged although ``sort`` transforms the output.
-            linked[i] = Invocation(
-                exe=_OPAQUE_STAGE,
-                args=(),
-                cwd=cwd,
-                piped_into=linked[i + 1] if i + 1 < len(stages) else None,
-            )
-            continue
-        cmd = _parse_command(stages[i])
-        if not cmd.exe:
-            continue
-        # Only the LAST stage's stdout reaches an enclosing redirect; the
-        # others feed the next pipe regardless.
-        linked[i] = Invocation(
-            exe=cmd.exe,
-            args=cmd.args,
-            cwd=cwd,
-            piped_into=linked[i + 1] if i + 1 < len(stages) else None,
-            env_prefix=cmd.env_prefix,
-            captures_stdout=cmd.captures_stdout or (captured and i == len(stages) - 1),
-        )
-    # ``Invocation`` is frozen, so the upstream link is stitched by
-    # rebuilding each record once its predecessor is known.
-    for i, inv in enumerate(linked):
-        if inv is None:
-            continue
-        prev = next((linked[j] for j in reversed(range(i)) if linked[j]), None)
-        out.append(dataclasses.replace(inv, piped_from=prev) if prev else inv)
-    for i, stage in enumerate(stages):
-        if stage.kind == "command":
-            _walk_substitutions(stage, cwd=cwd, out=out)
-            continue
-        # The commands INSIDE a compound stage feed whatever the stage
-        # feeds, so they must carry that sink too: ``(grep p f) | sort``
-        # is a search whose output is transformed, not a bare search.
-        stage_inv = linked[i]
-        _walk_node(
-            stage,
-            cwd=cwd,
-            out=out,
-            captured=captured,
-            sink=stage_inv.piped_into if stage_inv is not None else None,
-        )
-
-
-def _walk_command(
-    node: Node,
-    *,
-    cwd: str,
-    out: list[Invocation],
-    captured: bool = False,
-    sink: Invocation | None = None,
-) -> None:
-    """Record one un-piped simple command, then its substitutions."""
-    cmd = _parse_command(node)
-    if cmd.exe:
-        out.append(
-            Invocation(
-                exe=cmd.exe,
-                args=cmd.args,
-                cwd=cwd,
-                piped_into=sink,
-                env_prefix=cmd.env_prefix,
-                captures_stdout=cmd.captures_stdout or captured,
-            )
-        )
-    _walk_substitutions(node, cwd=cwd, out=out)
-
-
-def _walk_substitutions(node: Node, *, cwd: str, out: list[Invocation]) -> None:
-    """Descend into ``$(...)`` and friends nested in a command's words."""
-    for child in _child_nodes(node):
-        if child.kind in ("word", "commandsubstitution", "command", "list", "pipeline"):
-            _walk_node(child, cwd=cwd, out=out)
 
 
 # Sinks that only truncate or paginate what the source already produced.
@@ -404,68 +205,6 @@ _SEARCH_EXES: frozenset[str] = frozenset({"grep", "rg"})
 # by one of these still has a file operand -- one hop upstream -- so it
 # remains a single tool call.
 _FILE_PRODUCERS: frozenset[str] = frozenset({"cat", "head", "tail", "sed"})
-
-
-def _value_flags_for(exe: str) -> frozenset[str]:
-    """Return flags of ``exe`` whose value is the next word (or the token tail).
-
-    One definition, two readers: :func:`operands` skips the value so it
-    is not counted as a path, and :func:`_denied` stops its letter scan
-    there so an attached value is not read as more flags. A copy per
-    caller is how the two ``find`` denylists drifted apart.
-    """
-    # ``-n`` is the counterexample in both directions: it takes a value
-    # for head/tail and takes NONE for ``cat`` (number lines), ``sed``
-    # (quiet), or ``grep`` (show line numbers), where consuming the next
-    # word swallows the filename.
-    vocabulary: dict[str, frozenset[str]] = {
-        "grep": frozenset(
-            {"-A", "-B", "-C", "-m", "-e", "-f", "-d", "-D", "--label", "--color"}
-        ),
-        "rg": frozenset({"-A", "-B", "-C", "-m", "-e", "-f", "-g", "-t", "--color"}),
-        "head": frozenset({"-n", "-c", "--lines", "--bytes"}),
-        "tail": frozenset({"-n", "-c", "--lines", "--bytes"}),
-        "sed": frozenset({"-e", "-f", "--expression", "--file"}),
-        "ls": frozenset({"-I", "-w", "-T", "--ignore", "--block-size", "--format"}),
-        # ``find``'s operands are its ROOTS. Its predicates are whole
-        # words rather than clustered letters, and most take a value, so
-        # without them ``find /src -name '*.py'`` reports the glob as a
-        # second root.
-        "find": frozenset(
-            {
-                "-name",
-                "-iname",
-                "-path",
-                "-ipath",
-                "-regex",
-                "-iregex",
-                "-type",
-                "-maxdepth",
-                "-mindepth",
-                "-newer",
-                "-mtime",
-                "-mmin",
-                "-size",
-                "-perm",
-                "-user",
-                "-group",
-                "-anewer",
-                "-cnewer",
-            }
-        ),
-    }
-    return vocabulary.get(exe, frozenset[str]())
-
-
-def _value_flag_letters(exe: str) -> frozenset[str]:
-    """Short-flag letters of ``exe`` that consume the rest of the token.
-
-    Shares :func:`operands`' vocabulary rather than repeating it: a
-    second copy is exactly how the two ``find`` denylists drifted apart.
-    """
-    return frozenset(
-        f[1] for f in _value_flags_for(exe) if len(f) == 2 and not f.startswith("--")
-    )
 
 
 def operands(exe: str, args: Sequence[str]) -> tuple[str, ...]:
@@ -570,43 +309,6 @@ def render_command(inv: Invocation) -> str:
     return " ".join([inv.exe, *(shlex.quote(a) for a in inv.args)])
 
 
-def _denied(arg: str, deny: frozenset[str], *, exe: str = "") -> bool:
-    """Whether ``arg`` carries a denied flag in any of its spellings.
-
-    Short flags BUNDLE and may carry an attached value, so ``-c``, ``-c5``
-    and ``-fn`` all mean ``-c``/``-f`` to the shell while sharing no token
-    with each other. Whole-token equality saw only the first, and
-    ``head -c5`` -- a byte window -- was advertised as a line read.
-
-    A bare count (``head -20``) is not a cluster: its digits are the
-    argument. Testing that first keeps the most common head/tail spelling
-    out of the letter scan.
-
-    A value-taking flag ENDS the cluster: everything after it is that
-    flag's argument, not more letters. ``grep -evalue`` is ``-e`` with
-    the pattern ``value``, and scanning the whole tail found a ``-v``
-    that is not there -- silently suppressing the nudge for any pattern
-    containing a denied letter.
-    """
-    if arg in deny or arg.partition("=")[0] in deny:
-        return True
-    if not arg.startswith("-") or arg.startswith("--") or arg[1:].isdigit():
-        return False
-    value_flags = _value_flag_letters(exe)
-    for c in arg[1:]:
-        if c.isdigit():
-            continue
-        # Deny FIRST: ``head -c5`` is a denied byte window whose own
-        # letter also takes a value, so stopping on the value test would
-        # wave through the very flag being denied.
-        if f"-{c}" in deny:
-            return True
-        if c in value_flags:
-            # This letter consumes the REST of the token as its value.
-            return False
-    return False
-
-
 def bounding_sink(inv: Invocation) -> Invocation | None:
     """Return the ``head``/``tail`` that bounds ``inv``, anywhere downstream.
 
@@ -672,70 +374,6 @@ def parse_line_count(args: tuple[str, ...]) -> int | None:
     if count is None or count < 1:
         return None
     return count
-
-
-def _sink_blocks(source: Invocation, sink: Invocation) -> bool:
-    """Whether ``sink`` stops ``source`` from being one tool call.
-
-    Asked of every stage in ``downstream()``, not just the adjacent one:
-    checking the immediate sink alone made ``a | head | grep -v`` and
-    ``a | grep -v | head`` -- the same pipeline -- disagree.
-    """
-    if sink.captures_stdout:
-        return True
-    if sink.exe in _SHAPING_SINKS:
-        return False
-    # ``grep p f | wc -l`` is the search's own ``output_mode="count"``;
-    # other ``wc`` flags count bytes or words, which it cannot express.
-    return not (
-        sink.exe == "wc" and sink.args == ("-l",) and source.exe in _SEARCH_EXES
-    )
-
-
-def _stdin_operand(inv: Invocation) -> bool:
-    """Whether a stdin-fed ``inv`` still names an operand one hop up.
-
-    A search reading a pipe has no path of its own, and every dedicated
-    tool takes a path. ``git log | grep fix`` is therefore not a Grep
-    call at all, while ``cat f.py | grep fix`` is -- the operand is on
-    the producer.
-    """
-    source = inv.piped_from
-    assert source is not None
-    return (
-        inv.exe in _SEARCH_EXES
-        # A search still needs its own pattern; only the PATH comes from
-        # upstream.
-        and bool(operands(inv.exe, inv.args))
-        and source.exe in _FILE_PRODUCERS
-        # The producer's own vocabulary, not the search's: ``head -n 20``
-        # spends its ``20`` on the flag, so it is not the path either.
-        and bool(operands(source.exe, source.args))
-        and not (source.exe == "sed" and sed_mutates(source.args))
-    )
-
-
-def _child_nodes(node: Node) -> list[Node]:
-    """Return every child AST node hanging off ``node``.
-
-    bashlex hangs children off several attributes (``parts``, ``list``,
-    ``command``) depending on the construct, so the walk asks for all of
-    them rather than special-casing each compound type.
-    """
-    out: list[Node] = []
-    for attr in ("parts", "list", "command"):
-        value: object = getattr(node, attr, None)
-        if value is None:
-            continue
-        items: list[object] = (
-            cast(list[object], value) if isinstance(value, list) else [value]
-        )
-        out.extend(
-            cast(Node, child)
-            for child in items
-            if child is not node and hasattr(child, "kind")
-        )
-    return out
 
 
 def parse_bash(command: str) -> tuple[Node, ...] | None:
@@ -874,7 +512,7 @@ def is_read_only(trees: Sequence[Node]) -> bool:
 
 _READ_ONLY_BASE: frozenset[str] = frozenset(
     {
-        # BASH_SEARCH_COMMANDS
+        # BASH_SEARCH_COMMANDS.
         "find",
         "grep",
         "rg",
@@ -883,7 +521,7 @@ _READ_ONLY_BASE: frozenset[str] = frozenset(
         "locate",
         "which",
         "whereis",
-        # BASH_READ_COMMANDS
+        # BASH_READ_COMMANDS.
         "cat",
         "head",
         "tail",
@@ -899,17 +537,17 @@ _READ_ONLY_BASE: frozenset[str] = frozenset(
         "sort",
         "uniq",
         "tr",
-        # BASH_LIST_COMMANDS
+        # BASH_LIST_COMMANDS.
         "ls",
         "tree",
         "du",
-        # BASH_SEMANTIC_NEUTRAL_COMMANDS
+        # BASH_SEMANTIC_NEUTRAL_COMMANDS.
         "echo",
         "printf",
         "true",
         "false",
         ":",
-    }
+    },
 )
 
 _READ_ONLY_EXTRA: frozenset[str] = frozenset(
@@ -958,7 +596,7 @@ _READ_ONLY_EXTRA: frozenset[str] = frozenset(
         "comm",
         "diff",
         "cmp",
-        # sed - read-only iff no in-place flag (see sed_mutates).
+        # `sed` is read-only only without an in-place flag (see `sed_mutates`).
         "sed",
         # Hashing.
         "md5sum",
@@ -982,7 +620,7 @@ _READ_ONLY_EXTRA: frozenset[str] = frozenset(
         # invocation, with no flag to gate. "Always mutates" is not a shape a
         # flag denylist can express, so they are not read-only at all.
         "ty",
-    }
+    },
 )
 
 _READ_ONLY: frozenset[str] = _READ_ONLY_BASE | _READ_ONLY_EXTRA
@@ -1002,7 +640,7 @@ FIND_DENY_FLAGS: frozenset[str] = frozenset(
         "-fprint0",
         "-fprintf",
         "-fls",
-    }
+    },
 )
 
 # Only ``ty`` remains read-only (see _READ_ONLY_EXTRA); the others write
@@ -1044,7 +682,7 @@ _AWK_ESCAPE: Final = re.compile(r"\b(system|close|fflush)\s*\(|>|\|")
 # all and must fail closed. Same shape as mypy/basedpyright above:
 # "unanalysable" is not something a flag denylist can wave through.
 _PROGRAM_FILE_FLAGS: frozenset[str] = frozenset(
-    {"-f", "--file", "--expression-file", "--source-file"}
+    {"-f", "--file", "--expression-file", "--source-file"},
 )
 
 # Utilities whose behaviour is a PROGRAM, analysed above as text. These
@@ -1086,17 +724,17 @@ _SUBCOMMAND: dict[str, tuple[tuple[str, ...], ...]] = {
             "diff",
             "show",
             "blame",
-            "branch",  # refined by _subcommand_extra_safe (no positionals)
+            "branch",  # Refined by _subcommand_extra_safe (no positionals)
             "rev-parse",
             "rev-list",
             "ls-files",
             "ls-tree",
             "ls-remote",
             "describe",
-            "reflog",  # refined (deny expire/delete/exists)
+            "reflog",  # Refined (deny expire/delete/exists)
             "shortlog",
             "cat-file",
-            "tag",  # refined (no positionals)
+            "tag",  # Refined (no positionals)
             "for-each-ref",
             "name-rev",
             "merge-base",
@@ -1175,7 +813,7 @@ _SUBCOMMAND: dict[str, tuple[tuple[str, ...], ...]] = {
             "view",
             "show",
             "outdated",
-            "audit",  # refined (deny next "fix")
+            "audit",  # Refined (deny next "fix")
             "search",
             "doctor",
             "help",
@@ -1186,7 +824,7 @@ _SUBCOMMAND: dict[str, tuple[tuple[str, ...], ...]] = {
         )
     ),
     "pip": tuple((w,) for w in ("list", "show", "freeze", "check", "search")),
-    # uv: `uv run X` goes through _EXEC_WRAPPERS (delegates to X).
+    # `uv run X` goes through `_EXEC_WRAPPERS` (delegates to X).
     # `uv cache` and `uv python` use multi-word prefixes to admit
     # only their read-only subsubcommands.
     "uv": (
@@ -1255,90 +893,11 @@ _GLUE_NODE_KINDS: frozenset[str] = frozenset(
 )
 
 
-def _parse_command(node: Node) -> Command:
-    """Convert a bashlex ``command`` node into a :class:`Command` record."""
-    env: dict[str, str] = {}
-    words: list[str] = []
-    captures_stdout = False
-    for p in node.parts:
-        kind = p.kind
-        if kind == "redirect":
-            # bashlex: ``.input`` is the source fd (``None`` = default =
-            # stdout for ``>``/``>>``, stdin for ``<``). We flag only
-            # redirects that divert fd 1 (stdout) - stderr redirects
-            # like ``2>&1`` or ``2>/dev/null`` leave stdout untouched.
-            input_fd = cast(int | None, getattr(p, "input", None))
-            type_ = cast(str, getattr(p, "type", ""))
-            if type_ in (">", ">>", ">&", ">|") and input_fd in (None, 1):
-                captures_stdout = True
-            continue
-        if kind == "assignment" and not words:
-            # Only leading assignments are env prefix; anything after
-            # the first word is a regular positional (argv[n]).
-            k, _, v = p.word.partition("=")
-            env[k] = v
-            continue
-        if kind == "word":
-            words.append(p.word)
-    if not words:
-        return Command(exe="", args=(), env_prefix=env, captures_stdout=captures_stdout)
-    return Command(
-        exe=words[0],
-        args=tuple(words[1:]),
-        env_prefix=env,
-        captures_stdout=captures_stdout,
-    )
-
-
 # Utilities whose SECOND positional operand is the output file. POSIX gives
 # ``uniq`` and ``xxd`` an optional ``output`` operand, so no flag exists to
 # deny -- a flag-shaped gate can never reach these, which is why they read
 # safe while overwriting the named file.
 _OPERAND_WRITERS: frozenset[str] = frozenset({"uniq", "xxd"})
-
-
-def _mutating_flags(exe: str, args: list[str]) -> bool:
-    """Whether an otherwise read-only utility was asked to write.
-
-    Each entry is a utility that reads by default but has a documented
-    write mode; the allow-list keys on the executable alone, so without
-    these gates ``sort -o victim`` and ``sed 'w victim'`` both read safe.
-
-    Verified by tracing every allow-listed utility for writes outside the
-    system paths and for child ``execve``. Reading man pages was not enough:
-    ``--output-separator`` names no file, while ``uniq``'s output operand
-    carries no flag at all.
-    """
-    # ``-f prog`` supplies the program from a FILE, so every gate below
-    # that analyses program TEXT is looking somewhere the program is not.
-    # Unanalysable is not read-only.
-    if exe in _PROGRAM_TEXT_UTILITIES and any(
-        a in _PROGRAM_FILE_FLAGS or a.partition("=")[0] in _PROGRAM_FILE_FLAGS
-        for a in args
-    ):
-        return True
-    if exe in _OPERAND_WRITERS:
-        return len([a for a in args if not a.startswith("-")]) >= 2
-    if exe == "tree":
-        # ``-J``/``-X`` select JSON/XML on STDOUT and write nothing;
-        # measured leaving the sandbox byte-identical. Only ``-o`` names
-        # a file.
-        return any(a.startswith("-o") for a in args)
-    if exe == "find":
-        return any(a in FIND_DENY_FLAGS for a in args)
-    if exe == "sed":
-        return sed_mutates(args) or any(_SED_WRITE_SCRIPT.search(a) for a in args)
-    if exe in _TYPE_CHECKERS:
-        return _type_checker_mutates(args)
-    if exe == "sort":
-        # ``-oFILE`` attaches the value to the flag, so an equality test never
-        # matched it: `sort -oout input` classified read-only and wrote `out`.
-        return any(a.startswith(("-o", "--output")) for a in args)
-    if exe == "awk":
-        # ``system()``/``print > file`` make awk a general executor; the
-        # program text is not something this classifier can analyse.
-        return any(_AWK_ESCAPE.search(a) for a in args)
-    return False
 
 
 def sed_mutates(args: Sequence[str]) -> bool:
@@ -1347,6 +906,13 @@ def sed_mutates(args: Sequence[str]) -> bool:
     Catches ``--in-place``/``--in-place=SUFFIX``, the short form ``-i``
     (optionally with a backup suffix like ``-i.bak``), and combined
     short flags that include ``i`` (e.g. ``-ni``, ``-Ei``).
+
+    Args:
+      args: Sed arguments to inspect.
+
+    Returns:
+      mutates: Whether the arguments request in-place editing.
+
     """
     for a in args:
         if a == "--in-place" or a.startswith("--in-place="):
@@ -1356,14 +922,11 @@ def sed_mutates(args: Sequence[str]) -> bool:
     return False
 
 
+# ``--output``/``-o`` and the report formats are here because a checker that reads
+# source still writes when told where to put its report: ``--junit-xml`` and
+# ``--gitlabcodequality`` were both measured writing a file.
 def _type_checker_mutates(args: list[str]) -> bool:
-    """Check whether type-checker args write files or install packages.
-
-    ``--output``/``-o`` and the report formats are here because a checker
-    that reads source still writes when told where to put its report:
-    ``--junit-xml`` and ``--gitlabcodequality`` were both measured writing
-    a file.
-    """
+    """Check whether type-checker args write files or install packages."""
     for a in args:
         if a.startswith(("--createstub", "--output", "--junit", "--gitlab")):
             return True
@@ -1372,12 +935,10 @@ def _type_checker_mutates(args: list[str]) -> bool:
     return False
 
 
+# Flags listed in :data:`_VALUE_FLAGS` for ``exe`` consume the following token as their
+# value (e.g. ``--project .``).
 def _skip_leading_flags(exe: str, args: list[str]) -> int:
-    """Index in ``args`` past all leading flags.
-
-    Flags listed in :data:`_VALUE_FLAGS` for ``exe`` consume the
-    following token as their value (e.g. ``--project .``).
-    """
+    """Index in ``args`` past all leading flags."""
     value_flags = _VALUE_FLAGS.get(exe, frozenset())
     i = 0
     while i < len(args) and args[i].startswith("-"):
@@ -1392,12 +953,10 @@ def _skip_leading_flags(exe: str, args: list[str]) -> int:
     return i
 
 
+# Handles value-flags by skipping the next token; otherwise any non-flag token is a bare
+# positional and unsafe.
 def _git_branch_or_tag_safe(args_after_sub: list[str]) -> bool:
-    """Check whether args contain no bare positional (positional → mutation).
-
-    Handles value-flags by skipping the next token; otherwise any
-    non-flag token is a bare positional and unsafe.
-    """
+    """Check whether args contain no bare positional (positional → mutation)."""
     i = 0
     while i < len(args_after_sub):
         a = args_after_sub[i]
@@ -1415,17 +974,14 @@ def _git_branch_or_tag_safe(args_after_sub: list[str]) -> bool:
 # its argument to the shell as a pager, so `git grep -O"sh -c ..."` is
 # arbitrary execution wearing the name of a read-only subcommand.
 _GIT_UNSAFE_FLAGS: frozenset[str] = frozenset(
-    {"--output", "-o", "-O", "-c", "--exec-path"}
+    {"--output", "-o", "-O", "-c", "--exec-path"},
 )
 
 
+# Checked over the WHOLE argv, not the post-subcommand tail: ``-c`` and ``-O`` are
+# accepted before the subcommand, where a tail-only scan never looks.
 def _git_unsafe_flag(args: tuple[str, ...]) -> bool:
-    """Whether any git argument writes a file or runs a command.
-
-    Checked over the WHOLE argv, not the post-subcommand tail: ``-c`` and
-    ``-O`` are accepted before the subcommand, where a tail-only scan
-    never looks.
-    """
+    """Whether any git argument writes a file or runs a command."""
     return any(
         a in _GIT_UNSAFE_FLAGS
         or a.partition("=")[0] in _GIT_UNSAFE_FLAGS
@@ -1440,16 +996,13 @@ def _go_env_writes(tail: tuple[str, ...]) -> bool:
     return any(a in ("-w", "-u") for a in tail)
 
 
+# Called after the subcommand prefix has matched. Returns False to veto the match.
 def _subcommand_extra_safe(
     exe: str,
     prefix: tuple[str, ...],
     tail: tuple[str, ...],
 ) -> bool:
-    """Apply post-match safety refinement for a matched subcommand.
-
-    Called after the subcommand prefix has matched. Returns False to
-    veto the match.
-    """
+    """Apply post-match safety refinement for a matched subcommand."""
     if exe == "git" and prefix in (("branch",), ("tag",)):
         return _git_branch_or_tag_safe(list(tail[len(prefix) :]))
     if exe == "go" and prefix == ("env",) and _go_env_writes(tail):
@@ -1465,11 +1018,9 @@ def _command_words(node: Node) -> list[str]:
     return [p.word for p in node.parts if p.kind == "word"]
 
 
+# Recurses into command/process substitutions inside word parts.
 def _is_command_safe(node: Node) -> bool:
-    """Return True iff this CommandNode is a read-only invocation.
-
-    Recurses into command/process substitutions inside word parts.
-    """
+    """Return True iff this CommandNode is a read-only invocation."""
     # Reject any redirect at this command level (writes, here-strings
     # that may carry substitutions, etc.).
     if any(p.kind in _UNSAFE_NODE_KINDS for p in node.parts):
@@ -1491,13 +1042,10 @@ def _is_command_safe(node: Node) -> bool:
     return _classify(Path(words[0]).name, words[1:])
 
 
+# Split out so exec wrappers (``uv run basedpyright``) can recurse: the inner command
+# gets the full safety check, including its own flag-gates.
 def _classify(exe: str, args: list[str]) -> bool:
-    """Classify an ``exe args...`` invocation as read-only.
-
-    Split out so exec wrappers (``uv run basedpyright``) can recurse:
-    the inner command gets the full safety check, including its own
-    flag-gates.
-    """
+    """Classify an ``exe args...`` invocation as read-only."""
     wrapper_subcmd = _EXEC_WRAPPERS.get(exe)
     if wrapper_subcmd is not None:
         i = _skip_leading_flags(exe, args)
@@ -1568,3 +1116,422 @@ def _is_node_safe(node: Node) -> bool:
     # kind bashlex grows later) may hide arbitrary code. Fail CLOSED:
     # a classifier whose default is "safe" is not a classifier.
     return kind in ("tilde", "parameter")
+
+
+# ``captured`` carries an ENCLOSING redirect down to the commands it governs. bashlex
+# hangs a compound's redirects off its own ``redirects`` attribute, so ``(grep p f) >
+# out`` gave the inner command ``captures_stdout=False`` and every matcher nudged a
+# fragment that writes a file.
+def _walk_node(
+    node: Node,
+    *,
+    cwd: str,
+    out: list[Invocation],
+    captured: bool = False,
+    sink: Invocation | None = None,
+) -> None:
+    """Recurse one AST node, appending every simple command found."""
+    kind: str = node.kind
+    captured = captured or _redirects_stdout(node)
+    if kind == "command":
+        _walk_command(node, cwd=cwd, out=out, captured=captured, sink=sink)
+        return
+    if kind == "pipeline":
+        _walk_pipeline(node, cwd=cwd, out=out, captured=captured)
+        return
+    if kind == "list":
+        _walk_list(node, cwd=cwd, out=out, captured=captured)
+        return
+    # ``compound`` (loops, conditionals) and everything else: descend
+    # through whatever child collections the node carries. A loop body
+    # nudges even when its argument is a loop variable -- a command
+    # reaching for ``cat $f`` wants the tool regardless of whether the
+    # filename is knowable here.
+    for child in _child_nodes(node):
+        _walk_node(child, cwd=cwd, out=out, captured=captured, sink=sink)
+
+
+def _redirects_stdout(node: Node) -> bool:
+    """Whether a compound node carries a redirect that diverts fd 1."""
+    redirects: object = getattr(node, "redirects", None)
+    if not isinstance(redirects, list):
+        return False
+    return any(
+        cast(str, getattr(r, "type", "")) in (">", ">>", ">&", ">|")
+        and cast(int | None, getattr(r, "input", None)) in (None, 1)
+        for r in cast(list[object], redirects)
+    )
+
+
+# A ``cd`` binds to everything after it in the same list, so ``cd X && ls && cat f``
+# reports BOTH commands under ``X`` -- the two-command-only unwrap missed the chain
+# entirely.
+#
+# Three ways the shell's own answer differs from "the last ``cd`` wins":
+#
+# - ``cd`` COMPOSES. ``cd /srv && cd sub`` leaves the shell in ``/srv/sub``, so the
+# second is resolved against the first. - ``||`` runs its tail only when the left side
+# FAILED, so the ``cd`` immediately before it did not happen -- but any EARLIER one did.
+# Rewinding all the way to the incoming cwd discarded those. - ``&`` backgrounds the
+# ``cd`` in a subshell, so the parent's directory is untouched and the prior one still
+# stands.
+def _walk_list(
+    node: Node,
+    *,
+    cwd: str,
+    out: list[Invocation],
+    captured: bool = False,
+) -> None:
+    """Walk an ``A && B ; C`` list, threading any ``cd`` through it."""
+    inner_cwd = cwd
+    # The cwd in force before the most recent ``cd``, which is where an
+    # ``||`` tail runs: that ``cd`` is exactly the command that failed.
+    before_last_cd = cwd
+    for part in node.parts:
+        if part.kind == "operator":
+            if part.op == "||":
+                inner_cwd = before_last_cd
+            elif part.op == "&":
+                # The preceding command ran in a subshell; if it was a
+                # ``cd``, the parent never moved.
+                inner_cwd = before_last_cd
+            continue
+        if part.kind == "command":
+            cmd = _parse_command(part)
+            if cmd.exe == "cd" and not cmd.captures_stdout:
+                before_last_cd = inner_cwd
+                inner_cwd = _cd_target(inner_cwd, cmd.args)
+                continue
+        before_last_cd = inner_cwd
+        _walk_node(part, cwd=inner_cwd, out=out, captured=captured)
+
+
+# Only a literal path is knowable here. Bare ``cd`` goes to ``$HOME`` and ``cd -`` to
+# ``$OLDPWD``; both were previously read as "no cd" or, worse, as a directory literally
+# named ``-`` -- which rendered ``file_path='-/f'``. Option flags (``-P``, ``-L``,
+# ``--``) carry no destination and must not be mistaken for one.
+def _cd_target(cwd: str, args: tuple[str, ...]) -> str:
+    """Where a ``cd`` leaves the shell, or ``_UNKNOWN_CWD`` when unknowable."""
+    paths = [a for a in args if not a.startswith("-") or a == "-"]
+    if not paths or paths[0] == "-":
+        # ``$HOME`` / ``$OLDPWD``: real, but not knowable from the text.
+        return _UNKNOWN_CWD
+    return resolve_cwd_path(cwd, paths[0])
+
+
+# Built back-to-front so each stage can hold a reference to the one it feeds; the
+# reverse links are then stitched in a second pass. Names would not do: two pipelines on
+# one line can both end in ``wc``, and a matcher that searches for one by name reads the
+# wrong pipeline.
+def _walk_pipeline(
+    node: Node,
+    *,
+    cwd: str,
+    out: list[Invocation],
+    captured: bool = False,
+) -> None:
+    """Walk ``A | B | C``, linking each stage to its true neighbours."""
+    stages = [p for p in node.parts if p.kind != "pipe"]
+    linked: list[Invocation | None] = [None] * len(stages)
+    for i in reversed(range(len(stages))):
+        if stages[i].kind != "command":
+            # A compound stage -- ``(sort)``, a loop -- is still a stage.
+            # Leaving it unlinked let its neighbours join across it as if
+            # it were absent, so ``grep p f | (sort)`` looked unpiped and
+            # nudged although ``sort`` transforms the output.
+            linked[i] = Invocation(
+                exe=_OPAQUE_STAGE,
+                args=(),
+                cwd=cwd,
+                piped_into=linked[i + 1] if i + 1 < len(stages) else None,
+            )
+            continue
+        cmd = _parse_command(stages[i])
+        if not cmd.exe:
+            continue
+        # Only the LAST stage's stdout reaches an enclosing redirect; the
+        # others feed the next pipe regardless.
+        linked[i] = Invocation(
+            exe=cmd.exe,
+            args=cmd.args,
+            cwd=cwd,
+            piped_into=linked[i + 1] if i + 1 < len(stages) else None,
+            env_prefix=cmd.env_prefix,
+            captures_stdout=cmd.captures_stdout or (captured and i == len(stages) - 1),
+        )
+    # ``Invocation`` is frozen, so the upstream link is stitched by
+    # rebuilding each record once its predecessor is known.
+    for i, inv in enumerate(linked):
+        if inv is None:
+            continue
+        prev = next((linked[j] for j in reversed(range(i)) if linked[j]), None)
+        out.append(dataclasses.replace(inv, piped_from=prev) if prev else inv)
+    for i, stage in enumerate(stages):
+        if stage.kind == "command":
+            _walk_substitutions(stage, cwd=cwd, out=out)
+            continue
+        # The commands INSIDE a compound stage feed whatever the stage
+        # feeds, so they must carry that sink too: ``(grep p f) | sort``
+        # is a search whose output is transformed, not a bare search.
+        stage_inv = linked[i]
+        _walk_node(
+            stage,
+            cwd=cwd,
+            out=out,
+            captured=captured,
+            sink=stage_inv.piped_into if stage_inv is not None else None,
+        )
+
+
+def _walk_command(
+    node: Node,
+    *,
+    cwd: str,
+    out: list[Invocation],
+    captured: bool = False,
+    sink: Invocation | None = None,
+) -> None:
+    """Record one un-piped simple command, then its substitutions."""
+    cmd = _parse_command(node)
+    if cmd.exe:
+        out.append(
+            Invocation(
+                exe=cmd.exe,
+                args=cmd.args,
+                cwd=cwd,
+                piped_into=sink,
+                env_prefix=cmd.env_prefix,
+                captures_stdout=cmd.captures_stdout or captured,
+            ),
+        )
+    _walk_substitutions(node, cwd=cwd, out=out)
+
+
+def _walk_substitutions(node: Node, *, cwd: str, out: list[Invocation]) -> None:
+    """Descend into ``$(...)`` and friends nested in a command's words."""
+    for child in _child_nodes(node):
+        if child.kind in ("word", "commandsubstitution", "command", "list", "pipeline"):
+            _walk_node(child, cwd=cwd, out=out)
+
+
+# One definition, two readers: :func:`operands` skips the value so it is not counted as
+# a path, and :func:`_denied` stops its letter scan there so an attached value is not
+# read as more flags. A copy per caller is how the two ``find`` denylists drifted apart.
+def _value_flags_for(exe: str) -> frozenset[str]:
+    """Return flags of ``exe`` whose value is the next word (or the token tail)."""
+    # ``-n`` is the counterexample in both directions: it takes a value
+    # for head/tail and takes NONE for ``cat`` (number lines), ``sed``
+    # (quiet), or ``grep`` (show line numbers), where consuming the next
+    # word swallows the filename.
+    vocabulary: dict[str, frozenset[str]] = {
+        "grep": frozenset(
+            {"-A", "-B", "-C", "-m", "-e", "-f", "-d", "-D", "--label", "--color"},
+        ),
+        "rg": frozenset({"-A", "-B", "-C", "-m", "-e", "-f", "-g", "-t", "--color"}),
+        "head": frozenset({"-n", "-c", "--lines", "--bytes"}),
+        "tail": frozenset({"-n", "-c", "--lines", "--bytes"}),
+        "sed": frozenset({"-e", "-f", "--expression", "--file"}),
+        "ls": frozenset({"-I", "-w", "-T", "--ignore", "--block-size", "--format"}),
+        # ``find``'s operands are its ROOTS. Its predicates are whole
+        # words rather than clustered letters, and most take a value, so
+        # without them ``find /src -name '*.py'`` reports the glob as a
+        # second root.
+        "find": frozenset(
+            {
+                "-name",
+                "-iname",
+                "-path",
+                "-ipath",
+                "-regex",
+                "-iregex",
+                "-type",
+                "-maxdepth",
+                "-mindepth",
+                "-newer",
+                "-mtime",
+                "-mmin",
+                "-size",
+                "-perm",
+                "-user",
+                "-group",
+                "-anewer",
+                "-cnewer",
+            },
+        ),
+    }
+    return vocabulary.get(exe, frozenset[str]())
+
+
+# Shares :func:`operands`' vocabulary rather than repeating it: a second copy is exactly
+# how the two ``find`` denylists drifted apart.
+def _value_flag_letters(exe: str) -> frozenset[str]:
+    """Short-flag letters of ``exe`` that consume the rest of the token."""
+    return frozenset(
+        f[1] for f in _value_flags_for(exe) if len(f) == 2 and not f.startswith("--")
+    )
+
+
+# Short flags BUNDLE and may carry an attached value, so ``-c``, ``-c5`` and ``-fn`` all
+# mean ``-c``/``-f`` to the shell while sharing no token with each other. Whole-token
+# equality saw only the first, and ``head -c5`` -- a byte window -- was advertised as a
+# line read.
+#
+# A bare count (``head -20``) is not a cluster: its digits are the argument. Testing
+# that first keeps the most common head/tail spelling out of the letter scan.
+#
+# A value-taking flag ENDS the cluster: everything after it is that flag's argument, not
+# more letters. ``grep -evalue`` is ``-e`` with the pattern ``value``, and scanning the
+# whole tail found a ``-v`` that is not there -- silently suppressing the nudge for any
+# pattern containing a denied letter.
+def _denied(arg: str, deny: frozenset[str], *, exe: str = "") -> bool:
+    """Whether ``arg`` carries a denied flag in any of its spellings."""
+    if arg in deny or arg.partition("=")[0] in deny:
+        return True
+    if not arg.startswith("-") or arg.startswith("--") or arg[1:].isdigit():
+        return False
+    value_flags = _value_flag_letters(exe)
+    for c in arg[1:]:
+        if c.isdigit():
+            continue
+        # Deny FIRST: ``head -c5`` is a denied byte window whose own
+        # letter also takes a value, so stopping on the value test would
+        # wave through the very flag being denied.
+        if f"-{c}" in deny:
+            return True
+        if c in value_flags:
+            # This letter consumes the REST of the token as its value.
+            return False
+    return False
+
+
+# Asked of every stage in ``downstream()``, not just the adjacent one: checking the
+# immediate sink alone made ``a | head | grep -v`` and ``a | grep -v | head`` -- the
+# same pipeline -- disagree.
+def _sink_blocks(source: Invocation, sink: Invocation) -> bool:
+    """Whether ``sink`` stops ``source`` from being one tool call."""
+    if sink.captures_stdout:
+        return True
+    if sink.exe in _SHAPING_SINKS:
+        return False
+    # ``grep p f | wc -l`` is the search's own ``output_mode="count"``;
+    # other ``wc`` flags count bytes or words, which it cannot express.
+    return not (
+        sink.exe == "wc" and sink.args == ("-l",) and source.exe in _SEARCH_EXES
+    )
+
+
+# A search reading a pipe has no path of its own, and every dedicated tool takes a path.
+# ``git log | grep fix`` is therefore not a Grep call at all, while ``cat f.py | grep
+# fix`` is -- the operand is on the producer.
+def _stdin_operand(inv: Invocation) -> bool:
+    """Whether a stdin-fed ``inv`` still names an operand one hop up."""
+    source = inv.piped_from
+    assert source is not None
+    return (
+        inv.exe in _SEARCH_EXES
+        # A search still needs its own pattern; only the PATH comes from
+        # upstream.
+        and bool(operands(inv.exe, inv.args))
+        and source.exe in _FILE_PRODUCERS
+        # The producer's own vocabulary, not the search's: ``head -n 20``
+        # spends its ``20`` on the flag, so it is not the path either.
+        and bool(operands(source.exe, source.args))
+        and not (source.exe == "sed" and sed_mutates(source.args))
+    )
+
+
+# `bashlex` hangs children off several attributes (``parts``, ``list``, ``command``)
+# depending on the construct, so the walk asks for all of them rather than special-
+# casing each compound type.
+def _child_nodes(node: Node) -> list[Node]:
+    """Return every child AST node hanging off ``node``."""
+    out: list[Node] = []
+    for attr in ("parts", "list", "command"):
+        value: object = getattr(node, attr, None)
+        if value is None:
+            continue
+        items: list[object] = (
+            cast(list[object], value) if isinstance(value, list) else [value]
+        )
+        out.extend(
+            cast(Node, child)
+            for child in items
+            if child is not node and hasattr(child, "kind")
+        )
+    return out
+
+
+def _parse_command(node: Node) -> Command:
+    """Convert a bashlex ``command`` node into a :class:`Command` record."""
+    env: dict[str, str] = {}
+    words: list[str] = []
+    captures_stdout = False
+    for p in node.parts:
+        kind = p.kind
+        if kind == "redirect":
+            # `bashlex`: ``.input`` is the source fd (``None`` = default =
+            # stdout for ``>``/``>>``, stdin for ``<``). We flag only
+            # redirects that divert fd 1 (stdout) - stderr redirects
+            # like ``2>&1`` or ``2>/dev/null`` leave stdout untouched.
+            input_fd = cast(int | None, getattr(p, "input", None))
+            type_ = cast(str, getattr(p, "type", ""))
+            if type_ in (">", ">>", ">&", ">|") and input_fd in (None, 1):
+                captures_stdout = True
+            continue
+        if kind == "assignment" and not words:
+            # Only leading assignments are env prefix; anything after
+            # the first word is a regular positional (argv[n]).
+            k, _, v = p.word.partition("=")
+            env[k] = v
+            continue
+        if kind == "word":
+            words.append(p.word)
+    if not words:
+        return Command(exe="", args=(), env_prefix=env, captures_stdout=captures_stdout)
+    return Command(
+        exe=words[0],
+        args=tuple(words[1:]),
+        env_prefix=env,
+        captures_stdout=captures_stdout,
+    )
+
+
+# Each entry is a utility that reads by default but has a documented write mode; the
+# allow-list keys on the executable alone, so without these gates ``sort -o victim`` and
+# ``sed 'w victim'`` both read safe.
+#
+# Verified by tracing every allow-listed utility for writes outside the system paths and
+# for child ``execve``. Reading man pages was not enough: ``--output-separator`` names
+# no file, while ``uniq``'s output operand carries no flag at all.
+def _mutating_flags(exe: str, args: list[str]) -> bool:
+    """Whether an otherwise read-only utility was asked to write."""
+    # ``-f prog`` supplies the program from a FILE, so every gate below
+    # that analyses program TEXT is looking somewhere the program is not.
+    # Unanalysable is not read-only.
+    if exe in _PROGRAM_TEXT_UTILITIES and any(
+        a in _PROGRAM_FILE_FLAGS or a.partition("=")[0] in _PROGRAM_FILE_FLAGS
+        for a in args
+    ):
+        return True
+    if exe in _OPERAND_WRITERS:
+        return len([a for a in args if not a.startswith("-")]) >= 2
+    if exe == "tree":
+        # ``-J``/``-X`` select JSON/XML on STDOUT and write nothing;
+        # measured leaving the sandbox byte-identical. Only ``-o`` names
+        # a file.
+        return any(a.startswith("-o") for a in args)
+    if exe == "find":
+        return any(a in FIND_DENY_FLAGS for a in args)
+    if exe == "sed":
+        return sed_mutates(args) or any(_SED_WRITE_SCRIPT.search(a) for a in args)
+    if exe in _TYPE_CHECKERS:
+        return _type_checker_mutates(args)
+    if exe == "sort":
+        # ``-oFILE`` attaches the value to the flag, so an equality test never
+        # matched it: `sort -oout input` classified read-only and wrote `out`.
+        return any(a.startswith(("-o", "--output")) for a in args)
+    if exe == "awk":
+        # ``system()``/``print > file`` make awk a general executor; the
+        # program text is not something this classifier can analyse.
+        return any(_AWK_ESCAPE.search(a) for a in args)
+    return False

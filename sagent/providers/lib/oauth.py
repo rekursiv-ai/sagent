@@ -348,21 +348,6 @@ _LOCK_REGISTRY: dict[str, _PathLock] = {}
 _LOCK_REGISTRY_GUARD = threading.Lock()
 
 
-def _path_lock_for(lock_path: Path) -> _PathLock:
-    """Return the singleton ``_PathLock`` for ``lock_path``, creating it once."""
-    # Resolved unconditionally: ``resolve`` is non-strict, and keying a
-    # not-yet-created path raw would change the key the moment the first
-    # acquisition creates it -- one file, two locks.
-    key = str(lock_path.resolve())
-    with _LOCK_REGISTRY_GUARD:
-        existing = _LOCK_REGISTRY.get(key)
-        if existing is not None:
-            return existing
-        new = _PathLock(path=lock_path)
-        _LOCK_REGISTRY[key] = new
-        return new
-
-
 @asynccontextmanager
 async def credential_file_lock(cred_path: Path) -> AsyncGenerator[None]:
     """Hold an exclusive cross-process lock around an OAuth refresh sequence.
@@ -395,6 +380,9 @@ async def credential_file_lock(cred_path: Path) -> AsyncGenerator[None]:
       cred_path: Credential file path. The lock targets
           ``<cred_path>.lock`` next to it.
 
+    Yields:
+      lock: An acquired lock held until the context exits.
+
     """
     lock_path = cred_path.with_suffix(cred_path.suffix + ".lock")
     fd = _path_lock_for(lock_path).open_fd()
@@ -410,3 +398,18 @@ async def credential_file_lock(cred_path: Path) -> AsyncGenerator[None]:
         yield
     finally:
         os.close(fd)
+
+
+def _path_lock_for(lock_path: Path) -> _PathLock:
+    """Return the singleton ``_PathLock`` for ``lock_path``, creating it once."""
+    # Resolved unconditionally: ``resolve`` is non-strict, and keying a
+    # not-yet-created path raw would change the key the moment the first
+    # acquisition creates it -- one file, two locks.
+    key = str(lock_path.resolve())
+    with _LOCK_REGISTRY_GUARD:
+        existing = _LOCK_REGISTRY.get(key)
+        if existing is not None:
+            return existing
+        new = _PathLock(path=lock_path)
+        _LOCK_REGISTRY[key] = new
+        return new

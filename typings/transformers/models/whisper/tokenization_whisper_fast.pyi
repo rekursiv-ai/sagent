@@ -46,7 +46,9 @@ class WhisperTokenizerFast(PreTrainedTokenizerFast):
     def basic_normalize(text, remove_diacritics=...):  # -> str:
         ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
     def set_prefix_tokens(
         self,
@@ -58,7 +60,9 @@ class WhisperTokenizerFast(PreTrainedTokenizerFast):
     @property
     def prefix_tokens(self) -> list[int]: ...
     def build_inputs_with_special_tokens(
-        self, token_ids_0, token_ids_1=...
+        self,
+        token_ids_0,
+        token_ids_1=...,
     ) -> list[int]: ...
     def get_special_tokens_mask(
         self,
@@ -67,7 +71,10 @@ class WhisperTokenizerFast(PreTrainedTokenizerFast):
         already_has_special_tokens: bool = ...,
     ) -> list[int]: ...
     def get_decoder_prompt_ids(
-        self, task=..., language=..., no_timestamps=...
+        self,
+        task=...,
+        language=...,
+        no_timestamps=...,
     ):  # -> list[tuple[int, int]]:
         ...
     def get_prompt_ids(self, text: str, return_tensors=...):  # -> Encoding:

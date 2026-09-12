@@ -235,7 +235,11 @@ class Client:
     @property
     def base_url(self) -> URL: ...
     def send(
-        self, request: Request, *, stream: bool = ..., **kwargs: Any
+        self,
+        request: Request,
+        *,
+        stream: bool = ...,
+        **kwargs: Any,
     ) -> Response: ...
     def build_request(self, method: str, url: URLTypes, **kwargs: Any) -> Request: ...
     def request(
@@ -352,7 +356,10 @@ class Client:
         extensions: RequestExtensions | None = ...,
     ) -> Response: ...
     def stream(
-        self, method: str, url: URLTypes, **kwargs: Any
+        self,
+        method: str,
+        url: URLTypes,
+        **kwargs: Any,
     ) -> _StreamContextManager: ...
     def close(self) -> None: ...
 
@@ -408,10 +415,17 @@ class AsyncClient:
     async def patch(self, url: URLTypes, **kwargs: Any) -> Response: ...
     async def delete(self, url: URLTypes, **kwargs: Any) -> Response: ...
     async def send(
-        self, request: Request, *, stream: bool = ..., **kwargs: Any
+        self,
+        request: Request,
+        *,
+        stream: bool = ...,
+        **kwargs: Any,
     ) -> Response: ...
     def stream(
-        self, method: str, url: URLTypes, **kwargs: Any
+        self,
+        method: str,
+        url: URLTypes,
+        **kwargs: Any,
     ) -> _AsyncStreamContextManager: ...
     def build_request(self, method: str, url: URLTypes, **kwargs: Any) -> Request: ...
     async def aclose(self) -> None: ...
@@ -442,7 +456,11 @@ class TooManyRedirects(HTTPError): ...
 
 class HTTPStatusError(HTTPError):
     def __init__(
-        self, message: str, *, request: Request, response: Response
+        self,
+        message: str,
+        *,
+        request: Request,
+        response: Response,
     ) -> None: ...
     @property
     def response(self) -> Response: ...

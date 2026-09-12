@@ -22,7 +22,12 @@ from ...utils.generic import TransformersKwargs
 
 class EdgeTamVideoLayerNorm(nn.LayerNorm):
     def __init__(
-        self, normalized_shape, *, eps=..., data_format=..., **kwargs
+        self,
+        normalized_shape,
+        *,
+        eps=...,
+        data_format=...,
+        **kwargs,
     ) -> None: ...
     def forward(self, features: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -73,13 +78,18 @@ class EdgeTamVideoAttention(nn.Module):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 def rotate_pairwise(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb_2d_self_attn(
-    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class EdgeTamVideoRoPESelfAttention(nn.Module):
@@ -122,7 +132,9 @@ class EdgeTamVideoRoPECrossAttention(nn.Module):
 
 class EdgeTamVideoTwoWayAttentionBlock(nn.Module):
     def __init__(
-        self, config: EdgeTamVideoMaskDecoderConfig, skip_first_layer_pe: bool = ...
+        self,
+        config: EdgeTamVideoMaskDecoderConfig,
+        skip_first_layer_pe: bool = ...,
     ) -> None: ...
     def forward(
         self,
@@ -159,7 +171,10 @@ class EdgeTamVideoMemoryFuser(nn.Module):
 
 class EdgeTamVideoMaskDownSamplerLayer(nn.Module):
     def __init__(
-        self, config: EdgeTamVideoConfig, in_channels: int, out_channels: int
+        self,
+        config: EdgeTamVideoConfig,
+        in_channels: int,
+        out_channels: int,
     ) -> None: ...
     def forward(self, x): ...
 
@@ -171,10 +186,14 @@ class EdgeTamVideoMaskDownSampler(nn.Module):
 class EdgeTamVideoMemoryEncoder(nn.Module):
     def __init__(self, config: EdgeTamVideoConfig) -> None: ...
     def forward(
-        self, vision_features: torch.Tensor, masks: torch.Tensor
+        self,
+        vision_features: torch.Tensor,
+        masks: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class EdgeTamVideoFeedForward(nn.Module):
@@ -234,7 +253,10 @@ class EdgeTamVideoInferenceSession:
     def remove_point_inputs(self, obj_idx: int, frame_idx: int):  # -> None:
         ...
     def add_mask_inputs(
-        self, obj_idx: int, frame_idx: int, inputs: torch.Tensor
+        self,
+        obj_idx: int,
+        frame_idx: int,
+        inputs: torch.Tensor,
     ):  # -> None:
         ...
     def remove_mask_inputs(self, obj_idx: int, frame_idx: int):  # -> None:
@@ -257,7 +279,9 @@ class EdgeTamVideoInferenceSession:
     ):  # -> Tensor | None:
         ...
     def add_new_frame(
-        self, pixel_values: torch.Tensor, frame_idx: int | None = ...
+        self,
+        pixel_values: torch.Tensor,
+        frame_idx: int | None = ...,
     ) -> int: ...
     def get_frame(self, frame_idx: int) -> torch.Tensor: ...
     def reset_tracking_data(self):  # -> None:
@@ -335,7 +359,9 @@ class EdgeTamVideoPerceiverResampler(nn.Module):
         positional_encoding: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 @dataclass
@@ -377,7 +403,9 @@ class EdgeTamVideoPromptEncoder(nn.Module):
         input_masks: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class EdgeTamVideoTwoWayTransformer(nn.Module):
@@ -408,7 +436,9 @@ class EdgeTamVideoMaskDecoder(nn.Module):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 NO_OBJ_SCORE = ...
@@ -428,7 +458,9 @@ class EdgeTamVideoModel(EdgeTamVideoPreTrainedModel):
     def get_image_wide_positional_embeddings(self) -> torch.Tensor: ...
     @torch.no_grad()
     def get_image_embeddings(
-        self, pixel_values: torch.FloatTensor, **kwargs: Unpack[TransformersKwargs]
+        self,
+        pixel_values: torch.FloatTensor,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> list[torch.Tensor]: ...
     @torch.no_grad()
     def get_prompt_embeddings(
@@ -448,7 +480,9 @@ class EdgeTamVideoModel(EdgeTamVideoPreTrainedModel):
         reverse: bool = ...,
     ) -> EdgeTamVideoSegmentationOutput: ...
     def get_image_features(
-        self, pixel_values: torch.FloatTensor, **kwargs: Unpack[TransformersKwargs]
+        self,
+        pixel_values: torch.FloatTensor,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[
         list[torch.Tensor],
         list[torch.Tensor],

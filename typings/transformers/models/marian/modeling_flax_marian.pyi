@@ -32,7 +32,9 @@ MARIAN_DECODE_INPUTS_DOCSTRING = ...
 def create_sinusoidal_positions(n_pos, dim):  # -> Array:
     ...
 def shift_tokens_right(
-    input_ids: jnp.ndarray, pad_token_id: int, decoder_start_token_id: int
+    input_ids: jnp.ndarray,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ) -> jnp.ndarray: ...
 
 class FlaxMarianAttention(nn.Module):
@@ -188,12 +190,16 @@ class FlaxMarianPreTrainedModel(FlaxPreTrainedModel):
         **kwargs,
     ) -> None: ...
     def init_weights(
-        self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...
+        self,
+        rng: jax.random.PRNGKey,
+        input_shape: tuple,
+        params: FrozenDict = ...,
     ) -> FrozenDict: ...
     def init_cache(self, batch_size, max_length, encoder_outputs): ...
     @add_start_docstrings(MARIAN_ENCODE_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=FlaxBaseModelOutput, config_class=MarianConfig
+        output_type=FlaxBaseModelOutput,
+        config_class=MarianConfig,
     )
     def encode(
         self,
@@ -281,7 +287,8 @@ class FlaxMarianMTModel(FlaxMarianPreTrainedModel):
     dtype: jnp.dtype = ...
     @add_start_docstrings(MARIAN_DECODE_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=FlaxCausalLMOutputWithCrossAttentions, config_class=MarianConfig
+        output_type=FlaxCausalLMOutputWithCrossAttentions,
+        config_class=MarianConfig,
     )
     def decode(
         self,

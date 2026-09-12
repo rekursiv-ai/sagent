@@ -45,10 +45,14 @@ class Qwen2Tokenizer(PreTrainedTokenizer):
         **kwargs,
     ) -> str: ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
     def prepare_for_tokenization(
-        self, text, **kwargs
+        self,
+        text,
+        **kwargs,
     ):  # -> tuple[str, dict[str, Any]]:
         ...
 

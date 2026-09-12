@@ -35,7 +35,9 @@ logger = ...
 _CONFIG_FOR_DOC = Kosmos2_5Config
 
 def create_position_ids_from_input_ids(
-    input_ids, padding_idx, past_key_values_length=...
+    input_ids,
+    padding_idx,
+    past_key_values_length=...,
 ): ...
 
 KOSMOS2_5_START_DOCSTRING = ...
@@ -99,7 +101,10 @@ def eager_attention_forward(
 class Kosmos2_5VisionAttention(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states, attention_mask=..., **kwargs: Unpack[TransformersKwargs]
+        self,
+        hidden_states,
+        attention_mask=...,
+        **kwargs: Unpack[TransformersKwargs],
     ):  # -> tuple[Any, Any]:
         ...
 
@@ -113,7 +118,9 @@ class Kosmos2_5VisionLayer(GradientCheckpointingLayer):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
 
 class Kosmos2_5VisionEncoder(nn.Module):
@@ -130,15 +137,23 @@ class Kosmos2_5VisionEncoder(nn.Module):
 
 class Kosmos2_5TextSinusoidalPositionalEmbedding(nn.Module):
     def __init__(
-        self, num_positions: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_positions: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ) -> None: ...
     def make_weights(
-        self, num_embeddings: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ):  # -> None:
         ...
     @staticmethod
     def get_embedding(
-        num_embeddings: int, embedding_dim: int, padding_idx: int | None = ...
+        num_embeddings: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ):  # -> Tensor:
         ...
     @torch.no_grad()
@@ -151,7 +166,9 @@ class Kosmos2_5TextSinusoidalPositionalEmbedding(nn.Module):
     ):  # -> Tensor | Any:
         ...
     def create_position_ids_from_inputs_embeds(
-        self, inputs_embeds, past_key_values_length
+        self,
+        inputs_embeds,
+        past_key_values_length,
     ): ...
 
 class Kosmos2_5TextFFN(nn.Module):
@@ -181,7 +198,9 @@ class Kosmos2_5TextAttention(nn.Module):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class Kosmos2_5TextBlock(GradientCheckpointingLayer):
@@ -196,12 +215,16 @@ class Kosmos2_5TextBlock(GradientCheckpointingLayer):
         cache_position: torch.LongTensor | None = ...,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class Kosmos2_5TextTransformer(nn.Module):
@@ -222,7 +245,9 @@ class Kosmos2_5TextTransformer(nn.Module):
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> BaseModelOutputWithPastAndCrossAttentions: ...
 
 class Kosmos2_5ImageToTextProjection(nn.Module):
@@ -294,7 +319,8 @@ class Kosmos2_5Model(Kosmos2_5PreTrainedModel):
     @can_return_tuple
     @add_start_docstrings_to_model_forward(KOSMOS2_5_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=Kosmos2_5ModelOutput, config_class=_CONFIG_FOR_DOC
+        output_type=Kosmos2_5ModelOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,
@@ -331,7 +357,8 @@ class Kosmos2_5TextForCausalLM(Kosmos2_5PreTrainedModel):
         ...
     @add_start_docstrings_to_model_forward(KOSMOS2_5_TEXT_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=CausalLMOutputWithCrossAttentions, config_class=Kosmos2_5TextConfig
+        output_type=CausalLMOutputWithCrossAttentions,
+        config_class=Kosmos2_5TextConfig,
     )
     def forward(
         self,

@@ -24,7 +24,8 @@ class BarkSubModelConfig(PretrainedConfig):
 
 @add_start_docstrings(
     BARK_SUBMODELCONFIG_START_DOCSTRING.format(
-        config="BarkSemanticConfig", model="BarkSemanticModel"
+        config="BarkSemanticConfig",
+        model="BarkSemanticModel",
     ),
     ...,
 )
@@ -32,7 +33,8 @@ class BarkSemanticConfig(BarkSubModelConfig): ...
 
 @add_start_docstrings(
     BARK_SUBMODELCONFIG_START_DOCSTRING.format(
-        config="BarkCoarseConfig", model="BarkCoarseModel"
+        config="BarkCoarseConfig",
+        model="BarkCoarseModel",
     ),
     ...,
 )
@@ -40,13 +42,18 @@ class BarkCoarseConfig(BarkSubModelConfig): ...
 
 @add_start_docstrings(
     BARK_SUBMODELCONFIG_START_DOCSTRING.format(
-        config="BarkFineConfig", model="BarkFineModel"
+        config="BarkFineConfig",
+        model="BarkFineModel",
     ),
     ...,
 )
 class BarkFineConfig(BarkSubModelConfig):
     def __init__(
-        self, tie_word_embeddings=..., n_codes_total=..., n_codes_given=..., **kwargs
+        self,
+        tie_word_embeddings=...,
+        n_codes_total=...,
+        n_codes_given=...,
+        **kwargs,
     ) -> None: ...
 
 class BarkConfig(PretrainedConfig):

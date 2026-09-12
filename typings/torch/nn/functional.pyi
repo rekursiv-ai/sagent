@@ -29,31 +29,42 @@ def adaptive_avg_pool3d(input: Tensor, output_size: _size_3_opt_t) -> Tensor: ..
 __all__ += ["adaptive_avg_pool3d"]
 
 def adaptive_max_pool1d_with_indices(
-    input: Tensor, output_size: _size, return_indices: bool = ...
+    input: Tensor,
+    output_size: _size,
+    return_indices: bool = ...,
 ) -> tuple[Tensor, Tensor]: ...
 
 __all__ += ["adaptive_max_pool1d_with_indices"]
 
 def adaptive_max_pool2d_with_indices(
-    input: Tensor, output_size: _size_2_opt_t, return_indices: bool = ...
+    input: Tensor,
+    output_size: _size_2_opt_t,
+    return_indices: bool = ...,
 ) -> tuple[Tensor, Tensor]: ...
 
 __all__ += ["adaptive_max_pool2d_with_indices"]
 
 def adaptive_max_pool3d_with_indices(
-    input: Tensor, output_size: _size_3_opt_t, return_indices: bool = ...
+    input: Tensor,
+    output_size: _size_3_opt_t,
+    return_indices: bool = ...,
 ) -> tuple[Tensor, Tensor]: ...
 
 __all__ += ["adaptive_max_pool3d_with_indices"]
 
 def affine_grid(
-    theta: Tensor, size: list[int], align_corners: Any | None = ...
+    theta: Tensor,
+    size: list[int],
+    align_corners: Any | None = ...,
 ) -> Tensor: ...
 
 __all__ += ["affine_grid"]
 
 def alpha_dropout(
-    input: Tensor, p: float = ..., training: bool = ..., inplace: bool = ...
+    input: Tensor,
+    p: float = ...,
+    training: bool = ...,
+    inplace: bool = ...,
 ) -> Tensor: ...
 
 __all__ += ["alpha_dropout"]
@@ -140,25 +151,37 @@ def ctc_loss(
 __all__ += ["ctc_loss"]
 
 def dropout(
-    input: Tensor, p: float = ..., training: bool = ..., inplace: bool = ...
+    input: Tensor,
+    p: float = ...,
+    training: bool = ...,
+    inplace: bool = ...,
 ) -> Tensor: ...
 
 __all__ += ["dropout"]
 
 def dropout1d(
-    input: Tensor, p: float = ..., training: bool = ..., inplace: bool = ...
+    input: Tensor,
+    p: float = ...,
+    training: bool = ...,
+    inplace: bool = ...,
 ) -> Tensor: ...
 
 __all__ += ["dropout1d"]
 
 def dropout2d(
-    input: Tensor, p: float = ..., training: bool = ..., inplace: bool = ...
+    input: Tensor,
+    p: float = ...,
+    training: bool = ...,
+    inplace: bool = ...,
 ) -> Tensor: ...
 
 __all__ += ["dropout2d"]
 
 def dropout3d(
-    input: Tensor, p: float = ..., training: bool = ..., inplace: bool = ...
+    input: Tensor,
+    p: float = ...,
+    training: bool = ...,
+    inplace: bool = ...,
 ) -> Tensor: ...
 
 __all__ += ["dropout3d"]
@@ -196,7 +219,10 @@ def embedding(
 __all__ += ["embedding"]
 
 def feature_alpha_dropout(
-    input: Tensor, p: float = ..., training: bool = ..., inplace: bool = ...
+    input: Tensor,
+    p: float = ...,
+    training: bool = ...,
+    inplace: bool = ...,
 ) -> Tensor: ...
 
 __all__ += ["feature_alpha_dropout"]
@@ -270,7 +296,11 @@ def group_norm(
 __all__ += ["group_norm"]
 
 def gumbel_softmax(
-    logits: Tensor, tau: float = ..., hard: bool = ..., eps: float = ..., dim: int = ...
+    logits: Tensor,
+    tau: float = ...,
+    hard: bool = ...,
+    eps: float = ...,
+    dim: int = ...,
 ) -> Tensor: ...
 
 __all__ += ["gumbel_softmax"]
@@ -284,7 +314,10 @@ def hardswish(input: Tensor, inplace: bool = ...) -> Tensor: ...
 __all__ += ["hardswish"]
 
 def hardtanh(
-    input: Tensor, min_val: float = ..., max_val: float = ..., inplace: bool = ...
+    input: Tensor,
+    min_val: float = ...,
+    max_val: float = ...,
+    inplace: bool = ...,
 ) -> Tensor: ...
 
 __all__ += ["hardtanh"]
@@ -301,7 +334,10 @@ def hinge_embedding_loss(
 __all__ += ["hinge_embedding_loss"]
 
 def huber_loss(
-    input: Tensor, target: Tensor, reduction: str = ..., delta: float = ...
+    input: Tensor,
+    target: Tensor,
+    reduction: str = ...,
+    delta: float = ...,
 ) -> Tensor: ...
 
 __all__ += ["huber_loss"]
@@ -363,13 +399,19 @@ def layer_norm(
 __all__ += ["layer_norm"]
 
 def leaky_relu(
-    input: Tensor, negative_slope: float = ..., inplace: bool = ...
+    input: Tensor,
+    negative_slope: float = ...,
+    inplace: bool = ...,
 ) -> Tensor: ...
 
 __all__ += ["leaky_relu"]
 
 def local_response_norm(
-    input: Tensor, size: int, alpha: float = ..., beta: float = ..., k: float = ...
+    input: Tensor,
+    size: int,
+    alpha: float = ...,
+    beta: float = ...,
+    k: float = ...,
 ) -> Tensor: ...
 
 __all__ += ["local_response_norm"]
@@ -698,7 +740,10 @@ def tanhshrink(input: Any): ...
 __all__ += ["tanhshrink"]
 
 def threshold(
-    input: Tensor, threshold: float, value: float, inplace: bool = ...
+    input: Tensor,
+    threshold: float,
+    value: float,
+    inplace: bool = ...,
 ) -> Tensor: ...
 
 __all__ += ["threshold"]
@@ -742,13 +787,17 @@ def unfold(
 __all__ += ["unfold"]
 
 def upsample_bilinear(
-    input: Any, size: Any | None = ..., scale_factor: Any | None = ...
+    input: Any,
+    size: Any | None = ...,
+    scale_factor: Any | None = ...,
 ): ...
 
 __all__ += ["upsample_bilinear"]
 
 def upsample_nearest(
-    input: Any, size: Any | None = ..., scale_factor: Any | None = ...
+    input: Any,
+    size: Any | None = ...,
+    scale_factor: Any | None = ...,
 ): ...
 
 __all__ += ["upsample_nearest"]
@@ -765,39 +814,63 @@ __all__ += ["upsample"]
 
 @overload
 def adaptive_max_pool1d(
-    input: Tensor, output_size: _int | _size, return_indices: Literal[False] = ...
+    input: Tensor,
+    output_size: _int | _size,
+    return_indices: Literal[False] = ...,
 ) -> Tensor: ...
 @overload
 def adaptive_max_pool1d(
-    input: Tensor, output_size: _int | _size, return_indices: Literal[True], /
+    input: Tensor,
+    output_size: _int | _size,
+    return_indices: Literal[True],
+    /,
 ) -> tuple[Tensor, Tensor]: ...
 @overload
 def adaptive_max_pool1d(
-    input: Tensor, output_size: _int | _size, *, return_indices: Literal[True]
+    input: Tensor,
+    output_size: _int | _size,
+    *,
+    return_indices: Literal[True],
 ) -> tuple[Tensor, Tensor]: ...
 @overload
 def adaptive_max_pool2d(
-    input: Tensor, output_size: _int | _size, return_indices: Literal[False] = ...
+    input: Tensor,
+    output_size: _int | _size,
+    return_indices: Literal[False] = ...,
 ) -> Tensor: ...
 @overload
 def adaptive_max_pool2d(
-    input: Tensor, output_size: _int | _size, return_indices: Literal[True], /
+    input: Tensor,
+    output_size: _int | _size,
+    return_indices: Literal[True],
+    /,
 ) -> tuple[Tensor, Tensor]: ...
 @overload
 def adaptive_max_pool2d(
-    input: Tensor, output_size: _int | _size, *, return_indices: Literal[True]
+    input: Tensor,
+    output_size: _int | _size,
+    *,
+    return_indices: Literal[True],
 ) -> tuple[Tensor, Tensor]: ...
 @overload
 def adaptive_max_pool3d(
-    input: Tensor, output_size: _int | _size, return_indices: Literal[False] = ...
+    input: Tensor,
+    output_size: _int | _size,
+    return_indices: Literal[False] = ...,
 ) -> Tensor: ...
 @overload
 def adaptive_max_pool3d(
-    input: Tensor, output_size: _int | _size, return_indices: Literal[True], /
+    input: Tensor,
+    output_size: _int | _size,
+    return_indices: Literal[True],
+    /,
 ) -> tuple[Tensor, Tensor]: ...
 @overload
 def adaptive_max_pool3d(
-    input: Tensor, output_size: _int | _size, *, return_indices: Literal[True]
+    input: Tensor,
+    output_size: _int | _size,
+    *,
+    return_indices: Literal[True],
 ) -> tuple[Tensor, Tensor]: ...
 @overload
 def fractional_max_pool2d(
@@ -1021,7 +1094,10 @@ def gelu(input: Tensor, approximate: str = ...) -> Tensor: ...
 def softplus(input: Tensor, beta: float = ..., threshold: float = ...) -> Tensor: ...
 def logsigmoid(input: Tensor) -> Tensor: ...
 def cosine_similarity(
-    x1: Tensor, x2: Tensor, dim: int = ..., eps: float = ...
+    x1: Tensor,
+    x2: Tensor,
+    dim: int = ...,
+    eps: float = ...,
 ) -> Tensor: ...
 def avg_pool2d(
     input: Tensor,

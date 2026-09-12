@@ -39,5 +39,6 @@ class SDPBackend(Enum):
 
 @contextlib.contextmanager
 def sdpa_kernel(
-    backends: list[SDPBackend] | SDPBackend, set_priority: bool = ...
+    backends: list[SDPBackend] | SDPBackend,
+    set_priority: bool = ...,
 ) -> Generator[dict[Any, Any], Any]: ...

@@ -17,5 +17,6 @@ class _InsertPoint:
     ) -> None: ...
 
 def insert_point_guard(
-    self: torch._C.Graph, insert_point: torch._C.Node | torch._C.Block
+    self: torch._C.Graph,
+    insert_point: torch._C.Node | torch._C.Block,
 ) -> _InsertPoint: ...

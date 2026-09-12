@@ -25,7 +25,10 @@ class ZoeDepthDepthEstimatorOutput(ModelOutput):
 class ZoeDepthReassembleStage(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: list[torch.Tensor], patch_height, patch_width
+        self,
+        hidden_states: list[torch.Tensor],
+        patch_height,
+        patch_width,
     ) -> list[torch.Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> list[torch.Tensor]: ...
 
@@ -47,14 +50,19 @@ class ZoeDepthPreActResidualLayer(nn.Module):
 class ZoeDepthFeatureFusionLayer(nn.Module):
     def __init__(self, config: ZoeDepthConfig, align_corners: bool = ...) -> None: ...
     def forward(
-        self, hidden_state: torch.Tensor, residual: torch.Tensor | None = ...
+        self,
+        hidden_state: torch.Tensor,
+        residual: torch.Tensor | None = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class ZoeDepthNeck(nn.Module):
     def __init__(self, config: ZoeDepthConfig) -> None: ...
     def forward(
-        self, hidden_states: list[torch.Tensor], patch_height, patch_width
+        self,
+        hidden_states: list[torch.Tensor],
+        patch_height,
+        patch_width,
     ) -> list[torch.Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> list[torch.Tensor]: ...
 
@@ -71,14 +79,24 @@ class LogBinomialSoftmax(nn.Module):
 
 class ZoeDepthConditionalLogBinomialSoftmax(nn.Module):
     def __init__(
-        self, config, in_features, condition_dim, n_classes=..., bottleneck_factor=...
+        self,
+        config,
+        in_features,
+        condition_dim,
+        n_classes=...,
+        bottleneck_factor=...,
     ) -> None: ...
     def forward(self, main_feature, condition_feature):  # -> Any:
         ...
 
 class ZoeDepthSeedBinRegressor(nn.Module):
     def __init__(
-        self, config, n_bins=..., mlp_dim=..., min_depth=..., max_depth=...
+        self,
+        config,
+        n_bins=...,
+        mlp_dim=...,
+        min_depth=...,
+        max_depth=...,
     ) -> None: ...
     def forward(self, x):  # -> tuple[Any, Tensor] | tuple[Any, Any]:
         ...
@@ -97,7 +115,11 @@ class ZoeDepthAttractorLayer(nn.Module):
         memory_efficient=...,
     ) -> None: ...
     def forward(
-        self, x, prev_bin, prev_bin_embedding=..., interpolate=...
+        self,
+        x,
+        prev_bin,
+        prev_bin_embedding=...,
+        interpolate=...,
     ):  # -> tuple[Tensor | Any, Tensor]:
         ...
 
@@ -112,7 +134,11 @@ class ZoeDepthAttractorLayerUnnormed(nn.Module):
         memory_efficient=...,
     ) -> None: ...
     def forward(
-        self, x, prev_bin, prev_bin_embedding=..., interpolate=...
+        self,
+        x,
+        prev_bin,
+        prev_bin_embedding=...,
+        interpolate=...,
     ):  # -> tuple[Tensor | Any, Tensor | Any]:
         ...
 
@@ -141,7 +167,12 @@ class ZoeDepthTransformerEncoderLayer(nn.Module):
 class ZoeDepthPatchTransformerEncoder(nn.Module):
     def __init__(self, config) -> None: ...
     def positional_encoding_1d(
-        self, batch_size, sequence_length, embedding_dim, device=..., dtype=...
+        self,
+        batch_size,
+        sequence_length,
+        embedding_dim,
+        device=...,
+        dtype=...,
     ):  # -> Tensor:
         ...
     def forward(self, x):  # -> Tensor | Any:
@@ -155,14 +186,22 @@ class ZoeDepthMLPClassifier(nn.Module):
 class ZoeDepthMultipleMetricDepthEstimationHeads(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, outconv_activation, bottleneck, feature_blocks, relative_depth
+        self,
+        outconv_activation,
+        bottleneck,
+        feature_blocks,
+        relative_depth,
     ):  # -> tuple[Tensor, Any]:
         ...
 
 class ZoeDepthMetricDepthEstimationHead(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, outconv_activation, bottleneck, feature_blocks, relative_depth
+        self,
+        outconv_activation,
+        bottleneck,
+        feature_blocks,
+        relative_depth,
     ):  # -> tuple[Tensor, None]:
         ...
 

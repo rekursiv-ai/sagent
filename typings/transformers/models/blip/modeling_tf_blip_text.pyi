@@ -81,7 +81,10 @@ class TFBlipTextIntermediate(keras.layers.Layer):
 class TFBlipTextOutput(keras.layers.Layer):
     def __init__(self, config: BlipTextConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -161,7 +164,10 @@ class TFBlipTextModel(TFBlipTextPreTrainedModel):
         ...
     @tf.function
     def get_extended_attention_mask(
-        self, attention_mask: tf.Tensor, input_shape: tuple[int], is_decoder: bool
+        self,
+        attention_mask: tf.Tensor,
+        input_shape: tuple[int],
+        is_decoder: bool,
     ) -> tf.Tensor: ...
     @add_start_docstrings_to_model_forward(BLIP_TEXT_INPUTS_DOCSTRING)
     @unpack_inputs
@@ -216,7 +222,11 @@ class TFBlipTextLMHeadModel(TFBlipTextPreTrainedModel):
     ):  # -> TFCausalLMOutputWithCrossAttentions:
         ...
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=..., attention_mask=..., **model_kwargs
+        self,
+        input_ids,
+        past_key_values=...,
+        attention_mask=...,
+        **model_kwargs,
     ):  # -> dict[str, Any | bool | None]:
         ...
     def build(self, input_shape=...):  # -> None:

@@ -27,7 +27,10 @@ def get_hash_for_files(paths: tuple[str], extra: str = ...) -> bytes: ...
 class CustomPartitionerFn(ABC):
     @abstractmethod
     def __call__(
-        self, gm: torch.fx.GraphModule, joint_inputs: Sequence[object], **kwargs: Any
+        self,
+        gm: torch.fx.GraphModule,
+        joint_inputs: Sequence[object],
+        **kwargs: Any,
     ) -> tuple[torch.fx.GraphModule, torch.fx.GraphModule]: ...
     @abstractmethod
     def uuid(self) -> None: ...

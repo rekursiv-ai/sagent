@@ -16,7 +16,10 @@ class TimmBackbone(PreTrainedModel, BackboneMixin):
     def __init__(self, config, **kwargs) -> None: ...
     @classmethod
     def from_pretrained(
-        cls, pretrained_model_name_or_path, *model_args, **kwargs
+        cls,
+        pretrained_model_name_or_path,
+        *model_args,
+        **kwargs,
     ):  # -> Self:
         ...
     def freeze_batch_norm_2d(self):  # -> None:
@@ -32,7 +35,9 @@ class TimmBackbone(PreTrainedModel, BackboneMixin):
         **kwargs,
     ) -> BackboneOutput | tuple[Tensor, ...]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> BackboneOutput | tuple[Tensor, ...]: ...
 
 __all__ = ["TimmBackbone"]

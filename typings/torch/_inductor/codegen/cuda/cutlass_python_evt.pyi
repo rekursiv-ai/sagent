@@ -13,7 +13,10 @@ import torch
 _ACCUMULATOR_ARG_NAME = ...
 
 def scaled_mm_evt(
-    scale_A_name: str, scale_B_name: str, bias_name: str | None, output_name: str
+    scale_A_name: str,
+    scale_B_name: str,
+    bias_name: str | None,
+    output_name: str,
 ) -> tuple[list[str], dict[str, Any], str]: ...
 
 class CutlassEVTOpsMixIn:
@@ -50,7 +53,9 @@ class _AssignmentFormatter(DefaultHandler):
 
 class CutlassEVTCodegen(CutlassEVTOpsMixIn):
     def __init__(
-        self, accumulator_node_name: str, removed_buffers: OrderedSet[str]
+        self,
+        accumulator_node_name: str,
+        removed_buffers: OrderedSet[str],
     ) -> None: ...
     @staticmethod
     def ir_to_evt_python_code(
@@ -67,7 +72,11 @@ class CutlassEVTCodegen(CutlassEVTOpsMixIn):
     def get_writes(self) -> list[str]: ...
     def load(self, name: str, index: Any) -> str: ...
     def store(
-        self, name: Any, index: Any = ..., value: Any = ..., mode: Any = ...
+        self,
+        name: Any,
+        index: Any = ...,
+        value: Any = ...,
+        mode: Any = ...,
     ) -> None: ...
     @staticmethod
     def get_index_vars(node: ComputedBuffer) -> Sequence[sympy.Expr]: ...

@@ -21,7 +21,9 @@ _torch_distributed_available = ...
 def softmax_backward_data(parent, grad_output, output):  # -> Tensor:
     ...
 def prune_linear_layer(
-    layer: nn.Linear, index: torch.LongTensor, dim: int = ...
+    layer: nn.Linear,
+    index: torch.LongTensor,
+    dim: int = ...,
 ) -> nn.Linear: ...
 
 class Conv1D(nn.Module):
@@ -30,10 +32,14 @@ class Conv1D(nn.Module):
         ...
 
 def prune_conv1d_layer(
-    layer: Conv1D, index: torch.LongTensor, dim: int = ...
+    layer: Conv1D,
+    index: torch.LongTensor,
+    dim: int = ...,
 ) -> Conv1D: ...
 def prune_layer(
-    layer: nn.Linear | Conv1D, index: torch.LongTensor, dim: int | None = ...
+    layer: nn.Linear | Conv1D,
+    index: torch.LongTensor,
+    dim: int | None = ...,
 ) -> nn.Linear | Conv1D: ...
 def apply_chunking_to_forward(
     forward_fn: Callable[..., torch.Tensor],
@@ -42,18 +48,24 @@ def apply_chunking_to_forward(
     *input_tensors,
 ) -> torch.Tensor: ...
 def find_pruneable_heads_and_indices(
-    heads: list[int], n_heads: int, head_size: int, already_pruned_heads: set[int]
+    heads: list[int],
+    n_heads: int,
+    head_size: int,
+    already_pruned_heads: set[int],
 ) -> tuple[set[int], torch.LongTensor]: ...
 def meshgrid(
-    *tensors: torch.Tensor | list[torch.Tensor], indexing: str | None = ...
+    *tensors: torch.Tensor | list[torch.Tensor],
+    indexing: str | None = ...,
 ) -> tuple[torch.Tensor, ...]: ...
 def id_tensor_storage(tensor: torch.Tensor) -> tuple[torch.device, int, int]: ...
 def isin_mps_friendly(
-    elements: torch.Tensor, test_elements: torch.Tensor | int
+    elements: torch.Tensor,
+    test_elements: torch.Tensor | int,
 ) -> torch.Tensor: ...
 @wraps(lru_cache)
 def compile_compatible_method_lru_cache(
-    *lru_args, **lru_kwargs
+    *lru_args,
+    **lru_kwargs,
 ):  # -> Callable[..., _Wrapped[..., Any, ..., Any]]:
     ...
 def infer_device():  # -> Literal['cuda', 'xpu', 'cpu']:

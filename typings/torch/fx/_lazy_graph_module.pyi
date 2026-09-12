@@ -17,7 +17,8 @@ class _LazyGraphModule(GraphModule):
     def force_recompile(gm) -> None: ...
     def real_recompile(self) -> None: ...
     def __reduce_package__(
-        self, exporter: PackageExporter
+        self,
+        exporter: PackageExporter,
     ) -> tuple[Callable[..., Module], tuple[dict[str, Any], str]]: ...
     def __reduce__(
         self,

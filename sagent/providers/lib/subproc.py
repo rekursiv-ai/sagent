@@ -55,7 +55,7 @@ class Subproc:
       stream_limit: Per-line buffer cap (bytes) for the child's stdout
           ``asyncio.StreamReader``. Defaults to asyncio's 64 KiB. A line
           longer than the cap strands ``readline()`` with ``ValueError:
-          Separator is found, but chunk is longer than limit`` — raise it
+          Separator is found, but chunk is longer than limit`` -- raise it
           for protocols that put large payloads on a single NDJSON line.
 
     """
@@ -138,7 +138,8 @@ class Subproc:
         assert proc.stdout is not None
         try:
             raw = await asyncio.wait_for(
-                proc.stdout.readline(), timeout=self._read_timeout_sec
+                proc.stdout.readline(),
+                timeout=self._read_timeout_sec,
             )
         except TimeoutError as exc:
             raise SubprocessTransportError(
@@ -150,7 +151,9 @@ class Subproc:
         return raw.rstrip(b"\n").decode("utf-8", errors="replace")
 
     async def read_json_line(
-        self, *, skip_non_json: bool = False
+        self,
+        *,
+        skip_non_json: bool = False,
     ) -> MutableJSON | None:
         """Read until a valid JSON object line appears.
 
@@ -183,7 +186,7 @@ class Subproc:
                     logger.debug("skipping malformed stdout: %s", line[:120])
                     continue
                 raise SubprocessTransportError(
-                    f"non-JSON line on stdout: {line[:200]!r}: {self._diagnostic()}"
+                    f"non-JSON line on stdout: {line[:200]!r}: {self._diagnostic()}",
                 ) from exc
             if isinstance(obj, dict):
                 return cast(MutableJSON, obj)
@@ -228,6 +231,9 @@ class Subproc:
         ``read_json_line`` (which will raise ``SubprocessTransportError``
         once the subprocess closes its stdout).
 
+        Returns:
+          signalled: Whether SIGINT was sent to a live subprocess.
+
         Empirical: ``claude --print`` aborts its current generation on
         SIGINT and exits without flushing a terminal ``result`` event,
         so the provider's ``stream()`` resolves as ``ModelResponseError``
@@ -235,6 +241,7 @@ class Subproc:
         time a turn is requested. Partial assistant text from the
         cancelled turn is lost -- intentional, since the caller is
         preempting precisely because that work is no longer wanted.
+
         """
         if self._closed:
             return False
@@ -279,5 +286,5 @@ class Subproc:
             if not raw:
                 return
             self._stderr_tail.append(
-                raw.rstrip(b"\n").decode("utf-8", errors="replace")
+                raw.rstrip(b"\n").decode("utf-8", errors="replace"),
             )

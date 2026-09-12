@@ -52,7 +52,7 @@ def _catalog() -> PriceCatalog:
             PriceCatalogProduct("auto", 0): TokenPrice(request=2.0),
             PriceCatalogProduct("auto", 200_000): TokenPrice(request=4.0),
             PriceCatalogProduct("priority", 0): TokenPrice(request=6.0),
-        }
+        },
     )
 
 
@@ -112,7 +112,7 @@ def test_contains_agrees_with_getitem_above_the_lowest_tier() -> None:
     then raised on access.
     """
     catalog = PriceCatalog(
-        {PriceCatalogProduct("auto", 272_000): TokenPrice(request=1.0)}
+        {PriceCatalogProduct("auto", 272_000): TokenPrice(request=1.0)},
     )
     key = PriceCatalogProduct("auto", 0)
     assert (key in catalog) is _resolves(catalog, key)

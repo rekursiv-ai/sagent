@@ -58,14 +58,23 @@ class TFLxmertEmbeddings(keras.layers.Layer):
     def build(self, input_shape=...):  # -> None:
         ...
     def call(
-        self, input_ids=..., token_type_ids=..., inputs_embeds=..., training=...
+        self,
+        input_ids=...,
+        token_type_ids=...,
+        inputs_embeds=...,
+        training=...,
     ): ...
 
 class TFLxmertAttention(keras.layers.Layer):
     def __init__(self, config, **kwargs) -> None: ...
     def transpose_for_scores(self, x, batch_size): ...
     def call(
-        self, hidden_states, context, attention_mask, output_attentions, training=...
+        self,
+        hidden_states,
+        context,
+        attention_mask,
+        output_attentions,
+        training=...,
     ):  # -> tuple[Any, Any] | tuple[Any]:
         ...
     def build(self, input_shape=...):  # -> None:
@@ -92,7 +101,11 @@ class TFLxmertAttentionOutput(keras.layers.Layer):
 class TFLxmertSelfAttentionLayer(keras.layers.Layer):
     def __init__(self, config, **kwargs) -> None: ...
     def call(
-        self, input_tensor, attention_mask, output_attentions, training=...
+        self,
+        input_tensor,
+        attention_mask,
+        output_attentions,
+        training=...,
     ):  # -> tuple[Any, Any] | tuple[Any]:
         ...
     def build(self, input_shape=...):  # -> None:
@@ -254,7 +267,10 @@ class TFLxmertPredictionHeadTransform(keras.layers.Layer):
 
 class TFLxmertLMPredictionHead(keras.layers.Layer):
     def __init__(
-        self, config: LxmertConfig, input_embeddings: keras.layers.Layer, **kwargs
+        self,
+        config: LxmertConfig,
+        input_embeddings: keras.layers.Layer,
+        **kwargs,
     ) -> None: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -268,7 +284,10 @@ class TFLxmertLMPredictionHead(keras.layers.Layer):
 
 class TFLxmertMLMHead(keras.layers.Layer):
     def __init__(
-        self, config: LxmertConfig, input_embeddings: keras.layers.Layer, **kwargs
+        self,
+        config: LxmertConfig,
+        input_embeddings: keras.layers.Layer,
+        **kwargs,
     ) -> None: ...
     def call(self, sequence_output: tf.Tensor) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -306,7 +325,8 @@ class TFLxmertForPreTraining(TFLxmertPreTrainedModel):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(LXMERT_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFLxmertForPreTrainingOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFLxmertForPreTrainingOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,

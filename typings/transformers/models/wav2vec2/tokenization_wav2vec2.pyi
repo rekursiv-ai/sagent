@@ -56,7 +56,10 @@ class Wav2Vec2CTCTokenizer(PreTrainedTokenizer):
         output_word_offsets: bool = ...,
     ) -> dict[str, str | float]: ...
     def prepare_for_tokenization(
-        self, text, is_split_into_words=..., **kwargs
+        self,
+        text,
+        is_split_into_words=...,
+        **kwargs,
     ):  # -> tuple[str, dict[str, Any]]:
         ...
     def batch_decode(
@@ -78,7 +81,9 @@ class Wav2Vec2CTCTokenizer(PreTrainedTokenizer):
         **kwargs,
     ) -> str: ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
 
 class Wav2Vec2Tokenizer(PreTrainedTokenizer):
@@ -122,7 +127,9 @@ class Wav2Vec2Tokenizer(PreTrainedTokenizer):
     def get_vocab(self) -> dict: ...
     def convert_tokens_to_string(self, tokens: list[str]) -> str: ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
 
 __all__ = ["Wav2Vec2CTCTokenizer", "Wav2Vec2Tokenizer"]

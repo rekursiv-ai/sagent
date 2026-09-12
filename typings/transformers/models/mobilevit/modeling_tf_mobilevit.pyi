@@ -30,7 +30,9 @@ _IMAGE_CLASS_CHECKPOINT = ...
 _IMAGE_CLASS_EXPECTED_OUTPUT = ...
 
 def make_divisible(
-    value: int, divisor: int = ..., min_value: int | None = ...
+    value: int,
+    divisor: int = ...,
+    min_value: int | None = ...,
 ) -> int: ...
 
 class TFMobileViTConvLayer(keras.layers.Layer):
@@ -121,7 +123,10 @@ class TFMobileViTOutput(keras.layers.Layer):
         **kwargs,
     ) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -140,7 +145,11 @@ class TFMobileViTTransformerLayer(keras.layers.Layer):
 
 class TFMobileViTTransformer(keras.layers.Layer):
     def __init__(
-        self, config: MobileViTConfig, hidden_size: int, num_stages: int, **kwargs
+        self,
+        config: MobileViTConfig,
+        hidden_size: int,
+        num_stages: int,
+        **kwargs,
     ) -> None: ...
     def call(self, hidden_states: tf.Tensor, training: bool = ...) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -180,7 +189,10 @@ class TFMobileViTEncoder(keras.layers.Layer):
 class TFMobileViTMainLayer(keras.layers.Layer):
     config_class = MobileViTConfig
     def __init__(
-        self, config: MobileViTConfig, expand_output: bool = ..., **kwargs
+        self,
+        config: MobileViTConfig,
+        expand_output: bool = ...,
+        **kwargs,
     ) -> None: ...
     @unpack_inputs
     def call(
@@ -207,7 +219,11 @@ MOBILEVIT_INPUTS_DOCSTRING = ...
 )
 class TFMobileViTModel(TFMobileViTPreTrainedModel):
     def __init__(
-        self, config: MobileViTConfig, expand_output: bool = ..., *inputs, **kwargs
+        self,
+        config: MobileViTConfig,
+        expand_output: bool = ...,
+        *inputs,
+        **kwargs,
     ) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(MOBILEVIT_INPUTS_DOCSTRING)
@@ -233,7 +249,8 @@ class TFMobileViTModel(TFMobileViTPreTrainedModel):
     MOBILEVIT_START_DOCSTRING,
 )
 class TFMobileViTForImageClassification(
-    TFMobileViTPreTrainedModel, TFSequenceClassificationLoss
+    TFMobileViTPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config: MobileViTConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
@@ -257,7 +274,11 @@ class TFMobileViTForImageClassification(
 
 class TFMobileViTASPPPooling(keras.layers.Layer):
     def __init__(
-        self, config: MobileViTConfig, in_channels: int, out_channels: int, **kwargs
+        self,
+        config: MobileViTConfig,
+        in_channels: int,
+        out_channels: int,
+        **kwargs,
     ) -> None: ...
     def call(self, features: tf.Tensor, training: bool = ...) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:

@@ -41,7 +41,10 @@ THINKING_COMMANDS: Final[tuple[str, ...]] = (
 
 
 def apply_thinking_command(
-    command: str, settings: ModelSettings, *, show: bool
+    command: str,
+    settings: ModelSettings,
+    *,
+    show: bool,
 ) -> bool:
     """Apply one word to ``settings``; return the new display flag.
 
@@ -70,7 +73,7 @@ def apply_thinking_command(
     if not thinking_offered(command, settings):
         raise ValueError(
             f"thinking {command!r} is not offered by"
-            f" {settings.capability.model_id or 'this model'}"
+            f" {settings.capability.model_id or 'this model'}",
         )
     settings.thinking_budget = budget
     settings.thinking_output = output
@@ -115,7 +118,10 @@ def describe_thinking(settings: ModelSettings, *, show: bool) -> str:
 
 
 def _axes(
-    command: str, settings: ModelSettings, *, show: bool
+    command: str,
+    settings: ModelSettings,
+    *,
+    show: bool,
 ) -> tuple[ThinkingBudget, ThinkingOutput, bool]:
     """Resolve one word against the axes already selected."""
     match command:

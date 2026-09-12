@@ -25,7 +25,9 @@ class _Z3Ops:
     def div(self, numerator: z3.ArithRef, denominator: z3.ArithRef) -> z3.ArithRef: ...
     def floor(self, number: z3.ArithRef) -> z3.ArithRef: ...
     def floordiv(
-        self, numerator: z3.ArithRef, denominator: z3.ArithRef
+        self,
+        numerator: z3.ArithRef,
+        denominator: z3.ArithRef,
     ) -> z3.ArithRef: ...
     def ceil(self, number: z3.ArithRef) -> z3.ArithRef: ...
     def trunc(self, number: z3.ArithRef) -> z3.ArithRef: ...
@@ -46,13 +48,21 @@ def z3op(op: Callable, validator: TranslationValidator) -> Callable: ...
 
 class PopulateValidator(torch.fx.Interpreter):
     def __init__(
-        self, graph: torch.fx.Graph, validator: TranslationValidator
+        self,
+        graph: torch.fx.Graph,
+        validator: TranslationValidator,
     ) -> None: ...
     def placeholder(
-        self, target: Target, args: tuple[Argument, ...], kwargs: dict[str, Any]
+        self,
+        target: Target,
+        args: tuple[Argument, ...],
+        kwargs: dict[str, Any],
     ) -> Any: ...
     def call_function(
-        self, target: Target, args: tuple[Argument, ...], kwargs: dict[str, Any]
+        self,
+        target: Target,
+        args: tuple[Argument, ...],
+        kwargs: dict[str, Any],
     ) -> Any: ...
 
 class SympyToZ3:
@@ -63,13 +73,19 @@ class SympyToZ3:
     def trunc_to_int(self, x: z3.ArithRef, dtype: torch.dtype) -> z3.ArithRef: ...
     def round_to_int(self, x: z3.ArithRef, dtype: torch.dtype) -> z3.ArithRef: ...
     def int_truediv(
-        self, numerator: z3.ArithRef, denominator: z3.ArithRef
+        self,
+        numerator: z3.ArithRef,
+        denominator: z3.ArithRef,
     ) -> z3.ArithRef: ...
     def truediv(
-        self, numerator: z3.ArithRef, denominator: z3.ArithRef
+        self,
+        numerator: z3.ArithRef,
+        denominator: z3.ArithRef,
     ) -> z3.ArithRef: ...
     def floordiv(
-        self, numerator: z3.ArithRef, denominator: z3.ArithRef
+        self,
+        numerator: z3.ArithRef,
+        denominator: z3.ArithRef,
     ) -> z3.ArithRef: ...
     def div(self, numerator: z3.ArithRef, denominator: z3.ArithRef) -> z3.ArithRef: ...
     def pow(self, base: z3.ArithRef, exp: z3.ArithRef) -> z3.ArithRef: ...
@@ -95,7 +111,11 @@ def translation_validation_timeout() -> int: ...
 
 class ValidationException(TorchDynamoException):
     def __init__(
-        self, model, assertions, target_exprs, failed_source_exprs
+        self,
+        model,
+        assertions,
+        target_exprs,
+        failed_source_exprs,
     ) -> None: ...
 
 class BisectValidationException(TorchDynamoException):

@@ -48,7 +48,9 @@ class TFDebertaStableDropout(keras.layers.Layer):
     def xdropout(self, inputs):  # -> tuple[Any, Callable[..., Any]]:
         ...
     def call(
-        self, inputs: tf.Tensor, training: tf.Tensor = ...
+        self,
+        inputs: tf.Tensor,
+        training: tf.Tensor = ...,
     ):  # -> tuple[Any, Callable[..., Any]]:
         ...
 
@@ -87,7 +89,10 @@ class TFDebertaIntermediate(keras.layers.Layer):
 class TFDebertaOutput(keras.layers.Layer):
     def __init__(self, config: DebertaConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -115,7 +120,10 @@ class TFDebertaEncoder(keras.layers.Layer):
         ...
     def get_attention_mask(self, attention_mask): ...
     def get_rel_pos(
-        self, hidden_states, query_states=..., relative_pos=...
+        self,
+        hidden_states,
+        query_states=...,
+        relative_pos=...,
     ):  # -> None:
         ...
     def call(
@@ -152,7 +160,12 @@ class TFDebertaDisentangledSelfAttention(keras.layers.Layer):
         training: bool = ...,
     ) -> tuple[tf.Tensor]: ...
     def disentangled_att_bias(
-        self, query_layer, key_layer, relative_pos, rel_embeddings, scale_factor
+        self,
+        query_layer,
+        key_layer,
+        relative_pos,
+        rel_embeddings,
+        scale_factor,
     ):  # -> Literal[0]:
         ...
 
@@ -178,7 +191,10 @@ class TFDebertaPredictionHeadTransform(keras.layers.Layer):
 
 class TFDebertaLMPredictionHead(keras.layers.Layer):
     def __init__(
-        self, config: DebertaConfig, input_embeddings: keras.layers.Layer, **kwargs
+        self,
+        config: DebertaConfig,
+        input_embeddings: keras.layers.Layer,
+        **kwargs,
     ) -> None: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -192,7 +208,10 @@ class TFDebertaLMPredictionHead(keras.layers.Layer):
 
 class TFDebertaOnlyMLMHead(keras.layers.Layer):
     def __init__(
-        self, config: DebertaConfig, input_embeddings: keras.layers.Layer, **kwargs
+        self,
+        config: DebertaConfig,
+        input_embeddings: keras.layers.Layer,
+        **kwargs,
     ) -> None: ...
     def call(self, sequence_output: tf.Tensor) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -235,7 +254,7 @@ class TFDebertaModel(TFDebertaPreTrainedModel):
     def __init__(self, config: DebertaConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        DEBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        DEBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -263,7 +282,7 @@ class TFDebertaForMaskedLM(TFDebertaPreTrainedModel, TFMaskedLanguageModelingLos
     def get_lm_head(self) -> keras.layers.Layer: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        DEBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        DEBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -291,12 +310,13 @@ class TFDebertaForMaskedLM(TFDebertaPreTrainedModel, TFMaskedLanguageModelingLos
     DEBERTA_START_DOCSTRING,
 )
 class TFDebertaForSequenceClassification(
-    TFDebertaPreTrainedModel, TFSequenceClassificationLoss
+    TFDebertaPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config: DebertaConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        DEBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        DEBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -324,12 +344,13 @@ class TFDebertaForSequenceClassification(
     DEBERTA_START_DOCSTRING,
 )
 class TFDebertaForTokenClassification(
-    TFDebertaPreTrainedModel, TFTokenClassificationLoss
+    TFDebertaPreTrainedModel,
+    TFTokenClassificationLoss,
 ):
     def __init__(self, config: DebertaConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        DEBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        DEBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -360,7 +381,7 @@ class TFDebertaForQuestionAnswering(TFDebertaPreTrainedModel, TFQuestionAnswerin
     def __init__(self, config: DebertaConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        DEBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        DEBERTA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,

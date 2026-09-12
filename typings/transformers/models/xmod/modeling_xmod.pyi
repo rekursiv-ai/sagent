@@ -56,7 +56,9 @@ class XmodSelfAttention(nn.Module):
 class XmodSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -96,7 +98,9 @@ class XmodOutput(nn.Module):
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
     def lang_adapter(
-        self, lang_ids: torch.Tensor, hidden_states: torch.Tensor
+        self,
+        lang_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
     ):  # -> Tensor:
         ...
 
@@ -136,7 +140,9 @@ class XmodEncoder(nn.Module):
         cache_position: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
 
 class XmodPooler(nn.Module):
@@ -325,7 +331,9 @@ class XmodForQuestionAnswering(XmodPreTrainedModel):
     ) -> tuple[torch.Tensor] | QuestionAnsweringModelOutput: ...
 
 def create_position_ids_from_input_ids(
-    input_ids, padding_idx, past_key_values_length=...
+    input_ids,
+    padding_idx,
+    past_key_values_length=...,
 ): ...
 
 __all__ = [

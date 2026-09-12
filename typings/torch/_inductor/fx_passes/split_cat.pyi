@@ -25,7 +25,10 @@ from ..pattern_matcher import (
 log = ...
 type _Arguments = tuple[torch.fx.node.Argument, ...]
 type _TransformParam = tuple[
-    _Arguments | None, _Arguments | None, _Arguments | None, _Arguments | None
+    _Arguments | None,
+    _Arguments | None,
+    _Arguments | None,
+    _Arguments | None,
 ]
 type _Range = tuple[int, int]
 PRE_GRAD_PATTERNS: dict[str, PatternMatcherPass] = ...
@@ -38,7 +41,8 @@ def construct_pattern_matcher_pass(pass_name: str) -> PatternMatcherPass: ...
 def normalize_split_base(
     match: Match,
     _get_split_args: Callable[
-        [torch.fx.Node], tuple[torch.fx.Node | None, Any | None, int | None]
+        [torch.fx.Node],
+        tuple[torch.fx.Node | None, Any | None, int | None],
     ],
 ) -> None: ...
 @register_graph_pattern(
@@ -112,7 +116,8 @@ class TorchSplit(CallFunction):
         CallFunction(
             operator.getitem,
             TorchSplit(
-                KeywordArg("first_split_input"), KeywordArg("first_split_sections")
+                KeywordArg("first_split_input"),
+                KeywordArg("first_split_sections"),
             ),
             Ignored(),
         ),
@@ -136,16 +141,23 @@ class SplitCatSimplifier:
         split_sections: list[int],
     ) -> None: ...
     def get_user_input_list(
-        self, split_node: torch.fx.Node, next_users: list[torch.fx.Node]
+        self,
+        split_node: torch.fx.Node,
+        next_users: list[torch.fx.Node],
     ) -> list[list[torch.fx.Node | _Range]]: ...
     def get_merged_user_inputs(
-        self, split_node: torch.fx.Node, cat_node: torch.fx.Node
+        self,
+        split_node: torch.fx.Node,
+        cat_node: torch.fx.Node,
     ) -> list[torch.fx.Node | _Range]: ...
     def get_non_cat_node_input(
-        self, split_node: torch.fx.Node, node: torch.fx.Node
+        self,
+        split_node: torch.fx.Node,
+        node: torch.fx.Node,
     ) -> list[_Range]: ...
     def merge_consecutive_inputs(
-        self, inputs: list[torch.fx.Node | int]
+        self,
+        inputs: list[torch.fx.Node | int],
     ) -> list[torch.fx.Node | _Range]: ...
     def get_simplified_split_ranges(
         self,
@@ -186,7 +198,9 @@ class SplitCatSimplifier:
 
 class UnbindCatRemover(SplitCatSimplifier):
     def remove_unbind(
-        self, graph: torch.fx.Graph, unbind_node: torch.fx.Node
+        self,
+        graph: torch.fx.Graph,
+        unbind_node: torch.fx.Node,
     ) -> None: ...
     def get_simplified_split_ranges(
         self,
@@ -204,7 +218,9 @@ class UnbindCatRemover(SplitCatSimplifier):
 class GetItem(CallFunction):
     def __init__(self, arg, index, _users=...) -> None: ...
     def find_anchor_nodes(
-        self, ctx: MatchContext, searched: OrderedSet[torch.fx.Node]
+        self,
+        ctx: MatchContext,
+        searched: OrderedSet[torch.fx.Node],
     ) -> Generator[Node, Any]: ...
 
 @register_graph_pattern(
@@ -217,7 +233,7 @@ class GetItem(CallFunction):
             ),
             KeywordArg("dim"),
             _users=MULTIPLE,
-        )
+        ),
     ),
     pass_dict=construct_pattern_matcher_pass("split_cat_pass"),
 )
@@ -231,12 +247,15 @@ class GetItem(CallFunction):
             ),
             dim=KeywordArg("dim"),
             _users=MULTIPLE,
-        )
+        ),
     ),
     pass_dict=construct_pattern_matcher_pass("split_cat_pass"),
 )
 def merge_split_squeeze(
-    match: Match, split_input: torch.fx.Node, split_sizes: list[int], dim: int
+    match: Match,
+    split_input: torch.fx.Node,
+    split_sizes: list[int],
+    dim: int,
 ) -> None: ...
 
 getitem_unbind = ...
@@ -247,13 +266,19 @@ getitem_unbind = ...
 )
 @register_graph_pattern(
     CallFunction(
-        [torch.stack, torch.cat], getitem_unbind, dim=Ignored(), _users=MULTIPLE
+        [torch.stack, torch.cat],
+        getitem_unbind,
+        dim=Ignored(),
+        _users=MULTIPLE,
     ),
     pass_dict=construct_pattern_matcher_pass("unbind_stack_pass"),
 )
 @register_graph_pattern(
     CallFunction(
-        [torch.stack, torch.cat], tensors=getitem_unbind, dim=Ignored(), _users=MULTIPLE
+        [torch.stack, torch.cat],
+        tensors=getitem_unbind,
+        dim=Ignored(),
+        _users=MULTIPLE,
     ),
     pass_dict=construct_pattern_matcher_pass("unbind_stack_pass"),
 )
@@ -264,13 +289,19 @@ reshape_getitem_split = ...
 
 @register_graph_pattern(
     CallFunction(
-        [torch.stack, torch.cat], tensors=getitem_split, dim=Ignored(), _users=MULTIPLE
+        [torch.stack, torch.cat],
+        tensors=getitem_split,
+        dim=Ignored(),
+        _users=MULTIPLE,
     ),
     pass_dict=construct_pattern_matcher_pass("split_cat_pass"),
 )
 @register_graph_pattern(
     CallFunction(
-        [torch.stack, torch.cat], getitem_split, dim=Ignored(), _users=MULTIPLE
+        [torch.stack, torch.cat],
+        getitem_split,
+        dim=Ignored(),
+        _users=MULTIPLE,
     ),
     pass_dict=construct_pattern_matcher_pass("split_cat_pass"),
 )
@@ -283,7 +314,8 @@ def has_same_parent_node(node: torch.fx.Node) -> bool: ...
 def remove_zeros(split_sections: list[int]) -> tuple[list[Any], dict[Any, Any]]: ...
 def is_sorted_and_consecutive(arr: list[int]) -> bool: ...
 def calculate_fused_tensor_size(
-    split_node: torch.fx.Node, indices: list[int]
+    split_node: torch.fx.Node,
+    indices: list[int],
 ) -> int: ...
 @register_graph_pattern(
     CallFunction(torch.cat, getitem_split, dim=Ignored(), _users=MULTIPLE),
@@ -310,7 +342,10 @@ def normalize_split_default_aten(match: Match, *args, **kwargs) -> None: ...
 def normalize_split_with_size_default_aten(match: Match, *args, **kwargs) -> None: ...
 @register_graph_pattern(
     CallFunction(
-        torch.ops.aten.cat.default, getitem_split_aten, dim=Ignored(), _users=MULTIPLE
+        torch.ops.aten.cat.default,
+        getitem_split_aten,
+        dim=Ignored(),
+        _users=MULTIPLE,
     ),
     pass_dict=construct_pattern_matcher_pass("split_cat_aten_pass"),
 )
@@ -319,7 +354,8 @@ def merge_split_cat_aten(match: Match, *args, **kwargs) -> None: ...
     CallFunction(
         torch.ops.aten.cat.default,
         ListOf(
-            CallFunctionVarArgs(torch.ops.aten.select.int, users=MULTIPLE), partial=True
+            CallFunctionVarArgs(torch.ops.aten.select.int, users=MULTIPLE),
+            partial=True,
         ),
         dim=Ignored(),
         _users=MULTIPLE,
@@ -379,7 +415,8 @@ def construct_cat_args(
     run_update_func: Callable = ...,
 ) -> tuple[list[torch.fx.Node], list[torch.Tensor]]: ...
 def remove_split_unbind_children(
-    graph: torch.fx.Graph, inputs: list[torch.fx.Node]
+    graph: torch.fx.Graph,
+    inputs: list[torch.fx.Node],
 ) -> None: ...
 @register_graph_pattern(
     CallFunction(torch.cat, getitem_split, dim=Ignored(), _users=MULTIPLE),
@@ -415,7 +452,9 @@ def split_stack_to_cats(match: Match, split_sections: list[int], dim: int) -> No
     pass_dict=construct_pattern_matcher_pass("unbind_stack_to_slices_pass"),
 )
 def unbind_stack_to_slices(
-    match: Match, unbind_input: torch.fx.Node, dim: int
+    match: Match,
+    unbind_input: torch.fx.Node,
+    dim: int,
 ) -> None: ...
 def get_view_shape_list(cat_arg: torch.fx.Node, stack_dim: int) -> list[int]: ...
 @register_graph_pattern(

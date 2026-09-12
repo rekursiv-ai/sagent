@@ -80,7 +80,9 @@ class TightMarkdown(Markdown):
 
     @override
     def __rich_console__(
-        self, console: Console, options: ConsoleOptions
+        self,
+        console: Console,
+        options: ConsoleOptions,
     ) -> RenderResult:
         style = console.get_style(self.style, default="none")
         options = options.update(height=None)
@@ -113,7 +115,8 @@ class TightMarkdown(Markdown):
                 href = str(token.attrs.get("href", ""))
                 if self.hyperlinks:
                     link_style = console.get_style(
-                        "markdown.link_url", default="none"
+                        "markdown.link_url",
+                        default="none",
                     ) + RichStyle(link=href)
                     context.enter_style(link_style)
                 else:
@@ -124,7 +127,7 @@ class TightMarkdown(Markdown):
                 # blank line per tag and drops the ``<kbd>`` styling.
                 if token.content == "<kbd>":
                     context.enter_style(
-                        console.get_style("markdown.kbd", default="bold")
+                        console.get_style("markdown.kbd", default="bold"),
                     )
                 elif token.content == "</kbd>":
                     context.leave_style()
@@ -137,13 +140,13 @@ class TightMarkdown(Markdown):
                     element = context.stack.pop()
                     assert isinstance(element, Link)
                     context.enter_style(
-                        console.get_style("markdown.link", default="none")
+                        console.get_style("markdown.link", default="none"),
                     )
                     context.on_text(element.text.plain, node_type)
                     context.leave_style()
                     context.on_text(" (", node_type)
                     context.enter_style(
-                        console.get_style("markdown.link_url", default="none")
+                        console.get_style("markdown.link_url", default="none"),
                     )
                     context.on_text(element.href, node_type)
                     context.leave_style()
@@ -197,34 +200,23 @@ class TightMarkdown(Markdown):
                     new_line = element.new_line
 
 
+# CommonMark restricts a paragraph-interrupting ordered list to one starting at 1, so
+# that a line wrapping onto ``2024.`` is not read as a list. Assistant turns break the
+# other way: a continued numbering run under a bold sub-heading is common and renders as
+# run-on prose. Across 133,899 logged assistant messages the fix applied 244 times and
+# the wrapped-number case it protects against occurred zero times.
+#
+# Upstream reads the restriction off ``state.parentType``, so clearing it for the probe
+# is what disables the check. The probe is non-recursive -- ``list_block`` returns at
+# ``if silent`` before it tokenizes children -- so no nested parse ever observes the
+# swap.
 def _lenient_list_block(
-    state: StateBlock, start_line: int, end_line: int, silent: bool
+    state: StateBlock,
+    start_line: int,
+    end_line: int,
+    silent: bool,
 ) -> bool:
-    """Let an ordered list interrupt a paragraph at any start number.
-
-    CommonMark restricts a paragraph-interrupting ordered list to one
-    starting at 1, so that a line wrapping onto ``2024.`` is not read as a
-    list. Assistant turns break the other way: a continued numbering run
-    under a bold sub-heading is common and renders as run-on prose. Across
-    133,899 logged assistant messages the fix applied 244 times and the
-    wrapped-number case it protects against occurred zero times.
-
-    Upstream reads the restriction off ``state.parentType``, so clearing
-    it for the probe is what disables the check. The probe is
-    non-recursive -- ``list_block`` returns at ``if silent`` before it
-    tokenizes children -- so no nested parse ever observes the swap.
-
-    Args:
-      state: Block-parser state; ``parentType`` is swapped and restored.
-      start_line: First line of the candidate list.
-      end_line: Line after the last one available to this rule.
-      silent: True when upstream is only probing whether a list starts
-          here, which is the only mode that consults ``parentType``.
-
-    Returns:
-      matched: True when the lines form a list, per upstream.
-
-    """
+    """Let an ordered list interrupt a paragraph at any start number."""
     saved = state.parentType
     if silent and saved == "paragraph":
         state.parentType = "root"

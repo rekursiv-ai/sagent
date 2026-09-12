@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import argparse
 import asyncio
@@ -27,7 +27,7 @@ from sagent.agent.session_io import (
     unpersisted_session_error,
 )
 from sagent.agent.state import agent_registry
-from sagent.bin import cli as cli_module
+from sagent.bin import cli
 from sagent.bin.cli import (
     _DEFAULT_PROVIDER,
     DEFAULT_TOOLS,
@@ -79,6 +79,9 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
 
+_CWD: Final = Path(__file__).resolve().parent
+
+
 def _parse(args: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     namespace, _ = _parse_cli_args(parser, list(args))
@@ -87,8 +90,8 @@ def _parse(args: Sequence[str]) -> argparse.Namespace:
 
 def test_parse_cli_args_defaults() -> None:
     ns = _parse([])
-    assert ns.provider  # any non-empty default
-    assert ns.auth  # any non-empty default
+    assert ns.provider  # Any non-empty default.
+    assert ns.auth  # Any non-empty default.
     assert ns.output_format == "text"
     assert ns.input_format == "text"
     assert ns.continue_ is False
@@ -202,7 +205,7 @@ async def test_resume_does_not_resurrect_completed_oneshot(tmp_path: Path) -> No
                 tools=(),
                 system="system text",
                 notify_on_asleep=False,
-            )
+            ),
         ],
     )
     before = set(agent_registry)
@@ -222,7 +225,9 @@ def test_build_persistent_child_restores_thinking_state(
     """The thinking axes round-trip through a persistent-child rebuild."""
     _stub_build_provider(monkeypatch)
     record = _child_record(
-        thinking_budget="auto", thinking_output="text", show_thinking=False
+        thinking_budget="auto",
+        thinking_output="text",
+        show_thinking=False,
     )
     child = _build_persistent_child(record, allow_providers=(), parent_label="parent")
     assert child.model.settings.thinking_budget == "auto"
@@ -248,7 +253,7 @@ def test_default_allow_providers_leads_with_default_provider() -> None:
     out = _default_allow_providers()
     assert out[0] == _DEFAULT_PROVIDER
     assert set(out) == set(PROVIDER_NAMES)
-    assert len(out) == len(PROVIDER_NAMES)  # no dup
+    assert len(out) == len(PROVIDER_NAMES)  # No dup.
 
 
 def test_implicit_provider_derives_auth_from_provider(
@@ -262,7 +267,7 @@ def test_implicit_provider_derives_auth_from_provider(
     the default auth is ``credentials``).
     """
     ns = _parse([])
-    ns.provider = "Anthropic"  # simulate allow-list default selection
+    ns.provider = "Anthropic"  # Simulate allow-list default selection.
 
     class _Provider:
         def model(self, model_id: str | None = None) -> object:
@@ -356,7 +361,10 @@ def test_resumed_provider_never_implicitly_falls_back(
             raise AssertionError(f"resume attempted fallback to {provider_name}")
         raise RuntimeError("Anthropic API key not configured.")
 
-    monkeypatch.setattr("sagent.bin.cli.build_provider", fake_build_provider)
+    monkeypatch.setattr(
+        "sagent.bin.cli.build_provider",
+        fake_build_provider,
+    )
 
     with pytest.raises(RuntimeError, match="Anthropic API key not configured"):
         _build_provider_model(
@@ -393,7 +401,10 @@ def test_implicit_startup_fallback_honors_allow_providers(
             return _Provider()
         raise AssertionError(f"excluded provider was attempted: {provider_name}")
 
-    monkeypatch.setattr("sagent.bin.cli.build_provider", fake_build_provider)
+    monkeypatch.setattr(
+        "sagent.bin.cli.build_provider",
+        fake_build_provider,
+    )
 
     _, model, auth = _build_provider_model(
         ns,
@@ -605,7 +616,9 @@ def test_resolve_resume_bounds_listing_to_limit_plus_sentinel(
     captured_limit: list[int | None] = []
 
     def fake_list_sessions(
-        cwd: str | Path, *, limit: int | None = None
+        cwd: str | Path,
+        *,
+        limit: int | None = None,
     ) -> list[SessionInfo]:
         assert cwd == tmp_path
         captured_limit.append(limit)
@@ -696,7 +709,14 @@ def test_resume_model_defaults_explicit_provider_uses_provider_default_model() -
 
 def test_resume_model_defaults_explicit_model_overrides_session_meta() -> None:
     ns = _parse(
-        ["--resume", "abc123", "--provider", "OpenAISubscription", "--model", "gpt-5.5"]
+        [
+            "--resume",
+            "abc123",
+            "--provider",
+            "OpenAISubscription",
+            "--model",
+            "gpt-5.5",
+        ],
     )
     meta = SessionMeta(
         provider="AnthropicCLI",
@@ -859,7 +879,7 @@ def test_run_headless_model_error_exits_nonzero(
                 agent,
                 input_format="text",
                 output_format=output_format,
-            )
+            ),
         )
 
     assert exc_info.value.code == 1
@@ -879,9 +899,11 @@ def test_event_to_json_record_model_service_suspended() -> None:
             delay_sec=60.0,
             server_supplied=True,
             error=ServiceErrorSnapshot(
-                type_name="RateLimitError", message="429", status=429
+                type_name="RateLimitError",
+                message="429",
+                status=429,
             ),
-        )
+        ),
     )
     assert rec == {
         "descriptor": "application/x-model-service-suspended",
@@ -916,7 +938,7 @@ def test_parse_stream_json_multi_lines_joined() -> None:
             json.dumps({"prompt": "first"}),
             "",
             json.dumps({"prompt": "second"}),
-        ]
+        ],
     )
     assert _parse_stream_json(raw) == "first\n\nsecond"
 
@@ -983,7 +1005,7 @@ def test_install_repl_logging_silences_stderr(
     saved_last_resort = logging.lastResort
     try:
         root.handlers.clear()
-        stderr_handler = logging.StreamHandler()  # defaults to stderr
+        stderr_handler = logging.StreamHandler()  # Defaults to stderr.
         root.addHandler(stderr_handler)
 
         _install_repl_logging(session_dir=tmp_path)
@@ -1124,13 +1146,13 @@ def test_resolve_session_dir_fresh_when_no_flags() -> None:
     out = _resolve_session_dir(ns)
     assert isinstance(out, str)
     # Fresh session under the standard projects dir.
-    assert out  # non-empty path string
+    assert out  # non-empty path string.
 
 
 @pytest.mark.cli_python_subprocess
 def test_direct_script_bootstraps_dependencies() -> None:
     """Polyglot-shebang `cli.py --help` runs to completion and prints help."""
-    script = Path(__file__).resolve().parent / "cli.py"
+    script = _CWD / "cli.py"
     proc = subprocess.run(  # noqa: S603 -- known script, hard-coded args
         [str(script), "--help"],
         capture_output=True,
@@ -1224,13 +1246,13 @@ def test_resume_limit_rejects_a_non_positive_count(bad: str) -> None:
     """
     parser = argparse.ArgumentParser()
     with pytest.raises(SystemExit):
-        _ = cli_module._parse_cli_args(parser, ["--resume", "--resume-limit", bad])
+        _ = cli._parse_cli_args(parser, ["--resume", "--resume-limit", bad])
 
 
 def test_resume_limit_accepts_a_positive_count() -> None:
     """Sanity: the validator must not reject the values operators use."""
     parser = argparse.ArgumentParser()
-    args, _ = cli_module._parse_cli_args(parser, ["--resume", "--resume-limit", "50"])
+    args, _ = cli._parse_cli_args(parser, ["--resume", "--resume-limit", "50"])
     assert args.resume_limit == 50
 
 
@@ -1258,13 +1280,13 @@ async def test_headless_reports_total_persistence_failure(tmp_path: Path) -> Non
     assert "cannot be resumed" in error
 
     # And headless raises rather than printing a result and exiting 0.
-    source = inspect.getsource(cli_module._run_headless)
+    source = inspect.getsource(cli._run_headless)
     assert "unpersisted_session_error" in source, (
         "headless does not consult the persistence check; a total write"
         " failure exits 0 with the answer printed and nothing saved"
     )
     assert source.index("unpersisted_session_error") < source.index(
-        "result_text = _last_assistant_text"
+        "result_text = _last_assistant_text",
     ), "the check must run BEFORE the result is emitted"
 
 

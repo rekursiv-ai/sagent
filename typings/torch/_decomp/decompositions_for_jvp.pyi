@@ -22,7 +22,10 @@ def trace(self: Tensor) -> Tensor: ...
 @maybe_register_decomposition(aten.log_sigmoid_forward.default)
 def log_sigmoid_forward(self: Tensor) -> tuple[Tensor, Tensor]: ...
 def recompute_mean_var(
-    input: Tensor, rstd: Tensor, inner_dim_indices: list[int], keepdim: bool
+    input: Tensor,
+    rstd: Tensor,
+    inner_dim_indices: list[int],
+    keepdim: bool,
 ) -> tuple[Tensor, Tensor]: ...
 @register_decomposition_for_jvp(aten.native_layer_norm_backward)
 def native_layer_norm_backward(

@@ -9,7 +9,11 @@ class SourceRange:
 
 class SourceRangeFactory:
     def __init__(
-        self, text: str, filename: Any, file_lineno: int, leading_whitespace_chars: int
+        self,
+        text: str,
+        filename: Any,
+        file_lineno: int,
+        leading_whitespace_chars: int,
     ) -> None: ...
     def make_range(self, line: int, start_col: int, end_col: int) -> SourceRange: ...
     def make_raw_range(self, start: int, end: int) -> SourceRange: ...
@@ -47,7 +51,11 @@ class Def(TreeView):
 
 class Property(TreeView):
     def __init__(
-        self, r: SourceRange, name: Ident, getter: Def, setter: Def | None
+        self,
+        r: SourceRange,
+        name: Ident,
+        getter: Def,
+        setter: Def | None,
     ) -> None: ...
     def name(self) -> Ident: ...
     def getter_name(self) -> str: ...
@@ -55,12 +63,19 @@ class Property(TreeView):
 
 class ClassDef(TreeView):
     def __init__(
-        self, name: Ident, body: list[Stmt], props: list[Property], assigns: list[Any]
+        self,
+        name: Ident,
+        body: list[Stmt],
+        props: list[Property],
+        assigns: list[Any],
     ) -> None: ...
 
 class Decl(TreeView):
     def __init__(
-        self, r: SourceRange, params: list[Param], return_type: Expr | None
+        self,
+        r: SourceRange,
+        params: list[Param],
+        return_type: Expr | None,
     ) -> None: ...
 
 class Delete(Stmt):
@@ -107,7 +122,10 @@ class While(Stmt):
 
 class With(Stmt):
     def __init__(
-        self, range: SourceRange, targets: list[WithItem], body: list[Stmt]
+        self,
+        range: SourceRange,
+        targets: list[WithItem],
+        body: list[Stmt],
     ) -> None: ...
 
 class For(Stmt):
@@ -141,7 +159,10 @@ class StringLiteral(Expr):
 
 class Apply(Expr):
     def __init__(
-        self, expr: Expr, args: list[Expr], kwargs: list[Attribute]
+        self,
+        expr: Expr,
+        args: list[Expr],
+        kwargs: list[Attribute],
     ) -> None: ...
 
 class Select(Expr):
@@ -152,12 +173,21 @@ class TernaryIf(Expr):
 
 class ListComp(Expr):
     def __init__(
-        self, range: SourceRange, elt: Expr, target: Expr, iter: Expr
+        self,
+        range: SourceRange,
+        elt: Expr,
+        target: Expr,
+        iter: Expr,
     ) -> None: ...
 
 class DictComp(Expr):
     def __init__(
-        self, range: SourceRange, key: Expr, value: Expr, target: Expr, iter: Expr
+        self,
+        range: SourceRange,
+        key: Expr,
+        value: Expr,
+        target: Expr,
+        iter: Expr,
     ) -> None: ...
 
 class ListLiteral(Expr):
@@ -168,7 +198,10 @@ class TupleLiteral(Expr):
 
 class DictLiteral(Expr):
     def __init__(
-        self, range: SourceRange, keys: list[Expr], values: list[Expr]
+        self,
+        range: SourceRange,
+        keys: list[Expr],
+        values: list[Expr],
     ) -> None: ...
 
 class Subscript(Expr):

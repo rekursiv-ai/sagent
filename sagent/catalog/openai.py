@@ -64,10 +64,17 @@ def models() -> Mapping[str, ModelCapability]:
     # a far larger request body than the generations before it.
     gpt56 = ModelCapability(
         context=_windowed(
-            request=272_000, response=128_000, gpt56_images=True, long=1_050_000
+            request=272_000,
+            response=128_000,
+            gpt56_images=True,
+            long=1_050_000,
         ),
         prices=_prices(
-            request=4.0, response=20.0, cache_write=5.0, cache_read=0.4, two_tier=True
+            request=4.0,
+            response=20.0,
+            cache_write=5.0,
+            cache_read=0.4,
+            two_tier=True,
         ),
         service_tier=_tiers(),
         thinking_effort=_efforts(),
@@ -249,7 +256,9 @@ def models() -> Mapping[str, ModelCapability]:
 
 
 def reasoning_effort(
-    effort: ThinkingEffort, *, model_id: str
+    effort: ThinkingEffort,
+    *,
+    model_id: str,
 ) -> Literal["none", "low", "medium", "high", "xhigh", "max"]:
     """Map a selected effort to the Responses vocabulary.
 
@@ -330,23 +339,30 @@ def _one(*, request: int, response: int, gpt56_images: bool = False) -> ModelLim
 
 
 def _context(
-    *, request: int, response: int, gpt56_images: bool = False
+    *,
+    request: int,
+    response: int,
+    gpt56_images: bool = False,
 ) -> Mapping[ContextTag, ModelLimits]:
     """One context tag, for a model with no ``+1m`` variant."""
     return MappingProxyType(
-        {"": _one(request=request, response=response, gpt56_images=gpt56_images)}
+        {"": _one(request=request, response=response, gpt56_images=gpt56_images)},
     )
 
 
 def _windowed(
-    *, request: int, response: int, long: int, gpt56_images: bool = False
+    *,
+    request: int,
+    response: int,
+    long: int,
+    gpt56_images: bool = False,
 ) -> Mapping[ContextTag, ModelLimits]:
     """Both context tags; ``+1m`` opts into the full window and its surcharge."""
     return MappingProxyType(
         {
             "": _one(request=request, response=response, gpt56_images=gpt56_images),
             "+1m": _one(request=long, response=response, gpt56_images=gpt56_images),
-        }
+        },
     )
 
 
@@ -369,7 +385,7 @@ def _prices(
             response=response,
             cache_write=cache_write,
             cache_read=cache_read,
-        )
+        ),
     }
     if two_tier:
         # The >272K surcharge applies the input multiplier to all three input

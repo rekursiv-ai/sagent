@@ -201,7 +201,11 @@ class XLMRobertaXLForCausalLM(XLMRobertaXLPreTrainedModel, GenerationMixin):
         **kwargs,
     ) -> tuple | CausalLMOutputWithCrossAttentions: ...
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=..., attention_mask=..., **model_kwargs
+        self,
+        input_ids,
+        past_key_values=...,
+        attention_mask=...,
+        **model_kwargs,
     ):  # -> dict[str, Any | None]:
         ...
 
@@ -314,7 +318,9 @@ class XLMRobertaXLForQuestionAnswering(XLMRobertaXLPreTrainedModel):
     ) -> tuple | QuestionAnsweringModelOutput: ...
 
 def create_position_ids_from_input_ids(
-    input_ids, padding_idx, past_key_values_length=...
+    input_ids,
+    padding_idx,
+    past_key_values_length=...,
 ): ...
 
 __all__ = [

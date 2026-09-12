@@ -31,6 +31,12 @@ class AutoCastable: ...
 
 class AutoCloseable(AutoCastable):
     def __init__(
-        self, close_func, *args, obj=..., needs_free=..., tracked=..., **kwargs
+        self,
+        close_func,
+        *args,
+        obj=...,
+        needs_free=...,
+        tracked=...,
+        **kwargs,
     ) -> None: ...
     def close(self, _by_parent=...) -> bool: ...

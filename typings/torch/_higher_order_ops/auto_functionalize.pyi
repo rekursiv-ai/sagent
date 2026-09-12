@@ -56,7 +56,8 @@ class NotView(ViewInfo):
 
 def is_alias(base, tensor) -> bool: ...
 def try_use_slice(
-    base, tensor
+    base,
+    tensor,
 ) -> tuple[Literal[0], Literal[0], Any] | tuple[int | None, Any, Any] | None: ...
 def write_view_information_to_args(
     mutable_arg_names: list[str],
@@ -74,7 +75,10 @@ def read_view_information_from_args(
 class AutoFunctionalized(HigherOrderOperator):
     def __init__(self) -> None: ...
     def __call__(
-        self, /, _mutable_op: OpOverload, **kwargs: Any
+        self,
+        /,
+        _mutable_op: OpOverload,
+        **kwargs: Any,
     ) -> tuple[Any, tuple[Tensor, ...]]: ...
 
 auto_functionalized = ...
@@ -83,7 +87,10 @@ type _MutableOpType = OpOverload | HigherOrderOperator
 class AutoFunctionalizedV2(HigherOrderOperator):
     def __init__(self) -> None: ...
     def __call__(
-        self, /, _mutable_op: _MutableOpType, **kwargs: Any
+        self,
+        /,
+        _mutable_op: _MutableOpType,
+        **kwargs: Any,
     ) -> tuple[Any, tuple[Tensor, ...]]: ...
 
 auto_functionalized_v2 = ...
@@ -119,11 +126,15 @@ def auto_functionalized_dense(
 ) -> tuple[Any, tuple[Tensor, ...]]: ...
 @auto_functionalized.py_impl(FakeTensorMode)
 def auto_functionalized_fake(
-    mode, _mutable_op: OpOverload, **kwargs: Any
+    mode,
+    _mutable_op: OpOverload,
+    **kwargs: Any,
 ) -> tuple[Any, tuple[Tensor, ...]]: ...
 @auto_functionalized.py_impl(ProxyTorchDispatchMode)
 def auto_functionalized_proxy(
-    mode, _mutable_op: OpOverload, **kwargs: Any
+    mode,
+    _mutable_op: OpOverload,
+    **kwargs: Any,
 ) -> tuple[Any, tuple[Tensor, ...]]: ...
 @auto_functionalized.py_functionalize_impl
 def auto_functionalized_func(ctx, _mutable_op, **kwargs): ...
@@ -135,11 +146,15 @@ def auto_functionalized_v2_dense(
 ) -> tuple[Any, tuple[Tensor, ...]]: ...
 @auto_functionalized_v2.py_impl(FakeTensorMode)
 def auto_functionalized_v2_fake(
-    mode, _mutable_op: _MutableOpType, **kwargs: dict[str, Any]
+    mode,
+    _mutable_op: _MutableOpType,
+    **kwargs: dict[str, Any],
 ) -> tuple[Any, tuple[Tensor, ...]]: ...
 @auto_functionalized_v2.py_impl(ProxyTorchDispatchMode)
 def auto_functionalized_v2_proxy(
-    mode, _mutable_op: _MutableOpType, **kwargs: Any
+    mode,
+    _mutable_op: _MutableOpType,
+    **kwargs: Any,
 ) -> tuple[Any, tuple[Tensor, ...]]: ...
 @auto_functionalized_v2.py_functionalize_impl
 def auto_functionalized_v2_func(ctx, _mutable_op, **kwargs): ...

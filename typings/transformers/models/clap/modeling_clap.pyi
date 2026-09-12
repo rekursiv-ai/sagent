@@ -27,7 +27,9 @@ def interpolate(hidden_states, ratio): ...
 def window_partition(hidden_states, window_size): ...
 def window_reverse(windows, window_size, height, width): ...
 def create_position_ids_from_input_ids(
-    input_ids, padding_idx, past_key_values_length=...
+    input_ids,
+    padding_idx,
+    past_key_values_length=...,
 ): ...
 def contrastive_loss(logits: torch.Tensor) -> torch.Tensor: ...
 
@@ -86,7 +88,9 @@ class ClapAudioSelfAttention(nn.Module):
 class ClapAudioSelfOutput(nn.Module):
     def __init__(self, config, dim) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -128,7 +132,10 @@ class ClapAudioLayer(nn.Module):
     def get_attn_mask(self, height, width, dtype, device):  # -> Tensor | None:
         ...
     def maybe_pad(
-        self, hidden_states, height, width
+        self,
+        hidden_states,
+        height,
+        width,
     ):  # -> tuple[Tensor, tuple[Literal[0], Literal[0], Literal[0], Any, Literal[0], Any]]:
         ...
     def forward(
@@ -140,12 +147,21 @@ class ClapAudioLayer(nn.Module):
         always_partition: bool | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class ClapAudioStage(GradientCheckpointingLayer):
     def __init__(
-        self, config, dim, input_resolution, depth, num_heads, drop_path, downsample
+        self,
+        config,
+        dim,
+        input_resolution,
+        depth,
+        num_heads,
+        drop_path,
+        downsample,
     ) -> None: ...
     def forward(
         self,
@@ -159,12 +175,17 @@ class ClapAudioStage(GradientCheckpointingLayer):
 
 class ClapAudioPatchMerging(nn.Module):
     def __init__(
-        self, input_resolution: tuple[int], dim: int, norm_layer: nn.Module = ...
+        self,
+        input_resolution: tuple[int],
+        dim: int,
+        norm_layer: nn.Module = ...,
     ) -> None: ...
     def maybe_pad(self, input_feature, height, width):  # -> Tensor:
         ...
     def forward(
-        self, input_feature: torch.Tensor, input_dimensions: tuple[int, int]
+        self,
+        input_feature: torch.Tensor,
+        input_dimensions: tuple[int, int],
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -232,7 +253,9 @@ class ClapTextSelfAttention(nn.Module):
 class ClapTextSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -258,7 +281,9 @@ class ClapTextIntermediate(nn.Module):
 class ClapTextOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 

@@ -22,7 +22,9 @@ class ConstantVariable(VariableTracker):
     @property
     def items(self) -> list[VariableTracker]: ...
     def getitem_const(
-        self, tx: InstructionTranslator, arg: VariableTracker
+        self,
+        tx: InstructionTranslator,
+        arg: VariableTracker,
     ) -> VariableTracker: ...
     @staticmethod
     def is_base_literal(obj) -> bool: ...
@@ -38,7 +40,9 @@ class ConstantVariable(VariableTracker):
         kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def call_obj_hasattr(
-        self, tx: InstructionTranslator, name: str
+        self,
+        tx: InstructionTranslator,
+        name: str,
     ) -> VariableTracker: ...
 
 class EnumVariable(VariableTracker):

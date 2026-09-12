@@ -20,7 +20,12 @@ def angle_defn(pos, i, d_model_size): ...
 def positional_encoding(position, d_model_size, dtype):  # -> Tensor:
     ...
 def scaled_dot_product_attention(
-    q, k, v, mask, attention_mask=..., head_mask=...
+    q,
+    k,
+    v,
+    mask,
+    attention_mask=...,
+    head_mask=...,
 ):  # -> tuple[Tensor, Any | Tensor]:
     ...
 
@@ -49,7 +54,12 @@ def point_wise_feed_forward_network(d_model_size, dff):  # -> Sequential:
 
 class EncoderLayer(nn.Module):
     def __init__(
-        self, d_model_size, num_heads, dff, rate=..., layer_idx=...
+        self,
+        d_model_size,
+        num_heads,
+        dff,
+        rate=...,
+        layer_idx=...,
     ) -> None: ...
     def forward(
         self,
@@ -117,7 +127,11 @@ class CTRLLMHeadModel(CTRLPreTrainedModel, GenerationMixin):
         **kwargs,
     ) -> tuple[torch.Tensor] | CausalLMOutputWithPast: ...
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=..., use_cache=..., **kwargs
+        self,
+        input_ids,
+        past_key_values=...,
+        use_cache=...,
+        **kwargs,
     ):  # -> dict[str, Any | None]:
         ...
 

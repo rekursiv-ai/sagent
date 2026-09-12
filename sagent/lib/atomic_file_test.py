@@ -135,7 +135,7 @@ def test_atomic_write_bytes_symlink_to_nonexistent_does_not_create_target_dirs(
     tmp_path: Path,
 ) -> None:
     """Dangling symlink must not materialise the foreign target directory."""
-    target = tmp_path / "foreign" / "x.bin"  # parent does not exist
+    target = tmp_path / "foreign" / "x.bin"  # Parent does not exist.
     link = tmp_path / "link.bin"
     link.symlink_to(target)
     atomic_write_bytes(link, b"data")

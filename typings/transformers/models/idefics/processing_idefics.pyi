@@ -33,19 +33,25 @@ class IdeficsProcessorKwargs(ProcessingKwargs, total=False):
     _defaults = ...
 
 def incremental_to_binary_attention_mask(
-    incremental_mask, return_tensors, num_classes=...
+    incremental_mask,
+    return_tensors,
+    num_classes=...,
 ):  # -> Tensor:
     ...
 def image_attention_mask_for_packed_input_ids(
-    input_ids, tokenizer, return_tensors
+    input_ids,
+    tokenizer,
+    return_tensors,
 ):  # -> tuple[Tensor, Tensor] | tuple[Any, Any] | None:
     ...
 def image_attention_mask_for_packed_input_ids_pt(
-    input_ids, tokenizer
+    input_ids,
+    tokenizer,
 ):  # -> tuple[Tensor, Tensor]:
     ...
 def image_attention_mask_for_packed_input_ids_tf(
-    input_ids, tokenizer
+    input_ids,
+    tokenizer,
 ):  # -> tuple[Any, Any]:
     ...
 def is_url(string):  # -> bool:
@@ -64,7 +70,10 @@ class IdeficsProcessor(ProcessorMixin):
         **kwargs,
     ) -> None: ...
     @deprecate_kwarg(
-        old_name="prompts", version="5.0.0", new_name="text", raise_if_both_names=True
+        old_name="prompts",
+        version="5.0.0",
+        new_name="text",
+        raise_if_both_names=True,
     )
     def __call__(
         self,

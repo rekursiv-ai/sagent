@@ -69,7 +69,8 @@ class QuantizationAnnotation:
 
 class Quantizer(ABC):
     def transform_for_annotation(
-        self, model: torch.fx.GraphModule
+        self,
+        model: torch.fx.GraphModule,
     ) -> torch.fx.GraphModule: ...
     @abstractmethod
     def annotate(self, model: torch.fx.GraphModule) -> torch.fx.GraphModule: ...

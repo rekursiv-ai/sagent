@@ -112,7 +112,9 @@ async def reattach_files(
 
 
 def _truncate_to_tokens(
-    content: str, max_tokens: int, estimate_tokens: Callable[[str], int]
+    content: str,
+    max_tokens: int,
+    estimate_tokens: Callable[[str], int],
 ) -> str:
     """Cut ``content`` down to ``max_tokens``, suffix included in the cap."""
     if max_tokens <= 0 or estimate_tokens(content) <= max_tokens:
@@ -139,13 +141,11 @@ fragments, so the model loses surrounding context post-compaction unless
 re-attach can refresh the file."""
 
 
+# Walks pairs of ``AssistantMessage`` (with a Read/Edit/Write ``ToolCall``) plus the
+# immediately-following ``ToolResult`` so we can dedup re-attach against the file that's
+# already inline.
 def _collect_inlined_paths(history: list[ModelContextEvent]) -> set[str]:
-    """Collect resolved file paths whose contents are already inline in history.
-
-    Walks pairs of ``AssistantMessage`` (with a Read/Edit/Write ``ToolCall``)
-    plus the immediately-following ``ToolResult`` so we can dedup re-attach
-    against the file that's already inline.
-    """
+    """Collect resolved file paths whose contents are already inline in history."""
     inlined: dict[str, str] = {}
     for entry in history:
         if not isinstance(entry, AssistantMessage):

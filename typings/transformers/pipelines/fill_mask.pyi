@@ -20,7 +20,11 @@ class FillMaskPipeline(Pipeline):
     def ensure_exactly_one_mask_token(self, model_inputs: GenericTensor):  # -> None:
         ...
     def preprocess(
-        self, inputs, return_tensors=..., tokenizer_kwargs=..., **preprocess_parameters
+        self,
+        inputs,
+        return_tensors=...,
+        tokenizer_kwargs=...,
+        **preprocess_parameters,
     ) -> dict[str, GenericTensor]: ...
     def postprocess(self, model_outputs, top_k=..., target_ids=...):  # -> list[Any]:
         ...
@@ -30,8 +34,12 @@ class FillMaskPipeline(Pipeline):
     def __call__(self, inputs: str, **kwargs: Any) -> list[dict[str, Any]]: ...
     @overload
     def __call__(
-        self, inputs: list[str], **kwargs: Any
+        self,
+        inputs: list[str],
+        **kwargs: Any,
     ) -> list[list[dict[str, Any]]]: ...
     def __call__(
-        self, inputs: str | list[str], **kwargs: Any
+        self,
+        inputs: str | list[str],
+        **kwargs: Any,
     ) -> list[dict[str, Any]] | list[list[dict[str, Any]]]: ...

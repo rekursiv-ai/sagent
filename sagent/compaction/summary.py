@@ -54,7 +54,6 @@ from sagent.types.tape import (
 __all__ = [
     "SummaryCompactor",
     "build_continuation",
-    "estimate_entry_tokens",
 ]
 
 
@@ -135,9 +134,9 @@ class SummaryCompactor:
     ) -> None:
         if max_attempts < 1:
             raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
-        if not 0.0 < utilization_trigger <= 1.0:
+        if utilization_trigger <= 0.0 or utilization_trigger > 1.0:
             raise ValueError(
-                f"utilization_trigger must be in (0.0, 1.0], got {utilization_trigger}"
+                f"utilization_trigger must be in (0.0, 1.0], got {utilization_trigger}",
             )
         if compression < 0.0:
             raise ValueError(f"compression must be >= 0.0, got {compression}")
@@ -147,7 +146,7 @@ class SummaryCompactor:
         # diagnosable failure.
         if direction not in ("from", "up_to"):
             raise ValueError(  # pyright: ignore[reportUnreachable]
-                f"direction must be 'from' or 'up_to', got {direction!r}"
+                f"direction must be 'from' or 'up_to', got {direction!r}",
             )
         self._prompt = prompt
         self._partial_prompt = partial_prompt
@@ -333,11 +332,15 @@ class SummaryCompactor:
         if effective_keep > 0:
             if direction == "from":
                 to_summarize, to_keep = _safe_split(
-                    history, effective_keep, direction="from"
+                    history,
+                    effective_keep,
+                    direction="from",
                 )
             else:
                 to_keep, to_summarize = _safe_split(
-                    history, effective_keep, direction="up_to"
+                    history,
+                    effective_keep,
+                    direction="up_to",
                 )
             to_summarize = _strip_attachments(to_summarize)
             if not to_keep:
@@ -357,20 +360,9 @@ class SummaryCompactor:
 
         token_before = estimate_entry_tokens(compact_model, history)
 
-        def fallback_splice(reason: str) -> ContextSplice:
-            return _build_fallback_splice(
-                reason,
-                direction=direction,
-                to_keep=to_keep,
-                mint_ref=mint_ref,
-                mask=mask,
-                token_before=token_before,
-                model=compact_model,
-            )
-
         if to_keep:
             body = self._partial_prompt or read_asset(
-                recipe_dict("compactor")["partial"]
+                recipe_dict("compactor")["partial"],
             )
             if direction == "up_to":
                 body = (
@@ -395,7 +387,8 @@ class SummaryCompactor:
         entries: list[ModelContextEvent] = []
         for attempt in range(self._max_attempts):
             entries = _request_entries(
-                groups, tool_result_cap_chars=self._retry_tool_result_cap_chars
+                groups,
+                tool_result_cap_chars=self._retry_tool_result_cap_chars,
             )
             request = ModelRequest(
                 messages=[*entries, UserMessage(text=prompt)],
@@ -409,14 +402,16 @@ class SummaryCompactor:
                     max_attempts=self._max_attempts,
                     persistent_retry=True,
                     publish_recoverable=lambda text: logger.info(
-                        "compactor recoverable: %s", text
+                        "compactor recoverable: %s",
+                        text,
                     ),
                 )
                 summary_text = response.message.text
                 break
             except PromptTooLongError as exc:
                 if _shrink_groups_for_compaction(
-                    groups, cap_chars=self._retry_tool_result_cap_chars
+                    groups,
+                    cap_chars=self._retry_tool_result_cap_chars,
                 ):
                     logger.warning(
                         "Prompt too long (attempt %d/%d), shrinking tool results.",
@@ -433,14 +428,36 @@ class SummaryCompactor:
                 )
                 groups = groups[drop:]
                 if not groups:
-                    return fallback_splice("all groups dropped on overflow retry")
+                    return _build_fallback_splice(
+                        "all groups dropped on overflow retry",
+                        direction=direction,
+                        to_keep=to_keep,
+                        mint_ref=mint_ref,
+                        mask=mask,
+                        token_before=token_before,
+                        model=compact_model,
+                    )
 
         if summary_text is None:
-            return fallback_splice(
-                f"summary failed after {self._max_attempts} attempts"
+            return _build_fallback_splice(
+                f"summary failed after {self._max_attempts} attempts",
+                direction=direction,
+                to_keep=to_keep,
+                mint_ref=mint_ref,
+                mask=mask,
+                token_before=token_before,
+                model=compact_model,
             )
         if not summary_text.strip():
-            return fallback_splice("compactor returned an empty body")
+            return _build_fallback_splice(
+                "compactor returned an empty body",
+                direction=direction,
+                to_keep=to_keep,
+                mint_ref=mint_ref,
+                mask=mask,
+                token_before=token_before,
+                model=compact_model,
+            )
 
         raw = summary_text
         if self._verify_summary:
@@ -454,7 +471,15 @@ class SummaryCompactor:
                 logger.warning("summary verification failed; using original: %s", exc)
         summary = _format_summary(raw)
         if summary is None:
-            return fallback_splice("missing <summary>")
+            return _build_fallback_splice(
+                "missing <summary>",
+                direction=direction,
+                to_keep=to_keep,
+                mint_ref=mint_ref,
+                mask=mask,
+                token_before=token_before,
+                model=compact_model,
+            )
         logger.info(
             "Compacted %d entries → summary (%d chars), kept %d recent.",
             len(to_summarize),
@@ -483,33 +508,17 @@ class SummaryCompactor:
             token_after=token_after,
         )
 
+    # Re-runs the model with the original entries plus the produced summary, asking it
+    # to identify any missing technical details, file paths, tool results, or user
+    # constraints and emit an improved summary. Returns the improved text when non-
+    # empty, otherwise the original.
     async def _verify(
         self,
         compact_model: Model,
         original_entries: list[ModelContextEvent],
         raw_summary: str,
     ) -> str:
-        """Self-verification probe: ask the model to critique its own summary.
-
-        Re-runs the model with the original entries plus the produced
-        summary, asking it to identify any missing technical details,
-        file paths, tool results, or user constraints and emit an
-        improved summary. Returns the improved text when non-empty,
-        otherwise the original.
-
-        Args:
-          compact_model: Model used for the verification call (same one
-              that produced the summary).
-          original_entries: Entries that fed the original summarization
-              call, used to ground the critique.
-          raw_summary: Raw summary text (pre-format) the verification
-              should improve.
-
-        Returns:
-          improved: Verified summary text, or ``raw_summary`` unchanged
-              when the verification call returned nothing substantive.
-
-        """
+        """Self-verification probe: ask the model to critique its own summary."""
         probe = (
             "You produced this summary of the prior conversation:\n\n"
             f"<previous_summary>\n{raw_summary}\n</previous_summary>\n\n"
@@ -546,13 +555,15 @@ class SummaryCompactor:
                     max_attempts=self._max_attempts,
                     persistent_retry=False,
                     publish_recoverable=lambda text: logger.info(
-                        "verifier recoverable: %s", text
+                        "verifier recoverable: %s",
+                        text,
                     ),
                 )
                 break
             except PromptTooLongError as exc:
                 if _shrink_groups_for_compaction(
-                    groups, cap_chars=self._retry_tool_result_cap_chars
+                    groups,
+                    cap_chars=self._retry_tool_result_cap_chars,
                 ):
                     logger.warning(
                         "Verifier prompt too long (attempt %d/%d), shrinking tool results.",
@@ -585,17 +596,191 @@ class SummaryCompactor:
         return improved
 
 
+def build_continuation(
+    summary: str,
+    recent_preserved: bool = False,
+    proactive: bool = False,
+) -> str:
+    """Build the post-compaction continuation message from asset templates.
+
+    Args:
+      summary: Compacted summary text to embed.
+      recent_preserved: True when a recent tail was kept verbatim.
+      proactive: When True, the resume directive runs autonomously.
+
+    Returns:
+      message: Continuation user-message text ready to splice into history.
+
+    """
+    recent = (
+        "\n\nThe most recent messages appear below in their original form."
+        if recent_preserved
+        else ""
+    )
+    if proactive:
+        resume = (
+            "\n\nContinue working autonomously. Do not ask the user"
+            " any questions - resume directly from the last task."
+            " If uncertain, pick the most reasonable option and proceed."
+        )
+    else:
+        resume = (
+            "\nResume work immediately without preamble. Do not"
+            " reference or acknowledge this summary, do not recap"
+            " prior work, and do not use transition phrases"
+            ' ("I\'ll continue", "picking up where we left off",'
+            " etc.). Proceed as though no interruption occurred."
+        )
+    return (
+        read_asset(recipe_dict("compactor")["continuation"])
+        .replace("{{summary}}", summary)
+        .replace("{{recent}}", recent)
+        .replace("{{resume}}", resume)
+        .strip()
+    )
+
+
+# A new round starts at each ``UserMessage`` (and at the first entry if it isn't a
+# ``UserMessage``). ``AssistantMessage`` + its matching ``ToolResult`` entries cluster
+# together so truncation never orphans a tool result.
+def _group_history_by_round(
+    history: list[ModelContextEvent],
+) -> list[list[ModelContextEvent]]:
+    """Group history entries by API round-trip for safe truncation."""
+    groups: list[list[ModelContextEvent]] = []
+    current: list[ModelContextEvent] = []
+    for entry in history:
+        if isinstance(entry, (AgentSendMessage, UserMessage)) and current:
+            groups.append(current)
+            current = [entry]
+        else:
+            current.append(entry)
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _trailing_user_tail_len(history: list[ModelContextEvent]) -> int:
+    """Count consecutive user messages at the end of ``history``."""
+    count = 0
+    for entry in reversed(history):
+        if not isinstance(entry, (AgentSendMessage, UserMessage)):
+            break
+        count += 1
+    return count
+
+
+# Starts from the requested split index (``len - keep_recent`` for ``"from"``;
+# ``keep_recent`` for ``"up_to"``) and snaps the boundary left until no
+# ``AssistantMessage.tool_calls`` in the prefix lacks a matching ``ToolResult`` in the
+# prefix.
+#
+# Returns ``(to_summarize, to_keep)`` for ``"from"`` direction, or ``(to_keep,
+# to_summarize)`` for ``"up_to"``.
+def _safe_split(
+    history: list[ModelContextEvent],
+    keep_recent: int,
+    *,
+    direction: Literal["from", "up_to"],
+) -> tuple[list[ModelContextEvent], list[ModelContextEvent]]:
+    """Split ``history`` so tool_use/tool_result pairs stay together."""
+    n = len(history)
+    idx = n - keep_recent if direction == "from" else keep_recent
+    idx = max(0, min(idx, n))
+    safe = _safe_split_boundaries(history)
+    while idx > 0 and not safe[idx]:
+        idx -= 1
+    if direction == "from" and idx == 0:
+        if keep_recent >= n:
+            return [], history
+        return history, []
+    if direction == "up_to" and idx == n:
+        return history, []
+    return history[:idx], history[idx:]
+
+
+def _safe_split_boundaries(history: list[ModelContextEvent]) -> list[bool]:
+    """Return whether each prefix boundary has no unresolved tool calls."""
+    unresolved: set[str] = set()
+    safe = [True]
+    for entry in history:
+        if isinstance(entry, AssistantMessage):
+            for tc in entry.tool_calls:
+                unresolved.add(tc.id)
+        elif isinstance(entry, ToolResult):
+            unresolved.discard(entry.call_id)
+        safe.append(not unresolved)
+    return safe
+
+
+# Replaces each attachment with a ``[image]`` / ``[document]`` marker appended to the
+# text so the model retains awareness that media was present without paying for the
+# bytes again. Entries whose original ``text`` is empty and whose attachments all fall
+# through ``_attach_markers`` (non-``BytesMessage`` shapes) are dropped: an empty
+# user/tool message is rejected by Anthropic.
+def _strip_attachments(
+    history: list[ModelContextEvent],
+) -> list[ModelContextEvent]:
+    """Drop binary attachments before summarization."""
+    out: list[ModelContextEvent] = []
+    for entry in history:
+        if isinstance(entry, (AgentSendMessage, UserMessage)) and entry.attachments:
+            marked = _attach_markers(entry.text, entry.attachments)
+            if not marked:
+                logger.debug(
+                    "compaction dropped an empty %s with no markable attachments",
+                    type(entry).__name__,
+                )
+                continue
+            out.append(dataclasses.replace(entry, text=marked, attachments=()))
+        elif isinstance(entry, ToolResult) and entry.attachments:
+            marked = _attach_markers(entry.content, entry.attachments)
+            if not marked:
+                logger.debug(
+                    "compaction dropped an empty ToolResult with no markable"
+                    " attachments (call_id=%s)",
+                    entry.call_id,
+                )
+                continue
+            out.append(dataclasses.replace(entry, content=marked, attachments=()))
+        else:
+            out.append(entry)
+    return out
+
+
+# Non-``BytesMessage`` attachments are skipped; relying on ``getattr(a, 'descriptor',
+# '')`` collapses every unknown shape to ``[image]``, hiding bugs in upstream attachment
+# types. The descriptor branch on ``BytesMessage`` is the only contract.
+def _attach_markers(content: str, attachments: tuple[object, ...]) -> str:
+    """Suffix ``content`` with ``[image]`` / ``[document]`` markers."""
+    markers: list[str] = []
+    for a in attachments:
+        if not isinstance(a, BytesMessage):
+            continue
+        markers.append(_descriptor_marker(a.descriptor))
+    if content:
+        markers.insert(0, content)
+    return " ".join(markers)
+
+
+def _descriptor_marker(descriptor: str) -> str:
+    """Map a MIME-style descriptor to a compactor marker token."""
+    if descriptor.startswith("application/pdf"):
+        return "[document]"
+    if descriptor.startswith("image/"):
+        return "[image]"
+    return "[attachment]"
+
+
+# Measured directly in tokens via the model's estimator -- the provider's ``token_gap``
+# and each group's size are both token quantities, so there is no character
+# intermediary.
 def _groups_to_drop(
     groups: list[list[ModelContextEvent]],
     error: PromptTooLongError,
     model: Model,
 ) -> int:
-    """How many leading groups to drop to cover the token gap.
-
-    Measured directly in tokens via the model's estimator -- the
-    provider's ``token_gap`` and each group's size are both token
-    quantities, so there is no character intermediary.
-    """
+    """How many leading groups to drop to cover the token gap."""
     gap = error.token_gap
     if gap is None:
         return max(1, len(groups) // 5)
@@ -607,6 +792,10 @@ def _groups_to_drop(
     return max(1, len(groups) // 5)
 
 
+# Used for every path that fails to produce a real ``<summary>`` block: empty input
+# after split, all groups dropped on overflow, the model exhausting attempts, or
+# returning a blank/unparseable body. Keeps ``strategy='summary_fallback'`` the single
+# observability signal for "nothing was summarized".
 def _build_fallback_splice(
     reason: str,
     *,
@@ -617,14 +806,7 @@ def _build_fallback_splice(
     token_before: int,
     model: Model,
 ) -> ContextSplice:
-    """Build the no-summary ``summary_fallback`` ContextSplice.
-
-    Used for every path that fails to produce a real ``<summary>`` block:
-    empty input after split, all groups dropped on overflow, the model
-    exhausting attempts, or returning a blank/unparseable body. Keeps
-    ``strategy='summary_fallback'`` the single observability signal for
-    "nothing was summarized".
-    """
+    """Build the no-summary ``summary_fallback`` ContextSplice."""
     logger.warning("compactor falling back: %s", reason)
     fb = UserMessage(
         text="Compaction failed. Previous context summarized on disk only.",
@@ -646,29 +828,17 @@ def _build_fallback_splice(
     )
 
 
+# Caps oversized tool results up front rather than waiting for the provider to reject
+# them. The main model path budgets via ``materialize_request``; the compactor builds
+# its ``ModelRequest`` directly, so before this cap an 11.1M-character result reached
+# the wire intact -- and because compaction is what should have SHED it, the failure
+# recurred on every retry and every later turn (session ``190b6baec7ed``).
 def _request_entries(
     groups: list[list[ModelContextEvent]],
     *,
     tool_result_cap_chars: int = 0,
 ) -> list[ModelContextEvent]:
-    """Flatten request groups and normalize provider-facing shape.
-
-    Caps oversized tool results up front rather than waiting for the
-    provider to reject them. The main model path budgets via
-    ``materialize_request``; the compactor builds its ``ModelRequest``
-    directly, so before this cap an 11.1M-character result reached the
-    wire intact -- and because compaction is what should have SHED it,
-    the failure recurred on every retry and every later turn
-    (session ``190b6baec7ed``).
-
-    Args:
-      groups: Round-grouped history to summarize.
-      tool_result_cap_chars: Per-result character cap. ``0`` disables it.
-
-    Returns:
-      entries: Provider-facing entries, oversized results capped.
-
-    """
+    """Flatten request groups and normalize provider-facing shape."""
     entries = [entry for group in groups for entry in group]
     entries = _elide_skill_results(entries)
     entries = _drop_orphan_tool_results(entries)
@@ -680,7 +850,9 @@ def _request_entries(
 
 
 def _cap_tool_results(
-    entries: list[ModelContextEvent], *, cap_chars: int
+    entries: list[ModelContextEvent],
+    *,
+    cap_chars: int,
 ) -> list[ModelContextEvent]:
     """Truncate any ``ToolResult`` body above ``cap_chars``, idempotently."""
     return [
@@ -698,19 +870,16 @@ def _cap_tool_results(
     ]
 
 
+# Skill bodies are derived from ``(name, cwd)`` via the live catalog; summarizing them
+# is summarizing a lookup key's expansion. Drop them from the compactor's input so the
+# summarizer doesn't tokenize the full SKILL.md bytes. The notice is idempotent (prefix-
+# checked) so repeated passes are safe. Mirrors ``_collect_read_paths`` for the call-id
+# walk: AM tool_calls determine the owning tool name; only matching ``ToolResult``
+# entries are rewritten.
 def _elide_skill_results(
     entries: list[ModelContextEvent],
 ) -> list[ModelContextEvent]:
-    """Replace ``Skill`` tool-result bodies with a stable notice.
-
-    Skill bodies are derived from ``(name, cwd)`` via the live catalog;
-    summarizing them is summarizing a lookup key's expansion. Drop them
-    from the compactor's input so the summarizer doesn't tokenize the
-    full SKILL.md bytes. The notice is idempotent (prefix-checked) so
-    repeated passes are safe. Mirrors ``_collect_read_paths`` for the
-    call-id walk: AM tool_calls determine the owning tool name; only
-    matching ``ToolResult`` entries are rewritten.
-    """
+    """Replace ``Skill`` tool-result bodies with a stable notice."""
     skill_call_ids: set[str] = set()
     for entry in entries:
         if not isinstance(entry, AssistantMessage):
@@ -755,7 +924,7 @@ def _shrink_groups_for_compaction(
                             f"{_COMPACTOR_TOOL_RESULT_NOTICE}\n"
                             f"{entry.content[:cap_chars]}"
                         ),
-                    )
+                    ),
                 )
                 changed = True
             else:
@@ -764,28 +933,24 @@ def _shrink_groups_for_compaction(
     return changed
 
 
+# A pending ``AssistantMessage`` with ``tool_calls`` waits for every matching
+# ``ToolResult`` before being committed. Only a ``UserMessage`` interrupts the wait
+# (modelling the Halt / mid-tool user injection that the runtime emits on Ctrl+C). A
+# peer ``AgentSendMessage`` is not an interrupt: it interleaves with the ongoing tool
+# turn and must not flush the pending state, otherwise the AM is committed before its
+# result and the later ``ToolResult`` is silently discarded as "orphan". Non-
+# interrupting interleaved events are buffered and emitted after the tool turn closes so
+# the chronological order ``AM → TRs → ASM`` is preserved on the wire.
+#
+# Deliberately NOT unified with ``tape.pair_and_dedup_tool_calls``: this *drops* an
+# unanswered tool turn (the compactor must not summarize a synthetic ``[interrupted]``
+# as if it were a real cancellation), whereas the repair path *synthesizes*
+# ``[interrupted]`` to keep the turn. Same input domain, opposite policy -- one function
+# would need a mode flag.
 def _drop_orphan_tool_results(
     entries: list[ModelContextEvent],
 ) -> list[ModelContextEvent]:
-    """Filter entries that would violate tool-call/result ordering.
-
-    A pending ``AssistantMessage`` with ``tool_calls`` waits for every
-    matching ``ToolResult`` before being committed. Only a
-    ``UserMessage`` interrupts the wait (modelling the Halt / mid-tool
-    user injection that the runtime emits on Ctrl+C). A peer
-    ``AgentSendMessage`` is not an interrupt: it interleaves with the
-    ongoing tool turn and must not flush the pending state, otherwise
-    the AM is committed before its result and the later ``ToolResult``
-    is silently discarded as "orphan". Non-interrupting interleaved
-    events are buffered and emitted after the tool turn closes so the
-    chronological order ``AM → TRs → ASM`` is preserved on the wire.
-
-    Deliberately NOT unified with ``tape.pair_and_dedup_tool_calls``: this
-    *drops* an unanswered tool turn (the compactor must not summarize a
-    synthetic ``[interrupted]`` as if it were a real cancellation), whereas
-    the repair path *synthesizes* ``[interrupted]`` to keep the turn. Same
-    input domain, opposite policy -- one function would need a mode flag.
-    """
+    """Filter entries that would violate tool-call/result ordering."""
     seen_results: set[str] = set()
     out: list[ModelContextEvent] = []
     pending_assistant: AssistantMessage | None = None
@@ -853,26 +1018,14 @@ def _append_user_guidance(body: str, guidance: str) -> str:
     )
 
 
+# When no ``<summary>`` block is present the analysis-stripped text is not a real
+# summary: it may carry the model's raw scratch reasoning or arbitrary prose. Returning
+# that to the resumed agent would leak scratchpad content and silently record
+# ``strategy='summary'`` for an output that never passed the contract. Return ``None``
+# instead so the caller dispatches to ``fallback_splice`` with
+# ``strategy='summary_fallback'``.
 def _format_summary(raw: str) -> str | None:
-    r"""Strip ``<analysis>``, extract ``<summary>`` content.
-
-    When no ``<summary>`` block is present the analysis-stripped text
-    is not a real summary: it may carry the model's raw scratch
-    reasoning or arbitrary prose. Returning that to the resumed agent
-    would leak scratchpad content and silently record ``strategy='summary'``
-    for an output that never passed the contract. Return ``None`` instead
-    so the caller dispatches to ``fallback_splice`` with
-    ``strategy='summary_fallback'``.
-
-    Args:
-      raw: Raw model output, possibly containing ``<analysis>`` and
-          ``<summary>`` blocks.
-
-    Returns:
-      summary: Formatted ``Summary:\\n...`` body when a ``<summary>``
-          block is present; ``None`` when the contract failed.
-
-    """
+    r"""Strip ``<analysis>``, extract ``<summary>`` content."""
     text = _RE_ANALYSIS.sub("", raw)
     m = _RE_SUMMARY.search(text)
     if not m:
@@ -884,190 +1037,3 @@ def _format_summary(raw: str) -> str | None:
     text = f"Summary:\n{m.group(1).strip()}"
     text = re.sub(r"\n\n+", "\n\n", text)
     return text.strip()
-
-
-def build_continuation(
-    summary: str,
-    recent_preserved: bool = False,
-    proactive: bool = False,
-) -> str:
-    """Build the post-compaction continuation message from asset templates.
-
-    Args:
-      summary: Compacted summary text to embed.
-      recent_preserved: True when a recent tail was kept verbatim.
-      proactive: When True, the resume directive runs autonomously.
-
-    Returns:
-      message: Continuation user-message text ready to splice into history.
-
-    """
-    recent = (
-        "\n\nThe most recent messages appear below in their original form."
-        if recent_preserved
-        else ""
-    )
-    if proactive:
-        resume = (
-            "\n\nContinue working autonomously. Do not ask the user"
-            " any questions - resume directly from the last task."
-            " If uncertain, pick the most reasonable option and proceed."
-        )
-    else:
-        resume = (
-            "\nResume work immediately without preamble. Do not"
-            " reference or acknowledge this summary, do not recap"
-            " prior work, and do not use transition phrases"
-            ' ("I\'ll continue", "picking up where we left off",'
-            " etc.). Proceed as though no interruption occurred."
-        )
-    return (
-        read_asset(recipe_dict("compactor")["continuation"])
-        .replace("{{summary}}", summary)
-        .replace("{{recent}}", recent)
-        .replace("{{resume}}", resume)
-        .strip()
-    )
-
-
-def _group_history_by_round(
-    history: list[ModelContextEvent],
-) -> list[list[ModelContextEvent]]:
-    """Group history entries by API round-trip for safe truncation.
-
-    A new round starts at each ``UserMessage`` (and at the first entry
-    if it isn't a ``UserMessage``). ``AssistantMessage`` + its
-    matching ``ToolResult`` entries cluster together so truncation
-    never orphans a tool result.
-    """
-    groups: list[list[ModelContextEvent]] = []
-    current: list[ModelContextEvent] = []
-    for entry in history:
-        if isinstance(entry, (AgentSendMessage, UserMessage)) and current:
-            groups.append(current)
-            current = [entry]
-        else:
-            current.append(entry)
-    if current:
-        groups.append(current)
-    return groups
-
-
-def _trailing_user_tail_len(history: list[ModelContextEvent]) -> int:
-    """Count consecutive user messages at the end of ``history``."""
-    count = 0
-    for entry in reversed(history):
-        if not isinstance(entry, (AgentSendMessage, UserMessage)):
-            break
-        count += 1
-    return count
-
-
-def _safe_split(
-    history: list[ModelContextEvent],
-    keep_recent: int,
-    *,
-    direction: Literal["from", "up_to"],
-) -> tuple[list[ModelContextEvent], list[ModelContextEvent]]:
-    """Split ``history`` so tool_use/tool_result pairs stay together.
-
-    Starts from the requested split index (``len - keep_recent`` for
-    ``"from"``; ``keep_recent`` for ``"up_to"``) and snaps the boundary
-    left until no ``AssistantMessage.tool_calls`` in the prefix lacks a
-    matching ``ToolResult`` in the prefix.
-
-    Returns ``(to_summarize, to_keep)`` for ``"from"`` direction, or
-    ``(to_keep, to_summarize)`` for ``"up_to"``.
-    """
-    n = len(history)
-    idx = n - keep_recent if direction == "from" else keep_recent
-    idx = max(0, min(idx, n))
-    safe = _safe_split_boundaries(history)
-    while idx > 0 and not safe[idx]:
-        idx -= 1
-    if direction == "from" and idx == 0:
-        if keep_recent >= n:
-            return [], history
-        return history, []
-    if direction == "up_to" and idx == n:
-        return history, []
-    return history[:idx], history[idx:]
-
-
-def _safe_split_boundaries(history: list[ModelContextEvent]) -> list[bool]:
-    """Return whether each prefix boundary has no unresolved tool calls."""
-    unresolved: set[str] = set()
-    safe = [True]
-    for entry in history:
-        if isinstance(entry, AssistantMessage):
-            for tc in entry.tool_calls:
-                unresolved.add(tc.id)
-        elif isinstance(entry, ToolResult):
-            unresolved.discard(entry.call_id)
-        safe.append(not unresolved)
-    return safe
-
-
-def _strip_attachments(
-    history: list[ModelContextEvent],
-) -> list[ModelContextEvent]:
-    """Drop binary attachments before summarization.
-
-    Replaces each attachment with a ``[image]`` / ``[document]`` marker
-    appended to the text so the model retains awareness that media was
-    present without paying for the bytes again. Entries whose original
-    ``text`` is empty and whose attachments all fall through
-    ``_attach_markers`` (non-``BytesMessage`` shapes) are dropped: an
-    empty user/tool message is rejected by Anthropic.
-    """
-    out: list[ModelContextEvent] = []
-    for entry in history:
-        if isinstance(entry, (AgentSendMessage, UserMessage)) and entry.attachments:
-            marked = _attach_markers(entry.text, entry.attachments)
-            if not marked:
-                logger.debug(
-                    "compaction dropped an empty %s with no markable attachments",
-                    type(entry).__name__,
-                )
-                continue
-            out.append(dataclasses.replace(entry, text=marked, attachments=()))
-        elif isinstance(entry, ToolResult) and entry.attachments:
-            marked = _attach_markers(entry.content, entry.attachments)
-            if not marked:
-                logger.debug(
-                    "compaction dropped an empty ToolResult with no markable"
-                    " attachments (call_id=%s)",
-                    entry.call_id,
-                )
-                continue
-            out.append(dataclasses.replace(entry, content=marked, attachments=()))
-        else:
-            out.append(entry)
-    return out
-
-
-def _attach_markers(content: str, attachments: tuple[object, ...]) -> str:
-    """Suffix ``content`` with ``[image]`` / ``[document]`` markers.
-
-    Non-``BytesMessage`` attachments are skipped; relying on
-    ``getattr(a, 'descriptor', '')`` collapses every unknown shape to
-    ``[image]``, hiding bugs in upstream attachment types. The
-    descriptor branch on ``BytesMessage`` is the only contract.
-    """
-    markers: list[str] = []
-    for a in attachments:
-        if not isinstance(a, BytesMessage):
-            continue
-        markers.append(_descriptor_marker(a.descriptor))
-    if content:
-        markers.insert(0, content)
-    return " ".join(markers)
-
-
-def _descriptor_marker(descriptor: str) -> str:
-    """Map a MIME-style descriptor to a compactor marker token."""
-    if descriptor.startswith("application/pdf"):
-        return "[document]"
-    if descriptor.startswith("image/"):
-        return "[image]"
-    return "[attachment]"

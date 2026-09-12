@@ -19,7 +19,6 @@ import pytest
 
 from sagent.agent.retry import is_rate_limited, is_retryable
 from sagent.agent.session_io import _entry_from_json, _entry_to_json
-from sagent.catalog import openai as openai_catalog
 from sagent.lib.custom_json import DictCodec, JSONValue, MutableJSON
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.openai.api import OpenAI
@@ -57,6 +56,8 @@ from sagent.types.runtime import (
     UserMessage,
 )
 
+import sagent.catalog.openai
+
 
 @dataclass(slots=True, kw_only=True)
 class _Wire:
@@ -68,7 +69,9 @@ class _Wire:
         self.requests.append(DictCodec.coerce(json.loads(request.content)))
         if request.url.path != "/v1/responses":
             return httpx2.Response(
-                404, request=request, json={"error": {"message": "Responses required"}}
+                404,
+                request=request,
+                json={"error": {"message": "Responses required"}},
             )
         return httpx2.Response(
             200,
@@ -139,7 +142,9 @@ def _patch_wire(monkeypatch: pytest.MonkeyPatch) -> _Wire:
     result = _Wire()
 
     async def send(
-        client: httpx2.AsyncClient, request: httpx2.Request, **_kwargs: object
+        client: httpx2.AsyncClient,
+        request: httpx2.Request,
+        **_kwargs: object,
     ) -> httpx2.Response:
         del client
         return await result.send(request)
@@ -152,7 +157,7 @@ async def _stream_once() -> None:
     provider = OpenAI.from_key("test-key")
     try:
         await provider.model("gpt-4o").stream(
-            ModelRequest(messages=[UserMessage(text="hello")])
+            ModelRequest(messages=[UserMessage(text="hello")]),
         )
     finally:
         await provider.close_sdk()
@@ -162,7 +167,10 @@ async def _stream_once() -> None:
 @pytest.mark.anyio
 @pytest.mark.parametrize("model_id", ["gpt-4o", "gpt-6-astra"])
 async def test_api_stream_uses_responses_with_supported_knobs(
-    wire: _Wire, model_id: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    wire: _Wire,
+    model_id: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     log_path = tmp_path / "debug.jsonl"
     monkeypatch.setenv("SAGENT_DEBUG", "1")
@@ -178,7 +186,7 @@ async def test_api_stream_uses_responses_with_supported_knobs(
                 tools=[_StubTool()],
                 max_response_tokens=123,
                 temperature=0.25,
-            )
+            ),
         )
     finally:
         await provider.close_sdk()
@@ -227,14 +235,14 @@ def test_responses_preserves_image_bearing_tool_results() -> None:
     request = ModelRequest(
         messages=[
             AssistantMessage(
-                tool_calls=(ToolCall(id="foreign", name="Read", args={}),)
+                tool_calls=(ToolCall(id="foreign", name="Read", args={}),),
             ),
             ToolResult(
                 call_id="foreign",
                 content="image",
                 attachments=(BytesMessage(data=_TINY_PNG, descriptor="image/png"),),
             ),
-        ]
+        ],
     )
     items = _build_input(request)
     output = DictCodec.coerce(items[-1])["output"]
@@ -248,14 +256,14 @@ def test_responses_preserves_image_bearing_tool_results() -> None:
 @pytest.mark.parametrize("model_id", ["o1", "o3-mini"])
 def test_o_series_catalog_has_only_supported_efforts(model_id: str) -> None:
     assert OpenAI.from_key("test-key").model(
-        model_id
+        model_id,
     ).capability.thinking_effort == frozenset({"low", "medium", "high"})
 
 
 @pytest.mark.parametrize("model_id", ["gpt-5.4-pro", "gpt-5.5-pro"])
 def test_pro_catalog_has_only_supported_efforts(model_id: str) -> None:
     assert OpenAI.from_key("test-key").model(
-        model_id
+        model_id,
     ).capability.thinking_effort == frozenset({"medium", "high", "xhigh"})
 
 
@@ -266,9 +274,9 @@ def test_pro_catalog_has_only_supported_efforts(model_id: str) -> None:
 def test_earlier_gpt5_catalog_keeps_native_efforts(model_id: str) -> None:
     model = OpenAI.from_key("test-key").model(model_id)
     assert model.capability.thinking_effort == frozenset(
-        {"none", "low", "medium", "high", "xhigh"}
+        {"none", "low", "medium", "high", "xhigh"},
     )
-    assert openai_catalog.reasoning_effort("xhigh", model_id=model_id) == "xhigh"
+    assert sagent.catalog.openai.reasoning_effort("xhigh", model_id=model_id) == "xhigh"
 
 
 def _free_model() -> _OpenAIResponsesModel:
@@ -276,7 +284,7 @@ def _free_model() -> _OpenAIResponsesModel:
     return _OpenAIResponsesModel(
         provider=OpenAI.from_key("test-key"),
         capability=ModelCapability(
-            prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()})
+            prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
         ),
         settings=ModelSettings(),
     )
@@ -288,8 +296,8 @@ def _priced_model() -> _OpenAIResponsesModel:
         provider=OpenAI.from_key("test-key"),
         capability=ModelCapability(
             prices=PriceCatalog(
-                {PriceCatalogProduct(): TokenPrice(request=1.0, cache_write=1.25)}
-            )
+                {PriceCatalogProduct(): TokenPrice(request=1.0, cache_write=1.25)},
+            ),
         ),
         settings=ModelSettings(),
     )
@@ -527,7 +535,7 @@ def test_build_input_user_message() -> None:
 
 _TINY_PNG = base64.b64decode(
     b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgAAIAAAUAAen"
-    b"63NgAAAAASUVORK5CYII="
+    b"63NgAAAAASUVORK5CYII=",
 )
 
 
@@ -559,7 +567,9 @@ def test_build_input_preserves_user_image_attachment() -> None:
 def test_build_user_item_text_only_keeps_bare_string_content() -> None:
     """No attachments → no allocation overhead, simple ``content=str`` shape."""
     item = _build_user_item(
-        UserMessage(text="hi"), max_image_dim=2048, max_image_bytes=20 * 1024 * 1024
+        UserMessage(text="hi"),
+        max_image_dim=2048,
+        max_image_bytes=20 * 1024 * 1024,
     )
     assert item == {"role": "user", "content": "hi"}
 
@@ -572,7 +582,10 @@ def test_build_user_item_drops_non_image_attachment_with_warning(
     The Responses API has no analogue of Anthropic's PDF block; opaque drop
     would silently lose user intent, so the path logs each skipped descriptor.
     """
-    with caplog.at_level("WARNING", logger="sagent.providers.openai.responses"):
+    with caplog.at_level(
+        "WARNING",
+        logger="sagent.providers.openai.responses",
+    ):
         item = _build_user_item(
             UserMessage(
                 text="see attached",
@@ -703,7 +716,8 @@ class TestStreamIdleTimeout:
 
     @pytest.mark.anyio
     async def test_silent_stream_times_out_and_closes(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         stream = _NeverYieldingStream()
         monkeypatch.setattr(
@@ -725,7 +739,8 @@ class TestStreamIdleTimeout:
 
     @pytest.mark.anyio
     async def test_stream_events_reschedule_idle_timeout(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(
             "sagent.providers.openai.responses._STREAM_IDLE_TIMEOUT",
@@ -758,7 +773,8 @@ class TestStreamIdleTimeout:
 
     @pytest.mark.anyio
     async def test_truncated_stream_raises_interrupted(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(
             "sagent.providers.openai.responses.responses.ResponseTextDeltaEvent",
@@ -778,7 +794,8 @@ class TestStreamIdleTimeout:
 
     @pytest.mark.anyio
     async def test_response_error_event_is_user_facing(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(
             "sagent.providers.openai.responses.responses.ResponseErrorEvent",
@@ -803,7 +820,8 @@ class TestStreamIdleTimeout:
 
     @pytest.mark.anyio
     async def test_error_event_closes_stream(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A mid-stream error event must close the stream before propagating.
 
@@ -841,7 +859,8 @@ class TestStreamIdleTimeout:
 
     @pytest.mark.anyio
     async def test_response_failed_event_is_user_facing(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(
             "sagent.providers.openai.responses.responses.ResponseFailedEvent",
@@ -866,7 +885,8 @@ class TestStreamIdleTimeout:
 
     @pytest.mark.anyio
     async def test_response_incomplete_event_returns_partial_length_response(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(
             "sagent.providers.openai.responses.responses.ResponseTextDeltaEvent",
@@ -893,7 +913,8 @@ class TestStreamIdleTimeout:
 
     @pytest.mark.anyio
     async def test_response_incomplete_content_filter_is_refusal(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(
             "sagent.providers.openai.responses.responses.ResponseTextDeltaEvent",
@@ -919,7 +940,8 @@ class TestStreamIdleTimeout:
 
     @pytest.mark.anyio
     async def test_completed_usage_tracks_and_bills_cache_write_tokens(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(
             "sagent.providers.openai.responses.responses.ResponseCompletedEvent",
@@ -931,8 +953,8 @@ class TestStreamIdleTimeout:
                     input_tokens=1309,
                     output_tokens=2,
                     cache_write_tokens=1306,
-                )
-            )
+                ),
+            ),
         )
         response = await _consume_stream(
             _DelayedStream([event], delay_sec=0.0),
@@ -949,7 +971,8 @@ class TestStreamIdleTimeout:
 
     @pytest.mark.anyio
     async def test_stream_preserves_and_replays_encrypted_reasoning(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(
             "sagent.providers.openai.responses.responses.ResponseOutputItemDoneEvent",
@@ -973,13 +996,14 @@ class TestStreamIdleTimeout:
             if block.get("encrypted_content") == "encrypted-reasoning"
         )
         replay = _items_as_list(
-            ModelRequest(messages=[AssistantMessage(thinking_blocks=(encrypted,))])
+            ModelRequest(messages=[AssistantMessage(thinking_blocks=(encrypted,))]),
         )
         assert replay == [encrypted]
 
     @pytest.mark.anyio
     async def test_stream_preserves_refusal_without_duplication(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(
             "sagent.providers.openai.responses.responses.ResponseRefusalDeltaEvent",
@@ -1011,7 +1035,8 @@ class TestStreamIdleTimeout:
 
     @pytest.mark.anyio
     async def test_stream_routes_reasoning_deltas_to_thinking(
-        self, monkeypatch: pytest.MonkeyPatch
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(
             "sagent.providers.openai.responses.responses.ResponseTextDeltaEvent",
@@ -1085,7 +1110,7 @@ class _VerifyTool(_StubTool):
             "properties": {"n": {"type": "integer"}},
             "required": ["n"],
             "additionalProperties": False,
-        }
+        },
     )
 
 
@@ -1098,13 +1123,15 @@ async def test_api_astra_reasoning_tool_roundtrip_and_legacy_replay() -> None:
     model = provider.model("gpt-6-astra")
     model.settings.thinking_effort = "high"
     user = UserMessage(
-        text="Find the smallest positive integer n with n mod 17=12, n mod 19=7, n mod 23=5. Compute it before calling verify(n). After verification, do not call tools again; report the result."
+        text="Find the smallest positive integer n with n mod 17=12, n mod 19=7, n mod 23=5. Compute it before calling verify(n). After verification, do not call tools again; report the result.",
     )
     try:
         first = await model.stream(
             ModelRequest(
-                messages=[user], tools=[_VerifyTool()], max_response_tokens=2048
-            )
+                messages=[user],
+                tools=[_VerifyTool()],
+                max_response_tokens=2048,
+            ),
         )
         assert any(
             isinstance(block.get("encrypted_content"), str)
@@ -1118,7 +1145,7 @@ async def test_api_astra_reasoning_tool_roundtrip_and_legacy_replay() -> None:
         assert isinstance(number, int)
         assert (number % 17, number % 19, number % 23) == (12, 7, 5)
         restored = _entry_from_json(
-            DictCodec.coerce(json.loads(json.dumps(_entry_to_json(first.message))))
+            DictCodec.coerce(json.loads(json.dumps(_entry_to_json(first.message)))),
         )
         assert isinstance(restored, AssistantMessage)
         assert restored == first.message
@@ -1129,7 +1156,7 @@ async def test_api_astra_reasoning_tool_roundtrip_and_legacy_replay() -> None:
                     messages=[user, history, result],
                     tools=[_VerifyTool()],
                     max_response_tokens=2048,
-                )
+                ),
             )
             assert response.message.text
             assert not response.message.tool_calls
@@ -1141,7 +1168,8 @@ async def test_api_astra_reasoning_tool_roundtrip_and_legacy_replay() -> None:
 def _replay_variants(message: AssistantMessage) -> Iterator[AssistantMessage]:
     yield message
     yield dataclasses.replace(
-        message, thinking_blocks=({"type": "reasoning", "text": "legacy reasoning"},)
+        message,
+        thinking_blocks=({"type": "reasoning", "text": "legacy reasoning"},),
     )
 
 

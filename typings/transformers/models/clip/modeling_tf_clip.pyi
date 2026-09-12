@@ -226,10 +226,11 @@ class TFCLIPTextModel(TFCLIPPreTrainedModel):
     def __init__(self, config: CLIPTextConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        CLIP_TEXT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        CLIP_TEXT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFBaseModelOutputWithPooling, config_class=CLIPTextConfig
+        output_type=TFBaseModelOutputWithPooling,
+        config_class=CLIPTextConfig,
     )
     def call(
         self,
@@ -251,7 +252,8 @@ class TFCLIPVisionModel(TFCLIPPreTrainedModel):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(CLIP_VISION_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFBaseModelOutputWithPooling, config_class=CLIPVisionConfig
+        output_type=TFBaseModelOutputWithPooling,
+        config_class=CLIPVisionConfig,
     )
     def call(
         self,
@@ -270,7 +272,7 @@ class TFCLIPModel(TFCLIPPreTrainedModel):
     def __init__(self, config: CLIPConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        CLIP_TEXT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        CLIP_TEXT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     def get_text_features(
         self,
@@ -294,7 +296,7 @@ class TFCLIPModel(TFCLIPPreTrainedModel):
     ) -> tf.Tensor: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        CLIP_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        CLIP_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(output_type=TFCLIPOutput, config_class=CLIPConfig)
     def call(

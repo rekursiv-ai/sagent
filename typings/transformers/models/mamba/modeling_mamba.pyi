@@ -38,7 +38,9 @@ class MambaCache:
         cache_position: torch.LongTensor,
     ) -> torch.Tensor: ...
     def update_ssm_state(
-        self, layer_idx: int, new_ssm_state: torch.Tensor
+        self,
+        layer_idx: int,
+        new_ssm_state: torch.Tensor,
     ):  # -> Tensor:
         ...
     def reset(self):  # -> None:
@@ -101,7 +103,7 @@ class MambaPreTrainedModel(PreTrainedModel):
 @auto_docstring(
     custom_intro="""
     Class for the MAMBA model outputs.
-    """
+    """,
 )
 class MambaOutput(ModelOutput):
     last_hidden_state: torch.FloatTensor | None = ...

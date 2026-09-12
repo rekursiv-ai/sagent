@@ -43,7 +43,9 @@ def clamp(
 ) -> torch.Tensor: ...
 @register_decomposition([aten.full])
 def full(
-    size: list[int | torch.SymInt], fill_value: torch.types.Number, **kwargs: Any
+    size: list[int | torch.SymInt],
+    fill_value: torch.types.Number,
+    **kwargs: Any,
 ) -> torch.Tensor: ...
 @register_decomposition([aten.index_add])
 def index_add(
@@ -56,7 +58,9 @@ def index_add(
 ) -> torch.Tensor: ...
 @register_decomposition([aten.empty_permuted.default])
 def empty_permuted(
-    size: list[int | torch.SymInt], physical_layout: list[int], **kwargs: Any
+    size: list[int | torch.SymInt],
+    physical_layout: list[int],
+    **kwargs: Any,
 ) -> torch.Tensor: ...
 @register_decomposition([aten.convolution_backward])
 def convolution_backward(
@@ -77,7 +81,9 @@ def round_dec(x: torch.Tensor, decimals: int = ...) -> torch.Tensor: ...
 @register_decomposition([aten.bmm])
 @pw_cast_for_opmath
 def bmm(
-    self: torch.Tensor, batch2: torch.Tensor, out_dtype: torch.dtype | None = ...
+    self: torch.Tensor,
+    batch2: torch.Tensor,
+    out_dtype: torch.dtype | None = ...,
 ) -> torch.Tensor: ...
 @register_decomposition([aten.addmm])
 @pw_cast_for_opmath
@@ -92,7 +98,9 @@ def addmm(
 @register_decomposition([aten.mm])
 @pw_cast_for_opmath
 def mm(
-    self: torch.Tensor, input2: torch.Tensor, out_dtype: torch.dtype | None = ...
+    self: torch.Tensor,
+    input2: torch.Tensor,
+    out_dtype: torch.dtype | None = ...,
 ) -> torch.Tensor: ...
 @register_decomposition([aten.cat.default])
 def cat(tensors: list[torch.Tensor], dim: int = ...) -> torch.Tensor: ...
@@ -100,7 +108,10 @@ def cat(tensors: list[torch.Tensor], dim: int = ...) -> torch.Tensor: ...
 def angle(x: torch.Tensor) -> torch.Tensor: ...
 @register_decomposition([aten.add])
 def add(
-    x: torch.Tensor, y: torch.Tensor, *, alpha: torch.types.Number | None = ...
+    x: torch.Tensor,
+    y: torch.Tensor,
+    *,
+    alpha: torch.types.Number | None = ...,
 ) -> torch.Tensor: ...
 @register_decomposition([aten.conj_physical])
 def conj_physical(self: torch.Tensor) -> torch.Tensor: ...
@@ -112,19 +123,27 @@ def fmin(self: torch.Tensor, other: torch.Tensor) -> torch.Tensor: ...
 def fmax(self: torch.Tensor, other: torch.Tensor) -> torch.Tensor: ...
 @register_decomposition(aten.amax)
 def amax(
-    self: torch.Tensor, dim: int | None = ..., keepdim: bool = ...
+    self: torch.Tensor,
+    dim: int | None = ...,
+    keepdim: bool = ...,
 ) -> torch.Tensor: ...
 @register_decomposition(aten.amin)
 def amin(
-    self: torch.Tensor, dim: int | None = ..., keepdim: bool = ...
+    self: torch.Tensor,
+    dim: int | None = ...,
+    keepdim: bool = ...,
 ) -> torch.Tensor: ...
 @register_decomposition([aten.narrow_copy])
 def narrow_copy(
-    self: torch.Tensor, dim: int, start: int, length: int
+    self: torch.Tensor,
+    dim: int,
+    start: int,
+    length: int,
 ) -> torch.Tensor: ...
 @register_decomposition([aten.view_copy.default])
 def view_copy_default(
-    self: torch.Tensor, size: list[int | torch.SymInt]
+    self: torch.Tensor,
+    size: list[int | torch.SymInt],
 ) -> torch.Tensor: ...
 @register_decomposition([aten.view_copy.dtype])
 def view_copy_dtype(self: torch.Tensor, dtype: torch.dtype) -> torch.Tensor: ...
@@ -148,15 +167,22 @@ def randn_like(self: torch.Tensor, **kwargs: Any) -> torch.Tensor: ...
 def randint_like(self: torch.Tensor, high: int, **kwargs: Any) -> torch.Tensor: ...
 @register_decomposition(aten.randint_like.low_dtype)
 def randint_like_low(
-    self: torch.Tensor, low: int, high: int, **kwargs: Any
+    self: torch.Tensor,
+    low: int,
+    high: int,
+    **kwargs: Any,
 ) -> torch.Tensor: ...
 @register_decomposition(aten.randint.default)
 def randint(
-    high: int, size: list[int | torch.SymInt], **kwargs: Any
+    high: int,
+    size: list[int | torch.SymInt],
+    **kwargs: Any,
 ) -> torch.Tensor: ...
 @register_decomposition(quantized.linear_dynamic_fp16_unpacked_weight.default)
 def linear_dynamic_fp16_unpacked_weight(
-    input: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = ...
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = ...,
 ) -> torch.Tensor: ...
 @register_decomposition(_quantized.wrapped_quantized_linear.default)
 def wrapped_quantized_linear(
@@ -199,11 +225,17 @@ def fast_random_decomps() -> dict[Any, Callable[..., Any]]: ...
 def select_decomp_table() -> dict[Any, Callable[..., Any]]: ...
 @register_decomposition(aten.masked_scatter)
 def masked_scatter(
-    self: torch.Tensor, mask: torch.Tensor, source: torch.Tensor
+    self: torch.Tensor,
+    mask: torch.Tensor,
+    source: torch.Tensor,
 ) -> torch.Tensor: ...
 @register_decomposition(quantized_decomposed.choose_qparams.tensor)
 def choose_qparams_tensor(
-    input: torch.Tensor, quant_min: int, quant_max: int, eps: float, dtype: torch.dtype
+    input: torch.Tensor,
+    quant_min: int,
+    quant_max: int,
+    eps: float,
+    dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 @register_decomposition(aten.put)
 def put(
@@ -249,7 +281,8 @@ def max_pool3d_with_indices(
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 @register_decomposition(aten.adaptive_max_pool2d)
 def adaptive_max_pool2d(
-    x: torch.Tensor, output_size: list[int]
+    x: torch.Tensor,
+    output_size: list[int],
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 @register_decomposition(aten.searchsorted.Scalar)
 def searchsorted_scalar(
@@ -272,5 +305,6 @@ def rrelu_with_noise_functional(
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 @register_decomposition(aten.repeat_interleave.Tensor)
 def repeat_interleave_Tensor(
-    repeat: torch.Tensor, output_size: int | None = ...
+    repeat: torch.Tensor,
+    output_size: int | None = ...,
 ) -> torch.Tensor: ...

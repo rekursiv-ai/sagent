@@ -57,13 +57,18 @@ class Gemma3nAudioRelativePositionEmbedding(nn.Module):
 class Gemma3nAudioAttention(nn.Module):
     def __init__(self, config: Gemma3nAudioConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, mask: torch.BoolTensor
+        self,
+        hidden_states: torch.Tensor,
+        mask: torch.BoolTensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class Gemma3nAudioCumulativeGroupNorm(nn.Module):
     def __init__(
-        self, num_channels: int, feature_dims: Sequence[int], eps: float = ...
+        self,
+        num_channels: int,
+        feature_dims: Sequence[int],
+        eps: float = ...,
     ) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -87,7 +92,9 @@ class Gemma3nAudioSubSampleConvProjection(nn.Module):
 class Gemma3nAudioConformerAttention(nn.Module):
     def __init__(self, config: Gemma3nAudioConfig) -> None: ...
     def forward(
-        self, audio_encodings: torch.Tensor, audio_mel_mask: torch.BoolTensor
+        self,
+        audio_encodings: torch.Tensor,
+        audio_mel_mask: torch.BoolTensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -104,7 +111,9 @@ class Gemma3nAudioConformerLightConv1d(nn.Module):
 class Gemma3nAudioConformerBlock(nn.Module):
     def __init__(self, config: Gemma3nAudioConfig) -> None: ...
     def forward(
-        self, audio_encodings: torch.Tensor, audio_mel_mask: torch.BoolTensor
+        self,
+        audio_encodings: torch.Tensor,
+        audio_mel_mask: torch.BoolTensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -113,10 +122,14 @@ class Gemma3nAudioEncoder(PreTrainedModel):
     main_input_name = ...
     def __init__(self, config: Gemma3nAudioConfig) -> None: ...
     def forward(
-        self, audio_mel: torch.Tensor, audio_mel_mask: torch.BoolTensor
+        self,
+        audio_mel: torch.Tensor,
+        audio_mel_mask: torch.BoolTensor,
     ) -> tuple[torch.Tensor, torch.BoolTensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.BoolTensor]: ...
 
 class Gemma3nTextScaledWordEmbedding(nn.Embedding):
@@ -145,7 +158,9 @@ class Gemma3nTextAltUp(nn.Module):
     def compute_router_modalities(self, x: torch.Tensor) -> torch.Tensor: ...
     def predict(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
     def correct(
-        self, predictions: torch.Tensor, activated: torch.Tensor
+        self,
+        predictions: torch.Tensor,
+        activated: torch.Tensor,
     ) -> torch.Tensor: ...
     def forward(self, corrected: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -336,7 +351,9 @@ class Gemma3nModel(Gemma3nPreTrainedModel):
         **lm_kwargs,
     ) -> Gemma3nCausalLMOutputWithPast: ...
     def get_audio_features(
-        self, input_features: torch.Tensor, input_features_mask: torch.Tensor
+        self,
+        input_features: torch.Tensor,
+        input_features_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 @auto_docstring(custom_intro=...)

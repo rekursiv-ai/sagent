@@ -20,7 +20,9 @@ class NumaOptions:
 
 @contextmanager
 def maybe_temporarily_apply_numa_binding_to_current_thread(
-    *, gpu_index: int, numa_options: NumaOptions | None
+    *,
+    gpu_index: int,
+    numa_options: NumaOptions | None,
 ) -> Iterator[None]: ...
 
 K = TypeVar("K")

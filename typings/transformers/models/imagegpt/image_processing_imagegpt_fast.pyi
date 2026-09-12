@@ -11,7 +11,8 @@ from ...utils import auto_docstring
 """Fast Image processor class for ImageGPT."""
 
 def squared_euclidean_distance_torch(
-    a: torch.Tensor, b: torch.Tensor
+    a: torch.Tensor,
+    b: torch.Tensor,
 ) -> torch.Tensor: ...
 def color_quantize_torch(x: torch.Tensor, clusters: torch.Tensor) -> torch.Tensor: ...
 

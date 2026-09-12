@@ -79,10 +79,12 @@ class BackendConfig:
     def __init__(self, name: str = ...) -> None: ...
     def set_name(self, name: str) -> BackendConfig: ...
     def set_backend_pattern_config(
-        self, config: BackendPatternConfig
+        self,
+        config: BackendPatternConfig,
     ) -> BackendConfig: ...
     def set_backend_pattern_configs(
-        self, configs: list[BackendPatternConfig]
+        self,
+        configs: list[BackendPatternConfig],
     ) -> BackendConfig: ...
     @property
     def configs(self) -> list[BackendPatternConfig]: ...
@@ -94,27 +96,34 @@ class BackendPatternConfig:
     def __init__(self, pattern: Pattern | None = ...) -> None: ...
     def set_pattern(self, pattern: Pattern) -> BackendPatternConfig: ...
     def set_observation_type(
-        self, observation_type: ObservationType
+        self,
+        observation_type: ObservationType,
     ) -> BackendPatternConfig: ...
     def add_dtype_config(self, dtype_config: DTypeConfig) -> BackendPatternConfig: ...
     def set_dtype_configs(
-        self, dtype_configs: list[DTypeConfig]
+        self,
+        dtype_configs: list[DTypeConfig],
     ) -> BackendPatternConfig: ...
     def set_root_module(
-        self, root_module: type[torch.nn.Module]
+        self,
+        root_module: type[torch.nn.Module],
     ) -> BackendPatternConfig: ...
     def set_qat_module(
-        self, qat_module: type[torch.nn.Module]
+        self,
+        qat_module: type[torch.nn.Module],
     ) -> BackendPatternConfig: ...
     def set_reference_quantized_module(
-        self, reference_quantized_module: type[torch.nn.Module]
+        self,
+        reference_quantized_module: type[torch.nn.Module],
     ) -> BackendPatternConfig: ...
     def set_fused_module(
-        self, fused_module: type[torch.nn.Module]
+        self,
+        fused_module: type[torch.nn.Module],
     ) -> BackendPatternConfig: ...
     def set_fuser_method(self, fuser_method: Callable) -> BackendPatternConfig: ...
     @classmethod
     def from_dict(
-        cls, backend_pattern_config_dict: dict[str, Any]
+        cls,
+        backend_pattern_config_dict: dict[str, Any],
     ) -> BackendPatternConfig: ...
     def to_dict(self) -> dict[str, Any]: ...

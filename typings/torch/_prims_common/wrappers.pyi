@@ -22,7 +22,9 @@ class elementwise_type_promotion_wrapper:
 
 def is_cpu_scalar(x: TensorLikeType) -> bool: ...
 def check_copy_devices(
-    *, copy_from: TensorLikeType, copy_to: TensorLikeType
+    *,
+    copy_from: TensorLikeType,
+    copy_to: TensorLikeType,
 ) -> None: ...
 def out_wrapper(
     *out_names: str,

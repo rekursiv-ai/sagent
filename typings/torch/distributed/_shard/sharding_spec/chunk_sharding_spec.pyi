@@ -19,5 +19,8 @@ class ChunkShardingSpec(ShardingSpec):
         tensor_properties: sharded_tensor_meta.TensorProperties,
     ) -> sharded_tensor_meta.ShardedTensorMetadata: ...
     def shard(
-        self, tensor: torch.Tensor, src_rank: int = ..., process_group=...
+        self,
+        tensor: torch.Tensor,
+        src_rank: int = ...,
+        process_group=...,
     ) -> ShardedTensor: ...

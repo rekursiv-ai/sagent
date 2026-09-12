@@ -15,17 +15,27 @@ class OperatorIssue(RuntimeError):
 
 class MissingOperatorWithoutDecomp(OperatorIssue):
     def __init__(
-        self, target: Any, args: list[Any], kwargs: dict[str, Any]
+        self,
+        target: Any,
+        args: list[Any],
+        kwargs: dict[str, Any],
     ) -> None: ...
 
 class MissingOperatorWithDecomp(OperatorIssue):
     def __init__(
-        self, target: Any, args: list[Any], kwargs: dict[str, Any]
+        self,
+        target: Any,
+        args: list[Any],
+        kwargs: dict[str, Any],
     ) -> None: ...
 
 class LoweringException(OperatorIssue):
     def __init__(
-        self, exc: Exception, target: Any, args: list[Any], kwargs: dict[str, Any]
+        self,
+        exc: Exception,
+        target: Any,
+        args: list[Any],
+        kwargs: dict[str, Any],
     ) -> None: ...
 
 class SubgraphLoweringException(RuntimeError): ...
@@ -55,5 +65,7 @@ class GPUTooOldForTriton(ShortenTraceback):
 class InductorError(BackendCompilerFailed):
     backend_name = ...
     def __init__(
-        self, inner_exception: Exception, first_useful_frame: types.FrameType | None
+        self,
+        inner_exception: Exception,
+        first_useful_frame: types.FrameType | None,
     ) -> None: ...

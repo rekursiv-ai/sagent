@@ -58,30 +58,38 @@ class SparseSemiStructuredTensor(torch.Tensor):
     def to_dense(self) -> Tensor: ...
     @classmethod
     def from_dense(
-        cls, original_tensor: torch.Tensor
+        cls,
+        original_tensor: torch.Tensor,
     ) -> SparseSemiStructuredTensor: ...
 
 def to_sparse_semi_structured(
-    original_tensor: torch.Tensor, transposed: bool = ...
+    original_tensor: torch.Tensor,
+    transposed: bool = ...,
 ) -> SparseSemiStructuredTensor: ...
 
 class SparseSemiStructuredTensorCUTLASS(SparseSemiStructuredTensor):
     @classmethod
     def from_dense(
-        cls, original_tensor: torch.Tensor
+        cls,
+        original_tensor: torch.Tensor,
     ) -> SparseSemiStructuredTensorCUTLASS: ...
     def to_dense(self) -> Tensor: ...
     @classmethod
     def prune_dense_static_sort(
-        cls, original_tensor: torch.Tensor, algorithm=...
+        cls,
+        original_tensor: torch.Tensor,
+        algorithm=...,
     ) -> SparseSemiStructuredTensor: ...
 
 class SparseSemiStructuredTensorCUSPARSELT(SparseSemiStructuredTensor):
     @classmethod
     def from_dense(
-        cls, original_tensor: torch.Tensor
+        cls,
+        original_tensor: torch.Tensor,
     ) -> SparseSemiStructuredTensorCUSPARSELT: ...
     @classmethod
     def prune_dense_static_sort(
-        cls, original_tensor: torch.Tensor, algorithm=...
+        cls,
+        original_tensor: torch.Tensor,
+        algorithm=...,
     ) -> SparseSemiStructuredTensor: ...

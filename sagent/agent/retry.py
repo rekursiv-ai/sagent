@@ -35,10 +35,10 @@ if TYPE_CHECKING:
 else:
     from wrapt import lazy_import
 
-    httpx2 = lazy_import("httpx2")  # 168ms
+    httpx2 = lazy_import("httpx2")  # 168ms.
 
 from sagent.lib.durations import humanize_duration
-from sagent.types import runtime as runtime_types
+from sagent.types import runtime
 from sagent.types.model import (
     Model,
     ModelRequest,
@@ -290,61 +290,9 @@ def extract_retry_after(error: Exception) -> float | None:
 _UNIFIED_REJECTED_STATUSES = frozenset({"rejected", "rate_limited"})
 
 
-def _unified_limit_rejected(headers: Mapping[str, str]) -> bool:
-    """Return True when a unified-ratelimit status header reports a blocked request.
-
-    Consults Anthropic's per-window status headers. A ``rejected`` /
-    ``rate_limited`` value on any window means the request was actually
-    throttled, so the ``-reset`` clock becomes a real retry-after.
-    ``allowed`` and ``allowed_warning`` are both non-blocking:
-    ``allowed_warning`` is a heads-up that a window is filling (it rides the
-    always-present ``-reset`` clock, often the 7d rollover ~24h away), NOT an
-    instruction to wait -- honoring it halts a still-serviceable session for
-    hours (Issue#316). ``-overage-status`` is excluded: it describes overage
-    billing eligibility, not whether THIS request was limited.
-    """
-    for name in (
-        "anthropic-ratelimit-unified-status",
-        "anthropic-ratelimit-unified-5h-status",
-        "anthropic-ratelimit-unified-7d-status",
-    ):
-        status = headers.get(name)
-        if status is not None and status.strip().lower() in _UNIFIED_REJECTED_STATUSES:
-            return True
-    return False
-
-
 _MAX_SERVER_RETRY_AFTER_SEC = (
     24 * 60 * 60
 )  # config-globals: ignore -- epoch-vs-delay Retry-After cutoff
-
-
-def _retry_after_seconds(value: float) -> float:
-    """Interpret a numeric ``Retry-After`` as a delay, converting epochs.
-
-    Some servers and proxies send an absolute Unix timestamp instead of
-    RFC 7231 delta-seconds. An epoch reset is close to ``now``; a delta --
-    even a large one -- is not. Convert to a delta only when ``value`` lands
-    within a clamp-window of ``now`` (i.e. it plausibly *is* an epoch), so a
-    far-from-now large delta stays a delta and clamps rather than collapsing
-    to ~0 via ``value - now``.
-
-    Args:
-      value: Parsed ``retry-after`` number (delta-seconds or epoch).
-
-    Returns:
-      delay_sec: Non-negative seconds to wait.
-
-    """
-    now = time.time()
-    if value >= now - _MAX_SERVER_RETRY_AFTER_SEC:
-        return max(0.0, value - now)
-    return max(0.0, value)
-
-
-def _clamp_retry_after(delta_sec: float) -> float:
-    """Clamp a server-advertised retry delay into ``[0, _MAX_SERVER_RETRY_AFTER_SEC]``."""
-    return min(max(0.0, delta_sec), _MAX_SERVER_RETRY_AFTER_SEC)
 
 
 # Google's 429 backoff arrives in the JSON error body as a
@@ -352,54 +300,6 @@ def _clamp_retry_after(delta_sec: float) -> float:
 # JSON encoding is a decimal-seconds string with a trailing ``s`` (e.g.
 # ``"16s"`` or ``"7.5s"``).
 _GOOGLE_RETRY_DELAY_RE = re.compile(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"')
-
-
-def _google_retry_delay(body: str) -> float | None:
-    """Parse a Google ``RetryInfo.retryDelay`` (seconds) from an error body."""
-    if "retrydelay" not in body.lower():
-        return None
-    match = _GOOGLE_RETRY_DELAY_RE.search(body)
-    if match is None:
-        return None
-    try:
-        return float(match.group(1))
-    except ValueError:
-        return None
-
-
-def _response_body_text(response: object) -> str:
-    """Return the full response body text, never raising.
-
-    Uncapped: a provider error body is the whole forensic payload, and a
-    character clamp cut JSON mid-object exactly when the detail mattered
-    -- a ``retryDelay`` far into a large body, say. Guards
-    ``ResponseNotRead`` for unread streaming responses.
-    """
-    if response is None:
-        return ""
-    try:
-        text = getattr(response, "text", None)
-        if isinstance(text, str):
-            return text
-        raw = getattr(response, "content", None)
-    except httpx2.ResponseNotRead:
-        return ""
-    if isinstance(raw, (bytes, bytearray)):
-        try:
-            return raw.decode("utf-8", errors="replace")
-        except (AttributeError, ValueError):
-            return ""
-    return ""
-
-
-def _lower_headers(headers: object) -> dict[str, str]:
-    """Return ``headers`` as a flat lowercase-key dict; tolerate any Mapping."""
-    if not isinstance(headers, Mapping):
-        return {}
-    return {
-        str(k).lower(): str(v)
-        for k, v in cast(Mapping[object, object], headers).items()
-    }
 
 
 def error_diagnostics(error: Exception) -> str:
@@ -424,7 +324,7 @@ def error_diagnostics(error: Exception) -> str:
     return " ".join(parts)
 
 
-def service_error_snapshot(error: Exception) -> runtime_types.ServiceErrorSnapshot:
+def service_error_snapshot(error: Exception) -> runtime.ServiceErrorSnapshot:
     """Capture sanitized provider error details for durable runtime events.
 
     Args:
@@ -438,7 +338,7 @@ def service_error_snapshot(error: Exception) -> runtime_types.ServiceErrorSnapsh
     headers = getattr(response, "headers", {}) or {}
     # An SDK error stringifies to its entire JSON body; the body's own
     # ``message`` is the one sentence worth showing a user.
-    return runtime_types.ServiceErrorSnapshot(
+    return runtime.ServiceErrorSnapshot(
         type_name=type(error).__name__,
         message=_body_error_message(error) or str(error),
         status=error_status(error),
@@ -451,7 +351,7 @@ async def send_with_retry(
     model: Model,
     request: ModelRequest,
     *,
-    publish: Callable[[runtime_types.RuntimeEvent], None] | None = None,
+    publish: Callable[[runtime.RuntimeEvent], None] | None = None,
     max_attempts: int,
     persistent_retry: bool,
     publish_recoverable: Callable[[str], None],
@@ -526,7 +426,7 @@ async def send_with_retry(
             publish_recoverable(
                 f"prior resume wait ({delay:.0f}s) exceeds the interactive"
                 f" ceiling ({INTERACTIVE_MAX_SLEEP_SEC:.0f}s); skipping it and"
-                " sending now"
+                " sending now",
             )
     last_error: Exception | None = None
     prior_emitted = ""
@@ -551,7 +451,7 @@ async def send_with_retry(
                 if full.startswith(prior_emitted):
                     suffix = full.removeprefix(prior_emitted)
                     if suffix:
-                        publish(runtime_types.ModelResponsePartial(suffix))
+                        publish(runtime.ModelResponsePartial(suffix))
                 else:
                     # The partial streamed before the interrupt does not prefix
                     # the retry, so it cannot be extended -- the text above this
@@ -559,19 +459,19 @@ async def send_with_retry(
                     # that drops the stale text outright needs a renderer-side
                     # reset event; the explicit banner is the in-band signal.)
                     publish(
-                        runtime_types.ModelResponsePartial(
+                        runtime.ModelResponsePartial(
                             "\n[retry diverged; discard the text above -- "
-                            "the corrected response follows]\n"
-                        )
+                            "the corrected response follows]\n",
+                        ),
                     )
-                    publish(runtime_types.ModelResponsePartial(full))
+                    publish(runtime.ModelResponsePartial(full))
             return resp
         except StreamInterruptedError as e:
             stream_interrupts += 1
             prior_emitted = "".join(chunks) if live else prior_emitted
             publish_recoverable(
                 f"stream interrupted (attempt {stream_attempt},"
-                f" {stream_interrupts} interrupts so far): {e}"
+                f" {stream_interrupts} interrupts so far): {e}",
             )
             if stream_interrupts > _MAX_STREAM_INTERRUPT_RETRIES:
                 logger.warning(
@@ -583,14 +483,14 @@ async def send_with_retry(
                 return e.response
             if on_discarded_response is not None:
                 on_discarded_response(
-                    e.response
-                )  # may raise (e.g. budget exhaustion) -- intentional
+                    e.response,
+                )  # May raise (e.g. budget exhaustion) -- intentional.
             attempt -= 1
             continue
         except Exception as e:
             if model.is_context_overflow(e):
                 publish_recoverable(
-                    f"context overflow (attempt {attempt}): {type(e).__name__}: {e}"
+                    f"context overflow (attempt {attempt}): {type(e).__name__}: {e}",
                 )
                 raise
             if not is_retryable(e, model):
@@ -684,7 +584,7 @@ async def send_with_retry(
             publish_recoverable(
                 f"retry attempt {attempt_label}, waiting {delay:.1f}s:"
                 f" {type(e).__name__}: {e}"
-                + (f" [{diagnostics}]" if diagnostics else "")
+                + (f" [{diagnostics}]" if diagnostics else ""),
             )
             logger.warning(
                 "API error (attempt %d/%d): %s%s: %s. Retrying in %.0fs.%s",
@@ -714,27 +614,15 @@ async def send_with_retry(
     ) from last_error
 
 
+# The base doubles per attempt (``RETRY_BASE_SEC * 2**attempt``) and is clamped to
+# ``cap``. Jitter is then subtracted (up to 25% of the clamped base), so the result is
+# always in ``[0.75 * cap_base, cap_base]`` and never exceeds ``cap`` -- ``cap`` stays a
+# true upper bound (the interactive ceiling must never be breached). Jittering DOWN
+# rather than the prior ``min(base + jitter, cap)`` keeps the jitter visible at the
+# ceiling: that shape collapsed every late attempt to exactly ``cap``, re-synchronizing
+# concurrent retriers into a thundering herd.
 def _backoff_delay(attempt: int, *, cap: float) -> float:
-    """Exponential backoff with downward jitter; ``cap`` is a hard ceiling.
-
-    The base doubles per attempt (``RETRY_BASE_SEC * 2**attempt``) and is
-    clamped to ``cap``. Jitter is then subtracted (up to 25% of the clamped
-    base), so the result is always in ``[0.75 * cap_base, cap_base]`` and never
-    exceeds ``cap`` -- ``cap`` stays a true upper bound (the interactive
-    ceiling must never be breached). Jittering DOWN rather than the prior
-    ``min(base + jitter, cap)`` keeps the jitter visible at the ceiling:
-    that shape collapsed every late attempt to exactly ``cap``, re-synchronizing
-    concurrent retriers into a thundering herd.
-
-    Args:
-      attempt: Zero-based backoff attempt number.
-      cap: Hard ceiling on the returned delay, in seconds.
-
-    Returns:
-      delay_sec: Backoff delay in ``[0.75 * cap_base, cap_base]`` where
-          ``cap_base = min(RETRY_BASE_SEC * 2**attempt, cap)``.
-
-    """
+    """Exponential backoff with downward jitter; ``cap`` is a hard ceiling."""
     base = min(RETRY_BASE_SEC * (2.0**attempt), cap)
     return base - random.uniform(0, 0.25 * base)  # noqa: S311 -- jitter, not security
 
@@ -818,20 +706,18 @@ def _error_status(error: Exception, depth: int) -> int | None:
     return None
 
 
+# Always captures text chunks into ``chunks`` for cross-attempt retry-dedup. When
+# ``live`` is set (first attempt, nothing emitted yet) it also forwards every event.
+# Whether reasoning reaches a screen is the renderer's decision, so dropping it here hid
+# it from every observer.
 def _make_stream_sink(
     chunks: list[str],
-    live: Callable[[runtime_types.RuntimeEvent], None] | None,
-) -> Callable[[runtime_types.RuntimeEvent], None]:
-    """Build the ``publish`` sink handed to ``model.stream``.
+    live: Callable[[runtime.RuntimeEvent], None] | None,
+) -> Callable[[runtime.RuntimeEvent], None]:
+    """Build the ``publish`` sink handed to ``model.stream``."""
 
-    Always captures text chunks into ``chunks`` for cross-attempt
-    retry-dedup. When ``live`` is set (first attempt, nothing emitted yet)
-    it also forwards every event. Whether reasoning reaches a screen is the
-    renderer's decision, so dropping it here hid it from every observer.
-    """
-
-    def _sink(event: runtime_types.RuntimeEvent) -> None:
-        if isinstance(event, runtime_types.ModelResponsePartial):
+    def _sink(event: runtime.RuntimeEvent) -> None:
+        if isinstance(event, runtime.ModelResponsePartial):
             chunks.append(event.text)
         if live is not None:
             live(event)
@@ -853,3 +739,87 @@ def _diagnostic_headers(headers: object) -> dict[str, str]:
         ):
             out[str(key)] = str(value)
     return out
+
+
+# Consults Anthropic's per-window status headers. A ``rejected`` / ``rate_limited``
+# value on any window means the request was actually throttled, so the ``-reset`` clock
+# becomes a real retry-after. ``allowed`` and ``allowed_warning`` are both non-blocking:
+# ``allowed_warning`` is a heads-up that a window is filling (it rides the always-
+# present ``-reset`` clock, often the 7d rollover ~24h away), NOT an instruction to wait
+# -- honoring it halts a still-serviceable session for hours (Issue#316). ``-overage-
+# status`` is excluded: it describes overage billing eligibility, not whether THIS
+# request was limited.
+def _unified_limit_rejected(headers: Mapping[str, str]) -> bool:
+    """Return True when a unified-ratelimit status header reports a blocked request."""
+    for name in (
+        "anthropic-ratelimit-unified-status",
+        "anthropic-ratelimit-unified-5h-status",
+        "anthropic-ratelimit-unified-7d-status",
+    ):
+        status = headers.get(name)
+        if status is not None and status.strip().lower() in _UNIFIED_REJECTED_STATUSES:
+            return True
+    return False
+
+
+# Some servers and proxies send an absolute Unix timestamp instead of RFC 7231 delta-
+# seconds. An epoch reset is close to ``now``; a delta -- even a large one -- is not.
+# Convert to a delta only when ``value`` lands within a clamp-window of ``now`` (i.e. it
+# plausibly *is* an epoch), so a far-from-now large delta stays a delta and clamps
+# rather than collapsing to ~0 via ``value - now``.
+def _retry_after_seconds(value: float) -> float:
+    """Interpret a numeric ``Retry-After`` as a delay, converting epochs."""
+    now = time.time()
+    if value >= now - _MAX_SERVER_RETRY_AFTER_SEC:
+        return max(0.0, value - now)
+    return max(0.0, value)
+
+
+def _clamp_retry_after(delta_sec: float) -> float:
+    """Clamp a server-advertised retry delay into ``[0, _MAX_SERVER_RETRY_AFTER_SEC]``."""
+    return min(max(0.0, delta_sec), _MAX_SERVER_RETRY_AFTER_SEC)
+
+
+def _google_retry_delay(body: str) -> float | None:
+    """Parse a Google ``RetryInfo.retryDelay`` (seconds) from an error body."""
+    if "retrydelay" not in body.lower():
+        return None
+    match = _GOOGLE_RETRY_DELAY_RE.search(body)
+    if match is None:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+# Uncapped: a provider error body is the whole forensic payload, and a character clamp
+# cut JSON mid-object exactly when the detail mattered -- a ``retryDelay`` far into a
+# large body, say. Guards ``ResponseNotRead`` for unread streaming responses.
+def _response_body_text(response: object) -> str:
+    """Return the full response body text, never raising."""
+    if response is None:
+        return ""
+    try:
+        text = getattr(response, "text", None)
+        if isinstance(text, str):
+            return text
+        raw = getattr(response, "content", None)
+    except httpx2.ResponseNotRead:
+        return ""
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            return raw.decode("utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            return ""
+    return ""
+
+
+def _lower_headers(headers: object) -> dict[str, str]:
+    """Return ``headers`` as a flat lowercase-key dict; tolerate any Mapping."""
+    if not isinstance(headers, Mapping):
+        return {}
+    return {
+        str(k).lower(): str(v)
+        for k, v in cast(Mapping[object, object], headers).items()
+    }

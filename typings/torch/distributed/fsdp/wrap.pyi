@@ -28,11 +28,15 @@ class ModuleWrapPolicy(_Policy):
 
 class CustomPolicy(_Policy):
     def __init__(
-        self, lambda_fn: Callable[[nn.Module], bool | dict[str, Any]]
+        self,
+        lambda_fn: Callable[[nn.Module], bool | dict[str, Any]],
     ) -> None: ...
 
 def lambda_auto_wrap_policy(
-    module: nn.Module, recurse: bool, nonwrapped_numel: int, lambda_fn: Callable
+    module: nn.Module,
+    recurse: bool,
+    nonwrapped_numel: int,
+    lambda_fn: Callable,
 ) -> bool: ...
 def transformer_auto_wrap_policy(
     module: nn.Module,

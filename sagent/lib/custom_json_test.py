@@ -107,7 +107,9 @@ class TestJsonFreeze:
         ],
     )
     def test_non_finite_extensions_round_trip_through_json_text(
-        self, value: float, literal: str
+        self,
+        value: float,
+        literal: str,
     ) -> None:
         text = json.dumps(json_unfreeze(json_freeze({"value": value})))
         assert literal in text
@@ -252,7 +254,9 @@ class TestFloatVal:
         ],
     )
     def test_non_finite_extension_is_preserved(
-        self, value: object, expected: float
+        self,
+        value: object,
+        expected: float,
     ) -> None:
         result = FloatCodec.coerce(value, 3.5)
         assert math.isnan(result) if math.isnan(expected) else result == expected
@@ -347,7 +351,10 @@ class TestOptionalVal:
         ],
     )
     def test_reads_the_special_scalars_the_codec_encodes(
-        self, target: type, wire: str, expected: object
+        self,
+        target: type,
+        wire: str,
+        expected: object,
     ) -> None:
         """Every type the codec string-encodes must read back through here.
 
@@ -511,7 +518,7 @@ class TestLosslessFields:
                 "states": {"value": "garbage"},
                 "raw": {"value": 1},
                 "residual": {},
-            }
+            },
         }
         assert replay(stored, {"value": 2}) == stored
 
@@ -547,7 +554,8 @@ class TestDictVal:
 
     def test_filters_by_item_type(self) -> None:
         typed: dict[str, int] = DictCodec.coerce(
-            {"a": 1, "b": "x", "c": 2, "truth": True}, int
+            {"a": 1, "b": "x", "c": 2, "truth": True},
+            int,
         )
         assert typed == {"a": 1, "c": 2}
 
@@ -632,7 +640,7 @@ class TestValidateJsonSchema:
                         "type": "object",
                         "properties": {"file_path": {"type": "string"}},
                         "required": ["file_path"],
-                    }
+                    },
                 },
             },
             {"payload": {}},
@@ -648,7 +656,7 @@ class TestValidateJsonSchema:
                         "type": "object",
                         "properties": {"file_path": {"type": "string"}},
                         "additionalProperties": False,
-                    }
+                    },
                 },
             },
             {"payload": {"file_path": "x", "extra": True}},
@@ -667,7 +675,7 @@ class TestValidateJsonSchema:
                             "properties": {"id": {"type": "string"}},
                             "required": ["id"],
                         },
-                    }
+                    },
                 },
             },
             {"items": [dict[str, object]()]},
@@ -695,12 +703,12 @@ class TestValidateJsonSchema:
 
     def test_union_type_rejects_non_member_lists_both(self) -> None:
         assert validate_json_schema({"type": ["array", "string"]}, 7) == [
-            "Parameter `<root>` must be array or string."
+            "Parameter `<root>` must be array or string.",
         ]
 
     def test_union_type_single_member_renders_bare_name(self) -> None:
         assert validate_json_schema({"type": ["integer"]}, "x") == [
-            "Parameter `<root>` must be integer."
+            "Parameter `<root>` must be integer.",
         ]
 
     def test_union_type_ignores_non_string_members(self) -> None:
@@ -734,15 +742,15 @@ class TestValidateJsonSchema:
     def test_non_finite_extension_is_a_number(self, value: float) -> None:
         assert validate_json_schema({"type": "number"}, value) == []
         assert validate_json_schema({"type": "integer"}, value) == [
-            "Parameter `<root>` must be integer."
+            "Parameter `<root>` must be integer.",
         ]
 
     def test_bool_is_not_integer_or_number(self) -> None:
         assert validate_json_schema({"type": "integer"}, True) == [
-            "Parameter `<root>` must be integer."
+            "Parameter `<root>` must be integer.",
         ]
         assert validate_json_schema({"type": "number"}, True) == [
-            "Parameter `<root>` must be number."
+            "Parameter `<root>` must be number.",
         ]
 
     def test_scalar_enum(self) -> None:
@@ -774,10 +782,10 @@ class TestValidateJsonSchema:
 
     def test_numeric_range(self) -> None:
         assert validate_json_schema({"minimum": 1, "maximum": 3}, 0) == [
-            "Parameter `<root>` must be >= 1."
+            "Parameter `<root>` must be >= 1.",
         ]
         assert validate_json_schema({"minimum": 1, "maximum": 3}, 4) == [
-            "Parameter `<root>` must be <= 3."
+            "Parameter `<root>` must be <= 3.",
         ]
 
     @pytest.mark.parametrize(
@@ -788,7 +796,9 @@ class TestValidateJsonSchema:
         ],
     )
     def test_nan_does_not_satisfy_ranges(
-        self, schema: dict[str, int], issue: str
+        self,
+        schema: dict[str, int],
+        issue: str,
     ) -> None:
         assert validate_json_schema(schema, float("nan")) == [issue]
 
@@ -942,7 +952,7 @@ class _MappingSpecialUnion:
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class _MappingDataclassUnion:
     value: dict[str, object] | _Child = dataclasses.field(
-        default_factory=dict[str, object]
+        default_factory=dict[str, object],
     )
 
 
@@ -964,7 +974,7 @@ class _ListUnion:
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class _MappingElementUnion:
     value: dict[str, int] | dict[str, str] = dataclasses.field(
-        default_factory=dict[str, int]
+        default_factory=dict[str, int],
     )
 
 
@@ -1121,7 +1131,7 @@ class TestDataclassCodec:
 
     def test_encoded_form_is_json_serializable(self) -> None:
         doc = _Doc(when=datetime(2026, 1, 1, tzinfo=UTC), atts=(_Bytes(data=b"z"),))
-        json.dumps(DataclassCodec.to_json(doc))  # must not raise.
+        json.dumps(DataclassCodec.to_json(doc))  # Must not raise.
 
     def test_type_tag_present_and_ignored_on_decode(self) -> None:
         encoded = DataclassCodec.to_json(_Child(n=3))
@@ -1264,7 +1274,8 @@ class TestDataclassCodec:
         for value in (Path("/a"), b"b"):
             doc = _OptionalSpecialUnion(scalar=value)
             back = DataclassCodec.from_json(
-                _OptionalSpecialUnion, DataclassCodec.to_json(doc)
+                _OptionalSpecialUnion,
+                DataclassCodec.to_json(doc),
             )
             assert back == doc
             assert isinstance(back.scalar, type(value))
@@ -1396,7 +1407,9 @@ class TestStrictDecode:
         ],
     )
     def test_literal_separates_booleans_from_numbers(
-        self, annotation: object, value: object
+        self,
+        annotation: object,
+        value: object,
     ) -> None:
         with pytest.raises(TypeError):
             decode(annotation, value)
@@ -1425,7 +1438,10 @@ class TestStrictDecode:
         ],
     )
     def test_bare_container_annotations_decode(
-        self, annotation: object, wire: object, expected: object
+        self,
+        annotation: object,
+        wire: object,
+        expected: object,
     ) -> None:
         assert decode(annotation, wire) == expected
 
@@ -1437,7 +1453,9 @@ class TestStrictDecode:
         [([1, 2], [1, 2]), (["a", "b"], ["a", "b"])],
     )
     def test_container_union_selects_by_element_type(
-        self, raw: list[object], expected: list[object]
+        self,
+        raw: list[object],
+        expected: list[object],
     ) -> None:
         assert decode(list[int] | list[str], raw) == expected
 
@@ -1451,7 +1469,10 @@ class TestStrictDecode:
         ],
     )
     def test_generic_union_selects_by_nested_elements(
-        self, annotation: object, raw: object, expected: object
+        self,
+        annotation: object,
+        raw: object,
+        expected: object,
     ) -> None:
         assert decode(annotation, raw) == expected
 
@@ -1467,7 +1488,8 @@ class TestStrictEncode:
         ],
     )
     def test_rejects_values_that_do_not_match_annotations(
-        self, doc: _StrictAnnotations
+        self,
+        doc: _StrictAnnotations,
     ) -> None:
         with pytest.raises(TypeError):
             DataclassCodec.to_json(doc)
@@ -1485,7 +1507,8 @@ class TestStrictEncode:
 
         assert (
             DataclassCodec.from_json(
-                _ObjectHolder, json.loads(json.dumps(DataclassCodec.to_json(doc)))
+                _ObjectHolder,
+                json.loads(json.dumps(DataclassCodec.to_json(doc))),
             )
             == doc
         )
@@ -1498,7 +1521,8 @@ class TestMixedScalarUnion:
         for value in (b"raw", "raw"):
             doc = _MixedScalarUnion(blob=value)
             back = DataclassCodec.from_json(
-                _MixedScalarUnion, DataclassCodec.to_json(doc)
+                _MixedScalarUnion,
+                DataclassCodec.to_json(doc),
             )
             assert back == doc
             assert isinstance(back.blob, type(value))
@@ -1507,7 +1531,8 @@ class TestMixedScalarUnion:
         for value in (Path("/x"), 3):
             doc = _SpecialNativeUnion(value=value)
             back = DataclassCodec.from_json(
-                _SpecialNativeUnion, DataclassCodec.to_json(doc)
+                _SpecialNativeUnion,
+                DataclassCodec.to_json(doc),
             )
             assert back == doc
             assert isinstance(back.value, type(value))
@@ -1518,8 +1543,8 @@ class TestMixedScalarUnion:
             _ReorderedSpecialUnion,
             {
                 "value": ListCodec.coerce(
-                    DictCodec.coerce(encoded["values"])["py/tuple"]
-                )[0]
+                    DictCodec.coerce(encoded["values"])["py/tuple"],
+                )[0],
             },
         )
         assert reordered.value == b"x"
@@ -1527,21 +1552,24 @@ class TestMixedScalarUnion:
     def test_literal_union_round_trips(self) -> None:
         assert (
             DataclassCodec.from_json(
-                _LiteralUnion, DataclassCodec.to_json(_LiteralUnion())
+                _LiteralUnion,
+                DataclassCodec.to_json(_LiteralUnion()),
             )
             == _LiteralUnion()
         )
 
     @pytest.mark.parametrize("value", [[1, 2], ["a", "b"]])
     def test_container_union_round_trips_by_element_type(
-        self, value: list[int] | list[str]
+        self,
+        value: list[int] | list[str],
     ) -> None:
         doc = _ListUnion(value=value)
         assert DataclassCodec.from_json(_ListUnion, DataclassCodec.to_json(doc)) == doc
 
     @pytest.mark.parametrize("value", [{"x": 1}, {"x": "one"}])
     def test_mapping_union_round_trips_by_value_type(
-        self, value: dict[str, int] | dict[str, str]
+        self,
+        value: dict[str, int] | dict[str, str],
     ) -> None:
         doc = _MappingElementUnion(value=value)
         assert (
@@ -1551,7 +1579,8 @@ class TestMixedScalarUnion:
 
     @pytest.mark.parametrize("value", [(1, 2), ("one", "two")])
     def test_tuple_union_round_trips_by_element_type(
-        self, value: tuple[int, ...] | tuple[str, ...]
+        self,
+        value: tuple[int, ...] | tuple[str, ...],
     ) -> None:
         doc = _TupleElementUnion(value=value)
         assert (
@@ -1563,7 +1592,8 @@ class TestMixedScalarUnion:
         doc = _RecursiveAnnotationUnion(value=_JsonHolder(value={"x": [1]}))
         assert (
             DataclassCodec.from_json(
-                _RecursiveAnnotationUnion, DataclassCodec.to_json(doc)
+                _RecursiveAnnotationUnion,
+                DataclassCodec.to_json(doc),
             )
             == doc
         )
@@ -1591,7 +1621,8 @@ class TestMixedScalarUnion:
         value = {"__scalar__": "Path", "__value__": "/x"}
         doc = _MappingSpecialUnion(value=value)
         back = DataclassCodec.from_json(
-            _MappingSpecialUnion, DataclassCodec.to_json(doc)
+            _MappingSpecialUnion,
+            DataclassCodec.to_json(doc),
         )
         assert back == doc
         assert isinstance(back.value, dict)
@@ -1600,7 +1631,8 @@ class TestMixedScalarUnion:
         value: dict[str, object] = {"__type__": "_Child", "n": 3}
         doc = _MappingDataclassUnion(value=value)
         back = DataclassCodec.from_json(
-            _MappingDataclassUnion, DataclassCodec.to_json(doc)
+            _MappingDataclassUnion,
+            DataclassCodec.to_json(doc),
         )
         assert back == doc
         assert isinstance(back.value, dict)
@@ -1613,7 +1645,8 @@ class TestMixedScalarUnion:
         for value in values:
             doc = _UnionContainer(value=value)
             back = DataclassCodec.from_json(
-                _UnionContainer, DataclassCodec.to_json(doc)
+                _UnionContainer,
+                DataclassCodec.to_json(doc),
             )
             assert back == doc
             assert isinstance(back.value, dict)
@@ -1664,11 +1697,13 @@ class TestNonFiniteEncoding:
         ],
     )
     def test_reserved_untyped_mappings_round_trip_as_data(
-        self, value: dict[str, object]
+        self,
+        value: dict[str, object],
     ) -> None:
         doc = _ObjectHolder(value=value)
         back = DataclassCodec.from_json(
-            _ObjectHolder, json.loads(json.dumps(DataclassCodec.to_json(doc)))
+            _ObjectHolder,
+            json.loads(json.dumps(DataclassCodec.to_json(doc))),
         )
         assert back == doc
 
@@ -1688,7 +1723,8 @@ class TestNonFiniteEncoding:
     def test_non_finite_float_in_a_union_round_trips(self, value: float) -> None:
         doc = _FloatUnion(value=value)
         back = DataclassCodec.from_json(
-            _FloatUnion, json.loads(json.dumps(DataclassCodec.to_json(doc)))
+            _FloatUnion,
+            json.loads(json.dumps(DataclassCodec.to_json(doc))),
         )
         if math.isnan(value):
             assert math.isnan(back.value)
@@ -1709,7 +1745,8 @@ class TestZonedDatetimeEncoding:
         doc = _Doc(when=datetime(2026, 8, 24, 12, tzinfo=zone))
 
         back = DataclassCodec.from_json(
-            _Doc, json.loads(json.dumps(DataclassCodec.to_json(doc)))
+            _Doc,
+            json.loads(json.dumps(DataclassCodec.to_json(doc))),
         )
 
         assert back.when == doc.when
@@ -1721,11 +1758,12 @@ class TestZonedDatetimeEncoding:
         # either way, but only a named zone shifts to -08:00 when arithmetic
         # carries it across the DST boundary. A fixed -07:00 stays -07:00.
         doc = _Doc(
-            when=datetime(2026, 8, 24, 12, tzinfo=ZoneInfo("America/Los_Angeles"))
+            when=datetime(2026, 8, 24, 12, tzinfo=ZoneInfo("America/Los_Angeles")),
         )
 
         back = DataclassCodec.from_json(
-            _Doc, json.loads(json.dumps(DataclassCodec.to_json(doc)))
+            _Doc,
+            json.loads(json.dumps(DataclassCodec.to_json(doc))),
         ).when
         assert back is not None
         winter = back.astimezone(back.tzinfo) + timedelta(days=150)
@@ -1739,7 +1777,7 @@ class TestZonedDatetimeEncoding:
         doc = _Doc(when=datetime(2026, 8, 24, tzinfo=UTC))
 
         assert DictCodec.coerce(DataclassCodec.to_json(doc))["when"] == {
-            "py/datetime": "2026-08-24T00:00:00+00:00"
+            "py/datetime": "2026-08-24T00:00:00+00:00",
         }
 
 
@@ -1842,65 +1880,104 @@ class TestGeneratedRoundTrip:
     """Each value type round-trips bare, optional, and in every container."""
 
     def test_bare(
-        self, label: str, annotation: type | UnionType, first: object, second: object
+        self,
+        label: str,
+        annotation: type | UnionType,
+        first: object,
+        second: object,
     ) -> None:
         del label, second
         _assert_round_trips(annotation, first)
 
     def test_optional_holding_a_value(
-        self, label: str, annotation: type | UnionType, first: object, second: object
+        self,
+        label: str,
+        annotation: type | UnionType,
+        first: object,
+        second: object,
     ) -> None:
         del label, second
         _assert_round_trips(annotation | None, first)
 
     def test_optional_holding_none(
-        self, label: str, annotation: type | UnionType, first: object, second: object
+        self,
+        label: str,
+        annotation: type | UnionType,
+        first: object,
+        second: object,
     ) -> None:
         del label, first, second
         _assert_round_trips(annotation | None, None)
 
     def test_list(
-        self, label: str, annotation: type | UnionType, first: object, second: object
+        self,
+        label: str,
+        annotation: type | UnionType,
+        first: object,
+        second: object,
     ) -> None:
         del label
         _assert_round_trips(GenericAlias(list, annotation), [first, second])
 
     def test_variadic_tuple(
-        self, label: str, annotation: type | UnionType, first: object, second: object
+        self,
+        label: str,
+        annotation: type | UnionType,
+        first: object,
+        second: object,
     ) -> None:
         del label
         _assert_round_trips(GenericAlias(tuple, (annotation, ...)), (first, second))
 
     def test_fixed_tuple(
-        self, label: str, annotation: type | UnionType, first: object, second: object
+        self,
+        label: str,
+        annotation: type | UnionType,
+        first: object,
+        second: object,
     ) -> None:
         # A FIXED-length tuple decodes positionally; a homogeneous one repeats
         # a single annotation. Both spellings must reach the same value.
         del label
         _assert_round_trips(
-            GenericAlias(tuple, (annotation, annotation)), (first, second)
+            GenericAlias(tuple, (annotation, annotation)),
+            (first, second),
         )
 
     def test_dict_value(
-        self, label: str, annotation: type | UnionType, first: object, second: object
+        self,
+        label: str,
+        annotation: type | UnionType,
+        first: object,
+        second: object,
     ) -> None:
         del label
         _assert_round_trips(
-            GenericAlias(dict, (str, annotation)), {"a": first, "b": second}
+            GenericAlias(dict, (str, annotation)),
+            {"a": first, "b": second},
         )
 
     def test_frozenset(
-        self, label: str, annotation: type | UnionType, first: object, second: object
+        self,
+        label: str,
+        annotation: type | UnionType,
+        first: object,
+        second: object,
     ) -> None:
         del label
         if not isinstance(first, Hashable):
             pytest.skip("unhashable value cannot inhabit a set")
         _assert_round_trips(
-            GenericAlias(frozenset, annotation), frozenset({first, second})
+            GenericAlias(frozenset, annotation),
+            frozenset({first, second}),
         )
 
     def test_abstract_set(
-        self, label: str, annotation: type | UnionType, first: object, second: object
+        self,
+        label: str,
+        annotation: type | UnionType,
+        first: object,
+        second: object,
     ) -> None:
         # The abc spelling, whose origin is ``collections.abc.Set`` rather
         # than ``set`` -- the shape that silently decoded to a list.
@@ -1908,7 +1985,8 @@ class TestGeneratedRoundTrip:
         if not isinstance(first, Hashable):
             pytest.skip("unhashable value cannot inhabit a set")
         _assert_round_trips(
-            GenericAlias(AbstractSet, annotation), frozenset({first, second})
+            GenericAlias(AbstractSet, annotation),
+            frozenset({first, second}),
         )
 
     @pytest.mark.parametrize(
@@ -1943,12 +2021,16 @@ class TestGeneratedRoundTrip:
             value = cast(Callable[[set[object]], object], materialized)({first, second})
         else:
             value = cast(Callable[[list[object]], object], materialized)(
-                [first, second]
+                [first, second],
             )
         _assert_round_trips(GenericAlias(container, annotation), value)
 
     def test_mapping_abc(
-        self, label: str, annotation: type | UnionType, first: object, second: object
+        self,
+        label: str,
+        annotation: type | UnionType,
+        first: object,
+        second: object,
     ) -> None:
         # ``MutableMapping`` is the other half of ``MutableJSONValue``; its
         # origin is neither ``dict`` nor ``Mapping``.
@@ -1981,13 +2063,14 @@ class TestJsonpickleVocabulary:
         doc = _Doc(atts=(_Bytes(data=b"z"),))
 
         container = DictCodec.coerce(
-            cast(JSONValue, DictCodec.coerce(DataclassCodec.to_json(doc))["atts"])
+            cast(JSONValue, DictCodec.coerce(DataclassCodec.to_json(doc))["atts"]),
         )
         tagged = DictCodec.coerce(ListCodec.coerce(container["py/tuple"])[0])
         assert tagged["py/object"] == f"{_Bytes.__module__}._Bytes"
         assert (
             DataclassCodec.from_json(
-                _Doc, json.loads(json.dumps(DataclassCodec.to_json(doc)))
+                _Doc,
+                json.loads(json.dumps(DataclassCodec.to_json(doc))),
             )
             == doc
         )
@@ -1996,11 +2079,12 @@ class TestJsonpickleVocabulary:
         doc = _Floats(ratio=float("inf"))
 
         assert DictCodec.coerce(DataclassCodec.to_json(doc))["ratio"] == {
-            "py/float": "inf"
+            "py/float": "inf",
         }
         assert (
             DataclassCodec.from_json(
-                _Floats, json.loads(json.dumps(DataclassCodec.to_json(doc)))
+                _Floats,
+                json.loads(json.dumps(DataclassCodec.to_json(doc))),
             )
             == doc
         )
@@ -2009,11 +2093,12 @@ class TestJsonpickleVocabulary:
         doc = _Bytes(data=b"hi")
 
         assert DictCodec.coerce(DataclassCodec.to_json(doc))["data"] == {
-            "py/b64": "aGk="
+            "py/b64": "aGk=",
         }
         assert (
             DataclassCodec.from_json(
-                _Bytes, json.loads(json.dumps(DataclassCodec.to_json(doc)))
+                _Bytes,
+                json.loads(json.dumps(DataclassCodec.to_json(doc))),
             )
             == doc
         )
@@ -2046,7 +2131,8 @@ class TestNamedZonePreservation:
         doc = _Doc(when=datetime(2026, 8, 24, 12, tzinfo=zone))
 
         back = DataclassCodec.from_json(
-            _Doc, json.loads(json.dumps(DataclassCodec.to_json(doc)))
+            _Doc,
+            json.loads(json.dumps(DataclassCodec.to_json(doc))),
         )
 
         assert back.when == doc.when
@@ -2085,7 +2171,9 @@ class TestSelfDescribingValues:
         ],
     )
     def test_a_tagged_value_decodes_without_an_annotation(
-        self, value: object, tag: str
+        self,
+        value: object,
+        tag: str,
     ) -> None:
         encoded = encode_value(value)
 
@@ -2121,15 +2209,16 @@ class TestSelfDiscriminatingUnionMembers:
 
         member = DictCodec.coerce(
             ListCodec.coerce(
-                DictCodec.coerce(DataclassCodec.to_json(doc)["atts"])["py/tuple"]
-            )[0]
+                DictCodec.coerce(DataclassCodec.to_json(doc)["atts"])["py/tuple"],
+            )[0],
         )
 
         assert "py/union" not in member
         assert StrCodec.coerce(member["py/object"]).endswith("._Bytes")
         assert (
             DataclassCodec.from_json(
-                _Doc, json.loads(json.dumps(DataclassCodec.to_json(doc)))
+                _Doc,
+                json.loads(json.dumps(DataclassCodec.to_json(doc))),
             )
             == doc
         )
@@ -2183,7 +2272,8 @@ class TestDecodeCapabilities:
         ],
     )
     def test_import_and_execution_tags_are_safe_by_default(
-        self, tree: dict[str, object]
+        self,
+        tree: dict[str, object],
     ) -> None:
         with pytest.raises(TypeError):
             decode_graph(tree)
@@ -2202,7 +2292,7 @@ class TestDecodeCapabilities:
             "py/reduce": [
                 {"py/type": "builtins.list"},
                 {"py/tuple": [[1, 2]]},
-            ]
+            ],
         }
         assert decode_graph(tree, capabilities=capabilities) == [1, 2]
 
@@ -2452,7 +2542,7 @@ class TestGraphEncoding:
             "py/reduce": [
                 {"py/type": "pathlib.PurePosixPath"},
                 {"py/tuple": ["/", "opt", "scratch", "x"]},
-            ]
+            ],
         }
 
         decoded = decode_graph(
@@ -2504,7 +2594,7 @@ class TestGraphEncoding:
 
     def test_hook_payload_is_encoded_as_strict_json(self) -> None:
         hooks: GraphHooks = {
-            _NonFiniteHookMember: (_encode_non_finite_hook, _decode_non_finite_hook)
+            _NonFiniteHookMember: (_encode_non_finite_hook, _decode_non_finite_hook),
         }
         member = _NonFiniteHookMember(math.inf)
 
@@ -2525,7 +2615,7 @@ class TestGraphEncoding:
             _ReservedKeyHookMember: (
                 _encode_reserved_key_hook,
                 _decode_reserved_key_hook,
-            )
+            ),
         }
         member = _ReservedKeyHookMember("data")
 
@@ -2641,7 +2731,9 @@ class TestStrictGraphTags:
         ],
     )
     def test_scalar_tags_reject_wrong_payload_shapes(
-        self, tag: str, payload: object
+        self,
+        tag: str,
+        payload: object,
     ) -> None:
         with pytest.raises(TypeError) as excinfo:
             decode_graph({tag: payload})
@@ -2651,7 +2743,9 @@ class TestStrictGraphTags:
     @pytest.mark.parametrize("tag", ["py/hook", "py/inline"])
     @pytest.mark.parametrize("payload", [[], ["only-one"], ["a", "b", "c"]])
     def test_two_element_tags_reject_wrong_envelope_arity(
-        self, tag: str, payload: list[object]
+        self,
+        tag: str,
+        payload: list[object],
     ) -> None:
         """A malformed envelope is rejected as malformed, not as an unpack error.
 
@@ -2706,7 +2800,9 @@ class TestIssue19672Contracts:
     @pytest.mark.parametrize("target", [bytes, Path])
     @pytest.mark.parametrize("value", [42, ["x"], {"x": 1}])
     def test_special_scalars_reject_wrong_wire_shapes(
-        self, target: type, value: object
+        self,
+        target: type,
+        value: object,
     ) -> None:
         with pytest.raises(TypeError):
             decode(target, value)
@@ -2714,7 +2810,9 @@ class TestIssue19672Contracts:
 
     @pytest.mark.parametrize(("target", "value"), [(bytes, b"x"), (Path, Path("/x"))])
     def test_special_scalars_accept_already_typed_values(
-        self, target: type, value: object
+        self,
+        target: type,
+        value: object,
     ) -> None:
         assert decode(target, value) == value
         assert decode_or_none(target, value) == value
@@ -2730,7 +2828,9 @@ class TestIssue19672Contracts:
         ],
     )
     def test_every_scalar_tag_envelope_rejects_extra_keys(
-        self, tag: str, payload: str
+        self,
+        tag: str,
+        payload: str,
     ) -> None:
         with pytest.raises(TypeError, match="envelope"):
             decode_graph({tag: payload, "extra": True})
@@ -2778,7 +2878,7 @@ class TestIssue19672Contracts:
                 "states": {"x": "value"},
                 "raw": "garbage",
                 "residual": {},
-            }
+            },
         }
 
         assert replay(stored, {"x": 2}) == stored
@@ -2863,7 +2963,8 @@ class TestIssue19670Structure:
         assert "unknown field-state labels" in doc
 
     @pytest.mark.parametrize(
-        "module", [sys.modules[decode.__module__], sys.modules[__name__]]
+        "module",
+        [sys.modules[decode.__module__], sys.modules[__name__]],
     )
     def test_no_nested_helper_exceeds_three_lines(self, module: ModuleType) -> None:
         assert not _long_nested_helpers(inspect.getsource(module))
@@ -2882,7 +2983,8 @@ def _long_nested_helpers(source: str) -> list[str]:
             continue
         parent = parents.get(node)
         while parent is not None and not isinstance(
-            parent, (ast.FunctionDef, ast.AsyncFunctionDef)
+            parent,
+            (ast.FunctionDef, ast.AsyncFunctionDef),
         ):
             parent = parents.get(parent)
         if parent is None or not node.body or node.end_lineno is None:

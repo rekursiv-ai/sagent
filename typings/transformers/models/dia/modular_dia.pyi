@@ -64,7 +64,9 @@ class DiaCrossAttention(nn.Module):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class DiaEncoderLayer(GradientCheckpointingLayer):
@@ -77,7 +79,9 @@ class DiaEncoderLayer(GradientCheckpointingLayer):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class DiaEncoder(DiaPreTrainedModel):
@@ -107,7 +111,9 @@ class DiaDecoderLayer(GradientCheckpointingLayer):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]: ...
 
 class DiaDecoder(DiaPreTrainedModel):

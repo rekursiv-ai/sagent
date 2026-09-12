@@ -54,10 +54,14 @@ class AutotuneCache:
     remote_cache: tuple[RemoteCache[JsonDataTy], str] | None = ...
     @staticmethod
     def create(
-        inductor_meta: _InductorMetaTy, filename: str, configs_hash: str
+        inductor_meta: _InductorMetaTy,
+        filename: str,
+        configs_hash: str,
     ) -> AutotuneCache | None: ...
     def read_best(
-        self, inductor_meta: _InductorMetaTy, configs: list[Config]
+        self,
+        inductor_meta: _InductorMetaTy,
+        configs: list[Config],
     ) -> Config | None: ...
     def __getstate__(self) -> dict[str, Any]: ...
     def __setstate__(self, state: dict[str, Any]) -> None: ...

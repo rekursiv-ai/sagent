@@ -51,7 +51,7 @@ class PlayAudio:
                 },
             },
             "required": ["path"],
-        }
+        },
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -148,15 +148,15 @@ def _play_windows(path: Path) -> str | None:
     return None
 
 
+# Returns None on success, a reason string otherwise. A missing audio subsystem (no
+# command on PATH, or the command exits non-zero because no device) is treated as a soft
+# failure.
 def _play_via_cmd(
-    path: Path, *candidates: list[str], timeout_sec: float = 10.0
+    path: Path,
+    *candidates: list[str],
+    timeout_sec: float = 10.0,
 ) -> str | None:
-    """Try each ``[exe, *flags]`` candidate; run the first one on PATH.
-
-    Returns None on success, a reason string otherwise. A missing
-    audio subsystem (no command on PATH, or the command exits
-    non-zero because no device) is treated as a soft failure.
-    """
+    """Try each ``[exe, *flags]`` candidate; run the first one on PATH."""
     tried: list[str] = []
     for argv in candidates:
         exe = shutil.which(argv[0])

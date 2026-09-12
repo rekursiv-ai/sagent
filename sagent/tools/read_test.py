@@ -40,7 +40,9 @@ def _png_bytes() -> bytes:
 )
 @pytest.mark.asyncio
 async def test_unreadable_notebook_is_an_error(
-    label: str, payload: bytes, tmp_path: Path
+    label: str,
+    payload: bytes,
+    tmp_path: Path,
 ) -> None:
     """A notebook that cannot be parsed is a failure, and must say so.
 
@@ -391,12 +393,13 @@ async def test_read_pdf_byte_budget_is_provider_specific(tmp_path: Path) -> None
     assert len(small_result.attachments) < len(large_result.attachments), (
         "small-ceiling model must truncate more than large-ceiling model"
     )
-    assert "pages=" in small_result.content  # continuation hint on the truncated read
+    assert "pages=" in small_result.content  # Continuation hint on the truncated read.
 
 
 @pytest.mark.asyncio
 async def test_read_pdf_partial_on_byte_budget_surfaces_continuation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A read that busts the rendered-byte budget returns the pages that fit
     plus a VISIBLE continuation hint naming the remaining range.
@@ -407,7 +410,7 @@ async def test_read_pdf_partial_on_byte_budget_surfaces_continuation(
     """
     f = tmp_path / "dense.pdf"
     _build_pdf(f, 4)
-    del monkeypatch  # budget now derives from the active model ceiling
+    del monkeypatch  # Budget now derives from the active model ceiling.
     # Active-model ceiling that admits some but not all pages. The rendered
     # budget is ``(ceiling // 2) * 3 // 4`` raw bytes; size the ceiling so a
     # couple of pages fit but not all four.
@@ -428,7 +431,8 @@ async def test_read_pdf_partial_on_byte_budget_surfaces_continuation(
 
 @pytest.mark.asyncio
 async def test_read_pdf_partial_truncation_does_not_depend_on_recount(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Truncation is surfaced from the renderer's total, not a re-open.
 
@@ -450,9 +454,12 @@ async def test_read_pdf_partial_truncation_does_not_depend_on_recount(
         del p
         return None
 
-    monkeypatch.setattr("sagent.tools.read.get_pdf_page_count", _no_count)
+    monkeypatch.setattr(
+        "sagent.tools.read.get_pdf_page_count",
+        _no_count,
+    )
     small = FakeAgent()
-    small.max_request_bytes = per_page * 7  # admits some, not all 4 pages
+    small.max_request_bytes = per_page * 7  # Admits some, not all 4 pages.
     with with_fake_agent(agent=small) as agent:
         agent.tool_state.bash_cwd = str(tmp_path)
         result = await read.run({"file_path": str(f), "pages": "1-"})
@@ -475,7 +482,7 @@ async def test_read_pdf_over_range_last_is_not_truncation(tmp_path: Path) -> Non
     f = tmp_path / "short.pdf"
     _build_pdf(f, 3)
     large = FakeAgent()
-    large.max_request_bytes = 1 << 30  # ample: all pages fit
+    large.max_request_bytes = 1 << 30  # Ample: all pages fit.
     with with_fake_agent(agent=large) as agent:
         agent.tool_state.bash_cwd = str(tmp_path)
         result = await read.run({"file_path": str(f), "pages": "1-9999"})
@@ -608,7 +615,7 @@ async def test_read_notebook_non_dict_cell(tmp_path: Path) -> None:
     f = tmp_path / "nb.ipynb"
     # Cells list contains a string, not a dict; iterator must skip it.
     f.write_text(
-        json.dumps({"cells": ["bogus", {"cell_type": "code", "source": "ok"}]})
+        json.dumps({"cells": ["bogus", {"cell_type": "code", "source": "ok"}]}),
     )
     with with_fake_agent() as agent:
         agent.tool_state.bash_cwd = str(tmp_path)
@@ -621,8 +628,8 @@ async def test_read_notebook_non_list_outputs(tmp_path: Path) -> None:
     f = tmp_path / "nb.ipynb"
     f.write_text(
         json.dumps(
-            {"cells": [{"cell_type": "code", "source": "x", "outputs": "bogus"}]}
-        )
+            {"cells": [{"cell_type": "code", "source": "x", "outputs": "bogus"}]},
+        ),
     )
     with with_fake_agent() as agent:
         agent.tool_state.bash_cwd = str(tmp_path)
@@ -641,10 +648,10 @@ async def test_read_notebook_non_dict_output(tmp_path: Path) -> None:
                         "cell_type": "code",
                         "source": "x",
                         "outputs": ["bogus_string", {"text": "real"}],
-                    }
-                ]
-            }
-        )
+                    },
+                ],
+            },
+        ),
     )
     with with_fake_agent() as agent:
         agent.tool_state.bash_cwd = str(tmp_path)
@@ -664,10 +671,10 @@ async def test_read_notebook_output_no_text(tmp_path: Path) -> None:
                         "cell_type": "code",
                         "source": "x",
                         "outputs": [{"data": "not text"}],
-                    }
-                ]
-            }
-        )
+                    },
+                ],
+            },
+        ),
     )
     with with_fake_agent() as agent:
         agent.tool_state.bash_cwd = str(tmp_path)
@@ -697,8 +704,8 @@ async def test_notebook_outputs_beyond_stream_text_are_kept(tmp_path: Path) -> N
                         "traceback": ["Traceback", "ZeroDivisionError: division"],
                     },
                 ],
-            }
-        ]
+            },
+        ],
     }
     nb_path = tmp_path / "n.ipynb"
     nb_path.write_text(json.dumps(nb), encoding="utf-8")

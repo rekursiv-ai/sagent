@@ -71,7 +71,9 @@ class TensorVariable(VariableTracker):
         value: torch.Tensor,
     ) -> dict[str, dtype | device | layout | int | bool | type[Tensor]]: ...
     def dynamic_getattr(
-        self, tx: InstructionTranslator, name
+        self,
+        tx: InstructionTranslator,
+        name,
     ) -> VariableTracker | Any | GetAttrVariable: ...
     def method_attr_ndim(self, tx) -> VariableTracker: ...
     def method_attr_dtype(self, tx) -> VariableTracker | None: ...
@@ -89,7 +91,9 @@ class TensorVariable(VariableTracker):
     def method_attr__version(self, tx) -> VariableTracker: ...
     def call_obj_hasattr(self, tx: InstructionTranslator, name) -> ConstantVariable: ...
     def var_getattr(
-        self, tx: InstructionTranslator, name
+        self,
+        tx: InstructionTranslator,
+        name,
     ) -> (
         UserDefinedClassVariable
         | DelayGraphBreakVariable
@@ -100,17 +104,25 @@ class TensorVariable(VariableTracker):
     def call_id(self, tx) -> VariableTracker: ...
     def has_unpack_var_sequence(self, tx): ...
     def unpack_var_sequence(
-        self, tx: InstructionTranslator, idxes=...
+        self,
+        tx: InstructionTranslator,
+        idxes=...,
     ) -> list[Any]: ...
     def valid_size(self) -> bool: ...
     @property
     def size(self): ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def method_size(self, *args, **kwargs) -> SizeVariable | VariableTracker | None: ...
     def method_stride(
-        self, *args, **kwargs
+        self,
+        *args,
+        **kwargs,
     ) -> SizeVariable | VariableTracker | None: ...
     def method_numel(self) -> VariableTracker | None: ...
 
@@ -123,7 +135,10 @@ class TensorVariable(VariableTracker):
     def method_is_complex(self) -> VariableTracker | None: ...
     def method_is_contiguous(self, memory_format=...) -> VariableTracker | None: ...
     def method_type(
-        self, dtype=..., non_blocking=..., **kwargs
+        self,
+        dtype=...,
+        non_blocking=...,
+        **kwargs,
     ) -> VariableTracker | None: ...
     def method_as_subclass(self, cls) -> TensorWithTFOverrideVariable: ...
     def method_get_device(self) -> VariableTracker | None: ...
@@ -144,16 +159,24 @@ class TensorVariable(VariableTracker):
     def method_set_(self, *args, **kwargs) -> None: ...
     def method_add_(self, other, *, alpha=...) -> VariableTracker | None: ...
     def method_addcdiv_(
-        self, tensor1, tensor2, *, value=...
+        self,
+        tensor1,
+        tensor2,
+        *,
+        value=...,
     ) -> VariableTracker | None: ...
     def method___contains__(self, arg) -> VariableTracker: ...
     def method_redistribute(self, *args, **kwargs) -> VariableTracker: ...
     def method_to_local(self, *args, **kwargs) -> VariableTracker: ...
     def method_register_hook(
-        self, *args, **kwargs
+        self,
+        *args,
+        **kwargs,
     ) -> VariableTracker | RemovableHandleVariable: ...
     def method_register_post_accumulate_grad_hook(
-        self, *args, **kwargs
+        self,
+        *args,
+        **kwargs,
     ) -> VariableTracker | RemovableHandleVariable: ...
     def method_requires_grad_(self, requires_grad=...) -> Self: ...
     def method_new(self, *args, **kwargs) -> VariableTracker | None: ...
@@ -165,7 +188,11 @@ class SymNodeVariable(VariableTracker):
     def debug_repr(self) -> str: ...
     @classmethod
     def create(
-        cls, tx, proxy, sym_num=..., **options
+        cls,
+        tx,
+        proxy,
+        sym_num=...,
+        **options,
     ) -> VariableTracker | SymNodeVariable: ...
     def __init__(self, proxy, sym_num, **kwargs) -> None: ...
     def python_type(self) -> Any: ...
@@ -173,7 +200,11 @@ class SymNodeVariable(VariableTracker):
     def as_tensor(self, tx, dtype) -> Any: ...
     def evaluate_expr(self, output_graph=...) -> bool | int | float: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
 
 class NumpyNdarrayVariable(TensorVariable):
@@ -183,18 +214,30 @@ class NumpyNdarrayVariable(TensorVariable):
     @staticmethod
     def patch_args(name, args, kwargs) -> tuple[Any, dict[str | None, Any] | Any]: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def python_type(self) -> type[ndarray[_AnyShape, dtype[Any]]]: ...
 
 class UnspecializedPythonVariable(TensorVariable):
     _nonvar_fields = ...
     def __init__(
-        self, proxy: torch.fx.Proxy, *, raw_value=..., need_unwrap=..., **kwargs
+        self,
+        proxy: torch.fx.Proxy,
+        *,
+        raw_value=...,
+        need_unwrap=...,
+        **kwargs,
     ) -> None: ...
     @classmethod
     def from_tensor_variable(
-        cls, tensor_variable, raw_value, need_unwrap=...
+        cls,
+        tensor_variable,
+        raw_value,
+        need_unwrap=...,
     ) -> UnspecializedPythonVariable: ...
 
 class FakeItemVariable(TensorVariable):
@@ -215,10 +258,17 @@ class TensorSubclassVariable(UserDefinedClassVariable):
 class UntypedStorageVariable(VariableTracker):
     _nonvar_fields = ...
     def __init__(
-        self, from_tensor: TensorVariable, example_value: torch.UntypedStorage, **kwargs
+        self,
+        from_tensor: TensorVariable,
+        example_value: torch.UntypedStorage,
+        **kwargs,
     ) -> None: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def reconstruct(self, codegen: PyCodegen) -> None: ...
 

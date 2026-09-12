@@ -46,7 +46,14 @@ class TFXLMMultiHeadAttention(keras.layers.Layer):
     def __init__(self, n_heads, dim, config, **kwargs) -> None: ...
     def prune_heads(self, heads): ...
     def call(
-        self, input, mask, kv, cache, head_mask, output_attentions, training=...
+        self,
+        input,
+        mask,
+        kv,
+        cache,
+        head_mask,
+        output_attentions,
+        training=...,
     ):  # -> tuple[Any, Any] | tuple[Any]:
         ...
     def build(self, input_shape=...):  # -> None:
@@ -110,7 +117,7 @@ class TFXLMModel(TFXLMPreTrainedModel):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        XLM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        XLM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -160,12 +167,14 @@ class TFXLMWithLMHeadModel(TFXLMPreTrainedModel):
         ...
     def get_prefix_bias_name(self): ...
     def prepare_inputs_for_generation(
-        self, inputs, **kwargs
+        self,
+        inputs,
+        **kwargs,
     ):  # -> dict[str, Any | None]:
         ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        XLM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        XLM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -196,12 +205,13 @@ class TFXLMWithLMHeadModel(TFXLMPreTrainedModel):
     XLM_START_DOCSTRING,
 )
 class TFXLMForSequenceClassification(
-    TFXLMPreTrainedModel, TFSequenceClassificationLoss
+    TFXLMPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        XLM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        XLM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -239,7 +249,7 @@ class TFXLMForMultipleChoice(TFXLMPreTrainedModel, TFMultipleChoiceLoss):
         ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        XLM_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        XLM_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -274,7 +284,7 @@ class TFXLMForTokenClassification(TFXLMPreTrainedModel, TFTokenClassificationLos
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        XLM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        XLM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -309,7 +319,7 @@ class TFXLMForQuestionAnsweringSimple(TFXLMPreTrainedModel, TFQuestionAnsweringL
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        XLM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        XLM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,

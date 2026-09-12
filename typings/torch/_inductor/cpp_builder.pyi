@@ -38,7 +38,10 @@ def check_msvc_cl_language_id(compiler: str) -> None: ...
 def get_cpp_compiler() -> str: ...
 def get_ld_and_objcopy(use_relative_path: bool) -> tuple[str, str]: ...
 def convert_cubin_to_obj(
-    cubin_file: str, kernel_name: str, ld: str, objcopy: str
+    cubin_file: str,
+    kernel_name: str,
+    ld: str,
+    objcopy: str,
 ) -> str: ...
 @functools.cache
 def is_gcc() -> bool: ...
@@ -94,7 +97,13 @@ def get_cpp_options(
     extra_flags: Sequence[str] = ...,
     min_optimize: bool = ...,
 ) -> tuple[
-    list[str], list[str], list[str], list[str], list[str], list[str], list[str]
+    list[str],
+    list[str],
+    list[str],
+    list[str],
+    list[str],
+    list[str],
+    list[str],
 ]: ...
 
 class CppOptions(BuildOptionsBase):
@@ -127,7 +136,13 @@ def get_cpp_torch_options(
     use_relative_path: bool,
     use_mmap_weights: bool,
 ) -> tuple[
-    list[str], list[str], list[str], list[str], list[str], list[str], list[str]
+    list[str],
+    list[str],
+    list[str],
+    list[str],
+    list[str],
+    list[str],
+    list[str],
 ]: ...
 
 class CppTorchOptions(CppOptions):
@@ -149,9 +164,17 @@ class CppTorchOptions(CppOptions):
     ) -> None: ...
 
 def get_cpp_torch_device_options(
-    device_type: str, aot_mode: bool = ..., compile_only: bool = ...
+    device_type: str,
+    aot_mode: bool = ...,
+    compile_only: bool = ...,
 ) -> tuple[
-    list[str], list[str], list[str], list[str], list[str], list[str], list[str]
+    list[str],
+    list[str],
+    list[str],
+    list[str],
+    list[str],
+    list[str],
+    list[str],
 ]: ...
 
 class CppTorchDeviceOptions(CppTorchOptions):
@@ -188,7 +211,9 @@ class CppBuilder:
     def save_compile_cmd_to_cmake(self, cmake_path: str, device_type: str) -> None: ...
     def save_src_to_cmake(self, cmake_path: str, src_path: str) -> None: ...
     def save_kernel_asm_to_cmake(
-        self, cmake_path: str, asm_files: list[str]
+        self,
+        cmake_path: str,
+        asm_files: list[str],
     ) -> None: ...
     def save_link_cmd_to_cmake(self, cmake_path: str) -> None: ...
 

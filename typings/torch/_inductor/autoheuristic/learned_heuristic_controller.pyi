@@ -8,7 +8,8 @@ from torch._inductor.autoheuristic.autoheuristic_utils import (
 from torch._inductor.autoheuristic.learnedheuristic_interface import LearnedHeuristic
 
 def find_and_instantiate_subclasses(
-    package_name: str, base_class: Any
+    package_name: str,
+    base_class: Any,
 ) -> list[LearnedHeuristic]: ...
 
 class LearnedHeuristicController:

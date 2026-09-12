@@ -11,7 +11,15 @@ logger = ...
 
 class PdfBitmap(pdfium_i.AutoCloseable):
     def __init__(
-        self, raw, buffer, width, height, stride, format, rev_byteorder, needs_free
+        self,
+        raw,
+        buffer,
+        width,
+        height,
+        stride,
+        format,
+        rev_byteorder,
+        needs_free,
     ) -> None: ...
     @property
     def parent(self) -> None: ...
@@ -19,15 +27,30 @@ class PdfBitmap(pdfium_i.AutoCloseable):
     def from_raw(cls, raw, rev_byteorder=..., ex_buffer=...) -> Self: ...
     @classmethod
     def new_native(
-        cls, width, height, format, rev_byteorder=..., buffer=..., stride=...
+        cls,
+        width,
+        height,
+        format,
+        rev_byteorder=...,
+        buffer=...,
+        stride=...,
     ) -> Self: ...
     @classmethod
     def new_foreign(
-        cls, width, height, format, rev_byteorder=..., force_packed=...
+        cls,
+        width,
+        height,
+        format,
+        rev_byteorder=...,
+        force_packed=...,
     ) -> Self: ...
     @classmethod
     def new_foreign_simple(
-        cls, width, height, use_alpha, rev_byteorder=...
+        cls,
+        width,
+        height,
+        use_alpha,
+        rev_byteorder=...,
     ) -> Self: ...
     def fill_rect(self, color, left, top, width, height) -> None: ...
     def to_numpy(self) -> ndarray[_AnyShape, dtype[Any]]: ...

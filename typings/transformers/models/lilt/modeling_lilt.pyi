@@ -22,7 +22,11 @@ logger = ...
 class LiltTextEmbeddings(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, input_ids=..., token_type_ids=..., position_ids=..., inputs_embeds=...
+        self,
+        input_ids=...,
+        token_type_ids=...,
+        position_ids=...,
+        inputs_embeds=...,
     ):  # -> tuple[Any, Any | Tensor]:
         ...
     def create_position_ids_from_input_ids(self, input_ids, padding_idx): ...
@@ -50,7 +54,9 @@ class LiltSelfAttention(nn.Module):
 class LiltSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -76,7 +82,9 @@ class LiltIntermediate(nn.Module):
 class LiltOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -109,7 +117,9 @@ class LiltEncoder(nn.Module):
         return_dict: bool | None = ...,
     ) -> tuple[torch.Tensor] | BaseModelOutput: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | BaseModelOutput: ...
 
 class LiltPooler(nn.Module):

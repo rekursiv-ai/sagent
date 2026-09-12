@@ -74,10 +74,15 @@ class FlavaForPreTrainingOutput(ModelOutput):
 
 class FlavaImageEmbeddings(nn.Module):
     def __init__(
-        self, config: FlavaImageConfig, use_mask_token: bool = ...
+        self,
+        config: FlavaImageConfig,
+        use_mask_token: bool = ...,
     ) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
         self,
@@ -96,7 +101,9 @@ class PatchEmbeddings(nn.Module):
         embed_dim: int = ...,
     ) -> None: ...
     def forward(
-        self, pixel_values: torch.Tensor, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values: torch.Tensor,
+        interpolate_pos_encoding: bool = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -120,13 +127,17 @@ class FlavaSelfAttention(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
 
 class FlavaSelfOutput(nn.Module):
     def __init__(self, config: FlavaPossibleConfigs) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -141,7 +152,9 @@ class FlavaAttention(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
 
 class FlavaIntermediate(nn.Module):
@@ -152,7 +165,9 @@ class FlavaIntermediate(nn.Module):
 class FlavaOutput(nn.Module):
     def __init__(self, config: FlavaPossibleConfigs) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -166,7 +181,9 @@ class FlavaLayer(GradientCheckpointingLayer):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
 
 class FlavaEncoder(nn.Module):
@@ -199,7 +216,9 @@ class FlavaImageModel(FlavaPreTrainedModel):
     base_model_prefix = ...
     main_input_name = ...
     def __init__(
-        self, config: FlavaImageConfig, add_pooling_layer: bool = ...
+        self,
+        config: FlavaImageConfig,
+        add_pooling_layer: bool = ...,
     ) -> None: ...
     def get_input_embeddings(self) -> nn.Module: ...
     def set_input_embeddings(self, value: nn.Module):  # -> None:
@@ -222,7 +241,9 @@ class FlavaTextModel(FlavaPreTrainedModel):
     config: FlavaTextConfig
     base_model_prefix = ...
     def __init__(
-        self, config: FlavaTextConfig, add_pooling_layer: bool = ...
+        self,
+        config: FlavaTextConfig,
+        add_pooling_layer: bool = ...,
     ) -> None: ...
     def get_input_embeddings(self) -> PatchEmbeddings: ...
     def set_input_embeddings(self, value: nn.Module):  # -> None:
@@ -246,7 +267,9 @@ class FlavaMultimodalModel(FlavaPreTrainedModel):
     base_model_prefix = ...
     main_input_name = ...
     def __init__(
-        self, config: FlavaMultimodalConfig, add_pooling_layer=...
+        self,
+        config: FlavaMultimodalConfig,
+        add_pooling_layer=...,
     ) -> None: ...
     @auto_docstring
     def forward(
@@ -305,7 +328,11 @@ class FlavaImageCodebookResPath(nn.Module):
 
 class FlavaImageCodebookBlock(nn.Module):
     def __init__(
-        self, in_size: int, out_size: int, num_layers: int, **kwargs
+        self,
+        in_size: int,
+        out_size: int,
+        num_layers: int,
+        **kwargs,
     ) -> None: ...
     def forward(self, x: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -352,7 +379,10 @@ class FlavaITMHead(nn.Module):
 class FlavaGlobalContrastiveHead(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, image_embeddings, text_embeddings, logit_scale
+        self,
+        image_embeddings,
+        text_embeddings,
+        logit_scale,
     ):  # -> tuple[Tensor, Tensor, Tensor | Any]:
         ...
 
@@ -360,7 +390,9 @@ class FlavaGlobalContrastiveHead(nn.Module):
 class FlavaForPreTraining(FlavaPreTrainedModel):
     _tied_weights_keys = ...
     def __init__(
-        self, config: FlavaConfig, image_codebook: nn.Module | None = ...
+        self,
+        config: FlavaConfig,
+        image_codebook: nn.Module | None = ...,
     ) -> None: ...
     @auto_docstring
     def forward(

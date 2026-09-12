@@ -73,14 +73,18 @@ class IterationRangesRoot(IterationRanges):
     def cache_clear(self) -> None: ...
     def index_sym(self) -> sympy.Symbol: ...
     def lookup(
-        self, divisor: sympy.Expr, length: sympy.Expr
+        self,
+        divisor: sympy.Expr,
+        length: sympy.Expr,
     ) -> IterationRangesEntry: ...
     def construct_entries(
-        self, lengths: list[sympy.Expr]
+        self,
+        lengths: list[sympy.Expr],
     ) -> list[IterationRangesEntry]: ...
     def construct(self, lengths: list[sympy.Expr]) -> list[sympy.Symbol]: ...
     def vars_and_sizes(
-        self, index: sympy.Expr
+        self,
+        index: sympy.Expr,
     ) -> tuple[list[sympy.Symbol], list[sympy.Expr]]: ...
 
 class IterationRangesEntry(IterationRanges):
@@ -136,7 +140,10 @@ class SIMDKernel(Kernel[CSEVariableType], Generic[CSEVariableType]):
     def initialize_range_tree(self, pid_cache: dict[str, str]) -> None: ...
     def finalize_indexing(self, indices: Sequence[sympy.Expr]) -> None: ...
     def store_reduction(
-        self, name: str, index: sympy.Expr, value: CSEVariable
+        self,
+        name: str,
+        index: sympy.Expr,
+        value: CSEVariable,
     ) -> None: ...
     def should_use_cooperative_reduction(self) -> bool: ...
     def should_use_persistent_reduction(self) -> bool: ...
@@ -147,7 +154,9 @@ class SIMDKernel(Kernel[CSEVariableType], Generic[CSEVariableType]):
     def dense_size_str(self) -> str: ...
     def combine_modular_indexing_pairs(self, index: sympy.Expr) -> sympy.Expr: ...
     def combine_contiguous_dims(
-        self, index: sympy.Expr, tree: IterationRangesRoot
+        self,
+        index: sympy.Expr,
+        tree: IterationRangesRoot,
     ) -> sympy.Expr: ...
     def disable_reduction(self) -> contextlib.AbstractContextManager[None]: ...
     def set_ranges(self, *lengths: sympy.Expr) -> list[sympy.Symbol]: ...
@@ -166,7 +175,8 @@ class SIMDKernel(Kernel[CSEVariableType], Generic[CSEVariableType]):
         reduction_numel: sympy.Expr = ...,
     ) -> bool: ...
     def split_and_set_ranges(
-        self, lengths: Sequence[Sequence[sympy.Expr]]
+        self,
+        lengths: Sequence[Sequence[sympy.Expr]],
     ) -> list[list[sympy.Expr]]: ...
     @classmethod
     def map_kernel_groups_to_node_sizes(
@@ -186,7 +196,8 @@ class SIMDKernel(Kernel[CSEVariableType], Generic[CSEVariableType]):
     @contextlib.contextmanager
     def mask_loads(self, mask: str | OpsWrapper, value: float) -> Iterator[str]: ...
     def get_strides_of_load(
-        self, index: sympy.Expr
+        self,
+        index: sympy.Expr,
     ) -> dict[sympy.Symbol, sympy.Expr]: ...
     def estimate_flops(self) -> int | None: ...
     def estimate_kernel_num_bytes(self) -> int: ...
@@ -203,7 +214,8 @@ class SIMDScheduling(BaseScheduling):
     def can_fuse(self, node1, node2): ...
     def generate_node_schedule(self, nodes, numel, rnumel) -> list[Any]: ...
     def codegen_node(
-        self, node: scheduler.FusedSchedulerNode | scheduler.SchedulerNode
+        self,
+        node: scheduler.FusedSchedulerNode | scheduler.SchedulerNode,
     ) -> None: ...
     @staticmethod
     def can_use_32bit_indexing(
@@ -212,7 +224,10 @@ class SIMDScheduling(BaseScheduling):
     ) -> bool: ...
     def codegen_node_schedule(self, kernel_features: SIMDKernelFeatures) -> None: ...
     def create_kernel_choices(
-        self, kernel_features: SIMDKernelFeatures, kernel_args, kernel_kwargs
+        self,
+        kernel_features: SIMDKernelFeatures,
+        kernel_args,
+        kernel_kwargs,
     ) -> list[SIMDKernel]: ...
     def codegen_node_schedule_with_kernel(self, node_schedule, kernel) -> None: ...
     def codegen_template(
@@ -237,15 +252,22 @@ class SIMDScheduling(BaseScheduling):
     @classmethod
     @functools.lru_cache(32)
     def candidate_tilings(
-        cls, node, numel, reduction_numel
+        cls,
+        node,
+        numel,
+        reduction_numel,
     ) -> list[CandidateTiling]: ...
     @classmethod
     def create_tiling(
-        cls, pw_tiling: Sequence[sympy.Expr], reduction_tiling: Sequence[sympy.Expr]
+        cls,
+        pw_tiling: Sequence[sympy.Expr],
+        reduction_tiling: Sequence[sympy.Expr],
     ) -> immutable_dict[str, sympy.Expr]: ...
     @classmethod
     def create_partial_tiling(
-        cls, tiling: Sequence[sympy.Expr], is_pointwise: bool
+        cls,
+        tiling: Sequence[sympy.Expr],
+        is_pointwise: bool,
     ) -> immutable_dict[str, sympy.Expr]: ...
     @classmethod
     def complete_partial_tiling(
@@ -256,7 +278,10 @@ class SIMDScheduling(BaseScheduling):
     ) -> immutable_dict[str, sympy.Expr]: ...
     @classmethod
     def get_nd_tilings(
-        cls, node_schedule, pointwise_numel, reduction_numel
+        cls,
+        node_schedule,
+        pointwise_numel,
+        reduction_numel,
     ) -> list[immutable_dict[str, sympy.Expr]]: ...
     @classmethod
     def compute_tiling_strategy(
@@ -301,7 +326,10 @@ class SIMDScheduling(BaseScheduling):
     def flush(self) -> None: ...
     def ready_to_flush(self) -> bool: ...
     def generate_kernel_code_from_nodes(
-        self, nodes, benchmark_kernel=..., hint_override: int | None = ...
+        self,
+        nodes,
+        benchmark_kernel=...,
+        hint_override: int | None = ...,
     ) -> str | Any: ...
     def codegen_comment(self, node_schedule) -> None: ...
     def define_kernel(self, src_code, node_schedule, kernel): ...

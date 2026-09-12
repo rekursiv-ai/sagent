@@ -64,7 +64,10 @@ class TFEfficientFormerSelfAttention(keras.layers.Layer):
 
 class TFEfficientFormerConvStem(keras.layers.Layer):
     def __init__(
-        self, config: EfficientFormerConfig, out_channels: int, **kwargs
+        self,
+        config: EfficientFormerConfig,
+        out_channels: int,
+        **kwargs,
     ) -> None: ...
     def call(self, pixel_values: tf.Tensor, training: bool = ...) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -111,7 +114,11 @@ class TFEfficientFormerFlat(keras.layers.Layer):
 
 class TFEfficientFormerMeta3D(keras.layers.Layer):
     def __init__(
-        self, config: EfficientFormerConfig, dim: int, drop_path: float = ..., **kwargs
+        self,
+        config: EfficientFormerConfig,
+        dim: int,
+        drop_path: float = ...,
+        **kwargs,
     ) -> None: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -135,20 +142,31 @@ class TFEfficientFormerMeta3DLayers(keras.layers.Layer):
 
 class TFEfficientFormerMeta4D(keras.layers.Layer):
     def __init__(
-        self, config: EfficientFormerConfig, dim: int, drop_path: float = ..., **kwargs
+        self,
+        config: EfficientFormerConfig,
+        dim: int,
+        drop_path: float = ...,
+        **kwargs,
     ) -> None: ...
     def build(self, input_shape=...):  # -> None:
         ...
     def call(
-        self, hidden_states: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        training: bool = ...,
     ) -> tuple[tf.Tensor]: ...
 
 class TFEfficientFormerMeta4DLayers(keras.layers.Layer):
     def __init__(
-        self, config: EfficientFormerConfig, stage_idx: int, **kwargs
+        self,
+        config: EfficientFormerConfig,
+        stage_idx: int,
+        **kwargs,
     ) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        training: bool = ...,
     ) -> tuple[tf.Tensor]: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -156,7 +174,9 @@ class TFEfficientFormerMeta4DLayers(keras.layers.Layer):
 class TFEfficientFormerIntermediateStage(keras.layers.Layer):
     def __init__(self, config: EfficientFormerConfig, index: int, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        training: bool = ...,
     ) -> tuple[tf.Tensor]: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -240,7 +260,8 @@ class TFEfficientFormerModel(TFEfficientFormerPreTrainedModel):
     EFFICIENTFORMER_START_DOCSTRING,
 )
 class TFEfficientFormerForImageClassification(
-    TFEfficientFormerPreTrainedModel, TFSequenceClassificationLoss
+    TFEfficientFormerPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config: EfficientFormerConfig) -> None: ...
     @unpack_inputs
@@ -276,7 +297,7 @@ class TFEfficientFormerForImageClassificationWithTeacherOutput(ModelOutput):
     EFFICIENTFORMER_START_DOCSTRING,
 )
 class TFEfficientFormerForImageClassificationWithTeacher(
-    TFEfficientFormerPreTrainedModel
+    TFEfficientFormerPreTrainedModel,
 ):
     def __init__(self, config: EfficientFormerConfig) -> None: ...
     @unpack_inputs

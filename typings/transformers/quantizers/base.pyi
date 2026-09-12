@@ -19,32 +19,49 @@ class HfQuantizer(ABC):
     required_packages = ...
     requires_parameters_quantization = ...
     def __init__(
-        self, quantization_config: QuantizationConfigMixin, **kwargs
+        self,
+        quantization_config: QuantizationConfigMixin,
+        **kwargs,
     ) -> None: ...
     def update_torch_dtype(self, dtype: torch.dtype) -> torch.dtype: ...
     def update_dtype(self, dtype: torch.dtype) -> torch.dtype: ...
     def update_device_map(
-        self, device_map: dict[str, Any] | None
+        self,
+        device_map: dict[str, Any] | None,
     ) -> dict[str, Any] | None: ...
     def adjust_target_dtype(self, dtype: torch.dtype) -> torch.dtype: ...
     def update_missing_keys(
-        self, model, missing_keys: list[str], prefix: str
+        self,
+        model,
+        missing_keys: list[str],
+        prefix: str,
     ) -> list[str]: ...
     def update_expected_keys(
-        self, model, expected_keys: list[str], loaded_keys: list[str]
+        self,
+        model,
+        expected_keys: list[str],
+        loaded_keys: list[str],
     ) -> list[str]: ...
     def update_unexpected_keys(
-        self, model, unexpected_keys: list[str]
+        self,
+        model,
+        unexpected_keys: list[str],
     ) -> list[str]: ...
     def get_special_dtypes_update(
-        self, model, dtype: torch.dtype
+        self,
+        model,
+        dtype: torch.dtype,
     ) -> dict[str, torch.dtype]: ...
     def adjust_max_memory(
-        self, max_memory: dict[str, int | str]
+        self,
+        max_memory: dict[str, int | str],
     ) -> dict[str, int | str]: ...
     def check_quantized_param(self, *args, **kwargs) -> bool: ...
     def param_needs_quantization(
-        self, model: PreTrainedModel, param_name: str, **kwargs
+        self,
+        model: PreTrainedModel,
+        param_name: str,
+        **kwargs,
     ) -> bool: ...
     def create_quantized_param(self, *args, **kwargs):  # -> None:
         ...
@@ -75,7 +92,9 @@ class HfQuantizer(ABC):
     @property
     def is_compileable(self) -> bool: ...
     def get_state_dict_and_metadata(
-        self, model, safe_serialization=...
+        self,
+        model,
+        safe_serialization=...,
     ):  # -> tuple[None, dict[Any, Any]]:
         ...
     def update_state_dict_with_metadata(self, state_dict, metadata): ...

@@ -7,7 +7,8 @@ type FuncType = Callable[..., Any]
 F = TypeVar("F", bound=FuncType)
 
 def context_decorator(
-    ctx, func
+    ctx,
+    func,
 ) -> (
     _Wrapped[..., Any, ..., Generator[Any, Any, Any]] | _Wrapped[..., Any, ..., Any]
 ): ...

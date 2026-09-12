@@ -27,7 +27,9 @@ class Owlv2ImageProcessorFast(OwlViTImageProcessorFast):
     def __init__(self, **kwargs: Unpack[Owlv2FastImageProcessorKwargs]) -> None: ...
     @auto_docstring
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[Owlv2FastImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[Owlv2FastImageProcessorKwargs],
     ):  # -> BatchFeature:
         ...
     def pad(

@@ -37,7 +37,9 @@ class _BufferCommHook:
 class _DDPSink(Function):
     @staticmethod
     def forward(
-        ctx, ddp_weakref, *inputs
+        ctx,
+        ddp_weakref,
+        *inputs,
     ) -> tuple[Tensor | Any, ...] | tuple[Any, ...]: ...
     @staticmethod
     def backward(ctx, *grad_outputs) -> tuple[None, *tuple[Any, ...]]: ...
@@ -76,10 +78,16 @@ class DistributedDataParallel(Module, Joinable):
     def forward(self, *inputs, **kwargs) -> RRef[PyTree] | PyTree: ...
     def __call__(self, *args: Any, **kwargs: Any) -> RRef[PyTree] | PyTree: ...
     def scatter(
-        self, inputs, kwargs, device_ids
+        self,
+        inputs,
+        kwargs,
+        device_ids,
     ) -> tuple[tuple[Any, ...], tuple[dict[str, Any], ...]]: ...
     def to_kwargs(
-        self, inputs, kwargs, device_id
+        self,
+        inputs,
+        kwargs,
+        device_id,
     ) -> tuple[tuple[Any, ...], tuple[dict[str, Any], ...]]: ...
     def gather(self, outputs, output_device) -> Any: ...
     def train(self, mode=...) -> Self: ...

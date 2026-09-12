@@ -57,7 +57,9 @@ class MoshiConfig(PretrainedConfig):
         ...
     @classmethod
     def from_audio_encoder_config(
-        cls, audio_encoder_config: PretrainedConfig, **kwargs
+        cls,
+        audio_encoder_config: PretrainedConfig,
+        **kwargs,
     ):  # -> Self:
         ...
 

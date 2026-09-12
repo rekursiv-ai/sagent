@@ -26,7 +26,9 @@ _IMAGE_CLASS_CHECKPOINT = ...
 _IMAGE_CLASS_EXPECTED_OUTPUT = ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class VanDropPath(nn.Module):
@@ -113,7 +115,9 @@ class VanEncoder(nn.Module):
         return_dict: bool | None = ...,
     ) -> tuple | BaseModelOutputWithNoAttention: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithNoAttention: ...
 
 class VanPreTrainedModel(PreTrainedModel):

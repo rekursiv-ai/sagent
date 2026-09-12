@@ -44,7 +44,7 @@ class ToolResultPolicy:
             raise ValueError(f"persist_tokens must be >= 0, got {self.persist_tokens}")
         if self.message_budget_tokens < 0:
             raise ValueError(
-                f"message_budget_tokens must be >= 0, got {self.message_budget_tokens}"
+                f"message_budget_tokens must be >= 0, got {self.message_budget_tokens}",
             )
 
     @classmethod

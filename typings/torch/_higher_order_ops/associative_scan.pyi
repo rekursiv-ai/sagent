@@ -29,7 +29,10 @@ def associative_scan(
     combine_mode: str = ...,
 ) -> torch.Tensor: ...
 def generic_associative_scan(
-    operator, leaves, dim=..., additional_inputs=...
+    operator,
+    leaves,
+    dim=...,
+    additional_inputs=...,
 ) -> list[Any]: ...
 def trace_associative_scan(
     proxy_mode,
@@ -44,7 +47,11 @@ def associative_scan_op_dense(combine_fn, xs, additional_inputs) -> list[Any]: .
 class AssociativeScanAutogradOp(torch.autograd.Function):
     @staticmethod
     def forward(
-        ctx, combine_fn, num_xs, num_additional_inputs, *operands
+        ctx,
+        combine_fn,
+        num_xs,
+        num_additional_inputs,
+        *operands,
     ) -> tuple[Any, ...]: ...
     @staticmethod
     def backward(ctx, *gl_ys) -> tuple[Any | None, ...]: ...
@@ -53,11 +60,17 @@ class AssociativeScanAutogradOp(torch.autograd.Function):
 def associative_scan_autograd(combine_fn, xs, additional_inputs) -> tuple[Any, ...]: ...
 @associative_scan_op.py_impl(ProxyTorchDispatchMode)
 def associative_scan_proxy_mode(
-    mode, combine_fn, xs, additional_inputs
+    mode,
+    combine_fn,
+    xs,
+    additional_inputs,
 ) -> tuple[Any, ...]: ...
 @associative_scan_op.py_impl(FakeTensorMode)
 def assoiciative_scan_fake_tensor_mode(
-    mode, combine_fn, xs, additional_inputs
+    mode,
+    combine_fn,
+    xs,
+    additional_inputs,
 ) -> tuple[Any, ...]: ...
 @associative_scan_op.py_functionalize_impl
 def associative_scan_functionalize(ctx, combine_fn, xs, additional_inputs): ...
