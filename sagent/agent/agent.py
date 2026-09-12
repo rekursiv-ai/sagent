@@ -591,7 +591,7 @@ class Agent:
 
     @property
     def system(self) -> str:
-        """Assembled system prompt (base + per-tool contributions)."""
+        """Assembled system prompt (base + per-tool contributions unless frozen)."""
         return self._build_system()
 
     @property
@@ -599,6 +599,11 @@ class Agent:
         """Base system prompt before tool or persistent IPC augmentation."""
         spec = self._base_system_spec
         return spec if isinstance(spec, str) else spec()
+
+    @property
+    def frozen_system(self) -> bool:
+        """Whether :meth:`system_prompt` returns the spec verbatim (hot spawn)."""
+        return self._frozen_system
 
     @property
     def max_budget_usd(self) -> float | None:
@@ -665,52 +670,6 @@ class Agent:
         self.runtime.publish(event)
 
     # -- Mutation methods ---------------------------------------------
-
-    def rebuild(
-        self,
-        *,
-        name: str,
-        system: SystemPromptArg,
-        session_dir: str | Path | None,
-        lifecycle: Literal["oneshot", "serviced"],
-        frozen_system: bool | None = None,
-    ) -> Agent:
-        """Recreate this agent with construction-time identity fields changed.
-
-        Args:
-          name: New agent name.
-          system: New system-prompt spec.
-          session_dir: New session directory, or ``None`` to disable
-              persistence.
-          lifecycle: New lifecycle policy for the rebuilt agent.
-          frozen_system: Overrides this agent's own ``_frozen_system`` on
-              the rebuilt copy; ``None`` (the default) carries it over
-              unchanged, so a hot spawn stays frozen through a rebuild.
-
-        """
-        rebuilt = Agent(
-            model=self.model,
-            model_recipe=self.model_recipe,
-            system=system,
-            tools=self.tools,
-            compactor=self.compactor,
-            session_dir=session_dir,
-            budget=self.budget,
-            max_attempts=self.max_attempts,
-            name=name,
-            description=self.description,
-            max_tool_call_rounds=self.max_tool_call_rounds,
-            max_budget_usd=self.max_budget_usd,
-            persistent_retry=self.persistent_retry,
-            frozen_system=(
-                self._frozen_system if frozen_system is None else frozen_system
-            ),
-        )
-        # The knobs ride ``model.settings``, and the rebuild shares the same
-        # model object, so they need no copying here.
-        rebuilt._lifecycle = lifecycle
-        rebuilt._is_subagent = self._is_subagent
-        return rebuilt
 
     def replace_tool(self, name: str, tool: Tool) -> None:
         """Swap the tool registered under ``name`` for ``tool``.
@@ -992,7 +951,8 @@ class Agent:
         """Assemble the full system prompt (system + tool contributions).
 
         Returns:
-          prompt: System prompt rebuilt for the next request.
+          prompt: System prompt rebuilt for the next request, or the
+              frozen spec verbatim when ``frozen_system`` is set.
 
         """
         return self._build_system()

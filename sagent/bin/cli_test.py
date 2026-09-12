@@ -229,6 +229,20 @@ def test_build_persistent_child_restores_thinking_state(
     assert child.model.settings.thinking_output == "text"
 
 
+def test_build_persistent_child_restores_frozen_system(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hot child's persisted ``system`` is already fully rendered.
+
+    Resuming it cold would re-append its tools' prompt contributions on
+    top of that snapshot, so the resumed prompt must stay frozen.
+    """
+    _stub_build_provider(monkeypatch)
+    record = _child_record(frozen_system=True)
+    child = _build_persistent_child(record, allow_providers=(), parent_label="parent")
+    assert child.frozen_system is True
+
+
 def test_default_allow_providers_leads_with_default_provider() -> None:
     """Default allow-list's first entry is the zero-flag default provider."""
     out = _default_allow_providers()

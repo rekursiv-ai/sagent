@@ -131,6 +131,9 @@ class PersistentAgentRecord:
     service_tier: str = "auto"
     max_budget_usd: float | None = None
     persistent_retry: bool = False
+    frozen_system: bool = False
+    """A hot child's ``system`` is already the parent's rendered prompt;
+    resuming it cold would re-append its own tools' contributions."""
 
 
 def _att_to_json(att: BytesMessage) -> dict[str, str]:
@@ -1133,6 +1136,7 @@ def _persistent_agent_from_json(
         service_tier=str(record.get("service_tier") or "auto"),
         max_budget_usd=_optional_float(record.get("max_budget_usd")),
         persistent_retry=_json_bool(record.get("persistent_retry")),
+        frozen_system=_json_bool(record.get("frozen_system")),
     )
 
 
@@ -1251,6 +1255,7 @@ def _persistent_agent_to_json(record: PersistentAgentRecord) -> dict[str, object
         "service_tier": record.service_tier,
         "max_budget_usd": record.max_budget_usd,
         "persistent_retry": record.persistent_retry,
+        "frozen_system": record.frozen_system,
         "timestamp": time.time(),
     }
 
@@ -1309,6 +1314,7 @@ def append_persistent_agent_lifecycle(
                 service_tier=settings.service_tier,
                 max_budget_usd=child.max_budget_usd,
                 persistent_retry=child.persistent_retry,
+                frozen_system=child.frozen_system,
             )
         ],
     )

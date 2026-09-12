@@ -1125,6 +1125,7 @@ def _build_persistent_child(
         max_tool_call_rounds=record.max_tool_call_rounds,
         max_budget_usd=record.max_budget_usd,
         persistent_retry=record.persistent_retry,
+        frozen_system=record.frozen_system,
     )
     if record.max_request_tokens is not None:
         agent.max_request_tokens = record.max_request_tokens

@@ -6,7 +6,7 @@ from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast, override
+from typing import override
 from unittest.mock import MagicMock, patch
 
 import asyncio
@@ -57,7 +57,6 @@ from sagent.types.runtime import (
     ModelServiceSuspended,
     NoticeMessage,
     RuntimeEvent,
-    SaveSession,
     ServiceErrorSnapshot,
     ToolCall,
     ToolResult,
@@ -1495,53 +1494,6 @@ def test_forwarder_response_tokens_tokenize_whole_not_per_chunk() -> None:
 
 
 @pytest.mark.asyncio
-async def test_persistent_spawn_session_root_dir_uses_label_path(
-    tmp_path: Path,
-) -> None:
-    parent_dir = tmp_path / "parent"
-    parent = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
-        tools=[],
-        session_dir=parent_dir,
-    )
-    child = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="done")]),
-        tools=[],
-    )
-    spawn = AgentSpawn(session_root_dir=tmp_path / "children")
-
-    with _parent_context(parent):
-        result = spawn._spawn_serviced(child, "fix-tools", "do work")
-
-    task = _persistent_tasks.get("fix-tools")
-    spawned = agent_registry.get("fix-tools")
-    assert not result.is_error
-    assert isinstance(spawned, Agent)
-    try:
-        child_session_dir = spawned.session_dir
-        assert child_session_dir is not None
-        assert child_session_dir == tmp_path / "children" / "fix-tools"
-        spawned.runtime.append_history(UserMessage(text="persisted child message"))
-        spawned.runtime.publish(SaveSession())
-        assert (child_session_dir / "session.jsonl").exists()
-        lifecycle = [
-            json.loads(line)
-            for line in (parent_dir / "session.jsonl")
-            .read_text(encoding="utf-8")
-            .splitlines()
-            if "persistent_agent" in line
-        ]
-        assert lifecycle[-1]["session_dir"] == str(tmp_path / "children" / "fix-tools")
-    finally:
-        spawned.shutdown(force=True)
-        if task is not None:
-            _ = task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
-        agent_registry.pop("fix-tools", None)
-
-
-@pytest.mark.asyncio
 async def test_persistent_spawn_persists_base_system_without_ipc_rule(
     tmp_path: Path,
 ) -> None:
@@ -1724,40 +1676,6 @@ async def test_spawn_serviced_hot_child_keeps_frozen_system_after_ipc_augment() 
     )
     task = _persistent_tasks.get("hot-persist-1")
     child.shutdown(force=True)
-    if task is not None:
-        try:
-            await asyncio.wait_for(task, timeout=2.0)
-        except (TimeoutError, Exception):  # noqa: BLE001
-            _ = task.cancel()
-
-
-@pytest.mark.asyncio
-async def test_spawn_serviced_with_session_root_dir_rebuild_keeps_frozen_system(
-    tmp_path: Path,
-) -> None:
-    """The rebuild branch (``session_root_dir`` set) must carry
-    ``frozen_system`` through ``Agent.rebuild`` via its default carry-over
-    (``rebuild`` doesn't receive ``frozen_system`` explicitly here).
-    """
-    parent = _make_parent()
-    child = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="done")]),
-        name="child",
-        system="You are the root agent.",
-        tools=[],
-        frozen_system=True,
-    )
-    t = AgentSpawn(session_root_dir=tmp_path)
-    with _parent_context(parent, label="Root"):
-        result = t._spawn_serviced(
-            child, "hot-persist-2", "do work", notify_on_asleep=False
-        )
-    assert not result.is_error
-    rebuilt = cast(Agent, agent_registry["hot-persist-2"])
-    assert rebuilt._frozen_system is True
-    assert rebuilt.system_prompt().startswith("You are the root agent.")
-    task = _persistent_tasks.get("hot-persist-2")
-    rebuilt.shutdown(force=True)
     if task is not None:
         try:
             await asyncio.wait_for(task, timeout=2.0)

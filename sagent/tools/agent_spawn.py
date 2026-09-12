@@ -17,7 +17,7 @@ itself *is* the registry for those objects.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
@@ -317,7 +317,6 @@ class AgentSpawn:
         max_depth: int | None = None,
         compactor: Compactor | None = None,
         max_attempts: int | None = None,
-        session_root_dir: str | Path | None = None,
         verbosity: int = 1,
         allow_providers: tuple[str, ...] | None = None,
     ) -> None:
@@ -331,9 +330,6 @@ class AgentSpawn:
         self._max_depth = max_depth
         self._compactor = compactor
         self._max_attempts = max_attempts
-        self._session_root_dir = (
-            Path(session_root_dir) if session_root_dir is not None else None
-        )
         self._verbosity = verbosity
         self._allow_providers: tuple[str, ...] = (
             tuple(allow_providers)
@@ -341,10 +337,6 @@ class AgentSpawn:
             else tuple(PROVIDER_NAMES)
         )
         self.directive_schema: JSON = _build_directive_schema(self._allow_providers)
-        self.on_persistent_spawn: (
-            Callable[[str, asyncio.Queue[RuntimeEvent | None]], None] | None
-        ) = None
-        self.on_persistent_stop: Callable[[str], None] | None = None
 
     def summary(self, args: Mapping[str, object]) -> str:
         """Return a short label summarizing this spawn call.
@@ -812,23 +804,12 @@ class AgentSpawn:
         parent_label = agent_label_var.get("") or (
             parent_agent.name if parent_agent is not None else "parent"
         )
-        if self._session_root_dir is not None:
-            child = child.rebuild(
-                name=label,
-                system=_augment_system_for_persistent(
-                    child.base_system_spec,
-                    parent_label=parent_label,
-                ),
-                session_dir=self._session_root_dir / label,
-                lifecycle="serviced",
-            )
-        else:
-            child._lifecycle = "serviced"  # noqa: SLF001 -- cross-layer lifecycle flag
-            child.name = label
-            child._system_spec = _augment_system_for_persistent(  # noqa: SLF001 -- spec mutation is intentional for the serviced IPC rule
-                child._system_spec,  # noqa: SLF001 -- see above
-                parent_label=parent_label,
-            )
+        child._lifecycle = "serviced"  # noqa: SLF001 -- cross-layer lifecycle flag
+        child.name = label
+        child._system_spec = _augment_system_for_persistent(  # noqa: SLF001 -- spec mutation is intentional for the serviced IPC rule
+            child._system_spec,  # noqa: SLF001 -- see above
+            parent_label=parent_label,
+        )
         child._is_subagent = True  # noqa: SLF001 -- cross-layer subagent flag
         run_id = uuid.uuid4().hex
         self._persist_lifecycle(
@@ -852,9 +833,6 @@ class AgentSpawn:
         if forwarder is not None:
             child.runtime.observers.append(forwarder)
         bg_key = f"persistent:{label}"
-        external_queue: asyncio.Queue[RuntimeEvent | None] | None = (
-            asyncio.Queue() if self.on_persistent_spawn is not None else None
-        )
 
         async def _run() -> None:
             state: Literal["completed", "failed", "cancelled"] = "completed"
@@ -885,10 +863,6 @@ class AgentSpawn:
                 _persistent_tasks.pop(label, None)
                 if parent_agent is not None:
                     parent_agent.forget_background(bg_key)
-                if external_queue is not None:
-                    external_queue.put_nowait(None)
-                if self.on_persistent_stop is not None:
-                    self.on_persistent_stop(label)
 
         child.runtime.inbox.push_back(UserMessage(text=prompt))
         task = asyncio.create_task(_run())
@@ -908,8 +882,6 @@ class AgentSpawn:
                     notify_on_asleep=notify_on_asleep,
                 ),
             )
-        if self.on_persistent_spawn is not None and external_queue is not None:
-            self.on_persistent_spawn(label, external_queue)
         if notify_on_asleep:
             reply_path = (
                 f"Replies arrive in your inbox as '[from {label}]: ...'"
@@ -1151,24 +1123,10 @@ class AgentSpawn:
     ) -> Path | None:
         """Per-child subdir for transcript persistence, or None.
 
-        Two resolution paths:
-
-        1. **Explicit ``session_root_dir``** (factory construction):
-           ``<root>/<parent_session_id>/<child_uuid>/``. The
-           ``parent_session_id`` prefix disambiguates sibling children
-           spawned by different parent sessions that share a flat root
-           (e.g. the slack v1 router pointing every worker at one dir).
-        2. **Inherited from parent's ``session_dir``** (the common path):
-           ``<parent_session_dir>/<child_uuid>/``. The parent's session
-           dir already encodes its identity in its path, so we skip the
-           redundant ``parent_session_id`` prepend that case (1) needs.
-
-        Returns ``None`` when neither source supplies a root (ephemeral
-        child, no transcript).
+        ``<parent_session_dir>/<child_uuid>/``; the parent's session dir
+        already encodes its identity in its path. Returns ``None`` when
+        the parent has no session dir (ephemeral child, no transcript).
         """
-        if self._session_root_dir is not None:
-            parent_id = parent_agent.session_id if parent_agent is not None else "root"
-            return self._session_root_dir / parent_id / str(uuid.uuid4())
         if parent_agent is None or parent_agent.session_dir is None:
             return None
         return parent_agent.session_dir / str(uuid.uuid4())
