@@ -537,7 +537,7 @@ def _create_kwargs_for(
 
 
 def _wire_effort_for(*, model_id: str, effort: ThinkingEffort) -> object:
-    """The ``reasoning.effort`` value the request carried."""
+    """Return the ``reasoning.effort`` value the request carried."""
     reasoning = (_create_kwargs_for(model_id=model_id, effort=effort))["reasoning"]
     assert isinstance(reasoning, dict)
     return cast(dict[str, object], reasoning)["effort"]

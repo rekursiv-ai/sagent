@@ -75,7 +75,7 @@ class _CatalogProvider(Protocol):
 
 
 def _request() -> ModelRequest:
-    """The smallest request that carries a thinking knob to the wire."""
+    """Return the smallest request that carries a thinking knob to the wire."""
     return ModelRequest(messages=[UserMessage(text="x")])
 
 
@@ -144,7 +144,7 @@ _ROWS = _rows()
 
 
 def _settings_for(capability: ModelCapability, effort: ThinkingEffort) -> ModelSettings:
-    """The settings that ask for ``effort`` with the widest budget offered."""
+    """Return the settings that ask for ``effort`` with the widest budget offered."""
     budgets: tuple[ThinkingBudget, ...] = ("fixed", "auto", "none")
     budget: ThinkingBudget = next(b for b in budgets if b in capability.thinking_budget)
     output: ThinkingOutput = "text" if "text" in capability.thinking_output else "none"

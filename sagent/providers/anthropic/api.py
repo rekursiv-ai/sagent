@@ -166,7 +166,7 @@ _CONTEXT_MANAGEMENT_MODELS = frozenset(
 
 
 def supports_native_context_management(model_id: str) -> bool:
-    """True when the model accepts the ``clear_tool_uses_20250919`` beta."""
+    """Check whether the model accepts the ``clear_tool_uses_20250919`` beta."""
     return base_model_id(model_id) in _CONTEXT_MANAGEMENT_MODELS
 
 
@@ -551,7 +551,7 @@ def _is_prompt_too_long_text(
     *,
     error_body: Mapping[str, object] | None = None,
 ) -> bool:
-    """True if the error describes a context-window overflow.
+    """Check whether the error describes a context-window overflow.
 
     Prefers the structured ``error.type``/``error.message`` fields on
     ``error_body`` when present: an Anthropic ``invalid_request_error``
@@ -638,8 +638,7 @@ def _guard_stream_interrupt(
     kind: str,
     model_id: str,
 ) -> None:
-    """Raise ``StreamInterruptedError`` if a ``model_tool_use`` response arrived
-    without any ``ToolCall``s.
+    """Raise ``StreamInterruptedError`` if a ``model_tool_use`` response arrived without any ``ToolCall``s.
 
     Gates on actual content rather than the API's ``stop_reason``, which is
     unreliable. When violated, the tool block was almost certainly dropped
@@ -1285,7 +1284,7 @@ def _assistant_blocks(
 
 
 def _is_orphan_thinking(block: Mapping[str, object]) -> bool:
-    """True for signed ``thinking`` blocks whose signed body is gone."""
+    """Check whether a signed ``thinking`` block's signed body is gone."""
     return (
         block.get("type") == "thinking"
         and bool(block.get("signature"))
@@ -1294,7 +1293,7 @@ def _is_orphan_thinking(block: Mapping[str, object]) -> bool:
 
 
 def _is_native_thinking(block: Mapping[str, object]) -> bool:
-    """True for Anthropic-native thinking-block types the API accepts."""
+    """Check whether a block is an Anthropic-native thinking-block type the API accepts."""
     return block.get("type") in ("thinking", "redacted_thinking")
 
 
@@ -1377,7 +1376,7 @@ def _attachment_block(
 
 
 def _is_image_mime(descriptor: str) -> bool:
-    """True for image MIME types accepted by Anthropic image blocks."""
+    """Check whether a MIME type is accepted by Anthropic image blocks."""
     return descriptor in {"image/jpeg", "image/png", "image/gif", "image/webp"}
 
 

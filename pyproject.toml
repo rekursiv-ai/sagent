@@ -96,7 +96,9 @@ selfhosted = [
 ]
 
 [dependency-groups]
-# uv sync --all-groups
+# NEVER ADD MORE DEPENDENCIES!
+
+# uv sync --all-groups --all-extras --frozen
 
 debug = [
     "ipython",
@@ -128,6 +130,8 @@ dev = [
     {include-group = "pre-commit"},
 ]
 
+# NEVER ADD MORE DEPENDENCY GROUPS!
+
 [project.urls]
 Homepage = "https://www.rekursiv.ai"
 Repository = "https://github.com/rekursiv-ai/sagent"
@@ -142,12 +146,12 @@ build-backend = "hatchling.build"
 
 # Tool settings: single source of truth.
 # Preferred location for any tool setting, in order:
-#   pyproject.toml  >  .pre-commit-config.yaml  >  .github/workflows/tests.yml
+#   pyproject.toml  >  .pre-commit-config.yaml  >  .github/workflows/ci.yml
 # Put a setting as high in this chain as the tool allows. Only drop to a lower
 # file when the higher one cannot express it (e.g. a CLI-only flag with no
 # config key). pyproject.toml holds tool config; .pre-commit-config.yaml is the
 # sole source for how hooks run (thread/worker counts, heap caps);
-# .github/workflows/tests.yml only invokes the hooks and must not redefine any
+# .github/workflows/ci.yml only invokes the hooks and must not redefine any
 # of these.
 
 [tool.hatch.build.targets.wheel]
@@ -198,6 +202,7 @@ markers = [
     "gpu_jax_cuda: requires JAX CUDA execution",
     "gpu_nvidia: requires NVIDIA GPU hardware",
     "gpu_torch_cuda: requires torch CUDA execution",
+    "gpu_torch_mps: requires torch MPS execution",
     "gpu_triton: requires Triton kernels",
     "network_anthropic: reaches Anthropic over the network",
     "network_duckduckgo: reaches DuckDuckGo over the network",
@@ -229,12 +234,17 @@ filterwarnings = [
     "ignore:Using .httpx. with .starlette.testclient. is deprecated:starlette.exceptions.StarletteDeprecationWarning",
     "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",  # starlette 1.6.0 issue.
     "ignore:'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16:DeprecationWarning:zendriver.core.connection",
+    # NEVER ADD MORE FILTERWARNINGS!
 ]
 norecursedirs = [
     "*.egg-info",
     ".agents",
     ".claude",
+    ".git",
     ".hypothesis",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
     ".venv",
     "__pycache__",
     "third_party",
@@ -275,14 +285,19 @@ exclude = [
     "build/",
     "dist/",
     "**/third_party/",
+    # NEVER ADD MORE EXCLUDES!
 ]
 extend-include = ["*.ipynb"]
 
 [tool.ruff.lint]
+# NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
+
 select = ["ALL"]
 ignore = [
     # Module-level ignores.
-    "ANN",     # Flake8 annotations. (We use pyright for type checking.)
+    # "ANN",     # Flake8 annotations. (We use pyright for type checking.)
+    "ANN0",    # Flake8 missing-annotation rules. (We use pyright for type checking.)
+    "ANN2",    # Flake8 missing-return-annotation rules. (We use pyright for type checking.)
     "C90",     # McCabe complexity. (One function slightly over threshold.)
     "COM812",  # Missing trailing comma. (select=ALL warning is unfixable.)
                # https://github.com/astral-sh/ruff/issues/9216
@@ -291,18 +306,18 @@ ignore = [
     # Relax docstring rules.
     "D100",    # Undocumented public module.
     "D101",    # Undocumented public class.
-    "D102",    # Undocumented public method.
-    "D103",    # Undocumented public function.
+    # "D102",    # Undocumented public method.
+    # "D103",    # Undocumented public function.
     "D104",    # Undocumented public package.
     "D105",    # Undocumented magic method.
     "D106",    # Undocumented public nested class.
     "D107",    # Undocumented public init.
     "D203",    # Incorrect blank line before class. (Conflicts with D211.)
-    "D205",    # Missing blank line after summary.
+    # "D205",    # Missing blank line after summary.
     "D213",    # Multi-line summary second line. (Conflicts with D212.)
-    "D400",    # Missing trailing period.
-    "D401",    # Non-imperative mood.
-    "D415",    # Missing terminal punctuation.
+    # "D400",    # Missing trailing period.
+    # "D401",    # Non-imperative mood.
+    # "D415",    # Missing terminal punctuation.
     "RUF001",  # Ambiguous unicode character string. (Intentional math usage of `α, σ, γ, ×` etc.)
     "RUF002",  # Ambiguous unicode character docstring. (Intentional math usage of `α, σ, η, ε, ≝, ½` etc.)
     "RUF003",  # Ambiguous unicode character comment. (Intentional math usage of `α, σ, η, ε, ≝, ½` etc.)
@@ -362,18 +377,30 @@ ignore = [
 
     # Exclusions due to public export.
     # "TC002",   # Typing-only third-party import. (Export strips runtime uses, leaving type-only imports.)
+
+    # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 ]
 
 [tool.ruff.lint.per-file-ignores]
+# NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
+
 "__init__.py" = [
     "F401",    # Unused import.
+    # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 ]
 "{*_test.py,**/tests/test*.py}" = [
+    "D100",    # Undocumented public module. (A test module's name is its docstring.)
+    "D101",    # Undocumented public class. (A test class's name is its docstring.)
+    "D102",    # Undocumented public method. (A test's name is its docstring.)
+    "D103",    # Undocumented public function. (Same.)
+    "D105",    # Undocumented magic method. (Test helper dunders.)
+    "D205",    # Missing blank line after summary. (Test docstrings are prose.)
     "INP001",  # Implicit namespace package. (Tests don't need __init__.py.)
     "PLR2004", # Magic value comparison.
     "S101",    # Use of `assert` detected.
     "S301",    # Pickle usage.
     "SLF001",  # Private member access.
+    # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 ]
 # Vendored third-party stubs generated by `pyright --createstub`. NEVER-FIX set:
 # every rule here either has no autofix at all (clearing it means risky manual
@@ -390,6 +417,7 @@ ignore = [
 #    uv --quiet run --frozen ruff format typings
 "typings/**" = [
     # === MUST NOT FIX (also in lint.unfixable): autofix corrupts stub types. ===
+    "ANN401",   # typings.Any.
     "PYI015",   #    41 -- assignment-default-in-stub -- strips dataclass_transform field-specifier; breaks synthesized __init__.
     "PYI018",   #    39 -- unused-private-type-var -- deletes TypeVars used only in Generic[]/Protocol[] subscripts.
     "UP046",    #    94 -- non-pep695-generic-class -- PEP 695 rewrite rebinds/drops TypeVar params.
@@ -444,6 +472,14 @@ ignore = [
     "PYI046",   #     4 -- unused-private-protocol -- may be re-exported cross-stub.
     "PYI047",   #    45 -- unused-private-type-alias -- may be re-exported cross-stub.
     "PYI049",   #     2 -- unused-private-typed-dict -- may be re-exported cross-stub.
+
+    "D102",    # Undocumented public method. (A test's name is its docstring.)
+    "D103",    # Undocumented public function. (Same.)
+    "D205",    # Missing blank line after summary.
+    "D401",    # Non-imperative mood.
+    "TID251",  # Banned API.
+
+    # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 ]
 "*.ipynb" = [
     "ARG001",  # Unused function argument (callbacks).
@@ -457,12 +493,23 @@ ignore = [
     "S102",    # Use of exec.
     "S301",    # Pickle usage.
     "T201",    # Print found.
+    # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 ]
 "{**/docs/**,**/scripts/**}" = [
     "INP001",  # Standalone example scripts.
     "T201",    # Print found. (Eval scripts use print for output.)
+    # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 ]
+
 # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
+
+# STYLE.md / AGENTS.md rules ruff can host outright. Each ban carries the
+# house replacement so the finding is the fix.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"math.sqrt".msg = "Operators over functions: write `x**0.5` (STYLE.md Code Style)."
+"math.pow".msg = "Operators over functions: write `x**y` (STYLE.md Code Style)."
+"os.environ.setdefault".msg = "Assign, never setdefault: a deferred default writes a different tree per caller (AGENTS.md Provisioned Paths)."
+"pathlib.Path.home".msg = "Per-user paths go through sagent.lib.userdirs (XDG base directories)."
 
 [tool.ruff.lint.isort]
 case-sensitive = false
@@ -493,10 +540,6 @@ section-order = [
 typeCheckingMode = "recommended"
 failOnWarnings = true  # Warnings fail the check (basedpyright default; pinned explicitly).
 useLibraryCodeForTypes = false
-# The export SHIPS ``typings/`` but is checked from its own root, so without
-# this the stubs are present and unread: bashlex resolves to no ``Node`` and
-# webp to no ``ffi``, in files neither the monorepo nor the public build has
-# any other complaint about.
 extraPaths = ["typings"]
 exclude = [
     "**/.venv/",
@@ -510,6 +553,7 @@ exclude = [
     "typings/",
     "**/third_party/",
     "**/typings/",
+    # NEVER ADD MORE EXCLUSIONS! SUPPRESS IN FILE!
 ]
 ignore = [
     "**/.venv/",
@@ -520,6 +564,7 @@ ignore = [
     "dist/",
     "typings/",
     "**/third_party/",
+    # NEVER ADD MORE IGNORES! SUPPRESS IN FILE!
 ]
 pythonPlatform = "Linux"
 pythonVersion = "3.12"
@@ -556,6 +601,7 @@ exclude = [
     "typings/",
     "**/third_party/",
     "**/docs/",
+    # NEVER ADD MORE EXCLUSIONS! SUPPRESS IN FILE!
 ]
 
 [tool.ty.environment]
@@ -588,9 +634,6 @@ ignore-words = ".codespell-ignore"
 # codespell exclude regex instead. This list is only for file patterns.
 skip = "htmlcov,.doctrees,*.pyc,*.ico,*.png,*.jpg,*.PNG,*.inv,*.dot,*.css,*.egg-info,uv.lock,__pycache__,.git,.venv,typings,**/third_party/,*/web/data.js,*/web/*_useragents.txt"
 
-[tool.jupytext]
-formats = "ipynb,py:percent"
-
 [tool.uv]
 package = true
 environments = [
@@ -600,12 +643,6 @@ environments = [
 
 [tool.uv.pip]
 compile-bytecode = true
-
-[tool.uv.sources]
-# Github installs track wesearch main; PyPI installs use the floor above.
-# Advance the lock with `uv lock --upgrade-package wesearch` -- plain `uv lock`
-# leaves a branch source on its pinned SHA.
-wesearch = { git = "https://github.com/rekursiv-ai/wesearch", branch = "main" }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
@@ -626,6 +663,11 @@ explicit = true
 name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
+
+[tool.uv.sources]
+configgle = { git = "https://github.com/rekursiv-ai/configgle", branch = "main" }
+priml = { git = "https://github.com/rekursiv-ai/priml", branch = "main" }
+wesearch = { git = "https://github.com/rekursiv-ai/wesearch", branch = "main" }
 
 [tool.uv.workspace]
 members = []

@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 
 def _is_cached_pdf(path: Path, *, min_pdf_bytes: int = 128) -> bool:
-    """True if ``path`` holds a cached PDF (size + magic, same bar as fresh)."""
+    """Check whether ``path`` holds a cached PDF (size + magic, same bar as fresh)."""
     try:
         with path.open("rb") as f:
             return looks_like_pdf(f.read(min_pdf_bytes))

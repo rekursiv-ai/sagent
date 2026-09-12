@@ -59,6 +59,7 @@ class TokenStats[T: (int, float)]:
         return self.request + self.response + self.cache_write + self.cache_read
 
     def __add__(self, other: Self) -> Self:
+        """Add two token stats, handling non-matching types gracefully."""
         # Non-``TokenStats`` operands defer rather than raising
         # ``AttributeError`` mid-expression: callers reaching through
         # ``object``-typed plumbing (status pane, persisted-metadata
@@ -74,6 +75,7 @@ class TokenStats[T: (int, float)]:
         )
 
     def __sub__(self, other: Self) -> Self:
+        """Subtract two token stats, handling non-matching types gracefully."""
         # See ``__add__`` for the deferral.
         if not isinstance(other, type(self)):
             return NotImplemented
@@ -160,6 +162,7 @@ class TokenPrice(TokenStats[float]):
     """Tokens each rate is quoted per; vendors publish per million."""
 
     def __mul__(self, tokens: TokenCount) -> TokenCost:
+        """Multiply price by token count to get cost."""
         return TokenCost(
             request=self.request * tokens.request / self.tokens_per_unit,
             response=self.response * tokens.response / self.tokens_per_unit,

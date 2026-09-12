@@ -91,7 +91,7 @@ def _make_request(messages: list[ModelContextEvent], **kw: object) -> ModelReque
 
 
 def _thinking_capability() -> ModelCapability:
-    """The catalog row every wire test builds against."""
+    """Return the catalog row every wire test builds against."""
     return Google.from_key("k").model("gemini-2.5-pro").capability
 
 
@@ -101,7 +101,7 @@ def _settings(
     thinking_budget: ThinkingBudget = "none",
     thinking_output: ThinkingOutput = "none",
 ) -> ModelSettings:
-    """Settings bound to the thinking-capable row.
+    """Return settings bound to the thinking-capable row.
 
     Bound rather than bare: every axis validates on assignment, so a
     default-capability object cannot hold the thinking selections these

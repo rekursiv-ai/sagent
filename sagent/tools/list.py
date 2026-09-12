@@ -339,7 +339,7 @@ def _ls_fields(parsed: _LsParse) -> list[str]:
 
 
 def _ls_has_glob_positional(args: tuple[str, ...]) -> bool:
-    """True iff any non-flag argument contains a glob metacharacter."""
+    """Check whether any non-flag argument contains a glob metacharacter."""
     for a in args:
         if a == "--" or (a.startswith("-") and a != "-"):
             continue

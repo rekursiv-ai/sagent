@@ -48,9 +48,11 @@ class Deque[T]:
         return self._capacity
 
     def __len__(self) -> int:
+        """Return the number of items in the queue."""
         return len(self._dq)
 
     def __bool__(self) -> bool:
+        """Return True if the queue is non-empty."""
         return bool(self._dq)
 
     def __iter__(self) -> Iterator[T]:

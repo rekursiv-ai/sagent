@@ -152,7 +152,9 @@ class Text:
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class Defer:
-    """User typed ``/defer <text>`` (or pressed Tab on a non-empty buffer);
+    """Dispatch a deferred user message to be processed after the current round.
+
+    User typed ``/defer <text>`` (or pressed Tab on a non-empty buffer);
     dispatch as a non-preempting ``UserDeferredMessage`` that drains at
     ``AgentIdle``.
 

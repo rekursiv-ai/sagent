@@ -102,6 +102,7 @@ class BackgroundTaskEntry:
     """Whether subagent idle pings are enabled."""
 
     def __post_init__(self) -> None:
+        """Validate the configuration on initialization."""
         if (
             self.kind == "subagent"
             and self.lifecycle == "serviced"

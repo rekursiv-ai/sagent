@@ -32,12 +32,16 @@ class Lock(TypedDict):
 
 
 class PlateInfo(TypedDict):
+    """A pair of plate tiles sharing a lock."""
+
     letter: str
     a: tuple[int, int]
     b: tuple[int, int]
 
 
 class SpawnMeta(TypedDict):
+    """Metadata about a spawned level."""
+
     locks: int
     decoys: int
     hall_col: int
@@ -85,6 +89,7 @@ class Agent:
 
     @property
     def xy(self) -> tuple[int, int]:
+        """Return the agent's position."""
         return (self.x, self.y)
 
 
@@ -172,11 +177,13 @@ class World:
     # -- terrain queries ---------------------------------------------------
 
     def cell(self, x: int, y: int) -> CellType:
+        """Return the cell type at coordinates (x, y)."""
         if 0 <= y < self.height and 0 <= x < self.width:
             return self.grid[y][x]
         return "wall"
 
     def passable(self, x: int, y: int) -> bool:
+        """Check if a tile at (x, y) is passable."""
         c = self.cell(x, y)
         if c == "wall":
             return False
@@ -298,6 +305,7 @@ class World:
     # -- actions -----------------------------------------------------------
 
     def set_target(self, agent_id: str, xy: tuple[int, int]) -> None:
+        """Set the movement target for an agent."""
         self.agents[agent_id].target = xy
 
     def advance(self, agent_id: str) -> dict[str, object]:
@@ -421,6 +429,7 @@ class World:
     # -- tick + win/lose ---------------------------------------------------
 
     def pressed_plates(self) -> set[tuple[int, int]]:
+        """Return the set of plate tiles currently pressed by agents."""
         plates = {
             (x, y)
             for y in range(self.height)
@@ -431,6 +440,7 @@ class World:
         return plates & on
 
     def all_plates(self) -> set[tuple[int, int]]:
+        """Return the set of all plate tiles in the maze."""
         return {
             (x, y)
             for y in range(self.height)
@@ -439,6 +449,7 @@ class World:
         }
 
     def vault_open(self) -> bool:
+        """Check if all plates are currently pressed."""
         plates = self.all_plates()
         return bool(plates) and self.pressed_plates() == plates
 
@@ -464,12 +475,15 @@ class World:
                 lk["open"] = True
 
     def locks_open(self) -> int:
+        """Return the number of currently open locks."""
         return sum(1 for lk in self.locks if lk["open"])
 
     def all_locks_open(self) -> bool:
+        """Check if all locks are open."""
         return bool(self.locks) and all(lk["open"] for lk in self.locks)
 
     def diamond_at_exit(self) -> bool:
+        """Check if the diamond is located at the exit tile."""
         for it in self.items.values():
             if it.kind == "diamond" and it.xy == self.exit_xy and it.holder is None:
                 return True
@@ -516,20 +530,25 @@ class World:
         self.tick += 1
 
     def out_of_budget(self) -> bool:
+        """Check if the tick budget is exhausted."""
         return self.tick >= self.budget
 
     def all_extracted(self) -> bool:
+        """Check if all agents have extracted from the maze."""
         return all(a.extracted for a in self.agents.values())
 
     def treasures_total(self) -> int:
+        """Return the total number of treasures in the maze."""
         return sum(1 for it in self.items.values() if it.kind == "treasure")
 
     def treasures_collected(self) -> int:
+        """Return the number of treasures collected."""
         return sum(
             1 for it in self.items.values() if it.kind == "treasure" and it.collected
         )
 
     def all_treasures_collected(self) -> bool:
+        """Check if all treasures have been collected."""
         ts = [it for it in self.items.values() if it.kind == "treasure"]
         return bool(ts) and all(it.collected for it in ts)
 

@@ -1,11 +1,11 @@
 #!/bin/sh
-# ruff: noqa: EXE003, D300 -- Polyglot shell/Python script.
+# ruff: noqa: EXE003, D300, D205 -- Polyglot shell/Python script.
 # fmt: off
 '''' 2>/dev/null #
 exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
 Interactive LLM agent CLI.
 
-``--provider`` is a class name from ``sagent.providers``; ``--auth`` is
+Provider is a class name from ``sagent.providers``; auth is
 the suffix of a zero-arg ``from_<auth>`` classmethod on that class.
 Dispatch is ``getattr(providers, provider).from_<auth>()`` - no
 registry, no string aliases.
@@ -239,10 +239,10 @@ def resolve_tools(
     return resolved
 
 
-def _tool_kwargs(cls: type, overrides: Mapping[str, str]) -> Any:
+def _tool_kwargs(cls: type, overrides: Mapping[str, str]) -> dict[str, Any]:
     """Coerce ``--tool`` overrides for ``cls``, exiting on a bad key.
 
-    Returns ``Any`` deliberately: the result is splatted into a tool
+    Values are ``Any`` deliberately: the result is splatted into a tool
     constructor whose signature varies per tool, and the values were
     already validated against that signature by ``coerce_kwargs``.
     """

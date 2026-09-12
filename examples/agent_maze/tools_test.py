@@ -15,13 +15,14 @@ from examples.agent_maze.engine import Engine
 from examples.agent_maze.tools import CommsTool, SpawnTool
 from examples.agent_maze.world import make_spawn_level
 from sagent.agent.state import agent_label_var, agent_registry
+from sagent.types.runtime import ToolResult
 
 
 class _Inbox:
     def __init__(self) -> None:
-        self.msgs: list[Any] = []
+        self.msgs: list[object] = []
 
-    def push_back(self, m: Any) -> None:
+    def push_back(self, m: object) -> None:
         self.msgs.append(m)
 
 
@@ -52,7 +53,7 @@ def _clear(labels: list[str]) -> None:
         agent_registry.pop(lbl, None)
 
 
-def _run(coro: Coroutine[Any, Any, Any]) -> Any:
+def _run(coro: Coroutine[Any, Any, ToolResult]) -> ToolResult:
     return asyncio.run(coro)
 
 

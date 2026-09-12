@@ -758,7 +758,7 @@ def tool(
     schema: JSON | None = None,
     clearable_results: bool = False,
 ) -> _ToolImpl | Callable[[Callable[..., object]], _ToolImpl]:
-    """Decorator to create a Tool from a function.
+    """Create a Tool from a function.
 
     Args:
       fn: The function to wrap (when used without arguments).

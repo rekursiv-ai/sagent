@@ -272,7 +272,7 @@ def test_earlier_gpt5_catalog_keeps_native_efforts(model_id: str) -> None:
 
 
 def _free_model() -> _OpenAIResponsesModel:
-    """A model whose every rate is zero -- cost is not what these assert."""
+    """Return a model whose every rate is zero -- cost is not what these assert."""
     return _OpenAIResponsesModel(
         provider=OpenAI.from_key("test-key"),
         capability=ModelCapability(

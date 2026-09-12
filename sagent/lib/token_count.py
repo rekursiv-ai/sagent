@@ -40,8 +40,13 @@ class TokenEstimator(Protocol):
     against mocks that don't bother implementing transport methods.
     """
 
-    def approx_text_tokens(self, text: str) -> int: ...
-    def approx_image_tokens(self, data: bytes) -> int: ...
+    def approx_text_tokens(self, text: str) -> int:
+        """Estimate the token count for text."""
+        ...
+
+    def approx_image_tokens(self, data: bytes) -> int:
+        """Estimate the token count for image data."""
+        ...
 
 
 def approx_request_tokens(request: ModelRequest, model: TokenEstimator) -> int:

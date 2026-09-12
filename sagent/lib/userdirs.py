@@ -94,12 +94,12 @@ def data_dir(*, platform: str | None = None) -> Path:
     """
     platform = platform or sys.platform
     if platform == "win32":
-        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")  # noqa: TID251 -- this module IS the userdirs layout.
     if xdg_data_home := os.environ.get("XDG_DATA_HOME"):
         return Path(xdg_data_home)
     if platform == "darwin":
-        return Path.home() / "Library" / "Application Support"
-    return Path.home() / ".local" / "share"
+        return Path.home() / "Library" / "Application Support"  # noqa: TID251 -- this module IS the userdirs layout.
+    return Path.home() / ".local" / "share"  # noqa: TID251 -- this module IS the userdirs layout.
 
 
 def config_dir(*, platform: str | None = None) -> Path:
@@ -132,7 +132,7 @@ def config_dir(*, platform: str | None = None) -> Path:
         return Path(xdg_config_home)
     if platform == "darwin":
         return data_dir(platform=platform)
-    return Path.home() / ".config"
+    return Path.home() / ".config"  # noqa: TID251 -- this module IS the userdirs layout.
 
 
 def cache_dir(*, platform: str | None = None) -> Path:
@@ -165,8 +165,8 @@ def cache_dir(*, platform: str | None = None) -> Path:
     if xdg_cache_home := os.environ.get("XDG_CACHE_HOME"):
         return Path(xdg_cache_home)
     if platform == "darwin":
-        return Path.home() / "Library" / "Caches"
-    return Path.home() / ".cache"
+        return Path.home() / "Library" / "Caches"  # noqa: TID251 -- this module IS the userdirs layout.
+    return Path.home() / ".cache"  # noqa: TID251 -- this module IS the userdirs layout.
 
 
 def state_dir(*, platform: str | None = None) -> Path:
@@ -201,4 +201,4 @@ def state_dir(*, platform: str | None = None) -> Path:
         return Path(xdg_state_home)
     if platform == "darwin":
         return data_dir(platform=platform)
-    return Path.home() / ".local" / "state"
+    return Path.home() / ".local" / "state"  # noqa: TID251 -- this module IS the userdirs layout.

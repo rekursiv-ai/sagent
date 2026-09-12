@@ -56,6 +56,7 @@ def serve(port: int = PORT, host: str = "127.0.0.1") -> None:
 
 
 def main() -> None:
+    """Serve the agent-maze web interface."""
     ap = argparse.ArgumentParser(
         description="agent-maze coordination demo (mesh vs tree)"
     )

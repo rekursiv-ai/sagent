@@ -291,7 +291,7 @@ _UNIFIED_REJECTED_STATUSES = frozenset({"rejected", "rate_limited"})
 
 
 def _unified_limit_rejected(headers: Mapping[str, str]) -> bool:
-    """True when a unified-ratelimit status header reports a blocked request.
+    """Return True when a unified-ratelimit status header reports a blocked request.
 
     Consults Anthropic's per-window status headers. A ``rejected`` /
     ``rate_limited`` value on any window means the request was actually

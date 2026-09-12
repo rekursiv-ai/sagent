@@ -481,7 +481,7 @@ class TestExpandIncludePath:
     def test_home_relative(self, tmp_path: Path) -> None:
         result = agents_md._expand_include_path("~/foo.md", tmp_path)
         assert result is not None
-        assert result == (Path.home() / "foo.md").resolve()
+        assert result == (Path.home() / "foo.md").resolve()  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)
 
     def test_root_ref_rejected(self, tmp_path: Path) -> None:
         assert agents_md._expand_include_path("/", tmp_path) is None

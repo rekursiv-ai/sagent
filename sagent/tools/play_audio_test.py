@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import subprocess
@@ -146,7 +145,7 @@ def test_play_via_cmd_success(monkeypatch: pytest.MonkeyPatch) -> None:
         args=[], returncode=0, stdout="", stderr=""
     )
 
-    def _run(*_a: Any, **_k: Any) -> subprocess.CompletedProcess[str]:
+    def _run(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
         return completed
 
     monkeypatch.setattr("shutil.which", _which)
@@ -164,7 +163,7 @@ def test_play_via_cmd_nonzero_returns_reason(
         args=[], returncode=2, stdout="", stderr=""
     )
 
-    def _run(*_a: Any, **_k: Any) -> subprocess.CompletedProcess[str]:
+    def _run(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
         return completed
 
     monkeypatch.setattr("shutil.which", _which)
@@ -178,7 +177,7 @@ def test_play_via_cmd_exception_collected(monkeypatch: pytest.MonkeyPatch) -> No
     def _which(exe: str) -> str:
         return f"/usr/bin/{exe}"
 
-    def _boom(*_a: Any, **_k: Any) -> subprocess.CompletedProcess[str]:
+    def _boom(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
         raise OSError("nope")
 
     monkeypatch.setattr("shutil.which", _which)

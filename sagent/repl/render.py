@@ -186,36 +186,89 @@ class Printer(Protocol):
 
     show_thinking: bool
 
-    def write_line(self, text: str) -> None: ...
-    def write_dim_line(self, text: str) -> None: ...
-    def write_chunk(self, text: str) -> None: ...
-    def write_markdown(self, text: str) -> None: ...
-    def write_user_bar(self, text: str) -> None: ...
-    def write_agent_bar(self, source: str, text: str) -> None: ...
-    def write_slash_block(self, text: str) -> None: ...
+    def write_line(self, text: str) -> None:
+        """Write a line."""
+        ...
+
+    def write_dim_line(self, text: str) -> None:
+        """Write a dimmed line."""
+        ...
+
+    def write_chunk(self, text: str) -> None:
+        """Write a chunk."""
+        ...
+
+    def write_markdown(self, text: str) -> None:
+        """Write markdown text."""
+        ...
+
+    def write_user_bar(self, text: str) -> None:
+        """Write a user bar."""
+        ...
+
+    def write_agent_bar(self, source: str, text: str) -> None:
+        """Write an agent bar."""
+        ...
+
+    def write_slash_block(self, text: str) -> None:
+        """Write a slash block."""
+        ...
+
     def write_tool_label(
         self,
         text: str,
         *,
         command: OutputSpec | None = None,
         lang: str = "",
-    ) -> None: ...
-    def write_tool_error(self, text: str) -> None: ...
-    def write_tool_summary(self, text: str) -> None: ...
-    def write_tool_output(self, text: str) -> None: ...
-    def write_hint(self, text: str) -> None: ...
-    def write_thinking(self, text: str) -> None: ...
-    def write_diff(self, diff: str, file_path: str = "") -> None: ...
-    def write_interrupted(self) -> None: ...
-    def write_halt(self, text: str) -> None: ...
+    ) -> None:
+        """Write a tool label."""
+        ...
+
+    def write_tool_error(self, text: str) -> None:
+        """Write a tool error."""
+        ...
+
+    def write_tool_summary(self, text: str) -> None:
+        """Write a tool summary."""
+        ...
+
+    def write_tool_output(self, text: str) -> None:
+        """Write tool output."""
+        ...
+
+    def write_hint(self, text: str) -> None:
+        """Write a hint."""
+        ...
+
+    def write_thinking(self, text: str) -> None:
+        """Write thinking text."""
+        ...
+
+    def write_diff(self, diff: str, file_path: str = "") -> None:
+        """Write a diff."""
+        ...
+
+    def write_interrupted(self) -> None:
+        """Write an interruption notice."""
+        ...
+
+    def write_halt(self, text: str) -> None:
+        """Write a halt message."""
+        ...
+
     def write_child_block(
         self,
         label: str,
         items: Sequence[ChildItem],
         *,
         output_policy: Callable[[str], ToolDisplay] | None = None,
-    ) -> None: ...
-    def set_terminal_title(self, text: str) -> None: ...
+    ) -> None:
+        """Write a child block."""
+        ...
+
+    def set_terminal_title(self, text: str) -> None:
+        """Set the terminal title."""
+        ...
 
 
 class RecordingPrinter:
@@ -304,24 +357,31 @@ class RecordingPrinter:
         self.titles = []
 
     def write_line(self, text: str) -> None:
+        """Record a line."""
         self.lines.append(text)
 
     def write_dim_line(self, text: str) -> None:
+        """Record a dimmed line."""
         self.dim_lines.append(text)
 
     def write_chunk(self, text: str) -> None:
+        """Record a chunk."""
         self.chunks.append(text)
 
     def write_markdown(self, text: str) -> None:
+        """Record markdown text."""
         self.markdowns.append(text)
 
     def write_user_bar(self, text: str) -> None:
+        """Record a user bar."""
         self.user_bars.append(text)
 
     def write_agent_bar(self, source: str, text: str) -> None:
+        """Record an agent bar."""
         self.agent_bars.append((source, text))
 
     def write_slash_block(self, text: str) -> None:
+        """Record a slash block."""
         self.slash_blocks.append(text)
 
     def write_tool_label(
@@ -331,31 +391,40 @@ class RecordingPrinter:
         command: OutputSpec | None = None,
         lang: str = "",
     ) -> None:
+        """Record a tool label."""
         del command, lang
         self.tool_labels.append(text)
 
     def write_tool_error(self, text: str) -> None:
+        """Record a tool error."""
         self.tool_errors.append(text)
 
     def write_tool_summary(self, text: str) -> None:
+        """Record a tool summary."""
         self.tool_summaries.append(text)
 
     def write_tool_output(self, text: str) -> None:
+        """Record tool output."""
         self.tool_outputs.append(text)
 
     def write_hint(self, text: str) -> None:
+        """Record a hint."""
         self.hints.append(text)
 
     def write_thinking(self, text: str) -> None:
+        """Record thinking text."""
         self.thinkings.append(text)
 
     def write_diff(self, diff: str, file_path: str = "") -> None:
+        """Record a diff."""
         self.diffs.append((diff, file_path))
 
     def write_interrupted(self) -> None:
+        """Record an interruption."""
         self.interruptions += 1
 
     def write_halt(self, text: str) -> None:
+        """Record a halt message."""
         self.halts.append(text)
 
     def write_child_block(
@@ -365,10 +434,12 @@ class RecordingPrinter:
         *,
         output_policy: Callable[[str], ToolDisplay] | None = None,
     ) -> None:
+        """Record a child block."""
         del output_policy
         self.child_blocks.append((label, list(items)))
 
     def set_terminal_title(self, text: str) -> None:
+        """Record a terminal title."""
         self.titles.append(text)
 
     @property
@@ -492,6 +563,7 @@ class RenderObserver:
         self._child_items: dict[str, list[ChildItem]] = {}
 
     def __call__(self, event: RuntimeEvent) -> None:
+        """Dispatch a runtime event to the printer."""
         try:
             self._dispatch(event)
         except Exception:

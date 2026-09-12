@@ -386,7 +386,7 @@ def _build_user_item(
 
 
 def _is_image_attachment(att: BytesMessage) -> bool:
-    """True for ``BytesMessage`` attachments whose descriptor is an image mime."""
+    """Check whether an attachment's descriptor is an image MIME type."""
     return att.descriptor.startswith("image/")
 
 

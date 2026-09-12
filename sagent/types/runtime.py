@@ -259,6 +259,7 @@ class AssistantMessage(SessionMessage):
     Gemini 3.x requires it echoed back verbatim on the next request."""
 
     def __post_init__(self) -> None:
+        """Validate tool call IDs are unique."""
         # Duplicate ``ToolCall.id`` corrupts the runtime's per-call
         # bookkeeping: ``running_tools[id]`` and the cohort set collapse
         # collisions silently, leaking tasks and dropping results. Reject
@@ -769,14 +770,17 @@ class DetachedResult:
 
     @property
     def call_id(self) -> str:
+        """Return the result's call ID."""
         return self.result.call_id
 
     @property
     def content(self) -> str:
+        """Return the result's content."""
         return self.result.content
 
     @property
     def is_error(self) -> bool:
+        """Check whether the result is an error."""
         return self.result.is_error
 
 

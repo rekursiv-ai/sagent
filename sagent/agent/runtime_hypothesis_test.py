@@ -97,7 +97,7 @@ def _assistant_message(draw: DrawFn) -> AssistantMessage:
 
 @composite
 def _agent_send_with_tool_call(draw: DrawFn) -> AssistantMessage:
-    """An assistant turn whose tool_calls includes one or more AgentSends."""
+    """Build an assistant turn whose tool_calls includes one or more AgentSends."""
     n_sends = draw(integers(min_value=1, max_value=3))
     sends = tuple(
         ToolCall(

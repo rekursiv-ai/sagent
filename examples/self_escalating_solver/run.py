@@ -108,6 +108,7 @@ def build(provider_name: str, model_id: str):
 
 
 def canonical_histograms() -> dict[str, Any]:
+    """Generate canonical histograms for visualization of sampler behavior."""
     # Canonical biased/fixed sampler histograms for the viz (illustrative — the
     # same bias the agent hits). Run in a subprocess so numpy/scipy need not be
     # in this env.
@@ -179,6 +180,7 @@ def _slim(s: dict[str, Any]) -> dict[str, Any]:
 
 
 async def run_live(config_name: str, trials: int) -> dict[str, Any]:
+    """Run the self-escalating solver experiment and capture results."""
     cfg = CONFIGS[config_name]
     cheap_prov, cheap_id = cfg["cheap"]
     high_prov, high_id = cfg["high"]  # expensive baseline (high-tier panel)
@@ -370,6 +372,7 @@ def _pick_provider() -> str:
 
 
 def main() -> None:
+    """Run the solver demo with replay or live experiment."""
     ap = argparse.ArgumentParser(
         description="Default: replay the captured run in a local webpage. "
         "--live re-runs it for real, then serves the fresh result."

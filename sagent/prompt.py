@@ -69,7 +69,7 @@ def _is_git_repo(cwd: str) -> bool:
 
 
 def _is_git_worktree(cwd: str) -> bool:
-    """True if cwd is a git worktree (not the primary checkout)."""
+    """Return True if cwd is a git worktree (not the primary checkout)."""
     try:
         # In a worktree, `.git` is a file (gitdir: …); in the main
         # repo, `.git` is a directory.

@@ -580,7 +580,7 @@ class ToolsBridge:
         return results
 
     def has_pending_detached(self) -> bool:
-        """True while any detached tool run is still in flight."""
+        """Check whether any detached tool run is still in flight."""
         return bool(self._bg_tasks)
 
     @property

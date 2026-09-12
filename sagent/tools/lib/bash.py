@@ -407,7 +407,7 @@ _FILE_PRODUCERS: frozenset[str] = frozenset({"cat", "head", "tail", "sed"})
 
 
 def _value_flags_for(exe: str) -> frozenset[str]:
-    """Flags of ``exe`` whose value is the next word (or the token tail).
+    """Return flags of ``exe`` whose value is the next word (or the token tail).
 
     One definition, two readers: :func:`operands` skips the value so it
     is not counted as a path, and :func:`_denied` stops its letter scan
@@ -608,7 +608,7 @@ def _denied(arg: str, deny: frozenset[str], *, exe: str = "") -> bool:
 
 
 def bounding_sink(inv: Invocation) -> Invocation | None:
-    """The ``head``/``tail`` that bounds ``inv``, anywhere downstream.
+    """Return the ``head``/``tail`` that bounds ``inv``, anywhere downstream.
 
     Reading only the ADJACENT stage lost the bound across a pass-through:
     ``ls | cat | head -5`` and ``ls | head -5`` are the same five rows,
@@ -1357,7 +1357,7 @@ def sed_mutates(args: Sequence[str]) -> bool:
 
 
 def _type_checker_mutates(args: list[str]) -> bool:
-    """True if type-checker args write files or install packages.
+    """Check whether type-checker args write files or install packages.
 
     ``--output``/``-o`` and the report formats are here because a checker
     that reads source still writes when told where to put its report:
@@ -1393,7 +1393,7 @@ def _skip_leading_flags(exe: str, args: list[str]) -> int:
 
 
 def _git_branch_or_tag_safe(args_after_sub: list[str]) -> bool:
-    """True iff args contain no bare positional (positional → mutation).
+    """Check whether args contain no bare positional (positional → mutation).
 
     Handles value-flags by skipping the next token; otherwise any
     non-flag token is a bare positional and unsafe.

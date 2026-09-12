@@ -102,7 +102,7 @@ else:
 logger = logging.getLogger(__name__)
 
 
-_CREDS_PATH = Path.home() / ".claude" / ".credentials.json"
+_CREDS_PATH = Path.home() / ".claude" / ".credentials.json"  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)
 _AUTH_STATUS_TIMEOUT_SEC = (
     5.0  # config-globals: ignore -- retunable auth-status probe timeout
 )
@@ -834,7 +834,9 @@ class _AnthropicCLIModel(ModelDefaults):
 
     @override
     def is_retryable_provider_error(self, error: Exception) -> bool:
-        """Session-persistent mode flags transient ``is_error`` results
+        """Flag transient results as retryable for session-persistent mode.
+
+        Session-persistent mode flags transient ``is_error`` results
         as retryable so ``send_with_retry`` performs an in-place retry
         (sleep → spawn fresh ``claude --print --resume`` → process only
         the entries the per-entry-advance ``_last_sent_index`` hasn't
@@ -1666,7 +1668,7 @@ def _load_cli_credentials_file(path: Path) -> AnthropicCLICredentials | None:
 
 
 def _real_home() -> Path:
-    """The HOME claude uses when sagent doesn't override it.
+    """Return HOME that claude uses when sagent doesn't override it.
 
     Honors ``CLAUDE_CONFIG_DIR`` the way the CLI does: when set, claude
     stores ``projects/`` under it rather than ``$HOME/.claude``. We

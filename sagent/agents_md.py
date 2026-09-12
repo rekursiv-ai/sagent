@@ -388,7 +388,7 @@ class _AgentMdFile:
 
 
 def _dedup_key(p: Path) -> str:
-    """Resolved path string for cycle/duplicate detection."""
+    """Return the resolved path string for cycle/duplicate detection."""
     try:
         return str(p.resolve())
     except OSError:
@@ -458,7 +458,7 @@ def _expand_include_path(ref: str, base_dir: Path) -> Path | None:
     if not ref:
         return None
     if ref.startswith("~/"):
-        return (Path.home() / ref[2:]).resolve()
+        return (Path.home() / ref[2:]).resolve()  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)
     if ref.startswith("/"):
         if ref == "/":
             return None

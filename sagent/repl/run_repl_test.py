@@ -1631,7 +1631,7 @@ def _history_user_texts(runtime: agent_runtime.AgentRuntime) -> list[str]:
 
 
 def _history_has(runtime: agent_runtime.AgentRuntime, needle: str) -> bool:
-    """True when ``needle`` appears in any user message (coalesced or not)."""
+    """Return True when ``needle`` appears in any user message (coalesced or not)."""
     return any(needle in text for text in _history_user_texts(runtime))
 
 

@@ -176,37 +176,46 @@ class MockModelCaps:
         )
 
     def approx_text_tokens(self, text: str) -> int:
+        """Return approximate text token count."""
         return len(text) // 4
 
     def approx_image_tokens(self, data: bytes) -> int:
+        """Return approximate image token count."""
         del data
         return 256
 
     def approx_request_tokens(self, request: ModelRequest) -> int:
+        """Return approximate request token count."""
         return token_count.approx_request_tokens(request, self)
 
     async def actual_text_tokens(self, text: str) -> int:
+        """Return approximate text token count."""
         return self.approx_text_tokens(text)
 
     async def actual_image_tokens(self, data: bytes) -> int:
+        """Return approximate image token count."""
         return self.approx_image_tokens(data)
 
     async def actual_request_tokens(self, request: ModelRequest) -> int:
+        """Return approximate request token count."""
         return self.approx_request_tokens(request)
 
     def is_context_overflow(self, error: Exception) -> bool:
+        """Check whether error is a context overflow."""
         del error
         return False
 
     def is_retryable_provider_error(self, error: Exception) -> bool:
+        """Check whether error is retryable."""
         del error
         return False
 
     def usage_snapshot(self) -> UsageSnapshot | None:
+        """Return usage snapshot."""
         return None
 
     async def close(self) -> None:
-        """No-op teardown -- the mock holds no resources.
+        """Tear down the mock (no-op).
 
         ``close`` is a required ``Model`` contract member; this mock
         satisfies it by returning immediately.
@@ -309,6 +318,7 @@ class FakeAgent:
     """How ``model`` was built; ``None`` mirrors a directly-constructed agent."""
 
     def __post_init__(self) -> None:
+        """Register events observer."""
         self.runtime.observers.append(self.events.append)
 
     def approx_text_tokens(self, text: str) -> int:

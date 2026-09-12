@@ -33,6 +33,7 @@ class Absent:
         return "ABSENT"
 
     def __bool__(self) -> bool:
+        """Return False as a falsy sentinel."""
         return False
 
     @override

@@ -57,7 +57,7 @@ def _claude_available() -> bool:
     status = _claude_auth_status(binary)
     if status is not None:
         return status
-    creds = credentials_path(Path.home() / ".claude" / ".credentials.json", None)
+    creds = credentials_path(Path.home() / ".claude" / ".credentials.json", None)  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)
     return creds.exists()
 
 

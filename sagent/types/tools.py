@@ -39,6 +39,7 @@ class ToolResultPolicy:
     """Aggregate live tool-result budget for one request; ``0`` disables."""
 
     def __post_init__(self) -> None:
+        """Validate policy parameters."""
         if self.persist_tokens < 0:
             raise ValueError(f"persist_tokens must be >= 0, got {self.persist_tokens}")
         if self.message_budget_tokens < 0:

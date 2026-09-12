@@ -449,7 +449,7 @@ def do_switch_effort(agent: Controllable, value: str, printer: Printer | None) -
 
 
 def _reachable_thinking_words(agent: Controllable) -> tuple[str, ...]:
-    """The ``/thinking`` words this model can actually honor.
+    """Return the ``/thinking`` words this model can actually honor.
 
     Each word is checked by applying it, because a word names one axis and
     inherits the rest -- ``redact`` is reachable only when the model can

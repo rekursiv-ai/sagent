@@ -80,7 +80,7 @@ class ScriptedModel:
         return f"{self.capability.model_id}{self.settings.context}"
 
     def spend(self, tokens: TokenCount) -> TokenCost:
-        """An offline model bills nothing."""
+        """Return zero cost; an offline model bills nothing."""
         return self.capability.prices[PriceCatalogProduct()] * tokens
 
     def approx_text_tokens(self, text: str) -> int:

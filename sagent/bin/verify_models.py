@@ -1,9 +1,9 @@
 #!/bin/sh
-# ruff: noqa: EXE003, D300 -- Polyglot shell/Python script.
+# ruff: noqa: EXE003, D300, D205 -- Polyglot shell/Python script.
 # fmt: off
 '''' 2>/dev/null #
 exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
-Verify CAPABILITIES limits against provider APIs and docs.
+Verify CAPABILITIES limits.
 
 Checks that every provider's CAPABILITIES entries have correct
 max_request_tokens and max_response_tokens by querying live APIs or

@@ -1,9 +1,9 @@
 #!/bin/sh
-# ruff: noqa: EXE003, D300, T201 -- Polyglot shell/Python script; CLI reports.
+# ruff: noqa: EXE003, D300, D205, T201 -- Polyglot shell/Python script; CLI reports.
 # fmt: off
 '''' 2>/dev/null #
 exec uv --quiet --project "$(dirname "$0")/../../../.." run --frozen --no-sync python3 "$0" "$@"
-Repair sessions truncated by the overbroad user-coalesce splice.
+Repair truncated sessions.
 
 A coalesce splice that landed on a barrier's payload absorbed that barrier's
 whole-tape mask while injecting only the merged user message, so the resolved
@@ -217,7 +217,7 @@ def repair_session(session_dir: Path) -> bool:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """The main function. Return the process exit code.
+    """Run the repair operation. Return the process exit code.
 
     Args:
       argv: Command-line arguments; ``sys.argv[1:]`` when omitted.

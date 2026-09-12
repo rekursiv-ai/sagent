@@ -346,7 +346,7 @@ def _ensure_valid_cwd(state: ToolState) -> None:
     """Reset ``state.bash_cwd`` to ``start_cwd`` (or ``$HOME``) if it's gone."""
     if not Path(state.bash_cwd).is_dir():
         state.bash_cwd = (
-            state.start_cwd if Path(state.start_cwd).is_dir() else str(Path.home())
+            state.start_cwd if Path(state.start_cwd).is_dir() else str(Path.home())  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)
         )
 
 

@@ -28,6 +28,7 @@ class WorldTool:
 
     @property
     def description(self) -> str:
+        """Return the tool description string."""
         return (
             "Perceive and act in a foggy maze. ONE call = ONE action. Coordinates are "
             "[x,y], (0,0) top-left. Actions:\n"
@@ -59,6 +60,7 @@ class WorldTool:
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
+        """Return a short summary of the tool invocation."""
         act = str(args.get("action", "?"))
         if act == "move":
             return f"world move ({args.get('x')},{args.get('y')})"
@@ -67,9 +69,11 @@ class WorldTool:
         return f"world {act}"
 
     def prompt(self) -> str:
+        """Return the tool prompt for the agent."""
         return ""
 
     def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Return a serialization key for caching (None = not cacheable)."""
         del args
         return None
 
@@ -82,6 +86,7 @@ class WorldTool:
         return None
 
     async def run(self, args: Mapping[str, object]) -> ToolResult:
+        """Execute the tool with the given arguments."""
         async with self.engine.lock:
             aid = self._aid()
             if aid is None:
@@ -137,6 +142,7 @@ class CommsTool:
 
     @property
     def description(self) -> str:
+        """Return the tool description string."""
         if self.mesh:
             return (
                 "Talk to teammates. action='say' (needs to, content) messages ONE agent "
@@ -164,11 +170,13 @@ class CommsTool:
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
+        """Return a short summary of the tool invocation."""
         if str(args.get("action")) == "say":
             return f"comms say → {args.get('to')}"
         return "comms broadcast"
 
     def prompt(self) -> str:
+        """Return the tool prompt for the agent."""
         me = agent_label_var.get("")
         peers = sorted(a for a in agent_registry if a != me)
         if self.mesh:
@@ -180,12 +188,14 @@ class CommsTool:
         return f"You are '{me}'. You may only message the coordinator '{self.coordinator}'."
 
     def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Return a serialization key for caching (None = not cacheable)."""
         del args
         return None
 
     def _deliver(
         self, frm: str, to: str, content: str, *, status: str = "delivered"
     ) -> None:
+        """Deliver a message to a target agent and log it."""
         target = agent_registry.get(to)
         if target is not None:
             target.runtime.inbox.push_back(
@@ -194,6 +204,7 @@ class CommsTool:
         self.engine.emit(frm, "message", to=to, text=content[:160], status=status)
 
     async def run(self, args: Mapping[str, object]) -> ToolResult:
+        """Execute the tool with the given arguments."""
         me = agent_label_var.get("")
         if not me:
             return ToolResult(call_id="", content="no identity.", is_error=True)
@@ -275,6 +286,7 @@ class SpawnTool:
 
     @property
     def description(self) -> str:
+        """Return the tool description string."""
         return (
             "Spawn a NEW teammate on an empty floor tile next to you that you can see "
             "(needs x,y). A lock needs two different agents pressing two plates at once, "
@@ -291,16 +303,20 @@ class SpawnTool:
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
+        """Return a short summary of the tool invocation."""
         return f"spawn ({args.get('x')},{args.get('y')})"
 
     def prompt(self) -> str:
+        """Return the tool prompt for the agent."""
         return ""
 
     def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        """Return a serialization key for caching (None = not cacheable)."""
         del args
         return None
 
     async def run(self, args: Mapping[str, object]) -> ToolResult:
+        """Execute the maze interaction tool."""
         async with self.engine.lock:
             me = agent_label_var.get("")
             if not me or me not in self.engine.world.agents:

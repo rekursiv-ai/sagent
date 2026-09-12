@@ -1548,7 +1548,7 @@ class Agent:
         return "\n\n".join(parts)
 
     def _has_detached_activity(self) -> bool:
-        """True when a tool is detached or a ``DetachedArrived`` turn is present.
+        """Return True when a tool is detached or a ``DetachedArrived`` turn is present.
 
         Proactive: a live ``runtime.detached`` task means a ``[detached]`` stub
         is already in context and a forward delivery is pending, so the note
@@ -1887,7 +1887,7 @@ class Agent:
         self._bg[job_id] = entry
 
     def _has_pending_background(self) -> bool:
-        """True iff a turn-scoped background tool is still running.
+        """Return True iff a turn-scoped background tool is still running.
 
         Feeds the runtime's ``_fully_drained`` gate (and thus ``AgentIdle``
         / one-shot ``Agent.run`` termination). Only ``kind="tool"``,
@@ -2090,7 +2090,7 @@ class Agent:
         )
 
     async def compact_now(self) -> bool:
-        """Synchronous compact path used by ``_AgentModel`` for overflow recovery.
+        """Execute the synchronous compact path used by ``_AgentModel`` for overflow recovery.
 
         Bypasses the inbox (the runtime would cancel our task if we
         pushed ``types.runtime.Compact``). Calls the inner compactor
@@ -2224,7 +2224,7 @@ def _context_overflow_error(
 
 
 def _is_work_idle(history: list[runtime.ModelContextEvent]) -> bool:
-    """True when an ``AgentIdle`` reflects real work, not the boot transition.
+    """Return True when an ``AgentIdle`` reflects real work, not the boot transition.
 
     The runtime publishes its first ``AgentIdle`` at the top of the first
     ``run_forever`` iteration -- before the agent has done any work. An

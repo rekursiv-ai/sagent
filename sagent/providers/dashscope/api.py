@@ -48,7 +48,7 @@ _NON_REASONING_MARKERS = frozenset({"instruct", "coder"})
 
 
 def _is_non_reasoning_variant(model_id: str) -> bool:
-    """True if ``model_id`` carries a non-reasoning marker as a hyphen segment."""
+    """Check whether ``model_id`` carries a non-reasoning marker as a hyphen segment."""
     return bool(_NON_REASONING_MARKERS.intersection(model_id.split("-")))
 
 
@@ -59,7 +59,7 @@ class _DashScopeModel(OpenAICompatModel):
 
     @override
     def _is_effort_model(self, model_id: str) -> bool:
-        """True for Qwen3/QwQ/QvQ models that accept ``enable_thinking``.
+        """Check whether Qwen3/QwQ/QvQ models accept ``enable_thinking``.
 
         A thinking prefix is necessary but not sufficient: the ``-instruct`` /
         ``-coder`` qwen3 ids share the prefix yet are pure non-reasoning models

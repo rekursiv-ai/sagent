@@ -1,10 +1,9 @@
 #!/bin/sh
-# ruff: noqa: EXE003, D300 -- Polyglot shell/Python script.
+# ruff: noqa: EXE003, D300, D205 -- Polyglot shell/Python script.
 # fmt: off
 '''' 2>/dev/null #
-exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@".
-
-Slack service: deterministic message routing to persistent agents.
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
+Slack service.
 
 Connects to Slack via Socket Mode, routes messages to persistent child
 agents using deterministic rules (log channels, @mentions, thread

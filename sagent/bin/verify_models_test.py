@@ -15,7 +15,7 @@ from sagent.types.capability import ModelCapability, ModelLimits
 
 
 def _cap(request: int, response: int) -> ModelCapability:
-    """A capability carrying only the two limits ``compare`` reads."""
+    """Build a capability carrying only the two limits ``compare`` reads."""
     return ModelCapability(
         context=MappingProxyType(
             {"": ModelLimits(max_request_tokens=request, max_response_tokens=response)}

@@ -31,7 +31,7 @@ PRESS_WINDOW = 8  # config-globals: ignore -- game-balance tuning dial
 
 
 def _local_map(world: World, aid: str) -> str:
-    """A small ASCII fog window centred on the agent (@)."""
+    """Return a small ASCII fog window centred on the agent (@)."""
     a = world.agents[aid]
     s = world.sight
     occ = {o.xy for o in world.agents.values() if o.alive and o.id != aid}
@@ -58,6 +58,7 @@ class Engine:
     """Owns the maze state, the logical clock, and the append-only event log."""
 
     def __init__(self, rows: list[str], *, sight: int = 3, model: str = "") -> None:
+        """Initialize the engine."""
         self.rows = rows
         self.world = World(rows, sight=sight)
         self.t = 0  # logical interaction clock (advances one per decision)
@@ -71,14 +72,15 @@ class Engine:
 
     # -- event log + scene -------------------------------------------------
 
-    def emit(self, agent: str, kind: str, **payload: Any) -> None:
+    def emit(self, agent: str, kind: str, **payload: object) -> None:
+        """Emit an event."""
         self.events.append(
             {"seq": self.seq, "t": self.t, "agent": agent, "kind": kind, **payload}
         )
         self.seq += 1
 
     def _build_scene(self, model: str) -> dict[str, Any]:
-        """Static header the replay draws before any event (grid + every plate)."""
+        """Return the static header the replay draws before any event."""
         w = self.world
         by_lock: dict[int, list[tuple[int, int]]] = {}
         for xy, li in w._plate_lock.items():  # noqa: SLF001
@@ -114,15 +116,17 @@ class Engine:
         self.emit(parent or aid, "spawn", child=aid, xy=list(xy))
 
     def all_locks_open(self) -> bool:
+        """Return whether all locks in the world are open."""
         return self.world.all_locks_open()
 
     # -- actions (called under self.lock by the WorldTool) -----------------
 
     def _frozen(self) -> bool:
-        """Once solved, every action no-ops — no post-win events, ticks, or mutation."""
+        """Return whether the puzzle is solved and frozen."""
         return self.solved_seq is not None
 
     def look(self, aid: str) -> str:
+        """Return the agent's view of the surrounding maze."""
         if self._frozen():
             return "the maze is already solved — stop."
         self.t += 1

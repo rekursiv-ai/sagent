@@ -155,7 +155,7 @@ class Arena:
         self.tasks[label] = asyncio.create_task(drive())
 
     def spawn_child(self, parent: str, xy: tuple[int, int]) -> str:
-        """Embody + launch a new helper task (called by the SpawnTool, under the lock)."""
+        """Spawn and launch a new helper task."""
         self._counter += 1
         label = f"a{self._counter}"
         self.engine.add_agent(label, xy, parent=parent)
@@ -163,6 +163,7 @@ class Arena:
         return label
 
     async def run(self, *, wall_s: float = 300.0) -> Engine:
+        """Run the arena until the goal is solved or time runs out."""
         loop = asyncio.get_event_loop()
         self.engine.add_agent(SEED, self.meta["seed_spawn"])
         self._launch(SEED, "seed")
@@ -179,9 +180,11 @@ class Arena:
         return self.engine
 
     async def _shutdown(self) -> None:
-        """Quiesce every agent. The engine froze on solve (no post-win events), so this
-        just stops the tasks; each agent closes its OWN model. Re-gather in a loop because
-        a task mid-spawn can create a new drive task after the first cancel sweep.
+        """Quiesce every agent.
+
+        The engine froze on solve (no post-win events), so this just stops the
+        tasks; each agent closes its OWN model. Re-gather in a loop because a
+        task mid-spawn can create a new drive task after the first cancel sweep.
         """
         for _ in range(5):
             tasks = list(self.tasks.values())

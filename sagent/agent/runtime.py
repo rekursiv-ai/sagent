@@ -612,7 +612,7 @@ class GatedDeque[T]:
         return self._gate is not None
 
     def empty(self) -> bool:
-        """True iff no items are queued. Snapshot at call time.
+        """Return True iff no items are queued. Snapshot at call time.
 
         Used by ``AgentRuntime._fully_drained`` to decide whether to
         publish ``AgentIdle`` before the next blocking ``drain()``.
@@ -1205,7 +1205,7 @@ class AgentRuntime:
         return self.accepts_user_dispatch and not self.cohort and not self.running_tools
 
     def _fully_drained(self) -> bool:
-        """True iff the agent has no work to do and no gate is armed.
+        """Return True iff the agent has no work to do and no gate is armed.
 
         Companion to :attr:`is_idle` -- this is the strict
         ``AgentIdle``-publish gate; ``is_idle`` is the looser
@@ -1427,8 +1427,7 @@ class AgentRuntime:
         return ref
 
     def _validate_no_alive_mask_overlap(self, new_mask: tuple[MaskRange, ...]) -> None:
-        """Reject ``new_mask`` if it shares any position with a currently
-        alive splice's mask.
+        """Reject ``new_mask`` if it shares any position with a live splice's mask.
 
         A splice is alive iff its record ref isn't covered by another
         alive splice's mask. The rule is: each tape ref has at most one
@@ -1739,7 +1738,7 @@ class AgentRuntime:
         self._pending_commits.append(_PendingCommit(kind="forward", result=result))
 
     def _inslot_result_is_terminal(self, call_id: str) -> bool:
-        """True when ``call_id``'s in-slot ``ToolResult`` is a final answer.
+        """Return True when ``call_id``'s in-slot ``ToolResult`` is a final answer.
 
         Reads the call's existing placeholder/result record (O(1) via
         ``_placeholder_refs``). ``CANCELLED`` / ``FINAL`` are terminal (the
@@ -1813,7 +1812,7 @@ class AgentRuntime:
                 self.publish(self._append_or_coalesce_user(commit.user))
 
     def _has_waking_commit(self) -> bool:
-        """True when a queued commit should itself drive a round.
+        """Return True when a queued commit should itself drive a round.
 
         Only ``forward`` (a completed detached tool's real result) wakes the
         model: a finished tool is worth surfacing promptly. ``pairing`` /
@@ -1823,8 +1822,7 @@ class AgentRuntime:
         return any(c.kind == "forward" for c in self._pending_commits)
 
     def _commit_pairing(self, result: ToolResult) -> None:
-        """Insert ``result`` immediately after the ``AssistantMessage`` that
-        emitted its ``call_id``, pairing the dangling ``tool_use`` in-slot.
+        """Insert ``result`` after its ``AssistantMessage``, pairing the tool-use.
 
         Slot placement (not tail append) is load-bearing: an intervening user
         turn or a forward detached delivery must not strand the ``tool_use``

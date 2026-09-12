@@ -169,9 +169,10 @@ class SummaryCompactor:
 
     @property
     def proactive(self) -> bool:
-        """Whether the post-compaction continuation tells the model to resume
-        autonomously (vs. await the user). Controls only the resume-directive
-        wording in :func:`build_continuation`; resume itself always occurs.
+        """Indicate whether to resume autonomously post-compaction.
+
+        Controls only the resume-directive wording in :func:`build_continuation`;
+        resume itself always occurs.
         """
         return self._proactive
 

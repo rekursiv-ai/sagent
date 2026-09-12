@@ -92,7 +92,7 @@ else:
 logger = logging.getLogger(__name__)
 
 
-_GEMINI_DIR = Path.home() / ".gemini"
+_GEMINI_DIR = Path.home() / ".gemini"  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)
 _CREDS_PATH = _GEMINI_DIR / "oauth_creds.json"
 _CREDENTIALS_SCHEMA: Final[JSON] = {
     "type": "object",

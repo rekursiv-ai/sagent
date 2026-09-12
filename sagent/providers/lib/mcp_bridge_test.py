@@ -3,17 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import cast, override
+from typing import TYPE_CHECKING, cast, override
 
 import asyncio
 import base64
 import json
 import urllib.error
 import urllib.request
-
-from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
-from mcp.types import ImageContent, TextContent
 
 import pytest
 
@@ -26,6 +22,23 @@ from sagent.types.runtime import (
     ToolResult,
 )
 from sagent.types.tools import Tool
+
+
+if TYPE_CHECKING:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+    from mcp.types import ImageContent, TextContent
+else:
+    from wrapt import lazy_import
+
+    # The subject module defers mcp the same way; importing it eagerly here
+    # would put the 430ms back onto every worker's collection.
+    ClientSession = lazy_import("mcp", "ClientSession")
+    streamable_http_client = lazy_import(
+        "mcp.client.streamable_http", "streamable_http_client"
+    )
+    ImageContent = lazy_import("mcp.types", "ImageContent")
+    TextContent = lazy_import("mcp.types", "TextContent")
 
 
 class _EchoTool:

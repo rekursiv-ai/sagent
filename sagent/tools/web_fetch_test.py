@@ -36,7 +36,7 @@ def _addrinfo(ip: str) -> list[AddrInfo]:
 
 
 def _result(text: str, *, kind: str = "html") -> FetchResult:
-    """A ``FetchResult`` stub for patching ``fetch_web`` in ``run`` tests."""
+    """Return a ``FetchResult`` stub for patching ``fetch_web`` in ``run`` tests."""
     return FetchResult(text=text, url="https://x", kind=kind, truncated=False)
 
 

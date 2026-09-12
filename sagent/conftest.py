@@ -23,7 +23,7 @@ from sagent.tools.agent_spawn import _persistent_tasks
 
 # In the OSS export the flattened top-level ``sagent/types`` masks stdlib
 # ``types``, crashing xdist workers.
-os.environ.setdefault("PYTHONSAFEPATH", "1")
+os.environ["PYTHONSAFEPATH"] = "1"
 
 
 __all__ = ["isolate_user_dirs", "pytest_collection_modifyitems"]

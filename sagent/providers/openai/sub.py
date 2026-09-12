@@ -138,7 +138,7 @@ _CLIENT_ID: Final = "app_EMoamEEZ73f0CkXaXp7hrann"
 _TOKEN_URL: Final = "https://auth.openai.com/oauth/token"  # noqa: S105 -- not a secret; OAuth endpoint URL
 _AUTHORIZE_URL: Final = "https://auth.openai.com/oauth/authorize"
 _BASE_URL: Final = "https://chatgpt.com/backend-api/codex"
-DEFAULT_CREDENTIALS_PATH = Path.home() / ".codex" / "auth.json"
+DEFAULT_CREDENTIALS_PATH = Path.home() / ".codex" / "auth.json"  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)
 _SCOPES: Final = (
     "openid profile email offline_access api.connectors.read api.connectors.invoke"
 )

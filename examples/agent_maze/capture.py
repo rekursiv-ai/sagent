@@ -15,7 +15,10 @@ import json
 
 from examples.agent_maze.arena import Arena
 from examples.agent_maze.engine import Engine
-from examples.agent_maze.world import make_spawn_level
+from examples.agent_maze.world import (
+    SpawnMeta,
+    make_spawn_level,
+)
 from sagent.lib.userdirs import config_dir
 from sagent.providers import Anthropic
 from sagent.types.model import Model
@@ -26,6 +29,7 @@ MODEL = "claude-sonnet-4-6"  # config-globals: ignore -- model choice, user retu
 
 
 def _key() -> str:
+    """Return the API key."""
     return (
         (config_dir() / "rekursiv-ai" / "sagent" / "anthropic_api_key")
         .read_text()
@@ -39,6 +43,7 @@ def _make_model() -> Model:
 
 
 def _lineage(eng: Engine) -> dict[str, str]:
+    """Return agent parent-child relationships."""
     return {
         e["child"]: e["agent"]
         for e in eng.events
@@ -47,6 +52,7 @@ def _lineage(eng: Engine) -> dict[str, str]:
 
 
 def _roster(eng: Engine) -> list[str]:
+    """Return the list of agent names."""
     roster: list[str] = []
     for e in eng.events:
         if e["kind"] == "spawn" and e.get("child") and e["child"] not in roster:
@@ -55,6 +61,7 @@ def _roster(eng: Engine) -> list[str]:
 
 
 def metrics(eng: Engine) -> dict[str, Any]:
+    """Return metrics about the engine state."""
     ev = eng.events
     msgs = [e for e in ev if e["kind"] == "message" and e.get("status") == "delivered"]
     presses = [e for e in ev if e["kind"] == "press"]
@@ -77,6 +84,7 @@ def metrics(eng: Engine) -> dict[str, Any]:
 
 
 def arm_payload(eng: Engine) -> dict[str, Any]:
+    """Return the arm payload."""
     return {
         "scene": eng.scene,
         "events": eng.events,
@@ -88,14 +96,27 @@ def arm_payload(eng: Engine) -> dict[str, Any]:
 
 async def run_arm(
     rows: list[str],
-    meta: Any,
+    meta: SpawnMeta,
     *,
     mesh: bool,
     told: bool,
     wall_s: float = 300.0,
-    **kw: Any,
+    max_agents: int = 8,
+    rounds: int = 28,
+    budget_t: int = 140,
 ) -> Engine:
-    arena = Arena(rows, meta, _make_model, mesh=mesh, told=told, model_id=MODEL, **kw)
+    """Run an arm and return the results."""
+    arena = Arena(
+        rows,
+        meta,
+        _make_model,
+        mesh=mesh,
+        told=told,
+        model_id=MODEL,
+        max_agents=max_agents,
+        rounds=rounds,
+        budget_t=budget_t,
+    )
     return await arena.run(wall_s=wall_s)
 
 
@@ -105,7 +126,9 @@ def _interactions(eng: Engine) -> int:
 
 
 def pick(engs: list[Engine], *, best: bool) -> Engine:
-    """Best mesh: solved, then MOST locks opened, then fewest interactions.
+    """Return the best/worst engine by solve/lock/interaction metrics.
+
+    Best mesh: solved, then MOST locks opened, then fewest interactions.
     Worst tree: least locks opened, then most interactions.
     """
     if best:
@@ -121,8 +144,16 @@ def pick(engs: list[Engine], *, best: bool) -> Engine:
 
 
 async def capture(
-    *, num_locks: int = 4, decoys: int = 2, k: int = 2, write: bool = True, **kw: Any
+    *,
+    num_locks: int = 4,
+    decoys: int = 2,
+    k: int = 2,
+    write: bool = True,
+    max_agents: int = 8,
+    rounds: int = 28,
+    budget_t: int = 140,
 ) -> dict[str, Any]:
+    """Run all coordination modes and return captured results."""
     rows, meta = make_spawn_level(num_locks=num_locks, decoys=decoys)
     data: dict[str, Any] = {
         "meta": {
@@ -139,8 +170,16 @@ async def capture(
         arms: dict[str, Any] = {}
         for arm, best in (("mesh", True), ("tree", False)):
             engs: list[Engine] = [
-                await run_arm(rows, meta, mesh=arm == "mesh", told=told, **kw)
-                for _i in range(k)
+                await run_arm(
+                    rows,
+                    meta,
+                    mesh=arm == "mesh",
+                    told=told,
+                    max_agents=max_agents,
+                    rounds=rounds,
+                    budget_t=budget_t,
+                )
+                for _ in range(k)
             ]
             chosen = pick(engs, best=best)
             arms[arm] = arm_payload(chosen)

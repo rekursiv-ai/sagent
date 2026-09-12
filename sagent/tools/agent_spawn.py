@@ -917,7 +917,7 @@ class AgentSpawn:
         )
 
     def _inherit_compactor(self, parent_agent: _Agent | None) -> Compactor | None:
-        """``factory arg → parent → None`` fall-through for the compactor.
+        """Inherit compactor: ``factory arg → parent → None`` fall-through.
 
         One accessor per knob rather than a ``getattr(self, f"_{name}")``
         walk: the stringly-keyed form returns ``object``, which erased the
@@ -930,7 +930,7 @@ class AgentSpawn:
         return parent_agent.compactor
 
     def _inherit_max_attempts(self, parent_agent: _Agent | None) -> int | None:
-        """``factory arg → parent → None`` fall-through for the retry count."""
+        """Inherit retry count: ``factory arg → parent → None`` fall-through."""
         if self._max_attempts is not None:
             return self._max_attempts
         if parent_agent is None:

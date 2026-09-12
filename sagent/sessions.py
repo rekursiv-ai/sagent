@@ -85,8 +85,8 @@ def restrict_path(path: Path, mode: int) -> None:
 # ``~/.claude`` squat is the symlink case. ``~/.claude`` is also where the
 # symlink resolves to, so the two are disambiguated by whether ``~/.sagent`` is
 # a real dir or a symlink.
-_LEGACY_SAGENT_HOME = Path.home() / ".sagent"
-_LEGACY_CLAUDE_HOME = Path.home() / ".claude"
+_LEGACY_SAGENT_HOME = Path.home() / ".sagent"  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)
+_LEGACY_CLAUDE_HOME = Path.home() / ".claude"  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)
 
 
 def _copy_tree_merge(src: Path, dst: Path) -> None:

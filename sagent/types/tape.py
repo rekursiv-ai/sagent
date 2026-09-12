@@ -130,6 +130,7 @@ class TapeRef:
     """Position of the record in its session's tape (0-based)."""
 
     def __post_init__(self) -> None:
+        """Validate ordinal is a non-negative integer."""
         # A bool is an int in Python, and a JSON ``true`` decoded to ordinal 1,
         # colliding with the record actually at position 1. A negative ordinal
         # is unreachable by every mask range (they start at ``lo >= 0``), so
@@ -165,6 +166,7 @@ class MaskRange:
     """Inclusive upper ordinal (``>= lo``)."""
 
     def __post_init__(self) -> None:
+        """Validate range ordinals are valid."""
         # Tape ordinals are minted monotonically from 0; a negative endpoint is
         # malformed wire/legacy data, not a valid range. Reject at the trust
         # boundary so downstream ``contains`` / ``overlaps`` never silently
@@ -179,11 +181,11 @@ class MaskRange:
             )
 
     def contains(self, ref: TapeRef) -> bool:
-        """True iff ``ref`` falls within this range's session and ordinals."""
+        """Check whether ``ref`` falls within this range's session and ordinals."""
         return ref.session_id == self.session_id and self.lo <= ref.ordinal <= self.hi
 
     def overlaps(self, other: MaskRange) -> bool:
-        """True iff two ranges in the same session share any ordinal."""
+        """Check whether two ranges in the same session share any ordinal."""
         return (
             self.session_id == other.session_id
             and self.lo <= other.hi

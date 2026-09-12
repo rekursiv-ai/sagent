@@ -35,7 +35,7 @@ def _capability(
 
 
 def _thinking() -> ModelSettings:
-    """A model that thinks, with the reasoning currently on."""
+    """Return a model that thinks, with the reasoning currently on."""
     return ModelSettings(
         capability=_capability(), thinking_budget="auto", thinking_output="text"
     )

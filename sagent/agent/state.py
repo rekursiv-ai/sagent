@@ -100,6 +100,7 @@ class ToolState:
     """Resolved-path → content captured at last read; powers change diffs."""
 
     def __post_init__(self) -> None:
+        """Set bash_cwd if not provided."""
         if not self.bash_cwd:
             self.bash_cwd = self.start_cwd
 

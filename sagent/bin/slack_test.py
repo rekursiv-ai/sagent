@@ -79,7 +79,7 @@ def _register(*names: str) -> dict[str, FakeAgent]:
 
 
 def _drain_inbox(agent: FakeAgent) -> list[RuntimeEvent]:
-    """Synchronously drain the agent runtime inbox for assertions."""
+    """Drain the agent runtime inbox synchronously for assertions."""
     out: list[RuntimeEvent] = []
     queue = agent.runtime.inbox._queue
     while not queue.empty():

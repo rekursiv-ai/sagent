@@ -147,6 +147,7 @@ class AgentSettings:
     """Hard spend cap for this agent's own tree; ``None`` for no cap."""
 
     def __post_init__(self) -> None:
+        """Validate window parameters."""
         if self.max_request_tokens <= 0:
             raise ValueError(
                 f"max_request_tokens must be > 0, got {self.max_request_tokens}"
@@ -470,7 +471,7 @@ class Model(Protocol):
         ...
 
     async def actual_text_tokens(self, text: str) -> int:
-        """Provider's best-truth input-token count for a text string.
+        """Return provider's best-truth input-token count for a text string.
 
         Asynchronous because some providers must roundtrip
         (Anthropic ``messages.count_tokens``, Google ``models.countTokens``).
@@ -487,7 +488,7 @@ class Model(Protocol):
         ...
 
     async def actual_image_tokens(self, data: bytes) -> int:
-        """Provider's best-truth input-token count for an image.
+        """Return provider's best-truth input-token count for an image.
 
         Args:
           data: Raw image bytes.
@@ -499,7 +500,7 @@ class Model(Protocol):
         ...
 
     async def actual_request_tokens(self, request: ModelRequest) -> int:
-        """Provider's best-truth input-token count for a full request.
+        """Return provider's best-truth input-token count for a full request.
 
         Falls back to ``approx_request_tokens`` on providers without a
         truth source (CLI variants without tokenizer access).
@@ -635,6 +636,7 @@ class ModelRecipe:
     """Optional account override (used by account auth)."""
 
     def __post_init__(self) -> None:
+        """Validate recipe fields."""
         # Empty ``provider``/``auth``/``model_id`` produce a degenerate
         # model that the provider factory rejects with a confusing
         # "no such provider" error far from the construction site.

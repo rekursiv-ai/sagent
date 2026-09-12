@@ -54,7 +54,7 @@ class PdfError(Exception):
 
 
 def is_pdf(path: Path) -> bool:
-    """True iff ``path`` begins with the ``%PDF-`` signature (5 bytes)."""
+    """Check whether ``path`` begins with the ``%PDF-`` signature (5 bytes)."""
     try:
         with path.open("rb") as f:
             return f.read(len(PDF_MAGIC)) == PDF_MAGIC

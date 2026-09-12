@@ -5,12 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from types import MappingProxyType
-from typing import cast, override
+from typing import TYPE_CHECKING, cast, override
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from anthropic.types import MessageParam
-
-import anthropic as anthropic_sdk
 import httpx2
 import pytest
 
@@ -64,8 +61,21 @@ from sagent.types.runtime import (
 from sagent.types.tools import Tool
 
 
+if TYPE_CHECKING:
+    from anthropic.types import MessageParam
+
+    import anthropic as anthropic_sdk
+else:
+    from wrapt import lazy_import
+
+    # The subject module defers the SDK (569ms cold); importing it eagerly
+    # here would put that back onto every worker's collection.
+    anthropic_sdk = lazy_import("anthropic")
+    MessageParam = lazy_import("anthropic.types", "MessageParam")
+
+
 def _free_model() -> _AnthropicModel:
-    """A model whose every rate is zero -- cost is not what these assert."""
+    """Return a model whose every rate is zero -- cost is not what these assert."""
     m = Anthropic.from_key("k").model("claude-opus-4-7")
     m._capability = replace(
         m.capability, prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()})

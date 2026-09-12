@@ -69,7 +69,7 @@ class _TrivialModel:
 
 
 def _make_runtime() -> agent_runtime.AgentRuntime:
-    """A REAL ``AgentRuntime`` with a list-backed inbox for poking state.
+    """Return a REAL ``AgentRuntime`` with a list-backed inbox for poking state.
 
     The dispatch predicates (``is_idle`` / ``accepts_user_dispatch`` /
     ``accepts_deferred_dispatch``) are the real ones -- never copied --
@@ -83,7 +83,7 @@ def _make_runtime() -> agent_runtime.AgentRuntime:
 
 
 def _sentinel_task() -> asyncio.Task[None]:
-    """A stand-in ``Task`` for poking ``model_call`` / ``compact_task``.
+    """Return a stand-in ``Task`` for poking ``model_call`` / ``compact_task``.
 
     The dispatch predicates only test these for ``is not None``; a real
     ``Task`` is never awaited here, so an opaque sentinel typed as the

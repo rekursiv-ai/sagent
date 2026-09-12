@@ -626,7 +626,7 @@ def _build_user_message(
 
 
 def _is_image_mime(descriptor: str) -> bool:
-    """True for image content types (no descriptor registry needed)."""
+    """Check whether a type is an image content type (no descriptor registry needed)."""
     return descriptor.startswith("image/")
 
 

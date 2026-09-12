@@ -45,6 +45,7 @@ class ReattachPolicy:
     """Total token budget across every re-attached file; ``0`` disables."""
 
     def __post_init__(self) -> None:
+        """Validate policy parameters."""
         if self.count < 0:
             raise ValueError(f"count must be >= 0, got {self.count}")
         if self.max_tokens < 0:

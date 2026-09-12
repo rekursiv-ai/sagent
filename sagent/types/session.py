@@ -28,6 +28,7 @@ class Session:
     """Directory holding the transcript; ``None`` disables persistence."""
 
     def __post_init__(self) -> None:
+        """Validate session ID and directory."""
         if not self.id:
             raise ValueError("Session.id must be non-empty")
         if self.dir is not None and self.dir.name != self.id:

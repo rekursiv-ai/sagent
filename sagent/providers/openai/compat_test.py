@@ -49,7 +49,7 @@ from sagent.types.runtime import (
 
 
 def _priced_model(prices: PriceCatalog) -> OpenAICompatModel:
-    """A model carrying ``prices`` and otherwise every capability default."""
+    """Return a model carrying ``prices`` and otherwise every capability default."""
     capability = ModelCapability(prices=prices)
     return OpenAICompatModel(
         provider=OpenAICompat.from_key("k"),
@@ -59,7 +59,7 @@ def _priced_model(prices: PriceCatalog) -> OpenAICompatModel:
 
 
 def _free_model() -> OpenAICompatModel:
-    """A model whose every rate is zero -- cost is not what these assert."""
+    """Return a model whose every rate is zero -- cost is not what these assert."""
     return _priced_model(PriceCatalog({PriceCatalogProduct(): TokenPrice()}))
 
 
@@ -77,7 +77,7 @@ def _billed_model() -> OpenAICompatModel:
 
 
 def _tiktoken_model() -> OpenAICompatModel:
-    """An OpenAI model whose text counts use the local tiktoken encoding."""
+    """Return an OpenAI model whose text counts use the local tiktoken encoding."""
     capability = ModelCapability(
         model_id="gpt-5.6-sol",
         prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),

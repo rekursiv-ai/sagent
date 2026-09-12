@@ -3825,7 +3825,7 @@ class _TokenIdleByteTightModel(StubModel):
 def _sent_turn(
     attachment: BytesMessage,
 ) -> list[ModelContextEvent]:
-    """A compactable (already-sent) turn: AM tool_call + its ToolResult.
+    """Build a compactable (already-sent) turn: AM tool_call + its ToolResult.
 
     The byte gate only counts attachments in the prefix up to and including
     the last ``AssistantMessage`` -- the bytes that rode in a prior request

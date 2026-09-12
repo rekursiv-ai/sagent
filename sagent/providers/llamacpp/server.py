@@ -276,13 +276,13 @@ def _start_log_reader(proc: subprocess.Popen[str], out: Queue[str]) -> None:
 
 
 def _looks_like_path(value: str) -> bool:
-    """True if ``value`` looks like a filesystem path or a GGUF model file."""
+    """Check whether ``value`` looks like a filesystem path or a GGUF model file."""
     return value.startswith(("/", "./", "../", "~/")) or value.endswith(".gguf")
 
 
 def _docker_server() -> str | None:
     """Return Docker Desktop's bundled llama-server path if present."""
-    path = Path.home() / ".docker/bin/inference/llama-server"
+    path = Path.home() / ".docker/bin/inference/llama-server"  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)
     return str(path) if path.exists() else None
 
 
@@ -300,7 +300,7 @@ def _free_port() -> int:
 
 
 def _http_ok(url: str) -> bool:
-    """True if a GET on ``url`` returns a 2xx response within 200ms."""
+    """Check whether a GET on ``url`` returns a 2xx response within 200ms."""
     try:
         with urllib.request.urlopen(url, timeout=0.2) as response:  # noqa: S310 -- local/provider-supplied readiness URL only.
             return bool(200 <= response.status < 300)

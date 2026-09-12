@@ -90,7 +90,7 @@ def test_the_effort_predicate_agrees_with_every_row(model_id: str) -> None:
 
 
 def _model(model_id: str, effort: ThinkingEffort | None = None) -> _DashScopeModel:
-    """A model with ``effort`` selected, or its own narrowest when omitted.
+    """Return a model with ``effort`` selected, or its own narrowest when omitted.
 
     Not defaulted to ``"none"``: a ``-thinking`` row withholds that value,
     so forcing it would make the helper unusable on exactly the rows whose
