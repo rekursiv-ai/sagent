@@ -37,13 +37,15 @@ class FreeableInputBuffer:
     def __hash__(self) -> int: ...
 
 def get_freeable_input_buf(
-    nodes: list[BaseSchedulerNode], graph_inputs: OrderedSet[str]
+    nodes: list[BaseSchedulerNode],
+    graph_inputs: OrderedSet[str],
 ) -> dict[str, FreeableInputBuffer]: ...
 def compute_size_for_scheduler_buffer(
     name_to_buf: dict[str, SchedulerBuffer],
 ) -> dict[str, tuple[int, int]]: ...
 def assign_memory_planning_info_for_scheduler_buffers(
-    nodes: list[BaseSchedulerNode], name_to_buf: dict[str, SchedulerBuffer]
+    nodes: list[BaseSchedulerNode],
+    name_to_buf: dict[str, SchedulerBuffer],
 ) -> None: ...
 def assign_memory_planning_info_for_scheduler_nodes(
     nodes: list[BaseSchedulerNode],

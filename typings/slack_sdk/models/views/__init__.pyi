@@ -38,7 +38,9 @@ class View(JsonObject):
 class ViewState(JsonObject):
     logger = ...
     def __init__(
-        self, *, values: dict[str, dict[str, dict | ViewStateValue]]
+        self,
+        *,
+        values: dict[str, dict[str, dict | ViewStateValue]],
     ) -> None: ...
     def to_dict(self, *args) -> dict[str, dict[str, dict[str, dict]]]: ...
 

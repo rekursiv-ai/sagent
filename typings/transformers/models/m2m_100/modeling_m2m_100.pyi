@@ -19,11 +19,15 @@ from ...utils.deprecation import deprecate_kwarg
 logger = ...
 
 def shift_tokens_right(
-    input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: torch.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ):  # -> Tensor:
     ...
 def create_position_ids_from_input_ids(
-    input_ids, padding_idx, past_key_values_length=...
+    input_ids,
+    padding_idx,
+    past_key_values_length=...,
 ): ...
 
 class M2M100ScaledWordEmbedding(nn.Embedding):
@@ -39,15 +43,23 @@ class M2M100ScaledWordEmbedding(nn.Embedding):
 
 class M2M100SinusoidalPositionalEmbedding(nn.Module):
     def __init__(
-        self, num_positions: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_positions: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ) -> None: ...
     def make_weights(
-        self, num_embeddings: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ):  # -> None:
         ...
     @staticmethod
     def get_embedding(
-        num_embeddings: int, embedding_dim: int, padding_idx: int | None = ...
+        num_embeddings: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ):  # -> Tensor:
         ...
     @torch.no_grad()
@@ -59,7 +71,9 @@ class M2M100SinusoidalPositionalEmbedding(nn.Module):
     ):  # -> Tensor | Any:
         ...
     def create_position_ids_from_inputs_embeds(
-        self, inputs_embeds, past_key_values_length
+        self,
+        inputs_embeds,
+        past_key_values_length,
     ): ...
 
 def eager_attention_forward(
@@ -141,7 +155,9 @@ class M2M100PreTrainedModel(PreTrainedModel):
 
 class M2M100Encoder(M2M100PreTrainedModel):
     def __init__(
-        self, config: M2M100Config, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: M2M100Config,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -157,7 +173,9 @@ class M2M100Encoder(M2M100PreTrainedModel):
 
 class M2M100Decoder(M2M100PreTrainedModel):
     def __init__(
-        self, config: M2M100Config, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: M2M100Config,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     def forward(
         self,

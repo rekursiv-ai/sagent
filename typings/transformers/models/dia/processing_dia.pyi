@@ -44,7 +44,9 @@ class DiaProcessor(ProcessorMixin):
         **kwargs: Unpack[DiaProcessorKwargs],
     ) -> torch.Tensor: ...
     def get_audio_prompt_len(
-        self, decoder_attention_mask: torch.Tensor, **kwargs: Unpack[DiaProcessorKwargs]
+        self,
+        decoder_attention_mask: torch.Tensor,
+        **kwargs: Unpack[DiaProcessorKwargs],
     ) -> int: ...
     def save_audio(
         self,

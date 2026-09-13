@@ -23,7 +23,7 @@ import pytest
 # slack_sdk ships only in the optional `slack` extra; skip when it is absent.
 pytest.importorskip("slack_sdk")
 
-from sagent.agent import Agent as RealAgent
+from sagent.agent import Agent
 from sagent.agent.state import agent_registry
 from sagent.bin.slack import (
     SlackAdapter,
@@ -126,10 +126,10 @@ def _make_adapter(
 ) -> tuple[SlackAdapter, _SpySlack]:
     """Build a ``SlackAdapter`` with all external dependencies stubbed out."""
     adapter: SlackAdapter = object.__new__(SlackAdapter)
-    adapter._bot_token = "xoxb-fake"  # noqa: S105 -- test credential
+    adapter._bot_token = "xoxb-fake"  # noqa: S105 -- Fixture credential in a test; never a real secret.
     adapter._self_user_id = "UBOT"
-    adapter._persona_dir = persona_dir or Path("/tmp/no-personas")  # noqa: S108 -- test fallback path
-    adapter._session_dir = tmp_path or Path("/tmp/no-session")  # noqa: S108 -- test fallback path
+    adapter._persona_dir = persona_dir or Path("/tmp/no-personas")  # noqa: S108 -- Path is a fixture string, never opened.
+    adapter._session_dir = tmp_path or Path("/tmp/no-session")  # noqa: S108 -- Path is a fixture string, never opened.
     adapter._log_prefix = ""
     adapter._log_channels = {}
     adapter._log_channel_owners = {}
@@ -270,18 +270,18 @@ class TestListPersonas:
 class TestAgentSlack:
     def test_prompt_lists_peers(self) -> None:
         _ = _register("Sara", "Bob")
-        tool = _AgentSlack(token="x", username="Sara")  # noqa: S106 -- test credential
+        tool = _AgentSlack(token="x", username="Sara")  # noqa: S106 -- Fixture credential in a test; never a real secret.
         p = tool.prompt()
         assert "Bob" in p
         assert "Sara" not in p
 
     def test_prompt_empty_when_alone(self) -> None:
         _ = _register("Sara")
-        tool = _AgentSlack(token="x", username="Sara")  # noqa: S106 -- test credential
+        tool = _AgentSlack(token="x", username="Sara")  # noqa: S106 -- Fixture credential in a test; never a real secret.
         assert tool.prompt() == ""
 
     def test_prompt_empty_no_agents(self) -> None:
-        tool = _AgentSlack(token="x", username="Sara")  # noqa: S106 -- test credential
+        tool = _AgentSlack(token="x", username="Sara")  # noqa: S106 -- Fixture credential in a test; never a real secret.
         assert tool.prompt() == ""
 
 
@@ -687,7 +687,7 @@ class TestRouteReactions:
         _ = _register("Sara")
         # No item.
         await adapter._route(
-            {"type": "reaction_added", "user": "UHUMAN", "reaction": "heart"}
+            {"type": "reaction_added", "user": "UHUMAN", "reaction": "heart"},
         )
         # No reaction.
         await adapter._route(
@@ -695,7 +695,7 @@ class TestRouteReactions:
                 "type": "reaction_added",
                 "user": "UHUMAN",
                 "item": {"type": "message", "channel": "C123", "ts": "1.0"},
-            }
+            },
         )
         # No user.
         await adapter._route(
@@ -703,7 +703,7 @@ class TestRouteReactions:
                 "type": "reaction_added",
                 "reaction": "heart",
                 "item": {"type": "message", "channel": "C123", "ts": "1.0"},
-            }
+            },
         )
 
     @pytest.mark.anyio
@@ -799,11 +799,11 @@ class TestRenderEvent:
         # ``AssistantMessage`` isn't in the ``RuntimeEvent`` union but the
         # renderer accepts it for the cases where the agent runtime
         # publishes assistant messages as part of an observer fanout.
-        ev: RuntimeEvent = AssistantMessage(text="hello")  # ty: ignore[invalid-assignment]  # pyright: ignore[reportAssignmentType]  -- see comment
+        ev: RuntimeEvent = AssistantMessage(text="hello")  # ty: ignore[invalid-assignment] -- The fixture uses a runtime event outside the narrow static union.  # pyright: ignore[reportAssignmentType] -- The fixture uses a runtime event outside the narrow static union.
         assert _render_event(ev) == "hello"
 
     def test_assistant_message_empty(self) -> None:
-        ev: RuntimeEvent = AssistantMessage(text="   ")  # ty: ignore[invalid-assignment]  # pyright: ignore[reportAssignmentType]  -- see comment above
+        ev: RuntimeEvent = AssistantMessage(text="   ")  # ty: ignore[invalid-assignment] -- The fixture uses a runtime event outside the narrow static union.  # pyright: ignore[reportAssignmentType] -- The fixture uses a runtime event outside the narrow static union.
         assert _render_event(ev) is None
 
     def test_tool_result_with_hint(self) -> None:
@@ -960,7 +960,9 @@ class TestResolveRouterLogChannel:
         adapter, _ = _make_adapter()
         adapter._router_log_channel = "router-log"
         with patch.object(
-            SlackAdapter, "_find_channel", new=AsyncMock(return_value="C_FOUND")
+            SlackAdapter,
+            "_find_channel",
+            new=AsyncMock(return_value="C_FOUND"),
         ):
             await adapter._resolve_router_log_channel()
         assert adapter._router_log_channel == "C_FOUND"
@@ -971,7 +973,9 @@ class TestResolveRouterLogChannel:
         adapter._router_log_channel = "router-log"
         spy.channel_maker = AsyncMock(return_value="id=C_NEW")
         with patch.object(
-            SlackAdapter, "_find_channel", new=AsyncMock(return_value=None)
+            SlackAdapter,
+            "_find_channel",
+            new=AsyncMock(return_value=None),
         ):
             await adapter._resolve_router_log_channel()
         assert adapter._router_log_channel == "C_NEW"
@@ -984,7 +988,9 @@ class TestResolveRouterLogChannel:
             return_value=ToolResult(call_id="", content="forbidden", is_error=True),
         )
         with patch.object(
-            SlackAdapter, "_find_channel", new=AsyncMock(return_value=None)
+            SlackAdapter,
+            "_find_channel",
+            new=AsyncMock(return_value=None),
         ):
             await adapter._resolve_router_log_channel()
         assert adapter._router_log_channel == ""
@@ -995,7 +1001,9 @@ class TestResolveRouterLogChannel:
         adapter._router_log_channel = "router-log"
         spy.channel_maker = AsyncMock(return_value="weird")
         with patch.object(
-            SlackAdapter, "_find_channel", new=AsyncMock(return_value=None)
+            SlackAdapter,
+            "_find_channel",
+            new=AsyncMock(return_value=None),
         ):
             await adapter._resolve_router_log_channel()
         assert adapter._router_log_channel == ""
@@ -1047,7 +1055,9 @@ class TestHandle:
         req.envelope_id = "env1"
         req.payload = {"event": {"type": "message", "text": "hi"}}
         with patch.object(
-            SlackAdapter, "_route", new=AsyncMock(side_effect=RuntimeError("nope"))
+            SlackAdapter,
+            "_route",
+            new=AsyncMock(side_effect=RuntimeError("nope")),
         ):
             await adapter._handle(client, req)  # No crash; exception swallowed.
 
@@ -1064,7 +1074,9 @@ class TestEnsureLogChannel:
     async def test_creates_new(self) -> None:
         adapter, _ = _make_adapter()
         with patch.object(
-            Slack, "create_channel", new=AsyncMock(return_value="id=C_NEW")
+            Slack,
+            "create_channel",
+            new=AsyncMock(return_value="id=C_NEW"),
         ):
             cid = await adapter.ensure_log_channel("sara")
         assert cid == "C_NEW"
@@ -1077,7 +1089,9 @@ class TestEnsureLogChannel:
         with (
             patch.object(Slack, "create_channel", new=AsyncMock(return_value=err)),
             patch.object(
-                SlackAdapter, "_find_channel", new=AsyncMock(return_value="C_FOUND")
+                SlackAdapter,
+                "_find_channel",
+                new=AsyncMock(return_value="C_FOUND"),
             ),
         ):
             cid = await adapter.ensure_log_channel("sara")
@@ -1091,7 +1105,9 @@ class TestEnsureLogChannel:
         with (
             patch.object(Slack, "create_channel", new=AsyncMock(return_value=err)),
             patch.object(
-                SlackAdapter, "_find_channel", new=AsyncMock(return_value=None)
+                SlackAdapter,
+                "_find_channel",
+                new=AsyncMock(return_value=None),
             ),
         ):
             cid = await adapter.ensure_log_channel("sara")
@@ -1110,7 +1126,9 @@ class TestEnsureLogChannel:
         sync_mock = AsyncMock()
         with (
             patch.object(
-                Slack, "create_channel", new=AsyncMock(return_value="id=C_NEW")
+                Slack,
+                "create_channel",
+                new=AsyncMock(return_value="id=C_NEW"),
             ),
             patch.object(SlackAdapter, "_sync_members", new=sync_mock),
         ):
@@ -1261,7 +1279,7 @@ class TestFlushLog:
 class _FakeLogChannelAdapter:
     """Minimal adapter for ``log_tap`` tests."""
 
-    bot_token = "xoxb-fake"  # noqa: S105 -- test credential
+    bot_token = "xoxb-fake"  # noqa: S105 -- Fixture credential in a test; never a real secret.
 
     def __init__(self, channel_id: str | None = "C_LOG") -> None:
         self._channel_id = channel_id
@@ -1339,8 +1357,8 @@ class TestParseSlackArgs:
                 "--continue",
             ],
         )
-        assert args.app_token == "A1"  # noqa: S105 -- test value
-        assert args.bot_token == "B1"  # noqa: S105 -- test value
+        assert args.app_token == "A1"  # noqa: S105 -- Fixture credential in a test; never a real secret.
+        assert args.bot_token == "B1"  # noqa: S105 -- Fixture credential in a test; never a real secret.
         assert args.resume is True
 
 
@@ -1349,8 +1367,8 @@ class TestResolveTokens:
         monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
         monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
         ns = argparse.Namespace(
-            app_token="A1",  # noqa: S106 -- test value
-            bot_token="B1",  # noqa: S106 -- test value
+            app_token="A1",  # noqa: S106 -- Fixture credential in a test; never a real secret.
+            bot_token="B1",  # noqa: S106 -- Fixture credential in a test; never a real secret.
         )
         assert _resolve_tokens(ns) == ("A1", "B1")
 
@@ -1469,7 +1487,7 @@ class TestAdapterConstruction:
     @pytest.mark.anyio
     async def test_stop_agent_shuts_down_real_agent(self, tmp_path: Path) -> None:
         adapter, _ = _make_adapter(tmp_path=tmp_path)
-        fake = MagicMock(spec=RealAgent)
+        fake = MagicMock(spec=Agent)
         agent_registry["Sara"] = fake
         adapter._active_agents["Sara"] = {"persona": "x", "system": "y"}
         adapter.stop_agent("Sara")
@@ -1480,8 +1498,8 @@ class TestAdapterConstruction:
     async def test_init_stores_attributes(self, tmp_path: Path) -> None:
         model = MagicMock()
         adapter = SlackAdapter(
-            app_token="xapp-fake",  # noqa: S106 -- test credential
-            bot_token="xoxb-fake",  # noqa: S106 -- test credential
+            app_token="xapp-fake",  # noqa: S106 -- Fixture credential in a test; never a real secret.
+            bot_token="xoxb-fake",  # noqa: S106 -- Fixture credential in a test; never a real secret.
             model=model,
             model_recipe=ModelRecipe(
                 provider="OpenAI",
@@ -1497,7 +1515,7 @@ class TestAdapterConstruction:
             max_tool_call_rounds=5,
             max_budget_usd=1.0,
         )
-        assert adapter.bot_token == "xoxb-fake"  # noqa: S105 -- test value
+        assert adapter.bot_token == "xoxb-fake"  # noqa: S105 -- Fixture credential in a test; never a real secret.
         assert adapter.bot_user_id == ""
         assert adapter._log_prefix == "agent-"
         assert adapter._router_log_channel == "ch"
@@ -1556,14 +1574,17 @@ class TestFlushLogSplitting:
         sent: list[str] = []
 
         async def _capture(
-            self: Slack, channel: str, text: str, thread_ts: str = ""
+            self: Slack,
+            channel: str,
+            text: str,
+            thread_ts: str = "",
         ) -> str:
             del self
             del channel, thread_ts
             sent.append(text)
             return "ok"
 
-        slack = Slack(token="x")  # noqa: S106 -- test credential
+        slack = Slack(token="x")  # noqa: S106 -- Fixture credential in a test; never a real secret.
         with patch.object(Slack, "send", new=_capture):
             await _flush_log(["x" * 5000], "C1", slack, msg_limit=3900)
         assert sent, "nothing was sent"

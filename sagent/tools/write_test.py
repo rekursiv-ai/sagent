@@ -112,7 +112,7 @@ async def test_write_preserves_file_mode(tmp_path: Path) -> None:
 
 
 def test_summary_path_basename() -> None:
-    assert write.summary({"file_path": "/tmp/foo.txt"}) == "Write foo.txt"  # noqa: S108
+    assert write.summary({"file_path": "/tmp/foo.txt"}) == "Write foo.txt"  # noqa: S108 -- The test documents a basename using a non-opened temporary path.
 
 
 def test_summary_no_path() -> None:

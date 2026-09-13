@@ -59,7 +59,8 @@ class SIMDKernelFeatures:
     @staticmethod
     def reduction_hint(node: Any) -> ReductionHint: ...
     def memory_stats(
-        self, groups_dict: dict[str, sympy.Expr] | None = ...
+        self,
+        groups_dict: dict[str, sympy.Expr] | None = ...,
     ) -> MemoryStats: ...
 
 class MemoryEstimator:
@@ -69,18 +70,23 @@ class MemoryEstimator:
     persistent: MemoryEstimate
     symbols: list[sympy.Symbol]
     def __init__(
-        self, features: SIMDKernelFeatures, groups: Sequence[sympy.Expr]
+        self,
+        features: SIMDKernelFeatures,
+        groups: Sequence[sympy.Expr],
     ) -> None: ...
     def simulate_codegen(self) -> None: ...
     def remove_kernel_local(self) -> None: ...
     def scope(self, dep: MemoryDep) -> MemoryEstimate: ...
     def has_reduction_var(self, index: sympy.Expr) -> bool: ...
     def set_ranges(
-        self, *lengths: list[list[sympy.Expr]]
+        self,
+        *lengths: list[list[sympy.Expr]],
     ) -> list[list[sympy.Expr]]: ...
     @staticmethod
     def make_flat_range(
-        sym: sympy.Symbol, numel: sympy.Expr, lengths: list[sympy.Expr]
+        sym: sympy.Symbol,
+        numel: sympy.Expr,
+        lengths: list[sympy.Expr],
     ) -> list[sympy.Expr]: ...
 
 @dataclasses.dataclass
@@ -143,7 +149,9 @@ class StatsForKernelType:
     memory: StatsForReadsOrWrites
     @classmethod
     def compute(
-        cls, loops: list[MemoryEstimate], estimator: MemoryEstimator
+        cls,
+        loops: list[MemoryEstimate],
+        estimator: MemoryEstimator,
     ) -> typing.Self: ...
 
 @dataclasses.dataclass

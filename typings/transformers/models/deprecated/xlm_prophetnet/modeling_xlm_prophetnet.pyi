@@ -29,11 +29,16 @@ def softmax(hidden_state, dim, onnx_trace=...):  # -> Tensor:
 def ngram_attention_bias(sequence_length, ngram, device, dtype):  # -> Tensor:
     ...
 def compute_relative_buckets(
-    num_buckets, max_distance, relative_positions, is_bidirectional=...
+    num_buckets,
+    max_distance,
+    relative_positions,
+    is_bidirectional=...,
 ):  # -> Tensor:
     ...
 def compute_all_stream_relative_buckets(
-    num_buckets, max_distance, position_ids
+    num_buckets,
+    max_distance,
+    position_ids,
 ):  # -> tuple[Any | Tensor, Any | Tensor]:
     ...
 
@@ -148,7 +153,11 @@ class XLMProphetNetNgramSelfAttention(nn.Module):
     ):  # -> tuple[Tensor, Tensor, Tensor, Cache | None]:
         ...
     def get_main_relative_pos_embeddings(
-        self, hidden_states, attn_weights, position_ids, main_relative_position_buckets
+        self,
+        hidden_states,
+        attn_weights,
+        position_ids,
+        main_relative_position_buckets,
     ):  # -> Tensor:
         ...
     def get_predict_relative_pos_embeddings(
@@ -198,7 +207,9 @@ class XLMProphetNetDecoderLayer(GradientCheckpointingLayer):
 )
 class XLMProphetNetEncoder(XLMProphetNetPreTrainedModel):
     def __init__(
-        self, config: XLMProphetNetConfig, word_embeddings: nn.Embedding | None = ...
+        self,
+        config: XLMProphetNetConfig,
+        word_embeddings: nn.Embedding | None = ...,
     ) -> None: ...
     def get_input_embeddings(self):  # -> Embedding | Module:
         ...
@@ -206,7 +217,8 @@ class XLMProphetNetEncoder(XLMProphetNetPreTrainedModel):
         ...
     @add_start_docstrings_to_model_forward(XLM_PROPHETNET_STANDALONE_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=BaseModelOutput, config_class=_CONFIG_FOR_DOC
+        output_type=BaseModelOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,
@@ -225,7 +237,9 @@ class XLMProphetNetEncoder(XLMProphetNetPreTrainedModel):
 )
 class XLMProphetNetDecoder(XLMProphetNetPreTrainedModel):
     def __init__(
-        self, config: XLMProphetNetConfig, word_embeddings: nn.Embedding | None = ...
+        self,
+        config: XLMProphetNetConfig,
+        word_embeddings: nn.Embedding | None = ...,
     ) -> None: ...
     def get_input_embeddings(self):  # -> Embedding | Module:
         ...
@@ -233,7 +247,8 @@ class XLMProphetNetDecoder(XLMProphetNetPreTrainedModel):
         ...
     @add_start_docstrings_to_model_forward(XLM_PROPHETNET_STANDALONE_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=XLMProphetNetDecoderModelOutput, config_class=_CONFIG_FOR_DOC
+        output_type=XLMProphetNetDecoderModelOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,
@@ -251,7 +266,8 @@ class XLMProphetNetDecoder(XLMProphetNetPreTrainedModel):
         return_dict: bool | None = ...,
     ) -> tuple | XLMProphetNetDecoderModelOutput: ...
     def compute_buffered_relative_buckets(
-        self, position_ids
+        self,
+        position_ids,
     ):  # -> tuple[Tensor | Any, Tensor]:
         ...
     def prepare_attention_mask(self, hidden_states, attention_mask): ...
@@ -272,7 +288,8 @@ class XLMProphetNetModel(XLMProphetNetPreTrainedModel):
         ...
     @add_start_docstrings_to_model_forward(XLM_PROPHETNET_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=XLMProphetNetSeq2SeqModelOutput, config_class=_CONFIG_FOR_DOC
+        output_type=XLMProphetNetSeq2SeqModelOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,
@@ -304,7 +321,8 @@ class XLMProphetNetForConditionalGeneration(XLMProphetNetPreTrainedModel):
         ...
     @add_start_docstrings_to_model_forward(XLM_PROPHETNET_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=XLMProphetNetSeq2SeqLMOutput, config_class=_CONFIG_FOR_DOC
+        output_type=XLMProphetNetSeq2SeqLMOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,
@@ -362,7 +380,8 @@ class XLMProphetNetForCausalLM(XLMProphetNetPreTrainedModel):
         ...
     @add_start_docstrings_to_model_forward(XLM_PROPHETNET_STANDALONE_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=XLMProphetNetDecoderLMOutput, config_class=_CONFIG_FOR_DOC
+        output_type=XLMProphetNetDecoderLMOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,

@@ -38,7 +38,8 @@ class PromptDepthAnythingImageProcessorFast(BaseImageProcessorFast):
     prompt_scale_to_meter = ...
     valid_kwargs = PromptDepthAnythingFastImageProcessorKwargs
     def __init__(
-        self, **kwargs: Unpack[PromptDepthAnythingFastImageProcessorKwargs]
+        self,
+        **kwargs: Unpack[PromptDepthAnythingFastImageProcessorKwargs],
     ) -> None: ...
     @auto_docstring
     def preprocess(

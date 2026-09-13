@@ -19,7 +19,10 @@ from ...utils.backbone_utils import BackboneMixin
 logger = ...
 
 def get_padding_value(
-    padding=..., kernel_size=..., stride=..., dilation=...
+    padding=...,
+    kernel_size=...,
+    stride=...,
+    dilation=...,
 ) -> tuple[tuple, bool]: ...
 
 class WeightStandardizedConv2d(nn.Conv2d):
@@ -40,7 +43,12 @@ class WeightStandardizedConv2d(nn.Conv2d):
 
 class BitGroupNormActivation(nn.GroupNorm):
     def __init__(
-        self, config, num_channels, eps=..., affine=..., apply_activation=...
+        self,
+        config,
+        num_channels,
+        eps=...,
+        affine=...,
+        apply_activation=...,
     ) -> None: ...
     def forward(self, hidden_state):  # -> Any:
         ...
@@ -70,7 +78,9 @@ class BitEmbeddings(nn.Module):
     def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class BitDropPath(nn.Module):
@@ -117,7 +127,12 @@ class BitBottleneckLayer(nn.Module):
 
 class BitDownsampleConv(nn.Module):
     def __init__(
-        self, config, in_channels, out_channels, stride=..., preact=...
+        self,
+        config,
+        in_channels,
+        out_channels,
+        stride=...,
+        preact=...,
     ) -> None: ...
     def forward(self, x):  # -> Any:
         ...

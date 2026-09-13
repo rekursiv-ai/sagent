@@ -16,5 +16,8 @@ class _INITIAL_MISSING: ...
 
 @substitute_in_graph(functools.reduce)
 def reduce(
-    function: Callable[[_U, _T], _U], iterable: Iterable[_T], initial: _U = ..., /
+    function: Callable[[_U, _T], _U],
+    iterable: Iterable[_T],
+    initial: _U = ...,
+    /,
 ) -> _U: ...

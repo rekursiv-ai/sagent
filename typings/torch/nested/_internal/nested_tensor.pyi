@@ -27,7 +27,8 @@ class NestedTensor(torch.Tensor):
     def offsets(self) -> Tensor: ...
     def lengths(self) -> Tensor | None: ...
     def __reduce_ex__(
-        self, proto
+        self,
+        proto,
     ) -> tuple[
         Any,
         tuple[
@@ -40,7 +41,10 @@ class NestedTensor(torch.Tensor):
     def __tensor_flatten__(self) -> tuple[list[str], dict[str, bool | int]]: ...
     @staticmethod
     def __tensor_unflatten__(
-        inner_tensors: Dict, meta, outer_size, outer_stride
+        inner_tensors: Dict,
+        meta,
+        outer_size,
+        outer_stride,
     ) -> NestedTensor: ...
     @classmethod
     def __torch_dispatch__(cls, func, types, args=..., kwargs=...): ...
@@ -66,20 +70,39 @@ class ViewNestedFromBuffer(torch.autograd.Function):
 
 def buffer_from_jagged(jagged) -> None: ...
 def jagged_from_list(
-    tensors: List[torch.Tensor], offsets: Optional[torch.Tensor], dtype=..., device=...
+    tensors: List[torch.Tensor],
+    offsets: Optional[torch.Tensor],
+    dtype=...,
+    device=...,
 ) -> tuple[NestedTensor, torch.Tensor]: ...
 def jagged_from_tensor_and_lengths(
-    tensor: torch.Tensor, starts: torch.Tensor, lengths: torch.Tensor
+    tensor: torch.Tensor,
+    starts: torch.Tensor,
+    lengths: torch.Tensor,
 ) -> tuple[NestedTensor, torch.Tensor, Optional[torch.Tensor]]: ...
 
 _dummy_instance: Optional[torch.Tensor] = ...
 
 def nested_view_from_values_offsets(
-    values, offsets, ragged_idx=..., min_seqlen=..., max_seqlen=...
+    values,
+    offsets,
+    ragged_idx=...,
+    min_seqlen=...,
+    max_seqlen=...,
 ) -> Tensor: ...
 def nested_view_from_values_offsets_lengths(
-    values, offsets, lengths, ragged_idx=..., min_seqlen=..., max_seqlen=...
+    values,
+    offsets,
+    lengths,
+    ragged_idx=...,
+    min_seqlen=...,
+    max_seqlen=...,
 ) -> Tensor: ...
 def nested_from_padded(
-    padded, offsets, ragged_idx=..., min_seqlen=..., max_seqlen=..., sum_S=...
+    padded,
+    offsets,
+    ragged_idx=...,
+    min_seqlen=...,
+    max_seqlen=...,
+    sum_S=...,
 ) -> Tensor: ...

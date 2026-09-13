@@ -21,10 +21,14 @@ __all__ = [
 ]
 
 def matches_module_pattern(
-    pattern: Iterable[type], node: fx.Node, modules: dict[str, Any]
+    pattern: Iterable[type],
+    node: fx.Node,
+    modules: dict[str, Any],
 ) -> bool: ...
 def replace_node_module(
-    node: fx.Node, modules: dict[str, Any], new_module: torch.nn.Module
+    node: fx.Node,
+    modules: dict[str, Any],
+    new_module: torch.nn.Module,
 ) -> None: ...
 def fuse(model: torch.nn.Module, inplace=..., no_trace=...) -> torch.nn.Module: ...
 def remove_dropout(model: nn.Module) -> nn.Module: ...
@@ -40,7 +44,8 @@ mkldnn_supported_unknown = ...
 mkldnn_map = ...
 
 def modules_to_mkldnn(
-    nodes: list[fx.Node], modules: dict[str, nn.Module]
+    nodes: list[fx.Node],
+    modules: dict[str, nn.Module],
 ) -> dict[Module, Module]: ...
 def reset_modules(
     nodes: list[fx.Node],

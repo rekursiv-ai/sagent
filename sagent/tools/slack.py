@@ -46,71 +46,6 @@ _OPERATIONS: Final = (
 )
 
 
-async def _slack_call(
-    method: str,
-    params: Mapping[str, str | int],
-    token: str,
-    post: bool = False,
-    *,
-    timeout_sec: float = 30.0,
-) -> dict[str, object] | ToolResult:
-    """Call a Slack Web API method and parse the JSON response.
-
-    POST methods use a JSON body + ``Authorization: Bearer``; GET
-    methods send params in the query string. Slack returns
-    ``{"ok": true, ...}`` or ``{"ok": false, "error": "..."}``.
-
-    Args:
-      method: Slack Web API method (e.g. ``chat.postMessage``).
-      params: Request parameters (body for POST, query for GET).
-      token: Bot user token (``xoxb-...``).
-      post: When True, send as ``POST`` with JSON body.
-      timeout_sec: Per-request HTTP timeout.
-
-    Returns:
-      body: Parsed JSON body on success, or a ``ToolResult`` error.
-
-    """
-    url = f"https://slack.com/api/{method}"
-    headers: dict[str, str] = {"Authorization": f"Bearer {token}"}
-    try:
-        if post:
-            headers["Content-Type"] = "application/json; charset=utf-8"
-            raw = await asyncio.to_thread(
-                fetch,
-                url=url,
-                request=RequestParams(
-                    content=ContentParams(
-                        method="POST", json=dict(params), headers=headers
-                    ),
-                    retry=RetryParams(timeout_sec=timeout_sec),
-                ),
-            )
-        else:
-            raw = await asyncio.to_thread(
-                fetch,
-                url=url,
-                request=RequestParams(
-                    content=ContentParams(params=dict(params), headers=headers),
-                    retry=RetryParams(timeout_sec=timeout_sec),
-                ),
-            )
-    except FetchError as e:
-        return ToolResult(
-            call_id="",
-            content=(f"Slack HTTP {e.status}: {e.body.decode(errors='replace')}"),
-            is_error=True,
-        )
-    body = DictCodec.coerce(json.loads(raw[0]))
-    if not body.get("ok"):
-        return ToolResult(
-            call_id="",
-            content=f"Slack API {method} failed: {body.get('error', 'unknown')}",
-            is_error=True,
-        )
-    return body
-
-
 class SlackSender(Protocol):
     """The Slack surface the bin/ adapters and log flusher actually use.
 
@@ -160,7 +95,7 @@ class Slack:
                 "limit": {"type": "integer", "minimum": 1},
             },
             "required": ["operation"],
-        }
+        },
     )
 
     def __init__(
@@ -318,7 +253,9 @@ class Slack:
             )
         params = {"channel": channel, "limit": max(1, min(200, limit))}
         body = await _slack_call(
-            "conversations.history", params=params, token=self._token
+            "conversations.history",
+            params=params,
+            token=self._token,
         )
         if isinstance(body, ToolResult):
             return body
@@ -345,7 +282,9 @@ class Slack:
             "limit": max(1, min(200, limit)),
         }
         body = await _slack_call(
-            "conversations.replies", params=params, token=self._token
+            "conversations.replies",
+            params=params,
+            token=self._token,
         )
         if isinstance(body, ToolResult):
             return body
@@ -435,3 +374,57 @@ def _render_messages(messages: list[dict[str, object]]) -> str:
             parts = [f":{r.get('name', '?')}:x{r.get('count', 0)}" for r in reactions]
             lines.append(f"  reactions: {' '.join(parts)}")
     return "\n".join(lines)
+
+
+# POST methods use a JSON body + ``Authorization: Bearer``; GET methods send params in
+# the query string. Slack returns ``{"ok": true, ...}`` or ``{"ok": false, "error":
+# "..."}``.
+async def _slack_call(
+    method: str,
+    params: Mapping[str, str | int],
+    token: str,
+    post: bool = False,
+    *,
+    timeout_sec: float = 30.0,
+) -> dict[str, object] | ToolResult:
+    """Call a Slack Web API method and parse the JSON response."""
+    url = f"https://slack.com/api/{method}"
+    headers: dict[str, str] = {"Authorization": f"Bearer {token}"}
+    try:
+        if post:
+            headers["Content-Type"] = "application/json; charset=utf-8"
+            raw = await asyncio.to_thread(
+                fetch,
+                url=url,
+                request=RequestParams(
+                    content=ContentParams(
+                        method="POST",
+                        json=dict(params),
+                        headers=headers,
+                    ),
+                    retry=RetryParams(timeout_sec=timeout_sec),
+                ),
+            )
+        else:
+            raw = await asyncio.to_thread(
+                fetch,
+                url=url,
+                request=RequestParams(
+                    content=ContentParams(params=dict(params), headers=headers),
+                    retry=RetryParams(timeout_sec=timeout_sec),
+                ),
+            )
+    except FetchError as e:
+        return ToolResult(
+            call_id="",
+            content=(f"Slack HTTP {e.status}: {e.body.decode(errors='replace')}"),
+            is_error=True,
+        )
+    body = DictCodec.coerce(json.loads(raw[0]))
+    if not body.get("ok"):
+        return ToolResult(
+            call_id="",
+            content=f"Slack API {method} failed: {body.get('error', 'unknown')}",
+            is_error=True,
+        )
+    return body

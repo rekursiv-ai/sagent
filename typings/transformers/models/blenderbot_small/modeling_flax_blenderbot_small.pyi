@@ -26,7 +26,9 @@ BLENDERBOT_SMALL_ENCODE_INPUTS_DOCSTRING = ...
 BLENDERBOT_SMALL_DECODE_INPUTS_DOCSTRING = ...
 
 def shift_tokens_right(
-    input_ids: jnp.ndarray, pad_token_id: int, decoder_start_token_id: int
+    input_ids: jnp.ndarray,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ) -> jnp.ndarray: ...
 
 class FlaxBlenderbotSmallAttention(nn.Module):
@@ -182,12 +184,16 @@ class FlaxBlenderbotSmallPreTrainedModel(FlaxPreTrainedModel):
         **kwargs,
     ) -> None: ...
     def init_weights(
-        self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...
+        self,
+        rng: jax.random.PRNGKey,
+        input_shape: tuple,
+        params: FrozenDict = ...,
     ) -> FrozenDict: ...
     def init_cache(self, batch_size, max_length, encoder_outputs): ...
     @add_start_docstrings(BLENDERBOT_SMALL_ENCODE_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=FlaxBaseModelOutput, config_class=BlenderbotSmallConfig
+        output_type=FlaxBaseModelOutput,
+        config_class=BlenderbotSmallConfig,
     )
     def encode(
         self,

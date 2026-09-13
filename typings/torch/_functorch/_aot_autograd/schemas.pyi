@@ -87,7 +87,10 @@ class SubclassCreationMeta:
     original_subclass_type: type | None = ...
     memory_format: MemoryFormatMeta | None = ...
     def compute_outer_size_and_stride(
-        self, all_args, *, curr_start_idx: int
+        self,
+        all_args,
+        *,
+        curr_start_idx: int,
     ) -> tuple[PyTree | Any, PyTree | Any]: ...
     def creation_fn(self, all_args, *, is_runtime: bool): ...
     def make_runtime_safe(self) -> None: ...
@@ -236,7 +239,11 @@ class CompilerWrapper:
         fw_metadata: ViewAndMutationMeta,
     ) -> tuple[Callable, list[FxValue], list[AOTInput], ViewAndMutationMeta]: ...
     def post_compile(
-        self, compiled_fn, aot_config, *, runtime_metadata
+        self,
+        compiled_fn,
+        aot_config,
+        *,
+        runtime_metadata,
     ) -> Callable: ...
 
 class InductorWrapper:
@@ -249,7 +256,11 @@ class InductorWrapper:
         fw_metadata: ViewAndMutationMeta,
     ) -> None: ...
     def post_compile(
-        self, compiled_fn, aot_config, *, runtime_metadata
+        self,
+        compiled_fn,
+        aot_config,
+        *,
+        runtime_metadata,
     ) -> Callable: ...
 
 @dataclass
@@ -265,7 +276,9 @@ TOutputCode = TypeVar("TOutputCode", bound=OutputCode)
 
 class AOTDispatchCompiler(Protocol):
     def __call__(
-        self, gm: torch.fx.GraphModule, example_inputs: Sequence[InputType]
+        self,
+        gm: torch.fx.GraphModule,
+        example_inputs: Sequence[InputType],
     ) -> Any: ...
 
 class SerializableAOTDispatchCompiler(AOTDispatchCompiler):
@@ -275,7 +288,9 @@ class SerializableAOTDispatchCompiler(AOTDispatchCompiler):
         compiler_fn: Callable[[torch.fx.GraphModule, Sequence[InputType]], TOutputCode],
     ) -> None: ...
     def __call__(
-        self, gm: torch.fx.GraphModule, example_inputs: Sequence[InputType]
+        self,
+        gm: torch.fx.GraphModule,
+        example_inputs: Sequence[InputType],
     ) -> OutputCode: ...
 
 class FlatFn(Protocol):
@@ -286,13 +301,16 @@ class TraceFn(Protocol):
 
 class PreppedForAutogradTraceFn(Protocol):
     def __call__(
-        self, *args: FxValue
+        self,
+        *args: FxValue,
     ) -> tuple[tuple[list[FxValue], list[bool]], list[AOTOutput]]: ...
 
 class JointTraceFn(Protocol):
     handle: JointFnHandle
     def __call__(
-        self, primals: list[FxValue], tangents: list[FxValue]
+        self,
+        primals: list[FxValue],
+        tangents: list[FxValue],
     ) -> tuple[
         tuple[list[FxValue], list[Tensor | None]],
         tuple[list[AOTOutput], list[AOTOutput | None]],

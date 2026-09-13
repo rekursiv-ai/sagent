@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from sagent import providers as providers_module
+from sagent import providers
 from sagent.providers import (
     PROVIDER_NAMES,
     Anthropic,
@@ -194,7 +194,10 @@ def test_build_provider_missing_auth_method_raises_even_with_from_key(
 
     providers_mod = sys.modules["sagent.providers"]
     monkeypatch.setattr(
-        providers_mod, "StubProvKeyOnly", StubProvKeyOnly, raising=False
+        providers_mod,
+        "StubProvKeyOnly",
+        StubProvKeyOnly,
+        raising=False,
     )
     with pytest.raises(AttributeError, match="no ``from_literal-key-here``"):
         build_provider("StubProvKeyOnly", "literal-key-here")
@@ -240,7 +243,7 @@ def test_build_provider_forwards_account_only_where_declared(
     sorted(
         name
         for name in PROVIDER_NAMES
-        if getattr(getattr(providers_module, name, None), "CAPABILITIES", {})
+        if getattr(getattr(providers, name, None), "CAPABILITIES", {})
     ),
 )
 def test_a_catalog_backed_provider_names_a_cheaper_utility_model(
@@ -254,7 +257,7 @@ def test_a_catalog_backed_provider_names_a_cheaper_utility_model(
     invisible from the role lookup alone: every summarizer call silently
     billed the top rate.
     """
-    cls = getattr(providers_module, provider_name)
+    cls = getattr(providers, provider_name)
     utility = getattr(cls, "DEFAULT_UTILITY_MODEL", "")
     assert utility, f"{provider_name} declares no DEFAULT_UTILITY_MODEL"
     caps = cls.CAPABILITIES

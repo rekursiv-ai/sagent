@@ -7,7 +7,8 @@ from torch.fx import Graph, Node
 log: logging.Logger = ...
 
 def create_joint_graph_node_information(
-    joint_graph: Graph, recomputable_node_info: dict[str, int]
+    joint_graph: Graph,
+    recomputable_node_info: dict[str, int],
 ) -> dict[str, Any]: ...
 def create_joint_graph_edges(joint_graph: Graph) -> list[tuple[str, str]]: ...
 def create_activation_checkpointing_logging_structure_payload(

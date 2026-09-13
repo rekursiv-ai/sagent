@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, ClassVar, Self
 
 import os
 
-from sagent.catalog import openai as openai_catalog
+from sagent.catalog import openai
 from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.openai.responses import _OpenAIResponsesModel
 from sagent.types.capability import ModelCapability
@@ -16,11 +16,11 @@ from sagent.types.providers import ModelRole, resolve
 
 
 if TYPE_CHECKING:
-    import openai
+    import openai as openai_sdk
 else:
     from wrapt import lazy_import
 
-    openai = lazy_import("openai")
+    openai_sdk = lazy_import("openai")
 
 __all__ = ["OpenAI"]
 
@@ -32,19 +32,19 @@ class OpenAI:
     DEFAULT_UTILITY_MODEL: ClassVar[str] = "gpt-5.6-luna"
     ENV_VAR: ClassVar[str] = "OPENAI_API_KEY"
     BASE_URL: ClassVar[str] = "https://api.openai.com/v1"
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = openai_catalog.models()
-    TRANSPORT: ClassVar[ModelCapability] = openai_catalog.api()
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = openai.models()
+    TRANSPORT: ClassVar[ModelCapability] = openai.api()
 
     def __init__(self, *, api_key: str, base_url: str | None = None) -> None:
         self.api_key = api_key
         self.base_url = base_url or self.BASE_URL
-        self._sdks: PerLoop[openai.AsyncOpenAI] = PerLoop(self._make_sdk)
+        self._sdks: PerLoop[openai_sdk.AsyncOpenAI] = PerLoop(self._make_sdk)
 
     @property
     def ROLES(self) -> Mapping[ModelRole, str]:  # noqa: N802 -- provider protocol spelling.
         """Role names resolved by model construction."""
         return MappingProxyType(
-            {"default": self.DEFAULT_MODEL, "utility": self.DEFAULT_UTILITY_MODEL}
+            {"default": self.DEFAULT_MODEL, "utility": self.DEFAULT_UTILITY_MODEL},
         )
 
     @classmethod
@@ -94,7 +94,9 @@ class OpenAI:
             transport=self.TRANSPORT,
         )
         return _OpenAIResponsesModel(
-            provider=self, capability=capability, settings=settings
+            provider=self,
+            capability=capability,
+            settings=settings,
         )
 
     def utility_model(self) -> _OpenAIResponsesModel:
@@ -106,7 +108,7 @@ class OpenAI:
         """
         return self.model("utility")
 
-    async def get_sdk(self) -> openai.AsyncOpenAI:
+    async def get_sdk(self) -> openai_sdk.AsyncOpenAI:
         """Get this event loop's SDK client.
 
         Returns:
@@ -122,7 +124,9 @@ class OpenAI:
         if sdk is not None:
             await sdk.close()
 
-    def _make_sdk(self) -> openai.AsyncOpenAI:
-        return openai.AsyncOpenAI(
-            api_key=self.api_key, base_url=self.base_url, max_retries=0
+    def _make_sdk(self) -> openai_sdk.AsyncOpenAI:
+        return openai_sdk.AsyncOpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            max_retries=0,
         )

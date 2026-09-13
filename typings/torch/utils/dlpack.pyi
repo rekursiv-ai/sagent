@@ -26,5 +26,8 @@ class DLDeviceType(enum.IntEnum):
     kDLMAIA = ...
 
 def from_dlpack(
-    ext_tensor: Any, *, device: _Device | None = ..., copy: bool | None = ...
+    ext_tensor: Any,
+    *,
+    device: _Device | None = ...,
+    copy: bool | None = ...,
 ) -> torch.Tensor: ...

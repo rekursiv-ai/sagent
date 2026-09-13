@@ -104,7 +104,8 @@ class Gemma2DecoderLayer(GradientCheckpointingLayer):
         cache_position: torch.LongTensor | None = ...,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class Gemma2PreTrainedModel(GemmaPreTrainedModel): ...

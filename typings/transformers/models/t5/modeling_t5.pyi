@@ -58,7 +58,11 @@ class T5Attention(nn.Module):
     def prune_heads(self, heads):  # -> None:
         ...
     def compute_bias(
-        self, query_length, key_length, device=..., cache_position=...
+        self,
+        query_length,
+        key_length,
+        device=...,
+        cache_position=...,
     ):  # -> Any:
         ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
@@ -79,7 +83,10 @@ class T5Attention(nn.Module):
 
 class T5LayerSelfAttention(nn.Module):
     def __init__(
-        self, config, has_relative_attention_bias=..., layer_idx: int | None = ...
+        self,
+        config,
+        has_relative_attention_bias=...,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -115,7 +122,10 @@ class T5LayerCrossAttention(nn.Module):
 
 class T5Block(GradientCheckpointingLayer):
     def __init__(
-        self, config, has_relative_attention_bias=..., layer_idx: int | None = ...
+        self,
+        config,
+        has_relative_attention_bias=...,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(

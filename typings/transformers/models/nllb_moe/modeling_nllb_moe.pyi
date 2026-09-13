@@ -19,14 +19,19 @@ from ...utils.deprecation import deprecate_kwarg
 logger = ...
 
 def shift_tokens_right(
-    input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: torch.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ):  # -> Tensor:
     ...
 def create_position_ids_from_input_ids(
-    input_ids, padding_idx, past_key_values_length=...
+    input_ids,
+    padding_idx,
+    past_key_values_length=...,
 ): ...
 def load_balancing_loss_func(
-    router_probs: torch.Tensor, expert_indices: torch.Tensor
+    router_probs: torch.Tensor,
+    expert_indices: torch.Tensor,
 ) -> float: ...
 
 class NllbMoeScaledWordEmbedding(nn.Embedding):
@@ -42,15 +47,23 @@ class NllbMoeScaledWordEmbedding(nn.Embedding):
 
 class NllbMoeSinusoidalPositionalEmbedding(nn.Module):
     def __init__(
-        self, num_positions: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_positions: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ) -> None: ...
     def make_weights(
-        self, num_embeddings: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ):  # -> None:
         ...
     @staticmethod
     def get_embedding(
-        num_embeddings: int, embedding_dim: int, padding_idx: int | None = ...
+        num_embeddings: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ):  # -> Tensor:
         ...
     @torch.no_grad()
@@ -62,13 +75,18 @@ class NllbMoeSinusoidalPositionalEmbedding(nn.Module):
     ):  # -> Tensor | Any:
         ...
     def create_position_ids_from_inputs_embeds(
-        self, inputs_embeds, past_key_values_length
+        self,
+        inputs_embeds,
+        past_key_values_length,
     ): ...
 
 class NllbMoeTop2Router(nn.Module):
     def __init__(self, config: NllbMoeConfig) -> None: ...
     def normalize_router_probabilities(
-        self, router_probs, top_1_mask, top_2_mask
+        self,
+        router_probs,
+        top_1_mask,
+        top_2_mask,
     ):  # -> tuple[Any, Any]:
         ...
     def route_tokens(
@@ -91,10 +109,15 @@ class NllbMoeDenseActDense(nn.Module):
 
 class NllbMoeSparseMLP(nn.Module):
     def __init__(
-        self, config: NllbMoeConfig, ffn_dim: int, expert_class: nn.Module = ...
+        self,
+        config: NllbMoeConfig,
+        ffn_dim: int,
+        expert_class: nn.Module = ...,
     ) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, padding_mask: torch.Tensor | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        padding_mask: torch.Tensor | None = ...,
     ):  # -> tuple[Tensor, tuple[Any, Tensor]]:
         ...
 
@@ -183,7 +206,9 @@ class NllbMoePreTrainedModel(PreTrainedModel):
 
 class NllbMoeEncoder(NllbMoePreTrainedModel):
     def __init__(
-        self, config: NllbMoeConfig, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: NllbMoeConfig,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -200,7 +225,9 @@ class NllbMoeEncoder(NllbMoePreTrainedModel):
 
 class NllbMoeDecoder(NllbMoePreTrainedModel):
     def __init__(
-        self, config: NllbMoeConfig, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: NllbMoeConfig,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     def forward(
         self,

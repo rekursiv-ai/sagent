@@ -130,7 +130,8 @@ class Zamba2AttentionDecoderLayer(ZambaAttentionDecoderLayer):
         position_embeddings: torch.LongTensor | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class Zamba2MambaDecoderLayer(ZambaMambaDecoderLayer):
@@ -156,7 +157,8 @@ class Zamba2HybridLayer(ZambaHybridLayer):
         use_cache: bool | None = ...,
         position_embeddings: torch.LongTensor | None = ...,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class Zamba2PreTrainedModel(PreTrainedModel):
@@ -188,7 +190,9 @@ class Zamba2Model(ZambaModel, Zamba2PreTrainedModel):
         cache_position: torch.LongTensor | None = ...,
     ) -> tuple | BaseModelOutputWithPast: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithPast: ...
 
 class Zamba2ForCausalLM(ZambaForCausalLM): ...

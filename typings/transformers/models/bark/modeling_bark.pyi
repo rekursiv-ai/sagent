@@ -215,7 +215,9 @@ class BarkModel(BarkPreTrainedModel):
     @property
     def device(self) -> torch.device: ...
     def enable_cpu_offload(
-        self, accelerator_id: int | None = ..., **kwargs
+        self,
+        accelerator_id: int | None = ...,
+        **kwargs,
     ):  # -> None:
         ...
     def codec_decode(self, fine_output, output_lengths=...):  # -> list[Any] | Any:

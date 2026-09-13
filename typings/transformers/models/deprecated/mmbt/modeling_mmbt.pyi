@@ -35,7 +35,8 @@ class MMBTModel(nn.Module, ModuleUtilsMixin):
     def __init__(self, config, transformer, encoder) -> None: ...
     @add_start_docstrings_to_model_forward(MMBT_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=BaseModelOutputWithPooling, config_class=_CONFIG_FOR_DOC
+        output_type=BaseModelOutputWithPooling,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,

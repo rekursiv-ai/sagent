@@ -69,10 +69,15 @@ class OwlViTImageGuidedObjectDetectionOutput(ModelOutput):
 class OwlViTVisionEmbeddings(nn.Module):
     def __init__(self, config: OwlViTVisionConfig) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
-        self, pixel_values: torch.FloatTensor, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values: torch.FloatTensor,
+        interpolate_pos_encoding: bool = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -96,7 +101,9 @@ class OwlViTAttention(nn.Module):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class OwlViTMLP(nn.Module):
@@ -198,12 +205,16 @@ class OwlViTModel(OwlViTPreTrainedModel):
     @filter_out_non_signature_kwargs()
     @auto_docstring
     def get_text_features(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = ...
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = ...,
     ) -> torch.FloatTensor: ...
     @filter_out_non_signature_kwargs()
     @auto_docstring
     def get_image_features(
-        self, pixel_values: torch.Tensor, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values: torch.Tensor,
+        interpolate_pos_encoding: bool = ...,
     ) -> torch.FloatTensor: ...
     @auto_docstring
     def forward(
@@ -239,7 +250,8 @@ class OwlViTForObjectDetection(OwlViTPreTrainedModel):
     def __init__(self, config: OwlViTConfig) -> None: ...
     @staticmethod
     def normalize_grid_corner_coordinates(
-        num_patches_height: int, num_patches_width: int
+        num_patches_height: int,
+        num_patches_width: int,
     ) -> torch.Tensor: ...
     @lru_cache(maxsize=2)  # noqa: B019 -- mirrors upstream @lru_cache on a method; not executed in a stub
     def compute_box_bias(

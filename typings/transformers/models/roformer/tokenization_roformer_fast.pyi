@@ -26,11 +26,15 @@ class RoFormerTokenizerFast(PreTrainedTokenizerFast):
     def __setstate__(self, d):  # -> None:
         ...
     def build_inputs_with_special_tokens(
-        self, token_ids_0, token_ids_1=...
+        self,
+        token_ids_0,
+        token_ids_1=...,
     ):  # -> list[str | list[str] | Any | None]:
         ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
     def save_pretrained(
         self,

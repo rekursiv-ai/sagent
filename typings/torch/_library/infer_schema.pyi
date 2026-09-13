@@ -11,7 +11,11 @@ _TestTensor = torch.Tensor
 
 @exposed_in("torch.library")
 def infer_schema(
-    prototype_function: typing.Callable, /, *, mutates_args, op_name: str | None = ...
+    prototype_function: typing.Callable,
+    /,
+    *,
+    mutates_args,
+    op_name: str | None = ...,
 ) -> str: ...
 def derived_types(
     base_type: type | typing._SpecialForm,

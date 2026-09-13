@@ -36,7 +36,12 @@ class PhimoeRotaryEmbedding(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids, unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -105,7 +110,8 @@ class MultiplierProcessor(torch.autograd.Function):
         ...
     @staticmethod
     def backward(
-        ctx, grad_at_output: torch.Tensor
+        ctx,
+        grad_at_output: torch.Tensor,
     ):  # -> tuple[Any, None, None, None, None]:
         ...
 
@@ -133,7 +139,8 @@ class PhimoeDecoderLayer(GradientCheckpointingLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring
@@ -202,7 +209,8 @@ class PhimoeForCausalLM(PhimoePreTrainedModel, GenerationMixin):
         ...
 
 class PhimoeForSequenceClassification(
-    GenericForSequenceClassification, PhimoePreTrainedModel
+    GenericForSequenceClassification,
+    PhimoePreTrainedModel,
 ): ...
 
 __all__ = [

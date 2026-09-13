@@ -30,11 +30,19 @@ def binary_mask_to_rle(mask):  # -> list[Any]:
 def convert_segmentation_to_rle(segmentation):  # -> list[Any]:
     ...
 def remove_low_and_no_objects(
-    masks, scores, labels, object_mask_threshold, num_labels
+    masks,
+    scores,
+    labels,
+    object_mask_threshold,
+    num_labels,
 ):  # -> tuple[Any, Any, Any]:
     ...
 def check_segment_validity(
-    mask_labels, mask_probs, k, mask_threshold=..., overlap_mask_area_threshold=...
+    mask_labels,
+    mask_probs,
+    k,
+    mask_threshold=...,
+    overlap_mask_area_threshold=...,
 ):  # -> tuple[Any | Literal[False], Any]:
     ...
 def compute_segments(
@@ -69,7 +77,7 @@ def load_metadata(repo_id, class_info_file):  # -> Any:
 class OneFormerImageProcessor(BaseImageProcessor):
     model_input_names = ...
     @filter_out_non_signature_kwargs(
-        extra=["max_size", "metadata", *INIT_SERVICE_KWARGS]
+        extra=["max_size", "metadata", *INIT_SERVICE_KWARGS],
     )
     def __init__(
         self,
@@ -116,7 +124,11 @@ class OneFormerImageProcessor(BaseImageProcessor):
     ):  # -> tuple[NDArray[floating[_32Bit]], NDArray[signedinteger[_64Bit]]]:
         ...
     def __call__(
-        self, images, task_inputs=..., segmentation_maps=..., **kwargs
+        self,
+        images,
+        task_inputs=...,
+        segmentation_maps=...,
+        **kwargs,
     ) -> BatchFeature: ...
     @filter_out_non_signature_kwargs()
     def preprocess(
@@ -149,15 +161,21 @@ class OneFormerImageProcessor(BaseImageProcessor):
         input_data_format: str | ChannelDimension | None = ...,
     ) -> BatchFeature: ...
     def get_semantic_annotations(
-        self, label, num_class_obj
+        self,
+        label,
+        num_class_obj,
     ):  # -> tuple[NDArray[Any], NDArray[Any], list[str] | Any]:
         ...
     def get_instance_annotations(
-        self, label, num_class_obj
+        self,
+        label,
+        num_class_obj,
     ):  # -> tuple[NDArray[Any], NDArray[Any], list[str] | Any]:
         ...
     def get_panoptic_annotations(
-        self, label, num_class_obj
+        self,
+        label,
+        num_class_obj,
     ):  # -> tuple[NDArray[Any], NDArray[Any], list[str] | Any]:
         ...
     def encode_inputs(
@@ -173,7 +191,9 @@ class OneFormerImageProcessor(BaseImageProcessor):
     ):  # -> BatchFeature:
         ...
     def post_process_semantic_segmentation(
-        self, outputs, target_sizes: list[tuple[int, int]] | None = ...
+        self,
+        outputs,
+        target_sizes: list[tuple[int, int]] | None = ...,
     ) -> torch.Tensor: ...
     def post_process_instance_segmentation(
         self,

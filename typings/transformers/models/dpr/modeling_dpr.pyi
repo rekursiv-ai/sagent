@@ -54,7 +54,9 @@ class DPREncoder(DPRPreTrainedModel):
         return_dict: bool = ...,
     ) -> BaseModelOutputWithPooling | tuple[Tensor, ...]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> BaseModelOutputWithPooling | tuple[Tensor, ...]: ...
     @property
     def embeddings_size(self) -> int: ...
@@ -72,7 +74,9 @@ class DPRSpanPredictor(DPRPreTrainedModel):
         return_dict: bool = ...,
     ) -> DPRReaderOutput | tuple[Tensor, ...]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> DPRReaderOutput | tuple[Tensor, ...]: ...
 
 class DPRPretrainedContextEncoder(DPRPreTrainedModel):

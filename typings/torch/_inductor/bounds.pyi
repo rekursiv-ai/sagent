@@ -18,7 +18,8 @@ class BoundVars:
     @cache_on_self
     def get_bounds(self) -> dict[torch.fx.Node, ValueRanges[Expr]]: ...
     def swap_submodules(
-        self, submodules: dict[str, Callable[..., Any]]
+        self,
+        submodules: dict[str, Callable[..., Any]],
     ) -> dict[str, Callable[..., ValueRanges[Expr]]]: ...
     def masked_subblock(
         self,
@@ -37,7 +38,11 @@ class ValueRangeAnalysis(SymPyValueRangeAnalysis, DefaultHandler):
     def bool_handler(*args: Any, **kwargs: Any) -> ValueRanges[Any]: ...
     def load(self, name: str, index: sympy.Expr) -> ValueRanges[Any]: ...
     def store(
-        self, name: str, index: sympy.Expr, value: Any, mode: StoreMode = ...
+        self,
+        name: str,
+        index: sympy.Expr,
+        value: Any,
+        mode: StoreMode = ...,
     ) -> None: ...
     def reduction(
         self,

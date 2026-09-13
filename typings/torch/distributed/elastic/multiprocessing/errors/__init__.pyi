@@ -23,7 +23,11 @@ class ProcessFailure:
     message: str
     timestamp: int
     def __init__(
-        self, local_rank: int, pid: int, exitcode: int, error_file: str
+        self,
+        local_rank: int,
+        pid: int,
+        exitcode: int,
+        error_file: str,
     ) -> None: ...
     def signal_name(self) -> str: ...
     def timestamp_isoformat(self) -> str: ...
@@ -44,5 +48,6 @@ class _Recorded(Protocol[_P, _R]):
 
 def get_error_handler() -> ErrorHandler: ...
 def record(
-    fn: Callable[_P, _R], error_handler: ErrorHandler | None = None
+    fn: Callable[_P, _R],
+    error_handler: ErrorHandler | None = None,
 ) -> _Recorded[_P, _R]: ...

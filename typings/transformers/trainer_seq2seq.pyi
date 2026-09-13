@@ -46,10 +46,12 @@ class Seq2SeqTrainer(Trainer):
         compute_metrics: Callable[[EvalPrediction], dict] | None = ...,
         callbacks: list[TrainerCallback] | None = ...,
         optimizers: tuple[
-            torch.optim.Optimizer | None, torch.optim.lr_scheduler.LambdaLR | None
+            torch.optim.Optimizer | None,
+            torch.optim.lr_scheduler.LambdaLR | None,
         ] = ...,
         preprocess_logits_for_metrics: Callable[
-            [torch.Tensor, torch.Tensor], torch.Tensor
+            [torch.Tensor, torch.Tensor],
+            torch.Tensor,
         ]
         | None = ...,
     ) -> None: ...

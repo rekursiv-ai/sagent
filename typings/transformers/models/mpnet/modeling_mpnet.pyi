@@ -27,7 +27,11 @@ class MPNetPreTrainedModel(PreTrainedModel):
 class MPNetEmbeddings(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, input_ids=..., position_ids=..., inputs_embeds=..., **kwargs
+        self,
+        input_ids=...,
+        position_ids=...,
+        inputs_embeds=...,
+        **kwargs,
     ):  # -> Any:
         ...
     def create_position_ids_from_inputs_embeds(self, inputs_embeds):  # -> Tensor:
@@ -69,7 +73,9 @@ class MPNetIntermediate(nn.Module):
 class MPNetOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -103,7 +109,9 @@ class MPNetEncoder(nn.Module):
         ...
     @staticmethod
     def relative_position_bucket(
-        relative_position, num_buckets=..., max_distance=...
+        relative_position,
+        num_buckets=...,
+        max_distance=...,
     ): ...
 
 class MPNetPooler(nn.Module):

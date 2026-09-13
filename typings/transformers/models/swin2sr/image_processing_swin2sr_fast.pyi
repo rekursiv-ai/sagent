@@ -31,7 +31,9 @@ class Swin2SRImageProcessorFast(BaseImageProcessorFast):
     def pad_size(self, value):  # -> None:
         ...
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[Swin2SRFastImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[Swin2SRFastImageProcessorKwargs],
     ) -> BatchFeature: ...
     @deprecate_kwarg("size", version="v5", new_name="size_divisor")
     def pad(self, images: torch.Tensor, size_divisor: int) -> torch.Tensor: ...

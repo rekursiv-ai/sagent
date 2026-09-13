@@ -72,7 +72,10 @@ _onnx_symbolic = ...
 @symbolic_helper.quantized_args(True)
 @symbolic_helper.parse_args("v", "f", "f")
 def hardtanh(
-    g: jit_utils.GraphContext, self: _C.Value, min_val: float, max_val: float
+    g: jit_utils.GraphContext,
+    self: _C.Value,
+    min_val: float,
+    max_val: float,
 ): ...
 @_onnx_symbolic("aten::clamp")
 def clamp(g: jit_utils.GraphContext, self, min, max): ...
@@ -90,7 +93,11 @@ def relu6(g: jit_utils.GraphContext, input): ...
 def select(g: jit_utils.GraphContext, self, dim, index): ...
 @_onnx_symbolic("aten::index_put")
 def index_put(
-    g: jit_utils.GraphContext, self, indices_list_value, values, accumulate=...
+    g: jit_utils.GraphContext,
+    self,
+    indices_list_value,
+    values,
+    accumulate=...,
 ) -> None: ...
 @_onnx_symbolic("aten::pixel_shuffle")
 @symbolic_helper.parse_args("v", "i")
@@ -126,7 +133,12 @@ def stack(g: jit_utils.GraphContext, tensor_list, dim): ...
 @_onnx_symbolic("aten::unique_dim")
 @symbolic_helper.parse_args("v", "i", "i", "i", "i")
 def unique_dim(
-    g: jit_utils.GraphContext, self, dim, sorted, return_inverse, return_counts
+    g: jit_utils.GraphContext,
+    self,
+    dim,
+    sorted,
+    return_inverse,
+    return_counts,
 ) -> tuple[Any, Any, Any]: ...
 @_onnx_symbolic("aten::topk")
 @symbolic_helper.parse_args("v", "v", "i", "i", "i", "none")
@@ -145,12 +157,20 @@ def remainder(g: jit_utils.GraphContext, input, other): ...
 @_onnx_symbolic("aten::split")
 @symbolic_helper.parse_args("v", "v", "i", "i")
 def split(
-    g: jit_utils.GraphContext, self, split_size_or_sizes, dim, _outputs=...
+    g: jit_utils.GraphContext,
+    self,
+    split_size_or_sizes,
+    dim,
+    _outputs=...,
 ) -> list[Any]: ...
 @_onnx_symbolic("aten::split_with_sizes")
 @symbolic_helper.parse_args("v", "v", "i", "i")
 def split_with_sizes(
-    g: jit_utils.GraphContext, self, split_sizes, dim, _outputs=...
+    g: jit_utils.GraphContext,
+    self,
+    split_sizes,
+    dim,
+    _outputs=...,
 ) -> list[Any]: ...
 @_onnx_symbolic("aten::unbind")
 @symbolic_helper.parse_args("v", "i", "i")
@@ -197,7 +217,12 @@ def index_copy(g: jit_utils.GraphContext, self, dim, index, source): ...
 @_onnx_symbolic("aten::im2col")
 @symbolic_helper.parse_args("v", "is", "is", "is", "is")
 def im2col(
-    g: jit_utils.GraphContext, input, kernel_size, dilation, padding, stride
+    g: jit_utils.GraphContext,
+    input,
+    kernel_size,
+    dilation,
+    padding,
+    stride,
 ): ...
 @_onnx_symbolic("aten::narrow")
 def narrow(g: jit_utils.GraphContext, input, dim, start, length) -> Value: ...
@@ -232,7 +257,11 @@ def embedding_bag(
 @_onnx_symbolic("aten::embedding_renorm")
 @symbolic_helper.parse_args("v", "v", "f", "f")
 def embedding_renorm(
-    g: jit_utils.GraphContext, weight, indices, max_norm, norm_type
+    g: jit_utils.GraphContext,
+    weight,
+    indices,
+    max_norm,
+    norm_type,
 ): ...
 @_onnx_symbolic("aten::chunk")
 def chunk(g: jit_utils.GraphContext, self, chunks, dim) -> list[Any]: ...

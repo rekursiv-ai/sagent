@@ -50,15 +50,23 @@ class EvollaSaProtRotaryEmbedding(nn.Module):
     inv_freq: torch.Tensor
     def __init__(self, dim: int) -> None: ...
     def forward(
-        self, q: torch.Tensor, k: torch.Tensor
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class EvollaSaProtSelfAttention(EsmSelfAttention):
     def __init__(
-        self, config, position_embedding_type=..., layer_idx=..., is_cross_attention=...
+        self,
+        config,
+        position_embedding_type=...,
+        layer_idx=...,
+        is_cross_attention=...,
     ) -> None: ...
 
 class EvollaSaProtSelfOutput(EsmSelfOutput): ...
@@ -125,7 +133,10 @@ class EvollaProteinEncoder(nn.Module):
     def __init__(self, config: EvollaConfig) -> None: ...
     @can_return_tuple
     def forward(
-        self, input_ids: torch.LongTensor, attention_mask: torch.FloatTensor, **kwargs
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: torch.FloatTensor,
+        **kwargs,
     ):  # -> EvollaProteinEncoderModelOutput:
         ...
 

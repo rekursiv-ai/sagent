@@ -36,7 +36,8 @@ class GraniteDecoderLayer(LlamaDecoderLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class GranitePreTrainedModel(LlamaPreTrainedModel): ...

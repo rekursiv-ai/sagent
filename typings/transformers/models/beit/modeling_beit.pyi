@@ -27,12 +27,14 @@ logger = ...
 @auto_docstring(
     custom_intro="""
     Class for outputs of [`BeitModel`].
-    """
+    """,
 )
 class BeitModelOutputWithPooling(BaseModelOutputWithPooling): ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class BeitDropPath(nn.Module):
@@ -44,7 +46,10 @@ class BeitDropPath(nn.Module):
 class BeitEmbeddings(nn.Module):
     def __init__(self, config: BeitConfig) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
         self,
@@ -71,7 +76,9 @@ class BeitSelfAttention(nn.Module):
         resolution: tuple[int] | None = ...,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
 
 class BeitSdpaSelfAttention(BeitSelfAttention):
@@ -85,13 +92,18 @@ class BeitSdpaSelfAttention(BeitSelfAttention):
         resolution: tuple[int] | None = ...,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
 
 class BeitSelfOutput(nn.Module):
     def __init__(self, config: BeitConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor, gamma=...
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
+        gamma=...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -111,7 +123,9 @@ class BeitAttention(nn.Module):
         resolution: tuple[int] | None = ...,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
 
 class BeitIntermediate(nn.Module):
@@ -141,17 +155,23 @@ class BeitLayer(GradientCheckpointingLayer):
         resolution: tuple[int, int] | None = ...,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
 
 class BeitRelativePositionBias(nn.Module):
     def __init__(self, config: BeitConfig, window_size: tuple) -> None: ...
     @compile_compatible_method_lru_cache(maxsize=10)
     def generate_relative_position_index(
-        self, window_size: tuple[int, int]
+        self,
+        window_size: tuple[int, int],
     ) -> torch.Tensor: ...
     def forward(
-        self, window_size, interpolate_pos_encoding: bool = ..., dim_size=...
+        self,
+        window_size,
+        interpolate_pos_encoding: bool = ...,
+        dim_size=...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 

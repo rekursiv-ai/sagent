@@ -27,7 +27,11 @@ class FlaxRoFormerEmbeddings(nn.Module):
     def setup(self):  # -> None:
         ...
     def __call__(
-        self, input_ids, token_type_ids, attention_mask, deterministic: bool = ...
+        self,
+        input_ids,
+        token_type_ids,
+        attention_mask,
+        deterministic: bool = ...,
     ): ...
 
 class FlaxRoFormerSelfAttention(nn.Module):
@@ -46,7 +50,10 @@ class FlaxRoFormerSelfAttention(nn.Module):
         ...
     @staticmethod
     def apply_rotary_position_embeddings(
-        sinusoidal_pos, query_layer, key_layer, value_layer=...
+        sinusoidal_pos,
+        query_layer,
+        key_layer,
+        value_layer=...,
     ):  # -> tuple[Array, Array, Array] | tuple[Array, Array]:
         ...
 
@@ -181,10 +188,13 @@ class FlaxRoFormerPreTrainedModel(FlaxPreTrainedModel):
         **kwargs,
     ) -> None: ...
     def init_weights(
-        self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...
+        self,
+        rng: jax.random.PRNGKey,
+        input_shape: tuple,
+        params: FrozenDict = ...,
     ) -> FrozenDict: ...
     @add_start_docstrings_to_model_forward(
-        ROFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ROFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     def __call__(
         self,

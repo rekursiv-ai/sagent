@@ -8,13 +8,15 @@ class TensorProperties:
 
 class Weights(dict):
     def __init__(
-        self, weight_dict: dict[str, tuple[torch.Tensor, TensorProperties]]
+        self,
+        weight_dict: dict[str, tuple[torch.Tensor, TensorProperties]],
     ) -> None: ...
     def get_weight(self, name: str) -> tuple[torch.Tensor, TensorProperties]: ...
     def get_weight_properties(self, name: str) -> TensorProperties: ...
 
 def get_complete(
-    group: OrderedSet[tuple[str, str]], models_weights: dict[str, Weights]
+    group: OrderedSet[tuple[str, str]],
+    models_weights: dict[str, Weights],
 ) -> tuple[str, str]: ...
 def group_weights(
     all_weights: dict[str, Weights],

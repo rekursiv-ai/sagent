@@ -30,12 +30,20 @@ class CKGemmTemplate(CKTemplate):
     def filter_op(self, op_info: InductorROCmOp) -> None: ...
     def emit_ck_instance(self, op: CKGemmOperation) -> tuple[Any, Any]: ...
     def render(
-        self, kernel: ROCmTemplateKernel, op: CKGemmOperation, **kwargs
+        self,
+        kernel: ROCmTemplateKernel,
+        op: CKGemmOperation,
+        **kwargs,
     ) -> str: ...
     def gen_ops(self) -> list[InductorROCmOp]: ...
     @staticmethod
     def add_ck_gemm_choices(
-        choices, layout, input_nodes, alpha=..., beta=..., input_reorder=...
+        choices,
+        layout,
+        input_nodes,
+        alpha=...,
+        beta=...,
+        input_reorder=...,
     ) -> None: ...
     def size_args(
         self,

@@ -65,7 +65,9 @@ class RepararametrizeModuleContextVariable(GenericContextWrappingVariable):
 class GradInplaceRequiresGradCtxManagerVariable(ContextWrappingVariable):
     @staticmethod
     def create(
-        tx: InstructionTranslator, target_values, **kwargs
+        tx: InstructionTranslator,
+        target_values,
+        **kwargs,
     ) -> GradInplaceRequiresGradCtxManagerVariable: ...
     def enter(self, tx) -> VariableTracker: ...
     def exit(self, tx: InstructionTranslator, *args) -> VariableTracker: ...
@@ -73,7 +75,9 @@ class GradInplaceRequiresGradCtxManagerVariable(ContextWrappingVariable):
 class TemporarilyPopInterpreterStackCtxManagerVariable(ContextWrappingVariable):
     @staticmethod
     def create(
-        tx: InstructionTranslator, target_values, **kwargs
+        tx: InstructionTranslator,
+        target_values,
+        **kwargs,
     ) -> TemporarilyPopInterpreterStackCtxManagerVariable: ...
     def enter(self, tx) -> VariableTracker: ...
     def exit(self, tx: InstructionTranslator, *args) -> VariableTracker: ...
@@ -82,7 +86,8 @@ class JvpIncrementNestingCtxManagerVariable(ContextWrappingVariable):
     _guards_singleton = ...
     @staticmethod
     def create(
-        tx: InstructionTranslator, **kwargs
+        tx: InstructionTranslator,
+        **kwargs,
     ) -> JvpIncrementNestingCtxManagerVariable: ...
     def enter(self, tx) -> VariableTracker: ...
     def exit(self, tx: InstructionTranslator, *args) -> VariableTracker: ...
@@ -90,7 +95,9 @@ class JvpIncrementNestingCtxManagerVariable(ContextWrappingVariable):
 class SetFwdGradEnabledContextManager(ContextWrappingVariable):
     @staticmethod
     def create(
-        tx: InstructionTranslator, target_values, **kwargs
+        tx: InstructionTranslator,
+        target_values,
+        **kwargs,
     ) -> SetFwdGradEnabledContextManager: ...
     def enter(self, tx) -> VariableTracker: ...
     def exit(self, tx: InstructionTranslator, *args) -> VariableTracker: ...
@@ -106,7 +113,8 @@ class GradIncrementNestingCtxManagerVariable(ContextWrappingVariable):
     _guards_singleton = ...
     @staticmethod
     def create(
-        tx: InstructionTranslator, **kwargs
+        tx: InstructionTranslator,
+        **kwargs,
     ) -> GradIncrementNestingCtxManagerVariable: ...
     def enter(self, tx) -> VariableTracker: ...
     def exit(self, tx: InstructionTranslator, *args) -> VariableTracker: ...
@@ -114,7 +122,8 @@ class GradIncrementNestingCtxManagerVariable(ContextWrappingVariable):
 class CatchWarningsCtxManagerVariable(ContextWrappingVariable):
     @staticmethod
     def create(
-        tx: InstructionTranslator, catch_warnings_args
+        tx: InstructionTranslator,
+        catch_warnings_args,
     ) -> CatchWarningsCtxManagerVariable: ...
     def __init__(self, catch_warnings_args, **kwargs) -> None: ...
     def enter(self, tx) -> VariableTracker: ...
@@ -124,7 +133,9 @@ class VmapIncrementNestingCtxManagerVariable(ContextWrappingVariable):
     _guards_singleton = ...
     @staticmethod
     def create(
-        tx: InstructionTranslator, target_values, **kwargs
+        tx: InstructionTranslator,
+        target_values,
+        **kwargs,
     ) -> VmapIncrementNestingCtxManagerVariable: ...
     def enter(self, tx) -> VariableTracker: ...
     def exit(self, tx: InstructionTranslator, *args) -> VariableTracker: ...
@@ -133,10 +144,17 @@ class GradModeVariable(ContextWrappingVariable):
     _guards_singleton = ...
     @staticmethod
     def create(
-        tx: InstructionTranslator, target_value, initialized=..., **kwargs
+        tx: InstructionTranslator,
+        target_value,
+        initialized=...,
+        **kwargs,
     ) -> GradModeVariable: ...
     def __init__(
-        self, target_values, initial_values=..., initialized=..., **kwargs
+        self,
+        target_values,
+        initial_values=...,
+        initialized=...,
+        **kwargs,
     ) -> None: ...
     def enter(self, tx) -> VariableTracker: ...
     def exit(self, tx: InstructionTranslator, *args) -> VariableTracker: ...
@@ -152,7 +170,9 @@ class GradModeVariable(ContextWrappingVariable):
 class InferenceModeVariable(ContextWrappingVariable):
     @staticmethod
     def create(
-        tx: InstructionTranslator, target_value, **kwargs
+        tx: InstructionTranslator,
+        target_value,
+        **kwargs,
     ) -> InferenceModeVariable: ...
     def __init__(self, target_values, initial_values=..., **kwargs) -> None: ...
     def exit(self, tx: InstructionTranslator, *args) -> None: ...
@@ -174,7 +194,11 @@ class TorchFunctionDisableVariable(ContextWrappingVariable):
     @staticmethod
     def create(tx: InstructionTranslator, **kwargs) -> TorchFunctionDisableVariable: ...
     def __init__(
-        self, target_values, initial_values=..., only_subclass=..., **kwargs
+        self,
+        target_values,
+        initial_values=...,
+        only_subclass=...,
+        **kwargs,
     ) -> None: ...
     def set_cleanup_hook(self, tx: InstructionTranslator, fn=...) -> None: ...
     def module_name(self) -> Literal[torch._C]: ...
@@ -186,7 +210,9 @@ class DeterministicAlgorithmsVariable(ContextWrappingVariable):
     _guards_singleton = ...
     @staticmethod
     def create(
-        tx: InstructionTranslator, target_value, **kwargs
+        tx: InstructionTranslator,
+        target_value,
+        **kwargs,
     ) -> DeterministicAlgorithmsVariable: ...
     def __init__(self, target_values, initial_values=..., **kwargs) -> None: ...
     def enter(self, tx) -> VariableTracker: ...
@@ -196,7 +222,9 @@ class DeterministicAlgorithmsVariable(ContextWrappingVariable):
 class DisabledSavedTensorsHooksVariable(ContextWrappingVariable):
     @staticmethod
     def create(
-        tx: InstructionTranslator, target_value, **kwargs
+        tx: InstructionTranslator,
+        target_value,
+        **kwargs,
     ) -> DisabledSavedTensorsHooksVariable: ...
     def __init__(self, target_values, initial_values=..., **kwargs) -> None: ...
     def enter(self, tx) -> VariableTracker: ...
@@ -230,7 +258,9 @@ class ProfilerContextVariable(ContextWrappingVariable):
 class StreamContextVariable(ContextWrappingVariable):
     @staticmethod
     def create(
-        tx: InstructionTranslator, target_value, **kwargs
+        tx: InstructionTranslator,
+        target_value,
+        **kwargs,
     ) -> StreamContextVariable: ...
     def __init__(self, target_values, device, initial_values=..., **kwargs) -> None: ...
     def enter(self, tx) -> None: ...
@@ -248,10 +278,17 @@ class FSDPParamGroupUseTrainingStateVariable(ContextWrappingVariable):
     _guards_singleton = ...
     @staticmethod
     def create(
-        tx: InstructionTranslator, param_group_var, target_value, **kwargs
+        tx: InstructionTranslator,
+        param_group_var,
+        target_value,
+        **kwargs,
     ) -> FSDPParamGroupUseTrainingStateVariable: ...
     def __init__(
-        self, param_group_var, target_values, initial_values=..., **kwargs
+        self,
+        param_group_var,
+        target_values,
+        initial_values=...,
+        **kwargs,
     ) -> None: ...
     def enter(self, tx) -> VariableTracker: ...
     def exit(self, tx: InstructionTranslator, *args) -> VariableTracker: ...
@@ -267,7 +304,10 @@ class FSDPParamGroupUseTrainingStateVariable(ContextWrappingVariable):
 class SDPAKernelVariable(ContextWrappingVariable):
     @staticmethod
     def create(
-        tx: InstructionTranslator, backends, set_priority=..., **kwargs
+        tx: InstructionTranslator,
+        backends,
+        set_priority=...,
+        **kwargs,
     ) -> SDPAKernelVariable: ...
     def __init__(
         self,
@@ -285,7 +325,11 @@ class StreamVariable(VariableTracker):
     def __init__(self, proxy, value, device, **kwargs) -> None: ...
     def python_type(self) -> type[Stream]: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def as_proxy(self): ...
     def reconstruct(self, codegen: PyCodegen) -> None: ...
@@ -293,7 +337,11 @@ class StreamVariable(VariableTracker):
 class EventVariable(VariableTracker):
     def __init__(self, proxy, value, **kwargs) -> None: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def as_proxy(self): ...
     def reconstruct(self, codegen: PyCodegen) -> None: ...

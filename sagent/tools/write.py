@@ -43,7 +43,7 @@ class Write:
                 "content": {"type": "string", "description": "File content to write."},
             },
             "required": ["file_path", "content"],
-        }
+        },
     )
 
     output: Annotated[Toggle, CLI_SETTABLE] = "off"

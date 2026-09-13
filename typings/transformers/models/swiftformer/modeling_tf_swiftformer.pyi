@@ -51,7 +51,10 @@ class TFSwiftFormerConvEncoder(keras.layers.Layer):
 
 class TFSwiftFormerMlp(keras.layers.Layer):
     def __init__(
-        self, config: SwiftFormerConfig, in_features: int, **kwargs
+        self,
+        config: SwiftFormerConfig,
+        in_features: int,
+        **kwargs,
     ) -> None: ...
     def call(self, x: tf.Tensor, training: bool = ...) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -71,7 +74,11 @@ class TFSwiftFormerLocalRepresentation(keras.layers.Layer):
 
 class TFSwiftFormerEncoderBlock(keras.layers.Layer):
     def __init__(
-        self, config: SwiftFormerConfig, dim: int, drop_path: float = ..., **kwargs
+        self,
+        config: SwiftFormerConfig,
+        dim: int,
+        drop_path: float = ...,
+        **kwargs,
     ) -> None: ...
     def build(self, input_shape=...):  # -> None:
         ...

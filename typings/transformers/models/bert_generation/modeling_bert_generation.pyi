@@ -22,7 +22,9 @@ logger = ...
 class BertGenerationSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -66,7 +68,9 @@ class BertGenerationIntermediate(nn.Module):
 class BertGenerationOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -104,11 +108,17 @@ class BertEncoder(nn.Module):
         cache_position: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
 
 def load_tf_weights_in_bert_generation(
-    model, tf_hub_path, model_class, is_encoder_named_decoder=..., is_encoder=...
+    model,
+    tf_hub_path,
+    model_class,
+    is_encoder_named_decoder=...,
+    is_encoder=...,
 ): ...
 
 class BertGenerationEmbeddings(nn.Module):

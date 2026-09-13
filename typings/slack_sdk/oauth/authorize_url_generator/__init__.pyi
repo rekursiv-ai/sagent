@@ -22,5 +22,8 @@ class OpenIDConnectAuthorizeUrlGenerator:
         authorization_url: str = ...,
     ) -> None: ...
     def generate(
-        self, state: str, nonce: str | None = ..., team: str | None = ...
+        self,
+        state: str,
+        nonce: str | None = ...,
+        team: str | None = ...,
     ) -> str: ...

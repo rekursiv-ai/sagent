@@ -16,18 +16,28 @@ class VideoClassificationPipeline(Pipeline):
     def __call__(self, inputs: str, **kwargs: Any) -> list[dict[str, Any]]: ...
     @overload
     def __call__(
-        self, inputs: list[str], **kwargs: Any
+        self,
+        inputs: list[str],
+        **kwargs: Any,
     ) -> list[list[dict[str, Any]]]: ...
     def __call__(
-        self, inputs: str | list[str] | None = ..., **kwargs
+        self,
+        inputs: str | list[str] | None = ...,
+        **kwargs,
     ):  # -> list[Any] | PipelineIterator | Generator[Any, Any, None] | Tensor | Any | None:
         ...
     def preprocess(
-        self, video, num_frames=..., frame_sampling_rate=...
+        self,
+        video,
+        num_frames=...,
+        frame_sampling_rate=...,
     ):  # -> transformers.feature_extraction_utils.BatchFeature | Any | transformers.image_processing_base.BatchFeature:
         ...
     def postprocess(
-        self, model_outputs, top_k=..., function_to_apply=...
+        self,
+        model_outputs,
+        top_k=...,
+        function_to_apply=...,
     ):  # -> list[dict[str, Any | str]]:
         ...
 

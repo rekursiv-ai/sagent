@@ -28,13 +28,19 @@ class SpectralNorm:
     ) -> None: ...
     def reshape_weight_to_matrix(self, weight: torch.Tensor) -> torch.Tensor: ...
     def compute_weight(
-        self, module: Module, do_power_iteration: bool
+        self,
+        module: Module,
+        do_power_iteration: bool,
     ) -> torch.Tensor: ...
     def remove(self, module: Module) -> None: ...
     def __call__(self, module: Module, inputs: Any) -> None: ...
     @staticmethod
     def apply(
-        module: Module, name: str, n_power_iterations: int, dim: int, eps: float
+        module: Module,
+        name: str,
+        n_power_iterations: int,
+        dim: int,
+        eps: float,
     ) -> SpectralNorm: ...
 
 class SpectralNormLoadStateDictPreHook:

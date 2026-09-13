@@ -73,7 +73,12 @@ def embedding_bag(
 @_onnx_symbolic("aten::fake_quantize_per_tensor_affine")
 @symbolic_helper.parse_args("v", "v", "v", "i", "i")
 def fake_quantize_per_tensor_affine(
-    g: jit_utils.GraphContext, inputs, scale, zero_point, quant_min=..., quant_max=...
+    g: jit_utils.GraphContext,
+    inputs,
+    scale,
+    zero_point,
+    quant_min=...,
+    quant_max=...,
 ): ...
 @_onnx_symbolic("aten::isinf")
 def isinf(g: jit_utils.GraphContext, input): ...
@@ -81,7 +86,11 @@ def isinf(g: jit_utils.GraphContext, input): ...
 def isfinite(g: jit_utils.GraphContext, input): ...
 @_onnx_symbolic("aten::quantize_per_tensor")
 def quantize_per_tensor(
-    g: jit_utils.GraphContext, input, scale, zero_point, dtype
+    g: jit_utils.GraphContext,
+    input,
+    scale,
+    zero_point,
+    dtype,
 ) -> Value: ...
 @_onnx_symbolic("aten::dequantize")
 def dequantize(g: jit_utils.GraphContext, input) -> Value: ...
@@ -90,35 +99,68 @@ def dequantize(g: jit_utils.GraphContext, input) -> Value: ...
 def nan_to_num(g: jit_utils.GraphContext, input, nan, posinf, neginf): ...
 @_onnx_symbolic("quantized::linear")
 def quantized_linear(
-    g: jit_utils.GraphContext, q_input, q_weight, bias, op_scale, op_zero_point
+    g: jit_utils.GraphContext,
+    q_input,
+    q_weight,
+    bias,
+    op_scale,
+    op_zero_point,
 ) -> Value: ...
 @_onnx_symbolic("quantized::linear_relu")
 def quantized_linear_relu(
-    g: jit_utils.GraphContext, q_input, q_weight, bias, op_scale, op_zero_point
+    g: jit_utils.GraphContext,
+    q_input,
+    q_weight,
+    bias,
+    op_scale,
+    op_zero_point,
 ) -> Value: ...
 @_onnx_symbolic("quantized::add")
 def quantized_add(
-    g: jit_utils.GraphContext, x, y, op_scale, op_zero_point
+    g: jit_utils.GraphContext,
+    x,
+    y,
+    op_scale,
+    op_zero_point,
 ) -> Value: ...
 @_onnx_symbolic("quantized::add_relu")
 def quantized_add_relu(
-    g: jit_utils.GraphContext, x, y, op_scale, op_zero_point
+    g: jit_utils.GraphContext,
+    x,
+    y,
+    op_scale,
+    op_zero_point,
 ) -> Value: ...
 @_onnx_symbolic("quantized::mul")
 def quantized_mul(
-    g: jit_utils.GraphContext, x, y, op_scale, op_zero_point
+    g: jit_utils.GraphContext,
+    x,
+    y,
+    op_scale,
+    op_zero_point,
 ) -> Value: ...
 @_onnx_symbolic("quantized::hardswish")
 def quantized_hardswish(
-    g: jit_utils.GraphContext, x, op_scale, op_zero_point
+    g: jit_utils.GraphContext,
+    x,
+    op_scale,
+    op_zero_point,
 ) -> Value: ...
 @_onnx_symbolic("quantized::sigmoid")
 def quantized_sigmoid(
-    g: jit_utils.GraphContext, x, op_scale, op_zero_point
+    g: jit_utils.GraphContext,
+    x,
+    op_scale,
+    op_zero_point,
 ) -> Value: ...
 @_onnx_symbolic("quantized::leaky_relu")
 def quantized_leaky_relu(
-    g: jit_utils.GraphContext, x, negative_slope, inplace, op_scale, op_zero_point
+    g: jit_utils.GraphContext,
+    x,
+    negative_slope,
+    inplace,
+    op_scale,
+    op_zero_point,
 ) -> Value: ...
 @_onnx_symbolic("quantized::layer_norm")
 def quantized_layer_norm(
@@ -133,12 +175,25 @@ def quantized_layer_norm(
 ) -> Value: ...
 @_onnx_symbolic("quantized::group_norm")
 def quantized_group_norm(
-    g: jit_utils.GraphContext, x, num_groups, weight, bias, eps, op_scale, op_zero_point
+    g: jit_utils.GraphContext,
+    x,
+    num_groups,
+    weight,
+    bias,
+    eps,
+    op_scale,
+    op_zero_point,
 ) -> Value: ...
 @_onnx_symbolic("quantized::instance_norm")
 @symbolic_helper.parse_args("v", "v", "v", "f", "v", "v")
 def quantized_instance_norm(
-    g: jit_utils.GraphContext, q_input, weight, bias, eps, op_scale, op_zero_point
+    g: jit_utils.GraphContext,
+    q_input,
+    weight,
+    bias,
+    eps,
+    op_scale,
+    op_zero_point,
 ) -> Value: ...
 @_onnx_symbolic("quantized::conv1d_relu")
 def quantized_conv1d_relu(

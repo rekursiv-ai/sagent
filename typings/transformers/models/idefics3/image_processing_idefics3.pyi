@@ -109,7 +109,10 @@ class Idefics3ImageProcessor(BaseImageProcessor):
     ):  # -> BatchFeature:
         ...
     def get_number_of_image_patches(
-        self, height: int, width: int, images_kwargs=...
+        self,
+        height: int,
+        width: int,
+        images_kwargs=...,
     ):  # -> tuple[Any | Literal[1], Any | Literal[1], Any | Literal[1]]:
         ...
 

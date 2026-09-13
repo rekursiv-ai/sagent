@@ -27,9 +27,13 @@ class StrobelightCLIFunctionProfiler:
         async_stack_max_len: int = ...,
     ) -> None: ...
     def profile(
-        self, work_function: Callable[_P, _R], *args: _P.args, **kwargs: _P.kwargs
+        self,
+        work_function: Callable[_P, _R],
+        *args: _P.args,
+        **kwargs: _P.kwargs,
     ) -> _R | None: ...
 
 def strobelight(
-    profiler: StrobelightCLIFunctionProfiler | None = ..., **kwargs: Any
+    profiler: StrobelightCLIFunctionProfiler | None = ...,
+    **kwargs: Any,
 ) -> Callable[[Callable[_P, _R]], Callable[_P, _R | None]]: ...

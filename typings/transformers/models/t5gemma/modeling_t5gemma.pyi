@@ -49,7 +49,12 @@ class T5GemmaRotaryEmbedding(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -121,7 +126,10 @@ class T5GemmaDecoderLayer(T5GemmaEncoderLayer):
 
 class T5GemmaClassificationHead(nn.Module):
     def __init__(
-        self, hidden_size: int, num_labels: int, classifier_dropout_rate: float = ...
+        self,
+        hidden_size: int,
+        num_labels: int,
+        classifier_dropout_rate: float = ...,
     ) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -282,7 +290,9 @@ class T5GemmaForConditionalGeneration(T5GemmaPreTrainedModel, GenerationMixin):
 @auto_docstring
 class T5GemmaForSequenceClassification(T5GemmaPreTrainedModel):
     def __init__(
-        self, config: T5GemmaConfig, is_encoder_decoder: bool | None = ...
+        self,
+        config: T5GemmaConfig,
+        is_encoder_decoder: bool | None = ...,
     ) -> None: ...
     def get_input_embeddings(self):  # -> Module:
         ...
@@ -308,7 +318,9 @@ class T5GemmaForSequenceClassification(T5GemmaPreTrainedModel):
 @auto_docstring
 class T5GemmaForTokenClassification(T5GemmaPreTrainedModel):
     def __init__(
-        self, config: T5GemmaConfig, is_encoder_decoder: bool | None = ...
+        self,
+        config: T5GemmaConfig,
+        is_encoder_decoder: bool | None = ...,
     ) -> None: ...
     def get_input_embeddings(self):  # -> Module:
         ...

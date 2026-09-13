@@ -29,7 +29,11 @@ class Attention(nn.Module):
     def merge_heads(self, x): ...
     def split_heads(self, x, k=...): ...
     def forward(
-        self, x, attention_mask=..., head_mask=..., output_attentions=...
+        self,
+        x,
+        attention_mask=...,
+        head_mask=...,
+        output_attentions=...,
     ):  # -> list[Any]:
         ...
 
@@ -41,7 +45,11 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, n_positions, config, scale=...) -> None: ...
     def forward(
-        self, x, attention_mask=..., head_mask=..., output_attentions=...
+        self,
+        x,
+        attention_mask=...,
+        head_mask=...,
+        output_attentions=...,
     ):  # -> Any:
         ...
 
@@ -111,7 +119,9 @@ class OpenAIGPTLMHeadModel(OpenAIGPTPreTrainedModel, GenerationMixin):
         **kwargs,
     ) -> tuple[torch.Tensor] | CausalLMOutput: ...
     def prepare_inputs_for_generation(
-        self, input_ids: torch.LongTensor, **kwargs
+        self,
+        input_ids: torch.LongTensor,
+        **kwargs,
     ) -> dict[str, Any]: ...
 
 @auto_docstring(custom_intro=...)

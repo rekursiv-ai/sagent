@@ -13,7 +13,8 @@ def get_eval_frame_callback() -> DynamoCallback: ...
 def reset_code(code: types.CodeType) -> None: ...
 def unsupported(obj1: object, obj2: object) -> object: ...
 def set_code_exec_strategy(
-    code: types.CodeType, strategy: _FrameExecStrategy
+    code: types.CodeType,
+    strategy: _FrameExecStrategy,
 ) -> None: ...
 def set_guard_error_hook(hook: DynamoGuardHook) -> None: ...
 def set_guard_complete_hook(
@@ -35,7 +36,9 @@ class _PrecompileEntry:
 
 class _ExtraState:
     def invalidate(
-        self, cache_entry: _CacheEntry, guard_manager: GuardManagerWrapper
+        self,
+        cache_entry: _CacheEntry,
+        guard_manager: GuardManagerWrapper,
     ) -> None: ...
 
 class _FrameAction(enum.IntEnum):
@@ -50,7 +53,9 @@ class _FrameExecStrategy:
     def __init__(self) -> None: ...
     @overload
     def __init__(
-        self, cur_action: _FrameAction, recursive_action: _FrameAction
+        self,
+        cur_action: _FrameAction,
+        recursive_action: _FrameAction,
     ) -> None: ...
 
 class _PyInterpreterFrame:

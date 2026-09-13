@@ -49,7 +49,9 @@ class PatchTSTAttention(nn.Module):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class PatchTSTBatchNorm(nn.Module):
@@ -86,7 +88,9 @@ class PatchTSTMasking(nn.Module):
 class PatchTSTEncoderLayer(nn.Module):
     def __init__(self, config: PatchTSTConfig) -> None: ...
     def forward(
-        self, hidden_state: torch.Tensor, output_attentions: bool | None = ...
+        self,
+        hidden_state: torch.Tensor,
+        output_attentions: bool | None = ...,
     ):  # -> tuple[Tensor, Any, Any] | tuple[Tensor, Any] | tuple[Tensor]:
         ...
 
@@ -168,46 +172,65 @@ class SamplePatchTSTOutput(ModelOutput):
     sequences: torch.FloatTensor | None = ...
 
 def nll(
-    input: torch.distributions.Distribution, target: torch.Tensor
+    input: torch.distributions.Distribution,
+    target: torch.Tensor,
 ) -> torch.Tensor: ...
 def weighted_average(
-    input_tensor: torch.Tensor, weights: torch.Tensor | None = ..., dim=...
+    input_tensor: torch.Tensor,
+    weights: torch.Tensor | None = ...,
+    dim=...,
 ) -> torch.Tensor: ...
 
 class PatchTSTStdScaler(nn.Module):
     def __init__(self, config: PatchTSTConfig) -> None: ...
     def forward(
-        self, data: torch.Tensor, observed_indicator: torch.Tensor
+        self,
+        data: torch.Tensor,
+        observed_indicator: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 class PatchTSTMeanScaler(nn.Module):
     def __init__(self, config: PatchTSTConfig) -> None: ...
     def forward(
-        self, data: torch.Tensor, observed_indicator: torch.Tensor
+        self,
+        data: torch.Tensor,
+        observed_indicator: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 class PatchTSTNOPScaler(nn.Module):
     def __init__(self, config: PatchTSTConfig) -> None: ...
     def forward(
-        self, data: torch.Tensor, observed_indicator: torch.Tensor | None = ...
+        self,
+        data: torch.Tensor,
+        observed_indicator: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 class PatchTSTScaler(nn.Module):
     def __init__(self, config: PatchTSTConfig) -> None: ...
     def forward(
-        self, data: torch.Tensor, observed_indicator: torch.Tensor
+        self,
+        data: torch.Tensor,
+        observed_indicator: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 @auto_docstring
@@ -232,7 +255,7 @@ class PatchTSTMaskPretrainHead(nn.Module):
 @auto_docstring(
     custom_intro="""
     The PatchTST for pretrain model.
-    """
+    """,
 )
 class PatchTSTForPretraining(PatchTSTPreTrainedModel):
     def __init__(self, config: PatchTSTConfig) -> None: ...
@@ -245,7 +268,9 @@ class PatchTSTForPretraining(PatchTSTPreTrainedModel):
         return_dict: bool | None = ...,
     ) -> tuple | PatchTSTForPretrainingOutput: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | PatchTSTForPretrainingOutput: ...
 
 class PatchTSTClassificationHead(nn.Module):
@@ -256,7 +281,7 @@ class PatchTSTClassificationHead(nn.Module):
 @auto_docstring(
     custom_intro="""
     The PatchTST for classification model.
-    """
+    """,
 )
 class PatchTSTForClassification(PatchTSTPreTrainedModel):
     def __init__(self, config: PatchTSTConfig) -> None: ...
@@ -274,11 +299,14 @@ class PatchTSTForClassification(PatchTSTPreTrainedModel):
 @auto_docstring(
     custom_intro="""
     The PatchTST for regression Model.
-    """
+    """,
 )
 class PatchTSTPredictionHead(nn.Module):
     def __init__(
-        self, config: PatchTSTConfig, num_patches: int, distribution_output=...
+        self,
+        config: PatchTSTConfig,
+        num_patches: int,
+        distribution_output=...,
     ) -> None: ...
     def forward(self, embedding: torch.Tensor):  # -> tuple[Any, ...] | Tensor | Any:
         ...
@@ -286,7 +314,7 @@ class PatchTSTPredictionHead(nn.Module):
 @auto_docstring(
     custom_intro="""
     The PatchTST for prediction model.
-    """
+    """,
 )
 class PatchTSTForPrediction(PatchTSTPreTrainedModel):
     def __init__(self, config: PatchTSTConfig) -> None: ...
@@ -300,7 +328,9 @@ class PatchTSTForPrediction(PatchTSTPreTrainedModel):
         return_dict: bool | None = ...,
     ) -> tuple | PatchTSTForPredictionOutput: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | PatchTSTForPredictionOutput: ...
     @torch.no_grad()
     def generate(
@@ -317,7 +347,7 @@ class PatchTSTRegressionHead(nn.Module):
 @auto_docstring(
     custom_intro="""
     The PatchTST for regression model.
-    """
+    """,
 )
 class PatchTSTForRegression(PatchTSTPreTrainedModel):
     def __init__(self, config: PatchTSTConfig) -> None: ...

@@ -35,7 +35,10 @@ class GptOssRMSNorm(LlamaRMSNorm):
 class GptOssExperts(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, router_indices=..., routing_weights=...
+        self,
+        hidden_states: torch.Tensor,
+        router_indices=...,
+        routing_weights=...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -57,7 +60,12 @@ class GptOssRotaryEmbedding(LlamaRotaryEmbedding):
         ...
 
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Tensor, Tensor]:
     ...
 def eager_attention_forward(

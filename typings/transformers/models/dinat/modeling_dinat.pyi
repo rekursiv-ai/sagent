@@ -40,7 +40,7 @@ class DinatModelOutput(ModelOutput):
 @auto_docstring(
     custom_intro="""
     Dinat outputs for image classification.
-    """
+    """,
 )
 class DinatImageClassifierOutput(ModelOutput):
     loss: torch.FloatTensor | None = ...
@@ -52,7 +52,8 @@ class DinatImageClassifierOutput(ModelOutput):
 class DinatEmbeddings(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, pixel_values: torch.FloatTensor | None
+        self,
+        pixel_values: torch.FloatTensor | None,
     ) -> tuple[torch.Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> tuple[torch.Tensor]: ...
 
@@ -67,7 +68,9 @@ class DinatDownsampler(nn.Module):
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class DinatDropPath(nn.Module):
@@ -79,14 +82,18 @@ class DinatDropPath(nn.Module):
 class NeighborhoodAttention(nn.Module):
     def __init__(self, config, dim, num_heads, kernel_size, dilation) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, output_attentions: bool | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> tuple[torch.Tensor]: ...
 
 class NeighborhoodAttentionOutput(nn.Module):
     def __init__(self, config, dim) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -95,7 +102,9 @@ class NeighborhoodAttentionModule(nn.Module):
     def prune_heads(self, heads):  # -> None:
         ...
     def forward(
-        self, hidden_states: torch.Tensor, output_attentions: bool | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> tuple[torch.Tensor]: ...
 
@@ -111,25 +120,46 @@ class DinatOutput(nn.Module):
 
 class DinatLayer(nn.Module):
     def __init__(
-        self, config, dim, num_heads, dilation, drop_path_rate=...
+        self,
+        config,
+        dim,
+        num_heads,
+        dilation,
+        drop_path_rate=...,
     ) -> None: ...
     def maybe_pad(
-        self, hidden_states, height, width
+        self,
+        hidden_states,
+        height,
+        width,
     ):  # -> tuple[Tensor | Any, tuple[Literal[0], Literal[0], Literal[0], int, Literal[0], int] | tuple[Literal[0], Literal[0], Literal[0], Literal[0], Literal[0], Literal[0]]]:
         ...
     def forward(
-        self, hidden_states: torch.Tensor, output_attentions: bool | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class DinatStage(nn.Module):
     def __init__(
-        self, config, dim, depth, num_heads, dilations, drop_path_rate, downsample
+        self,
+        config,
+        dim,
+        depth,
+        num_heads,
+        dilations,
+        drop_path_rate,
+        downsample,
     ) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, output_attentions: bool | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> tuple[torch.Tensor]: ...
 

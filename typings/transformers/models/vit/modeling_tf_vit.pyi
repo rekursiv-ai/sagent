@@ -68,7 +68,10 @@ class TFViTSelfAttention(keras.layers.Layer):
 class TFViTSelfOutput(keras.layers.Layer):
     def __init__(self, config: ViTConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -95,7 +98,10 @@ class TFViTIntermediate(keras.layers.Layer):
 class TFViTOutput(keras.layers.Layer):
     def __init__(self, config: ViTConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -130,7 +136,10 @@ class TFViTEncoder(keras.layers.Layer):
 class TFViTMainLayer(keras.layers.Layer):
     config_class = ViTConfig
     def __init__(
-        self, config: ViTConfig, add_pooling_layer: bool = ..., **kwargs
+        self,
+        config: ViTConfig,
+        add_pooling_layer: bool = ...,
+        **kwargs,
     ) -> None: ...
     def get_input_embeddings(self) -> keras.layers.Layer: ...
     @unpack_inputs
@@ -161,7 +170,11 @@ VIT_INPUTS_DOCSTRING = ...
 )
 class TFViTModel(TFViTPreTrainedModel):
     def __init__(
-        self, config: ViTConfig, *inputs, add_pooling_layer=..., **kwargs
+        self,
+        config: ViTConfig,
+        *inputs,
+        add_pooling_layer=...,
+        **kwargs,
     ) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(VIT_INPUTS_DOCSTRING)

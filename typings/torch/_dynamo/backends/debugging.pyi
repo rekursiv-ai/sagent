@@ -43,7 +43,9 @@ log = ...
 
 @register_backend
 def eager(
-    gm: torch.fx.GraphModule, fake_tensor_inputs: list[torch.Tensor], **kwargs: Any
+    gm: torch.fx.GraphModule,
+    fake_tensor_inputs: list[torch.Tensor],
+    **kwargs: Any,
 ) -> Callable[..., Any]: ...
 def make_eager_backend_with_torch_function_mode(
     mode: torch.overrides.TorchFunctionMode,
@@ -53,22 +55,30 @@ def make_eager_backend_with_torch_function_modes(
 ) -> Callable[..., Any]: ...
 @register_backend
 def eager_noexcept(
-    gm: torch.fx.GraphModule, fake_tensor_inputs: list[torch.Tensor], **kwargs: Any
+    gm: torch.fx.GraphModule,
+    fake_tensor_inputs: list[torch.Tensor],
+    **kwargs: Any,
 ) -> Callable[..., Any]: ...
 @register_backend
 def pre_dispatch_eager(
-    gm: torch.fx.GraphModule, fake_tensor_inputs: list[torch.Tensor], **kwargs: Any
+    gm: torch.fx.GraphModule,
+    fake_tensor_inputs: list[torch.Tensor],
+    **kwargs: Any,
 ) -> torch.fx.GraphModule: ...
 @register_backend
 def eager_debug(
-    gm: torch.fx.GraphModule, fake_tensor_inputs: list[torch.Tensor], **kwargs: Any
+    gm: torch.fx.GraphModule,
+    fake_tensor_inputs: list[torch.Tensor],
+    **kwargs: Any,
 ) -> Callable[..., Any]: ...
 @register_backend(name="ts")
 def torchscript(
-    gm: torch.fx.GraphModule, fake_tensor_inputs: list[torch.Tensor]
+    gm: torch.fx.GraphModule,
+    fake_tensor_inputs: list[torch.Tensor],
 ) -> torch.jit.ScriptModule: ...
 def boxed_nop(
-    fx_g: torch.fx.GraphModule, example_inputs: list[torch.Tensor]
+    fx_g: torch.fx.GraphModule,
+    example_inputs: list[torch.Tensor],
 ) -> Callable[..., Any]: ...
 def boxed_nop_with_mode(
     fx_g: torch.fx.GraphModule,
@@ -83,7 +93,8 @@ def fake_crossref_boxed_nop(
 ) -> Callable[..., Any]: ...
 def ignore_builtins(op: torch._ops.OpOverload) -> bool: ...
 def get_nop_func() -> Callable[
-    [torch.fx.GraphModule, list[torch.Tensor]], Callable[..., Any]
+    [torch.fx.GraphModule, list[torch.Tensor]],
+    Callable[..., Any],
 ]: ...
 def aot_eager(
     gm: torch.fx.GraphModule,
@@ -96,7 +107,9 @@ def aot_eager(
 aot_eager_default_partitioner = ...
 
 def aot_eager_decomp_partition(
-    gm: torch.fx.GraphModule, fake_tensor_inputs: list[torch.Tensor], **kwargs: Any
+    gm: torch.fx.GraphModule,
+    fake_tensor_inputs: list[torch.Tensor],
+    **kwargs: Any,
 ) -> Callable[..., Any]: ...
 def aot_eager_decomp_partition_with_mode(
     gm: torch.fx.GraphModule,
@@ -105,7 +118,9 @@ def aot_eager_decomp_partition_with_mode(
     **kwarg: Any,
 ) -> Callable[..., Any]: ...
 def aot_eager_decomp_partition_crossref(
-    gm: torch.fx.GraphModule, fake_tensor_inputs: list[torch.Tensor], **kwargs: Any
+    gm: torch.fx.GraphModule,
+    fake_tensor_inputs: list[torch.Tensor],
+    **kwargs: Any,
 ) -> Callable[..., Any]: ...
 
 aot_ts = ...
@@ -115,19 +130,23 @@ class TestingOnlyCompileError(Exception): ...
 
 @register_backend
 def relu_compile_error_TESTING_ONLY(
-    gm: torch.fx.GraphModule, example_inputs: list[torch.Tensor]
+    gm: torch.fx.GraphModule,
+    example_inputs: list[torch.Tensor],
 ) -> torch.fx.GraphModule: ...
 @register_backend
 def relu_runtime_error_TESTING_ONLY(
-    gm: torch.fx.GraphModule, example_inputs: list[torch.Tensor]
+    gm: torch.fx.GraphModule,
+    example_inputs: list[torch.Tensor],
 ) -> torch.fx.GraphModule: ...
 @register_backend
 def relu_accuracy_error_TESTING_ONLY(
-    gm: torch.fx.GraphModule, example_inputs: list[torch.Tensor]
+    gm: torch.fx.GraphModule,
+    example_inputs: list[torch.Tensor],
 ) -> torch.fx.GraphModule: ...
 @register_backend
 def non_leaf_compile_error_TESTING_ONLY(
-    gm: torch.fx.GraphModule, example_inputs: list[torch.Tensor]
+    gm: torch.fx.GraphModule,
+    example_inputs: list[torch.Tensor],
 ) -> torch.fx.GraphModule: ...
 
 @dataclasses.dataclass
@@ -144,6 +163,8 @@ class ExplainOutput:
 class ExplainWithBackend:
     def __init__(self, backend: CompilerFn | str) -> None: ...
     def __call__(
-        self, gm: torch.fx.GraphModule, example_inputs: list[torch.Tensor]
+        self,
+        gm: torch.fx.GraphModule,
+        example_inputs: list[torch.Tensor],
     ) -> CompiledFn: ...
     def output(self) -> ExplainOutput: ...

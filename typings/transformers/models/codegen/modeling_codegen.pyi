@@ -18,7 +18,9 @@ logger = ...
 def create_sinusoidal_positions(num_pos: int, dim: int) -> torch.Tensor: ...
 def rotate_every_two(x: torch.Tensor) -> torch.Tensor: ...
 def apply_rotary_pos_emb(
-    tensor: torch.Tensor, sin: torch.Tensor, cos: torch.Tensor
+    tensor: torch.Tensor,
+    sin: torch.Tensor,
+    cos: torch.Tensor,
 ) -> torch.Tensor: ...
 
 class CodeGenAttention(nn.Module):
@@ -39,7 +41,9 @@ class CodeGenAttention(nn.Module):
         | None
     ): ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> (
         tuple[torch.Tensor, tuple[torch.Tensor]]
         | tuple[torch.Tensor, tuple[torch.Tensor], tuple[torch.Tensor, ...]]
@@ -67,7 +71,9 @@ class CodeGenBlock(GradientCheckpointingLayer):
         tuple[torch.Tensor] | tuple[torch.Tensor, tuple[torch.FloatTensor, ...]] | None
     ): ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> (
         tuple[torch.Tensor] | tuple[torch.Tensor, tuple[torch.FloatTensor, ...]] | None
     ): ...

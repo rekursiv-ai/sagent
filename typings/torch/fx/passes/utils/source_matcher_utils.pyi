@@ -26,5 +26,6 @@ def get_source_partitions(
 ) -> dict[Any, list[SourcePartition]]: ...
 @compatibility(is_backward_compatible=False)
 def check_subgraphs_connected(
-    subgraph1: SourcePartition, subgraph2: SourcePartition
+    subgraph1: SourcePartition,
+    subgraph2: SourcePartition,
 ) -> bool: ...

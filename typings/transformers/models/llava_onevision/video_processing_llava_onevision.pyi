@@ -22,7 +22,8 @@ class LlavaOnevisionVideoProcessor(BaseVideoProcessor):
     valid_kwargs = LlavaOnevisionFastVideoProcessorInitKwargs
     model_input_names = ...
     def __init__(
-        self, **kwargs: Unpack[LlavaOnevisionFastVideoProcessorInitKwargs]
+        self,
+        **kwargs: Unpack[LlavaOnevisionFastVideoProcessorInitKwargs],
     ) -> None: ...
 
 __all__ = ["LlavaOnevisionVideoProcessor"]

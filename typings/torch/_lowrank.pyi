@@ -4,11 +4,20 @@ from torch import Tensor
 __all__ = ["pca_lowrank", "svd_lowrank"]
 
 def get_approximate_basis(
-    A: Tensor, q: int, niter: int | None = ..., M: Tensor | None = ...
+    A: Tensor,
+    q: int,
+    niter: int | None = ...,
+    M: Tensor | None = ...,
 ) -> Tensor: ...
 def svd_lowrank(
-    A: Tensor, q: int | None = ..., niter: int | None = ..., M: Tensor | None = ...
+    A: Tensor,
+    q: int | None = ...,
+    niter: int | None = ...,
+    M: Tensor | None = ...,
 ) -> tuple[Tensor, Tensor, Tensor]: ...
 def pca_lowrank(
-    A: Tensor, q: int | None = ..., center: bool = ..., niter: int = ...
+    A: Tensor,
+    q: int | None = ...,
+    center: bool = ...,
+    niter: int = ...,
 ) -> tuple[Tensor, Tensor, Tensor]: ...

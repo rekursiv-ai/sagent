@@ -24,14 +24,20 @@ from ...utils.deprecation import deprecate_kwarg
 class Starcoder2MLP(nn.Module):
     def __init__(self, config: Starcoder2Config) -> None: ...
     def forward(
-        self, hidden_states: tuple[torch.FloatTensor] | None
+        self,
+        hidden_states: tuple[torch.FloatTensor] | None,
     ) -> torch.FloatTensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -49,7 +55,9 @@ def eager_attention_forward(
 
 class Starcoder2Attention(nn.Module):
     def __init__(
-        self, config: Starcoder2Config, layer_idx: int | None = ...
+        self,
+        config: Starcoder2Config,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -138,10 +146,12 @@ class Starcoder2ForCausalLM(Starcoder2PreTrainedModel, GenerationMixin):
     ) -> CausalLMOutputWithPast: ...
 
 class Starcoder2ForSequenceClassification(
-    GenericForSequenceClassification, Starcoder2PreTrainedModel
+    GenericForSequenceClassification,
+    Starcoder2PreTrainedModel,
 ): ...
 class Starcoder2ForTokenClassification(
-    GenericForTokenClassification, Starcoder2PreTrainedModel
+    GenericForTokenClassification,
+    Starcoder2PreTrainedModel,
 ): ...
 
 __all__ = [

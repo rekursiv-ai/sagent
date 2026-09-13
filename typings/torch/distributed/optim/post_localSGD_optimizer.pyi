@@ -8,7 +8,9 @@ import torch
 
 class PostLocalSGDOptimizer(torch.optim.Optimizer):
     def __init__(
-        self, optim: torch.optim.Optimizer, averager: averagers.ModelAverager
+        self,
+        optim: torch.optim.Optimizer,
+        averager: averagers.ModelAverager,
     ) -> None: ...
     @property
     def state(self) -> defaultdict[Tensor, Any]: ...

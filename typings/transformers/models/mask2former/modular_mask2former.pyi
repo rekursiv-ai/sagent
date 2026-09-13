@@ -8,7 +8,9 @@ logger = ...
 
 class Mask2FormerImageProcessorFast(MaskFormerImageProcessorFast):
     def post_process_semantic_segmentation(
-        self, outputs, target_sizes: list[tuple[int, int]] | None = ...
+        self,
+        outputs,
+        target_sizes: list[tuple[int, int]] | None = ...,
     ) -> torch.Tensor: ...
     def post_process_instance_segmentation(
         self,

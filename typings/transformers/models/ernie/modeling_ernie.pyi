@@ -57,7 +57,9 @@ class ErnieSelfAttention(nn.Module):
 class ErnieSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -87,7 +89,9 @@ class ErnieIntermediate(nn.Module):
 class ErnieOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -125,7 +129,9 @@ class ErnieEncoder(nn.Module):
         cache_position: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
 
 class ErniePooler(nn.Module):
@@ -168,7 +174,7 @@ class ErniePreTrainedModel(PreTrainedModel):
 @auto_docstring(
     custom_intro="""
     Output type of [`ErnieForPreTraining`].
-    """
+    """,
 )
 class ErnieForPreTrainingOutput(ModelOutput):
     loss: torch.FloatTensor | None = ...
@@ -283,7 +289,10 @@ class ErnieForMaskedLM(ErniePreTrainedModel):
         return_dict: bool | None = ...,
     ) -> tuple[torch.Tensor] | MaskedLMOutput: ...
     def prepare_inputs_for_generation(
-        self, input_ids, attention_mask=..., **model_kwargs
+        self,
+        input_ids,
+        attention_mask=...,
+        **model_kwargs,
     ):  # -> dict[str, Tensor | Any]:
         ...
     @classmethod

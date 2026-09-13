@@ -25,13 +25,17 @@ T = TypeVar("T", bound=torch.Tensor)
 
 def requires_subclass_dispatch(args, fw_metadata: ViewAndMutationMeta) -> bool: ...
 def maybe_suggest_memory_format(
-    t, with_memory_format: bool
+    t,
+    with_memory_format: bool,
 ) -> MemoryFormatMeta | None: ...
 def get_subclass_typing_container(
     tensor_subclass: torch.Tensor,
 ) -> dict[type[torch.Tensor], list[type[torch.Tensor]]]: ...
 def create_subclass_metadata(
-    a: Any, start_idx: int, count_symints: bool, with_memory_format: bool = ...
+    a: Any,
+    start_idx: int,
+    count_symints: bool,
+    with_memory_format: bool = ...,
 ) -> tuple[PlainTensorMeta, int] | tuple[SubclassCreationMeta, int | Any]: ...
 def create_subclass_meta(
     curr_args: list[Any] | tuple[Any, ...],
@@ -62,7 +66,8 @@ def unwrap_tensor_subclasses_with_indices_to_original(
     wrapped_args,
 ) -> tuple[list[Any], list[Any]]: ...
 def remap_unwrapped_subclass_arg_indices(
-    wrapped_args, static_input_indices
+    wrapped_args,
+    static_input_indices,
 ) -> list[Any]: ...
 def wrap_tensor_subclasses(
     unwrapped_args: tuple[Any, ...] | list[Any],
@@ -74,8 +79,12 @@ def wrap_tensor_subclasses(
     make_subclass_override: Callable | None = ...,
 ) -> tuple[Any, ...]: ...
 def wrap_tensor_subclasses_maybe_joint(
-    unwrapped_args, *, is_joint_structure: bool, meta: ViewAndMutationMeta
+    unwrapped_args,
+    *,
+    is_joint_structure: bool,
+    meta: ViewAndMutationMeta,
 ) -> tuple[Any, ...] | list[Any]: ...
 def compute_inner_mutated_inp_indices_from_subclass_meta(
-    fw_metadata: ViewAndMutationMeta, inner_metadata: ViewAndMutationMeta
+    fw_metadata: ViewAndMutationMeta,
+    inner_metadata: ViewAndMutationMeta,
 ) -> list[int]: ...

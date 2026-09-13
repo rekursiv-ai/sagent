@@ -15,7 +15,9 @@ from ...utils.backbone_utils import BackboneMixin
 logger = ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class PvtV2DropPath(nn.Module):
@@ -67,7 +69,10 @@ class PvtV2ConvFeedForwardNetwork(nn.Module):
 
 class PvtV2BlockLayer(nn.Module):
     def __init__(
-        self, config: PvtV2Config, layer_idx: int, drop_path: float = ...
+        self,
+        config: PvtV2Config,
+        layer_idx: int,
+        drop_path: float = ...,
     ) -> None: ...
     def forward(
         self,
@@ -81,7 +86,9 @@ class PvtV2BlockLayer(nn.Module):
 class PvtV2EncoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: PvtV2Config, layer_idx: int) -> None: ...
     def forward(
-        self, hidden_states, output_attentions
+        self,
+        hidden_states,
+        output_attentions,
     ):  # -> tuple[tuple[Any, tuple[()] | tuple[Any, ...] | None] | tuple[Any], Any, Any]:
         ...
 

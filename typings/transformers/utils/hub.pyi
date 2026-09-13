@@ -48,10 +48,13 @@ def define_sagemaker_information():  # -> dict[str, str | bool | Any | None]:
     ...
 def http_user_agent(user_agent: dict | str | None = ...) -> str: ...
 def extract_commit_hash(
-    resolved_file: str | None, commit_hash: str | None
+    resolved_file: str | None,
+    commit_hash: str | None,
 ) -> str | None: ...
 def cached_file(
-    path_or_repo_id: str | os.PathLike, filename: str, **kwargs
+    path_or_repo_id: str | os.PathLike,
+    filename: str,
+    **kwargs,
 ) -> str | None: ...
 def cached_files(
     path_or_repo_id: str | os.PathLike,

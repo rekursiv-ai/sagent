@@ -60,7 +60,9 @@ class Wav2Vec2BertSelfAttention(Wav2Vec2ConformerSelfAttention, nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class Wav2Vec2BertEncoderLayer(GradientCheckpointingLayer):
@@ -126,7 +128,9 @@ class Wav2Vec2BertModel(Wav2Vec2Model, Wav2Vec2BertPreTrainedModel):
         return_dict: bool | None = ...,
     ) -> tuple | Wav2Vec2BertBaseModelOutput: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | Wav2Vec2BertBaseModelOutput: ...
 
 class Wav2Vec2BertForCTC(Wav2Vec2ConformerForCTC):
@@ -159,11 +163,13 @@ class Wav2Vec2BertForSequenceClassification(Wav2Vec2ForSequenceClassification):
         labels: torch.Tensor | None = ...,
     ) -> tuple | SequenceClassifierOutput: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | SequenceClassifierOutput: ...
 
 class Wav2Vec2BertForAudioFrameClassification(
-    Wav2Vec2ConformerForAudioFrameClassification
+    Wav2Vec2ConformerForAudioFrameClassification,
 ):
     def __init__(self, config) -> None: ...
     def freeze_feature_encoder(self): ...

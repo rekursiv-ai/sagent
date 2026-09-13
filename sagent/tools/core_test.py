@@ -53,13 +53,10 @@ def _schema_property(schema: object, name: str) -> Mapping[str, object]:
     return _as_mapping(props[name])
 
 
+# ``isinstance(v, Mapping)`` narrows to ``Mapping[Unknown, object]`` in ty/basedpyright;
+# cast at this single boundary so callers see the precise typed form.
 def _as_mapping(value: object) -> Mapping[str, object]:
-    """Narrow an object to ``Mapping[str, object]`` or fail.
-
-    ``isinstance(v, Mapping)`` narrows to ``Mapping[Unknown, object]``
-    in ty/basedpyright; cast at this single boundary so callers see
-    the precise typed form.
-    """
+    """Narrow an object to ``Mapping[str, object]`` or fail."""
     assert isinstance(value, Mapping)
     return cast(Mapping[str, object], value)
 
@@ -430,7 +427,7 @@ def test_default_tool_state_is_isolated_per_test_part_two() -> None:
 
 def test_tool_state_context_swaps_state() -> None:
     custom = ToolState()
-    custom.bash_cwd = "/tmp"  # noqa: S108 -- test placeholder, not real fs use
+    custom.bash_cwd = "/tmp"  # noqa: S108 -- The test uses this path as a placeholder value and never opens it.
     with tool_state_context(custom):
         assert get_tool_state() is custom
     assert get_tool_state() is not custom

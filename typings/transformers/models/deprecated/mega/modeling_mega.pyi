@@ -43,7 +43,8 @@ class MegaRotaryRelativePositionalBias(nn.Module):
     def __init__(self, config: MegaConfig) -> None: ...
     @staticmethod
     def get_sinusoid_embeddings(
-        max_positions: int, embedding_dim: int
+        max_positions: int,
+        embedding_dim: int,
     ):  # -> tuple[Tensor, Tensor]:
         ...
     def rotary(self, input):  # -> Tensor:
@@ -68,7 +69,12 @@ class MegaScaleNorm(nn.Module):
 
 class MegaSequenceNorm(nn.Module):
     def __init__(
-        self, norm_type, embedding_dim, eps=..., affine=..., export=...
+        self,
+        norm_type,
+        embedding_dim,
+        eps=...,
+        affine=...,
+        export=...,
     ) -> None: ...
     def forward(self, input):  # -> Any:
         ...
@@ -81,7 +87,10 @@ class MegaMultiDimensionDampedEma(nn.Module):
         ...
     def fft_convolution(self, inputs, kernel, length): ...
     def ema_step(
-        self, inputs, length, past_state=...
+        self,
+        inputs,
+        length,
+        past_state=...,
     ):  # -> tuple[Tensor, Any] | tuple[Any, Any | Tensor]:
         ...
     def one_ema_step(self, inputs, past_state=...):  # -> tuple[Tensor, Any]:
@@ -111,7 +120,9 @@ class MegaGatedCrossAttention(nn.Module):
         use_cache: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class MegaMovingAverageGatedAttention(nn.Module):
@@ -175,7 +186,7 @@ class MegaModel(MegaPreTrainedModel):
     def set_input_embeddings(self, value):  # -> None:
         ...
     @add_start_docstrings_to_model_forward(
-        MEGA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MEGA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -205,10 +216,11 @@ class MegaForCausalLM(MegaPreTrainedModel):
     _tied_weights_keys = ...
     def __init__(self, config: MegaConfig) -> None: ...
     @add_start_docstrings_to_model_forward(
-        MEGA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MEGA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=CausalLMOutputWithCrossAttentions, config_class=_CONFIG_FOR_DOC
+        output_type=CausalLMOutputWithCrossAttentions,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,
@@ -226,12 +238,17 @@ class MegaForCausalLM(MegaPreTrainedModel):
         return_dict: bool | None = ...,
     ) -> tuple[torch.Tensor] | CausalLMOutputWithCrossAttentions: ...
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=..., attention_mask=..., **model_kwargs
+        self,
+        input_ids,
+        past_key_values=...,
+        attention_mask=...,
+        **model_kwargs,
     ):  # -> dict[str, Any | None]:
         ...
 
 @add_start_docstrings(
-    """MEGA Model with a `language modeling` head on top.""", MEGA_START_DOCSTRING
+    """MEGA Model with a `language modeling` head on top.""",
+    MEGA_START_DOCSTRING,
 )
 class MegaForMaskedLM(MegaPreTrainedModel):
     _tied_weights_keys = ...
@@ -241,7 +258,7 @@ class MegaForMaskedLM(MegaPreTrainedModel):
     def set_output_embeddings(self, new_embeddings):  # -> None:
         ...
     @add_start_docstrings_to_model_forward(
-        MEGA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MEGA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -272,7 +289,7 @@ class MegaForMaskedLM(MegaPreTrainedModel):
 class MegaForSequenceClassification(MegaPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(
-        MEGA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MEGA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -298,7 +315,7 @@ class MegaForSequenceClassification(MegaPreTrainedModel):
 class MegaForMultipleChoice(MegaPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(
-        MEGA_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        MEGA_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -324,7 +341,7 @@ class MegaForMultipleChoice(MegaPreTrainedModel):
 class MegaForTokenClassification(MegaPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(
-        MEGA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MEGA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -355,7 +372,7 @@ class MegaClassificationHead(nn.Module):
 class MegaForQuestionAnswering(MegaPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(
-        MEGA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MEGA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,

@@ -114,25 +114,6 @@ class BackgroundTaskEntry:
             )
 
 
-_BG_FIELDS: JSON = json_freeze(
-    {
-        "background": {
-            "type": "boolean",
-            "description": (
-                "Run this tool asynchronously; result delivered at a later turn."
-            ),
-        },
-        "delay": {
-            "type": "integer",
-            "minimum": 0,
-            "description": (
-                "Seconds to sleep before executing (implies background). Must be ≥ 0."
-            ),
-        },
-    }
-)
-
-
 def bg_augmented_schema(directive_schema: JSON) -> JSON:
     """Return ``directive_schema`` with ``background``/``delay`` advertised.
 
@@ -171,7 +152,23 @@ def bg_augmented_schema(directive_schema: JSON) -> JSON:
         if isinstance(raw_props, Mapping)
         else cast(MutableJSON, {})
     )
-    props.update(json_unfreeze(_BG_FIELDS))
+    props.update(
+        {
+            "background": {
+                "type": "boolean",
+                "description": (
+                    "Run this tool asynchronously; result delivered at a later turn."
+                ),
+            },
+            "delay": {
+                "type": "integer",
+                "minimum": 0,
+                "description": (
+                    "Seconds to sleep before executing (implies background). Must be ≥ 0."
+                ),
+            },
+        },
+    )
     schema["properties"] = cast(MutableJSONValue, props)
     return json_freeze(schema)
 

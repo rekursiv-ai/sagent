@@ -15,10 +15,24 @@ b2b_gemm_left_template = ...
 b2b_gemm_right_template = ...
 
 def load_ratio_left(
-    M: int, N: int, O: int, P: int, m: int, n: int, o: int, p: int
+    M: int,
+    N: int,
+    O: int,
+    P: int,
+    m: int,
+    n: int,
+    o: int,
+    p: int,
 ) -> float: ...
 def load_ratio_right(
-    M: int, N: int, O: int, P: int, m: int, n: int, o: int, p: int
+    M: int,
+    N: int,
+    O: int,
+    P: int,
+    m: int,
+    n: int,
+    o: int,
+    p: int,
 ) -> float: ...
 
 b2b_gemm_configs = ...
@@ -43,7 +57,9 @@ unoptimized_choice = ...
 
 def build_subgraph_buffer(args: list[TensorBox], subgraph: Subgraph) -> PyTree: ...
 def create_placeholder(
-    name: str, dtype: torch.dtype, device: torch.device
+    name: str,
+    dtype: torch.dtype,
+    device: torch.device,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 def tuned_b2b_gemm(
     is_left_assoc: bool,
@@ -55,8 +71,11 @@ def tuned_b2b_gemm(
     layout=...,
 ) -> torch._inductor.ir.TensorBox: ...
 @register_graph_pattern(
-    CallFunction(torch.ops.aten.mm, Arg(), Arg()), pass_dict=B2B_GEMM_PASS
+    CallFunction(torch.ops.aten.mm, Arg(), Arg()),
+    pass_dict=B2B_GEMM_PASS,
 )
 def b2b_gemm_handler(
-    match: Match, mat1: torch.fx.Node, mat2: torch.fx.Node
+    match: Match,
+    mat1: torch.fx.Node,
+    mat2: torch.fx.Node,
 ) -> None: ...

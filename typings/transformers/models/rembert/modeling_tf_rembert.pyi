@@ -69,7 +69,10 @@ class TFRemBertSelfAttention(keras.layers.Layer):
 class TFRemBertSelfOutput(keras.layers.Layer):
     def __init__(self, config: RemBertConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -100,7 +103,10 @@ class TFRemBertIntermediate(keras.layers.Layer):
 class TFRemBertOutput(keras.layers.Layer):
     def __init__(self, config: RemBertConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -148,7 +154,10 @@ class TFRemBertPooler(keras.layers.Layer):
 
 class TFRemBertLMPredictionHead(keras.layers.Layer):
     def __init__(
-        self, config: RemBertConfig, input_embeddings: keras.layers.Layer, **kwargs
+        self,
+        config: RemBertConfig,
+        input_embeddings: keras.layers.Layer,
+        **kwargs,
     ) -> None: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -162,7 +171,10 @@ class TFRemBertLMPredictionHead(keras.layers.Layer):
 
 class TFRemBertMLMHead(keras.layers.Layer):
     def __init__(
-        self, config: RemBertConfig, input_embeddings: keras.layers.Layer, **kwargs
+        self,
+        config: RemBertConfig,
+        input_embeddings: keras.layers.Layer,
+        **kwargs,
     ) -> None: ...
     def call(self, sequence_output: tf.Tensor) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -172,7 +184,10 @@ class TFRemBertMLMHead(keras.layers.Layer):
 class TFRemBertMainLayer(keras.layers.Layer):
     config_class = RemBertConfig
     def __init__(
-        self, config: RemBertConfig, add_pooling_layer: bool = ..., **kwargs
+        self,
+        config: RemBertConfig,
+        add_pooling_layer: bool = ...,
+        **kwargs,
     ) -> None: ...
     def get_input_embeddings(self) -> keras.layers.Layer: ...
     def set_input_embeddings(self, value: tf.Variable):  # -> None:
@@ -213,7 +228,7 @@ class TFRemBertModel(TFRemBertPreTrainedModel):
     def __init__(self, config: RemBertConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        REMBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        REMBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="google/rembert",
@@ -246,7 +261,7 @@ class TFRemBertForMaskedLM(TFRemBertPreTrainedModel, TFMaskedLanguageModelingLos
     def get_lm_head(self) -> keras.layers.Layer: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        REMBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        REMBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="google/rembert",
@@ -278,7 +293,11 @@ class TFRemBertForCausalLM(TFRemBertPreTrainedModel, TFCausalLanguageModelingLos
     def __init__(self, config: RemBertConfig, *inputs, **kwargs) -> None: ...
     def get_lm_head(self) -> keras.layers.Layer: ...
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=..., attention_mask=..., **model_kwargs
+        self,
+        input_ids,
+        past_key_values=...,
+        attention_mask=...,
+        **model_kwargs,
     ):  # -> dict[str, Any | None]:
         ...
     @unpack_inputs
@@ -313,12 +332,13 @@ class TFRemBertForCausalLM(TFRemBertPreTrainedModel, TFCausalLanguageModelingLos
     REMBERT_START_DOCSTRING,
 )
 class TFRemBertForSequenceClassification(
-    TFRemBertPreTrainedModel, TFSequenceClassificationLoss
+    TFRemBertPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config: RemBertConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        REMBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        REMBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="google/rembert",
@@ -350,7 +370,7 @@ class TFRemBertForMultipleChoice(TFRemBertPreTrainedModel, TFMultipleChoiceLoss)
     def __init__(self, config: RemBertConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        REMBERT_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        REMBERT_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="google/rembert",
@@ -379,12 +399,13 @@ class TFRemBertForMultipleChoice(TFRemBertPreTrainedModel, TFMultipleChoiceLoss)
     REMBERT_START_DOCSTRING,
 )
 class TFRemBertForTokenClassification(
-    TFRemBertPreTrainedModel, TFTokenClassificationLoss
+    TFRemBertPreTrainedModel,
+    TFTokenClassificationLoss,
 ):
     def __init__(self, config: RemBertConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        REMBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        REMBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="google/rembert",
@@ -416,7 +437,7 @@ class TFRemBertForQuestionAnswering(TFRemBertPreTrainedModel, TFQuestionAnswerin
     def __init__(self, config: RemBertConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        REMBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        REMBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="google/rembert",

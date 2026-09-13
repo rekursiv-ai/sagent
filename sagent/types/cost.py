@@ -206,7 +206,7 @@ class PriceCatalog(Mapping[PriceCatalogProduct, TokenPrice]):
 
         """
         self._prices: dict[PriceCatalogProduct, TokenPrice] = dict(
-            sorted((prices or {}).items())
+            sorted((prices or {}).items()),
         )
         self._by_tier: dict[ServiceTier, list[PriceCatalogProduct]] = {}
         for key in self._prices:

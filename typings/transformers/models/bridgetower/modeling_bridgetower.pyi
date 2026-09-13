@@ -31,7 +31,7 @@ _TOKENIZER_FOR_DOC = ...
 @auto_docstring(
     custom_intro="""
     Output type of [`BridgeTowerModel`].
-    """
+    """,
 )
 class BridgeTowerModelOutput(ModelOutput):
     text_features: torch.FloatTensor | None = ...
@@ -54,28 +54,39 @@ class BridgeTowerContrastiveOutput(ModelOutput):
 class BridgeTowerResidualAttention(nn.Module):
     def __init__(self, config) -> None: ...
     def attention(
-        self, hidden_state: torch.Tensor, attention_mask: torch.Tensor
+        self,
+        hidden_state: torch.Tensor,
+        attention_mask: torch.Tensor,
     ):  # -> Any:
         ...
     def forward(
-        self, hidden_state: torch.Tensor, attention_mask: torch.Tensor | None = ...
+        self,
+        hidden_state: torch.Tensor,
+        attention_mask: torch.Tensor | None = ...,
     ):  # -> Tensor:
         ...
 
 class BridgeTowerTransformer(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_state: torch.Tensor, attention_mask: torch.Tensor | None = ...
+        self,
+        hidden_state: torch.Tensor,
+        attention_mask: torch.Tensor | None = ...,
     ):  # -> list[Any]:
         ...
 
 class BridgeTowerVisionEmbeddings(nn.Module):
     def __init__(self, config: BridgeTowerVisionConfig) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
-        self, pixel_values: torch.FloatTensor, interpolate_pos_encoding=...
+        self,
+        pixel_values: torch.FloatTensor,
+        interpolate_pos_encoding=...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -89,7 +100,9 @@ class BridgeTowerVisionTransformer(nn.Module):
     ):  # -> Tensor:
         ...
     def forward_pre(
-        self, pixel_values: torch.Tensor, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values: torch.Tensor,
+        interpolate_pos_encoding: bool = ...,
     ):  # -> Any:
         ...
     def forward_post(self, hidden_state: torch.Tensor):  # -> Any:
@@ -98,14 +111,19 @@ class BridgeTowerVisionTransformer(nn.Module):
 class BridgeTowerLinkTower(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states, cross_modal_hidden_states, attention_mask
+        self,
+        hidden_states,
+        cross_modal_hidden_states,
+        attention_mask,
     ):  # -> Any:
         ...
 
 class BridgeTowerSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -117,7 +135,9 @@ class BridgeTowerIntermediate(nn.Module):
 class BridgeTowerOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -210,7 +230,9 @@ class BridgeTowerTextEncoder(nn.Module):
         cache_position: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
 
 class BridgeTowerTextEmbeddings(nn.Module):
@@ -228,7 +250,9 @@ class BridgeTowerTextEmbeddings(nn.Module):
         ...
 
 def create_position_ids_from_input_ids(
-    input_ids, padding_idx, past_key_values_length=...
+    input_ids,
+    padding_idx,
+    past_key_values_length=...,
 ): ...
 
 @auto_docstring

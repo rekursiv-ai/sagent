@@ -18,7 +18,6 @@ from prompt_toolkit.history import FileHistory
 
 import pytest
 
-from sagent.agent import runtime as agent_runtime
 from sagent.agent.agent import Agent, _resolve_target_spec
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.state import AgentLike
@@ -82,6 +81,8 @@ from sagent.types.runtime import (
 )
 from sagent.types.tape import ContextSplice, TapeRef
 
+import sagent.agent.runtime
+
 
 async def wait_until(
     predicate: Callable[[], bool],
@@ -110,10 +111,7 @@ _DEFAULT_SPEC = ModelRecipe(
 
 
 def _parse(*tokens: str) -> tuple[str, str, str | None, str] | str:
-    """Parse + resolve helper: composes the slash-syntax parser with
-    the Agent's resolver and projects the resolved ``ModelRecipe`` back
-    into the legacy ``(provider, auth, account, model_id)`` tuple.
-    """
+    """Parse + resolve helper: composes the slash-syntax parser with the Agent's resolver and projects the resolved ``ModelRecipe`` back into the legacy ``(provider, auth, account, model_id)`` tuple."""
     parsed = _parse_model_args(list(tokens))
     if isinstance(parsed, str):
         return parsed
@@ -410,7 +408,11 @@ class _FakeModel:
         return ModelCapability(
             model_id=self.model_id,
             context=MappingProxyType(
-                {"": ModelLimits(max_request_tokens=200_000, max_response_tokens=8_192)}
+                {
+                    "": ModelLimits(
+                        max_request_tokens=200_000, max_response_tokens=8_192
+                    )
+                },
             ),
             thinking_effort={"none", *self.valid_efforts},
             thinking_budget=(
@@ -457,7 +459,7 @@ class _FakeRuntime:
 
 @dataclass(slots=True, kw_only=True)
 class _RuntimeHolder:
-    runtime: agent_runtime.AgentRuntime
+    runtime: sagent.agent.runtime.AgentRuntime
 
 
 @dataclass(slots=True, kw_only=True)
@@ -465,13 +467,15 @@ class _FakeAgent:
     model: _FakeModel = field(default_factory=_FakeModel)
     model_recipe: ModelRecipe | None = field(
         default_factory=lambda: ModelRecipe(
-            provider="Anthropic", auth="api", model_id="claude-opus-4-7"
+            provider="Anthropic",
+            auth="api",
+            model_id="claude-opus-4-7",
         ),
     )
     runtime: _FakeRuntime = field(default_factory=_FakeRuntime)
     work: object = None
     swap_calls: list[tuple[_FakeModel, ModelRecipe | None]] = field(
-        default_factory=list
+        default_factory=list,
     )
     change_model_calls: list[dict[str, object]] = field(default_factory=list)
     change_model_result: ModelRecipe | None = None
@@ -504,7 +508,7 @@ class _FakeAgent:
                 "auth": auth,
                 "model_id": model_id,
                 "account": account,
-            }
+            },
         )
         if self.change_model_side_effect is not None:
             raise self.change_model_side_effect
@@ -597,7 +601,7 @@ def test_do_switch_model_success_delegates_to_change_model() -> None:
             "auth": None,
             "model_id": "claude-sonnet-4-6",
             "account": None,
-        }
+        },
     ]
     assert any("claude-sonnet-4-6" in line for line in printer.slash_blocks)
 
@@ -609,7 +613,9 @@ def test_do_switch_model_infer_provider_overrides_provider_and_auth() -> None:
     agent = _FakeAgent()
     printer = RecordingPrinter()
     agent.change_model_result = ModelRecipe(
-        provider="Google", auth="sub", model_id="gemini-3-pro"
+        provider="Google",
+        auth="sub",
+        model_id="gemini-3-pro",
     )
     with patch(
         "sagent.repl.run_repl.infer_provider",
@@ -622,7 +628,7 @@ def test_do_switch_model_infer_provider_overrides_provider_and_auth() -> None:
             "auth": "sub",
             "model_id": "gemini-3-pro",
             "account": None,
-        }
+        },
     ]
     assert any(
         "Anthropic/claude-opus-4-7 -> Google/gemini-3-pro" in line
@@ -903,11 +909,13 @@ async def test_run_repl_invokes_replay_messages(
     the source text instead would pass on a commented-out call, so drive
     the real coroutine and record the invocation.
     """
-    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+    runtime = sagent.agent.runtime.AgentRuntime(
+        model=_TextOnlyModel(text="ok"),
+    )
 
     @dataclass(slots=True, kw_only=True)
     class _Holder:
-        runtime: agent_runtime.AgentRuntime
+        runtime: sagent.agent.runtime.AgentRuntime
         show_thinking: bool = False
         name: str = "test"
         status: str | None = None
@@ -939,7 +947,9 @@ async def test_run_repl_invokes_replay_messages(
     fake_pump: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
 
     def _stub_spawn(
-        agent: object, source: object, **_kwargs: object
+        agent: object,
+        source: object,
+        **_kwargs: object,
     ) -> asyncio.Task[None]:
         del agent, source
         return fake_pump
@@ -969,7 +979,9 @@ async def test_run_repl_unwinds_observers_and_before_tool_spawn(
     via ``install_input_queue_committer``. Without a ``finally`` that
     detaches them, repeated entries pile up across re-entries.
     """
-    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+    runtime = sagent.agent.runtime.AgentRuntime(
+        model=_TextOnlyModel(text="ok"),
+    )
 
     def _sentinel_observer(event: RuntimeEvent) -> None:
         del event
@@ -980,7 +992,7 @@ async def test_run_repl_unwinds_observers_and_before_tool_spawn(
 
     @dataclass(slots=True, kw_only=True)
     class _Holder:
-        runtime: agent_runtime.AgentRuntime
+        runtime: sagent.agent.runtime.AgentRuntime
         show_thinking: bool = False
         name: str = "test"
         status: str | None = None
@@ -1021,7 +1033,9 @@ async def test_run_repl_unwinds_observers_and_before_tool_spawn(
     fake_pump: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
 
     def _stub_spawn(
-        agent: object, source: object, **_kwargs: object
+        agent: object,
+        source: object,
+        **_kwargs: object,
     ) -> asyncio.Task[None]:
         del agent, source
         return fake_pump
@@ -1059,13 +1073,15 @@ async def test_run_repl_unwinds_when_setup_raises_after_install(
     those installs sit INSIDE the ``try``, the observer and the wrapped
     ``before_tool_spawn`` survive the failure and accumulate on re-entry.
     """
-    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+    runtime = sagent.agent.runtime.AgentRuntime(
+        model=_TextOnlyModel(text="ok"),
+    )
     observers_before = list(runtime.observers)
     original_before_tool_spawn = runtime.before_tool_spawn
 
     @dataclass(slots=True, kw_only=True)
     class _Holder:
-        runtime: agent_runtime.AgentRuntime
+        runtime: sagent.agent.runtime.AgentRuntime
         show_thinking: bool = False
         name: str = "test"
         status: str | None = None
@@ -1095,7 +1111,9 @@ async def test_run_repl_unwinds_when_setup_raises_after_install(
     fake_pump: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
 
     def _stub_spawn(
-        agent: object, source: object, **_kwargs: object
+        agent: object,
+        source: object,
+        **_kwargs: object,
     ) -> asyncio.Task[None]:
         del agent, source
         return fake_pump
@@ -1137,13 +1155,15 @@ async def test_run_repl_unwinds_when_teardown_step_raises(
     raise ahead of them re-opens the exact leak the ``try`` was widened
     to close.
     """
-    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+    runtime = sagent.agent.runtime.AgentRuntime(
+        model=_TextOnlyModel(text="ok"),
+    )
     observers_before = list(runtime.observers)
     original_before_tool_spawn = runtime.before_tool_spawn
 
     @dataclass(slots=True, kw_only=True)
     class _Holder:
-        runtime: agent_runtime.AgentRuntime
+        runtime: sagent.agent.runtime.AgentRuntime
         show_thinking: bool = False
         name: str = "test"
         status: str | None = None
@@ -1170,7 +1190,9 @@ async def test_run_repl_unwinds_when_teardown_step_raises(
     fake_pump: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
 
     def _stub_spawn(
-        agent: object, source: object, **_kwargs: object
+        agent: object,
+        source: object,
+        **_kwargs: object,
     ) -> asyncio.Task[None]:
         del agent, source
         return fake_pump
@@ -1207,11 +1229,13 @@ async def test_run_repl_creates_history_parent_directory(
     BEFORE ``buf.reset()``. The message dispatches and the input pane
     never clears.
     """
-    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+    runtime = sagent.agent.runtime.AgentRuntime(
+        model=_TextOnlyModel(text="ok"),
+    )
 
     @dataclass(slots=True, kw_only=True)
     class _Holder:
-        runtime: agent_runtime.AgentRuntime
+        runtime: sagent.agent.runtime.AgentRuntime
         show_thinking: bool = False
         name: str = "test"
         status: str | None = None
@@ -1240,7 +1264,9 @@ async def test_run_repl_creates_history_parent_directory(
     fake_pump: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
 
     def _stub_spawn(
-        agent: object, source: object, **_kwargs: object
+        agent: object,
+        source: object,
+        **_kwargs: object,
     ) -> asyncio.Task[None]:
         del agent, source
         return fake_pump
@@ -1311,7 +1337,10 @@ async def test_repl_teardown_skips_subagent_tasks_after_shutdown() -> None:
         _ = serviced_task.cancel()
         _ = oneshot_task.cancel()
         await asyncio.gather(
-            tool_task, serviced_task, oneshot_task, return_exceptions=True
+            tool_task,
+            serviced_task,
+            oneshot_task,
+            return_exceptions=True,
         )
 
 
@@ -1319,7 +1348,9 @@ async def test_repl_teardown_skips_subagent_tasks_after_shutdown() -> None:
 async def test_input_queue_committer_observer_pushes_deferred_on_agent_idle() -> None:
     """``AgentIdle`` with a deferred message pushes ``UserDeferredMessage``; pane cleared."""
     queues = InputQueues(deferred=QueuedInputBlock(text="elephant\n\nbanana\n\nchair"))
-    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+    runtime = sagent.agent.runtime.AgentRuntime(
+        model=_TextOnlyModel(text="ok"),
+    )
     holder = _RuntimeHolder(runtime=runtime)
     observer = _input_queue_committer_observer(cast(Agent, holder), queues)
     observer(AgentIdle())
@@ -1334,7 +1365,9 @@ async def test_input_queue_committer_observer_pushes_deferred_on_agent_idle() ->
 def test_input_queue_committer_observer_ignores_non_agent_idle_events() -> None:
     """Non-flush events leave ``queued_input`` and the inbox untouched."""
     queues = InputQueues(deferred=QueuedInputBlock(text="elephant"))
-    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+    runtime = sagent.agent.runtime.AgentRuntime(
+        model=_TextOnlyModel(text="ok"),
+    )
     holder = _RuntimeHolder(runtime=runtime)
     observer = _input_queue_committer_observer(cast(Agent, holder), queues)
     observer(UserMessage(text="real submission"))
@@ -1358,7 +1391,9 @@ async def test_input_queue_committer_observer_flushes_deferred_on_clear_complete
     wedge without claiming ``AWAIT_USER`` is idle.
     """
     queues = InputQueues(deferred=QueuedInputBlock(text="resume me"))
-    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+    runtime = sagent.agent.runtime.AgentRuntime(
+        model=_TextOnlyModel(text="ok"),
+    )
     holder = _RuntimeHolder(runtime=runtime)
     observer = _input_queue_committer_observer(cast(Agent, holder), queues)
     observer(ClearComplete())
@@ -1372,7 +1407,9 @@ async def test_input_queue_committer_observer_flushes_deferred_on_clear_complete
 def test_input_queue_committer_observer_ignores_agent_idle_when_empty() -> None:
     """``AgentIdle`` with an empty queue is a no-op (no spurious push)."""
     queues = InputQueues()
-    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+    runtime = sagent.agent.runtime.AgentRuntime(
+        model=_TextOnlyModel(text="ok"),
+    )
     holder = _RuntimeHolder(runtime=runtime)
     observer = _input_queue_committer_observer(cast(Agent, holder), queues)
     observer(AgentIdle())
@@ -1386,9 +1423,11 @@ async def test_startup_idle_flushes_staged_queue_on_first_agent_idle() -> None:
     synthetic startup pulse.
     """
     queues = InputQueues(
-        deferred=QueuedInputBlock(text="were we implementing issue 25?")
+        deferred=QueuedInputBlock(text="were we implementing issue 25?"),
     )
-    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+    runtime = sagent.agent.runtime.AgentRuntime(
+        model=_TextOnlyModel(text="ok"),
+    )
     holder = _RuntimeHolder(runtime=runtime)
     _ = install_input_queue_committer(cast(Agent, holder), queues)
 
@@ -1418,7 +1457,9 @@ async def test_startup_idle_not_fired_when_history_needs_model() -> None:
     would flush prematurely.
     """
     queues = InputQueues(deferred=QueuedInputBlock(text="for later"))
-    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+    runtime = sagent.agent.runtime.AgentRuntime(
+        model=_TextOnlyModel(text="ok"),
+    )
     holder = _RuntimeHolder(runtime=runtime)
     _ = install_input_queue_committer(cast(Agent, holder), queues)
     runtime.inbox.push_back(UserMessage(text="answer this first"))
@@ -1564,14 +1605,11 @@ class _GatedCompactor:
         )
 
 
+# The harness drives ``_kb_submit`` / ``_kb_defer`` directly rather than through the
+# prompt-toolkit dispatcher; the handlers only touch ``event.current_buffer.text`` /
+# ``.cursor_position`` / ``.reset()`` / ``.append_to_history()``.
 def _make_kb_event(text: str) -> MagicMock:
-    """Build a prompt-toolkit key event whose buffer holds ``text``.
-
-    The harness drives ``_kb_submit`` / ``_kb_defer`` directly rather
-    than through the prompt-toolkit dispatcher; the handlers only
-    touch ``event.current_buffer.text`` / ``.cursor_position`` /
-    ``.reset()`` / ``.append_to_history()``.
-    """
+    """Build a prompt-toolkit key event whose buffer holds ``text``."""
     buf = MagicMock()
     buf.text = text
     buf.cursor_position = len(text)
@@ -1597,15 +1635,13 @@ async def _wait_for(
         await asyncio.sleep(0)
 
 
+# Lets the test push to the inbox at any point and wait on predicates against history;
+# ``Quit`` is pushed at exit to drain the engine.
 @contextlib.asynccontextmanager
 async def _running_runtime(
-    runtime: agent_runtime.AgentRuntime,
+    runtime: sagent.agent.runtime.AgentRuntime,
 ):
-    """Start ``run_forever`` and tear it down on exit.
-
-    Lets the test push to the inbox at any point and wait on predicates
-    against history; ``Quit`` is pushed at exit to drain the engine.
-    """
+    """Start ``run_forever`` and tear it down on exit."""
     task = asyncio.create_task(runtime.run_forever())
     try:
         yield
@@ -1616,21 +1652,30 @@ async def _running_runtime(
 
 
 def _harness_runtime() -> tuple[
-    agent_runtime.AgentRuntime, _RuntimeHolder, InputQueues
+    sagent.agent.runtime.AgentRuntime,
+    _RuntimeHolder,
+    InputQueues,
 ]:
     """Build a runtime + queues + committer wired together."""
     queues = InputQueues()
-    runtime = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ok"))
+    runtime = sagent.agent.runtime.AgentRuntime(
+        model=_TextOnlyModel(text="ok"),
+    )
     holder = _RuntimeHolder(runtime=runtime)
     _ = install_input_queue_committer(cast(Agent, holder), queues)
     return runtime, holder, queues
 
 
-def _history_user_texts(runtime: agent_runtime.AgentRuntime) -> list[str]:
+def _history_user_texts(
+    runtime: sagent.agent.runtime.AgentRuntime,
+) -> list[str]:
     return [m.text for m in runtime.context().messages if isinstance(m, UserMessage)]
 
 
-def _history_has(runtime: agent_runtime.AgentRuntime, needle: str) -> bool:
+def _history_has(
+    runtime: sagent.agent.runtime.AgentRuntime,
+    needle: str,
+) -> bool:
     """Return True when ``needle`` appears in any user message (coalesced or not)."""
     return any(needle in text for text in _history_user_texts(runtime))
 
@@ -1677,7 +1722,7 @@ async def test_harness_tab_after_idle_turn_drains_to_history() -> None:
     nav = NavState()
     idle_events: list[type] = []
     runtime.observers.append(
-        lambda ev: idle_events.append(type(ev)) if isinstance(ev, AgentIdle) else None
+        lambda ev: idle_events.append(type(ev)) if isinstance(ev, AgentIdle) else None,
     )
     async with _running_runtime(runtime):
         # First turn: user types, model answers, agent idles. Wait for
@@ -1712,7 +1757,7 @@ async def test_pane_restored_onto_idle_agent_still_drains() -> None:
     nav = NavState()
     idle_events: list[type] = []
     runtime.observers.append(
-        lambda ev: idle_events.append(type(ev)) if isinstance(ev, AgentIdle) else None
+        lambda ev: idle_events.append(type(ev)) if isinstance(ev, AgentIdle) else None,
     )
     async with _running_runtime(runtime):
         queues.stage_queue("staged while busy", ())
@@ -1751,12 +1796,12 @@ async def test_queued_pane_message_detaches_running_tool() -> None:
     message would wait a full round -- the "type to redirect" path lost.
     """
     queues = InputQueues()
-    runtime = agent_runtime.AgentRuntime(
+    runtime = sagent.agent.runtime.AgentRuntime(
         model=_ScriptedModel(
             messages=[
                 AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),)),
                 AssistantMessage(text="queued answered"),
-            ]
+            ],
         ),
         tools=[_SlowTool()],
     )
@@ -1824,19 +1869,19 @@ async def test_typed_input_reaches_model_in_every_runtime_state() -> None:
             model = _ScriptedModel(
                 messages=[
                     AssistantMessage(
-                        tool_calls=(ToolCall(id="t1", name="echo", args={}),)
+                        tool_calls=(ToolCall(id="t1", name="echo", args={}),),
                     ),
                     AssistantMessage(text="done"),
-                ]
+                ],
             )
         else:
             model = _TextOnlyModel(text="ok")
 
         compactor = _GatedCompactor(release=release) if setup == "mid_compact" else None
-        runtime = agent_runtime.AgentRuntime(
-            model=cast(agent_runtime.Model, model),
+        runtime = sagent.agent.runtime.AgentRuntime(
+            model=cast(sagent.agent.runtime.Model, model),
             tools=[_GatedTool(release=release)] if setup == "mid_cohort" else [],
-            compactor=cast(agent_runtime.Compactor, compactor)
+            compactor=cast(sagent.agent.runtime.Compactor, compactor)
             if compactor is not None
             else None,
         )
@@ -1846,7 +1891,7 @@ async def test_typed_input_reaches_model_in_every_runtime_state() -> None:
         runtime.observers.append(
             lambda ev: (
                 idle_events.append(type(ev)) if isinstance(ev, AgentIdle) else None
-            )
+            ),
         )
 
         async with _running_runtime(runtime):
@@ -1861,7 +1906,7 @@ async def test_typed_input_reaches_model_in_every_runtime_state() -> None:
             elif setup == "mid_cohort":
                 runtime.inbox.push_back(UserMessage(text="warmup"))
                 await _wait_for(
-                    lambda: bool(runtime.cohort) and runtime.model_call is None
+                    lambda: bool(runtime.cohort) and runtime.model_call is None,
                 )
             elif setup == "post_halt":
                 runtime.inbox.push_back(UserMessage(text="warmup"))
@@ -1955,12 +2000,12 @@ async def test_enter_mid_cohort_detaches_running_tool() -> None:
     """
     queues = InputQueues()
     nav = NavState()
-    runtime = agent_runtime.AgentRuntime(
+    runtime = sagent.agent.runtime.AgentRuntime(
         model=_ScriptedModel(
             messages=[
                 AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),)),
                 AssistantMessage(text="redirected"),
-            ]
+            ],
         ),
         tools=[_SlowTool()],
     )
@@ -1998,7 +2043,7 @@ async def test_harness_enter_after_halt_dispatches_not_wedged() -> None:
     nav = NavState()
     idle_events: list[type] = []
     runtime.observers.append(
-        lambda ev: idle_events.append(type(ev)) if isinstance(ev, AgentIdle) else None
+        lambda ev: idle_events.append(type(ev)) if isinstance(ev, AgentIdle) else None,
     )
     async with _running_runtime(runtime):
         _kb_submit(cast(Agent, holder), queues, nav, _make_kb_event("first"))
@@ -2030,7 +2075,7 @@ async def test_harness_enter_at_nav_stop_on_idle_dispatches() -> None:
     nav = NavState()
     idle_events: list[type] = []
     runtime.observers.append(
-        lambda ev: idle_events.append(type(ev)) if isinstance(ev, AgentIdle) else None
+        lambda ev: idle_events.append(type(ev)) if isinstance(ev, AgentIdle) else None,
     )
     async with _running_runtime(runtime):
         _kb_submit(cast(Agent, holder), queues, nav, _make_kb_event("warm up"))
@@ -2062,7 +2107,9 @@ async def test_queued_input_committed_and_cleared_on_model_idle() -> None:
     at the next gate-section pass and fires a fresh round.
     """
     queues = InputQueues(deferred=QueuedInputBlock(text="elephant\n\nbanana\n\nchair"))
-    agent = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="committed"))
+    agent = sagent.agent.runtime.AgentRuntime(
+        model=_TextOnlyModel(text="committed"),
+    )
 
     class _Holder:
         runtime = agent
@@ -2105,7 +2152,9 @@ async def test_staging_path_end_to_end_renders_user_bar() -> None:
     empty buffer with a non-empty queue.
     """
     printer = RecordingPrinter()
-    agent = agent_runtime.AgentRuntime(model=_TextOnlyModel(text="ack"))
+    agent = sagent.agent.runtime.AgentRuntime(
+        model=_TextOnlyModel(text="ack"),
+    )
     agent.observers.append(make_render_observer(printer))
 
     agent.inbox.push_back(UserMessage(text="hello world"))
@@ -2195,7 +2244,10 @@ async def test_repl_commit_during_cohort_preempts_tools_to_background() -> None:
 
     tool = _BlockingTool()
     model = _TwoRoundModel()
-    runtime = agent_runtime.AgentRuntime(model=model, tools=[tool])
+    runtime = sagent.agent.runtime.AgentRuntime(
+        model=model,
+        tools=[tool],
+    )
 
     # Round 1 trigger.
     runtime.inbox.push_back(UserMessage(text="initial"))
@@ -2210,7 +2262,7 @@ async def test_repl_commit_during_cohort_preempts_tools_to_background() -> None:
         await wait_until(lambda: len(model.call_histories) >= 2)
         release_tool.set()
         await wait_until(
-            lambda: any(isinstance(m, ToolResult) for m in runtime.context().messages)
+            lambda: any(isinstance(m, ToolResult) for m in runtime.context().messages),
         )
         runtime.inbox.push_back(Quit())
 

@@ -23,9 +23,9 @@ from wesearch.paper.errors import PaperError
 from wesearch.paper.fetch import batch_oa_urls, download, looks_like_pdf
 from wesearch.paper.ids import id_slug, s2_wire_id
 
+from sagent.lib import userdirs
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import JSON, json_freeze
-from sagent.lib.userdirs import cache_dir as userdirs_cache_dir
 from sagent.tools.core import load_tool_description
 from sagent.tools.paper_common import (
     normalize_id_arg,
@@ -40,15 +40,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-
-
-def _is_cached_pdf(path: Path, *, min_pdf_bytes: int = 128) -> bool:
-    """Check whether ``path`` holds a cached PDF (size + magic, same bar as fresh)."""
-    try:
-        with path.open("rb") as f:
-            return looks_like_pdf(f.read(min_pdf_bytes))
-    except OSError:
-        return False
 
 
 class PaperFetch:
@@ -80,12 +71,12 @@ class PaperFetch:
                 },
             },
             "required": ["ids"],
-        }
+        },
     )
 
     def __init__(self, *, cache_dir: Path | None = None) -> None:
         self._cache_dir = (
-            cache_dir or userdirs_cache_dir() / "rekursiv-ai" / "wesearch" / "papers"
+            cache_dir or userdirs.cache_dir() / "rekursiv-ai" / "wesearch" / "papers"
         )
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -102,7 +93,15 @@ class PaperFetch:
         return None
 
     async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Download one or many paper PDFs by identifier."""
+        """Download one or many paper PDFs by identifier.
+
+        Args:
+          args: Parsed tool arguments.
+
+        Returns:
+          result: Download status for each requested paper.
+
+        """
         id_list = resolve_id_args(args)
         if isinstance(id_list, ToolResult):
             return id_list
@@ -116,7 +115,10 @@ class PaperFetch:
         if len(parsed_ids) == 1:
             kind, canonical = parsed_ids[0]
             return await self._fetch_one(
-                kind, canonical, oa_url=None, oa_looked_up=False
+                kind,
+                canonical,
+                oa_url=None,
+                oa_looked_up=False,
             )
 
         # Batch-resolve open-access URLs in one gated request. ``None`` for the
@@ -129,7 +131,7 @@ class PaperFetch:
             *(
                 self._fetch_one(kind, canonical, oa_url=oa, oa_looked_up=looked_up)
                 for (kind, canonical), oa in zip(parsed_ids, urls, strict=True)
-            )
+            ),
         )
         any_error = any(r.is_error for r in results)
         return ToolResult(
@@ -163,3 +165,12 @@ class PaperFetch:
             return ToolResult(call_id="", content=str(e), is_error=True)
         atomic_write_bytes(cache_path, body)
         return ToolResult(call_id="", content=f"Downloaded via {source}: {cache_path}")
+
+
+def _is_cached_pdf(path: Path, *, min_pdf_bytes: int = 128) -> bool:
+    """Check whether ``path`` holds a cached PDF (size + magic, same bar as fresh)."""
+    try:
+        with path.open("rb") as f:
+            return looks_like_pdf(f.read(min_pdf_bytes))
+    except OSError:
+        return False

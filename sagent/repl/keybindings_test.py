@@ -19,9 +19,8 @@ from prompt_toolkit.key_binding.key_bindings import (
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.shortcuts import PromptSession
 
-from sagent.agent import runtime as agent_runtime
 from sagent.agent.agent import Agent
-from sagent.repl import keybindings as keybindings_mod
+from sagent.repl import keybindings
 from sagent.repl.input_queues import InputQueues, QueuedInputBlock
 from sagent.repl.keybindings import NavState, build_key_bindings
 from sagent.types.runtime import (
@@ -31,6 +30,8 @@ from sagent.types.runtime import (
     UserDeferredMessage,
     UserMessage,
 )
+
+import sagent.agent.runtime
 
 
 @dataclass(slots=True, kw_only=True)
@@ -68,27 +69,26 @@ class _TrivialModel:
         return AssistantMessage(text="unused")
 
 
-def _make_runtime() -> agent_runtime.AgentRuntime:
-    """Return a REAL ``AgentRuntime`` with a list-backed inbox for poking state.
-
-    The dispatch predicates (``is_idle`` / ``accepts_user_dispatch`` /
-    ``accepts_deferred_dispatch``) are the real ones -- never copied --
-    so a keybinding test cannot pass against a broken predicate.
-    """
-    runtime = agent_runtime.AgentRuntime(
-        model=cast(agent_runtime.Model, _TrivialModel())
+# The dispatch predicates (``is_idle`` / ``accepts_user_dispatch`` /
+# ``accepts_deferred_dispatch``) are the real ones -- never copied -- so a keybinding
+# test cannot pass against a broken predicate.
+def _make_runtime() -> sagent.agent.runtime.AgentRuntime:
+    """Return a REAL ``AgentRuntime`` with a list-backed inbox for poking state."""
+    runtime = sagent.agent.runtime.AgentRuntime(
+        model=cast(sagent.agent.runtime.Model, _TrivialModel()),
     )
-    runtime.inbox = cast(agent_runtime.GatedDeque[RuntimeEvent], _ListInbox())
+    runtime.inbox = cast(
+        sagent.agent.runtime.GatedDeque[RuntimeEvent],
+        _ListInbox(),
+    )
     return runtime
 
 
+# The dispatch predicates only test these for ``is not None``; a real ``Task`` is never
+# awaited here, so an opaque sentinel typed as the field's declared type suffices and
+# keeps the checkers honest.
 def _sentinel_task() -> asyncio.Task[None]:
-    """Return a stand-in ``Task`` for poking ``model_call`` / ``compact_task``.
-
-    The dispatch predicates only test these for ``is not None``; a real
-    ``Task`` is never awaited here, so an opaque sentinel typed as the
-    field's declared type suffices and keeps the checkers honest.
-    """
+    """Return a stand-in ``Task`` for poking ``model_call`` / ``compact_task``."""
     return cast(asyncio.Task[None], object())
 
 
@@ -97,7 +97,9 @@ class _FakeAgent:
     """Minimal stand-in for ``Agent``; wraps a REAL runtime for predicates."""
 
     work: object = None
-    runtime: agent_runtime.AgentRuntime = field(default_factory=_make_runtime)
+    runtime: sagent.agent.runtime.AgentRuntime = field(
+        default_factory=_make_runtime,
+    )
     halt_calls: int = 0
 
     def halt(self) -> None:
@@ -136,7 +138,9 @@ def _handler(kb: KeyBindings, keys: tuple[str, ...]) -> Callable[[KeyPressEvent]
 
 
 def _fake_buf(
-    text: str = "", cursor: int | None = None, history: list[str] | None = None
+    text: str = "",
+    cursor: int | None = None,
+    history: list[str] | None = None,
 ) -> MagicMock:
     buf = MagicMock()
     buf.text = text
@@ -150,7 +154,8 @@ def _fake_buf(
 
 
 def _fake_event(
-    buf: MagicMock | None = None, app: MagicMock | None = None
+    buf: MagicMock | None = None,
+    app: MagicMock | None = None,
 ) -> MagicMock:
     ev = MagicMock()
     ev.current_buffer = buf
@@ -170,14 +175,11 @@ def _build(
     )
 
 
+# The handlers set ``buf.text``; a real buffer would move the cursor and not auto-clear.
+# The MagicMock retains assignments, so a sequence of presses sees the prior text --
+# matching live behavior closely enough to pin the navigation contract.
 def _press(kb: KeyBindings, key: str, buf: MagicMock) -> None:
-    """Press ``key`` against ``buf``; mirror prompt-toolkit's buffer mutation.
-
-    The handlers set ``buf.text``; a real buffer would move the cursor and
-    not auto-clear. The MagicMock retains assignments, so a sequence of
-    presses sees the prior text -- matching live behavior closely enough
-    to pin the navigation contract.
-    """
+    """Press ``key`` against ``buf``; mirror prompt-toolkit's buffer mutation."""
     _handler(kb, (key,))(cast(KeyPressEvent, _fake_event(buf)))
 
 
@@ -226,7 +228,7 @@ def test_enter_during_pending_halt_dispatches_not_stages() -> None:
     means mid-transition -> push directly.
     """
     agent = _busy_agent()
-    _inbox(agent).items.append(object())  # a queued Halt, not drained
+    _inbox(agent).items.append(object())  # `a` queued Halt, not drained.
     queues = InputQueues()
     kb = _build(agent, queues)
     _press(kb, "enter", _fake_buf("redirect now"))
@@ -422,7 +424,7 @@ def test_slash_during_navigation_restores_pane_and_ends_nav() -> None:
     nav = NavState()
     kb = _build(agent, queues, nav)
     buf = _fake_buf("g")
-    _press(kb, "up", buf)  # lift Q
+    _press(kb, "up", buf)  # Lift Q.
     buf.text = "/model"
     _press(kb, "enter", buf)
     buf.validate_and_handle.assert_called_once()
@@ -468,19 +470,20 @@ def test_up_unlifts_queue_into_input() -> None:
 def test_up_walks_queue_then_deferred_then_history() -> None:
     """Walk order: input -> queue -> deferred -> history (spec)."""
     queues = InputQueues(
-        queue=QueuedInputBlock(text="Q"), deferred=QueuedInputBlock(text="D")
+        queue=QueuedInputBlock(text="Q"),
+        deferred=QueuedInputBlock(text="D"),
     )
     nav = NavState()
     kb = _build(_busy_agent(), queues, nav)
     buf = _fake_buf("g", history=["h1"])
     _press(kb, "up", buf)
-    assert buf.text == "Q"  # queue stop
+    assert buf.text == "Q"  # `queue` stop.
     _press(kb, "up", buf)
-    assert buf.text == "D"  # deferred stop
-    assert queues.queue == QueuedInputBlock(text="Q")  # restored on pass
+    assert buf.text == "D"  # `deferred` stop.
+    assert queues.queue == QueuedInputBlock(text="Q")  # Restored on pass.
     _press(kb, "up", buf)
-    assert buf.text == "h1"  # history stop
-    assert queues.deferred == QueuedInputBlock(text="D")  # restored on pass
+    assert buf.text == "h1"  # `history` stop.
+    assert queues.deferred == QueuedInputBlock(text="D")  # Restored on pass.
 
 
 def test_up_at_oldest_history_is_noop() -> None:
@@ -490,7 +493,7 @@ def test_up_at_oldest_history_is_noop() -> None:
     _press(kb, "up", buf)
     assert buf.text == "old"
     _press(kb, "up", buf)
-    assert buf.text == "old"  # hard top -- no-op
+    assert buf.text == "old"  # Hard top -- no-op.
 
 
 def test_down_at_input_is_noop() -> None:
@@ -507,13 +510,13 @@ def test_unedited_round_trip_restores_everything() -> None:
     nav = NavState()
     kb = _build(_busy_agent(), queues, nav)
     buf = _fake_buf("g", history=["h1"])
-    _press(kb, "up", buf)  # input -> Q
-    _press(kb, "up", buf)  # Q restored, -> h1
+    _press(kb, "up", buf)  # Input -> Q.
+    _press(kb, "up", buf)  # Q restored, -> h1.
     assert queues.queue == QueuedInputBlock(text="Q")
     _press(kb, "down", buf)  # -> Q (queue emptied again)
     assert buf.text == "Q"
     assert queues.queue is None
-    _press(kb, "down", buf)  # -> g; queue restored
+    _press(kb, "down", buf)  # -> g; queue restored.
     assert buf.text == "g"
     assert queues.queue == QueuedInputBlock(text="Q")
     assert nav.cursor == 0
@@ -528,9 +531,9 @@ def test_edit_at_queue_stop_then_up_does_not_requeue() -> None:
     nav = NavState()
     kb = _build(_busy_agent(), queues, nav)
     buf = _fake_buf("g", history=["h1"])
-    _press(kb, "up", buf)  # input -> Q
-    buf.text = "Q2"  # edit
-    _press(kb, "up", buf)  # modified -> not restored
+    _press(kb, "up", buf)  # Input -> Q.
+    buf.text = "Q2"  # Edit.
+    _press(kb, "up", buf)  # Modified -> not restored.
     assert queues.queue is None
     assert buf.text == "h1"
 
@@ -541,10 +544,10 @@ def test_edit_survives_down_replay() -> None:
     nav = NavState()
     kb = _build(_busy_agent(), queues, nav)
     buf = _fake_buf("g", history=["h1"])
-    _press(kb, "up", buf)  # input -> Q
-    buf.text = "Q2"  # edit
-    _press(kb, "up", buf)  # -> h1, Q not restored
-    _press(kb, "down", buf)  # -> Q2 (the edit), not Q
+    _press(kb, "up", buf)  # Input -> Q.
+    buf.text = "Q2"  # Edit.
+    _press(kb, "up", buf)  # -> h1, Q not restored.
+    _press(kb, "down", buf)  # -> Q2 (the edit), not Q.
     assert buf.text == "Q2"
     assert queues.queue is None
 
@@ -560,20 +563,20 @@ def test_bug1_delete_gesture_removes_queued_message() -> None:
     nav = NavState()
     kb = _build(_busy_agent(), queues, nav)
     buf = _fake_buf("g", history=["h1"])
-    _press(kb, "up", buf)  # input -> Q
-    buf.text = ""  # delete
-    _press(kb, "up", buf)  # cleared -> Q not restored
+    _press(kb, "up", buf)  # Input -> Q.
+    buf.text = ""  # Delete.
+    _press(kb, "up", buf)  # Cleared -> Q not restored.
     assert queues.queue is None
     assert buf.text == "h1"
     _press(kb, "down", buf)  # -> "" (the cleared stop's value)
     assert buf.text == ""
     assert queues.queue is None
-    _press(kb, "down", buf)  # -> g
+    _press(kb, "down", buf)  # -> g.
     assert buf.text == "g"
-    assert queues.queue is None  # Q stays deleted everywhere
+    assert queues.queue is None  # Q stays deleted everywhere.
 
 
-# --- Enter/Tab during navigation: replace own pane / append elsewhere -
+# --- Enter/Tab during navigation: replace own pane / append elsewhere -.
 
 
 def test_enter_at_queue_stop_replaces_queue_no_doubling() -> None:
@@ -583,7 +586,7 @@ def test_enter_at_queue_stop_replaces_queue_no_doubling() -> None:
     buf = _fake_buf("g")
     _press(kb, "up", buf)  # -> Q (queue emptied)
     buf.text = "Q-edited"
-    _press(kb, "enter", buf)  # commit: replace queue
+    _press(kb, "enter", buf)  # Commit: replace queue.
     assert queues.queue == QueuedInputBlock(text="Q-edited")
     assert nav.cursor == 0
 
@@ -594,10 +597,10 @@ def test_enter_at_history_stop_appends_to_restored_queue() -> None:
     nav = NavState()
     kb = _build(_busy_agent(), queues, nav)
     buf = _fake_buf("g", history=["h1"])
-    _press(kb, "up", buf)  # input -> Q
-    _press(kb, "up", buf)  # Q restored, -> h1
+    _press(kb, "up", buf)  # Input -> Q.
+    _press(kb, "up", buf)  # Q restored, -> h1.
     buf.text = "h1-edited"
-    _press(kb, "enter", buf)  # commit at history stop: append to queue
+    _press(kb, "enter", buf)  # Commit at history stop: append to queue.
     assert queues.queue is not None
     assert queues.queue.text == "Q\n\nh1-edited"
     assert nav.cursor == 0
@@ -614,7 +617,7 @@ def test_nav_commit_preserves_attachments() -> None:
     nav = NavState()
     kb = _build(_busy_agent(), queues, nav)
     buf = _fake_buf("g")
-    _press(kb, "up", buf)  # lift Q (+image) into buffer
+    _press(kb, "up", buf)  # Lift Q (+image) into buffer.
     buf.text = "Q-edited"
     _press(kb, "enter", buf)
     assert queues.queue is not None
@@ -643,7 +646,7 @@ def test_tab_during_navigation_moves_queue_to_deferred() -> None:
     kb = _build(_busy_agent(), queues, nav)
     buf = _fake_buf("g")
     _press(kb, "up", buf)  # -> Q (queue emptied)
-    _press(kb, "tab", buf)  # commit as deferred
+    _press(kb, "tab", buf)  # Commit as deferred.
     assert queues.queue is None
     assert queues.deferred == QueuedInputBlock(text="Q")
     assert nav.cursor == 0
@@ -660,7 +663,7 @@ def test_whitespace_enter_during_navigation_ends_nav_no_restore() -> None:
     buf.text = "   "
     _press(kb, "enter", buf)
     assert nav.cursor == 0
-    assert queues.queue is None  # not restored; the gesture deletes
+    assert queues.queue is None  # Not restored; the gesture deletes.
     assert _inbox(agent).items == []
 
 
@@ -673,7 +676,7 @@ def test_enter_after_navigation_idle_dispatches() -> None:
     nav = NavState()
     kb = _build(agent, InputQueues(), nav)
     buf = _fake_buf("g", history=["h1"])
-    _press(kb, "up", buf)  # -> h1
+    _press(kb, "up", buf)  # -> h1.
     buf.text = "h1-edited"
     _press(kb, "enter", buf)
     assert [type(i) for i in _inbox(agent).items] == [UserMessage]
@@ -687,7 +690,7 @@ def test_tab_after_navigation_idle_dispatches_deferred() -> None:
     nav = NavState()
     kb = _build(agent, InputQueues(), nav)
     buf = _fake_buf("g", history=["h1"])
-    _press(kb, "up", buf)  # -> h1
+    _press(kb, "up", buf)  # -> h1.
     _press(kb, "tab", buf)
     assert [type(i) for i in _inbox(agent).items] == [UserDeferredMessage]
     assert cast(UserDeferredMessage, _inbox(agent).items[0]).text == "h1"
@@ -802,14 +805,14 @@ def test_ctrl_c_wins_over_prompt_session_default() -> None:
     user_bindings = session.key_bindings
     assert user_bindings is not None
     merged = merge_key_bindings(
-        [user_bindings, cast(KeyBindingsBase, session._create_prompt_bindings())]
+        [user_bindings, cast(KeyBindingsBase, session._create_prompt_bindings())],
     )
     matches = merged.get_bindings_for_keys((Keys.ControlC,))
     eager = [m for m in matches if m.eager()]
     resolved = (eager or matches)[-1]
     handler = resolved.handler
     inner = getattr(handler, "func", handler)
-    assert inner is keybindings_mod._kb_ctrl_c
+    assert inner is keybindings._kb_ctrl_c
     handler(cast(KeyPressEvent, _fake_event(_fake_buf(""))))
     assert agent.halt_calls == 1
 
@@ -846,7 +849,7 @@ def test_real_buffer_enter_idle_dispatches() -> None:
     _handler(kb, ("enter",))(_real_event(buf))
     assert [type(i) for i in _inbox(agent).items] == [UserMessage]
     assert cast(UserMessage, _inbox(agent).items[0]).text == "hello"
-    assert buf.text == ""  # real buffer reset
+    assert buf.text == ""  # Real buffer reset.
 
 
 def test_real_buffer_enter_busy_stages_and_resets() -> None:
@@ -874,14 +877,14 @@ def test_real_buffer_full_nav_round_trip() -> None:
     assert queues.queue is None
     up(_real_event(buf))
     assert buf.text == "h3"
-    assert queues.queue == QueuedInputBlock(text="Q")  # restored on pass
+    assert queues.queue == QueuedInputBlock(text="Q")  # Restored on pass.
     up(_real_event(buf))
     assert buf.text == "h2"
     down(_real_event(buf))
     assert buf.text == "h3"
     down(_real_event(buf))
     assert buf.text == "Q"
-    assert queues.queue is None  # re-unlifted on the way down
+    assert queues.queue is None  # re-unlifted on the way down.
     down(_real_event(buf))
     assert buf.text == "typed"
     assert queues.queue == QueuedInputBlock(text="Q")
@@ -896,10 +899,10 @@ def test_real_buffer_modified_test_delete_gesture() -> None:
     kb = _build(agent, queues, nav)
     buf = _real_buf("typed", history=["h1"])
     up = _handler(kb, ("up",))
-    up(_real_event(buf))  # lift Q
+    up(_real_event(buf))  # Lift Q.
     assert buf.text == "Q"
-    buf.text = ""  # delete
-    up(_real_event(buf))  # modified -> not restored
+    buf.text = ""  # Delete.
+    up(_real_event(buf))  # Modified -> not restored.
     assert queues.queue is None
     assert buf.text == "h1"
 

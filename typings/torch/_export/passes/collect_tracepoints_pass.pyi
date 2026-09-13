@@ -8,6 +8,8 @@ __all__ = ["CollectTracepointsPass"]
 
 class CollectTracepointsPass(PassBase):
     def __init__(
-        self, specs: dict[str, ModuleCallSignature], sig: ExportGraphSignature
+        self,
+        specs: dict[str, ModuleCallSignature],
+        sig: ExportGraphSignature,
     ) -> None: ...
     def call(self, gm: torch.fx.GraphModule) -> PassResult | None: ...

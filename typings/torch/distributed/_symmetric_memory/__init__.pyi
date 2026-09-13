@@ -54,10 +54,12 @@ class _ScaleMode(Enum):
 
 def make_contiguous_for_perm(t: torch.Tensor, perm: list[int]) -> torch.Tensor: ...
 def restride_A_shard_for_fused_all_gather_matmul(
-    t: torch.Tensor, gather_dim: int
+    t: torch.Tensor,
+    gather_dim: int,
 ) -> torch.Tensor: ...
 def restride_A_for_fused_matmul_reduce_scatter(
-    t: torch.Tensor, scatter_dim: int
+    t: torch.Tensor,
+    scatter_dim: int,
 ) -> torch.Tensor: ...
 
 class Work(_Work):
@@ -66,14 +68,21 @@ class Work(_Work):
 
 @overload
 def empty(
-    *size: _int, dtype: _dtype | None = ..., device: _device | None = ...
+    *size: _int,
+    dtype: _dtype | None = ...,
+    device: _device | None = ...,
 ) -> torch.Tensor: ...
 @overload
 def empty(
-    size: Sequence[_int], *, dtype: _dtype | None = ..., device: _device | None = ...
+    size: Sequence[_int],
+    *,
+    dtype: _dtype | None = ...,
+    device: _device | None = ...,
 ) -> torch.Tensor: ...
 def empty(
-    *size: Any, dtype: _dtype | None = ..., device: _device | None = ...
+    *size: Any,
+    dtype: _dtype | None = ...,
+    device: _device | None = ...,
 ) -> torch.Tensor: ...
 def rendezvous(tensor: torch.Tensor, group: str | ProcessGroup) -> _SymmetricMemory: ...
 def is_nvshmem_available() -> bool: ...

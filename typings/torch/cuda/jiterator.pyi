@@ -7,6 +7,10 @@ class _CodeParser:
 
 class _JittedFunction:
     def __init__(
-        self, code_string: str, return_by_ref: bool, num_outputs: int, **kwargs
+        self,
+        code_string: str,
+        return_by_ref: bool,
+        num_outputs: int,
+        **kwargs,
     ) -> None: ...
     def __call__(self, *tensors: Tensor, **kwargs) -> Tensor: ...

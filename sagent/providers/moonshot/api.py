@@ -21,7 +21,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import ClassVar
 
-from sagent.catalog import moonshot as moonshot_catalog
+from sagent.catalog import moonshot
 from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
@@ -37,7 +37,7 @@ class _MoonshotModel(OpenAICompatModel):
 
 # Moonshot/Kimi (OpenAI-compatible) publishes no per-image pixel or byte limit
 # and no request-body byte ceiling; images are preprocessed server-side. Use the
-# 0=unlimited sentinel rather than borrowing OpenAI's caps (verified Jun 2026;
+# 0=unlimited sentinel rather than borrowing OpenAI's caps (verified Jun 2026.
 # https://platform.kimi.ai/docs/guide/use-kimi-vision-model).
 
 
@@ -58,7 +58,7 @@ class Moonshot(OpenAICompat):
     #
     # To add a new model: check the Moonshot platform docs for the
     # model's context window and max output tokens.
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = moonshot_catalog.models()
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = moonshot.models()
     """Per-model capability; transport limits live on ``TRANSPORT``."""
 
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _MoonshotModel

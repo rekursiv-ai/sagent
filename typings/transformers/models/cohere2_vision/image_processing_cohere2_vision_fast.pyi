@@ -43,7 +43,8 @@ class Cohere2VisionImageProcessorFast(BaseImageProcessorFast):
     valid_kwargs = Cohere2VisionFastImageProcessorKwargs
     patch_size = ...
     def __init__(
-        self, **kwargs: Unpack[Cohere2VisionFastImageProcessorKwargs]
+        self,
+        **kwargs: Unpack[Cohere2VisionFastImageProcessorKwargs],
     ) -> None: ...
     @auto_docstring
     def preprocess(
@@ -62,7 +63,10 @@ class Cohere2VisionImageProcessorFast(BaseImageProcessorFast):
     ):  # -> Tensor:
         ...
     def get_number_of_image_patches(
-        self, height: int, width: int, images_kwargs=...
+        self,
+        height: int,
+        width: int,
+        images_kwargs=...,
     ):  # -> int:
         ...
 

@@ -4,7 +4,8 @@ from torch import Tensor
 from torch._dynamo.compiled_autograd import AutogradCompilerInstance
 
 def set_autograd_compiler(
-    autograd_compiler: Callable[[], AutogradCompilerInstance] | None, dynamic: bool
+    autograd_compiler: Callable[[], AutogradCompilerInstance] | None,
+    dynamic: bool,
 ) -> tuple[Callable[[], AutogradCompilerInstance] | None, bool]: ...
 def clear_cache() -> None: ...
 def is_cache_empty() -> bool: ...

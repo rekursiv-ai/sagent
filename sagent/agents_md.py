@@ -78,7 +78,7 @@ class AgentsMdConfig:
     """System-wide config root (``/etc/sagent`` or platform equivalent)."""
 
     user_dir: Path = field(
-        default_factory=lambda: data_dir() / "rekursiv-ai" / "sagent"
+        default_factory=lambda: data_dir() / "rekursiv-ai" / "sagent",
     )
     """User config root (``data_dir() / "rekursiv-ai"/sagent``)."""
 
@@ -180,21 +180,17 @@ def _matches_any_glob(path: str, globs: Iterable[str]) -> bool:
     return False
 
 
+# Order (lowest → highest precedence, since later entries appear later in the rendered
+# prompt and override earlier ones by appearance):
+#
+# 1. ``cfg.system_dir`` (Managed) -- root ``AGENTS.md`` then ``rules/**``. 2.
+# ``cfg.user_dir`` (User) -- same shape. 3. cwd ancestors, root → cwd (Project + Local),
+# interleaved per directory: ``AGENTS.md``, ``.sagent/AGENTS.md``, ``.sagent/rules/**``,
+# ``AGENTS.local.md``. 4. ``cfg.additional_dirs`` (Project + Local), processed in the
+# order supplied -- i.e. *after* the walk-up so ambient directories layer on top of
+# project context.
 def _discover(cwd: Path, cfg: AgentsMdConfig) -> list[_AgentMdFile]:
-    """Walk all four tiers and return discovered files in load order.
-
-    Order (lowest → highest precedence, since later entries appear later
-    in the rendered prompt and override earlier ones by appearance):
-
-    1. ``cfg.system_dir`` (Managed) — root ``AGENTS.md`` then ``rules/**``.
-    2. ``cfg.user_dir`` (User) — same shape.
-    3. cwd ancestors, root → cwd (Project + Local), interleaved per
-       directory: ``AGENTS.md``, ``.sagent/AGENTS.md``,
-       ``.sagent/rules/**``, ``AGENTS.local.md``.
-    4. ``cfg.additional_dirs`` (Project + Local), processed in the order
-       supplied — i.e. *after* the walk-up so ambient directories layer
-       on top of project context.
-    """
+    """Walk all four tiers and return discovered files in load order."""
     processed: set[str] = set()
     out: list[_AgentMdFile] = []
 
@@ -207,7 +203,7 @@ def _discover(cwd: Path, cfg: AgentsMdConfig) -> list[_AgentMdFile]:
             depth=0,
             parent=None,
             cfg=cfg,
-        )
+        ),
     )
     out.extend(_load_md_dir(cfg.system_dir / "rules", "Managed", processed, cfg))
 
@@ -220,7 +216,7 @@ def _discover(cwd: Path, cfg: AgentsMdConfig) -> list[_AgentMdFile]:
             depth=0,
             parent=None,
             cfg=cfg,
-        )
+        ),
     )
     out.extend(_load_md_dir(cfg.user_dir / "rules", "User", processed, cfg))
 
@@ -256,7 +252,7 @@ def _process_dir(
     local_filename = f"{p.stem}.local{p.suffix}"
     out: list[_AgentMdFile] = []
     out.extend(
-        _process(d / cfg.filename, "Project", processed, depth=0, parent=None, cfg=cfg)
+        _process(d / cfg.filename, "Project", processed, depth=0, parent=None, cfg=cfg),
     )
     out.extend(
         _process(
@@ -266,11 +262,11 @@ def _process_dir(
             depth=0,
             parent=None,
             cfg=cfg,
-        )
+        ),
     )
     out.extend(_load_md_dir(d / cfg.dot_dir / "rules", "Project", processed, cfg))
     out.extend(
-        _process(d / local_filename, "Local", processed, depth=0, parent=None, cfg=cfg)
+        _process(d / local_filename, "Local", processed, depth=0, parent=None, cfg=cfg),
     )
     return out
 
@@ -292,7 +288,7 @@ def _load_md_dir(
     for p in md_files:
         if p.is_file():
             out.extend(
-                _process(p, memory_type, processed, depth=0, parent=None, cfg=cfg)
+                _process(p, memory_type, processed, depth=0, parent=None, cfg=cfg),
             )
     return out
 
@@ -351,7 +347,7 @@ def _process(
                 depth=depth + 1,
                 parent=resolved,
                 cfg=cfg,
-            )
+            ),
         )
     return out
 
@@ -395,14 +391,11 @@ def _dedup_key(p: Path) -> str:
         return str(p)
 
 
+# Globs are preserved verbatim; ``src/**`` stays ``src/**``. A list consisting solely of
+# bare ``**`` collapses to ``[]`` because that pattern matches everything and is
+# indistinguishable from an unconditional rule.
 def _extract_path_globs(meta: dict[str, object]) -> list[str]:
-    """Extract ``paths:`` globs from frontmatter metadata.
-
-    Globs are preserved verbatim; ``src/**`` stays ``src/**``. A list
-    consisting solely of bare ``**`` collapses to ``[]`` because that
-    pattern matches everything and is indistinguishable from an
-    unconditional rule.
-    """
+    """Extract ``paths:`` globs from frontmatter metadata."""
     paths: object = meta.get("paths")
     globs: list[str] = []
     if isinstance(paths, str):
@@ -434,7 +427,7 @@ def _strip_html_block_comments(text: str) -> str:
         residue = re.sub(r"<!--[\s\S]*?-->", "", span)
         if residue.strip():
             replacements[start] = [
-                residue if residue.endswith("\n") else residue + "\n"
+                residue if residue.endswith("\n") else residue + "\n",
             ]
             for i in range(start + 1, end):
                 drop.add(i)
@@ -458,7 +451,9 @@ def _expand_include_path(ref: str, base_dir: Path) -> Path | None:
     if not ref:
         return None
     if ref.startswith("~/"):
-        return (Path.home() / ref[2:]).resolve()  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)
+        return (
+            Path(ref).expanduser().resolve()
+        )  # xdg-literal: ignore -- user-supplied include path.
     if ref.startswith("/"):
         if ref == "/":
             return None

@@ -35,7 +35,11 @@ class IdeficsPerceiverResampler(nn.Module):
 
 class IdeficsPerceiverAttention(nn.Module):
     def __init__(
-        self, embed_dim: int, n_heads: int, head_dim: int, qk_layer_norms: bool
+        self,
+        embed_dim: int,
+        n_heads: int,
+        head_dim: int,
+        qk_layer_norms: bool,
     ) -> None: ...
     def forward(self, context: torch.Tensor, latents: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -43,6 +47,7 @@ class IdeficsPerceiverAttention(nn.Module):
 class IdeficsMLP(nn.Module):
     def __init__(self, intermediate_size, config: IdeficsConfig) -> None: ...
     def forward(
-        self, hidden_states: tuple[torch.FloatTensor] | None
+        self,
+        hidden_states: tuple[torch.FloatTensor] | None,
     ) -> torch.FloatTensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...

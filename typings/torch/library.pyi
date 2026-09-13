@@ -42,7 +42,13 @@ class Library:
     def __init__(self, ns, kind, dispatch_key=...) -> None: ...
     def define(self, schema, alias_analysis=..., *, tags=...) -> Any: ...
     def impl(
-        self, op_name, fn, dispatch_key=..., *, with_keyset=..., allow_override=...
+        self,
+        op_name,
+        fn,
+        dispatch_key=...,
+        *,
+        with_keyset=...,
+        allow_override=...,
     ) -> None: ...
     def fallback(self, fn, dispatch_key=..., *, with_keyset=...) -> None: ...
 
@@ -71,7 +77,9 @@ def impl(
 ) -> None: ...
 @overload
 def impl(
-    lib: Library, name: str, dispatch_key: str = ...
+    lib: Library,
+    name: str,
+    dispatch_key: str = ...,
 ) -> Callable[[Callable[_P, _T]], Callable[_P, _T]]: ...
 @functools.singledispatch
 def impl(
@@ -86,7 +94,11 @@ def impl(
     category=FutureWarning,
 )
 def impl_abstract(
-    qualname, func=..., *, lib=..., _stacklevel=...
+    qualname,
+    func=...,
+    *,
+    lib=...,
+    _stacklevel=...,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]] | Callable[..., Any]: ...
 
 type _op_identifier = (
@@ -135,11 +147,16 @@ def register_torch_dispatch(
     lib: Library | None = ...,
 ) -> Callable[..., Any]: ...
 def register_vmap(
-    op: _op_identifier, func: Callable | None = ..., /, *, lib=...
+    op: _op_identifier,
+    func: Callable | None = ...,
+    /,
+    *,
+    lib=...,
 ) -> Callable[..., None] | None: ...
 def get_ctx() -> torch._library.fake_impl.FakeImplCtx: ...
 def get_kernel(
-    op: _op_identifier, dispatch_key: str | torch.DispatchKey
+    op: _op_identifier,
+    dispatch_key: str | torch.DispatchKey,
 ) -> torch._C._SafeKernelFunction: ...
 
 _OPCHECK_DEFAULT_UTILS = ...

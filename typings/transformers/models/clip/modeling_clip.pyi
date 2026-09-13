@@ -57,10 +57,15 @@ class CLIPOutput(ModelOutput):
 class CLIPVisionEmbeddings(nn.Module):
     def __init__(self, config: CLIPVisionConfig) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
-        self, pixel_values: torch.FloatTensor, interpolate_pos_encoding=...
+        self,
+        pixel_values: torch.FloatTensor,
+        interpolate_pos_encoding=...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -97,7 +102,9 @@ class CLIPAttention(nn.Module):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class CLIPMLP(nn.Module):
@@ -215,7 +222,9 @@ class CLIPModel(CLIPPreTrainedModel):
     @filter_out_non_signature_kwargs()
     @auto_docstring
     def get_image_features(
-        self, pixel_values: torch.FloatTensor, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values: torch.FloatTensor,
+        interpolate_pos_encoding: bool = ...,
     ) -> torch.FloatTensor: ...
     @can_return_tuple
     @auto_docstring

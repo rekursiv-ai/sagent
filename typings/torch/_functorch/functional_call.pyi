@@ -21,5 +21,6 @@ def stack_module_state(
     models: Sequence[nn.Module] | nn.ModuleList,
 ) -> tuple[dict[str, Any], dict[str, Any]]: ...
 def construct_stacked_leaf(
-    tensors: tuple[Tensor, ...] | list[Tensor], name: str
+    tensors: tuple[Tensor, ...] | list[Tensor],
+    name: str,
 ) -> Tensor: ...

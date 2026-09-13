@@ -18,13 +18,23 @@ class HqqHfQuantizer(HfQuantizer):
     required_packages = ...
     def __init__(self, quantization_config, **kwargs) -> None: ...
     def update_missing_keys(
-        self, model: PreTrainedModel, missing_keys: list[str], prefix: str, **kwargs
+        self,
+        model: PreTrainedModel,
+        missing_keys: list[str],
+        prefix: str,
+        **kwargs,
     ) -> list[str]: ...
     def update_expected_keys(
-        self, model: PreTrainedModel, expected_keys: list[str], loaded_keys: list[str]
+        self,
+        model: PreTrainedModel,
+        expected_keys: list[str],
+        loaded_keys: list[str],
     ) -> list[str]: ...
     def param_needs_quantization(
-        self, model: PreTrainedModel, param_name: str, **kwargs
+        self,
+        model: PreTrainedModel,
+        param_name: str,
+        **kwargs,
     ) -> bool: ...
     def create_quantized_param(
         self,

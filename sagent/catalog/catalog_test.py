@@ -115,7 +115,8 @@ def test_a_priced_tier_is_an_offered_tier(row: ModelCapability) -> None:
 
 @pytest.mark.parametrize(("models", "transport"), _TRANSPORTS, ids=_TRANSPORT_IDS)
 def test_a_transport_only_removes(
-    models: Mapping[str, ModelCapability], transport: ModelCapability
+    models: Mapping[str, ModelCapability],
+    transport: ModelCapability,
 ) -> None:
     for row in models.values():
         met = row & transport
@@ -128,7 +129,8 @@ def test_a_transport_only_removes(
 
 @pytest.mark.parametrize(("models", "transport"), _TRANSPORTS, ids=_TRANSPORT_IDS)
 def test_a_transport_preserves_windows_and_prices(
-    models: Mapping[str, ModelCapability], transport: ModelCapability
+    models: Mapping[str, ModelCapability],
+    transport: ModelCapability,
 ) -> None:
     for row in models.values():
         met = row & transport
@@ -139,7 +141,8 @@ def test_a_transport_preserves_windows_and_prices(
 
 @pytest.mark.parametrize(("models", "transport"), _TRANSPORTS, ids=_TRANSPORT_IDS)
 def test_a_narrowed_row_leaves_every_axis_selectable(
-    models: Mapping[str, ModelCapability], transport: ModelCapability
+    models: Mapping[str, ModelCapability],
+    transport: ModelCapability,
 ) -> None:
     for row in models.values():
         met = row & transport
@@ -152,7 +155,8 @@ def test_a_narrowed_row_leaves_every_axis_selectable(
 
 @pytest.mark.parametrize(("models", "transport"), _TRANSPORTS, ids=_TRANSPORT_IDS)
 def test_a_transport_never_advertises_what_no_row_can_reach(
-    models: Mapping[str, ModelCapability], transport: ModelCapability
+    models: Mapping[str, ModelCapability],
+    transport: ModelCapability,
 ) -> None:
     """A transport axis wider than EVERY row is a knob nobody can select.
 
@@ -199,7 +203,8 @@ _PUBLISHED_PRICES = {
 
 @pytest.mark.parametrize(("model_id", "published"), _PUBLISHED_PRICES.items())
 def test_a_row_bills_the_vendors_published_rate(
-    model_id: str, published: tuple[float, float]
+    model_id: str,
+    published: tuple[float, float],
 ) -> None:
     """Catch a reprice, which every structural invariant here passes through.
 

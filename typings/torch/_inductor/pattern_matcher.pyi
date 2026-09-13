@@ -64,7 +64,10 @@ class ReplaceFn(Protocol):
 
 class TraceFn(Protocol):
     def __call__(
-        self, fn: SearchFn | ReplaceFn, *args: Any, **kwargs: Any
+        self,
+        fn: SearchFn | ReplaceFn,
+        *args: Any,
+        **kwargs: Any,
     ) -> torch.fx.GraphModule: ...
 
 T = TypeVar("T")
@@ -98,7 +101,9 @@ class Match:
     def output_nodes(self) -> list[torch.fx.Node | None]: ...
     def output_node(self) -> torch.fx.Node: ...
     def replace_with_graph(
-        self, replacement_graph: torch.fx.Graph, args: Sequence[Any]
+        self,
+        replacement_graph: torch.fx.Graph,
+        args: Sequence[Any],
     ) -> None: ...
     def replace_by_example(
         self,
@@ -136,7 +141,9 @@ class PatternExpr(ABC):
     def match(self, node: torch.fx.Node) -> MatchResult: ...
     def has_multiple_users(self) -> bool: ...
     def find_anchor_nodes(
-        self, ctx: MatchContext, searched: OrderedSet[torch.fx.Node]
+        self,
+        ctx: MatchContext,
+        searched: OrderedSet[torch.fx.Node],
     ) -> Generator[torch.fx.Node | None]: ...
     def pattern_eq(self, other: Any) -> bool: ...
 
@@ -158,7 +165,9 @@ class _TargetExpr(PatternExpr):
     fns: list[FnsType]
     fns_set: OrderedSet[FnsType]
     def __init__(
-        self, fns: FnsType | Sequence[FnsType], users: Multiple | int = ...
+        self,
+        fns: FnsType | Sequence[FnsType],
+        users: Multiple | int = ...,
     ) -> None: ...
     @property
     @abstractmethod
@@ -166,7 +175,9 @@ class _TargetExpr(PatternExpr):
     def fns_repr(self) -> str: ...
     def has_multiple_users(self) -> bool: ...
     def find_anchor_nodes(
-        self, ctx: MatchContext, searched: OrderedSet[torch.fx.Node]
+        self,
+        ctx: MatchContext,
+        searched: OrderedSet[torch.fx.Node],
     ) -> Generator[torch.fx.Node | None]: ...
     def pattern_eq(self, other: Any) -> bool: ...
 
@@ -182,15 +193,19 @@ class _TargetArgsExpr(_TargetExpr):
     ) -> None: ...
     @staticmethod
     def simple_flatten(
-        args: Sequence[Any], kwargs: Mapping[Any, Any]
+        args: Sequence[Any],
+        kwargs: Mapping[Any, Any],
     ) -> tuple[Sequence[Any], _SimpleSpec | pytree.TreeSpec]: ...
     @staticmethod
     def pytree_flatten(
-        args: Sequence[Any], kwargs: Mapping[Any, Any]
+        args: Sequence[Any],
+        kwargs: Mapping[Any, Any],
     ) -> tuple[Sequence[Any], _SimpleSpec | pytree.TreeSpec]: ...
     def pretty_print(self, pp: PatternPrettyPrinter) -> str: ...
     def find_anchor_nodes(
-        self, ctx: MatchContext, searched: OrderedSet[torch.fx.Node]
+        self,
+        ctx: MatchContext,
+        searched: OrderedSet[torch.fx.Node],
     ) -> Generator[torch.fx.Node | None]: ...
     def pattern_eq(self, other: Any) -> bool: ...
 
@@ -231,7 +246,8 @@ class PatternPrettyPrinter:
 
 class _PassDictsType(Protocol):
     def __getitem__(
-        self, k: tuple[str, torch.fx.node.Target]
+        self,
+        k: tuple[str, torch.fx.node.Target],
     ) -> list[PatternEntry]: ...
 
 @dataclasses.dataclass
@@ -239,7 +255,10 @@ class PatternEntry:
     pattern: PatternExpr
     extra_check: Callable[[Match], bool]
     def apply(
-        self, match: Match, graph: torch.fx.Graph, node: torch.fx.Node
+        self,
+        match: Match,
+        graph: torch.fx.Graph,
+        node: torch.fx.Node,
     ) -> None: ...
     def register(
         self,
@@ -252,14 +271,20 @@ class PatternEntry:
 class LoweringPatternEntry(PatternEntry):
     handler: Callable[..., Any]
     def apply(
-        self, match: Match, graph: torch.fx.Graph, node: torch.fx.Node
+        self,
+        match: Match,
+        graph: torch.fx.Graph,
+        node: torch.fx.Node,
     ) -> None: ...
 
 @dataclasses.dataclass
 class GraphPatternEntry(PatternEntry):
     handler: Callable[..., Any]
     def apply(
-        self, match: Match, graph: torch.fx.Graph, node: torch.fx.Node
+        self,
+        match: Match,
+        graph: torch.fx.Graph,
+        node: torch.fx.Node,
     ) -> None: ...
 
 @dataclasses.dataclass
@@ -273,7 +298,10 @@ class ReplacementPatternEntry(PatternEntry):
         args: Sequence[torch.fx.Node],
     ) -> None: ...
     def apply(
-        self, match: Match, graph: torch.fx.Graph, node: torch.fx.Node
+        self,
+        match: Match,
+        graph: torch.fx.Graph,
+        node: torch.fx.Node,
     ) -> None: ...
 
 def log_trace_failure(search_fn: Callable[..., Any], e: RuntimeError) -> None: ...
@@ -363,7 +391,8 @@ def compute_mutation_region_ids(graph: torch.fx.Graph) -> None: ...
 class PatternMatcherPass:
     def __init__(self, pass_name: str | None = ...) -> None: ...
     def __getitem__(
-        self, item: tuple[str, torch.fx.node.Target]
+        self,
+        item: tuple[str, torch.fx.node.Target],
     ) -> list[PatternEntry]: ...
     def apply(self, gm: torch.fx.GraphModule | torch.fx.Graph) -> int: ...
     def clear(self) -> None: ...
@@ -385,7 +414,8 @@ def fwd_only(
 ) -> torch.fx.GraphModule: ...
 @torch.enable_grad()
 def joint_fwd_bwd(
-    fn: Callable[..., Any], args: Sequence[Any]
+    fn: Callable[..., Any],
+    args: Sequence[Any],
 ) -> torch.fx.GraphModule: ...
 def stable_topological_sort(graph: torch.fx.Graph) -> None: ...
 def init_once_fakemode(fn: Callable[..., Any]) -> Callable[[], Any]: ...
@@ -395,7 +425,9 @@ def clone_graph(input_graph: torch.fx.GraphModule) -> torch.fx.GraphModule: ...
 _seen_patterns: OrderedSet[str] = ...
 
 def get_arg_value(
-    node: torch.fx.Node, arg_number: int, kwarg_name: str | None = ...
+    node: torch.fx.Node,
+    arg_number: int,
+    kwarg_name: str | None = ...,
 ) -> Any: ...
 def filter_nodes(nodes: Iterable[torch.fx.Node], fn: Any) -> list[torch.fx.Node]: ...
 def extract_target(node: torch.fx.Node) -> torch.fx.node.Target: ...

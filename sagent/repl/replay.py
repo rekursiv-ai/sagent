@@ -187,7 +187,9 @@ def _render_entry(
             return 1
         case ToolResult():
             render_tool_result(
-                printer, entry, output=output_policy(entry.call_id).output
+                printer,
+                entry,
+                output=output_policy(entry.call_id).output,
             )
             return 1
         case _:
@@ -195,22 +197,13 @@ def _render_entry(
             return 0
 
 
+# Live rendering resolves this through the agent's call registry, which a resumed
+# session does not have. Recovering it by SCANNING the tape per call is quadratic:
+# measured at 200/800/1600 calls, resume took 0.004/0.052/0.592s -- doubling the calls
+# multiplied the work by up to eleven, so a long session stalls the pane on
+# ``--resume``.
 def _tool_names_by_call(tape: Sequence[TapeRecord]) -> dict[str, str]:
-    """Index ``call_id -> tool name`` for the whole tape, once.
-
-    Live rendering resolves this through the agent's call registry,
-    which a resumed session does not have. Recovering it by SCANNING the
-    tape per call is quadratic: measured at 200/800/1600 calls, resume
-    took 0.004/0.052/0.592s -- doubling the calls multiplied the work by
-    up to eleven, so a long session stalls the pane on ``--resume``.
-
-    Args:
-      tape: Full session tape.
-
-    Returns:
-      names: Tool name for every call id the tape opened.
-
-    """
+    """Index ``call_id -> tool name`` for the whole tape, once."""
     out: dict[str, str] = {}
     for record in tape:
         event = record.event if isinstance(record, ReferrableTapeEvent) else None
@@ -230,22 +223,18 @@ def _replay_output_policy(
     return ToolDisplay() if tool is None else row_spec(tool)
 
 
+# Microcompaction preserves the original ``tool.summary(args)`` output inside
+# ``args[MICROCOMPACTED_ARGS_KEY]`` so resume can still render the historical label even
+# though the original args (``file_path``, ``cmd``, etc.) have been replaced. Without
+# this check every microcompacted ``Read`` falls back to ``Read.summary``'s ``"?"``
+# placeholder and the resumed scrollback loses every filename.
+#
+# The ``and stored`` guard rejects empty strings (not just non-str types): an empty
+# stored label is no more useful than no label, so fall back to the live
+# ``tool.summary`` rather than emit a blank scrollback entry on a session whose
+# microcompactor stamped an empty placeholder.
 def _label_for_call(tc: ToolCall, tools: Mapping[str, Tool]) -> str:
-    """Return the rendered label for ``tc``, honoring microcompacted stubs.
-
-    Microcompaction preserves the original ``tool.summary(args)`` output
-    inside ``args[MICROCOMPACTED_ARGS_KEY]`` so resume can still render
-    the historical label even though the original args (``file_path``,
-    ``cmd``, etc.) have been replaced. Without this check every
-    microcompacted ``Read`` falls back to ``Read.summary``'s ``"?"``
-    placeholder and the resumed scrollback loses every filename.
-
-    The ``and stored`` guard rejects empty strings (not just non-str
-    types): an empty stored label is no more useful than no label, so
-    fall back to the live ``tool.summary`` rather than emit a blank
-    scrollback entry on a session whose microcompactor stamped an empty
-    placeholder.
-    """
+    """Return the rendered label for ``tc``, honoring microcompacted stubs."""
     stored = tc.args.get(MICROCOMPACTED_ARGS_KEY) if tc.args else None
     if isinstance(stored, str) and stored:
         return stored

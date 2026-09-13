@@ -45,7 +45,9 @@ def cycle(iterable: Iterable[_T]) -> Iterator[_T]: ...
 def dropwhile(predicate: _Predicate[_T], iterable: Iterable[_T], /) -> Iterator[_T]: ...
 @substitute_in_graph(itertools.filterfalse, is_embedded_type=True)
 def filterfalse(
-    function: _Predicate[_T], iterable: Iterable[_T], /
+    function: _Predicate[_T],
+    iterable: Iterable[_T],
+    /,
 ) -> Iterator[_T]: ...
 @substitute_in_graph(itertools.islice, is_embedded_type=True)
 def islice(iterable: Iterable[_T], /, *args: int | None) -> Iterator[_T]: ...
@@ -55,15 +57,24 @@ def pairwise(iterable: Iterable[_T], /) -> Iterator[tuple[_T, _T]]: ...
 def tee(iterable: Iterable[_T], n: int = ..., /) -> tuple[Iterator[_T], ...]: ...
 @overload
 def zip_longest(
-    iter1: Iterable[_T1], /, *, fillvalue: _U = ...
+    iter1: Iterable[_T1],
+    /,
+    *,
+    fillvalue: _U = ...,
 ) -> Iterator[tuple[_T1]]: ...
 @overload
 def zip_longest(
-    iter1: Iterable[_T1], iter2: Iterable[_T2], /
+    iter1: Iterable[_T1],
+    iter2: Iterable[_T2],
+    /,
 ) -> Iterator[tuple[_T1 | None, _T2 | None]]: ...
 @overload
 def zip_longest(
-    iter1: Iterable[_T1], iter2: Iterable[_T2], /, *, fillvalue: _U = ...
+    iter1: Iterable[_T1],
+    iter2: Iterable[_T2],
+    /,
+    *,
+    fillvalue: _U = ...,
 ) -> Iterator[tuple[_T1 | _U, _T2 | _U]]: ...
 @overload
 def zip_longest(
@@ -84,5 +95,6 @@ def zip_longest(
 ) -> Iterator[tuple[_T | _U, ...]]: ...
 @substitute_in_graph(itertools.zip_longest, is_embedded_type=True)
 def zip_longest(
-    *iterables: Iterable[_T], fillvalue: _U = ...
+    *iterables: Iterable[_T],
+    fillvalue: _U = ...,
 ) -> Iterator[tuple[_T | _U, ...]]: ...

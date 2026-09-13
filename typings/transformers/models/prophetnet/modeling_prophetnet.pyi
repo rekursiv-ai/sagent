@@ -21,11 +21,16 @@ def softmax(hidden_state, dim, onnx_trace=...):  # -> Tensor:
 def ngram_attention_bias(sequence_length, ngram, device, dtype):  # -> Tensor:
     ...
 def compute_relative_buckets(
-    num_buckets, max_distance, relative_positions, is_bidirectional=...
+    num_buckets,
+    max_distance,
+    relative_positions,
+    is_bidirectional=...,
 ):  # -> Tensor:
     ...
 def compute_all_stream_relative_buckets(
-    num_buckets, max_distance, position_ids
+    num_buckets,
+    max_distance,
+    position_ids,
 ):  # -> tuple[Any | Tensor, Any | Tensor]:
     ...
 
@@ -152,7 +157,11 @@ class ProphetNetNgramSelfAttention(nn.Module):
     ):  # -> tuple[Tensor, Tensor, Tensor]:
         ...
     def get_main_relative_pos_embeddings(
-        self, hidden_states, attn_weights, position_ids, main_relative_position_buckets
+        self,
+        hidden_states,
+        attn_weights,
+        position_ids,
+        main_relative_position_buckets,
     ):  # -> Tensor:
         ...
     def get_predict_relative_pos_embeddings(
@@ -200,7 +209,9 @@ class ProphetNetDecoderLayer(GradientCheckpointingLayer):
 @auto_docstring(custom_intro=...)
 class ProphetNetEncoder(ProphetNetPreTrainedModel):
     def __init__(
-        self, config: ProphetNetConfig, word_embeddings: nn.Embedding | None = ...
+        self,
+        config: ProphetNetConfig,
+        word_embeddings: nn.Embedding | None = ...,
     ) -> None: ...
     def get_input_embeddings(self):  # -> Embedding | Module:
         ...
@@ -221,7 +232,9 @@ class ProphetNetEncoder(ProphetNetPreTrainedModel):
 @auto_docstring(custom_intro=...)
 class ProphetNetDecoder(ProphetNetPreTrainedModel):
     def __init__(
-        self, config: ProphetNetConfig, word_embeddings: nn.Embedding | None = ...
+        self,
+        config: ProphetNetConfig,
+        word_embeddings: nn.Embedding | None = ...,
     ) -> None: ...
     def get_input_embeddings(self):  # -> Embedding | Module:
         ...
@@ -245,7 +258,8 @@ class ProphetNetDecoder(ProphetNetPreTrainedModel):
         cache_position: torch.Tensor | None = ...,
     ) -> tuple | ProphetNetDecoderModelOutput: ...
     def compute_buffered_relative_buckets(
-        self, position_ids
+        self,
+        position_ids,
     ):  # -> tuple[Tensor | Any, Tensor]:
         ...
     def prepare_attention_mask(self, hidden_states, attention_mask): ...

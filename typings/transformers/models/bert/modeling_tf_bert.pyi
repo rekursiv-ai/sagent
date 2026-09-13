@@ -90,7 +90,10 @@ class TFBertSelfAttention(keras.layers.Layer):
 class TFBertSelfOutput(keras.layers.Layer):
     def __init__(self, config: BertConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -121,7 +124,10 @@ class TFBertIntermediate(keras.layers.Layer):
 class TFBertOutput(keras.layers.Layer):
     def __init__(self, config: BertConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -175,7 +181,10 @@ class TFBertPredictionHeadTransform(keras.layers.Layer):
 
 class TFBertLMPredictionHead(keras.layers.Layer):
     def __init__(
-        self, config: BertConfig, input_embeddings: keras.layers.Layer, **kwargs
+        self,
+        config: BertConfig,
+        input_embeddings: keras.layers.Layer,
+        **kwargs,
     ) -> None: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -189,7 +198,10 @@ class TFBertLMPredictionHead(keras.layers.Layer):
 
 class TFBertMLMHead(keras.layers.Layer):
     def __init__(
-        self, config: BertConfig, input_embeddings: keras.layers.Layer, **kwargs
+        self,
+        config: BertConfig,
+        input_embeddings: keras.layers.Layer,
+        **kwargs,
     ) -> None: ...
     def call(self, sequence_output: tf.Tensor) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -205,7 +217,10 @@ class TFBertNSPHead(keras.layers.Layer):
 class TFBertMainLayer(keras.layers.Layer):
     config_class = BertConfig
     def __init__(
-        self, config: BertConfig, add_pooling_layer: bool = ..., **kwargs
+        self,
+        config: BertConfig,
+        add_pooling_layer: bool = ...,
+        **kwargs,
     ) -> None: ...
     def get_input_embeddings(self) -> keras.layers.Layer: ...
     def set_input_embeddings(self, value: tf.Variable):  # -> None:
@@ -252,11 +267,15 @@ BERT_INPUTS_DOCSTRING = ...
 )
 class TFBertModel(TFBertPreTrainedModel):
     def __init__(
-        self, config: BertConfig, add_pooling_layer: bool = ..., *inputs, **kwargs
+        self,
+        config: BertConfig,
+        add_pooling_layer: bool = ...,
+        *inputs,
+        **kwargs,
     ) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -294,10 +313,11 @@ class TFBertForPreTraining(TFBertPreTrainedModel, TFBertPreTrainingLoss):
     def get_prefix_bias_name(self) -> str: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFBertForPreTrainingOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFBertForPreTrainingOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -318,7 +338,8 @@ class TFBertForPreTraining(TFBertPreTrainedModel, TFBertPreTrainingLoss):
         ...
 
 @add_start_docstrings(
-    """Bert Model with a `language modeling` head on top.""", BERT_START_DOCSTRING
+    """Bert Model with a `language modeling` head on top.""",
+    BERT_START_DOCSTRING,
 )
 class TFBertForMaskedLM(TFBertPreTrainedModel, TFMaskedLanguageModelingLoss):
     _keys_to_ignore_on_load_unexpected = ...
@@ -327,7 +348,7 @@ class TFBertForMaskedLM(TFBertPreTrainedModel, TFMaskedLanguageModelingLoss):
     def get_prefix_bias_name(self) -> str: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -359,7 +380,11 @@ class TFBertLMHeadModel(TFBertPreTrainedModel, TFCausalLanguageModelingLoss):
     def get_lm_head(self) -> keras.layers.Layer: ...
     def get_prefix_bias_name(self) -> str: ...
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=..., attention_mask=..., **model_kwargs
+        self,
+        input_ids,
+        past_key_values=...,
+        attention_mask=...,
+        **model_kwargs,
     ):  # -> dict[str, Any | None]:
         ...
     @unpack_inputs
@@ -395,16 +420,18 @@ class TFBertLMHeadModel(TFBertPreTrainedModel, TFCausalLanguageModelingLoss):
     BERT_START_DOCSTRING,
 )
 class TFBertForNextSentencePrediction(
-    TFBertPreTrainedModel, TFNextSentencePredictionLoss
+    TFBertPreTrainedModel,
+    TFNextSentencePredictionLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config: BertConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFNextSentencePredictorOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFNextSentencePredictorOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -428,14 +455,15 @@ class TFBertForNextSentencePrediction(
     BERT_START_DOCSTRING,
 )
 class TFBertForSequenceClassification(
-    TFBertPreTrainedModel, TFSequenceClassificationLoss
+    TFBertPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     _keys_to_ignore_on_load_missing = ...
     def __init__(self, config: BertConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_SEQUENCE_CLASSIFICATION,
@@ -471,7 +499,7 @@ class TFBertForMultipleChoice(TFBertPreTrainedModel, TFMultipleChoiceLoss):
     def __init__(self, config: BertConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        BERT_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        BERT_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -505,7 +533,7 @@ class TFBertForTokenClassification(TFBertPreTrainedModel, TFTokenClassificationL
     def __init__(self, config: BertConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_TOKEN_CLASSIFICATION,
@@ -540,7 +568,7 @@ class TFBertForQuestionAnswering(TFBertPreTrainedModel, TFQuestionAnsweringLoss)
     def __init__(self, config: BertConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_QA,

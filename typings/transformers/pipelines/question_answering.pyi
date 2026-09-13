@@ -41,7 +41,9 @@ class QuestionAnsweringArgumentHandler(ArgumentHandler):
     def normalize(self, item):  # -> SquadExample | list[SquadExample]:
         ...
     def __call__(
-        self, *args, **kwargs
+        self,
+        *args,
+        **kwargs,
     ):  # -> GeneratorType[Any, Any, Any] | Dataset[Any] | list[dict[Any, Any]] | list[dict[str, str]]:
         ...
 
@@ -60,10 +62,13 @@ class QuestionAnsweringPipeline(ChunkPipeline):
     ) -> None: ...
     @staticmethod
     def create_sample(
-        question: str | list[str], context: str | list[str]
+        question: str | list[str],
+        context: str | list[str],
     ) -> SquadExample | list[SquadExample]: ...
     def __call__(
-        self, *args, **kwargs
+        self,
+        *args,
+        **kwargs,
     ):  # -> list[Any] | PipelineIterator | Generator[Any, Any, None] | Tensor | Any | None:
         ...
     def preprocess(
@@ -94,5 +99,8 @@ class QuestionAnsweringPipeline(ChunkPipeline):
         align_to_words: bool,
     ) -> tuple[int, int]: ...
     def span_to_answer(
-        self, text: str, start: int, end: int
+        self,
+        text: str,
+        start: int,
+        end: int,
     ) -> dict[str, str | int]: ...

@@ -87,11 +87,15 @@ class FlavaImageProcessorFast(BaseImageProcessorFast):
     def __init__(self, **kwargs: Unpack[FlavaFastImageProcessorKwargs]) -> None: ...
     @auto_docstring
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[DefaultFastImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[DefaultFastImageProcessorKwargs],
     ) -> BatchFeature: ...
     @classmethod
     def from_dict(
-        cls, image_processor_dict: dict[str, Any], **kwargs
+        cls,
+        image_processor_dict: dict[str, Any],
+        **kwargs,
     ):  # -> tuple[Self, dict[str, Any]] | Self:
         ...
     @lru_cache  # noqa: B019 -- mirrors upstream @lru_cache on a method; not executed in a stub

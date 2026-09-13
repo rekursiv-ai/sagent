@@ -10,7 +10,9 @@ from ...utils import TensorType
 logger = ...
 
 def divide_to_patches(
-    image: np.ndarray, patch_size: int, input_data_format
+    image: np.ndarray,
+    patch_size: int,
+    input_data_format,
 ) -> list[np.ndarray]: ...
 
 class AriaImageProcessor(BaseImageProcessor):
@@ -67,7 +69,10 @@ class AriaImageProcessor(BaseImageProcessor):
         input_data_format: ChannelDimension,
     ) -> list[np.ndarray]: ...
     def get_number_of_image_patches(
-        self, height: int, width: int, images_kwargs=...
+        self,
+        height: int,
+        width: int,
+        images_kwargs=...,
     ):  # -> Literal[1]:
         ...
 

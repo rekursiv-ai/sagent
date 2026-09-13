@@ -123,7 +123,7 @@ def test_coalesce_roles_merges_across_hidden_boundary_visible_wins() -> None:
     assert len(out) == 1
     merged = out[0]
     assert isinstance(merged, UserMessage)
-    assert merged.hidden is False  # a visible part keeps the block visible
+    assert merged.hidden is False  # `a` visible part keeps the block visible.
     assert merged.text == "visible\n\nhidden-part"
     # Both-hidden stays hidden.
     both = coalesce_roles(
@@ -325,7 +325,8 @@ def test_splice_safe_repair_output_is_splice_valid() -> None:
     straight to the validating ``ContextSplice`` constructor (F2).
     """
     am_setup = AssistantMessage(
-        text="setup", tool_calls=(ToolCall(id="t1", name="x", args={}),)
+        text="setup",
+        tool_calls=(ToolCall(id="t1", name="x", args={}),),
     )
     tr_setup = ToolResult(call_id="t1", content="ok")
     am_a = AssistantMessage(text="a")

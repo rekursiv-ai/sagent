@@ -21,7 +21,8 @@ class InstructBlipVideoVideoProcessor(BaseVideoProcessor):
     valid_kwargs = InstructBlipVideoVideoProcessorInitKwargs
     model_input_names = ...
     def __init__(
-        self, **kwargs: Unpack[InstructBlipVideoVideoProcessorInitKwargs]
+        self,
+        **kwargs: Unpack[InstructBlipVideoVideoProcessorInitKwargs],
     ) -> None: ...
 
 __all__ = ["InstructBlipVideoVideoProcessor"]

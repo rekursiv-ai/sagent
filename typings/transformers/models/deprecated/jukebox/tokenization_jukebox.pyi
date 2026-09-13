@@ -26,11 +26,19 @@ class JukeboxTokenizer(PreTrainedTokenizer):
     def get_vocab(self):  # -> dict[str, Any | dict[str, int]]:
         ...
     def tokenize(
-        self, artist, genre, lyrics, **kwargs
+        self,
+        artist,
+        genre,
+        lyrics,
+        **kwargs,
     ):  # -> tuple[str, str, list[Any]]:
         ...
     def prepare_for_tokenization(
-        self, artists: str, genres: str, lyrics: str, is_split_into_words: bool = ...
+        self,
+        artists: str,
+        genres: str,
+        lyrics: str,
+        is_split_into_words: bool = ...,
     ) -> tuple[str, str, str, dict[str, Any]]: ...
     def convert_lyric_tokens_to_string(self, lyrics: list[str]) -> str: ...
     def convert_to_tensors(
@@ -41,10 +49,16 @@ class JukeboxTokenizer(PreTrainedTokenizer):
     ):  # -> NDArray[Any] | Array | Tensor | list[Any]:
         ...
     def __call__(
-        self, artist, genres, lyrics=..., return_tensors=...
+        self,
+        artist,
+        genres,
+        lyrics=...,
+        return_tensors=...,
     ) -> BatchEncoding: ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
 
 __all__ = ["JukeboxTokenizer"]

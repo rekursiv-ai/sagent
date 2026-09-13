@@ -38,7 +38,8 @@ class GenerationConfig(PushToHubMixin):
     def __repr__(self):  # -> str:
         ...
     def get_generation_mode(
-        self, assistant_model: PreTrainedModel | None = ...
+        self,
+        assistant_model: PreTrainedModel | None = ...,
     ) -> GenerationMode: ...
     def validate(self, strict=...): ...
     def save_pretrained(
@@ -67,10 +68,14 @@ class GenerationConfig(PushToHubMixin):
     def to_diff_dict(self) -> dict[str, Any]: ...
     def to_dict(self) -> dict[str, Any]: ...
     def to_json_string(
-        self, use_diff: bool = ..., ignore_metadata: bool = ...
+        self,
+        use_diff: bool = ...,
+        ignore_metadata: bool = ...,
     ) -> str: ...
     def to_json_file(
-        self, json_file_path: str | os.PathLike, use_diff: bool = ...
+        self,
+        json_file_path: str | os.PathLike,
+        use_diff: bool = ...,
     ):  # -> None:
         ...
     @classmethod
@@ -114,7 +119,9 @@ class WatermarkingConfig(BaseWatermarkingConfig):
     def validate(self):  # -> None:
         ...
     def construct_processor(
-        self, vocab_size: int, device
+        self,
+        vocab_size: int,
+        device,
     ) -> WatermarkLogitsProcessor: ...
 
 @dataclass
@@ -132,7 +139,9 @@ class SynthIDTextWatermarkingConfig(BaseWatermarkingConfig):
     def validate(self):  # -> None:
         ...
     def construct_processor(
-        self, vocab_size: int, device
+        self,
+        vocab_size: int,
+        device,
     ) -> WatermarkLogitsProcessor: ...
 
 @dataclass

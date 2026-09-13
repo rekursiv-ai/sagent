@@ -41,7 +41,9 @@ class FuyuModel(FuyuPreTrainedModel):
         image_patch_input_indices: torch.Tensor,
     ) -> torch.Tensor: ...
     def get_image_features(
-        self, pixel_values: torch.FloatTensor, **kwargs
+        self,
+        pixel_values: torch.FloatTensor,
+        **kwargs,
     ):  # -> list[Any]:
         ...
     def get_placeholder_mask(

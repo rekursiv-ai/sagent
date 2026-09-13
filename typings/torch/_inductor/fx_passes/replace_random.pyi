@@ -28,5 +28,13 @@ def replace_random(
 ) -> None: ...
 @register_graph_pattern(CallFunctionVarArgs(aten.randint.low), pass_dict=patterns)
 def replace_randint(
-    match: Match, low, high, size, *, dtype=..., device=..., layout=..., pin_memory=...
+    match: Match,
+    low,
+    high,
+    size,
+    *,
+    dtype=...,
+    device=...,
+    layout=...,
+    pin_memory=...,
 ) -> None: ...

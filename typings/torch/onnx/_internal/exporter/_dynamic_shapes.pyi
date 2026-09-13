@@ -21,5 +21,6 @@ def convert_str_to_export_dim(
     dynamic_shapes: dict[str, Any] | tuple[Any, ...] | list[Any] | None,
 ) -> tuple[dict[str, Any] | tuple[Any, ...] | list[Any] | None, bool]: ...
 def create_rename_mapping(
-    inputs, dynamic_shapes: dict[str, Any] | tuple[Any, ...] | list[Any]
+    inputs,
+    dynamic_shapes: dict[str, Any] | tuple[Any, ...] | list[Any],
 ) -> dict[str, str]: ...

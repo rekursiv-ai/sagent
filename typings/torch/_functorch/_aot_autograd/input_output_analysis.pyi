@@ -21,7 +21,9 @@ In particular, the following analyses are provided:
 zip = ...
 
 def remove_dupe_metadata(
-    m: ViewAndMutationMeta, keep_arg_mask: list[bool], add_dupe_map: list[int]
+    m: ViewAndMutationMeta,
+    keep_arg_mask: list[bool],
+    add_dupe_map: list[int],
 ) -> ViewAndMutationMeta: ...
 def create_synthetic_base_metadata(
     m: ViewAndMutationMeta,
@@ -31,7 +33,9 @@ def create_synthetic_base_metadata(
     inner_args_desc: list[AOTInput],
 ) -> tuple[ViewAndMutationMeta, list[int]]: ...
 def compute_overlapping_inputs(
-    aot_config, fwd_inputs, aliased_input_indices
+    aot_config,
+    fwd_inputs,
+    aliased_input_indices,
 ) -> set[Any]: ...
 def create_graph_signature(
     fx_g: torch.fx.GraphModule,

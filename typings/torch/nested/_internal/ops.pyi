@@ -18,7 +18,11 @@ JAGGED_OPS_TABLE: Dict[Any, Any] = ...
 
 def check_schema(schema_str: str, func, *args, **kwargs) -> None: ...
 def check_ragged_dim_same(
-    func, a: NestedTensor, a_name: str, b: NestedTensor, b_name: str
+    func,
+    a: NestedTensor,
+    a_name: str,
+    b: NestedTensor,
+    b_name: str,
 ) -> None: ...
 def raggedness_matches(nt, size) -> bool: ...
 def squeeze_leading_ones(t): ...
@@ -51,25 +55,30 @@ def tensor_attr_unsupported_getter(func, *args, **kwargs) -> None: ...
 @register_jagged_func(torch.ops.aten.is_contiguous.default, "self: jt_all")
 def is_contiguous_general(func, *args, **kwargs) -> bool: ...
 @register_jagged_func(
-    torch.ops.aten.sym_is_contiguous.default, "self: jt_all, memory_format: any?"
+    torch.ops.aten.sym_is_contiguous.default,
+    "self: jt_all, memory_format: any?",
 )
 def sym_is_contiguous_general(func, *args, **kwargs) -> bool: ...
 @register_jagged_func(
-    torch.ops.aten.clone.default, "input: jt_all, memory_format: any?"
+    torch.ops.aten.clone.default,
+    "input: jt_all, memory_format: any?",
 )
 def clone_default(func, *args, **kwargs) -> NestedTensor: ...
 @register_jagged_func(torch.ops.aten.linear.default, "input: jt, weight: t, bias: t?")
 def linear_default(func, *args, **kwargs) -> NestedTensor: ...
 @register_jagged_func(torch.ops.aten.linear_backward.default, ...)
 def linear_backward_default(
-    func, *args, **kwargs
+    func,
+    *args,
+    **kwargs,
 ) -> tuple[NestedTensor | None, Tensor | None, Any | Tensor | None]: ...
 @register_jagged_func(torch.ops.aten.to.dtype, "input: jt_all, dtype: any")
 def to_dtype(func, *args, **kwargs) -> NestedTensor: ...
 @register_jagged_func(torch.ops.aten._to_copy.default, "self: jt_all")
 def to_copy_default(func, *args, **kwargs) -> NestedTensor: ...
 @register_jagged_func(
-    torch.ops.aten.copy_.default, "self: jt_all, src: jt_all, non_blocking: any?"
+    torch.ops.aten.copy_.default,
+    "self: jt_all, src: jt_all, non_blocking: any?",
 )
 def copy_default(func, *args, **kwargs) -> Any: ...
 @register_jagged_func(
@@ -86,10 +95,13 @@ def like_factory_default(func, *args, **kwargs) -> NestedTensor: ...
 @register_jagged_func(torch.ops.aten.zero_.default, "self: jt_all")
 def zero__default(func, *args, **kwargs) -> Any: ...
 @register_jagged_func(
-    torch.ops.aten.native_dropout.default, "self: jt, float: any, train: any?"
+    torch.ops.aten.native_dropout.default,
+    "self: jt, float: any, train: any?",
 )
 def native_dropout_default(
-    func, *args, **kwargs
+    func,
+    *args,
+    **kwargs,
 ) -> tuple[NestedTensor, NestedTensor]: ...
 @register_jagged_func(
     torch.ops.aten.native_dropout_backward.default,
@@ -97,21 +109,25 @@ def native_dropout_default(
 )
 def native_dropout_backward_default(func, *args, **kwargs) -> NestedTensor: ...
 @register_jagged_func(
-    torch.ops.aten.prod.dim_int, "self: jt_all, dim: any, keepdim: any?, dtype: any?"
+    torch.ops.aten.prod.dim_int,
+    "self: jt_all, dim: any, keepdim: any?, dtype: any?",
 )
 def prod_dim_int(func, *args, **kwargs) -> list[Any] | tuple[Any, ...] | PyTree: ...
 @register_jagged_func(torch.ops.aten.prod.default, "self: jt_all, dtype: any?")
 def prod_default(func, *args, **kwargs): ...
 @register_jagged_func(
-    torch.ops.aten.split.Tensor, "self: jt, split_size: any, dim: any?"
+    torch.ops.aten.split.Tensor,
+    "self: jt, split_size: any, dim: any?",
 )
 def split_tensor(func, *args, **kwargs) -> tuple[NestedTensor, ...]: ...
 @register_jagged_func(
-    torch.ops.aten.split_with_sizes.default, "self: jt, split_sizes: any, dim: any?"
+    torch.ops.aten.split_with_sizes.default,
+    "self: jt, split_sizes: any, dim: any?",
 )
 def split_with_sizes_default(func, *args, **kwargs) -> list[NestedTensor]: ...
 @register_jagged_func(
-    torch.ops.aten.narrow.default, "self: jt, dim: any, start: any, length: any"
+    torch.ops.aten.narrow.default,
+    "self: jt, dim: any, start: any, length: any",
 )
 def narrow(func, *args, **kwargs) -> NestedTensor: ...
 @register_jagged_func(torch.ops.aten.chunk.default, "self: jt, chunks: any, dim: any?")
@@ -129,7 +145,8 @@ def matmul_default(func, *args, **kwargs) -> Tensor | NestedTensor: ...
 @register_jagged_func(torch.ops.aten.bmm.default, "self: jt_all, mat2: any")
 def bmm_default(func, *args, **kwargs) -> Tensor | NestedTensor: ...
 @register_jagged_func(
-    torch.ops.aten.expand.default, "self: jt_all, size: any, implicit: any?"
+    torch.ops.aten.expand.default,
+    "self: jt_all, size: any, implicit: any?",
 )
 def expand_default(func, *args, **kwargs) -> NestedTensor: ...
 @register_jagged_func(torch.ops.aten.expand_as.default, "self: t, other: jt")
@@ -139,13 +156,15 @@ def broadcast_to(func, *args, **kwargs) -> Any: ...
 @register_jagged_func(torch.ops.aten.broadcast_tensors.default, "tensors: any")
 def broadcast_tensors(func, *args, **kwargs) -> tuple[Any, ...]: ...
 @register_jagged_func(
-    torch.ops.aten.where.self, "condition: jt_all, self: any, other: any"
+    torch.ops.aten.where.self,
+    "condition: jt_all, self: any, other: any",
 )
 def where_self(func, *args, **kwargs) -> NestedTensor: ...
 @register_jagged_func(torch.ops.aten.is_pinned.default, "self: jt, device: any?")
 def is_pinned_default(func, *args, **kwargs): ...
 @register_jagged_func(
-    torch.ops.aten.is_same_size.default, "self: jt_all, other: jt_all"
+    torch.ops.aten.is_same_size.default,
+    "self: jt_all, other: jt_all",
 )
 def is_same_size_default(func, *args, **kwargs): ...
 @register_jagged_func(torch.ops.aten.sum.default, "self: jt_all, dtype: any?")
@@ -153,7 +172,8 @@ def sum_default(func, *args, **kwargs): ...
 @register_jagged_func(torch.ops.aten.sum.dim_IntList, ...)
 def sum_dim_IntList(func, *args, **kwargs) -> list[Any] | tuple[Any, ...] | PyTree: ...
 @register_jagged_func(
-    torch.ops.aten.transpose.int, "self: jt_all, dim0: any, dim1: any"
+    torch.ops.aten.transpose.int,
+    "self: jt_all, dim0: any, dim1: any",
 )
 def transpose_int(func, *args, **kwargs) -> NestedTensor: ...
 @register_jagged_func(torch.ops.aten.permute.default, "self: jt_all, dims: any")
@@ -165,11 +185,15 @@ def permute_default(func, *args, **kwargs) -> NestedTensor: ...
 def view_default(func, *args, **kwargs) -> NestedTensor: ...
 @register_jagged_func(torch.ops.aten.native_layer_norm.default, ...)
 def native_layer_norm_default(
-    func, *args, **kwargs
+    func,
+    *args,
+    **kwargs,
 ) -> tuple[NestedTensor, Any, Tensor] | tuple[NestedTensor, Any, Any]: ...
 @register_jagged_func(torch.ops.aten.native_layer_norm_backward.default, ...)
 def native_layer_norm_backward_default(
-    func, *args, **kwargs
+    func,
+    *args,
+    **kwargs,
 ) -> tuple[None, Any, Any] | tuple[NestedTensor, Any, Any]: ...
 @register_jagged_func(torch.ops.aten.select.int, "self: jt_all, dim: any, index: any")
 def select_int(func, *args, **kwargs) -> NestedTensor: ...
@@ -207,24 +231,30 @@ def min_dim(func, *args, **kwargs) -> list[Any] | tuple[Any, ...] | PyTree: ...
 @register_jagged_func(torch.ops.aten.max.dim, "self: jt_all, dim: any, keepdim: any?")
 def max_dim(func, *args, **kwargs) -> list[Any] | tuple[Any, ...] | PyTree: ...
 @register_jagged_func(
-    torch.ops.aten.amin.default, "self: jt_all, dim: any?, keepdim: any?"
+    torch.ops.aten.amin.default,
+    "self: jt_all, dim: any?, keepdim: any?",
 )
 def amin_default(func, *args, **kwargs) -> list[Any] | tuple[Any, ...] | PyTree: ...
 @register_jagged_func(
-    torch.ops.aten.amax.default, "self: jt_all, dim: any?, keepdim: any?"
+    torch.ops.aten.amax.default,
+    "self: jt_all, dim: any?, keepdim: any?",
 )
 def amax_default(func, *args, **kwargs) -> list[Any] | tuple[Any, ...] | PyTree: ...
 @register_jagged_func(
-    torch.ops.aten.argmin.default, "self: jt_all, dim: any?, keepdim: any?"
+    torch.ops.aten.argmin.default,
+    "self: jt_all, dim: any?, keepdim: any?",
 )
 def argmin_default(func, *args, **kwargs) -> list[Any] | tuple[Any, ...] | PyTree: ...
 @register_jagged_func(
-    torch.ops.aten.argmax.default, "self: jt_all, dim: any?, keepdim: any?"
+    torch.ops.aten.argmax.default,
+    "self: jt_all, dim: any?, keepdim: any?",
 )
 def argmax_default(func, *args, **kwargs) -> list[Any] | tuple[Any, ...] | PyTree: ...
 @register_jagged_func(torch.ops.aten.value_selecting_reduction_backward.default, ...)
 def value_selecting_reduction_backward_default(
-    func, *args, **kwargs
+    func,
+    *args,
+    **kwargs,
 ) -> NestedTensor: ...
 @register_jagged_func(torch.ops.aten.stack.default, "tensors: any, dim: any")
 def stack_default(func, *args, **kwargs) -> NestedTensor: ...
@@ -280,7 +310,9 @@ def frexp_Tensor(func, *args, **kwargs) -> tuple[NestedTensor, NestedTensor]: ..
     "grad: any, self: any, other: any, mask: any",
 )
 def matmul_backward_default(
-    func, *args, **kwargs
+    func,
+    *args,
+    **kwargs,
 ) -> tuple[None, None] | tuple[Tensor | None, Tensor | None]: ...
 @flex_attention_hop.py_impl(NestedTensor)
 def flex_njt(
@@ -311,5 +343,8 @@ def flex_njt_backward(
     score_mod_other_buffers: Tuple = ...,
     mask_mod_other_buffers: Tuple = ...,
 ) -> Tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, Tuple[torch.Tensor | None, ...]
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    Tuple[torch.Tensor | None, ...],
 ]: ...

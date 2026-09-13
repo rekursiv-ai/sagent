@@ -29,5 +29,9 @@ class TrackedProcessPoolExecutor(ProcessPoolExecutor):
         initializer: Callable[[], object] | None = ...,
     ) -> None: ...
     def submit(
-        self, fn: Callable[_P, _R], /, *args: _P.args, **kwargs: _P.kwargs
+        self,
+        fn: Callable[_P, _R],
+        /,
+        *args: _P.args,
+        **kwargs: _P.kwargs,
     ) -> Future[_R]: ...

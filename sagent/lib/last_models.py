@@ -41,7 +41,7 @@ def load() -> dict[str, str]:
     """
     try:
         raw = (data_dir() / "rekursiv-ai" / "sagent" / "last-models.json").read_text(
-            encoding="utf-8"
+            encoding="utf-8",
         )
     except (FileNotFoundError, OSError):
         return {}
@@ -95,17 +95,19 @@ def record(provider: str, model_id: str) -> None:
     if not provider or not model_id:
         raise ValueError(
             "last_models.record requires non-empty provider and model_id; "
-            f"got provider={provider!r}, model_id={model_id!r}."
+            f"got provider={provider!r}, model_id={model_id!r}.",
         )
     try:
         (data_dir() / "rekursiv-ai" / "sagent" / "last-models.json").parent.mkdir(
-            parents=True, exist_ok=True
+            parents=True,
+            exist_ok=True,
+            mode=0o700,
         )
         lock_path = (
             data_dir() / "rekursiv-ai" / "sagent" / "last-models.json"
         ).with_suffix(
             (data_dir() / "rekursiv-ai" / "sagent" / "last-models.json").suffix
-            + ".lock"
+            + ".lock",
         )
         fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
@@ -117,6 +119,7 @@ def record(provider: str, model_id: str) -> None:
             atomic_write_bytes(
                 data_dir() / "rekursiv-ai" / "sagent" / "last-models.json",
                 json.dumps(current, indent=2).encode("utf-8"),
+                file_mode=0o600,
             )
         finally:
             os.close(fd)

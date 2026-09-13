@@ -41,26 +41,15 @@ def test_two_loops_get_different_values() -> None:
     assert held[0] is not held[1]
 
 
+# Sequential loops, not a thread pool: a pool lets each worker release before the next
+# contends, so the lock unbinds between runs and the defect never appears. Successive
+# loops are also the real shape -- every ``asyncio.run`` is a fresh loop.
+#
+# The sleep duration is load-bearing: without a real suspension the two holders never
+# overlap, so the lock is never contended and the harness proves nothing. Do not replace
+# it with a bare yield.
 def _drive(contend: Callable[[], Awaitable[None]], runs: int = 3) -> list[str]:
-    """Run ``contend`` on ``runs`` successive loops, collecting failures.
-
-    Sequential loops, not a thread pool: a pool lets each worker release
-    before the next contends, so the lock unbinds between runs and the
-    defect never appears. Successive loops are also the real shape --
-    every ``asyncio.run`` is a fresh loop.
-
-    The sleep duration is load-bearing: without a real suspension the two
-    holders never overlap, so the lock is never contended and the harness
-    proves nothing. Do not replace it with a bare yield.
-
-    Args:
-      contend: Builds the coroutine to run on each loop.
-      runs: How many loops to drive.
-
-    Returns:
-      failures: One message per loop that raised.
-
-    """
+    """Run ``contend`` on ``runs`` successive loops, collecting failures."""
     failures: list[str] = []
     for _ in range(runs):
         loop = asyncio.new_event_loop()

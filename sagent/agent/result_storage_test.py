@@ -69,7 +69,10 @@ def test_oversized_result_persists_to_disk(tmp_path: Path) -> None:
     big = "X" * 5_000
     result = ToolResult(call_id="call_abc", content=big)
     out = post_process_result(
-        result, "Bash", session_dir=tmp_path, persist_tokens=1_000
+        result,
+        "Bash",
+        session_dir=tmp_path,
+        persist_tokens=1_000,
     )
     assert PERSISTED_TAG in out.content
     on_disk = tmp_path / "tool-results" / "call_abc.txt"
@@ -254,7 +257,10 @@ def test_persist_collision_writes_distinct_file(tmp_path: Path) -> None:
     _ = (target / "call_abc.txt").write_text("PRIOR")
     result = ToolResult(call_id="call_abc", content="X" * 5_000)
     out = post_process_result(
-        result, "Bash", session_dir=tmp_path, persist_tokens=1_000
+        result,
+        "Bash",
+        session_dir=tmp_path,
+        persist_tokens=1_000,
     )
     match = re.search(r"Full output saved to: (.+)", out.content)
     assert match is not None
@@ -284,7 +290,8 @@ def test_post_process_does_not_touch_attachments() -> None:
 
 
 def test_persist_handles_posix_short_writes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Regression for AGENT-REVIEW-002: short ``os.write`` must not truncate.
 
@@ -307,7 +314,10 @@ def test_persist_handles_posix_short_writes(
     body = "Y" * 5_000
     result = ToolResult(call_id="short_write", content=body)
     out = post_process_result(
-        result, "Bash", session_dir=tmp_path, persist_tokens=1_000
+        result,
+        "Bash",
+        session_dir=tmp_path,
+        persist_tokens=1_000,
     )
     assert PERSISTED_TAG in out.content
     on_disk = tmp_path / "tool-results" / "short_write.txt"

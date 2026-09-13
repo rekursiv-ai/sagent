@@ -58,7 +58,11 @@ class PlacementVariable(DistributedVariable):
     def as_python_constant(self) -> Any: ...
     def var_getattr(self, tx: InstructionTranslator, name: str) -> VariableTracker: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
 
 class DeviceMeshVariable(DistributedVariable):
@@ -67,16 +71,26 @@ class DeviceMeshVariable(DistributedVariable):
     def as_python_constant(self) -> Any: ...
     def var_getattr(self, tx: InstructionTranslator, name: str) -> VariableTracker: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
 
 class ProcessGroupVariable(DistributedVariable):
     def as_python_constant(self) -> Any: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def var_getattr(
-        self, tx: InstructionTranslator, name
+        self,
+        tx: InstructionTranslator,
+        name,
     ) -> VariableTracker | LambdaVariable: ...
     @staticmethod
     def is_process_group(value) -> bool: ...
@@ -99,5 +113,9 @@ class BackwardHookVariable(VariableTracker):
     ) -> None: ...
     def as_proxy(self) -> Proxy: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...

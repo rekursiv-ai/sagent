@@ -16,11 +16,15 @@ class ImageSegmentationPipeline(Pipeline):
     def __init__(self, *args, **kwargs) -> None: ...
     @overload
     def __call__(
-        self, inputs: str | Image.Image, **kwargs: Any
+        self,
+        inputs: str | Image.Image,
+        **kwargs: Any,
     ) -> list[dict[str, Any]]: ...
     @overload
     def __call__(
-        self, inputs: list[str] | list[Image.Image], **kwargs: Any
+        self,
+        inputs: list[str] | list[Image.Image],
+        **kwargs: Any,
     ) -> list[list[dict[str, Any]]]: ...
     def __call__(
         self,
@@ -28,7 +32,10 @@ class ImageSegmentationPipeline(Pipeline):
         **kwargs: Any,
     ) -> list[dict[str, Any]] | list[list[dict[str, Any]]]: ...
     def preprocess(
-        self, image, subtask=..., timeout=...
+        self,
+        image,
+        subtask=...,
+        timeout=...,
     ):  # -> transformers.feature_extraction_utils.BatchFeature | Any | transformers.image_processing_base.BatchFeature:
         ...
     def postprocess(

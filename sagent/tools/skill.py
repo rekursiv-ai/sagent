@@ -18,7 +18,6 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
 
 import dataclasses
 import logging
@@ -60,12 +59,6 @@ class SkillInfo:
     """Absolute path to the source ``SKILL.md``."""
 
 
-# Harness dirs, each holding a ``skills`` subdir. Named separately from the
-# join so no literal harness path appears in exported source (leak check).
-_PROJECT_SKILL_DIRS: Final = (".sagent", ".claude", ".agents")
-_SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
-
-
 def user_skill_roots() -> tuple[Path, ...]:
     """Return the user-global skill roots.
 
@@ -95,10 +88,12 @@ def discover(cwd: str | Path) -> list[SkillInfo]:
       skills: Deduplicated list of discovered skills, project-first.
 
     """
+    # Harness dirs, each holding a ``skills`` subdir. Named separately from the
+    # join so no literal harness path appears in exported source (leak check).
     project_roots = [
         d / name / "skills"
         for d in reversed(walk_up(Path(cwd)))
-        for name in _PROJECT_SKILL_DIRS
+        for name in (".sagent", ".claude", ".agents")
     ]
     project = _scan_roots(project_roots, "project")
     user = _scan_roots(list(user_skill_roots()), "user")
@@ -110,11 +105,6 @@ def discover(cwd: str | Path) -> list[SkillInfo]:
         seen.add(s.name)
         out.append(s)
     return out
-
-
-def _discover_for_state(tool_state: ToolState) -> list[SkillInfo]:
-    """Discover skills for the active tool state."""
-    return discover(tool_state.bash_cwd)
 
 
 def format_listing(skills: list[SkillInfo]) -> str:
@@ -134,7 +124,7 @@ def format_listing(skills: list[SkillInfo]) -> str:
         (
             "The following user-authored skills are available. Invoke one by"
             ' calling the `Skill` tool with `{"skill": "<name>"}`. Each skill'
-            " description states when to use it — match against user requests"
+            " description states when to use it -- match against user requests"
             " and invoke when applicable."
         ),
         "",
@@ -188,7 +178,7 @@ class Skill:
                 },
             },
             "required": ["skill"],
-        }
+        },
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -273,7 +263,7 @@ class Skill:
             parts.append(
                 "Not restored (post-compaction budget): "
                 + ", ".join(sorted(skipped))
-                + ". Re-invoke Skill if you need one of these."
+                + ". Re-invoke Skill if you need one of these.",
             )
         if not parts:
             return
@@ -360,7 +350,7 @@ def _load_skill(skill_dir: Path, source: str) -> SkillInfo | None:
         return None
     meta, body = parse_frontmatter(raw)
     name = meta.get("name") or skill_dir.name
-    if not _SKILL_NAME_RE.fullmatch(name):
+    if not re.fullmatch(r"^[a-z0-9][a-z0-9-]{0,63}$", name):
         logger.warning("Skipping skill with invalid name %r at %s.", name, md)
         return None
     description = meta.get("description") or _first_nonempty_line(body)
@@ -373,14 +363,11 @@ def _load_skill(skill_dir: Path, source: str) -> SkillInfo | None:
     )
 
 
+# Recurses into nested skill directories so a child doc such as ``trax/paper/SKILL.md``
+# registers as its own skill (name from frontmatter). Symlink cycles (e.g. ``.claude``
+# -> ``.sagent``) are broken via a resolved-path visited set.
 def _scan_roots(roots: list[Path], source: str) -> list[SkillInfo]:
-    """Collect every loadable ``<name>/SKILL.md`` under each root.
-
-    Recurses into nested skill directories so a child doc such as
-    ``trax/paper/SKILL.md`` registers as its own skill (name from
-    frontmatter). Symlink cycles (e.g. ``.claude`` -> ``.sagent``) are
-    broken via a resolved-path visited set.
-    """
+    """Collect every loadable ``<name>/SKILL.md`` under each root."""
     out: list[SkillInfo] = []
     visited: set[Path] = set()
     for root in roots:
@@ -410,3 +397,8 @@ def _scan_skill_dir(
     for sub in sorted(skill_dir.iterdir()):
         if sub.is_dir():
             _scan_skill_dir(sub, source, out, visited)
+
+
+def _discover_for_state(tool_state: ToolState) -> list[SkillInfo]:
+    """Discover skills for the active tool state."""
+    return discover(tool_state.bash_cwd)

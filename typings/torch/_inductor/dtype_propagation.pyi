@@ -35,7 +35,8 @@ class DtypePropagationOpsHandler:
     def __init__(self) -> None: ...
     @staticmethod
     def op_dtype_rule(
-        *args: DTypeArg, type_promotion_kind: ELEMENTWISE_TYPE_PROMOTION_KIND
+        *args: DTypeArg,
+        type_promotion_kind: ELEMENTWISE_TYPE_PROMOTION_KIND,
     ) -> torch.dtype: ...
     @staticmethod
     def return_dtype(*args: DTypeArg, dtype: torch.dtype) -> torch.dtype: ...
@@ -47,7 +48,9 @@ class DtypePropagationOpsHandler:
     def randint64(seed: int, offset: int, low: int, high: int) -> torch.dtype: ...
     @staticmethod
     def masked(
-        mask: DTypeArg, body: Callable[[], DTypeArg], other: DTypeArg
+        mask: DTypeArg,
+        body: Callable[[], DTypeArg],
+        other: DTypeArg,
     ) -> torch.dtype: ...
     @staticmethod
     def where(a: DTypeArg, b: DTypeArg, c: DTypeArg) -> torch.dtype: ...
@@ -62,7 +65,9 @@ class DtypePropagationOpsHandler:
     ) -> torch.dtype: ...
     @staticmethod
     def to_dtype_bitcast(
-        x: DTypeArg, dtype: torch.dtype, src_dtype: torch.dtype
+        x: DTypeArg,
+        dtype: torch.dtype,
+        src_dtype: torch.dtype,
     ) -> torch.dtype: ...
     @staticmethod
     def gelu(x: DTypeArg) -> torch.dtype: ...
@@ -76,7 +81,10 @@ class DtypePropagationOpsHandler:
     def mod(a: DTypeArg, b: DTypeArg) -> torch.dtype: ...
     @staticmethod
     def indirect_indexing(
-        x: DTypeArg, size: int, check: bool = ..., wrap_neg: bool = ...
+        x: DTypeArg,
+        size: int,
+        check: bool = ...,
+        wrap_neg: bool = ...,
     ) -> torch.dtype: ...
     @staticmethod
     def randn(seed: int, offset: int) -> torch.dtype: ...
@@ -86,7 +94,10 @@ class DtypePropagationOpsHandler:
     def store_reduction(name: str, index, value: DTypeArg) -> None: ...
     @staticmethod
     def reduction(
-        dtype: torch.dtype, src_dtype: torch.dtype, reduction_type: str, value: DTypeArg
+        dtype: torch.dtype,
+        src_dtype: torch.dtype,
+        reduction_type: str,
+        value: DTypeArg,
     ) -> torch.dtype: ...
     @staticmethod
     def store(name: str, index, value: DTypeArg, mode: str | None = ...) -> None: ...
@@ -147,13 +158,21 @@ class DtypePropagationOpsHandler:
     def halide_clamp(value, size, check) -> dtype: ...
     @staticmethod
     def inline_asm_elementwise(
-        *inputs, asm, constraints=..., dtype=..., is_pure=..., pack=...
+        *inputs,
+        asm,
+        constraints=...,
+        dtype=...,
+        is_pure=...,
+        pack=...,
     ) -> dtype: ...
     @staticmethod
     def lshift(x: DTypeArg, y: DTypeArg) -> torch.dtype: ...
     @staticmethod
     def check_bounds(
-        expr: sympy.Expr, size: sympy.Expr, lower: bool, upper: bool
+        expr: sympy.Expr,
+        size: sympy.Expr,
+        lower: bool,
+        upper: bool,
     ) -> None: ...
     def output(self, *args: DTypeArg) -> None: ...
     def placeholder(self, index: int) -> torch.dtype: ...

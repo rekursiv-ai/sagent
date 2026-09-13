@@ -51,7 +51,7 @@ class PlayAudio:
                 },
             },
             "required": ["path"],
-        }
+        },
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -142,21 +142,21 @@ def _play_windows(path: Path) -> str | None:
     except ImportError as e:
         return f"winsound unavailable: {e}"
     try:
-        ws.PlaySound(str(path), ws.SND_FILENAME | ws.SND_NODEFAULT)  # ty: ignore[unresolved-attribute] -- dynamic import; ty can't resolve winsound attrs
+        ws.PlaySound(str(path), ws.SND_FILENAME | ws.SND_NODEFAULT)  # ty: ignore[unresolved-attribute] -- The platform module is dynamically imported and lacks checker-visible attributes.
     except RuntimeError as e:
         return f"winsound.PlaySound failed: {e}"
     return None
 
 
+# Returns None on success, a reason string otherwise. A missing audio subsystem (no
+# command on PATH, or the command exits non-zero because no device) is treated as a soft
+# failure.
 def _play_via_cmd(
-    path: Path, *candidates: list[str], timeout_sec: float = 10.0
+    path: Path,
+    *candidates: list[str],
+    timeout_sec: float = 10.0,
 ) -> str | None:
-    """Try each ``[exe, *flags]`` candidate; run the first one on PATH.
-
-    Returns None on success, a reason string otherwise. A missing
-    audio subsystem (no command on PATH, or the command exits
-    non-zero because no device) is treated as a soft failure.
-    """
+    """Try each ``[exe, *flags]`` candidate; run the first one on PATH."""
     tried: list[str] = []
     for argv in candidates:
         exe = shutil.which(argv[0])
@@ -164,7 +164,7 @@ def _play_via_cmd(
             tried.append(f"{argv[0]} (not on PATH)")
             continue
         try:
-            result = subprocess.run(  # noqa: S603 -- argv built from static candidates + validated path
+            result = subprocess.run(  # noqa: S603 -- The player argv uses static candidates and a validated local path.
                 [exe, *argv[1:], str(path)],
                 capture_output=True,
                 text=True,

@@ -63,7 +63,9 @@ class AliasOfIntermediateHandler:
 _HANDLER_MAP = ...
 
 def make_output_handler(
-    info, runtime_metadata, trace_joint
+    info,
+    runtime_metadata,
+    trace_joint,
 ) -> (
     AliasOfInputHandler | AliasOfIntermediateHandler | IsInputHandler | NoopAliasHandler
 ): ...
@@ -73,7 +75,12 @@ def maybe_mark_dynamic_helper(t: torch.Tensor, dims: set[int]) -> None: ...
 class FunctionalizedRngRuntimeWrapper(InductorWrapper):
     return_new_outs: bool = ...
     def pre_compile(
-        self, flat_fn: torch.fx.GraphModule, flat_args, aot_config, *, fw_metadata
+        self,
+        flat_fn: torch.fx.GraphModule,
+        flat_args,
+        aot_config,
+        *,
+        fw_metadata,
     ) -> None: ...
     def post_compile(
         self,
@@ -89,7 +96,12 @@ class FakifiedOutWrapper(InductorWrapper):
     fwd_output_strides: list[list[int] | None] | None = ...
     needs_post_compile: bool = ...
     def pre_compile(
-        self, fw_module: fx.GraphModule, flat_args, aot_config, *, fw_metadata
+        self,
+        fw_module: fx.GraphModule,
+        flat_args,
+        aot_config,
+        *,
+        fw_metadata,
     ) -> None: ...
     def set_fwd_output_strides(self, fwd_output_strides) -> None: ...
     def post_compile(
@@ -126,7 +138,11 @@ class AOTDispatchSubclassWrapper(CompilerWrapper):
 @dataclass
 class EffectTokensWrapper(CompilerWrapper):
     def post_compile(
-        self, compiled_fn, _aot_config, *, runtime_metadata: ViewAndMutationMeta
+        self,
+        compiled_fn,
+        _aot_config,
+        *,
+        runtime_metadata: ViewAndMutationMeta,
     ) -> _Wrapped[..., Any, ..., Any | None]: ...
 
 @dataclass
@@ -203,13 +219,15 @@ def initialize_rng_states(
     bwd_rng_states: list[torch.Generator],
 ) -> None: ...
 def coerce_to_expected_memory_format(
-    x: torch.Tensor, memory_format: MemoryFormatMeta
+    x: torch.Tensor,
+    memory_format: MemoryFormatMeta,
 ) -> Tensor: ...
 
 class AOTDispatchAutograd:
     @staticmethod
     def process_runtime_tangent(
-        x, meta: PlainTensorMeta | SubclassCreationMeta
+        x,
+        meta: PlainTensorMeta | SubclassCreationMeta,
     ) -> tuple[Any, list[Any]] | tuple[Tensor, list[Tensor]]: ...
     @staticmethod
     def post_compile(
@@ -257,5 +275,6 @@ def post_compile(
     runtime_metadata: ViewAndMutationMeta,
 ) -> tuple[Callable, ViewAndMutationMeta]: ...
 def make_runtime_safe(
-    fw_metadata: ViewAndMutationMeta, maybe_subclass_meta: SubclassMeta | None
+    fw_metadata: ViewAndMutationMeta,
+    maybe_subclass_meta: SubclassMeta | None,
 ) -> None: ...

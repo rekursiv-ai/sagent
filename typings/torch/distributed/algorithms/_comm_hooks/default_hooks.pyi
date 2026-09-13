@@ -11,11 +11,17 @@ class LowPrecisionState(DefaultState):
 
 def allreduce_hook(state: DefaultState, grad: torch.Tensor) -> None: ...
 def reduce_scatter_hook(
-    state: DefaultState, grad: torch.Tensor, output: torch.Tensor
+    state: DefaultState,
+    grad: torch.Tensor,
+    output: torch.Tensor,
 ) -> None: ...
 def fp16_compress_hook(
-    state: LowPrecisionState, grad: torch.Tensor, output: torch.Tensor | None = ...
+    state: LowPrecisionState,
+    grad: torch.Tensor,
+    output: torch.Tensor | None = ...,
 ) -> None: ...
 def bf16_compress_hook(
-    state: LowPrecisionState, grad: torch.Tensor, output: torch.Tensor | None = ...
+    state: LowPrecisionState,
+    grad: torch.Tensor,
+    output: torch.Tensor | None = ...,
 ) -> None: ...

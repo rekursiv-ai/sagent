@@ -35,7 +35,9 @@ class ReorderInfo:
 def is_gemm_like(node: IRNode | Operation | None) -> bool: ...
 def contains_gemm_like(snode: BaseSchedulerNode) -> bool: ...
 def decide_global_ordering_of_comms(
-    nodes: list[BaseSchedulerNode], name_to_buf, name_to_fused_node
+    nodes: list[BaseSchedulerNode],
+    name_to_buf,
+    name_to_fused_node,
 ) -> list[BaseSchedulerNode]: ...
 
 @dataclass

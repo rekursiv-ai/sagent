@@ -85,7 +85,14 @@ class TFFlaubertMultiHeadAttention(keras.layers.Layer):
     def __init__(self, n_heads, dim, config, **kwargs) -> None: ...
     def prune_heads(self, heads): ...
     def call(
-        self, input, mask, kv, cache, head_mask, output_attentions, training=...
+        self,
+        input,
+        mask,
+        kv,
+        cache,
+        head_mask,
+        output_attentions,
+        training=...,
     ):  # -> tuple[Any, Any] | tuple[Any]:
         ...
     def build(self, input_shape=...):  # -> None:
@@ -155,7 +162,9 @@ class TFFlaubertWithLMHeadModel(TFFlaubertPreTrainedModel):
         ...
     def get_prefix_bias_name(self): ...
     def prepare_inputs_for_generation(
-        self, inputs, **kwargs
+        self,
+        inputs,
+        **kwargs,
     ):  # -> dict[str, Any | None]:
         ...
     @unpack_inputs
@@ -189,12 +198,13 @@ class TFFlaubertWithLMHeadModel(TFFlaubertPreTrainedModel):
     FLAUBERT_START_DOCSTRING,
 )
 class TFFlaubertForSequenceClassification(
-    TFFlaubertPreTrainedModel, TFSequenceClassificationLoss
+    TFFlaubertPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        FLAUBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        FLAUBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -226,12 +236,13 @@ class TFFlaubertForSequenceClassification(
     FLAUBERT_START_DOCSTRING,
 )
 class TFFlaubertForQuestionAnsweringSimple(
-    TFFlaubertPreTrainedModel, TFQuestionAnsweringLoss
+    TFFlaubertPreTrainedModel,
+    TFQuestionAnsweringLoss,
 ):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        FLAUBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        FLAUBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -264,12 +275,13 @@ class TFFlaubertForQuestionAnsweringSimple(
     FLAUBERT_START_DOCSTRING,
 )
 class TFFlaubertForTokenClassification(
-    TFFlaubertPreTrainedModel, TFTokenClassificationLoss
+    TFFlaubertPreTrainedModel,
+    TFTokenClassificationLoss,
 ):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        FLAUBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        FLAUBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -307,7 +319,7 @@ class TFFlaubertForMultipleChoice(TFFlaubertPreTrainedModel, TFMultipleChoiceLos
         ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        FLAUBERT_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        FLAUBERT_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,

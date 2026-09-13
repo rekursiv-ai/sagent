@@ -103,7 +103,11 @@ kernel parameters for addmm-based operations.
 __all__ = ["get_meta", "tune__int_bsr_dense_addmm", "tune_bsr_dense_addmm"]
 
 def get_meta(
-    op, key, device_name=..., version=..., exact=...
+    op,
+    key,
+    device_name=...,
+    version=...,
+    exact=...,
 ) -> (
     dict[Literal[GROUP_SIZE, SPLIT_N, TILE_M, TILE_N, num_stages, num_warps], Any]
     | dict[Literal[GROUP_SIZE_ROW, SPLIT_N, num_stages, num_warps], Any]
@@ -126,7 +130,15 @@ def minimize(
 ): ...
 def create_blocked_tensor(B, M, N, blocksize, sparsity, dtype, device) -> Tensor: ...
 def optimize_scatter_mm(
-    m, k, n, bm, bk, dtype=..., device=..., sparsity=..., force=...
+    m,
+    k,
+    n,
+    bm,
+    bk,
+    dtype=...,
+    device=...,
+    sparsity=...,
+    force=...,
 ) -> None: ...
 def tune__int_bsr_dense_addmm(
     input,

@@ -18,7 +18,7 @@ caught the moment it lands.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol
+from typing import Final, Protocol
 
 import ast
 import inspect
@@ -54,13 +54,10 @@ _MODEL_CLASSES = [
 ]
 
 
+# Walks the protocol's own ``__dict__`` so both ``def`` methods and ``@property``
+# descriptors count; excludes dunders and the ``Protocol`` machinery.
 def _protocol_members(proto: type) -> set[str]:
-    """Public member names declared by a Protocol (methods AND properties).
-
-    Walks the protocol's own ``__dict__`` so both ``def`` methods and
-    ``@property`` descriptors count; excludes dunders and the
-    ``Protocol`` machinery.
-    """
+    """Public member names declared by a Protocol (methods AND properties)."""
     base = set(dir(Protocol))
     return {
         name
@@ -71,23 +68,13 @@ def _protocol_members(proto: type) -> set[str]:
     }
 
 
+# Resolves each name through the MRO and tests the RAW attribute, not ``getattr(cls,
+# name)``: a ``property`` fetched off the class is a descriptor object and
+# ``callable()`` on it is False, so a callable-only predicate silently skips every
+# property. That blind spot is how eight dead ``valid_latency_modes`` overrides outlived
+# the callers that once read them.
 def _public_members(cls: type) -> set[str]:
-    """Every public member ``cls`` exposes, inherited included.
-
-    Resolves each name through the MRO and tests the RAW attribute, not
-    ``getattr(cls, name)``: a ``property`` fetched off the class is a
-    descriptor object and ``callable()`` on it is False, so a
-    callable-only predicate silently skips every property. That blind
-    spot is how eight dead ``valid_latency_modes`` overrides outlived
-    the callers that once read them.
-
-    Args:
-      cls: Class to inspect.
-
-    Returns:
-      names: Public method and property names, own or inherited.
-
-    """
+    """Every public member ``cls`` exposes, inherited included."""
     found: set[str] = set()
     for name in dir(cls):
         if name.startswith("_"):
@@ -101,21 +88,12 @@ def _public_members(cls: type) -> set[str]:
     return found
 
 
+# The contract is uniformity, so the yardstick is the peers, not the protocol: a member
+# all nine models share is the shared shape (the ``spec``-derived capability accessors),
+# while one only some carry is the latent deviation callers learn to ``getattr``-probe
+# for.
 def _peer_surface(cls: type) -> set[str]:
-    """Public surface every OTHER model class also exposes.
-
-    The contract is uniformity, so the yardstick is the peers, not the
-    protocol: a member all nine models share is the shared shape (the
-    ``spec``-derived capability accessors), while one only some carry is
-    the latent deviation callers learn to ``getattr``-probe for.
-
-    Args:
-      cls: Class being checked; excluded from the intersection.
-
-    Returns:
-      names: Members common to all peers.
-
-    """
+    """Public surface every OTHER model class also exposes."""
     peers = [_public_members(c) for c in _MODEL_CLASSES if c is not cls]
     shared: set[str] = peers[0].intersection(*peers[1:])
     return shared | _MODEL_MEMBERS
@@ -206,6 +184,8 @@ def test_no_cancel_in_flight_method_anywhere() -> None:
 # getattr-smell guard: agent/runtime must not probe contract members.
 # ----------------------------------------------------------------------
 
+_CWD: Final = Path(__file__).resolve().parent
+
 _GUARDED_FILES = [
     "agent/runtime.py",
     "agent/agent.py",
@@ -229,9 +209,9 @@ def _getattr_string_literals(tree: ast.AST) -> list[tuple[int, str]]:
     for node in ast.walk(tree):
         if not _is_getattr_str_literal(node):
             continue
-        assert isinstance(node, ast.Call)  # narrowed by guard above
+        assert isinstance(node, ast.Call)  # Narrowed by guard above.
         name = node.args[1]
-        assert isinstance(name, ast.Constant)  # guard checked Constant[str]
+        assert isinstance(name, ast.Constant)  # Guard checked Constant[str].
         value = name.value
         assert isinstance(value, str)
         out.append((node.lineno, value))
@@ -248,7 +228,7 @@ def test_no_getattr_of_model_contract_members(rel: str) -> None:
     in. ``getattr`` of NON-contract attributes (SDK exception fields,
     ``_provider``, etc.) is fine and not flagged.
     """
-    sagent_root = Path(__file__).resolve().parent.parent
+    sagent_root = _CWD.parent
     src = (sagent_root / rel).read_text(encoding="utf-8")
     tree = ast.parse(src)
     offenders = [

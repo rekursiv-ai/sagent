@@ -21,7 +21,9 @@ class BaseModelOutputWithCLSToken(ModelOutput):
     hidden_states: tuple[torch.FloatTensor, ...] | None = ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class CvtDropPath(nn.Module):
@@ -32,14 +34,25 @@ class CvtDropPath(nn.Module):
 
 class CvtEmbeddings(nn.Module):
     def __init__(
-        self, patch_size, num_channels, embed_dim, stride, padding, dropout_rate
+        self,
+        patch_size,
+        num_channels,
+        embed_dim,
+        stride,
+        padding,
+        dropout_rate,
     ) -> None: ...
     def forward(self, pixel_values):  # -> Any:
         ...
 
 class CvtConvEmbeddings(nn.Module):
     def __init__(
-        self, patch_size, num_channels, embed_dim, stride, padding
+        self,
+        patch_size,
+        num_channels,
+        embed_dim,
+        stride,
+        padding,
     ) -> None: ...
     def forward(self, pixel_values):  # -> Any:
         ...
@@ -54,7 +67,12 @@ class CvtSelfAttentionLinearProjection(nn.Module):
 
 class CvtSelfAttentionProjection(nn.Module):
     def __init__(
-        self, embed_dim, kernel_size, padding, stride, projection_method=...
+        self,
+        embed_dim,
+        kernel_size,
+        padding,
+        stride,
+        projection_method=...,
     ) -> None: ...
     def forward(self, hidden_state):  # -> Any:
         ...
@@ -143,7 +161,10 @@ class CvtStage(nn.Module):
 class CvtEncoder(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, pixel_values, output_hidden_states=..., return_dict=...
+        self,
+        pixel_values,
+        output_hidden_states=...,
+        return_dict=...,
     ):  # -> tuple[Any | tuple[()] | tuple[Any, ...], ...] | BaseModelOutputWithCLSToken:
         ...
 

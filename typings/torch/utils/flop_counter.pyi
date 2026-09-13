@@ -19,7 +19,8 @@ flop_registry: dict[Any, Any] = ...
 
 def shape_wrapper(f) -> _Wrapped[..., Any, ..., Any]: ...
 def register_flop_formula(
-    targets, get_raw=...
+    targets,
+    get_raw=...,
 ) -> Callable[[Callable[_P, _T]], Callable[_P, _T]]: ...
 @register_flop_formula(aten.mm)
 def mm_flop(a_shape, b_shape, *args, out_shape=..., **kwargs) -> int: ...
@@ -30,7 +31,10 @@ def bmm_flop(a_shape, b_shape, out_shape=..., **kwargs) -> int: ...
 @register_flop_formula(aten.baddbmm)
 def baddbmm_flop(self_shape, a_shape, b_shape, out_shape=..., **kwargs) -> int: ...
 def conv_flop_count(
-    x_shape: list[int], w_shape: list[int], out_shape: list[int], transposed: bool = ...
+    x_shape: list[int],
+    w_shape: list[int],
+    out_shape: list[int],
+    transposed: bool = ...,
 ) -> int: ...
 @register_flop_formula(
     [
@@ -38,7 +42,7 @@ def conv_flop_count(
         aten._convolution,
         aten.cudnn_convolution,
         aten._slow_conv2d_forward,
-    ]
+    ],
 )
 def conv_flop(
     x_shape,
@@ -73,23 +77,37 @@ def sdpa_flop_count(query_shape, key_shape, value_shape) -> int: ...
         aten._scaled_dot_product_efficient_attention,
         aten._scaled_dot_product_flash_attention,
         aten._scaled_dot_product_cudnn_attention,
-    ]
+    ],
 )
 def sdpa_flop(
-    query_shape, key_shape, value_shape, *args, out_shape=..., **kwargs
+    query_shape,
+    key_shape,
+    value_shape,
+    *args,
+    out_shape=...,
+    **kwargs,
 ) -> int: ...
 def sdpa_backward_flop_count(
-    grad_out_shape, query_shape, key_shape, value_shape
+    grad_out_shape,
+    query_shape,
+    key_shape,
+    value_shape,
 ) -> int: ...
 @register_flop_formula(
     [
         aten._scaled_dot_product_efficient_attention_backward,
         aten._scaled_dot_product_flash_attention_backward,
         aten._scaled_dot_product_cudnn_attention_backward,
-    ]
+    ],
 )
 def sdpa_backward_flop(
-    grad_out_shape, query_shape, key_shape, value_shape, *args, out_shape=..., **kwargs
+    grad_out_shape,
+    query_shape,
+    key_shape,
+    value_shape,
+    *args,
+    out_shape=...,
+    **kwargs,
 ) -> int: ...
 
 flop_registry = ...
@@ -120,5 +138,9 @@ class _FlopCounterMode(TorchDispatchMode):
     supports_higher_order_operators = ...
     def __init__(self, counter: FlopCounterMode) -> None: ...
     def __torch_dispatch__(
-        self, func, types, args=..., kwargs=...
+        self,
+        func,
+        types,
+        args=...,
+        kwargs=...,
     ) -> NotImplementedType | None: ...

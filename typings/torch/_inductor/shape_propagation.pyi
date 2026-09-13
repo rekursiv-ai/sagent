@@ -34,7 +34,10 @@ class ShapePropagationOpsHandler:
     ) -> BlockShapeType | tuple[BlockShapeType, ...]: ...
     @staticmethod
     def store(
-        name: str, index: int, value: ShapeArg, mode: str | None = ...
+        name: str,
+        index: int,
+        value: ShapeArg,
+        mode: str | None = ...,
     ) -> None: ...
     @staticmethod
     def to_dtype(
@@ -49,7 +52,10 @@ class ShapePropagationOpsHandler:
     def load_seed(name: str, offset: int) -> BlockShapeType: ...
     @staticmethod
     def indirect_indexing(
-        var: ShapeArg, size: sympy.Expr | int, check: bool = ..., wrap_neg: bool = ...
+        var: ShapeArg,
+        size: sympy.Expr | int,
+        check: bool = ...,
+        wrap_neg: bool = ...,
     ) -> None: ...
     def __getattr__(self, name: str) -> Callable[..., BlockShapeType]: ...
     @staticmethod

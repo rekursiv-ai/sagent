@@ -38,7 +38,9 @@ class MusicgenMelodyOutputWithPast(ModelOutput):
     encoder_hidden_states: torch.FloatTensor | None = ...
 
 def shift_tokens_right(
-    input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: torch.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ):  # -> Tensor:
     ...
 
@@ -51,7 +53,9 @@ class MusicgenMelodySinusoidalPositionalEmbedding(nn.Module):
         ...
     @torch.no_grad()
     def forward(
-        self, inputs_embeds: torch.Tensor, past_key_values_length: int = ...
+        self,
+        inputs_embeds: torch.Tensor,
+        past_key_values_length: int = ...,
     ):  # -> Tensor | Any:
         ...
 

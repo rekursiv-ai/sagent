@@ -56,7 +56,8 @@ class ConstMap:
     def __getattr__(self, attr): ...
 
 def unpackage_script_module(
-    importer: PackageImporter, script_module_id: str
+    importer: PackageImporter,
+    script_module_id: str,
 ) -> torch.nn.Module: ...
 
 _magic_methods: Incomplete
@@ -203,7 +204,10 @@ class _ScriptProfileColumn:
     offset: Incomplete
     rows: Incomplete
     def __init__(
-        self, header: str, alignment: int = ..., offset: int = ...
+        self,
+        header: str,
+        alignment: int = ...,
+        offset: int = ...,
     ) -> None: ...
     def add_row(self, lineno: int, value: Any): ...
     def materialize(self): ...
@@ -212,7 +216,9 @@ class _ScriptProfileTable:
     cols: Incomplete
     source_range: Incomplete
     def __init__(
-        self, cols: list[_ScriptProfileColumn], source_range: list[int]
+        self,
+        cols: list[_ScriptProfileColumn],
+        source_range: list[int],
     ) -> None: ...
     def dump_string(self): ...
 

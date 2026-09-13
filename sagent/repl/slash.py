@@ -259,7 +259,7 @@ def parse_slash(line: str) -> SlashAction | None:
         if not arg or arg in THINKING_COMMANDS:
             return Thinking(command=arg)
         return Unknown(
-            text="/thinking requires one of: " + ", ".join(THINKING_COMMANDS)
+            text="/thinking requires one of: " + ", ".join(THINKING_COMMANDS),
         )
     arg = _arg_after("/effort", stripped)
     if arg is not None:

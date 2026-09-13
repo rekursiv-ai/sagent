@@ -15,7 +15,8 @@ from ...utils import auto_docstring
 """Fast Image processor class for BridgeTower."""
 
 def make_pixel_mask(
-    image: torch.Tensor, output_size: tuple[int, int]
+    image: torch.Tensor,
+    output_size: tuple[int, int],
 ) -> torch.Tensor: ...
 def get_resize_output_image_size(
     input_image: torch.Tensor,
@@ -44,11 +45,14 @@ class BridgeTowerImageProcessorFast(BaseImageProcessorFast):
     valid_kwargs = BridgeTowerFastImageProcessorKwargs
     model_input_names = ...
     def __init__(
-        self, **kwargs: Unpack[BridgeTowerFastImageProcessorKwargs]
+        self,
+        **kwargs: Unpack[BridgeTowerFastImageProcessorKwargs],
     ) -> None: ...
     @auto_docstring
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[BridgeTowerFastImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[BridgeTowerFastImageProcessorKwargs],
     ) -> BatchFeature: ...
     def resize(
         self,
@@ -60,7 +64,10 @@ class BridgeTowerImageProcessorFast(BaseImageProcessorFast):
         **kwargs,
     ) -> torch.Tensor: ...
     def center_crop(
-        self, image: torch.Tensor, size: dict[str, int], **kwargs
+        self,
+        image: torch.Tensor,
+        size: dict[str, int],
+        **kwargs,
     ) -> torch.Tensor: ...
     def to_dict(self):  # -> dict[str, Any]:
         ...

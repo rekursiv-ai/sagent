@@ -63,7 +63,9 @@ class LayoutLMv3SelfAttention(nn.Module):
 class LayoutLMv3SelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -98,7 +100,11 @@ class LayoutLMv3Layer(GradientCheckpointingLayer):
 class LayoutLMv3Encoder(nn.Module):
     def __init__(self, config) -> None: ...
     def relative_position_bucket(
-        self, relative_position, bidirectional=..., num_buckets=..., max_distance=...
+        self,
+        relative_position,
+        bidirectional=...,
+        num_buckets=...,
+        max_distance=...,
     ):  # -> Tensor:
         ...
     def forward(
@@ -124,7 +130,9 @@ class LayoutLMv3Intermediate(nn.Module):
 class LayoutLMv3Output(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 

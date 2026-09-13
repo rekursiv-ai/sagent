@@ -55,7 +55,10 @@ class _HasCtxForward[**CP, CR](Protocol):
     def forward(cls, ctx: Any, /, *args: CP.args, **kwargs: CP.kwargs) -> CR: ...
 
 class _SingleLevelFunction(
-    _C._FunctionBase, FunctionCtx, _HookMixin, metaclass=FunctionMeta
+    _C._FunctionBase,
+    FunctionCtx,
+    _HookMixin,
+    metaclass=FunctionMeta,
 ):
     @staticmethod
     def forward(*args: Any, **kwargs: Any) -> Any: ...
@@ -83,12 +86,16 @@ class _SingleLevelFunction(
     @overload
     @classmethod
     def apply[**CP, CR](
-        cls: type[_HasCtxForward[CP, CR]], *args: CP.args, **kwargs: CP.kwargs
+        cls: type[_HasCtxForward[CP, CR]],
+        *args: CP.args,
+        **kwargs: CP.kwargs,
     ) -> CR: ...
     @overload
     @classmethod
     def apply[**AP, AR](
-        cls: type[_HasStaticForward[AP, AR]], *args: AP.args, **kwargs: AP.kwargs
+        cls: type[_HasStaticForward[AP, AR]],
+        *args: AP.args,
+        **kwargs: AP.kwargs,
     ) -> AR: ...
     @classmethod
     def apply(cls, *args: Any, **kwargs: Any) -> Any: ...

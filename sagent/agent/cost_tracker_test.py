@@ -75,7 +75,10 @@ def test_cost_tracker_record_tokens_updates_last_model_id() -> None:
 def test_cost_tracker_record_cache_miss_appends() -> None:
     t = CostTracker()
     miss = CacheMiss(
-        missed_tokens=1_000, wasted_cost_usd=9.0, idle_sec=1.0, cause="prefix_mutated"
+        missed_tokens=1_000,
+        wasted_cost_usd=9.0,
+        idle_sec=1.0,
+        cause="prefix_mutated",
     )
     t.record_cache_miss(miss)
     assert t.cache_misses == [miss]
@@ -87,8 +90,11 @@ def test_cost_tracker_record_cache_miss_trims_to_retention_bound() -> None:
     for i in range(510):
         t.record_cache_miss(
             CacheMiss(
-                missed_tokens=i, wasted_cost_usd=0.0, idle_sec=0.0, cause="ttl_expired"
-            )
+                missed_tokens=i,
+                wasted_cost_usd=0.0,
+                idle_sec=0.0,
+                cause="ttl_expired",
+            ),
         )
     assert len(t.cache_misses) == 500
     # Oldest entries are dropped first; the most recent survive.

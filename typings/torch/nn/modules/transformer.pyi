@@ -51,7 +51,9 @@ class Transformer(Module):
     def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...
     @staticmethod
     def generate_square_subsequent_mask(
-        sz: int, device: torch.device | None = ..., dtype: torch.dtype | None = ...
+        sz: int,
+        device: torch.device | None = ...,
+        dtype: torch.dtype | None = ...,
     ) -> Tensor: ...
 
 class TransformerEncoder(Module):

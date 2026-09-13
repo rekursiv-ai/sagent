@@ -26,10 +26,15 @@ class Dinov2WithRegistersPatchEmbeddings(nn.Module):
 class Dinov2WithRegistersEmbeddings(nn.Module):
     def __init__(self, config: Dinov2WithRegistersConfig) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
-        self, pixel_values: torch.Tensor, bool_masked_pos: torch.Tensor | None = ...
+        self,
+        pixel_values: torch.Tensor,
+        bool_masked_pos: torch.Tensor | None = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -48,16 +53,22 @@ def eager_attention_forward(
 class Dinov2WithRegistersSelfAttention(nn.Module):
     def __init__(self, config: Dinov2WithRegistersConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, head_mask: torch.Tensor | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        head_mask: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class Dinov2WithRegistersSelfOutput(nn.Module):
     def __init__(self, config: Dinov2WithRegistersConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -66,7 +77,9 @@ class Dinov2WithRegistersAttention(nn.Module):
     def prune_heads(self, heads: set[int]):  # -> None:
         ...
     def forward(
-        self, hidden_states: torch.Tensor, head_mask: torch.Tensor | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        head_mask: torch.Tensor | None = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -76,7 +89,9 @@ class Dinov2WithRegistersLayerScale(nn.Module):
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class Dinov2WithRegistersDropPath(nn.Module):
@@ -98,7 +113,9 @@ class Dinov2WithRegistersSwiGLUFFN(nn.Module):
 class Dinov2WithRegistersLayer(GradientCheckpointingLayer):
     def __init__(self, config: Dinov2WithRegistersConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, head_mask: torch.Tensor | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        head_mask: torch.Tensor | None = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 

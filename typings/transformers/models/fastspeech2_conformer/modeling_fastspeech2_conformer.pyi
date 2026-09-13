@@ -54,7 +54,11 @@ class FastSpeech2ConformerSpeechDecoderPostnet(nn.Module):
 
 class FastSpeech2ConformerPredictorLayer(nn.Module):
     def __init__(
-        self, input_channels, num_chans, kernel_size, dropout_rate
+        self,
+        input_channels,
+        num_chans,
+        kernel_size,
+        dropout_rate,
     ) -> None: ...
     def forward(self, hidden_states):  # -> Any:
         ...
@@ -95,12 +99,16 @@ class FastSpeech2ConformerAttention(nn.Module):
         output_attentions: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class FastSpeech2ConformerConvolutionModule(nn.Module):
     def __init__(
-        self, config: FastSpeech2ConformerConfig, module_config=...
+        self,
+        config: FastSpeech2ConformerConfig,
+        module_config=...,
     ) -> None: ...
     def forward(self, hidden_states, attention_mask=...):  # -> Any:
         ...
@@ -172,7 +180,7 @@ class FastSpeech2ConformerPreTrainedModel(PreTrainedModel):
 @auto_docstring(
     custom_intro="""
     FastSpeech2Conformer Model.
-    """
+    """,
 )
 class FastSpeech2ConformerModel(FastSpeech2ConformerPreTrainedModel):
     def __init__(self, config: FastSpeech2ConformerConfig) -> None: ...
@@ -195,7 +203,11 @@ class FastSpeech2ConformerModel(FastSpeech2ConformerPreTrainedModel):
 
 class HifiGanResidualBlock(nn.Module):
     def __init__(
-        self, channels, kernel_size=..., dilation=..., leaky_relu_slope=...
+        self,
+        channels,
+        kernel_size=...,
+        dilation=...,
+        leaky_relu_slope=...,
     ) -> None: ...
     def get_padding(self, kernel_size, dilation=...): ...
     def apply_weight_norm(self):  # -> None:
@@ -207,7 +219,7 @@ class HifiGanResidualBlock(nn.Module):
 @auto_docstring(
     custom_intro="""
     HiFi-GAN vocoder.
-    """
+    """,
 )
 class FastSpeech2ConformerHifiGan(PreTrainedModel):
     config: FastSpeech2ConformerHifiGanConfig

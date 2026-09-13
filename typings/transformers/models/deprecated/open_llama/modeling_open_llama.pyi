@@ -33,25 +33,44 @@ class OpenLlamaRotaryEmbedding(nn.Module):
     cos_cached: torch.Tensor
     sin_cached: torch.Tensor
     def __init__(
-        self, dim, max_position_embeddings=..., base=..., device=...
+        self,
+        dim,
+        max_position_embeddings=...,
+        base=...,
+        device=...,
     ) -> None: ...
     def forward(self, x, seq_len=...):  # -> tuple[Tensor, Tensor]:
         ...
 
 class OpenLlamaLinearScalingRotaryEmbedding(OpenLlamaRotaryEmbedding):
     def __init__(
-        self, dim, max_position_embeddings=..., base=..., device=..., scaling_factor=...
+        self,
+        dim,
+        max_position_embeddings=...,
+        base=...,
+        device=...,
+        scaling_factor=...,
     ) -> None: ...
 
 class OpenLlamaDynamicNTKScalingRotaryEmbedding(OpenLlamaRotaryEmbedding):
     def __init__(
-        self, dim, max_position_embeddings=..., base=..., device=..., scaling_factor=...
+        self,
+        dim,
+        max_position_embeddings=...,
+        base=...,
+        device=...,
+        scaling_factor=...,
     ) -> None: ...
 
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids, unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 
@@ -91,7 +110,8 @@ class OpenLlamaDecoderLayer(GradientCheckpointingLayer):
         output_attentions: bool | None = ...,
         use_cache: bool | None = ...,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 OPEN_LLAMA_START_DOCSTRING = ...
@@ -132,7 +152,8 @@ class OpenLlamaForCausalLM(OpenLlamaPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(OPEN_LLAMA_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC
+        output_type=CausalLMOutputWithPast,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,

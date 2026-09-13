@@ -75,7 +75,6 @@ __all__ = [
     "InvalidPayloadError",
     "InvalidSpliceError",
     "MaskRange",
-    "ModelContextEvent",
     "ReferrableTapeEvent",
     "TapeEvent",
     "TapeRecord",
@@ -195,6 +194,13 @@ class MaskRange:
     @classmethod
     def between(cls, r_from: TapeRef, r_to: TapeRef) -> MaskRange:
         """Build from two same-session endpoint refs (wire/legacy boundary).
+
+        Args:
+          r_from: Lower endpoint of the range.
+          r_to: Upper endpoint of the range.
+
+        Returns:
+          range: Inclusive range between the endpoints.
 
         Raises:
           InvalidPayloadError: The endpoints belong to different sessions.
@@ -490,26 +496,14 @@ def pair_and_dedup_tool_calls(
     seen: set[str] = set()
     deferred: list[ModelContextEvent] = []
 
-    def _flush_interrupted() -> None:
-        for cid in sorted(pending - paired_externally):
-            seen.add(cid)
-            out.append(ToolResult(call_id=cid, content="[interrupted]", is_error=True))
-        pending.clear()
-        _flush_deferred()
-
-    def _flush_deferred() -> None:
-        """Emit peers held past an open pair, in arrival order."""
-        out.extend(deferred)
-        deferred.clear()
-
     for entry in payload:
         if isinstance(entry, AssistantMessage):
-            _flush_interrupted()
+            _flush_interrupted(pending, paired_externally, seen, out, deferred)
             kept = tuple(tc for tc in entry.tool_calls if tc.id not in seen)
             if not kept and not entry.text and not entry.thinking_blocks:
                 continue
             out.append(
-                entry if kept == entry.tool_calls else replace(entry, tool_calls=kept)
+                entry if kept == entry.tool_calls else replace(entry, tool_calls=kept),
             )
             pending.update(tc.id for tc in kept)
             seen.update(tc.id for tc in kept)
@@ -522,9 +516,9 @@ def pair_and_dedup_tool_calls(
                     # Draining only on the INTERRUPT path left them queued, so
                     # every later peer overtook them and the conversation read
                     # back with its replies inverted.
-                    _flush_deferred()
+                    _flush_deferred(out, deferred)
         elif isinstance(entry, UserMessage):
-            _flush_interrupted()
+            _flush_interrupted(pending, paired_externally, seen, out, deferred)
             out.append(entry)
         elif pending:
             # A peer ``AgentSendMessage`` interleaving an open tool turn: not an
@@ -532,7 +526,7 @@ def pair_and_dedup_tool_calls(
             deferred.append(entry)
         else:
             out.append(entry)
-    _flush_interrupted()
+    _flush_interrupted(pending, paired_externally, seen, out, deferred)
     return out
 
 
@@ -563,7 +557,7 @@ def splice_safe_repair(
 
     """
     return coalesce_roles(
-        pair_and_dedup_tool_calls(payload, paired_externally=paired_externally)
+        pair_and_dedup_tool_calls(payload, paired_externally=paired_externally),
     )
 
 
@@ -608,113 +602,18 @@ def coalesce_roles(
     for entry in payload:
         prior = out[-1] if out else None
         if isinstance(entry, (UserMessage, AgentSendMessage)) and isinstance(
-            prior, (UserMessage, AgentSendMessage)
+            prior,
+            (UserMessage, AgentSendMessage),
         ):
             out[-1] = _merge_user(prior, entry)
         elif isinstance(entry, AssistantMessage) and isinstance(
-            prior, AssistantMessage
+            prior,
+            AssistantMessage,
         ):
             out[-1] = _merge_assistant(prior, entry)
         else:
             out.append(entry)
     return tuple(out)
-
-
-def _labeled_text(entry: UserMessage | AgentSendMessage) -> str:
-    """Return ``entry`` text, labeling an ``AgentSendMessage`` with its source.
-
-    ``UserMessage`` is the human and carries no label. An ``AgentSendMessage``
-    is prefixed via the shared :func:`labeled_agent_send_text` so attribution
-    survives demotion to a plain ``UserMessage`` (the structured ``source`` is
-    then gone) and the label format stays identical to the wire path.
-    """
-    if isinstance(entry, UserMessage):
-        return entry.text
-    return labeled_agent_send_text(entry)
-
-
-def _merge_user(
-    prior: UserMessage | AgentSendMessage,
-    entry: UserMessage | AgentSendMessage,
-) -> UserMessage | AgentSendMessage:
-    """Merge two adjacent user-side entries per the canonical source policy.
-
-    Same-source pairs (two ``UserMessage``; two ``AgentSendMessage`` sharing a
-    ``source``) keep their type and ``prior``'s identity. Cross-source pairs
-    demote to ``UserMessage`` with each part's ``[from <source>]: `` label
-    inlined so attribution is not lost (C-002).
-
-    ``hidden`` is render-only (the model receives the text either way; the bit
-    only suppresses REPL display), so merging across a ``hidden`` boundary is
-    lossless on the wire. The merged ``hidden`` is the AND of both: a block is
-    suppressed only if every part was, so any visible part keeps the merged
-    block visible. This keeps ``coalesce_roles`` total -- the rescue and load
-    paths must never raise on an arbitrary legacy adjacency (C-001).
-    """
-    attachments = (*prior.attachments, *entry.attachments)
-    hidden = prior.hidden and entry.hidden
-    same_source = (
-        isinstance(prior, AgentSendMessage)
-        and isinstance(entry, AgentSendMessage)
-        and prior.source == entry.source
-    ) or (isinstance(prior, UserMessage) and isinstance(entry, UserMessage))
-    merged_id = max(prior.id, entry.id)
-    if same_source:
-        text = f"{prior.text}\n\n{entry.text}"
-        return replace(
-            prior, id=merged_id, text=text, hidden=hidden, attachments=attachments
-        )
-    text = f"{_labeled_text(prior)}\n\n{_labeled_text(entry)}"
-    return UserMessage(id=merged_id, text=text, attachments=attachments, hidden=hidden)
-
-
-def _merge_assistant(
-    prior: AssistantMessage,
-    entry: AssistantMessage,
-) -> AssistantMessage:
-    """Merge two adjacent assistant turns, keeping the result constructible.
-
-    Joins text and concatenates ``tool_calls``, dropping any ``entry`` call
-    whose id already appears in ``prior`` so the merged ``AssistantMessage``
-    never carries a duplicate id its ``__post_init__`` would reject (H1/H2).
-
-    Signed ``thinking`` blocks bind to their originating turn; a merged turn
-    cannot re-sign them, and concatenating two turns' signed blocks serializes
-    a signature set the provider rejects. Drop *every* signed ``thinking``
-    block from *both* inputs (the merged turn re-signs none of them), body
-    included -- not just the ``signature``: Anthropic requires a valid
-    signature on a thinking block, so a signature-stripped body would 400 just
-    the same, and the reasoning trace is unrecoverable across a merge either
-    way. Unsigned / ``redacted_thinking`` blocks carry no per-turn signature
-    and survive (H14, R2O-5).
-
-    ``thought_signature`` goes for the same reason one step out: it signs the
-    TEXT of the turn that produced it, and the merged text is two turns' worth,
-    so keeping ``prior``'s asserts a provenance that no longer holds.
-
-    ``hidden`` follows the user-side rule (see :func:`_merge_user`): the AND of
-    both parts, so any visible part keeps the merged turn visible. Inheriting
-    ``prior``'s bit meant a hidden system turn ahead of a real answer
-    suppressed the answer from the REPL.
-    """
-    seen = {tc.id for tc in prior.tool_calls}
-    tool_calls = prior.tool_calls + tuple(
-        tc for tc in entry.tool_calls if tc.id not in seen
-    )
-    thinking_blocks = tuple(
-        tb
-        for tb in (*prior.thinking_blocks, *entry.thinking_blocks)
-        if not (tb.get("type") == "thinking" and tb.get("signature"))
-    )
-    return replace(
-        prior,
-        id=max(prior.id, entry.id),
-        text="\n\n".join(t for t in (prior.text, entry.text) if t),
-        thinking_blocks=thinking_blocks,
-        thought_signature="",
-        tool_calls=tool_calls,
-        hidden=prior.hidden and entry.hidden,
-    )
 
 
 def _field_default(f: Field[object]) -> object:
@@ -728,14 +627,12 @@ def _field_default(f: Field[object]) -> object:
     )
 
 
+# Cross-session and inverted ranges are unconstructable (:class:`MaskRange` carries one
+# ``session_id`` and enforces ``hi >= lo``), so only overlap remains to check here
+# (Issue#313 -- the cross-session/inverted guards were deleted because the type subsumes
+# them).
 def _validate_mask_disjoint(mask: tuple[MaskRange, ...]) -> None:
-    """Reject overlapping mask ranges.
-
-    Cross-session and inverted ranges are unconstructable (:class:`MaskRange`
-    carries one ``session_id`` and enforces ``hi >= lo``), so only overlap
-    remains to check here (Issue#313 -- the cross-session/inverted guards were
-    deleted because the type subsumes them).
-    """
+    """Reject overlapping mask ranges."""
     for i, r in enumerate(mask):
         for prior in mask[:i]:
             if prior.overlaps(r):
@@ -790,44 +687,27 @@ def unpaired_call_ids(
     return frozenset(am_only_local | tr_only_local)
 
 
+# ``paired_externally`` means **the partner lives outside this payload** -- never "skip
+# local pairing checks for this id". A call_id in ``paired_externally`` appearing as an
+# ``AssistantMessage.tool_calls`` id has its partner ``ToolResult`` somewhere else on
+# the tape; the same id appearing as a ``ToolResult.call_id`` has its partner
+# ``AssistantMessage`` external. Declaring both sides of the same id locally while also
+# calling it ``paired_externally`` is misuse and is rejected.
+#
+# Rules enforced (in addition to the contract above): 1. ``ToolResult.call_id`` must
+# match an earlier ``AssistantMessage`` tool_call in ``payload``, OR appear in
+# ``paired_externally`` (and then **not** alongside a local AM declaring it). 2.
+# ``AssistantMessage.tool_calls`` ids must each be matched by a later ``ToolResult`` in
+# ``payload``, OR appear in ``paired_externally`` (and then **not** alongside a local TR
+# declaring it). 3. No ``ToolResult.call_id`` appears twice within ``payload``. 4. No
+# ``AssistantMessage.tool_calls`` id appears twice across all AssistantMessages in
+# ``payload``. 5. Wire role alternation: never two consecutive user-side or assistant-
+# side entries (a ``ToolResult`` closes the assistant turn and resets the role tracker).
 def _validate_payload(
     payload: tuple[ModelContextEvent, ...],
     paired_externally: frozenset[str],
 ) -> None:
-    """Enforce tool-call / tool-result pairing on a payload.
-
-    ``paired_externally`` means **the partner lives outside this payload**
-    -- never "skip local pairing checks for this id". A call_id in
-    ``paired_externally`` appearing as an ``AssistantMessage.tool_calls``
-    id has its partner ``ToolResult`` somewhere else on the tape; the
-    same id appearing as a ``ToolResult.call_id`` has its partner
-    ``AssistantMessage`` external. Declaring both sides of the same id
-    locally while also calling it ``paired_externally`` is misuse and
-    is rejected.
-
-    Rules enforced (in addition to the contract above):
-      1. ``ToolResult.call_id`` must match an earlier ``AssistantMessage``
-         tool_call in ``payload``, OR appear in ``paired_externally``
-         (and then **not** alongside a local AM declaring it).
-      2. ``AssistantMessage.tool_calls`` ids must each be matched by a
-         later ``ToolResult`` in ``payload``, OR appear in
-         ``paired_externally`` (and then **not** alongside a local TR
-         declaring it).
-      3. No ``ToolResult.call_id`` appears twice within ``payload``.
-      4. No ``AssistantMessage.tool_calls`` id appears twice across all
-         AssistantMessages in ``payload``.
-      5. Wire role alternation: never two consecutive user-side or
-         assistant-side entries (a ``ToolResult`` closes the assistant
-         turn and resets the role tracker).
-
-    Args:
-      payload: ``ContextSplice.payload`` to validate.
-      paired_externally: Call ids whose pair lives outside this payload.
-
-    Raises:
-      InvalidPayloadError: On any violation.
-
-    """
+    """Enforce tool-call / tool-result pairing on a payload."""
     pending: set[str] = set()
     seen_results: set[str] = set()
     seen_tool_call_ids: set[str] = set()
@@ -914,3 +794,120 @@ def _validate_payload(
 
 
 type TapeRecord = ReferrableTapeEvent | ContextSplice
+
+
+# ``UserMessage`` is the human and carries no label. An ``AgentSendMessage`` is prefixed
+# via the shared :func:`labeled_agent_send_text` so attribution survives demotion to a
+# plain ``UserMessage`` (the structured ``source`` is then gone) and the label format
+# stays identical to the wire path.
+def _labeled_text(entry: UserMessage | AgentSendMessage) -> str:
+    """Return ``entry`` text, labeling an ``AgentSendMessage`` with its source."""
+    if isinstance(entry, UserMessage):
+        return entry.text
+    return labeled_agent_send_text(entry)
+
+
+# Same-source pairs (two ``UserMessage``; two ``AgentSendMessage`` sharing a ``source``)
+# keep their type and ``prior``'s identity. Cross-source pairs demote to ``UserMessage``
+# with each part's ``[from <source>]: `` label inlined so attribution is not lost
+# (C-002).
+#
+# ``hidden`` is render-only (the model receives the text either way; the bit only
+# suppresses REPL display), so merging across a ``hidden`` boundary is lossless on the
+# wire. The merged ``hidden`` is the AND of both: a block is suppressed only if every
+# part was, so any visible part keeps the merged block visible. This keeps
+# ``coalesce_roles`` total -- the rescue and load paths must never raise on an arbitrary
+# legacy adjacency (C-001).
+def _merge_user(
+    prior: UserMessage | AgentSendMessage,
+    entry: UserMessage | AgentSendMessage,
+) -> UserMessage | AgentSendMessage:
+    """Merge two adjacent user-side entries per the canonical source policy."""
+    attachments = (*prior.attachments, *entry.attachments)
+    hidden = prior.hidden and entry.hidden
+    same_source = (
+        isinstance(prior, AgentSendMessage)
+        and isinstance(entry, AgentSendMessage)
+        and prior.source == entry.source
+    ) or (isinstance(prior, UserMessage) and isinstance(entry, UserMessage))
+    merged_id = max(prior.id, entry.id)
+    if same_source:
+        text = f"{prior.text}\n\n{entry.text}"
+        return replace(
+            prior,
+            id=merged_id,
+            text=text,
+            hidden=hidden,
+            attachments=attachments,
+        )
+    text = f"{_labeled_text(prior)}\n\n{_labeled_text(entry)}"
+    return UserMessage(id=merged_id, text=text, attachments=attachments, hidden=hidden)
+
+
+# Joins text and concatenates ``tool_calls``, dropping any ``entry`` call whose id
+# already appears in ``prior`` so the merged ``AssistantMessage`` never carries a
+# duplicate id its ``__post_init__`` would reject (H1/H2).
+#
+# Signed ``thinking`` blocks bind to their originating turn; a merged turn cannot re-
+# sign them, and concatenating two turns' signed blocks serializes a signature set the
+# provider rejects. Drop *every* signed ``thinking`` block from *both* inputs (the
+# merged turn re-signs none of them), body included -- not just the ``signature``:
+# Anthropic requires a valid signature on a thinking block, so a signature-stripped body
+# would 400 just the same, and the reasoning trace is unrecoverable across a merge
+# either way. Unsigned / ``redacted_thinking`` blocks carry no per-turn signature and
+# survive (H14, R2O-5).
+#
+# ``thought_signature`` goes for the same reason one step out: it signs the TEXT of the
+# turn that produced it, and the merged text is two turns' worth, so keeping ``prior``'s
+# asserts a provenance that no longer holds.
+#
+# ``hidden`` follows the user-side rule (see :func:`_merge_user`): the AND of both
+# parts, so any visible part keeps the merged turn visible. Inheriting ``prior``'s bit
+# meant a hidden system turn ahead of a real answer suppressed the answer from the REPL.
+def _merge_assistant(
+    prior: AssistantMessage,
+    entry: AssistantMessage,
+) -> AssistantMessage:
+    """Merge two adjacent assistant turns, keeping the result constructible."""
+    seen = {tc.id for tc in prior.tool_calls}
+    tool_calls = prior.tool_calls + tuple(
+        tc for tc in entry.tool_calls if tc.id not in seen
+    )
+    thinking_blocks = tuple(
+        tb
+        for tb in (*prior.thinking_blocks, *entry.thinking_blocks)
+        if not (tb.get("type") == "thinking" and tb.get("signature"))
+    )
+    return replace(
+        prior,
+        id=max(prior.id, entry.id),
+        text="\n\n".join(t for t in (prior.text, entry.text) if t),
+        thinking_blocks=thinking_blocks,
+        thought_signature="",
+        tool_calls=tool_calls,
+        hidden=prior.hidden and entry.hidden,
+    )
+
+
+def _flush_interrupted(
+    pending: set[str],
+    paired_externally: frozenset[str],
+    seen: set[str],
+    out: list[ModelContextEvent],
+    deferred: list[ModelContextEvent],
+) -> None:
+    """Emit interrupted results and deferred peers."""
+    for cid in sorted(pending - paired_externally):
+        seen.add(cid)
+        out.append(ToolResult(call_id=cid, content="[interrupted]", is_error=True))
+    pending.clear()
+    _flush_deferred(out, deferred)
+
+
+def _flush_deferred(
+    out: list[ModelContextEvent],
+    deferred: list[ModelContextEvent],
+) -> None:
+    """Emit peers held past an open pair, in arrival order."""
+    out.extend(deferred)
+    deferred.clear()

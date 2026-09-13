@@ -41,28 +41,51 @@ else:
     system = ...
 
 def user_data_dir(
-    appname=..., appauthor=..., version=..., roaming=...
+    appname=...,
+    appauthor=...,
+    version=...,
+    roaming=...,
 ) -> str | Any: ...
 def site_data_dir(
-    appname=..., appauthor=..., version=..., multipath=...
+    appname=...,
+    appauthor=...,
+    version=...,
+    multipath=...,
 ) -> str | Any: ...
 def user_config_dir(
-    appname=..., appauthor=..., version=..., roaming=...
+    appname=...,
+    appauthor=...,
+    version=...,
+    roaming=...,
 ) -> str | Any: ...
 def site_config_dir(
-    appname=..., appauthor=..., version=..., multipath=...
+    appname=...,
+    appauthor=...,
+    version=...,
+    multipath=...,
 ) -> str | Any: ...
 def user_cache_dir(
-    appname=..., appauthor=..., version=..., opinion=...
+    appname=...,
+    appauthor=...,
+    version=...,
+    opinion=...,
 ) -> str | Any: ...
 def user_state_dir(
-    appname=..., appauthor=..., version=..., roaming=...
+    appname=...,
+    appauthor=...,
+    version=...,
+    roaming=...,
 ) -> str | Any: ...
 def user_log_dir(appname=..., appauthor=..., version=..., opinion=...) -> str | Any: ...
 
 class AppDirs:
     def __init__(
-        self, appname=..., appauthor=..., version=..., roaming=..., multipath=...
+        self,
+        appname=...,
+        appauthor=...,
+        version=...,
+        roaming=...,
+        multipath=...,
     ) -> None: ...
     @property
     def user_data_dir(self) -> str | Any: ...

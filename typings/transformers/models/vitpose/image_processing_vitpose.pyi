@@ -22,13 +22,21 @@ def box_to_center_and_scale(
 def coco_to_pascal_voc(bboxes: np.ndarray) -> np.ndarray: ...
 def get_keypoint_predictions(heatmaps: np.ndarray) -> tuple[np.ndarray, np.ndarray]: ...
 def post_dark_unbiased_data_processing(
-    coords: np.ndarray, batch_heatmaps: np.ndarray, kernel: int = ...
+    coords: np.ndarray,
+    batch_heatmaps: np.ndarray,
+    kernel: int = ...,
 ) -> np.ndarray: ...
 def transform_preds(
-    coords: np.ndarray, center: np.ndarray, scale: np.ndarray, output_size: np.ndarray
+    coords: np.ndarray,
+    center: np.ndarray,
+    scale: np.ndarray,
+    output_size: np.ndarray,
 ) -> np.ndarray: ...
 def get_warp_matrix(
-    theta: float, size_input: np.ndarray, size_dst: np.ndarray, size_target: np.ndarray
+    theta: float,
+    size_input: np.ndarray,
+    size_dst: np.ndarray,
+    size_target: np.ndarray,
 ):  # -> NDArray[floating[_32Bit]]:
     ...
 def scipy_warp_affine(src, M, size):  # -> NDArray[Any]:

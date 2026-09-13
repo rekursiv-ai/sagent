@@ -7,5 +7,9 @@ from .quantize_handler import QuantizeHandler
 __all__: list[str] = ...
 type _MatchResult = tuple[Node, list[Node], Pattern | None, QuantizeHandler]
 type _MatchResultWithQConfig = tuple[
-    Node, list[Node], Pattern | None, QuantizeHandler, QConfigAny
+    Node,
+    list[Node],
+    Pattern | None,
+    QuantizeHandler,
+    QConfigAny,
 ]

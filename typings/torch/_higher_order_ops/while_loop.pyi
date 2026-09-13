@@ -20,7 +20,11 @@ class WhileLoopOp(HigherOrderOperator):
         /,
     ) -> None: ...
     def gen_schema(
-        self, cond_fn, body_fn, carried_inputs, additional_inputs
+        self,
+        cond_fn,
+        body_fn,
+        carried_inputs,
+        additional_inputs,
     ) -> FunctionSchema: ...
 
 while_loop_op = ...
@@ -28,21 +32,40 @@ while_loop_op = ...
 def while_loop(cond_fn, body_fn, carried_inputs) -> None: ...
 @while_loop_op.py_impl(DispatchKey.CompositeExplicitAutograd)
 def while_loop_dense(
-    cond_fn, body_fn, carried_inputs, additional_inputs, stack_output=...
+    cond_fn,
+    body_fn,
+    carried_inputs,
+    additional_inputs,
+    stack_output=...,
 ) -> tuple[Tensor | Any, ...] | tuple[Tensor, ...] | tuple[Any, ...]: ...
 @while_loop_op.py_autograd_impl
 def while_loop_autograd(cond_fn, body_fn, operands, additional_inputs) -> None: ...
 @while_loop_op.py_impl(ProxyTorchDispatchMode)
 def while_loop_tracing(
-    mode, cond_fn, body_fn, carried_inputs, additional_inputs, stack_output=...
+    mode,
+    cond_fn,
+    body_fn,
+    carried_inputs,
+    additional_inputs,
+    stack_output=...,
 ): ...
 @while_loop_op.py_impl(FakeTensorMode)
 def while_loop_fake_tensor_mode(
-    mode, cond_fn, body_fn, carried_inputs, additional_inputs, stack_output=...
+    mode,
+    cond_fn,
+    body_fn,
+    carried_inputs,
+    additional_inputs,
+    stack_output=...,
 ) -> PyTree: ...
 @while_loop_op.py_functionalize_impl
 def while_loop_func(
-    ctx, cond_fn, body_fn, carried_inputs, additional_inputs, stack_output=...
+    ctx,
+    cond_fn,
+    body_fn,
+    carried_inputs,
+    additional_inputs,
+    stack_output=...,
 ): ...
 
 class WhileLoopStackOutputOp(HigherOrderOperator):
@@ -68,7 +91,8 @@ class WhileLoopAutogradOp(torch.autograd.Function):
     ) -> tuple[Any, ...]: ...
     @staticmethod
     def backward(
-        ctx, *grads
+        ctx,
+        *grads,
     ) -> tuple[None, None, None, None, *tuple[Tensor | None, ...]]: ...
 
 while_loop_stack_output_op = ...

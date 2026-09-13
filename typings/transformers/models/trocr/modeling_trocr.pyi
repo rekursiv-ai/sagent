@@ -37,11 +37,16 @@ class TrOCRScaledWordEmbedding(nn.Embedding):
 
 class TrOCRSinusoidalPositionalEmbedding(nn.Module):
     def __init__(
-        self, num_positions: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_positions: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ) -> None: ...
     @staticmethod
     def get_embedding(
-        num_embeddings: int, embedding_dim: int, padding_idx: int | None = ...
+        num_embeddings: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ):  # -> Tensor:
         ...
     @torch.no_grad()

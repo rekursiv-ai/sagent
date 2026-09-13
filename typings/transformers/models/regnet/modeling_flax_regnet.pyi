@@ -31,7 +31,9 @@ class FlaxRegNetConvLayer(nn.Module):
     def setup(self):  # -> None:
         ...
     def __call__(
-        self, hidden_state: jnp.ndarray, deterministic: bool = ...
+        self,
+        hidden_state: jnp.ndarray,
+        deterministic: bool = ...,
     ) -> jnp.ndarray: ...
 
 class FlaxRegNetEmbeddings(nn.Module):
@@ -40,7 +42,9 @@ class FlaxRegNetEmbeddings(nn.Module):
     def setup(self):  # -> None:
         ...
     def __call__(
-        self, pixel_values: jnp.ndarray, deterministic: bool = ...
+        self,
+        pixel_values: jnp.ndarray,
+        deterministic: bool = ...,
     ) -> jnp.ndarray: ...
 
 class FlaxRegNetShortCut(nn.Module):
@@ -75,7 +79,9 @@ class FlaxRegNetXLayerCollection(nn.Module):
     def setup(self):  # -> None:
         ...
     def __call__(
-        self, hidden_state: jnp.ndarray, deterministic: bool = ...
+        self,
+        hidden_state: jnp.ndarray,
+        deterministic: bool = ...,
     ) -> jnp.ndarray: ...
 
 class FlaxRegNetXLayer(nn.Module):
@@ -87,7 +93,9 @@ class FlaxRegNetXLayer(nn.Module):
     def setup(self):  # -> None:
         ...
     def __call__(
-        self, hidden_state: jnp.ndarray, deterministic: bool = ...
+        self,
+        hidden_state: jnp.ndarray,
+        deterministic: bool = ...,
     ) -> jnp.ndarray: ...
 
 class FlaxRegNetYLayerCollection(nn.Module):
@@ -109,7 +117,9 @@ class FlaxRegNetYLayer(nn.Module):
     def setup(self):  # -> None:
         ...
     def __call__(
-        self, hidden_state: jnp.ndarray, deterministic: bool = ...
+        self,
+        hidden_state: jnp.ndarray,
+        deterministic: bool = ...,
     ) -> jnp.ndarray: ...
 
 class FlaxRegNetStageLayersCollection(nn.Module):
@@ -174,7 +184,10 @@ class FlaxRegNetPreTrainedModel(FlaxPreTrainedModel):
         **kwargs,
     ) -> None: ...
     def init_weights(
-        self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...
+        self,
+        rng: jax.random.PRNGKey,
+        input_shape: tuple,
+        params: FrozenDict = ...,
     ) -> FrozenDict: ...
     @add_start_docstrings_to_model_forward(REGNET_INPUTS_DOCSTRING)
     def __call__(

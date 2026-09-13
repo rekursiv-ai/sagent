@@ -33,7 +33,11 @@ class CUDATemplate(KernelTemplate):
     def supports_epilogue_fusion(op: GemmOperation) -> bool: ...
     def make_key(self, name: str, input_key: str, layout_repr: str) -> str: ...
     def generate_code_and_args(
-        self, name: str, input_key: str, layout_repr: str, **kwargs
+        self,
+        name: str,
+        input_key: str,
+        layout_repr: str,
+        **kwargs,
     ) -> tuple[str, tuple[int, ...]]: ...
     def generate(
         self,

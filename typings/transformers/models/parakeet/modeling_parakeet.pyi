@@ -58,13 +58,17 @@ class ParakeetEncoderAttention(nn.Module):
 class ParakeetEncoderSubsamplingConv2D(nn.Module):
     def __init__(self, config: ParakeetEncoderConfig) -> None: ...
     def forward(
-        self, input_features: torch.Tensor, attention_mask: torch.Tensor = ...
+        self,
+        input_features: torch.Tensor,
+        attention_mask: torch.Tensor = ...,
     ):  # -> Any:
         ...
 
 class ParakeetEncoderBlock(GradientCheckpointingLayer):
     def __init__(
-        self, config: ParakeetEncoderConfig, layer_idx: int | None = ...
+        self,
+        config: ParakeetEncoderConfig,
+        layer_idx: int | None = ...,
     ) -> None: ...
     def forward(
         self,

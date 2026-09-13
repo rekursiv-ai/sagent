@@ -23,13 +23,18 @@ from ...utils.deprecation import deprecate_kwarg
 logger = ...
 
 def shift_tokens_right(
-    input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: torch.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ):  # -> Tensor:
     ...
 
 class PegasusSinusoidalPositionalEmbedding(nn.Embedding):
     def __init__(
-        self, num_positions: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_positions: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ) -> None: ...
     @torch.no_grad()
     def forward(
@@ -117,7 +122,9 @@ class PegasusPreTrainedModel(PreTrainedModel):
 
 class PegasusEncoder(PegasusPreTrainedModel):
     def __init__(
-        self, config: PegasusConfig, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: PegasusConfig,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     def resize_position_embeddings(self, new_num_position_embeddings: int):  # -> None:
         ...
@@ -136,7 +143,9 @@ class PegasusEncoder(PegasusPreTrainedModel):
 
 class PegasusDecoder(PegasusPreTrainedModel):
     def __init__(
-        self, config: PegasusConfig, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: PegasusConfig,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     def resize_position_embeddings(self, new_num_position_embeddings: int):  # -> None:
         ...

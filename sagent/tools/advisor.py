@@ -18,7 +18,6 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Final
 
-from sagent.agent import runtime as agent_runtime
 from sagent.lib import debug_log
 from sagent.lib.custom_json import JSON, json_freeze
 from sagent.types.model import Model, ModelRequest
@@ -29,6 +28,8 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
+
+import sagent.agent.runtime
 
 
 SYSTEM_NUDGE: Final = (
@@ -50,33 +51,6 @@ SYSTEM_NUDGE: Final = (
     " situation, the options you've considered, and the specific"
     " decision you need help with."
 )
-
-
-class _AdvisorModel:
-    """Bridge a provider ``Model`` to the runtime ``Model`` protocol."""
-
-    def __init__(self, inner: Model, system: str) -> None:
-        self._inner = inner
-        self._system = system
-
-    async def stream(
-        self,
-        history: list[ModelContextEvent],
-        publish: Callable[[RuntimeEvent], None],
-    ) -> AssistantMessage:
-        """Stream a provider response and adapt it to the runtime ``Model`` protocol.
-
-        Args:
-          history: Conversation history for the advisor consult.
-          publish: Runtime event sink for streamed events.
-
-        Returns:
-          message: Final ``AssistantMessage`` from the inner provider.
-
-        """
-        request = ModelRequest(messages=history, system=self._system or None)
-        response = await self._inner.stream(request, publish)
-        return response.message
 
 
 class Advisor:
@@ -107,7 +81,7 @@ class Advisor:
                 },
             },
             "required": ["prompt"],
-        }
+        },
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -179,12 +153,39 @@ class Advisor:
             uses=self._uses,
             max_uses=self._max_uses,
         )
-        runtime = agent_runtime.AgentRuntime(
+        agent_runtime = sagent.agent.runtime.AgentRuntime(
             model=_AdvisorModel(self._model, self._system),
             tools=[],
         )
-        history = await runtime.run(UserMessage(text=prompt))
+        history = await agent_runtime.run(UserMessage(text=prompt))
         for m in reversed(history):
             if isinstance(m, AssistantMessage):
                 return ToolResult(call_id="", content=m.text)
         return ToolResult(call_id="", content="")
+
+
+class _AdvisorModel:
+    """Bridge a provider ``Model`` to the runtime ``Model`` protocol."""
+
+    def __init__(self, inner: Model, system: str) -> None:
+        self._inner = inner
+        self._system = system
+
+    async def stream(
+        self,
+        history: list[ModelContextEvent],
+        publish: Callable[[RuntimeEvent], None],
+    ) -> AssistantMessage:
+        """Stream a provider response and adapt it to the runtime ``Model`` protocol.
+
+        Args:
+          history: Conversation history for the advisor consult.
+          publish: Runtime event sink for streamed events.
+
+        Returns:
+          message: Final ``AssistantMessage`` from the inner provider.
+
+        """
+        request = ModelRequest(messages=history, system=self._system or None)
+        response = await self._inner.stream(request, publish)
+        return response.message

@@ -30,7 +30,9 @@ def create_sinusoidal_embeddings(n_pos: int, dim: int, out: torch.Tensor):  # ->
 class Embeddings(nn.Module):
     def __init__(self, config: PretrainedConfig) -> None: ...
     def forward(
-        self, input_ids: torch.Tensor, input_embeds: torch.Tensor | None = ...
+        self,
+        input_ids: torch.Tensor,
+        input_embeds: torch.Tensor | None = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -106,7 +108,9 @@ class Transformer(nn.Module):
         return_dict: bool | None = ...,
     ) -> BaseModelOutput | tuple[torch.Tensor, ...]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> BaseModelOutput | tuple[torch.Tensor, ...]: ...
 
 @auto_docstring

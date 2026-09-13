@@ -32,7 +32,9 @@ class DimensionInfo:
     padded_seq_len: int
 
 def shift_tokens_right(
-    input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: torch.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ):  # -> Tensor:
     ...
 
@@ -112,20 +114,38 @@ class PegasusXGlobalLocalAttention(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]: ...
     def compute_global_attention_representations(
-        self, global_q, global_k, global_v, local_k, local_v, mask, dim: DimensionInfo
+        self,
+        global_q,
+        global_k,
+        global_v,
+        local_k,
+        local_v,
+        mask,
+        dim: DimensionInfo,
     ):  # -> tuple[Tensor, Tensor]:
         ...
     def compute_local_attention_representations(
-        self, global_k, global_v, local_q, local_k, local_v, mask, dim: DimensionInfo
+        self,
+        global_k,
+        global_v,
+        local_q,
+        local_k,
+        local_v,
+        mask,
+        dim: DimensionInfo,
     ):  # -> tuple[Tensor, Tensor]:
         ...
 
 class PegasusXEncoderLayer(GradientCheckpointingLayer):
     def __init__(
-        self, stagger_blocks_this_layer: bool, config: PegasusXConfig
+        self,
+        stagger_blocks_this_layer: bool,
+        config: PegasusXConfig,
     ) -> None: ...
     def forward(
         self,
@@ -137,7 +157,10 @@ class PegasusXEncoderLayer(GradientCheckpointingLayer):
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
     @classmethod
     def pad_local_tokens(
-        cls, hidden_states, attention_mask, block_size
+        cls,
+        hidden_states,
+        attention_mask,
+        block_size,
     ):  # -> tuple[Tensor, Tensor]:
         ...
     @classmethod
@@ -171,7 +194,9 @@ class PegasusXPreTrainedModel(PreTrainedModel):
 
 class PegasusXEncoder(PegasusXPreTrainedModel):
     def __init__(
-        self, config: PegasusXConfig, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: PegasusXConfig,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     def resize_position_embeddings(self, new_num_position_embeddings: int):  # -> None:
         ...
@@ -189,7 +214,9 @@ class PegasusXEncoder(PegasusXPreTrainedModel):
 
 class PegasusXDecoder(PegasusXPreTrainedModel):
     def __init__(
-        self, config: PegasusXConfig, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: PegasusXConfig,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     def forward(
         self,

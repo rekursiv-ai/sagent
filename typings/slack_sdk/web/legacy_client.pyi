@@ -109,7 +109,10 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_apps_config_lookup(
-        self, *, app_ids: str | Sequence[str], **kwargs
+        self,
+        *,
+        app_ids: str | Sequence[str],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_apps_config_set(
         self,
@@ -153,10 +156,19 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_linkObjects(
-        self, *, channel: str, record_id: str, salesforce_org_id: str, **kwargs
+        self,
+        *,
+        channel: str,
+        record_id: str,
+        salesforce_org_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_unlinkObjects(
-        self, *, channel: str, new_name: str, **kwargs
+        self,
+        *,
+        channel: str,
+        new_name: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_barriers_create(
         self,
@@ -167,7 +179,10 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_barriers_delete(
-        self, *, barrier_id: str, **kwargs
+        self,
+        *,
+        barrier_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_barriers_update(
         self,
@@ -179,7 +194,11 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_barriers_list(
-        self, *, cursor: str | None = ..., limit: int | None = ..., **kwargs
+        self,
+        *,
+        cursor: str | None = ...,
+        limit: int | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_create(
         self,
@@ -192,19 +211,36 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_delete(
-        self, *, channel_id: str, **kwargs
+        self,
+        *,
+        channel_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_invite(
-        self, *, channel_id: str, user_ids: str | Sequence[str], **kwargs
+        self,
+        *,
+        channel_id: str,
+        user_ids: str | Sequence[str],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_archive(
-        self, *, channel_id: str, **kwargs
+        self,
+        *,
+        channel_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_unarchive(
-        self, *, channel_id: str, **kwargs
+        self,
+        *,
+        channel_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_rename(
-        self, *, channel_id: str, name: str, **kwargs
+        self,
+        *,
+        channel_id: str,
+        name: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_search(
         self,
@@ -219,16 +255,29 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_convertToPrivate(
-        self, *, channel_id: str, **kwargs
+        self,
+        *,
+        channel_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_convertToPublic(
-        self, *, channel_id: str, **kwargs
+        self,
+        *,
+        channel_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_setConversationPrefs(
-        self, *, channel_id: str, prefs: str | dict[str, str], **kwargs
+        self,
+        *,
+        channel_id: str,
+        prefs: str | dict[str, str],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_getConversationPrefs(
-        self, *, channel_id: str, **kwargs
+        self,
+        *,
+        channel_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_disconnectShared(
         self,
@@ -257,13 +306,27 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_restrictAccess_addGroup(
-        self, *, channel_id: str, group_id: str, team_id: str | None = ..., **kwargs
+        self,
+        *,
+        channel_id: str,
+        group_id: str,
+        team_id: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_restrictAccess_listGroups(
-        self, *, channel_id: str, team_id: str | None = ..., **kwargs
+        self,
+        *,
+        channel_id: str,
+        team_id: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_restrictAccess_removeGroup(
-        self, *, channel_id: str, group_id: str, team_id: str, **kwargs
+        self,
+        *,
+        channel_id: str,
+        group_id: str,
+        team_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_setTeams(
         self,
@@ -283,35 +346,71 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_getCustomRetention(
-        self, *, channel_id: str, **kwargs
+        self,
+        *,
+        channel_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_removeCustomRetention(
-        self, *, channel_id: str, **kwargs
+        self,
+        *,
+        channel_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_setCustomRetention(
-        self, *, channel_id: str, duration_days: int, **kwargs
+        self,
+        *,
+        channel_id: str,
+        duration_days: int,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_bulkArchive(
-        self, *, channel_ids: Sequence[str] | str, **kwargs
+        self,
+        *,
+        channel_ids: Sequence[str] | str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_bulkDelete(
-        self, *, channel_ids: Sequence[str] | str, **kwargs
+        self,
+        *,
+        channel_ids: Sequence[str] | str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_conversations_bulkMove(
-        self, *, channel_ids: Sequence[str] | str, target_team_id: str, **kwargs
+        self,
+        *,
+        channel_ids: Sequence[str] | str,
+        target_team_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_emoji_add(
-        self, *, name: str, url: str, **kwargs
+        self,
+        *,
+        name: str,
+        url: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_emoji_addAlias(
-        self, *, alias_for: str, name: str, **kwargs
+        self,
+        *,
+        alias_for: str,
+        name: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_emoji_list(
-        self, *, cursor: str | None = ..., limit: int | None = ..., **kwargs
+        self,
+        *,
+        cursor: str | None = ...,
+        limit: int | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_emoji_remove(self, *, name: str, **kwargs) -> Future | SlackResponse: ...
     def admin_emoji_rename(
-        self, *, name: str, new_name: str, **kwargs
+        self,
+        *,
+        name: str,
+        new_name: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_functions_list(
         self,
@@ -323,7 +422,10 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_functions_permissions_lookup(
-        self, *, function_ids: str | Sequence[str], **kwargs
+        self,
+        *,
+        function_ids: str | Sequence[str],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_functions_permissions_set(
         self,
@@ -376,7 +478,11 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_users_session_invalidate(
-        self, *, session_id: str, team_id: str, **kwargs
+        self,
+        *,
+        session_id: str,
+        team_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_users_session_list(
         self,
@@ -388,10 +494,17 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_teams_settings_setDefaultChannels(
-        self, *, team_id: str, channel_ids: str | Sequence[str], **kwargs
+        self,
+        *,
+        team_id: str,
+        channel_ids: str | Sequence[str],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_users_session_getSettings(
-        self, *, user_ids: str | Sequence[str], **kwargs
+        self,
+        *,
+        user_ids: str | Sequence[str],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_users_session_setSettings(
         self,
@@ -402,7 +515,10 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_users_session_clearSettings(
-        self, *, user_ids: str | Sequence[str], **kwargs
+        self,
+        *,
+        user_ids: str | Sequence[str],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_users_unsupportedVersions_export(
         self,
@@ -412,7 +528,11 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_inviteRequests_approve(
-        self, *, invite_request_id: str, team_id: str | None = ..., **kwargs
+        self,
+        *,
+        invite_request_id: str,
+        team_id: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_inviteRequests_approved_list(
         self,
@@ -431,7 +551,11 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_inviteRequests_deny(
-        self, *, invite_request_id: str, team_id: str | None = ..., **kwargs
+        self,
+        *,
+        invite_request_id: str,
+        team_id: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_inviteRequests_list(self, **kwargs) -> Future | SlackResponse: ...
     def admin_teams_admins_list(
@@ -452,7 +576,11 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_teams_list(
-        self, *, cursor: str | None = ..., limit: int | None = ..., **kwargs
+        self,
+        *,
+        cursor: str | None = ...,
+        limit: int | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_teams_owners_list(
         self,
@@ -463,19 +591,38 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_teams_settings_info(
-        self, *, team_id: str, **kwargs
+        self,
+        *,
+        team_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_teams_settings_setDescription(
-        self, *, team_id: str, description: str, **kwargs
+        self,
+        *,
+        team_id: str,
+        description: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_teams_settings_setDiscoverability(
-        self, *, team_id: str, discoverability: str, **kwargs
+        self,
+        *,
+        team_id: str,
+        discoverability: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_teams_settings_setIcon(
-        self, *, team_id: str, image_url: str, **kwargs
+        self,
+        *,
+        team_id: str,
+        image_url: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_teams_settings_setName(
-        self, *, team_id: str, name: str, **kwargs
+        self,
+        *,
+        team_id: str,
+        name: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_usergroups_addChannels(
         self,
@@ -502,7 +649,11 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_usergroups_removeChannels(
-        self, *, usergroup_id: str, channel_ids: str | Sequence[str], **kwargs
+        self,
+        *,
+        usergroup_id: str,
+        channel_ids: str | Sequence[str],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_users_assign(
         self,
@@ -540,19 +691,40 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_users_remove(
-        self, *, team_id: str, user_id: str, **kwargs
+        self,
+        *,
+        team_id: str,
+        user_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_users_setAdmin(
-        self, *, team_id: str, user_id: str, **kwargs
+        self,
+        *,
+        team_id: str,
+        user_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_users_setExpiration(
-        self, *, expiration_ts: int, user_id: str, team_id: str | None = ..., **kwargs
+        self,
+        *,
+        expiration_ts: int,
+        user_id: str,
+        team_id: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_users_setOwner(
-        self, *, team_id: str, user_id: str, **kwargs
+        self,
+        *,
+        team_id: str,
+        user_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_users_setRegular(
-        self, *, team_id: str, user_id: str, **kwargs
+        self,
+        *,
+        team_id: str,
+        user_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_workflows_search(
         self,
@@ -591,13 +763,22 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def admin_workflows_unpublish(
-        self, *, workflow_ids: str | Sequence[str], **kwargs
+        self,
+        *,
+        workflow_ids: str | Sequence[str],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def api_test(
-        self, *, error: str | None = ..., **kwargs
+        self,
+        *,
+        error: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def apps_connections_open(
-        self, *, app_token: str, **kwargs
+        self,
+        *,
+        app_token: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def apps_event_authorizations_list(
         self,
@@ -608,28 +789,56 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def apps_uninstall(
-        self, *, client_id: str, client_secret: str, **kwargs
+        self,
+        *,
+        client_id: str,
+        client_secret: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def apps_manifest_create(
-        self, *, manifest: str | dict[str, Any], **kwargs
+        self,
+        *,
+        manifest: str | dict[str, Any],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def apps_manifest_delete(
-        self, *, app_id: str, **kwargs
+        self,
+        *,
+        app_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def apps_manifest_export(
-        self, *, app_id: str, **kwargs
+        self,
+        *,
+        app_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def apps_manifest_update(
-        self, *, app_id: str, manifest: str | dict[str, Any], **kwargs
+        self,
+        *,
+        app_id: str,
+        manifest: str | dict[str, Any],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def apps_manifest_validate(
-        self, *, manifest: str | dict[str, Any], app_id: str | None = ..., **kwargs
+        self,
+        *,
+        manifest: str | dict[str, Any],
+        app_id: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def apps_user_connection_update(
-        self, *, user_id: str, status: str, **kwargs
+        self,
+        *,
+        user_id: str,
+        status: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def tooling_tokens_rotate(
-        self, *, refresh_token: str, **kwargs
+        self,
+        *,
+        refresh_token: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def assistant_threads_setStatus(
         self,
@@ -641,7 +850,12 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def assistant_threads_setTitle(
-        self, *, channel_id: str, thread_ts: str, title: str, **kwargs
+        self,
+        *,
+        channel_id: str,
+        thread_ts: str,
+        title: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def assistant_threads_setSuggestedPrompts(
         self,
@@ -653,7 +867,10 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def auth_revoke(
-        self, *, test: bool | None = ..., **kwargs
+        self,
+        *,
+        test: bool | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def auth_test(self, **kwargs) -> Future | SlackResponse: ...
     def auth_teams_list(
@@ -686,13 +903,24 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def bookmarks_list(
-        self, *, channel_id: str, **kwargs
+        self,
+        *,
+        channel_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def bookmarks_remove(
-        self, *, bookmark_id: str, channel_id: str, **kwargs
+        self,
+        *,
+        bookmark_id: str,
+        channel_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def bots_info(
-        self, *, bot: str | None = ..., team_id: str | None = ..., **kwargs
+        self,
+        *,
+        bot: str | None = ...,
+        team_id: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def calls_add(
         self,
@@ -708,14 +936,26 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def calls_end(
-        self, *, id: str, duration: int | None = ..., **kwargs
+        self,
+        *,
+        id: str,
+        duration: int | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def calls_info(self, *, id: str, **kwargs) -> Future | SlackResponse: ...
     def calls_participants_add(
-        self, *, id: str, users: str | Sequence[dict[str, str]], **kwargs
+        self,
+        *,
+        id: str,
+        users: str | Sequence[dict[str, str]],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def calls_participants_remove(
-        self, *, id: str, users: str | Sequence[dict[str, str]], **kwargs
+        self,
+        *,
+        id: str,
+        users: str | Sequence[dict[str, str]],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def calls_update(
         self,
@@ -727,13 +967,24 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def canvases_create(
-        self, *, title: str | None = ..., document_content: dict[str, str], **kwargs
+        self,
+        *,
+        title: str | None = ...,
+        document_content: dict[str, str],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def canvases_edit(
-        self, *, canvas_id: str, changes: Sequence[dict[str, Any]], **kwargs
+        self,
+        *,
+        canvas_id: str,
+        changes: Sequence[dict[str, Any]],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def canvases_delete(
-        self, *, canvas_id: str, **kwargs
+        self,
+        *,
+        canvas_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def canvases_access_set(
         self,
@@ -753,38 +1004,73 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def canvases_sections_lookup(
-        self, *, canvas_id: str, criteria: dict[str, Any], **kwargs
+        self,
+        *,
+        canvas_id: str,
+        criteria: dict[str, Any],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def channels_archive(self, *, channel: str, **kwargs) -> Future | SlackResponse: ...
     def channels_create(self, *, name: str, **kwargs) -> Future | SlackResponse: ...
     def channels_history(self, *, channel: str, **kwargs) -> Future | SlackResponse: ...
     def channels_info(self, *, channel: str, **kwargs) -> Future | SlackResponse: ...
     def channels_invite(
-        self, *, channel: str, user: str, **kwargs
+        self,
+        *,
+        channel: str,
+        user: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def channels_join(self, *, name: str, **kwargs) -> Future | SlackResponse: ...
     def channels_kick(
-        self, *, channel: str, user: str, **kwargs
+        self,
+        *,
+        channel: str,
+        user: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def channels_leave(self, *, channel: str, **kwargs) -> Future | SlackResponse: ...
     def channels_list(self, **kwargs) -> Future | SlackResponse: ...
     def channels_mark(
-        self, *, channel: str, ts: str, **kwargs
+        self,
+        *,
+        channel: str,
+        ts: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def channels_rename(
-        self, *, channel: str, name: str, **kwargs
+        self,
+        *,
+        channel: str,
+        name: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def channels_replies(
-        self, *, channel: str, thread_ts: str, **kwargs
+        self,
+        *,
+        channel: str,
+        thread_ts: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def channels_setPurpose(
-        self, *, channel: str, purpose: str, **kwargs
+        self,
+        *,
+        channel: str,
+        purpose: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def channels_setTopic(
-        self, *, channel: str, topic: str, **kwargs
+        self,
+        *,
+        channel: str,
+        topic: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def channels_unarchive(
-        self, *, channel: str, **kwargs
+        self,
+        *,
+        channel: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def chat_appendStream(
         self,
@@ -796,7 +1082,12 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def chat_delete(
-        self, *, channel: str, ts: str, as_user: bool | None = ..., **kwargs
+        self,
+        *,
+        channel: str,
+        ts: str,
+        as_user: bool | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def chat_deleteScheduledMessage(
         self,
@@ -807,10 +1098,18 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def chat_getPermalink(
-        self, *, channel: str, message_ts: str, **kwargs
+        self,
+        *,
+        channel: str,
+        message_ts: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def chat_meMessage(
-        self, *, channel: str, text: str, **kwargs
+        self,
+        *,
+        channel: str,
+        text: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def chat_postEphemeral(
         self,
@@ -950,13 +1249,23 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def conversations_approveSharedInvite(
-        self, *, invite_id: str, target_team: str | None = ..., **kwargs
+        self,
+        *,
+        invite_id: str,
+        target_team: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def conversations_archive(
-        self, *, channel: str, **kwargs
+        self,
+        *,
+        channel: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def conversations_close(
-        self, *, channel: str, **kwargs
+        self,
+        *,
+        channel: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def conversations_create(
         self,
@@ -967,10 +1276,19 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def conversations_declineSharedInvite(
-        self, *, invite_id: str, target_team: str | None = ..., **kwargs
+        self,
+        *,
+        invite_id: str,
+        target_team: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def conversations_externalInvitePermissions_set(
-        self, *, action: str, channel: str, target_team: str, **kwargs
+        self,
+        *,
+        action: str,
+        channel: str,
+        target_team: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def conversations_history(
         self,
@@ -1009,13 +1327,23 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def conversations_join(
-        self, *, channel: str, **kwargs
+        self,
+        *,
+        channel: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def conversations_kick(
-        self, *, channel: str, user: str, **kwargs
+        self,
+        *,
+        channel: str,
+        user: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def conversations_leave(
-        self, *, channel: str, **kwargs
+        self,
+        *,
+        channel: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def conversations_list(
         self,
@@ -1036,7 +1364,11 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def conversations_mark(
-        self, *, channel: str, ts: str, **kwargs
+        self,
+        *,
+        channel: str,
+        ts: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def conversations_members(
         self,
@@ -1055,7 +1387,11 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def conversations_rename(
-        self, *, channel: str, name: str, **kwargs
+        self,
+        *,
+        channel: str,
+        name: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def conversations_replies(
         self,
@@ -1080,7 +1416,11 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def conversations_requestSharedInvite_deny(
-        self, *, invite_id: str, message: str | None = ..., **kwargs
+        self,
+        *,
+        invite_id: str,
+        message: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def conversations_requestSharedInvite_list(
         self,
@@ -1095,33 +1435,64 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def conversations_setPurpose(
-        self, *, channel: str, purpose: str, **kwargs
+        self,
+        *,
+        channel: str,
+        purpose: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def conversations_setTopic(
-        self, *, channel: str, topic: str, **kwargs
+        self,
+        *,
+        channel: str,
+        topic: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def conversations_unarchive(
-        self, *, channel: str, **kwargs
+        self,
+        *,
+        channel: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def conversations_canvases_create(
-        self, *, channel_id: str, document_content: dict[str, str], **kwargs
+        self,
+        *,
+        channel_id: str,
+        document_content: dict[str, str],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def dialog_open(
-        self, *, dialog: dict[str, Any], trigger_id: str, **kwargs
+        self,
+        *,
+        dialog: dict[str, Any],
+        trigger_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def dnd_endDnd(self, **kwargs) -> Future | SlackResponse: ...
     def dnd_endSnooze(self, **kwargs) -> Future | SlackResponse: ...
     def dnd_info(
-        self, *, team_id: str | None = ..., user: str | None = ..., **kwargs
+        self,
+        *,
+        team_id: str | None = ...,
+        user: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def dnd_setSnooze(
-        self, *, num_minutes: int | str, **kwargs
+        self,
+        *,
+        num_minutes: int | str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def dnd_teamInfo(
-        self, users: str | Sequence[str], team_id: str | None = ..., **kwargs
+        self,
+        users: str | Sequence[str],
+        team_id: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def emoji_list(
-        self, include_categories: bool | None = ..., **kwargs
+        self,
+        include_categories: bool | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def entity_presentDetails(
         self,
@@ -1133,7 +1504,11 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def files_comments_delete(
-        self, *, file: str, id: str, **kwargs
+        self,
+        *,
+        file: str,
+        id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def files_delete(self, *, file: str, **kwargs) -> Future | SlackResponse: ...
     def files_info(
@@ -1161,7 +1536,11 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def files_remote_info(
-        self, *, external_id: str | None = ..., file: str | None = ..., **kwargs
+        self,
+        *,
+        external_id: str | None = ...,
+        file: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def files_remote_list(
         self,
@@ -1197,7 +1576,11 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def files_remote_remove(
-        self, *, external_id: str | None = ..., file: str | None = ..., **kwargs
+        self,
+        *,
+        external_id: str | None = ...,
+        file: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def files_remote_share(
         self,
@@ -1208,10 +1591,16 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def files_revokePublicURL(
-        self, *, file: str, **kwargs
+        self,
+        *,
+        file: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def files_sharedPublicURL(
-        self, *, file: str, **kwargs
+        self,
+        *,
+        file: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def files_upload(
         self,
@@ -1263,41 +1652,80 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def functions_completeSuccess(
-        self, *, function_execution_id: str, outputs: dict[str, Any], **kwargs
+        self,
+        *,
+        function_execution_id: str,
+        outputs: dict[str, Any],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def functions_completeError(
-        self, *, function_execution_id: str, error: str, **kwargs
+        self,
+        *,
+        function_execution_id: str,
+        error: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def groups_archive(self, *, channel: str, **kwargs) -> Future | SlackResponse: ...
     def groups_create(self, *, name: str, **kwargs) -> Future | SlackResponse: ...
     def groups_createChild(
-        self, *, channel: str, **kwargs
+        self,
+        *,
+        channel: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def groups_history(self, *, channel: str, **kwargs) -> Future | SlackResponse: ...
     def groups_info(self, *, channel: str, **kwargs) -> Future | SlackResponse: ...
     def groups_invite(
-        self, *, channel: str, user: str, **kwargs
+        self,
+        *,
+        channel: str,
+        user: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def groups_kick(
-        self, *, channel: str, user: str, **kwargs
+        self,
+        *,
+        channel: str,
+        user: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def groups_leave(self, *, channel: str, **kwargs) -> Future | SlackResponse: ...
     def groups_list(self, **kwargs) -> Future | SlackResponse: ...
     def groups_mark(
-        self, *, channel: str, ts: str, **kwargs
+        self,
+        *,
+        channel: str,
+        ts: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def groups_open(self, *, channel: str, **kwargs) -> Future | SlackResponse: ...
     def groups_rename(
-        self, *, channel: str, name: str, **kwargs
+        self,
+        *,
+        channel: str,
+        name: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def groups_replies(
-        self, *, channel: str, thread_ts: str, **kwargs
+        self,
+        *,
+        channel: str,
+        thread_ts: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def groups_setPurpose(
-        self, *, channel: str, purpose: str, **kwargs
+        self,
+        *,
+        channel: str,
+        purpose: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def groups_setTopic(
-        self, *, channel: str, topic: str, **kwargs
+        self,
+        *,
+        channel: str,
+        topic: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def groups_unarchive(self, *, channel: str, **kwargs) -> Future | SlackResponse: ...
     def im_close(self, *, channel: str, **kwargs) -> Future | SlackResponse: ...
@@ -1306,7 +1734,11 @@ class LegacyWebClient(LegacyBaseClient):
     def im_mark(self, *, channel: str, ts: str, **kwargs) -> Future | SlackResponse: ...
     def im_open(self, *, user: str, **kwargs) -> Future | SlackResponse: ...
     def im_replies(
-        self, *, channel: str, thread_ts: str, **kwargs
+        self,
+        *,
+        channel: str,
+        thread_ts: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def migration_exchange(
         self,
@@ -1320,13 +1752,24 @@ class LegacyWebClient(LegacyBaseClient):
     def mpim_history(self, *, channel: str, **kwargs) -> Future | SlackResponse: ...
     def mpim_list(self, **kwargs) -> Future | SlackResponse: ...
     def mpim_mark(
-        self, *, channel: str, ts: str, **kwargs
+        self,
+        *,
+        channel: str,
+        ts: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def mpim_open(
-        self, *, users: str | Sequence[str], **kwargs
+        self,
+        *,
+        users: str | Sequence[str],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def mpim_replies(
-        self, *, channel: str, thread_ts: str, **kwargs
+        self,
+        *,
+        channel: str,
+        thread_ts: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def oauth_v2_access(
         self,
@@ -1349,7 +1792,12 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def oauth_v2_exchange(
-        self, *, token: str, client_id: str, client_secret: str, **kwargs
+        self,
+        *,
+        token: str,
+        client_id: str,
+        client_secret: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def openid_connect_token(
         self,
@@ -1363,14 +1811,27 @@ class LegacyWebClient(LegacyBaseClient):
     ) -> Future | SlackResponse: ...
     def openid_connect_userInfo(self, **kwargs) -> Future | SlackResponse: ...
     def pins_add(
-        self, *, channel: str, timestamp: str | None = ..., **kwargs
+        self,
+        *,
+        channel: str,
+        timestamp: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def pins_list(self, *, channel: str, **kwargs) -> Future | SlackResponse: ...
     def pins_remove(
-        self, *, channel: str, timestamp: str | None = ..., **kwargs
+        self,
+        *,
+        channel: str,
+        timestamp: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def reactions_add(
-        self, *, channel: str, name: str, timestamp: str, **kwargs
+        self,
+        *,
+        channel: str,
+        name: str,
+        timestamp: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def reactions_get(
         self,
@@ -1415,16 +1876,31 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def reminders_complete(
-        self, *, reminder: str, team_id: str | None = ..., **kwargs
+        self,
+        *,
+        reminder: str,
+        team_id: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def reminders_delete(
-        self, *, reminder: str, team_id: str | None = ..., **kwargs
+        self,
+        *,
+        reminder: str,
+        team_id: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def reminders_info(
-        self, *, reminder: str, team_id: str | None = ..., **kwargs
+        self,
+        *,
+        reminder: str,
+        team_id: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def reminders_list(
-        self, *, team_id: str | None = ..., **kwargs
+        self,
+        *,
+        team_id: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def rtm_connect(
         self,
@@ -1511,10 +1987,18 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def slackLists_download_get(
-        self, *, list_id: str, job_id: str, **kwargs
+        self,
+        *,
+        list_id: str,
+        job_id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def slackLists_download_start(
-        self, *, list_id: str, include_archived: bool | None = ..., **kwargs
+        self,
+        *,
+        list_id: str,
+        include_archived: bool | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def slackLists_items_create(
         self,
@@ -1526,10 +2010,18 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def slackLists_items_delete(
-        self, *, list_id: str, id: str, **kwargs
+        self,
+        *,
+        list_id: str,
+        id: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def slackLists_items_deleteMultiple(
-        self, *, list_id: str, ids: list[str], **kwargs
+        self,
+        *,
+        list_id: str,
+        ids: list[str],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def slackLists_items_info(
         self,
@@ -1549,7 +2041,11 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def slackLists_items_update(
-        self, *, list_id: str, cells: list[dict[str, Any]], **kwargs
+        self,
+        *,
+        list_id: str,
+        cells: list[dict[str, Any]],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def slackLists_update(
         self,
@@ -1600,11 +2096,18 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def team_billableInfo(
-        self, *, team_id: str | None = ..., user: str | None = ..., **kwargs
+        self,
+        *,
+        team_id: str | None = ...,
+        user: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def team_billing_info(self, **kwargs) -> Future | SlackResponse: ...
     def team_externalTeams_disconnect(
-        self, *, target_team: str, **kwargs
+        self,
+        *,
+        target_team: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def team_externalTeams_list(
         self,
@@ -1619,7 +2122,11 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def team_info(
-        self, *, team: str | None = ..., domain: str | None = ..., **kwargs
+        self,
+        *,
+        team: str | None = ...,
+        domain: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def team_integrationLogs(
         self,
@@ -1634,7 +2141,10 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def team_profile_get(
-        self, *, visibility: str | None = ..., **kwargs
+        self,
+        *,
+        visibility: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def team_preferences_list(self, **kwargs) -> Future | SlackResponse: ...
     def usergroups_create(
@@ -1717,7 +2227,11 @@ class LegacyWebClient(LegacyBaseClient):
     def users_getPresence(self, *, user: str, **kwargs) -> Future | SlackResponse: ...
     def users_identity(self, **kwargs) -> Future | SlackResponse: ...
     def users_info(
-        self, *, user: str, include_locale: bool | None = ..., **kwargs
+        self,
+        *,
+        user: str,
+        include_locale: bool | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def users_list(
         self,
@@ -1729,7 +2243,10 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def users_lookupByEmail(
-        self, *, email: str, **kwargs
+        self,
+        *,
+        email: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def users_setPhoto(
         self,
@@ -1741,13 +2258,22 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def users_setPresence(
-        self, *, presence: str, **kwargs
+        self,
+        *,
+        presence: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def users_discoverableContacts_lookup(
-        self, email: str, **kwargs
+        self,
+        email: str,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def users_profile_get(
-        self, *, user: str | None = ..., include_labels: bool | None = ..., **kwargs
+        self,
+        *,
+        user: str | None = ...,
+        include_labels: bool | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def users_profile_set(
         self,
@@ -1784,25 +2310,53 @@ class LegacyWebClient(LegacyBaseClient):
         **kwargs,
     ) -> Future | SlackResponse: ...
     def views_publish(
-        self, *, user_id: str, view: dict | View, hash: str | None = ..., **kwargs
+        self,
+        *,
+        user_id: str,
+        view: dict | View,
+        hash: str | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def workflows_featured_add(
-        self, *, channel_id: str, trigger_ids: str | Sequence[str], **kwargs
+        self,
+        *,
+        channel_id: str,
+        trigger_ids: str | Sequence[str],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def workflows_featured_list(
-        self, *, channel_ids: str | Sequence[str], **kwargs
+        self,
+        *,
+        channel_ids: str | Sequence[str],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def workflows_featured_remove(
-        self, *, channel_id: str, trigger_ids: str | Sequence[str], **kwargs
+        self,
+        *,
+        channel_id: str,
+        trigger_ids: str | Sequence[str],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def workflows_featured_set(
-        self, *, channel_id: str, trigger_ids: str | Sequence[str], **kwargs
+        self,
+        *,
+        channel_id: str,
+        trigger_ids: str | Sequence[str],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def workflows_stepCompleted(
-        self, *, workflow_step_execute_id: str, outputs: dict | None = ..., **kwargs
+        self,
+        *,
+        workflow_step_execute_id: str,
+        outputs: dict | None = ...,
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def workflows_stepFailed(
-        self, *, workflow_step_execute_id: str, error: dict[str, str], **kwargs
+        self,
+        *,
+        workflow_step_execute_id: str,
+        error: dict[str, str],
+        **kwargs,
     ) -> Future | SlackResponse: ...
     def workflows_updateStep(
         self,

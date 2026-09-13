@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Annotated, Final, cast, get_args
+from typing import TYPE_CHECKING, Annotated, cast, get_args
 
 import asyncio
 
@@ -21,9 +21,15 @@ from sagent.tools.core import (
     truncate_to_budget,
 )
 from sagent.tools.display import Toggle, Wrap
-from sagent.tools.lib.bash import Node, walk_commands
+from sagent.tools.lib.bash import walk_commands
 from sagent.tools.tool_spec import CLI_SETTABLE
 from sagent.types.runtime import ToolResult
+
+
+if TYPE_CHECKING:
+    from bashlex.ast import (
+        node as Node,  # noqa: N812 -- PascalCase for the type name; bashlex spells it lowercase.
+    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -57,7 +63,8 @@ class WebFetch:
     # swap from inheriting a stale cache.
     _cache: cachetools.TTLCache[tuple[Transport, Extractor, str], str] = field(
         default_factory=lambda: cachetools.TTLCache[
-            tuple[Transport, Extractor, str], str
+            tuple[Transport, Extractor, str],
+            str,
         ](maxsize=128, ttl=15 * 60),
         repr=False,
         compare=False,
@@ -236,7 +243,7 @@ def _request_bodies(
     # caller-side ``except ValueError`` envelope in ``WebFetch.run``.
     if not isinstance(unfrozen_form, dict):
         raise ValueError(  # noqa: TRY004 -- caller catches ValueError uniformly.
-            f"'form' must be an object of string fields, got {type(unfrozen_form).__name__}."
+            f"'form' must be an object of string fields, got {type(unfrozen_form).__name__}.",
         )
     # Values checked, not stringified: str() turned {"x": []} into the literal
     # field "x=[]" and {"x": {"a": 1}} into "x={'a': 1}" -- a request the caller
@@ -247,13 +254,12 @@ def _request_bodies(
     for key, value in cast(dict[str, object], unfrozen_form).items():
         if not isinstance(value, str):
             raise ValueError(  # noqa: TRY004 -- caller catches ValueError uniformly.
-                f"'form' field {key!r} must be a string, got {type(value).__name__}."
+                f"'form' field {key!r} must be a string, got {type(value).__name__}.",
             )
         form[str(key)] = value
     return None, form
 
 
-_NUDGE: Final = "curl/wget via Bash is a bad UX. Use the WebFetch tool."
 _HTTP_FETCH_BAIL_FLAGS: frozenset[str] = frozenset(
     {
         "-o",
@@ -279,7 +285,7 @@ _HTTP_FETCH_BAIL_FLAGS: frozenset[str] = frozenset(
         "--remote-name-all",
         "-J",
         "--remote-header-name",
-    }
+    },
 )
 
 # Utilities that write to disk BY DEFAULT, so the bare invocation is the
@@ -289,18 +295,15 @@ _HTTP_FETCH_BAIL_FLAGS: frozenset[str] = frozenset(
 _WRITES_BY_DEFAULT: frozenset[str] = frozenset({"wget"})
 
 
+# A fetch that writes a file or uploads one is not something WebFetch can do, so those
+# forms stay with Bash. Exact-string matching missed every spelling but the separated
+# one: ``--output=x``, the bundled ``-sO``, and ``--output-document=x`` all still
+# nudged.
+#
+# Two axes, because a flag denylist alone answers neither: an option FILE can carry the
+# write flag where argv never shows it, and ``wget`` writes with no flag at all.
 def _match_http_fetch(exe: str, args: tuple[str, ...]) -> str | None:
-    """Return a nudge when a shell command is a simple HTTP fetch.
-
-    A fetch that writes a file or uploads one is not something WebFetch
-    can do, so those forms stay with Bash. Exact-string matching missed
-    every spelling but the separated one: ``--output=x``, the bundled
-    ``-sO``, and ``--output-document=x`` all still nudged.
-
-    Two axes, because a flag denylist alone answers neither: an option
-    FILE can carry the write flag where argv never shows it, and ``wget``
-    writes with no flag at all.
-    """
+    """Return a nudge when a shell command is a simple HTTP fetch."""
     # ``-O -`` is wget's "write the body to stdout", so the output flag
     # is exactly what makes this shape replaceable. Asked FIRST, because
     # the generic scan below denies ``-O`` on sight.
@@ -317,16 +320,14 @@ def _match_http_fetch(exe: str, args: tuple[str, ...]) -> str | None:
     # the one that needs the bail rather than the one that earns a nudge.
     if exe in _WRITES_BY_DEFAULT and not streams:
         return None
-    return _NUDGE
+    return "curl/wget via Bash is a bad UX. Use the WebFetch tool."
 
 
+# ``-O -`` (and its bundled ``-qO-``) is the only form that does; every other invocation
+# saves a file, so the polarity is the reverse of the ``-O`` denial that applies to
+# ``curl``.
 def _streams_to_stdout(args: tuple[str, ...]) -> bool:
-    """Whether ``wget`` was told to write the body to stdout.
-
-    ``-O -`` (and its bundled ``-qO-``) is the only form that does; every
-    other invocation saves a file, so the polarity is the reverse of the
-    ``-O`` denial that applies to ``curl``.
-    """
+    """Whether ``wget`` was told to write the body to stdout."""
     for i, a in enumerate(args):
         if a in ("-O", "--output-document") and i + 1 < len(args):
             return args[i + 1] == "-"

@@ -63,9 +63,12 @@ def get_size_dict(
     param_name=...,
 ) -> dict: ...
 def select_best_resolution(
-    original_size: tuple, possible_resolutions: list
+    original_size: tuple,
+    possible_resolutions: list,
 ) -> tuple: ...
 def get_patch_output_size(
-    image, target_resolution, input_data_format
+    image,
+    target_resolution,
+    input_data_format,
 ):  # -> tuple[Any, Any]:
     ...

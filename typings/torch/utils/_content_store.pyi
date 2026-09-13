@@ -14,9 +14,16 @@ class ContentStoreWriter:
     def __init__(self, loc: str, stable_hash: bool = ...) -> None: ...
     def write_storage(self, storage: torch.UntypedStorage) -> str: ...
     def compute_tensor_metadata(
-        self, t: torch.Tensor, h=...
+        self,
+        t: torch.Tensor,
+        h=...,
     ) -> tuple[
-        dtype, str | Any, int | SymInt, tuple[int, ...], tuple[int, ...], Any
+        dtype,
+        str | Any,
+        int | SymInt,
+        tuple[int, ...],
+        tuple[int, ...],
+        Any,
     ]: ...
     def write_tensor(self, name: str, t: torch.Tensor) -> None: ...
 

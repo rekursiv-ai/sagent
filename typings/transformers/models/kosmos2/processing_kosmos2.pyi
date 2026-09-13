@@ -35,7 +35,11 @@ class Kosmos2Processor(ProcessorMixin):
     image_processor_class = ...
     tokenizer_class = ...
     def __init__(
-        self, image_processor, tokenizer, num_patch_index_tokens=..., *kwargs
+        self,
+        image_processor,
+        tokenizer,
+        num_patch_index_tokens=...,
+        *kwargs,
     ) -> None: ...
     def __call__(
         self,
@@ -53,21 +57,29 @@ class Kosmos2Processor(ProcessorMixin):
         num_image_tokens: int | None = ...,
     ) -> str | list[str]: ...
     def post_process_generation(
-        self, text, cleanup_and_extract=...
+        self,
+        text,
+        cleanup_and_extract=...,
     ):  # -> tuple[str, list[Any]]:
         ...
     def post_process_image_text_to_text(
-        self, generated_outputs, skip_special_tokens=..., **kwargs
+        self,
+        generated_outputs,
+        skip_special_tokens=...,
+        **kwargs,
     ):  # -> list[tuple[str, list[Any]] | Any]:
         ...
     @property
     def model_input_names(self): ...
 
 def coordinate_to_patch_index(
-    bbox: tuple[float, float, float, float], num_patches_per_side: int
+    bbox: tuple[float, float, float, float],
+    num_patches_per_side: int,
 ) -> tuple[int, int]: ...
 def patch_index_to_coordinate(
-    ul_idx: int, lr_idx: int, num_patches_per_side: int
+    ul_idx: int,
+    lr_idx: int,
+    num_patches_per_side: int,
 ):  # -> tuple[float, float, float, float]:
     ...
 def extract_entities_with_patch_indices(text):  # -> list[Any]:
@@ -75,7 +87,8 @@ def extract_entities_with_patch_indices(text):  # -> list[Any]:
 def adjust_entity_positions(entity, text):  # -> tuple[Any, tuple[int, int]]:
     ...
 def clean_text_and_extract_entities_with_bboxes(
-    text, num_patches_per_side=...
+    text,
+    num_patches_per_side=...,
 ):  # -> tuple[str, list[Any]]:
     ...
 

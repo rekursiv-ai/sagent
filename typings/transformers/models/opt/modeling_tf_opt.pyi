@@ -182,12 +182,17 @@ class TFOPTForCausalLM(TFOPTPreTrainedModel, TFCausalLanguageModelingLoss):
     def get_output_embeddings(self):  # -> TFSharedEmbeddings:
         ...
     def prepare_inputs_for_generation(
-        self, inputs, past_key_values=..., use_cache=..., **kwargs
+        self,
+        inputs,
+        past_key_values=...,
+        use_cache=...,
+        **kwargs,
     ):  # -> dict[str, Any | None]:
         ...
     @unpack_inputs
     @replace_return_docstrings(
-        output_type=TFCausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC
+        output_type=TFCausalLMOutputWithPast,
+        config_class=_CONFIG_FOR_DOC,
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,

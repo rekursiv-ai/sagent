@@ -27,13 +27,17 @@ class _ExecOrderData:
     @property
     def is_first_iter(self) -> bool: ...
     def get_handle_to_backward_prefetch(
-        self, current_handle: FlatParamHandle
+        self,
+        current_handle: FlatParamHandle,
     ) -> FlatParamHandle | None: ...
     def get_handle_to_forward_prefetch(
-        self, current_handle: FlatParamHandle
+        self,
+        current_handle: FlatParamHandle,
     ) -> FlatParamHandle | None: ...
     def record_post_forward(self, handle: FlatParamHandle | None) -> None: ...
     def record_pre_forward(
-        self, handle: FlatParamHandle | None, is_training: bool
+        self,
+        handle: FlatParamHandle | None,
+        is_training: bool,
     ) -> None: ...
     def next_iter(self) -> None: ...

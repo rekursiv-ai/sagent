@@ -128,13 +128,16 @@ def has_static_value(a: SymBool | SymFloat | SymInt | bool | float) -> bool: ...
 def guard_size_oblivious(expr: torch.SymBool | bool) -> bool: ...
 def check_consistent(new: _T, old: _T) -> None: ...
 def resolve_unbacked_bindings(
-    shape_env: ShapeEnv | None, bindings: dict[sympy.Symbol, pytree.KeyPath] | None
+    shape_env: ShapeEnv | None,
+    bindings: dict[sympy.Symbol, pytree.KeyPath] | None,
 ) -> dict[sympy.Symbol, pytree.KeyPath] | None: ...
 
 type Result = torch.Tensor | tuple[torch.Tensor, ...]
 
 def rebind_unbacked(
-    shape_env: ShapeEnv | None, n: torch.fx.Node, result: Result
+    shape_env: ShapeEnv | None,
+    n: torch.fx.Node,
+    result: Result,
 ) -> None: ...
 def is_accessor_node(node: torch.fx.Node) -> bool: ...
 def canonicalize_bool_expr(expr: _T) -> _T: ...
@@ -206,10 +209,13 @@ def guard_float(a: FloatLikeType) -> float: ...
 def fx_placeholder_vals(gm: torch.fx.GraphModule) -> list[object]: ...
 def fx_placeholder_targets(gm: torch.fx.GraphModule) -> list[str]: ...
 def eval_guards(
-    gm: torch.fx.GraphModule, *args: Tensor, ignore_static: bool = ...
+    gm: torch.fx.GraphModule,
+    *args: Tensor,
+    ignore_static: bool = ...,
 ) -> bool: ...
 def bind_symbols(
-    gm: torch.fx.GraphModule, *args: Tensor
+    gm: torch.fx.GraphModule,
+    *args: Tensor,
 ) -> dict[sympy.Symbol, int]: ...
 
 class DimDynamic(Enum):
@@ -248,7 +254,10 @@ class EqualityConstraint(Constraint):
     def __post_init__(self) -> None: ...
     def is_equal(self, source1: Source, source2: Source) -> bool: ...
     def is_derived(
-        self, src: Source, symbol_src: Source, fn: Callable[[sympy.Expr], sympy.Expr]
+        self,
+        src: Source,
+        symbol_src: Source,
+        fn: Callable[[sympy.Expr], sympy.Expr],
     ) -> bool: ...
 
 @dataclass(frozen=True)
@@ -307,7 +316,8 @@ class _SymbolInfo(NamedTuple):
 
 def error() -> NoReturn: ...
 def eval_is_non_overlapping_and_dense(
-    sizes: Sequence[int], strides: Sequence[int]
+    sizes: Sequence[int],
+    strides: Sequence[int],
 ) -> int: ...
 def cast_symbool_to_symint_guardless(
     symbool: bool | torch.SymBool,
@@ -435,7 +445,9 @@ class ShapeEnv:
     def prefer_deferred_runtime_asserts_over_guards(self) -> bool: ...
     @contextmanager
     def patch_source_specialization(
-        self, source: Source, check_fn: Callable[[sympy.Symbol], sympy.Expr]
+        self,
+        source: Source,
+        check_fn: Callable[[sympy.Symbol], sympy.Expr],
     ) -> Iterator[None]: ...
     def check_equal(self, other: ShapeEnv) -> None: ...
     @record_shapeenv_event()
@@ -456,15 +468,26 @@ class ShapeEnv:
     ) -> tuple[tuple[IntLikeType, ...], tuple[IntLikeType, ...], IntLikeType]: ...
     @record_shapeenv_event()
     def create_symintnode(
-        self, sym: sympy.Expr, *, hint: int | None, source: Source | None = ...
+        self,
+        sym: sympy.Expr,
+        *,
+        hint: int | None,
+        source: Source | None = ...,
     ) -> IntLikeType: ...
     @record_shapeenv_event()
     def create_symfloatnode(
-        self, sym: sympy.Expr, *, hint: float | bool | None, source: Source | None = ...
+        self,
+        sym: sympy.Expr,
+        *,
+        hint: float | bool | None,
+        source: Source | None = ...,
     ) -> FloatLikeType: ...
     @record_shapeenv_event()
     def create_unspecified_symint_and_symbol(
-        self, value: int, source: Source, dynamic_dim: DimDynamic
+        self,
+        value: int,
+        source: Source,
+        dynamic_dim: DimDynamic,
     ) -> IntLikeType: ...
     def create_symboolnode(self, sym: sympy.Expr) -> SymBool: ...
     @record_shapeenv_event()
@@ -527,28 +550,39 @@ class ShapeEnv:
         ignore_static: bool = ...,
     ) -> bool: ...
     def get_pruned_guards(
-        self, symints: Sequence[torch.SymInt]
+        self,
+        symints: Sequence[torch.SymInt],
     ) -> list[ShapeGuard]: ...
     def bind_symbols(
-        self, placeholders: Sequence[FakeTensor], args: Sequence[Tensor]
+        self,
+        placeholders: Sequence[FakeTensor],
+        args: Sequence[Tensor],
     ) -> dict[sympy.Symbol, int]: ...
     def get_nontrivial_guards(self) -> list[SympyBoolean]: ...
     def format_guards(self, verbose: bool = ...) -> str: ...
     def bound_sympy(
-        self, expr: sympy.Expr, size_oblivious: bool = ...
+        self,
+        expr: sympy.Expr,
+        size_oblivious: bool = ...,
     ) -> ValueRanges: ...
     def get_axioms(
-        self, symbols: tuple[sympy.Symbol] | None = ..., compute_hint: bool = ...
+        self,
+        symbols: tuple[sympy.Symbol] | None = ...,
+        compute_hint: bool = ...,
     ) -> tuple[SympyBoolean, ...]: ...
     @lru_cache(None)
     def get_implications(
-        self, e: SympyBoolean
+        self,
+        e: SympyBoolean,
     ) -> tuple[tuple[SympyBoolean, sympy.logic.boolalg.BooleanAtom], ...]: ...
     def replace(self, expr: _SympyT) -> _SympyT: ...
     def simplify(self, expr: _SympyT, size_oblivious: bool = ...) -> _SympyT: ...
     @lru_cache(256)
     def size_hint(
-        self, expr: sympy.Basic, *, allow_none: bool = ...
+        self,
+        expr: sympy.Basic,
+        *,
+        allow_none: bool = ...,
     ) -> sympy.Basic | None: ...
     @lru_cache(256)
     def has_hint(self, expr: sympy.Expr) -> bool: ...
@@ -574,12 +608,18 @@ class ShapeEnv:
     @lru_cache(256)
     @record_shapeenv_event(save_tracked_fakes=True)
     def guard_or_defer_runtime_assert(
-        self, orig_expr: SympyBoolean, msg: str, fx_node: torch.fx.Node | None = ...
+        self,
+        orig_expr: SympyBoolean,
+        msg: str,
+        fx_node: torch.fx.Node | None = ...,
     ) -> bool: ...
     @lru_cache(maxsize=None)
     @record_shapeenv_event()
     def constrain_symbol_range(
-        self, s: sympy.Symbol, compiler_min: int, compiler_max: int
+        self,
+        s: sympy.Symbol,
+        compiler_min: int,
+        compiler_max: int,
     ) -> None: ...
 
 class PropagateUnbackedSymInts(torch.fx.Interpreter):

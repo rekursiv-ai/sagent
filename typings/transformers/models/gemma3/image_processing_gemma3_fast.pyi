@@ -45,7 +45,9 @@ class Gemma3ImageProcessorFast(BaseImageProcessorFast):
         ...
     @auto_docstring
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[Gemma3FastImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[Gemma3FastImageProcessorKwargs],
     ) -> BatchFeature: ...
 
 __all__ = ["Gemma3ImageProcessorFast"]

@@ -61,7 +61,9 @@ class RemBertSelfAttention(nn.Module):
 class RemBertSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -89,7 +91,9 @@ class RemBertIntermediate(nn.Module):
 class RemBertOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -127,7 +131,9 @@ class RemBertEncoder(nn.Module):
         cache_position: torch.Tensor | None = ...,
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
 
 class RemBertPredictionHeadTransform(nn.Module):
@@ -203,7 +209,10 @@ class RemBertForMaskedLM(RemBertPreTrainedModel):
         return_dict: bool | None = ...,
     ) -> tuple | MaskedLMOutput: ...
     def prepare_inputs_for_generation(
-        self, input_ids, attention_mask=..., **model_kwargs
+        self,
+        input_ids,
+        attention_mask=...,
+        **model_kwargs,
     ):  # -> dict[str, Tensor | Any]:
         ...
     @classmethod

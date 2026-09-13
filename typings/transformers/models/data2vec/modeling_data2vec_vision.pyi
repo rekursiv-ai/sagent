@@ -25,7 +25,9 @@ logger = ...
 class Data2VecVisionModelOutputWithPooling(BaseModelOutputWithPooling): ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class Data2VecVisionDropPath(nn.Module):
@@ -37,7 +39,10 @@ class Data2VecVisionDropPath(nn.Module):
 class Data2VecVisionEmbeddings(nn.Module):
     def __init__(self, config: Data2VecVisionConfig) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
         self,
@@ -54,7 +59,9 @@ class Data2VecVisionPatchEmbeddings(nn.Module):
 
 class Data2VecVisionSelfAttention(nn.Module):
     def __init__(
-        self, config: Data2VecVisionConfig, window_size: tuple | None = ...
+        self,
+        config: Data2VecVisionConfig,
+        window_size: tuple | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -66,7 +73,9 @@ class Data2VecVisionSelfAttention(nn.Module):
         resolution: tuple[int] | None = ...,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
 
 class Data2VecVisionSdpaSelfAttention(Data2VecVisionSelfAttention):
@@ -80,13 +89,18 @@ class Data2VecVisionSdpaSelfAttention(Data2VecVisionSelfAttention):
         resolution: tuple[int] | None = ...,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
 
 class Data2VecVisionSelfOutput(nn.Module):
     def __init__(self, config: Data2VecVisionConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor, gamma=...
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
+        gamma=...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -94,7 +108,9 @@ DATA2VEC_VISION_SELF_ATTENTION_CLASSES = ...
 
 class Data2VecVisionAttention(nn.Module):
     def __init__(
-        self, config: Data2VecVisionConfig, window_size: tuple | None = ...
+        self,
+        config: Data2VecVisionConfig,
+        window_size: tuple | None = ...,
     ) -> None: ...
     def prune_heads(self, heads):  # -> None:
         ...
@@ -108,7 +124,9 @@ class Data2VecVisionAttention(nn.Module):
         resolution: tuple[int] | None = ...,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
 
 class Data2VecVisionIntermediate(nn.Module):
@@ -138,23 +156,31 @@ class Data2VecVisionLayer(GradientCheckpointingLayer):
         resolution: tuple[int, int] | None = ...,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | tuple[torch.Tensor, torch.Tensor]: ...
 
 class Data2VecVisionRelativePositionBias(nn.Module):
     def __init__(self, config: Data2VecVisionConfig, window_size: tuple) -> None: ...
     @compile_compatible_method_lru_cache(maxsize=10)
     def generate_relative_position_index(
-        self, window_size: tuple[int, int]
+        self,
+        window_size: tuple[int, int],
     ) -> torch.Tensor: ...
     def forward(
-        self, window_size, interpolate_pos_encoding: bool = ..., dim_size=...
+        self,
+        window_size,
+        interpolate_pos_encoding: bool = ...,
+        dim_size=...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class Data2VecVisionEncoder(nn.Module):
     def __init__(
-        self, config: Data2VecVisionConfig, window_size: tuple | None = ...
+        self,
+        config: Data2VecVisionConfig,
+        window_size: tuple | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -181,7 +207,9 @@ class Data2VecVisionPreTrainedModel(PreTrainedModel):
 @auto_docstring
 class Data2VecVisionModel(Data2VecVisionPreTrainedModel):
     def __init__(
-        self, config: Data2VecVisionConfig, add_pooling_layer: bool = ...
+        self,
+        config: Data2VecVisionConfig,
+        add_pooling_layer: bool = ...,
     ) -> None: ...
     def get_input_embeddings(self):  # -> Data2VecVisionPatchEmbeddings:
         ...

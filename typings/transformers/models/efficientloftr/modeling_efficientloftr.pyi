@@ -25,7 +25,10 @@ class KeypointMatchingOutput(ModelOutput):
 
 @compile_compatible_method_lru_cache(maxsize=32)
 def compute_embeddings(
-    inv_freq: torch.Tensor, embed_height: int, embed_width: int, hidden_size: int
+    inv_freq: torch.Tensor,
+    embed_height: int,
+    embed_width: int,
+    hidden_size: int,
 ) -> torch.Tensor: ...
 
 class EfficientLoFTRRotaryEmbedding(nn.Module):
@@ -54,7 +57,10 @@ class EfficientLoFTRConvNormLayer(nn.Module):
 
 class EfficientLoFTRRepVGGBlock(GradientCheckpointingLayer):
     def __init__(
-        self, config: EfficientLoFTRConfig, stage_idx: int, block_idx: int
+        self,
+        config: EfficientLoFTRConfig,
+        stage_idx: int,
+        block_idx: int,
     ) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -77,13 +83,20 @@ class EfficientLoFTRAggregationLayer(nn.Module):
         encoder_hidden_states: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -109,7 +122,9 @@ class EfficientLoFTRAttention(nn.Module):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class EfficientLoFTRMLP(nn.Module):
@@ -150,23 +165,34 @@ class EfficientLoFTRLocalFeatureTransformer(nn.Module):
 
 class EfficientLoFTROutConvBlock(nn.Module):
     def __init__(
-        self, config: EfficientLoFTRConfig, hidden_size: int, intermediate_size: int
+        self,
+        config: EfficientLoFTRConfig,
+        hidden_size: int,
+        intermediate_size: int,
     ) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, residual_states: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        residual_states: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class EfficientLoFTRFineFusionLayer(nn.Module):
     def __init__(self, config: EfficientLoFTRConfig) -> None: ...
     def forward_pyramid(
-        self, hidden_states: torch.Tensor, residual_states: list[torch.Tensor]
+        self,
+        hidden_states: torch.Tensor,
+        residual_states: list[torch.Tensor],
     ) -> torch.Tensor: ...
     def forward(
-        self, coarse_features: torch.Tensor, residual_features: list[torch.Tensor]
+        self,
+        coarse_features: torch.Tensor,
+        residual_features: list[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 @auto_docstring
@@ -179,7 +205,8 @@ class EfficientLoFTRPreTrainedModel(PreTrainedModel):
     _supports_sdpa = ...
     _can_record_outputs = ...
     def extract_one_channel_pixel_values(
-        self, pixel_values: torch.FloatTensor
+        self,
+        pixel_values: torch.FloatTensor,
     ) -> torch.FloatTensor: ...
 
 @auto_docstring(custom_intro=...)
@@ -195,7 +222,9 @@ class EfficientLoFTRModel(EfficientLoFTRPreTrainedModel):
     ) -> BackboneOutput: ...
 
 def mask_border(
-    tensor: torch.Tensor, border_margin: int, value: bool | float
+    tensor: torch.Tensor,
+    border_margin: int,
+    value: bool | float,
 ) -> torch.Tensor: ...
 def create_meshgrid(
     height: int | torch.Tensor,
@@ -205,7 +234,8 @@ def create_meshgrid(
     dtype: torch.dtype | None = ...,
 ) -> torch.Tensor: ...
 def spatial_expectation2d(
-    input: torch.Tensor, normalized_coordinates: bool = ...
+    input: torch.Tensor,
+    normalized_coordinates: bool = ...,
 ) -> torch.Tensor: ...
 
 @auto_docstring(custom_intro=...)

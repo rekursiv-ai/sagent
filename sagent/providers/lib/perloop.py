@@ -62,14 +62,12 @@ class PerLoop[T]:
         # because the contention is between threads, not coroutines.
         self._guard = threading.Lock()
 
+    # Weak keys alone do not bound growth: a contended ``asyncio.Lock`` stores
+    # ``lock._loop``, so the strongly-held value keeps its own weak key alive and the
+    # entry outlives the loop forever. Closure is the observable end of a loop's life,
+    # so evict on it.
     def _prune_locked(self) -> None:
-        """Drop entries for closed loops. Caller holds ``_guard``.
-
-        Weak keys alone do not bound growth: a contended ``asyncio.Lock``
-        stores ``lock._loop``, so the strongly-held value keeps its own
-        weak key alive and the entry outlives the loop forever. Closure
-        is the observable end of a loop's life, so evict on it.
-        """
+        """Drop entries for closed loops. Caller holds ``_guard``."""
         for loop in [x for x in self._values if x.is_closed()]:
             _ = self._values.pop(loop, None)
 

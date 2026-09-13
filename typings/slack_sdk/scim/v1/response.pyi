@@ -22,7 +22,12 @@ class SCIMResponse:
     @property
     def errors(self) -> Errors | None: ...
     def __init__(
-        self, *, url: str, status_code: int, raw_body: str | None, headers: dict
+        self,
+        *,
+        url: str,
+        status_code: int,
+        raw_body: str | None,
+        headers: dict,
     ) -> None: ...
 
 class SearchUsersResponse(SCIMResponse):

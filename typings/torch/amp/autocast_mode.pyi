@@ -15,7 +15,8 @@ __all__ = [
 
 def is_autocast_available(device_type: str) -> bool: ...
 def autocast_decorator(
-    autocast_instance: autocast, func: Callable[..., Any]
+    autocast_instance: autocast,
+    func: Callable[..., Any],
 ) -> Callable[..., Any]: ...
 
 class autocast:
@@ -42,5 +43,7 @@ def custom_fwd(
     cast_inputs: Any = ...,
 ) -> partial[Any] | Callable[..., Any]: ...
 def custom_bwd(
-    bwd: Callable[..., Any] = ..., *, device_type: str
+    bwd: Callable[..., Any] = ...,
+    *,
+    device_type: str,
 ) -> partial[Any] | Callable[..., Any]: ...

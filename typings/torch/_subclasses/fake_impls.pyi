@@ -50,22 +50,38 @@ def resize_as_(fake_mode, func, *args, **kwargs): ...
         torch.Tag.dynamic_output_shape in func.tags
         and func
         not in [aten.index.Tensor, aten.nonzero.default, aten.repeat_interleave.Tensor]
-    )
+    ),
 )
 def dyn_shape(fake_mode, func, *args, **kwargs): ...
 @register_op_impl(aten._unique2.default)
 def unique2(
-    fake_mode, func, arg, sorted=..., return_inverse=..., return_counts=...
+    fake_mode,
+    func,
+    arg,
+    sorted=...,
+    return_inverse=...,
+    return_counts=...,
 ) -> tuple[Any, ...]: ...
 @register_op_impl(aten.select.int)
 def meta_select(fake_mode, func, self, dim, index) -> NotImplementedType: ...
 @register_op_impl(aten.unique_dim.default)
 def unique_dim(
-    fake_mode, func, arg, dim, sorted=..., return_inverse=..., return_counts=...
+    fake_mode,
+    func,
+    arg,
+    dim,
+    sorted=...,
+    return_inverse=...,
+    return_counts=...,
 ) -> tuple[Any, ...]: ...
 @register_op_impl(aten.unique_consecutive.default)
 def _(
-    fake_mode, func, arg, return_inverse=..., return_counts=..., dim=...
+    fake_mode,
+    func,
+    arg,
+    return_inverse=...,
+    return_counts=...,
+    dim=...,
 ) -> tuple[Any, ...]: ...
 @register_op_impl(aten.repeat_interleave.Tensor)
 def repeat_interleave_tensor(fake_mode, func, repeats, output_size=...): ...
@@ -80,13 +96,24 @@ def nonzero(fake_mode, func, arg): ...
 def masked_select(fake_mode, func, self, mask): ...
 @register_op_impl(torch.ops.aten._assert_tensor_metadata.default)
 def assert_tensor_metadata(
-    fake_mode, func, t, sizes=..., strides=..., dtype=..., *, device=..., layout=...
+    fake_mode,
+    func,
+    t,
+    sizes=...,
+    strides=...,
+    dtype=...,
+    *,
+    device=...,
+    layout=...,
 ) -> None: ...
 @register_op_impl(lambda func: torch.Tag.data_dependent_output in func.tags)
 def data_dep(fake_mode, func, *args, **kwargs): ...
 def check_no_bool_index_tensors(func, self, indices) -> None: ...
 def run_and_return_new_tensor_of_input_device(
-    fake_mode, func, args, kwargs
+    fake_mode,
+    func,
+    args,
+    kwargs,
 ) -> FakeTensor: ...
 
 _is_builtin_namespaces = ...
@@ -98,10 +125,13 @@ def has_meta(func) -> bool: ...
         is_builtin(func)
         and func.name().startswith("aten::_foreach_")
         and has_meta(func)
-    )
+    ),
 )
 def foreach_run_and_map_input_device(
-    fake_mode, func, *args, **kwargs
+    fake_mode,
+    func,
+    *args,
+    **kwargs,
 ) -> NotImplementedType | list[Any]: ...
 @register_op_impl(aten.index.Tensor)
 def index_tensor(fake_mode, func, *args, **kwargs): ...
@@ -135,12 +165,15 @@ def nested_tensors_unsupported(fake_mode, func, *args, **kwargs): ...
             aten._nested_tensor_from_tensor_list.default,
             aten._nested_tensor_from_tensor_list.out,
         )
-    ]
+    ],
 )
 def nyi(fake_mode, func, *args, **kwargs) -> None: ...
 @register_op_impl([aten.convolution.default, aten.convolution_backward.default])
 def conv(
-    fake_mode, func, *args, **kwargs
+    fake_mode,
+    func,
+    *args,
+    **kwargs,
 ) -> FakeTensor | tuple[Any | FakeTensor, Any | FakeTensor, Any | FakeTensor]: ...
 @register_op_impl(torch.ops.aten.bincount.default)
 def bincount(fake_mode, func, inputs, weights=..., minlength=...): ...
@@ -150,7 +183,8 @@ FAST_OP_IMPLEMENTATIONS = ...
 def register_fast_op_impl(func: OpOverload) -> Callable[..., Any]: ...
 def infer_size(a, b) -> tuple[int, ...]: ...
 def make_fast_binary_impl(
-    slow_ref, type_promotion_kind=...
+    slow_ref,
+    type_promotion_kind=...,
 ) -> Callable[..., Any | FakeTensor]: ...
 def fast_detach(fake_mode, x, include_real=...) -> FakeTensor: ...
 @functools.cache

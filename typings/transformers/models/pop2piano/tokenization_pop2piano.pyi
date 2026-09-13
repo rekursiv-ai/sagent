@@ -17,7 +17,12 @@ VOCAB_FILES_NAMES = ...
 
 def token_time_to_note(number, cutoff_time_idx, current_idx): ...
 def token_note_to_note(
-    number, current_velocity, default_velocity, note_onsets_ready, current_idx, notes
+    number,
+    current_velocity,
+    default_velocity,
+    note_onsets_ready,
+    current_idx,
+    notes,
 ): ...
 
 @requires(backends=("pretty_midi", "torch"))
@@ -62,10 +67,15 @@ class Pop2PianoTokenizer(PreTrainedTokenizer):
     ):  # -> list[Any] | ndarray[Any, dtype[Any]]:
         ...
     def notes_to_midi(
-        self, notes: np.ndarray, beatstep: np.ndarray, offset_sec: int = ...
+        self,
+        notes: np.ndarray,
+        beatstep: np.ndarray,
+        offset_sec: int = ...,
     ): ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
     def encode_plus(
         self,
@@ -94,7 +104,10 @@ class Pop2PianoTokenizer(PreTrainedTokenizer):
         **kwargs,
     ) -> BatchEncoding: ...
     def batch_decode(
-        self, token_ids, feature_extractor_output: BatchFeature, return_midi: bool = ...
+        self,
+        token_ids,
+        feature_extractor_output: BatchFeature,
+        return_midi: bool = ...,
     ):  # -> BatchEncoding:
         ...
 

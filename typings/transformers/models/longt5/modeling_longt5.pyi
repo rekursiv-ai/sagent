@@ -46,7 +46,11 @@ class LongT5Attention(nn.Module):
     def prune_heads(self, heads):  # -> None:
         ...
     def compute_bias(
-        self, query_length, key_length, device=..., cache_position=...
+        self,
+        query_length,
+        key_length,
+        device=...,
+        cache_position=...,
     ):  # -> Any:
         ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
@@ -67,7 +71,9 @@ class LongT5Attention(nn.Module):
 
 class LongT5LocalAttention(nn.Module):
     def __init__(
-        self, config: LongT5Config, has_relative_attention_bias: bool = ...
+        self,
+        config: LongT5Config,
+        has_relative_attention_bias: bool = ...,
     ) -> None: ...
     def prune_heads(self, heads):  # -> None:
         ...
@@ -85,14 +91,18 @@ class LongT5LocalAttention(nn.Module):
 
 class LongT5TransientGlobalAttention(nn.Module):
     def __init__(
-        self, config: LongT5Config, has_relative_attention_bias: bool = ...
+        self,
+        config: LongT5Config,
+        has_relative_attention_bias: bool = ...,
     ) -> None: ...
     def prune_heads(self, heads):  # -> None:
         ...
     def compute_bias(self, block_length: int):  # -> Any:
         ...
     def compute_side_bias(
-        self, mask: torch.Tensor, global_segment_ids: torch.Tensor
+        self,
+        mask: torch.Tensor,
+        global_segment_ids: torch.Tensor,
     ) -> torch.Tensor: ...
     def forward(
         self,
@@ -106,7 +116,10 @@ class LongT5TransientGlobalAttention(nn.Module):
 
 class LongT5LayerSelfAttention(nn.Module):
     def __init__(
-        self, config, has_relative_attention_bias=..., layer_idx: int | None = ...
+        self,
+        config,
+        has_relative_attention_bias=...,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -124,7 +137,10 @@ class LongT5LayerSelfAttention(nn.Module):
 
 class LongT5LayerLocalSelfAttention(nn.Module):
     def __init__(
-        self, config, has_relative_attention_bias=..., layer_idx: int | None = ...
+        self,
+        config,
+        has_relative_attention_bias=...,
+        layer_idx: int | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -139,7 +155,10 @@ class LongT5LayerLocalSelfAttention(nn.Module):
 
 class LongT5LayerTransientGlobalSelfAttention(nn.Module):
     def __init__(
-        self, config, has_relative_attention_bias=..., layer_idx: int | None = ...
+        self,
+        config,
+        has_relative_attention_bias=...,
+        layer_idx: int | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -172,7 +191,10 @@ class LongT5LayerCrossAttention(nn.Module):
 
 class LongT5Block(GradientCheckpointingLayer):
     def __init__(
-        self, config, has_relative_attention_bias=..., layer_idx: int | None = ...
+        self,
+        config,
+        has_relative_attention_bias=...,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(

@@ -26,7 +26,9 @@ _CONFIG_FOR_DOC = ...
 LARGE_NEGATIVE = ...
 
 def shift_tokens_right(
-    input_ids: tf.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: tf.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ): ...
 
 class TFLEDLearnedPositionalEmbedding(keras.layers.Embedding):
@@ -250,7 +252,7 @@ class TFLEDModel(TFLEDPreTrainedModel):
         ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        LED_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        LED_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -307,7 +309,8 @@ class TFLEDForConditionalGeneration(TFLEDPreTrainedModel):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(LED_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFLEDSeq2SeqLMOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFLEDSeq2SeqLMOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,

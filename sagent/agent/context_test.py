@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
-from sagent.agent import context as context_module
+from sagent.agent import context
 from sagent.agent.context import (
     InvalidContextError,
     ResolvedContext,
@@ -150,7 +150,7 @@ def test_history_entries_are_object_identical_across_calls() -> None:
 def test_splice_masks_earlier_history_record() -> None:
     """A splice whose mask covers a HR position removes its entry.
 
-    With ``insert_after=_ref(0)``, the payload renders after ``a`` —
+    With ``insert_after=_ref(0)``, the payload renders after ``a`` --
     which is where ``b`` used to be in tape order.
     """
     tape = [
@@ -246,7 +246,7 @@ def test_multi_range_mask_removes_non_contiguous_positions() -> None:
         ),
     ]
     msgs = _resolve_messages(tape)
-    # b and d masked, summary at head-after-a, c and e survive.
+    # B and D are masked; summary is at head-after-A; C and E survive.
     assert [getattr(m, "text", None) for m in msgs] == ["a", "SUMMARY", "c", "e"]
 
 
@@ -313,7 +313,7 @@ def test_cover_the_cover_resurrects_originally_masked_content() -> None:
         ),
     ]
     msgs = _resolve_messages(tape)
-    # f killed d → d's mask of b lapses → b resurfaces.
+    # F kills D; D's mask of B lapses, so B resurfaces.
     # f's payload renders after a. Order: a, F, b, c, e.
     assert [getattr(m, "text", None) for m in msgs] == ["a", "F", "b", "c", "e"]
 
@@ -410,7 +410,7 @@ def test_alive_splices_handles_large_alive_splice_sets_quickly() -> None:
                 idx * 2 + 1,
                 mask=(MaskRange.between(_ref(idx * 2), _ref(idx * 2)),),
                 payload=(),
-            )
+            ),
         )
     alive = alive_splices(tape)
     assert len(alive) == 2_000
@@ -444,9 +444,9 @@ def test_resolve_scales_linearly_in_tape_length() -> None:
     while the scan count is the property that actually decides the growth.
     """
     scans = 0
-    real_contains = context_module._OrderedRefs.contains
+    real_contains = context._OrderedRefs.contains
 
-    def counting_contains(order: context_module._OrderedRefs, ref: TapeRef) -> bool:
+    def counting_contains(order: context._OrderedRefs, ref: TapeRef) -> bool:
         nonlocal scans
         scans += 1
         return real_contains(order, ref)
@@ -462,11 +462,11 @@ def test_resolve_scales_linearly_in_tape_length() -> None:
                 mask=(MaskRange(session_id="s", lo=ordinal - 1, hi=ordinal - 1),),
                 insert_after=_ref(ordinal - 2) if ordinal >= 2 else None,
                 payload=(_assistant(f"a{i}"),),
-            )
+            ),
         )
         ordinal += 1
 
-    with patch.object(context_module._OrderedRefs, "contains", counting_contains):
+    with patch.object(context._OrderedRefs, "contains", counting_contains):
         _ = resolve_context(tape)
 
     assert scans <= len(tape), (

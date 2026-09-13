@@ -52,7 +52,12 @@ def eager_attention_forward(
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 
@@ -138,10 +143,12 @@ class HeliumForCausalLM(HeliumPreTrainedModel, GenerationMixin):
     ) -> CausalLMOutputWithPast: ...
 
 class HeliumForSequenceClassification(
-    GenericForSequenceClassification, HeliumPreTrainedModel
+    GenericForSequenceClassification,
+    HeliumPreTrainedModel,
 ): ...
 class HeliumForTokenClassification(
-    GenericForTokenClassification, HeliumPreTrainedModel
+    GenericForTokenClassification,
+    HeliumPreTrainedModel,
 ): ...
 
 __all__ = [

@@ -42,7 +42,9 @@ class ParakeetCTCConfig(PretrainedConfig):
     ) -> None: ...
     @classmethod
     def from_encoder_config(
-        cls, encoder_config: ParakeetEncoderConfig, **kwargs
+        cls,
+        encoder_config: ParakeetEncoderConfig,
+        **kwargs,
     ):  # -> Self:
         ...
 

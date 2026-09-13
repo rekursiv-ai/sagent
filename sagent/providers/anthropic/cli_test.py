@@ -1,4 +1,4 @@
-"""Tests for ``providers.anthropic_cli``: wire-format + lifecycle."""
+"""Tests for ``providers.cli``: wire-format + lifecycle."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import re
 import pytest
 
 from sagent.lib.custom_json import MutableJSON
-from sagent.providers.anthropic import cli as anthropic_cli
+from sagent.providers.anthropic import cli
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.anthropic.cli import (
     AnthropicCLI,
@@ -58,7 +58,8 @@ from sagent.types.tape import TapeEvent
 
 
 def _noop_sync_tools_bridge(
-    request: ModelRequest, publish: Callable[[RuntimeEvent], None] | None = None
+    request: ModelRequest,
+    publish: Callable[[RuntimeEvent], None] | None = None,
 ) -> None:
     del request, publish
 
@@ -71,7 +72,7 @@ _CRED_PAYLOAD: dict[str, object] = {
         "scopes": ["user:profile", "user:inference"],
         "subscriptionType": "max",
         "rateLimitTier": "default",
-    }
+    },
 }
 
 
@@ -107,13 +108,14 @@ def _auth_status_logged_out(binary: str) -> bool | None:
     return False
 
 
-def test_anthropic_cli_does_not_import_subscription_provider() -> None:
-    source = inspect.getsource(anthropic_cli)
+def test_cli_does_not_import_subscription_provider() -> None:
+    source = inspect.getsource(cli)
     assert "providers.anthropic_sub" not in source
 
 
 def test_from_cli_requires_credentials(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Legacy CLIs without auth status still require the credentials file."""
     monkeypatch.setattr(
@@ -133,7 +135,8 @@ def test_from_cli_requires_credentials(
 
 
 def test_from_cli_accepts_native_login_without_credentials_file(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """The native Keychain login is authoritative without the legacy file."""
     monkeypatch.setattr(
@@ -155,7 +158,8 @@ def test_from_cli_accepts_native_login_without_credentials_file(
 
 
 def test_from_cli_treats_explicit_default_account_as_native_login(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """``--account default`` must not bypass the macOS Keychain login."""
     monkeypatch.setattr(
@@ -177,7 +181,8 @@ def test_from_cli_treats_explicit_default_account_as_native_login(
 
 
 def test_from_cli_missing_named_account_does_not_suggest_native_login(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Native login cannot create Sagent's legacy named credential file."""
     monkeypatch.setattr(
@@ -197,11 +202,15 @@ def test_from_cli_missing_named_account_does_not_suggest_native_login(
 
 
 def test_from_cli_rejects_native_logged_out_state_even_with_stale_file(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """A stale legacy JSON file must not override an explicit logged-out state."""
     creds = _write_creds(tmp_path)
-    monkeypatch.setattr("sagent.providers.anthropic.cli._CREDS_PATH", creds)
+    monkeypatch.setattr(
+        "sagent.providers.anthropic.cli._CREDS_PATH",
+        creds,
+    )
     monkeypatch.setattr(
         "sagent.providers.anthropic.cli.shutil.which",
         _which_claude_stub,
@@ -246,7 +255,10 @@ def test_claude_auth_status_scrubs_non_subscription_auth_and_reads_boolean(
     monkeypatch.setenv("CLAUDE_CODE_USE_MANTLE", "1")
     monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
     monkeypatch.setenv("CLAUDE_CODE_USE_FOUNDRY", "1")
-    monkeypatch.setattr("sagent.providers.anthropic.cli.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "sagent.providers.anthropic.cli.subprocess.run",
+        fake_run,
+    )
 
     assert _claude_auth_status("/opt/homebrew/bin/claude") is True
     assert captured["args"] == (
@@ -333,7 +345,10 @@ def test_login_runs_native_claudeai_flow_with_scrubbed_env(
         "sagent.providers.anthropic.cli.shutil.which",
         fake_which,
     )
-    monkeypatch.setattr("sagent.providers.anthropic.cli.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "sagent.providers.anthropic.cli.subprocess.run",
+        fake_run,
+    )
     monkeypatch.setattr(
         "sagent.providers.anthropic.cli._claude_auth_status",
         _auth_status_logged_in,
@@ -383,7 +398,8 @@ def test_login_reports_native_cli_failure(
 
 
 def test_from_cli_with_credentials(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """``from_credentials`` returns a configured provider when both creds + CLI exist."""
     creds = _write_creds(tmp_path)
@@ -412,7 +428,8 @@ def test_from_key_delegates_to_anthropic() -> None:
 
 
 def test_from_cli_rejects_malformed_credentials(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     creds = tmp_path / ".credentials.json"
     creds.write_text("", encoding="utf-8")
@@ -434,7 +451,8 @@ def test_from_cli_rejects_malformed_credentials(
 
 
 def test_from_cli_rejects_credentials_missing_oauth_fields(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     creds = tmp_path / ".credentials.json"
     creds.write_text(json.dumps({"claudeAiOauth": {}}), encoding="utf-8")
@@ -456,7 +474,8 @@ def test_from_cli_rejects_credentials_missing_oauth_fields(
 
 
 def test_from_cli_rejects_missing_executable(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """``from_credentials`` fails fast if ``claude`` is not on ``PATH``."""
     creds = _write_creds(tmp_path)
@@ -686,7 +705,7 @@ def test_session_jsonl_path_is_cwd_aware(tmp_path: Path) -> None:
     Claude indexes sessions per encoded-cwd project dir and ``--resume``
     cannot reach across. The path encoding maps every non-``[A-Za-z0-9-]``
     char of the RESOLVED cwd to ``-``, so two different cwds produce two
-    different project dirs: live repro 2026-06-09 — a second server
+    different project dirs: live repro 2026-06-09 -- a second server
     instance launched from a scratch cwd resumed the primary
     deployment's JSONL and claude exited ``No conversation found``,
     wedging warmup for all five agents.
@@ -712,7 +731,9 @@ def test_session_jsonl_path_is_cwd_aware(tmp_path: Path) -> None:
 def test_user_line_text_only() -> None:
     """A plain ``UserMessage`` becomes a single ``content: str`` line."""
     line = _user_line(
-        UserMessage(text="hello"), max_image_dim=8000, max_image_bytes=5 * 1024 * 1024
+        UserMessage(text="hello"),
+        max_image_dim=8000,
+        max_image_bytes=5 * 1024 * 1024,
     )
     assert line == {"type": "user", "message": {"role": "user", "content": "hello"}}
 
@@ -829,7 +850,7 @@ async def test_stateless_default_account_inherits_native_home(
         async def close(self) -> None:
             return None
 
-    monkeypatch.setattr(anthropic_cli, "Subproc", _CaptureSubproc)
+    monkeypatch.setattr(cli, "Subproc", _CaptureSubproc)
     model = AnthropicCLI().model("claude-haiku-4-5")
     bridge = MagicMock()
     bridge.url = "http://127.0.0.1:1234/mcp"
@@ -854,7 +875,10 @@ async def test_stateless_named_account_uses_isolated_file_home(
     named = tmp_path / ".credentials-work.json"
     named.write_text(json.dumps(_CRED_PAYLOAD), encoding="utf-8")
     isolated = tmp_path / "isolated-home"
-    monkeypatch.setattr("sagent.providers.anthropic.cli._CREDS_PATH", base)
+    monkeypatch.setattr(
+        "sagent.providers.anthropic.cli._CREDS_PATH",
+        base,
+    )
 
     def fake_mkdtemp(**_kwargs: object) -> str:
         return str(isolated)
@@ -876,7 +900,7 @@ async def test_stateless_named_account_uses_isolated_file_home(
         async def close(self) -> None:
             return None
 
-    monkeypatch.setattr(anthropic_cli, "Subproc", _CaptureSubproc)
+    monkeypatch.setattr(cli, "Subproc", _CaptureSubproc)
     model = AnthropicCLI(account="work").model("claude-haiku-4-5")
     bridge = MagicMock()
     bridge.url = "http://127.0.0.1:1234/mcp"
@@ -909,15 +933,15 @@ def test_build_model_response_normalizes_input_to_last_round() -> None:
         "type": "result",
         "modelUsage": {
             "claude-opus-4-6": {
-                "inputTokens": 5_600_000,  # cumulative across rounds
+                "inputTokens": 5_600_000,  # Cumulative across rounds.
                 "outputTokens": 450,
                 "cacheCreationInputTokens": 90_000,
                 "cacheReadInputTokens": 5_400_000,
                 "costUSD": 1.25,
-            }
+            },
         },
     }
-    # Raw Anthropic API shape off the last ``message_start`` —
+    # Raw Anthropic API shape off the last ``message_start`` --
     # snake_case, unlike the camelCase ``modelUsage`` rows above.
     last_round_usage: MutableJSON = {
         "input_tokens": 3,
@@ -955,7 +979,7 @@ def test_round_context_tokens_sums_cache_pools() -> None:
 async def test_drain_captures_last_round_usage_for_context_anchor() -> None:
     """End-to-end through ``_drain_until_result``: the LAST round's
     ``message_start`` usage feeds both ``response.tokens``'s input side
-    and the model's ``_last_input_tokens`` respawn/compaction anchor —
+    and the model's ``_last_input_tokens`` respawn/compaction anchor --
     while the cumulative ``result`` totals do not.
     """
 
@@ -969,7 +993,7 @@ async def test_drain_captures_last_round_usage_for_context_anchor() -> None:
                         "input_tokens": input_tokens,
                         "cache_creation_input_tokens": 0,
                         "cache_read_input_tokens": cache_read,
-                    }
+                    },
                 },
             },
         }
@@ -980,22 +1004,24 @@ async def test_drain_captures_last_round_usage_for_context_anchor() -> None:
         "is_error": False,
         "modelUsage": {
             "claude-haiku-4-5": {
-                "inputTokens": 146_003,  # cumulative
+                "inputTokens": 146_003,  # Cumulative.
                 "outputTokens": 70,
                 "cacheReadInputTokens": 96_000,
                 "costUSD": 0.01,
-            }
+            },
         },
     }
     events = [
-        _msg_start(50_000, 0),  # round 1: cold prompt
-        _msg_start(3, 96_000),  # round 2 (final): cached context
+        _msg_start(50_000, 0),  # Round 1: cold prompt.
+        _msg_start(3, 96_000),  # Round 2 (final): cached context.
         result_event,
     ]
 
     class _Proc:
         async def read_json_line(
-            self, *, skip_non_json: bool = False
+            self,
+            *,
+            skip_non_json: bool = False,
         ) -> MutableJSON | None:
             del skip_non_json
             return events.pop(0) if events else None
@@ -1029,21 +1055,23 @@ async def test_drain_zero_round_preserves_prior_input_token_anchor() -> None:
                 "inputTokens": 0,
                 "outputTokens": 0,
                 "costUSD": 0.0,
-            }
+            },
         },
     }
     events = [result_event]
 
     class _Proc:
         async def read_json_line(
-            self, *, skip_non_json: bool = False
+            self,
+            *,
+            skip_non_json: bool = False,
         ) -> MutableJSON | None:
             del skip_non_json
             return events.pop(0) if events else None
 
     provider = AnthropicCLI()
     model = provider.model("claude-haiku-4-5")
-    model._last_input_tokens = 180_000  # a genuinely full prior context
+    model._last_input_tokens = 180_000  # `a` genuinely full prior context.
     _ = await model._drain_until_result(cast(Subproc, _Proc()), publish=None)
     assert model._last_input_tokens == 180_000, "zero-round drain wiped the anchor"
 
@@ -1071,7 +1099,8 @@ def test_model_accepts_subprocess_read_timeout_kwarg() -> None:
 
 @pytest.mark.asyncio
 async def test_session_persistent_stream_returns_empty_when_history_cleared(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """After ``agent.clear()``, sagent's runtime calls ``stream()`` with
     an empty ``request.messages`` until new input arrives. The
@@ -1148,7 +1177,8 @@ async def test_session_persistent_stream_returns_empty_when_history_cleared(
 
 @pytest.mark.asyncio
 async def test_session_persistent_advances_sent_index_per_entry_on_partial_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Regression for 2026-06-03 ~14:30 SWE bug: when multiple new
     user-like entries are queued and the drain aborts partway through,
@@ -1244,10 +1274,11 @@ async def test_session_persistent_advances_sent_index_per_entry_on_partial_failu
 
     # Three entries queued. _last_sent_index = 5 means request.messages
     # has 8 entries; entries 5, 6, 7 are the new user-like ones.
-    msg_E1 = AgentSendMessage(source="tl", text="entry 1 — should land cleanly")
-    msg_E2 = AgentSendMessage(source="tl", text="entry 2 — drain aborts on this one")
+    msg_E1 = AgentSendMessage(source="tl", text="entry 1 -- should land cleanly")
+    msg_E2 = AgentSendMessage(source="tl", text="entry 2 -- drain aborts on this one")
     msg_E3 = AgentSendMessage(
-        source="tl", text="entry 3 — STOP directive that must NOT be lost"
+        source="tl",
+        text="entry 3 -- STOP directive that must NOT be lost",
     )
     request = ModelRequest(
         system="x",
@@ -1357,8 +1388,8 @@ async def test_await_mcp_listed_noop_without_tools() -> None:
     bridge = _FakeBridge([], has_tools=False)
     model._tools_bridge = cast(ToolsBridge, bridge)
     proc = cast(Subproc, object())
-    await model._await_mcp_listed(proc)  # must not raise
-    assert bridge.wait_calls == []  # never even waited
+    await model._await_mcp_listed(proc)  # Must not raise.
+    assert bridge.wait_calls == []  # Never even waited.
 
 
 @pytest.mark.asyncio
@@ -1398,7 +1429,7 @@ def test_detached_delivery_entry_folds_results_into_one_user_message() -> None:
         [
             ToolResult(call_id="", content="websearch: 3 hits"),
             ToolResult(call_id="", content="paperfetch failed", is_error=True),
-        ]
+        ],
     )
     model._tools_bridge = cast(ToolsBridge, bridge)
 
@@ -1437,12 +1468,12 @@ def test_detached_delivery_entry_holds_buffer_until_turn_succeeds() -> None:
     second = model._detached_delivery_entry()
     assert isinstance(second, UserMessage)
     assert second.text == "[detached tool result] staged"
-    assert bridge.drain_calls == 1  # not re-drained
+    assert bridge.drain_calls == 1  # Not re-drained.
 
     # Turn succeeds -> buffer cleared -> nothing pending.
     model._pending_detached_text = None
     assert model._detached_delivery_entry() is None
-    assert bridge.drain_calls == 2  # now consults the (empty) bridge again
+    assert bridge.drain_calls == 2  # Now consults the (empty) bridge again.
 
 
 def test_clear_drops_pending_detached_buffer() -> None:
@@ -1467,7 +1498,8 @@ def test_clear_drops_pending_detached_buffer() -> None:
 
 @pytest.mark.asyncio
 async def test_session_persistent_delivers_detached_result_as_trailing_entry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A turn with no new tape entries but a pending detached result still
     spawns: the result is sent as a trailing synthetic entry that does
@@ -1569,7 +1601,7 @@ async def test_stateless_exchange_delivers_pending_detached_result(
     """
     provider = AnthropicCLI()
     model = provider.model("claude-haiku-4-5")
-    assert model._session_id is None  # stateless
+    assert model._session_id is None  # `stateless`.
 
     bridge = _FakeBridge([ToolResult(call_id="", content="BG RESULT")])
     model._tools_bridge = cast(ToolsBridge, bridge)
@@ -1619,7 +1651,7 @@ def test_is_event_retryable_classifies_organic_shapes() -> None:
     multi-agent server.
     """
     # 1. The dominant aborted_streaming + ede_diagnostic shape (TL,
-    #    2026-06-03 10:17:53 — 418k cache reads attempt that died on
+    #    2026-06-03 10:17:53 -- 418k cache reads attempt that died on
     #    a tool_use boundary). Retryable.
     aborted_streaming = {
         "type": "result",
@@ -1680,7 +1712,8 @@ def test_extract_retry_after_ms_handles_both_key_names() -> None:
 
 
 def test_is_retryable_provider_error_session_persistent_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``send_with_retry`` consults this method to decide whether to
     sleep + retry vs let the runtime see the error. Session-persistent
@@ -1778,7 +1811,7 @@ def test_dispatch_stream_event_routes_text_and_thinking() -> None:
     )
     assert text_parts == ["hello"]
     assert thinking_parts == ["reflecting"]
-    assert signature_parts == []  # no signature_delta yet
+    assert signature_parts == []  # No signature_delta yet.
     assert text_chunks == ["hello"]
     assert thinking_chunks == ["reflecting"]
 
@@ -1788,7 +1821,7 @@ def test_dispatch_stream_event_captures_signature_delta() -> None:
 
     Required for v2.1-α materializer mode: claude's stream emits a
     ``signature_delta`` event after the thinking body, carrying the
-    opaque thought signature. The stream parser MUST capture it —
+    opaque thought signature. The stream parser MUST capture it --
     without it, ``AssistantMessage.thinking_blocks`` carry blocks
     with no signature, the materializer writes them unsigned to
     JSONL, and Anthropic's API rejects on the next ``--resume`` wire
@@ -1826,7 +1859,7 @@ def test_dispatch_stream_event_publishes_rich_tool_label_at_stop() -> None:
     thinking_parts: list[str] = []
     signature_parts: list[str] = []
     tool_use_blocks: dict[int, dict[str, object]] = {}
-    # 1) start: registers tool_use at index 0 -- NO label published yet
+    # 1) start: registers tool_use at index 0 -- NO label published yet.
     start_event: MutableJSON = {
         "type": "content_block_start",
         "index": 0,
@@ -1845,8 +1878,8 @@ def test_dispatch_stream_event_publishes_rich_tool_label_at_stop() -> None:
         tool_use_blocks=tool_use_blocks,
         publish=published.append,
     )
-    assert published == []  # nothing yet -- we wait for args
-    # 2) deltas: stream the JSON in two chunks
+    assert published == []  # Nothing yet -- we wait for args.
+    # 2) deltas: stream the JSON in two chunks.
     for partial in ('{"command":"ls', ' -la"}'):
         delta_event: MutableJSON = {
             "type": "content_block_delta",
@@ -1861,8 +1894,8 @@ def test_dispatch_stream_event_publishes_rich_tool_label_at_stop() -> None:
             tool_use_blocks=tool_use_blocks,
             publish=published.append,
         )
-    assert published == []  # still nothing
-    # 3) stop: now we publish the rich label
+    assert published == []  # Still nothing.
+    # 3) stop: now we publish the rich label.
     stop_event: MutableJSON = {"type": "content_block_stop", "index": 0}
     _dispatch_stream_event(
         stop_event,
@@ -1875,7 +1908,7 @@ def test_dispatch_stream_event_publishes_rich_tool_label_at_stop() -> None:
     assert len(published) == 1
     label = published[0]
     assert isinstance(label, ToolLabel)
-    # Includes both the tool name and the command arg
+    # Includes both the tool name and the command arg.
     assert label.text == "Bash ls -la"
     assert label.call_id == "toolu_abc123"
 
@@ -1919,7 +1952,7 @@ def test_dispatch_stream_event_ignores_unknown_delta_types() -> None:
     v2.1-α materialize mode started re-sending history via wire, so
     ``signature_delta`` moved into the known set. We use a genuinely
     unknown type (``fake_future_delta``) to keep the contract
-    semantics — the parser stays inert on shapes it doesn't know.
+    semantics -- the parser stays inert on shapes it doesn't know.
     """
     text_parts: list[str] = []
     thinking_parts: list[str] = []
@@ -1972,7 +2005,7 @@ def test_build_model_response_sums_model_usage_rows() -> None:
         fallback_message_id="fallback",
     )
     assert response.message.text == "reply"
-    # No ``message_start`` observed → input side is 0 ("unknown — estimate
+    # No ``message_start`` observed → input side is 0 ("unknown -- estimate
     # instead"), NOT the cumulative 300 (see the normalization tests below).
     assert response.tokens.request == 0
     # Output IS cumulative: every internal round's generation was produced.
@@ -1981,7 +2014,7 @@ def test_build_model_response_sums_model_usage_rows() -> None:
     assert response.stop_reason == "model_finished"
     assert response.message_id == "sid-x"
     assert len(response.message.thinking_blocks) == 1
-    # Signature MUST be carried alongside the thinking body — otherwise
+    # Signature MUST be carried alongside the thinking body -- otherwise
     # a subsequent wire send fails with HTTP 400
     # ``thinking.signature: Field required``.
     block = response.message.thinking_blocks[0]
@@ -2268,7 +2301,7 @@ async def test_stream_failed_turn_keeps_proven_system_hash(
 
     with pytest.raises(SubprocessTransportError, match="boom"):
         _ = await model.stream(
-            ModelRequest(messages=[UserMessage(text="hi")], system=system)
+            ModelRequest(messages=[UserMessage(text="hi")], system=system),
         )
 
     assert model._system_hash == _hash_system("proven system")
@@ -2400,7 +2433,7 @@ async def test_exchange_turn_skips_assistant_replay() -> None:
                 UserMessage(text="first"),
                 AssistantMessage(text="hidden"),
                 UserMessage(text="second"),
-            ]
+            ],
         ),
         publish=None,
     )
@@ -2552,7 +2585,7 @@ async def test_exchange_turn_drains_each_user_like_entry() -> None:
                 UserMessage(text="first"),
                 AssistantMessage(text="hidden"),
                 UserMessage(text="current"),
-            ]
+            ],
         ),
         publish=None,
     )
@@ -2572,7 +2605,9 @@ async def test_exchange_turn_replay_drain_does_not_update_input_tokens() -> None
             del line
 
         async def read_json_line(
-            self, *, skip_non_json: bool = False
+            self,
+            *,
+            skip_non_json: bool = False,
         ) -> MutableJSON | None:
             del skip_non_json
             nonlocal drain_count
@@ -2588,7 +2623,7 @@ async def test_exchange_turn_replay_drain_does_not_update_input_tokens() -> None
         _ = await model._exchange_turn(
             cast(Subproc, _Proc()),
             ModelRequest(
-                messages=[UserMessage(text="replay"), UserMessage(text="current")]
+                messages=[UserMessage(text="replay"), UserMessage(text="current")],
             ),
             publish=None,
         )
@@ -2599,17 +2634,23 @@ async def test_exchange_turn_replay_drain_does_not_update_input_tokens() -> None
 def test_serialize_for_stdin_user_passthrough() -> None:
     """``UserMessage`` falls through ``_serialize_for_stdin`` to ``_user_line``."""
     line = _serialize_for_stdin(
-        UserMessage(text="ping"), max_image_dim=8000, max_image_bytes=5 * 1024 * 1024
+        UserMessage(text="ping"),
+        max_image_dim=8000,
+        max_image_bytes=5 * 1024 * 1024,
     )
     assert line["type"] == "user"
 
 
 def test_interrupt_active_proc_returns_false_when_no_active_subprocess(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """No active hot-spare ⇒ ``_interrupt_active_proc`` returns False without raising."""
     creds = _write_creds(tmp_path)
-    monkeypatch.setattr("sagent.providers.anthropic.cli._CREDS_PATH", creds)
+    monkeypatch.setattr(
+        "sagent.providers.anthropic.cli._CREDS_PATH",
+        creds,
+    )
     monkeypatch.setattr(
         "sagent.providers.anthropic.cli.shutil.which",
         _which_claude_stub,
@@ -2623,11 +2664,15 @@ def test_interrupt_active_proc_returns_false_when_no_active_subprocess(
 
 
 def test_interrupt_active_proc_signals_active_subprocess(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Active hot-spare ⇒ ``_interrupt_active_proc`` forwards to ``Subproc.interrupt``."""
     creds = _write_creds(tmp_path)
-    monkeypatch.setattr("sagent.providers.anthropic.cli._CREDS_PATH", creds)
+    monkeypatch.setattr(
+        "sagent.providers.anthropic.cli._CREDS_PATH",
+        creds,
+    )
     monkeypatch.setattr(
         "sagent.providers.anthropic.cli.shutil.which",
         _which_claude_stub,

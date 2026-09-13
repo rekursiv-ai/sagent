@@ -117,14 +117,20 @@ def test_validate_details_args_year_from_without_citations() -> None:
 
 def test_validate_details_args_unrecognized_id() -> None:
     res = _validate_details_args(
-        "not-an-id", "", influential_only=False, year_from=None
+        "not-an-id",
+        "",
+        influential_only=False,
+        year_from=None,
     )
     assert hasattr(res, "is_error")
 
 
 def test_validate_details_args_valid_metadata() -> None:
     res = _validate_details_args(
-        "10.1234/x", "", influential_only=False, year_from=None
+        "10.1234/x",
+        "",
+        influential_only=False,
+        year_from=None,
     )
     assert isinstance(res, tuple)
     op, kind, canonical = res
@@ -163,8 +169,8 @@ def test_run_rejects_zero_limit() -> None:
     # LIM-001: limit=0 must error, not silently return no results.
     result = asyncio.run(
         PaperDetails().run(
-            {"ids": ["10.1234/x"], "operation": "references", "limit": 0}
-        )
+            {"ids": ["10.1234/x"], "operation": "references", "limit": 0},
+        ),
     )
     assert result.is_error
     assert "limit" in result.content
@@ -172,7 +178,7 @@ def test_run_rejects_zero_limit() -> None:
 
 def test_run_rejects_zero_abstract_chars() -> None:
     result = asyncio.run(
-        PaperDetails().run({"ids": ["10.1234/x"], "abstract_chars": 0})
+        PaperDetails().run({"ids": ["10.1234/x"], "abstract_chars": 0}),
     )
     assert result.is_error
     assert "abstract_chars" in result.content
@@ -186,7 +192,7 @@ def test_run_invalid_id_returns_error() -> None:
 def test_run_ids_with_operation_rejected() -> None:
     result = asyncio.run(
         PaperDetails().run(
-            {"ids": ["10.1234/a", "10.1234/b"], "operation": "references"}
+            {"ids": ["10.1234/a", "10.1234/b"], "operation": "references"},
         ),
     )
     assert result.is_error
@@ -200,7 +206,10 @@ def test_run_ids_with_operation_rejected() -> None:
 
 def test_run_metadata_success() -> None:
     rec = PaperRecord(title="T", year=2020, doi="10.1234/cached_meta", authors=("A",))
-    with patch("sagent.tools.paper_details.metadata", return_value=rec) as m:
+    with patch(
+        "sagent.tools.paper_details.metadata",
+        return_value=rec,
+    ) as m:
         result = asyncio.run(
             PaperDetails().run({"ids": ["10.1234/meta_ok"]}),
         )
@@ -211,7 +220,10 @@ def test_run_metadata_success() -> None:
 
 def test_run_metadata_caches() -> None:
     rec = PaperRecord(title="C", doi="10.1234/unique_cache_doi_zz")
-    with patch("sagent.tools.paper_details.metadata", return_value=rec) as m:
+    with patch(
+        "sagent.tools.paper_details.metadata",
+        return_value=rec,
+    ) as m:
         _ = asyncio.run(PaperDetails().run({"ids": ["10.1234/unique_cache_doi_zz"]}))
         _ = asyncio.run(PaperDetails().run({"ids": ["10.1234/unique_cache_doi_zz"]}))
     assert m.call_count == 1
@@ -234,12 +246,16 @@ def test_run_metadata_error_mapped() -> None:
 
 def test_run_references() -> None:
     listing = Listing(
-        records=[PaperRecord(title="Cited Paper", year=2019)], complete=True
+        records=[PaperRecord(title="Cited Paper", year=2019)],
+        complete=True,
     )
-    with patch("sagent.tools.paper_details.references", return_value=listing) as m:
+    with patch(
+        "sagent.tools.paper_details.references",
+        return_value=listing,
+    ) as m:
         result = asyncio.run(
             PaperDetails().run(
-                {"ids": ["10.1234/ref_target"], "operation": "references"}
+                {"ids": ["10.1234/ref_target"], "operation": "references"},
             ),
         )
     assert "Cited Paper" in result.content
@@ -254,7 +270,7 @@ def test_run_references_empty() -> None:
     ):
         result = asyncio.run(
             PaperDetails().run(
-                {"ids": ["10.1234/empty_refs"], "operation": "references"}
+                {"ids": ["10.1234/empty_refs"], "operation": "references"},
             ),
         )
     assert result.content == "(no results)"
@@ -262,7 +278,10 @@ def test_run_references_empty() -> None:
 
 def test_run_citations_delegates_filters() -> None:
     listing = Listing(records=[PaperRecord(title="New", year=2022)], complete=True)
-    with patch("sagent.tools.paper_details.citations", return_value=listing) as m:
+    with patch(
+        "sagent.tools.paper_details.citations",
+        return_value=listing,
+    ) as m:
         result = asyncio.run(
             PaperDetails().run(
                 {
@@ -271,7 +290,7 @@ def test_run_citations_delegates_filters() -> None:
                     "year_from": 2020,
                     "influential_only": True,
                     "limit": 5,
-                }
+                },
             ),
         )
     assert "New" in result.content
@@ -286,7 +305,10 @@ def test_run_citations_delegates_filters() -> None:
 
 def test_run_citations_openalex_source() -> None:
     listing = Listing(records=[PaperRecord(title="OA citer")], complete=True)
-    with patch("sagent.tools.paper_details.citations", return_value=listing) as m:
+    with patch(
+        "sagent.tools.paper_details.citations",
+        return_value=listing,
+    ) as m:
         result = asyncio.run(
             PaperDetails().run(
                 {
@@ -294,7 +316,7 @@ def test_run_citations_openalex_source() -> None:
                     "operation": "citations",
                     "source": "openalex",
                     "limit": 3,
-                }
+                },
             ),
         )
     assert "OA citer" in result.content
@@ -303,14 +325,17 @@ def test_run_citations_openalex_source() -> None:
 
 def test_run_references_openalex_source() -> None:
     listing = Listing(records=[PaperRecord(title="OA ref")], complete=True)
-    with patch("sagent.tools.paper_details.references", return_value=listing) as m:
+    with patch(
+        "sagent.tools.paper_details.references",
+        return_value=listing,
+    ) as m:
         result = asyncio.run(
             PaperDetails().run(
                 {
                     "ids": ["10.1234/oa_ref_target"],
                     "operation": "references",
                     "source": "openalex",
-                }
+                },
             ),
         )
     assert "OA ref" in result.content
@@ -320,8 +345,8 @@ def test_run_references_openalex_source() -> None:
 def test_run_invalid_source_rejected() -> None:
     result = asyncio.run(
         PaperDetails().run(
-            {"ids": ["10.1/x"], "operation": "citations", "source": "bogus"}
-        )
+            {"ids": ["10.1/x"], "operation": "citations", "source": "bogus"},
+        ),
     )
     assert result.is_error
     assert "Invalid source" in result.content
@@ -329,7 +354,10 @@ def test_run_invalid_source_rejected() -> None:
 
 def test_run_citations_incomplete_notice() -> None:
     listing = Listing(records=[PaperRecord(title="Citing")], complete=False)
-    with patch("sagent.tools.paper_details.citations", return_value=listing):
+    with patch(
+        "sagent.tools.paper_details.citations",
+        return_value=listing,
+    ):
         result = asyncio.run(
             PaperDetails().run({"ids": ["10.1234/cit_more"], "operation": "citations"}),
         )
@@ -347,7 +375,8 @@ def test_render_listing_empty() -> None:
 
 def test_render_listing_complete_no_notice() -> None:
     out = _render_listing(
-        Listing(records=[PaperRecord(title="Solo")], complete=True), None
+        Listing(records=[PaperRecord(title="Solo")], complete=True),
+        None,
     )
     assert "Solo" in out
     assert "more matches" not in out
@@ -355,7 +384,8 @@ def test_render_listing_complete_no_notice() -> None:
 
 def test_render_listing_incomplete_notice() -> None:
     out = _render_listing(
-        Listing(records=[PaperRecord(title="Solo")], complete=False), None
+        Listing(records=[PaperRecord(title="Solo")], complete=False),
+        None,
     )
     assert out.endswith("\n... (more matches exist; raise 'limit' to see them)")
 
@@ -381,7 +411,7 @@ def test_run_ids_batches_one_call() -> None:
         result = asyncio.run(
             PaperDetails().run({"ids": ["10.1234/a", "10.1234/b", "10.1234/c"]}),
         )
-    assert m.call_count == 1  # one batched call, not three
+    assert m.call_count == 1  # One batched call, not three.
     assert m.call_args.args == (["DOI:10.1234/a", "DOI:10.1234/b", "DOI:10.1234/c"],)
     assert not result.is_error
     assert "title: First" in result.content
@@ -435,7 +465,7 @@ def test_run_ids_batch_with_miss_not_cached() -> None:
         first = asyncio.run(PaperDetails().run({"ids": ids}))
         _ = asyncio.run(PaperDetails().run({"ids": ids}))
     assert "not found" in first.content
-    assert m.call_count == 2  # re-fetched, miss not pinned
+    assert m.call_count == 2  # re-fetched, miss not pinned.
 
 
 def test_run_ids_batch_cache_keys_on_canonical_id() -> None:
@@ -450,7 +480,7 @@ def test_run_ids_batch_cache_keys_on_canonical_id() -> None:
         return_value=records,
     ) as m:
         _ = asyncio.run(
-            PaperDetails().run({"ids": ["arXiv:2401.00001", "arXiv:2401.00002"]})
+            PaperDetails().run({"ids": ["arXiv:2401.00001", "arXiv:2401.00002"]}),
         )
         _ = asyncio.run(PaperDetails().run({"ids": ["2401.00001", "2401.00002"]}))
     assert m.call_count == 1

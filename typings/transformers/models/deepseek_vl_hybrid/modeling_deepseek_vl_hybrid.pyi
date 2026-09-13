@@ -34,7 +34,12 @@ class DeepseekVLHybridCausalLMOutputWithPast(ModelOutput):
 
 class DeepseekVLHybridLayerNorm(nn.LayerNorm):
     def __init__(
-        self, normalized_shape, *, eps=..., data_format=..., **kwargs
+        self,
+        normalized_shape,
+        *,
+        eps=...,
+        data_format=...,
+        **kwargs,
     ) -> None: ...
     def forward(self, features: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -52,7 +57,9 @@ class DeepseekVLSamVisionProj(nn.Module):
 class DeepseekVLHybridAligner(nn.Module):
     def __init__(self, config: DeepseekVLHybridConfig) -> None: ...
     def forward(
-        self, vision_encodings: torch.Tensor, high_res_vision_encodings: torch.Tensor
+        self,
+        vision_encodings: torch.Tensor,
+        high_res_vision_encodings: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -109,7 +116,8 @@ class DeepseekVLHybridModel(DeepseekVLHybridPreTrainedModel):
         ...
 
 class DeepseekVLHybridForConditionalGeneration(
-    DeepseekVLHybridPreTrainedModel, GenerationMixin
+    DeepseekVLHybridPreTrainedModel,
+    GenerationMixin,
 ):
     _tied_weights_keys = ...
     _can_compile_fullgraph = ...

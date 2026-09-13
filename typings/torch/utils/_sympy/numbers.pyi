@@ -26,7 +26,8 @@ class IntInfinity(Number, metaclass=Singleton):
     def __rsub__(self, other): ...
     @_sympifyit("other", NotImplemented)
     def __mul__(
-        self, other
+        self,
+        other,
     ) -> NaN | Self | Infinity | NegativeInfinity | NotImplementedType | Expr: ...
 
     __rmul__ = ...
@@ -71,7 +72,8 @@ class NegativeIntInfinity(Number, metaclass=Singleton):
     def __rsub__(self, other): ...
     @_sympifyit("other", NotImplemented)
     def __mul__(
-        self, other
+        self,
+        other,
     ) -> NaN | Self | Infinity | NegativeInfinity | NotImplementedType | Expr: ...
 
     __rmul__ = ...

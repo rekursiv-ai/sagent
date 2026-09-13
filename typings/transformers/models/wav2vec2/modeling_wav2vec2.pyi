@@ -105,7 +105,9 @@ class Wav2Vec2Attention(nn.Module):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class Wav2Vec2FeedForward(nn.Module):
@@ -116,7 +118,10 @@ class Wav2Vec2FeedForward(nn.Module):
 class Wav2Vec2EncoderLayer(GradientCheckpointingLayer):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states, attention_mask=..., output_attentions=...
+        self,
+        hidden_states,
+        attention_mask=...,
+        output_attentions=...,
     ):  # -> tuple[Any, Any] | tuple[Any]:
         ...
 
@@ -157,7 +162,9 @@ class Wav2Vec2EncoderStableLayerNorm(nn.Module):
 class Wav2Vec2GumbelVectorQuantizer(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states, mask_time_indices=...
+        self,
+        hidden_states,
+        mask_time_indices=...,
     ):  # -> tuple[Tensor | Any, Tensor]:
         ...
 

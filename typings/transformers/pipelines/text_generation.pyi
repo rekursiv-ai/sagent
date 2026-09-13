@@ -29,18 +29,26 @@ class TextGenerationPipeline(Pipeline):
     def __call__(self, text_inputs: str, **kwargs: Any) -> list[dict[str, str]]: ...
     @overload
     def __call__(
-        self, text_inputs: list[str], **kwargs: Any
+        self,
+        text_inputs: list[str],
+        **kwargs: Any,
     ) -> list[list[dict[str, str]]]: ...
     @overload
     def __call__(
-        self, text_inputs: ChatType, **kwargs: Any
+        self,
+        text_inputs: ChatType,
+        **kwargs: Any,
     ) -> list[dict[str, ChatType]]: ...
     @overload
     def __call__(
-        self, text_inputs: list[ChatType], **kwargs: Any
+        self,
+        text_inputs: list[ChatType],
+        **kwargs: Any,
     ) -> list[list[dict[str, ChatType]]]: ...
     def __call__(
-        self, text_inputs, **kwargs
+        self,
+        text_inputs,
+        **kwargs,
     ):  # -> list[Any] | PipelineIterator | Generator[Any, Any, None] | Tensor | Any | None:
         ...
     def preprocess(

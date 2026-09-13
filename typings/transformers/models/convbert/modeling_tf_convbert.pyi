@@ -51,7 +51,12 @@ class TFConvBertSelfAttention(keras.layers.Layer):
     def __init__(self, config, **kwargs) -> None: ...
     def transpose_for_scores(self, x, batch_size): ...
     def call(
-        self, hidden_states, attention_mask, head_mask, output_attentions, training=...
+        self,
+        hidden_states,
+        attention_mask,
+        head_mask,
+        output_attentions,
+        training=...,
     ):  # -> tuple[Any, Any] | tuple[Any]:
         ...
     def build(self, input_shape=...):  # -> None:
@@ -67,14 +72,24 @@ class TFConvBertAttention(keras.layers.Layer):
     def __init__(self, config, **kwargs) -> None: ...
     def prune_heads(self, heads): ...
     def call(
-        self, input_tensor, attention_mask, head_mask, output_attentions, training=...
+        self,
+        input_tensor,
+        attention_mask,
+        head_mask,
+        output_attentions,
+        training=...,
     ): ...
     def build(self, input_shape=...):  # -> None:
         ...
 
 class GroupedLinearLayer(keras.layers.Layer):
     def __init__(
-        self, input_size, output_size, num_groups, kernel_initializer, **kwargs
+        self,
+        input_size,
+        output_size,
+        num_groups,
+        kernel_initializer,
+        **kwargs,
     ) -> None: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -95,7 +110,12 @@ class TFConvBertOutput(keras.layers.Layer):
 class TFConvBertLayer(keras.layers.Layer):
     def __init__(self, config, **kwargs) -> None: ...
     def call(
-        self, hidden_states, attention_mask, head_mask, output_attentions, training=...
+        self,
+        hidden_states,
+        attention_mask,
+        head_mask,
+        output_attentions,
+        training=...,
     ): ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -164,7 +184,7 @@ class TFConvBertModel(TFConvBertPreTrainedModel):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        CONVBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        CONVBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -218,7 +238,7 @@ class TFConvBertForMaskedLM(TFConvBertPreTrainedModel, TFMaskedLanguageModelingL
     def get_prefix_bias_name(self): ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        CONVBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        CONVBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -253,12 +273,13 @@ class TFConvBertClassificationHead(keras.layers.Layer):
     CONVBERT_START_DOCSTRING,
 )
 class TFConvBertForSequenceClassification(
-    TFConvBertPreTrainedModel, TFSequenceClassificationLoss
+    TFConvBertPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        CONVBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        CONVBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -290,7 +311,7 @@ class TFConvBertForMultipleChoice(TFConvBertPreTrainedModel, TFMultipleChoiceLos
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        CONVBERT_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        CONVBERT_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -319,12 +340,13 @@ class TFConvBertForMultipleChoice(TFConvBertPreTrainedModel, TFMultipleChoiceLos
     CONVBERT_START_DOCSTRING,
 )
 class TFConvBertForTokenClassification(
-    TFConvBertPreTrainedModel, TFTokenClassificationLoss
+    TFConvBertPreTrainedModel,
+    TFTokenClassificationLoss,
 ):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        CONVBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        CONVBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -353,12 +375,13 @@ class TFConvBertForTokenClassification(
     CONVBERT_START_DOCSTRING,
 )
 class TFConvBertForQuestionAnswering(
-    TFConvBertPreTrainedModel, TFQuestionAnsweringLoss
+    TFConvBertPreTrainedModel,
+    TFQuestionAnsweringLoss,
 ):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        CONVBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        CONVBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,

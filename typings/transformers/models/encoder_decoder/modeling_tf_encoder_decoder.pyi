@@ -24,7 +24,9 @@ ENCODER_DECODER_START_DOCSTRING = ...
 ENCODER_DECODER_INPUTS_DOCSTRING = ...
 
 def shift_tokens_right(
-    input_ids: tf.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: tf.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ): ...
 
 @add_start_docstrings(ENCODER_DECODER_START_DOCSTRING)
@@ -57,10 +59,11 @@ class TFEncoderDecoderModel(TFPreTrainedModel, TFCausalLanguageModelingLoss):
     ) -> TFPreTrainedModel: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ENCODER_DECODER_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ENCODER_DECODER_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFSeq2SeqLMOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFSeq2SeqLMOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,

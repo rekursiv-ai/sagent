@@ -40,7 +40,12 @@ class GemmaRotaryEmbedding(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -138,10 +143,12 @@ class GemmaForCausalLM(GemmaPreTrainedModel, GenerationMixin):
     ) -> CausalLMOutputWithPast: ...
 
 class GemmaForSequenceClassification(
-    GenericForSequenceClassification, GemmaPreTrainedModel
+    GenericForSequenceClassification,
+    GemmaPreTrainedModel,
 ): ...
 class GemmaForTokenClassification(
-    GenericForTokenClassification, GemmaPreTrainedModel
+    GenericForTokenClassification,
+    GemmaPreTrainedModel,
 ): ...
 
 __all__ = [

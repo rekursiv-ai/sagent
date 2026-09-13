@@ -30,7 +30,7 @@ __all__ = ["HotSpare"]
 
 logger = logging.getLogger(__name__)
 
-_MAX_CONSECUTIVE_TRANSPORT_FAILURES = 3  # config-globals: ignore -- failure-count dial
+_MAX_CONSECUTIVE_TRANSPORT_FAILURES = 3  # house-ignore[globals] -- Failure-count dial.
 
 
 class HotSpare:
@@ -195,7 +195,7 @@ class HotSpare:
             await spare.close()
         except asyncio.CancelledError:
             await self._close_partial_spare()
-        except Exception as exc:  # noqa: BLE001 -- shutdown must not raise
+        except Exception as exc:  # noqa: BLE001 -- Shutdown cleanup must contain every task failure and preserve termination.
             logger.debug("hot spare close: spare task cleanup raised: %s", exc)
 
     async def _take_or_make_spare(self) -> Subproc:
@@ -205,7 +205,7 @@ class HotSpare:
         if task is not None:
             try:
                 return await task
-            except Exception as exc:  # noqa: BLE001 -- spare-warm failure: log and fall back to a fresh spawn
+            except Exception as exc:  # noqa: BLE001 -- Warm-up failures are logged before the provider falls back to a fresh spawn.
                 logger.warning("hot spare warm-up failed; spawning fresh: %s", exc)
         if self._spare is not None:
             spare = self._spare
@@ -230,5 +230,5 @@ class HotSpare:
             return
         try:
             await self._close_partial()
-        except Exception as exc:  # noqa: BLE001 -- shutdown must not raise
+        except Exception as exc:  # noqa: BLE001 -- Shutdown cleanup must contain every task failure and preserve termination.
             logger.debug("hot spare close: partial close raised: %s", exc)

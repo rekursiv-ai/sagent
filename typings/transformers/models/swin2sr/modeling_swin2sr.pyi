@@ -24,7 +24,9 @@ class Swin2SREncoderOutput(ModelOutput):
 def window_partition(input_feature, window_size): ...
 def window_reverse(windows, window_size, height, width): ...
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class Swin2SRDropPath(nn.Module):
@@ -36,17 +38,21 @@ class Swin2SRDropPath(nn.Module):
 class Swin2SREmbeddings(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, pixel_values: torch.FloatTensor | None
+        self,
+        pixel_values: torch.FloatTensor | None,
     ) -> tuple[torch.Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> tuple[torch.Tensor]: ...
 
 class Swin2SRPatchEmbeddings(nn.Module):
     def __init__(self, config, normalize_patches=...) -> None: ...
     def forward(
-        self, embeddings: torch.FloatTensor | None
+        self,
+        embeddings: torch.FloatTensor | None,
     ) -> tuple[torch.Tensor, tuple[int]]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, tuple[int]]: ...
 
 class Swin2SRPatchUnEmbeddings(nn.Module):
@@ -55,18 +61,28 @@ class Swin2SRPatchUnEmbeddings(nn.Module):
 
 class Swin2SRPatchMerging(nn.Module):
     def __init__(
-        self, input_resolution: tuple[int], dim: int, norm_layer: nn.Module = ...
+        self,
+        input_resolution: tuple[int],
+        dim: int,
+        norm_layer: nn.Module = ...,
     ) -> None: ...
     def maybe_pad(self, input_feature, height, width):  # -> Tensor:
         ...
     def forward(
-        self, input_feature: torch.Tensor, input_dimensions: tuple[int, int]
+        self,
+        input_feature: torch.Tensor,
+        input_dimensions: tuple[int, int],
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class Swin2SRSelfAttention(nn.Module):
     def __init__(
-        self, config, dim, num_heads, window_size, pretrained_window_size=...
+        self,
+        config,
+        dim,
+        num_heads,
+        window_size,
+        pretrained_window_size=...,
     ) -> None: ...
     def forward(
         self,
@@ -80,13 +96,20 @@ class Swin2SRSelfAttention(nn.Module):
 class Swin2SRSelfOutput(nn.Module):
     def __init__(self, config, dim) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class Swin2SRAttention(nn.Module):
     def __init__(
-        self, config, dim, num_heads, window_size, pretrained_window_size=...
+        self,
+        config,
+        dim,
+        num_heads,
+        window_size,
+        pretrained_window_size=...,
     ) -> None: ...
     def prune_heads(self, heads):  # -> None:
         ...
@@ -123,7 +146,10 @@ class Swin2SRLayer(nn.Module):
     def get_attn_mask(self, height, width, dtype):  # -> Tensor | None:
         ...
     def maybe_pad(
-        self, hidden_states, height, width
+        self,
+        hidden_states,
+        height,
+        width,
     ):  # -> tuple[Tensor, tuple[Literal[0], Literal[0], Literal[0], Any, Literal[0], Any]]:
         ...
     def forward(
@@ -134,7 +160,9 @@ class Swin2SRLayer(nn.Module):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class Swin2SRStage(GradientCheckpointingLayer):

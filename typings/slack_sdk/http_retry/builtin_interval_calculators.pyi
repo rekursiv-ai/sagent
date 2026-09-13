@@ -10,6 +10,8 @@ class BackoffRetryIntervalCalculator(RetryIntervalCalculator):
     backoff_factor: float
     jitter: Jitter
     def __init__(
-        self, backoff_factor: float = ..., jitter: Jitter | None = ...
+        self,
+        backoff_factor: float = ...,
+        jitter: Jitter | None = ...,
     ) -> None: ...
     def calculate_sleep_duration(self, current_attempt: int) -> float: ...

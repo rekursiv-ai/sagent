@@ -18,9 +18,11 @@ class CacheSizeRelevantForFrame:
     def will_compilation_exceed_specific_limit(self, limit: int) -> bool: ...
 
 def compute_cache_size(
-    frame: DynamoFrameType, cache_entry: Any
+    frame: DynamoFrameType,
+    cache_entry: Any,
 ) -> CacheSizeRelevantForFrame: ...
 def is_recompilation(cache_size: CacheSizeRelevantForFrame) -> bool: ...
 def exceeds_recompile_limit(
-    cache_size: CacheSizeRelevantForFrame, compile_id: CompileId
+    cache_size: CacheSizeRelevantForFrame,
+    compile_id: CompileId,
 ) -> tuple[bool, str]: ...

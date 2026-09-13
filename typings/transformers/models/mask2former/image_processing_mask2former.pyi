@@ -31,11 +31,19 @@ def binary_mask_to_rle(mask):  # -> list[Any]:
 def convert_segmentation_to_rle(segmentation):  # -> list[Any]:
     ...
 def remove_low_and_no_objects(
-    masks, scores, labels, object_mask_threshold, num_labels
+    masks,
+    scores,
+    labels,
+    object_mask_threshold,
+    num_labels,
 ):  # -> tuple[Any, Any, Any]:
     ...
 def check_segment_validity(
-    mask_labels, mask_probs, k, mask_threshold=..., overlap_mask_area_threshold=...
+    mask_labels,
+    mask_probs,
+    k,
+    mask_threshold=...,
+    overlap_mask_area_threshold=...,
 ):  # -> tuple[Any | Literal[False], Any]:
     ...
 def compute_segments(
@@ -156,7 +164,9 @@ class Mask2FormerImageProcessor(BaseImageProcessor):
     ):  # -> BatchFeature:
         ...
     def post_process_semantic_segmentation(
-        self, outputs, target_sizes: list[tuple[int, int]] | None = ...
+        self,
+        outputs,
+        target_sizes: list[tuple[int, int]] | None = ...,
     ) -> torch.Tensor: ...
     def post_process_instance_segmentation(
         self,

@@ -28,5 +28,7 @@ class _CallableIterator:
 class _SENTINEL_MISSING: ...
 
 def iter_(
-    fn_or_iterable, sentinel=..., /
+    fn_or_iterable,
+    sentinel=...,
+    /,
 ) -> Generator[Any, Any] | _CallableIterator: ...

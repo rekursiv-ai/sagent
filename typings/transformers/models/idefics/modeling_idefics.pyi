@@ -88,7 +88,11 @@ class IdeficsRMSNorm(nn.Module):
 
 class IdeficsEmbedding(torch.nn.Module):
     def __init__(
-        self, dim, max_position_embeddings=..., base=..., device=...
+        self,
+        dim,
+        max_position_embeddings=...,
+        base=...,
+        device=...,
     ) -> None: ...
     def forward(self, x, seq_len=...):  # -> tuple[Tensor | Any, Tensor | Any]:
         ...
@@ -96,13 +100,21 @@ class IdeficsEmbedding(torch.nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids, unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 
 class IdeficsMLP(nn.Module):
     def __init__(
-        self, hidden_size: int, intermediate_size: int, hidden_act: str
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
     ) -> None: ...
     def forward(self, x):  # -> Any:
         ...

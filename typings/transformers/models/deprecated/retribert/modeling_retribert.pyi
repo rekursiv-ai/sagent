@@ -25,15 +25,25 @@ RETRIBERT_START_DOCSTRING = ...
 class RetriBertModel(RetriBertPreTrainedModel):
     def __init__(self, config: RetriBertConfig) -> None: ...
     def embed_sentences_checkpointed(
-        self, input_ids, attention_mask, sent_encoder, checkpoint_batch_size=...
+        self,
+        input_ids,
+        attention_mask,
+        sent_encoder,
+        checkpoint_batch_size=...,
     ):  # -> Tensor:
         ...
     def embed_questions(
-        self, input_ids, attention_mask=..., checkpoint_batch_size=...
+        self,
+        input_ids,
+        attention_mask=...,
+        checkpoint_batch_size=...,
     ):  # -> Any:
         ...
     def embed_answers(
-        self, input_ids, attention_mask=..., checkpoint_batch_size=...
+        self,
+        input_ids,
+        attention_mask=...,
+        checkpoint_batch_size=...,
     ):  # -> Any:
         ...
     def forward(

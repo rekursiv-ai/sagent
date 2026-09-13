@@ -92,7 +92,8 @@ class _WireProtocolOutput:
 class _WireProtocolPickledOutput:
     value: bytes
     def deserialize(
-        self, constants: CompiledFxGraphConstants
+        self,
+        constants: CompiledFxGraphConstants,
     ) -> _WireProtocolOutput: ...
 
 class _LoggerState:

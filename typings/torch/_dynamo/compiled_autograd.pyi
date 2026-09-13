@@ -53,7 +53,10 @@ class OpNamespace:
 
 class Op:
     def __init__(
-        self, name: str, fn: Callable[..., Any], is_custom_function: bool
+        self,
+        name: str,
+        fn: Callable[..., Any],
+        is_custom_function: bool,
     ) -> None: ...
     def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
 
@@ -130,31 +133,55 @@ class AutogradCompilerInstance:
         output_metadata: Sequence[Any],
     ) -> Sequence[torch.Tensor]: ...
     def proxy_call(
-        self, fn: Callable[..., Any], args: Any, output_metadata: Sequence[Any]
+        self,
+        fn: Callable[..., Any],
+        args: Any,
+        output_metadata: Sequence[Any],
     ) -> Sequence[torch.Tensor]: ...
     def validate_outputs(
-        self, _: Any, outputs: Sequence[Any], args: Any, output_metadata: Sequence[Any]
+        self,
+        _: Any,
+        outputs: Sequence[Any],
+        args: Any,
+        output_metadata: Sequence[Any],
     ) -> Sequence[torch.Tensor]: ...
     def accumulate(self, old_var: Any, new_var: Any) -> torch.Tensor: ...
     def accumulate_grad(
-        self, variable: torch.Tensor, grad: torch.Tensor, has_post_hooks: bool
+        self,
+        variable: torch.Tensor,
+        grad: torch.Tensor,
+        has_post_hooks: bool,
     ) -> None: ...
     def proxy_call_hook(
-        self, hook: Callable[..., Any], *args: Any, **kwargs: Any
+        self,
+        hook: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
     ) -> torch.fx.Proxy: ...
     def unpack_hook(self, hook_id: int, data_id: int) -> torch.Tensor: ...
     def tensor_pre_hook(
-        self, inputs: list[torch.Tensor], hook_id: int, i: int
+        self,
+        inputs: list[torch.Tensor],
+        hook_id: int,
+        i: int,
     ) -> list[torch.Tensor]: ...
     def cpp_tensor_pre_hook(
-        self, inputs: list[torch.Tensor], hook_id: int, i: int
+        self,
+        inputs: list[torch.Tensor],
+        hook_id: int,
+        i: int,
     ) -> list[torch.Tensor]: ...
     def pre_hook(self, inputs: Sequence[Any], hook_id: int) -> list[torch.Tensor]: ...
     def post_hook(
-        self, outputs: list[torch.Tensor], inputs: Sequence[torch.Tensor], hook_id: int
+        self,
+        outputs: list[torch.Tensor],
+        inputs: Sequence[torch.Tensor],
+        hook_id: int,
     ) -> list[torch.Tensor]: ...
     def post_acc_grad_hook(
-        self, input: torch.Tensor, hook_id: int
+        self,
+        input: torch.Tensor,
+        hook_id: int,
     ) -> list[torch.Tensor]: ...
     def move_graph_nodes_to_cuda(self, graph: torch.fx.Graph) -> list[int]: ...
     def is_sym_node(self, node: Any) -> bool: ...
@@ -182,7 +209,10 @@ class AutogradCompilerInstance:
     ) -> Sequence[Any]: ...
     def bind_backward_state(self, index: int) -> BackwardState: ...
     def set_node_origin(
-        self, node_name: str, nodecall_index: int, pyobj: torch.autograd.Function | None
+        self,
+        node_name: str,
+        nodecall_index: int,
+        pyobj: torch.autograd.Function | None,
     ) -> None: ...
 
 compiled_autograd_enabled = ...

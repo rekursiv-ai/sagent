@@ -110,8 +110,11 @@ class FSDPParam:
 def alloc_storage(tensor: torch.Tensor) -> None: ...
 def free_storage(tensor: torch.Tensor) -> None: ...
 def unsafe_setattr_param(
-    module: nn.Module, param_name: str, param: nn.Parameter
+    module: nn.Module,
+    param_name: str,
+    param: nn.Parameter,
 ) -> None: ...
 def set_requires_grad_if_needed(
-    src_tensor: torch.Tensor, dst_tensor: torch.Tensor
+    src_tensor: torch.Tensor,
+    dst_tensor: torch.Tensor,
 ) -> None: ...

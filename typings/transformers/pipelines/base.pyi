@@ -49,7 +49,9 @@ def infer_framework_from_model(
 def get_framework(model, revision: str | None = ...):  # -> Literal['tf', 'pt', 'flax']:
     ...
 def get_default_model_and_revision(
-    targeted_task: dict, framework: str | None, task_options: Any | None
+    targeted_task: dict,
+    framework: str | None,
+    task_options: Any | None,
 ) -> tuple[str, str]: ...
 def load_assistant_model(
     model: PreTrainedModel,
@@ -145,7 +147,7 @@ SUPPORTED_PEFT_TASKS = ...
         has_feature_extractor=True,
         has_image_processor=True,
         has_processor=True,
-    )
+    ),
 )
 class Pipeline(_ScikitCompat, PushToHubMixin):
     _load_processor = ...
@@ -176,11 +178,13 @@ class Pipeline(_ScikitCompat, PushToHubMixin):
     ):  # -> None:
         ...
     def transform(
-        self, X
+        self,
+        X,
     ):  # -> list[Any] | PipelineIterator | Generator[Any, Any, None] | Tensor | Any | None:
         ...
     def predict(
-        self, X
+        self,
+        X,
     ):  # -> list[Any] | PipelineIterator | Generator[Any, Any, None] | Tensor | Any | None:
         ...
     @property
@@ -191,23 +195,30 @@ class Pipeline(_ScikitCompat, PushToHubMixin):
     def device_placement(self):  # -> Generator[None, Any, None]:
         ...
     def ensure_tensor_on_device(
-        self, **inputs
+        self,
+        **inputs,
     ):  # -> ModelOutput | dict[Any, Any] | UserDict[Any, Any] | list[Any] | tuple[Any, ...] | Tensor:
         ...
     def check_model_type(self, supported_models: list[str] | dict):  # -> None:
         ...
     @abstractmethod
     def preprocess(
-        self, input_: Any, **preprocess_parameters: dict
+        self,
+        input_: Any,
+        **preprocess_parameters: dict,
     ) -> dict[str, GenericTensor]: ...
     @abstractmethod
     def postprocess(
-        self, model_outputs: ModelOutput, **postprocess_parameters: dict
+        self,
+        model_outputs: ModelOutput,
+        **postprocess_parameters: dict,
     ) -> Any: ...
     def get_inference_context(self):  # -> type[no_grad]:
         ...
     def forward(
-        self, model_inputs, **forward_params
+        self,
+        model_inputs,
+        **forward_params,
     ):  # -> ModelOutput | dict[Any, Any] | UserDict[Any, Any] | list[Any] | tuple[Any, ...] | Tensor:
         ...
     def get_iterator(
@@ -221,25 +232,46 @@ class Pipeline(_ScikitCompat, PushToHubMixin):
     ):  # -> PipelineIterator:
         ...
     def __call__(
-        self, inputs, *args, num_workers=..., batch_size=..., **kwargs
+        self,
+        inputs,
+        *args,
+        num_workers=...,
+        batch_size=...,
+        **kwargs,
     ):  # -> list[Any] | PipelineIterator | Generator[Any, Any, None] | Tensor | Any | None:
         ...
     def run_multi(
-        self, inputs, preprocess_params, forward_params, postprocess_params
+        self,
+        inputs,
+        preprocess_params,
+        forward_params,
+        postprocess_params,
     ):  # -> list[Any]:
         ...
     def run_single(
-        self, inputs, preprocess_params, forward_params, postprocess_params
+        self,
+        inputs,
+        preprocess_params,
+        forward_params,
+        postprocess_params,
     ):  # -> Any:
         ...
     def iterate(
-        self, inputs, preprocess_params, forward_params, postprocess_params
+        self,
+        inputs,
+        preprocess_params,
+        forward_params,
+        postprocess_params,
     ):  # -> Generator[Any, Any, None]:
         ...
 
 class ChunkPipeline(Pipeline):
     def run_single(
-        self, inputs, preprocess_params, forward_params, postprocess_params
+        self,
+        inputs,
+        preprocess_params,
+        forward_params,
+        postprocess_params,
     ):  # -> Any:
         ...
     def get_iterator(
@@ -255,7 +287,9 @@ class ChunkPipeline(Pipeline):
 
 class PipelineRegistry:
     def __init__(
-        self, supported_tasks: dict[str, Any], task_aliases: dict[str, str]
+        self,
+        supported_tasks: dict[str, Any],
+        task_aliases: dict[str, str],
     ) -> None: ...
     def get_supported_tasks(self) -> list[str]: ...
     def check_task(self, task: str) -> tuple[str, dict, Any]: ...

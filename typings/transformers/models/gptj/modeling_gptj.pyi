@@ -26,7 +26,9 @@ def create_sinusoidal_positions(num_pos: int, dim: int) -> torch.Tensor: ...
 def get_embed_positions(embed_positions, position_ids): ...
 def rotate_every_two(x: torch.Tensor) -> torch.Tensor: ...
 def apply_rotary_pos_emb(
-    tensor: torch.Tensor, sin: torch.Tensor, cos: torch.Tensor
+    tensor: torch.Tensor,
+    sin: torch.Tensor,
+    cos: torch.Tensor,
 ) -> torch.Tensor: ...
 
 class GPTJAttention(nn.Module):
@@ -47,7 +49,9 @@ class GPTJAttention(nn.Module):
         | None
     ): ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> (
         tuple[torch.Tensor, tuple[torch.Tensor]]
         | tuple[torch.Tensor, tuple[torch.Tensor], tuple[torch.Tensor, ...]]
@@ -72,7 +76,9 @@ class GPTJFlashAttention2(GPTJAttention):
         | None
     ): ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> (
         tuple[torch.Tensor, tuple[torch.Tensor]]
         | tuple[torch.Tensor, tuple[torch.Tensor], tuple[torch.Tensor, ...]]
@@ -102,7 +108,9 @@ class GPTJBlock(GradientCheckpointingLayer):
         tuple[torch.Tensor] | tuple[torch.Tensor, tuple[torch.FloatTensor, ...]] | None
     ): ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> (
         tuple[torch.Tensor] | tuple[torch.Tensor, tuple[torch.FloatTensor, ...]] | None
     ): ...

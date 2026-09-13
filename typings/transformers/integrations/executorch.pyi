@@ -7,7 +7,10 @@ from ..modeling_utils import PreTrainedModel
 
 class TorchExportableModuleForVLM:
     def __init__(
-        self, model, max_batch_size: int = ..., max_cache_len: int = ...
+        self,
+        model,
+        max_batch_size: int = ...,
+        max_cache_len: int = ...,
     ) -> None: ...
     def export_vision_encoder(self):  # -> ExportedProgram:
         ...

@@ -52,7 +52,9 @@ def replace_batch_norm(model):  # -> None:
 class DabDetrConvEncoder(nn.Module):
     def __init__(self, config: DabDetrConfig) -> None: ...
     def forward(
-        self, pixel_values: torch.Tensor, pixel_mask: torch.Tensor
+        self,
+        pixel_values: torch.Tensor,
+        pixel_mask: torch.Tensor,
     ):  # -> list[Any]:
         ...
 
@@ -82,12 +84,17 @@ class DetrAttention(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class DabDetrAttention(nn.Module):
     def __init__(
-        self, config: DabDetrConfig, bias: bool = ..., is_cross: bool = ...
+        self,
+        config: DabDetrConfig,
+        bias: bool = ...,
+        is_cross: bool = ...,
     ) -> None: ...
     def forward(
         self,
@@ -98,7 +105,9 @@ class DabDetrAttention(nn.Module):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class DabDetrDecoderLayerSelfAttention(nn.Module):
@@ -222,7 +231,13 @@ class DabDetrModel(DabDetrPreTrainedModel):
 
 class DabDetrMHAttentionMap(nn.Module):
     def __init__(
-        self, query_dim, hidden_dim, num_heads, dropout=..., bias=..., std=...
+        self,
+        query_dim,
+        hidden_dim,
+        num_heads,
+        dropout=...,
+        bias=...,
+        std=...,
     ) -> None: ...
     def forward(self, q, k, mask: Tensor | None = ...):  # -> Any:
         ...

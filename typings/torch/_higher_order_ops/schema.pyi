@@ -33,7 +33,9 @@ class CTypeGen:
 class CArgumentGen:
     @staticmethod
     def from_hop_argument_info(
-        arg_idx: int, arg_info: HopArgumentInfo, is_output: bool = ...
+        arg_idx: int,
+        arg_info: HopArgumentInfo,
+        is_output: bool = ...,
     ) -> Any: ...
 
 class HopSchemaGenerator:
@@ -73,5 +75,6 @@ class HopSchema(torch._C.FunctionSchema):
     def __deepcopy__(self, memo: Any) -> HopSchema: ...
 
 def find_hop_schema(
-    gm: torch.fx.GraphModule, target: Target
+    gm: torch.fx.GraphModule,
+    target: Target,
 ) -> list[torch._C.FunctionSchema]: ...

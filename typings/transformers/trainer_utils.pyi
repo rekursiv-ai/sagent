@@ -99,7 +99,11 @@ def is_main_process(local_rank):  # -> bool:
 def total_processes_number(local_rank):  # -> int:
     ...
 def speed_metrics(
-    split, start_time, num_samples=..., num_steps=..., num_tokens=...
+    split,
+    start_time,
+    num_samples=...,
+    num_steps=...,
+    num_tokens=...,
 ):  # -> dict[str, Any]:
     ...
 
@@ -170,6 +174,8 @@ class RemoveColumnsCollator:
     def __call__(self, features: list[dict]): ...
 
 def check_target_module_exists(
-    optim_target_modules, key: str, return_is_regex: bool = ...
+    optim_target_modules,
+    key: str,
+    return_is_regex: bool = ...,
 ):  # -> tuple[bool, bool] | bool:
     ...

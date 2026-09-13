@@ -38,7 +38,9 @@ class SegformerImageProcessorFast(BaseImageProcessorFast):
         **kwargs: Unpack[SegformerFastImageProcessorKwargs],
     ) -> BatchFeature: ...
     def post_process_semantic_segmentation(
-        self, outputs, target_sizes: list[tuple] | None = ...
+        self,
+        outputs,
+        target_sizes: list[tuple] | None = ...,
     ):  # -> list[Any]:
         ...
 

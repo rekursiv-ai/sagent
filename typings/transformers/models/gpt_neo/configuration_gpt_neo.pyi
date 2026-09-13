@@ -38,7 +38,8 @@ class GPTNeoConfig(PretrainedConfig):
 
 def custom_unfold(input, dimension, size, step): ...
 def custom_get_block_length_and_num_blocks(
-    seq_length, window_size
+    seq_length,
+    window_size,
 ):  # -> tuple[Tensor, Tensor]:
     ...
 

@@ -13,12 +13,18 @@ logger = ...
 class DiaGenerationMixin(GenerationMixin):
     _uses_cfg = ...
     def prepare_inputs_for_generation(
-        self, input_ids, encoder_outputs=..., decoder_delay_mask=..., **kwargs
+        self,
+        input_ids,
+        encoder_outputs=...,
+        decoder_delay_mask=...,
+        **kwargs,
     ):  # -> dict[Any, Any]:
         ...
     @staticmethod
     def apply_delay_mask(
-        input_ids: torch.Tensor, pad_id: int, delay_mask: torch.Tensor | None
+        input_ids: torch.Tensor,
+        pad_id: int,
+        delay_mask: torch.Tensor | None,
     ) -> torch.Tensor: ...
     @torch.no_grad()
     def generate(

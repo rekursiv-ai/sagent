@@ -18,7 +18,9 @@ class SimpleOperatorEntry:
 class GenericTorchDispatchRuleHolder:
     def __init__(self, qualname) -> None: ...
     def register(
-        self, torch_dispatch_class: type, func: Callable
+        self,
+        torch_dispatch_class: type,
+        func: Callable,
     ) -> RegistrationHandle: ...
     def find(self, torch_dispatch_class) -> None: ...
 

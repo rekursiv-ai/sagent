@@ -24,13 +24,20 @@ mra_cuda_kernel = ...
 def load_cuda_kernels():  # -> None:
     ...
 def sparse_max(
-    sparse_qk_prod, indices, query_num_block, key_num_block
+    sparse_qk_prod,
+    indices,
+    query_num_block,
+    key_num_block,
 ):  # -> tuple[Any, Any]:
     ...
 def sparse_mask(mask, indices, block_size=...): ...
 def mm_to_sparse(dense_query, dense_key, indices, block_size=...): ...
 def sparse_dense_mm(
-    sparse_query, indices, dense_key, query_num_block, block_size=...
+    sparse_query,
+    indices,
+    dense_key,
+    query_num_block,
+    block_size=...,
 ): ...
 def transpose_indices(indices, dim_1_block, dim_2_block): ...
 
@@ -57,12 +64,19 @@ class MraSparseDenseMatMul(torch.autograd.Function):
 class MraReduceSum:
     @staticmethod
     def operator_call(
-        sparse_query, indices, query_num_block, key_num_block
+        sparse_query,
+        indices,
+        query_num_block,
+        key_num_block,
     ):  # -> Tensor:
         ...
 
 def get_low_resolution_logit(
-    query, key, block_size, mask=..., value=...
+    query,
+    key,
+    block_size,
+    mask=...,
+    value=...,
 ):  # -> tuple[Any | Tensor, Any, Any, Any | None]:
     ...
 def get_block_idxes(
@@ -89,7 +103,11 @@ def mra2_attention(
 class MraEmbeddings(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, input_ids=..., token_type_ids=..., position_ids=..., inputs_embeds=...
+        self,
+        input_ids=...,
+        token_type_ids=...,
+        position_ids=...,
+        inputs_embeds=...,
     ):  # -> Any:
         ...
 
@@ -101,7 +119,9 @@ class MraSelfAttention(nn.Module):
 class MraSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -120,7 +140,9 @@ class MraIntermediate(nn.Module):
 class MraOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 

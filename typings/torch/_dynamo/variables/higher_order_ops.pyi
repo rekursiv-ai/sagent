@@ -54,7 +54,8 @@ def check_meta_consistency_vt(
 ) -> None: ...
 @contextlib.contextmanager
 def dynamo_enable_grad(
-    tx: InstructionTranslator, enable=...
+    tx: InstructionTranslator,
+    enable=...,
 ) -> Generator[None, Any]: ...
 @contextlib.contextmanager
 def dynamo_under_activation_checkpoint(
@@ -64,7 +65,12 @@ def find_mismatched_vars(var, types, allow_none=...) -> set[Any]: ...
 def only_consist_of(var, types, allow_none=...) -> bool: ...
 def are_same_graph_modules(fn_name, a_mod, b_mod, fake_mode) -> bool: ...
 def validate_args_and_maybe_create_graph_inputs(
-    sub_args, tracer, tx, set_subgraph_inputs, description, sub_args_names=...
+    sub_args,
+    tracer,
+    tx,
+    set_subgraph_inputs,
+    description,
+    sub_args_names=...,
 ) -> list[VariableTracker] | list[Any]: ...
 def speculate_subgraph(
     tx,
@@ -89,11 +95,16 @@ def make_attr(tx: InstructionTranslator, name) -> Proxy: ...
 
 class TorchHigherOrderOperatorVariable(VariableTracker):
     def __init__(
-        self, value: HigherOrderOperator, source: Source | None = ..., **kwargs
+        self,
+        value: HigherOrderOperator,
+        source: Source | None = ...,
+        **kwargs,
     ) -> None: ...
     @staticmethod
     def make(
-        value, source=..., **kwargs
+        value,
+        source=...,
+        **kwargs,
     ) -> (
         AssociativeScanHigherOrderVariable
         | AutoFunctionalizeHigherOrderVariable
@@ -174,20 +185,32 @@ class FunctorchHigherOrderVariable(UserFunctionVariable):
 
 class FunctionalCallVariable(FunctorchHigherOrderVariable):
     def call_function(
-        self, tx, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
 
 class ReparametrizeModuleCallVariable(FunctorchHigherOrderVariable):
     def __init__(self, *args, **kwargs) -> None: ...
     def call_function(
-        self, tx, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
 
 class WrapHigherOrderVariable(TorchHigherOrderOperatorVariable):
     supports_input_mutation = ...
     supports_aliasing = ...
     def install_subgraph_in_output_graph(
-        self, tx, fn_vt, fn_args_vt, kwargs, body_gmod, attr_name=...
+        self,
+        tx,
+        fn_vt,
+        fn_args_vt,
+        kwargs,
+        body_gmod,
+        attr_name=...,
     ): ...
     def create_wrapped_node(
         self,
@@ -281,7 +304,13 @@ class InvokeSubgraphHigherOrderVariable(WrapHigherOrderVariable):
     supports_input_mutation = ...
     supports_aliasing = ...
     def install_subgraph_in_output_graph(
-        self, tx, fn_vt, fn_args_vt, kwargs, body_gmod, attr_name
+        self,
+        tx,
+        fn_vt,
+        fn_args_vt,
+        kwargs,
+        body_gmod,
+        attr_name,
     ): ...
 
 _hop_name_to_variable_class = ...

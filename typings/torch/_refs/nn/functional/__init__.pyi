@@ -76,7 +76,10 @@ DispatchKey = torch._C.DispatchKey
 
 @register_decomposition(aten.alpha_dropout)
 def alpha_dropout(
-    self: TensorLikeType, p: float = ..., training: bool = ..., inplace: bool = ...
+    self: TensorLikeType,
+    p: float = ...,
+    training: bool = ...,
+    inplace: bool = ...,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.celu)
 @out_wrapper()
@@ -85,11 +88,16 @@ def alpha_dropout(
     type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
 )
 def celu(
-    a: TensorLikeType, alpha: NumberType | None = ..., inplace: bool = ...
+    a: TensorLikeType,
+    alpha: NumberType | None = ...,
+    inplace: bool = ...,
 ) -> TensorLikeType: ...
 @out_wrapper()
 def dropout(
-    a: TensorLikeType, p: float = ..., training: bool = ..., inplace: bool = ...
+    a: TensorLikeType,
+    p: float = ...,
+    training: bool = ...,
+    inplace: bool = ...,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.elu)
 @out_wrapper()
@@ -135,7 +143,9 @@ def layer_norm(
     type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
 )
 def leaky_relu(
-    a: TensorLikeType, negative_slope: float = ..., inplace: bool = ...
+    a: TensorLikeType,
+    negative_slope: float = ...,
+    inplace: bool = ...,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.mish)
 @out_wrapper()
@@ -278,7 +288,10 @@ def tanhshrink(a: TensorLikeType) -> TensorLikeType: ...
     type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
 )
 def threshold(
-    a: TensorLikeType, threshold: NumberType, value: bool | float, inplace: bool = ...
+    a: TensorLikeType,
+    threshold: NumberType,
+    value: bool | float,
+    inplace: bool = ...,
 ) -> TensorLikeType: ...
 def triplet_margin_loss(
     anchor: TensorLikeType,
@@ -296,7 +309,8 @@ def triplet_margin_loss(
 @out_wrapper()
 @elementwise_unary_scalar_wrapper
 @elementwise_type_promotion_wrapper(
-    type_promoting_args="a", type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT
+    type_promoting_args="a",
+    type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.DEFAULT,
 )
 def hardtanh(
     a: TensorLikeType,

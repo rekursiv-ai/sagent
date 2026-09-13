@@ -27,7 +27,12 @@ class VitMattePreTrainedModel(PreTrainedModel):
 
 class VitMatteBasicConv3x3(nn.Module):
     def __init__(
-        self, config, in_channels, out_channels, stride=..., padding=...
+        self,
+        config,
+        in_channels,
+        out_channels,
+        stride=...,
+        padding=...,
     ) -> None: ...
     def forward(self, hidden_state):  # -> Any:
         ...

@@ -18,7 +18,9 @@ class ImageToImagePipeline(Pipeline):
     def __call__(self, images: str | Image.Image, **kwargs: Any) -> Image.Image: ...
     @overload
     def __call__(
-        self, images: list[str] | list[Image.Image], **kwargs: Any
+        self,
+        images: list[str] | list[Image.Image],
+        **kwargs: Any,
     ) -> list[Image.Image]: ...
     def __call__(
         self,
@@ -26,7 +28,9 @@ class ImageToImagePipeline(Pipeline):
         **kwargs: Any,
     ) -> Image.Image | list[Image.Image]: ...
     def preprocess(
-        self, image, timeout=...
+        self,
+        image,
+        timeout=...,
     ):  # -> transformers.feature_extraction_utils.BatchFeature | Any | transformers.image_processing_base.BatchFeature:
         ...
     def postprocess(self, model_outputs):  # -> list[Any]:

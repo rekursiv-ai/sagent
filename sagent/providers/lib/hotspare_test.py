@@ -53,7 +53,7 @@ async def test_first_acquire_spawns_active() -> None:
     assert active.is_alive
     # Give the background warm-up one tick.
     await asyncio.sleep(0.05)
-    assert spawn_count >= 2  # active + warmed spare
+    assert spawn_count >= 2  # `active` + warmed spare.
     await pool.close()
 
 

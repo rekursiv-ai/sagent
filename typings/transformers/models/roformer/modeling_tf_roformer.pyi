@@ -68,7 +68,10 @@ class TFRoFormerSelfAttention(keras.layers.Layer):
     ) -> tuple[tf.Tensor]: ...
     @staticmethod
     def apply_rotary_position_embeddings(
-        sinusoidal_pos, query_layer, key_layer, value_layer=...
+        sinusoidal_pos,
+        query_layer,
+        key_layer,
+        value_layer=...,
     ):  # -> tuple[Any, Any, Any] | tuple[Any, Any]:
         ...
     def build(self, input_shape=...):  # -> None:
@@ -77,7 +80,10 @@ class TFRoFormerSelfAttention(keras.layers.Layer):
 class TFRoFormerSelfOutput(keras.layers.Layer):
     def __init__(self, config: RoFormerConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -106,7 +112,10 @@ class TFRoFormerIntermediate(keras.layers.Layer):
 class TFRoFormerOutput(keras.layers.Layer):
     def __init__(self, config: RoFormerConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -148,7 +157,10 @@ class TFRoFormerPredictionHeadTransform(keras.layers.Layer):
 
 class TFRoFormerLMPredictionHead(keras.layers.Layer):
     def __init__(
-        self, config: RoFormerConfig, input_embeddings: keras.layers.Layer, **kwargs
+        self,
+        config: RoFormerConfig,
+        input_embeddings: keras.layers.Layer,
+        **kwargs,
     ) -> None: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -162,7 +174,10 @@ class TFRoFormerLMPredictionHead(keras.layers.Layer):
 
 class TFRoFormerMLMHead(keras.layers.Layer):
     def __init__(
-        self, config: RoFormerConfig, input_embeddings: keras.layers.Layer, **kwargs
+        self,
+        config: RoFormerConfig,
+        input_embeddings: keras.layers.Layer,
+        **kwargs,
     ) -> None: ...
     def call(self, sequence_output: tf.Tensor) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -172,7 +187,10 @@ class TFRoFormerMLMHead(keras.layers.Layer):
 class TFRoFormerMainLayer(keras.layers.Layer):
     config_class = RoFormerConfig
     def __init__(
-        self, config: RoFormerConfig, add_pooling_layer: bool = ..., **kwargs
+        self,
+        config: RoFormerConfig,
+        add_pooling_layer: bool = ...,
+        **kwargs,
     ) -> None: ...
     def get_input_embeddings(self) -> keras.layers.Layer: ...
     def set_input_embeddings(self, value: tf.Variable):  # -> None:
@@ -208,7 +226,7 @@ class TFRoFormerModel(TFRoFormerPreTrainedModel):
     def __init__(self, config: RoFormerConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ROFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ROFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -239,7 +257,7 @@ class TFRoFormerForMaskedLM(TFRoFormerPreTrainedModel, TFMaskedLanguageModelingL
     def get_lm_head(self) -> keras.layers.Layer: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ROFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ROFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -302,12 +320,13 @@ class TFRoFormerClassificationHead(keras.layers.Layer):
     ROFORMER_START_DOCSTRING,
 )
 class TFRoFormerForSequenceClassification(
-    TFRoFormerPreTrainedModel, TFSequenceClassificationLoss
+    TFRoFormerPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config: RoFormerConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ROFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ROFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -338,7 +357,7 @@ class TFRoFormerForMultipleChoice(TFRoFormerPreTrainedModel, TFMultipleChoiceLos
     def __init__(self, config: RoFormerConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ROFORMER_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        ROFORMER_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -366,12 +385,13 @@ class TFRoFormerForMultipleChoice(TFRoFormerPreTrainedModel, TFMultipleChoiceLos
     ROFORMER_START_DOCSTRING,
 )
 class TFRoFormerForTokenClassification(
-    TFRoFormerPreTrainedModel, TFTokenClassificationLoss
+    TFRoFormerPreTrainedModel,
+    TFTokenClassificationLoss,
 ):
     def __init__(self, config: RoFormerConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ROFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ROFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -399,12 +419,13 @@ class TFRoFormerForTokenClassification(
     ROFORMER_START_DOCSTRING,
 )
 class TFRoFormerForQuestionAnswering(
-    TFRoFormerPreTrainedModel, TFQuestionAnsweringLoss
+    TFRoFormerPreTrainedModel,
+    TFQuestionAnsweringLoss,
 ):
     def __init__(self, config: RoFormerConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ROFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ROFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,

@@ -84,11 +84,6 @@ def truncated_result(content: str, budget_tokens: int) -> str:
     return _render_truncated(content, low) if low else ""
 
 
-def _render_truncated(content: str, kept: int) -> str:
-    """Return ``content``'s first ``kept`` chars plus the resume marker."""
-    return content[:kept] + _TRUNCATION_NOTICE.format(kept=kept, total=len(content))
-
-
 def materialize_request(
     request: ModelRequest,
     *,
@@ -222,13 +217,11 @@ def materialize_messages(
     return _coalesce_adjacent_users(reversed(out_reversed))
 
 
+# The budget walk runs newest-first, so what a result may spend is bounded by what the
+# results BEHIND it still need. This is that count, precomputed once rather than
+# rescanned per entry (the walk is already O(n)).
 def _older_tool_result_counts(messages: Sequence[ModelContextEvent]) -> list[int]:
-    """Return, per index, how many ``ToolResult`` entries precede it.
-
-    The budget walk runs newest-first, so what a result may spend is bounded by
-    what the results BEHIND it still need. This is that count, precomputed once
-    rather than rescanned per entry (the walk is already O(n)).
-    """
+    """Return, per index, how many ``ToolResult`` entries precede it."""
     counts = [0] * len(messages)
     seen = 0
     for idx, entry in enumerate(messages):
@@ -238,24 +231,20 @@ def _older_tool_result_counts(messages: Sequence[ModelContextEvent]) -> list[int
     return counts
 
 
+# Applies the sender label before coalescing so that adjacent messages from different
+# agents retain per-sender attribution after merging. Idempotent: a text already
+# starting with this entry's own ``[from <source>]: `` marker is left unchanged.
+# ``startswith`` (not substring ``in``) avoids the trap where a body that legitimately
+# quotes the marker -- e.g. ``"please write [from bob]: literally"`` -- gets silently
+# passed through unlabelled. Coalescing runs after labeling: a cross-source merge
+# demotes to a ``UserMessage`` (skipped here) carrying per-segment labels, so it is
+# never re-labeled; a same-source ``AgentSendMessage`` merge keeps its type and un-
+# labeled text, and this prepends one outer label to the whole -- correct, since one
+# source authored every segment.
 def _label_agent_sends(
     messages: Iterable[ModelContextEvent],
 ) -> Iterable[ModelContextEvent]:
-    """Prepend ``[from <source>]: `` to each ``AgentSendMessage`` text.
-
-    Applies the sender label before coalescing so that adjacent messages
-    from different agents retain per-sender attribution after merging.
-    Idempotent: a text already starting with this entry's own
-    ``[from <source>]: `` marker is left unchanged. ``startswith`` (not
-    substring ``in``) avoids the trap where a body that legitimately
-    quotes the marker -- e.g. ``"please write [from bob]: literally"``
-    -- gets silently passed through unlabelled. Coalescing runs after
-    labeling: a cross-source merge demotes to a ``UserMessage`` (skipped
-    here) carrying per-segment labels, so it is never re-labeled; a
-    same-source ``AgentSendMessage`` merge keeps its type and un-labeled
-    text, and this prepends one outer label to the whole -- correct, since
-    one source authored every segment.
-    """
+    """Prepend ``[from <source>]: `` to each ``AgentSendMessage`` text."""
     for entry in messages:
         if isinstance(entry, AgentSendMessage):
             labeled = labeled_agent_send_text(entry)
@@ -268,19 +257,16 @@ def _label_agent_sends(
             yield entry
 
 
+# Same-source merges preserve the source type and attribution. Cross- source merges --
+# ``UserMessage`` with ``AgentSendMessage`` or two ``AgentSendMessage`` carrying
+# different ``source`` values -- demote to ``UserMessage``: the structured ``source``
+# cannot honestly represent two different senders, and the textual ``[from X]: `` labels
+# added by :func:`_label_agent_sends` upstream already carry per-sender attribution in
+# the merged text.
 def _coalesce_adjacent_users(
     messages: Iterable[ModelContextEvent],
 ) -> list[ModelContextEvent]:
-    """Merge adjacent user-side entries so the wire stays alternation-valid.
-
-    Same-source merges preserve the source type and attribution. Cross-
-    source merges -- ``UserMessage`` with ``AgentSendMessage`` or two
-    ``AgentSendMessage`` carrying different ``source`` values -- demote
-    to ``UserMessage``: the structured ``source`` cannot honestly
-    represent two different senders, and the textual ``[from X]: ``
-    labels added by :func:`_label_agent_sends` upstream already carry
-    per-sender attribution in the merged text.
-    """
+    """Merge adjacent user-side entries so the wire stays alternation-valid."""
     deferred = _defer_user_between_tool_pair(messages)
     out: list[ModelContextEvent] = []
     for entry in deferred:
@@ -306,20 +292,16 @@ def _coalesce_adjacent_users(
     return out
 
 
+# Provider APIs reject any user-role turn between an ``AssistantMessage`` carrying
+# ``tool_calls`` and the matching ``ToolResult`` for those calls. Such interleavings can
+# be produced by overrides whose payloads splice cross-source agent traffic
+# (``AgentSendMessage``) into a position that breaks the tool pair. Defer any such
+# entries to immediately after the matching tool results close so the wire ordering
+# stays valid while the user content is preserved.
 def _defer_user_between_tool_pair(
     messages: Iterable[ModelContextEvent],
 ) -> list[ModelContextEvent]:
-    """Move user-side entries appearing between AM(tool_calls) and its TR.
-
-    Provider APIs reject any user-role turn between an
-    ``AssistantMessage`` carrying ``tool_calls`` and the matching
-    ``ToolResult`` for those calls. Such interleavings can be produced
-    by overrides whose payloads splice cross-source agent traffic
-    (``AgentSendMessage``) into a position that breaks the tool pair.
-    Defer any such entries to immediately after the matching tool
-    results close so the wire ordering stays valid while the user
-    content is preserved.
-    """
+    """Move user-side entries appearing between AM(tool_calls) and its TR."""
     deferred_buffer: list[UserMessage | AgentSendMessage] = []
     pending: set[str] = set()
     out: list[ModelContextEvent] = []
@@ -346,19 +328,16 @@ def _defer_user_between_tool_pair(
     return out
 
 
+# ``UserMessage`` represents the human; two are same-source. Two ``AgentSendMessage``
+# are same-source iff their ``source`` values match. A ``UserMessage`` paired with an
+# ``AgentSendMessage`` is *not* same-source: the human did not author the agent's
+# content and the agent did not author the human's. :func:`_coalesce_adjacent_users`
+# still merges cross-type / cross-source pairs (both are wire-``user`` and cannot reach
+# the provider as adjacent turns) but *demotes* them to a plain ``UserMessage`` so the
+# structured ``source`` never falsely claims one sender authored the other's text; same-
+# source pairs preserve type.
 def _same_source(left: ModelContextEvent, right: ModelContextEvent) -> bool:
-    """Return True iff two user-side entries share sender identity.
-
-    ``UserMessage`` represents the human; two are same-source. Two
-    ``AgentSendMessage`` are same-source iff their ``source`` values
-    match. A ``UserMessage`` paired with an ``AgentSendMessage`` is
-    *not* same-source: the human did not author the agent's content
-    and the agent did not author the human's. :func:`_coalesce_adjacent_users`
-    still merges cross-type / cross-source pairs (both are wire-``user`` and
-    cannot reach the provider as adjacent turns) but *demotes* them to a
-    plain ``UserMessage`` so the structured ``source`` never falsely claims
-    one sender authored the other's text; same-source pairs preserve type.
-    """
+    """Return True iff two user-side entries share sender identity."""
     if type(left) is not type(right):
         return False
     if isinstance(left, AgentSendMessage) and isinstance(right, AgentSendMessage):
@@ -369,3 +348,8 @@ def _same_source(left: ModelContextEvent, right: ModelContextEvent) -> bool:
 def _assistant_has_payload(entry: AssistantMessage) -> bool:
     """Return whether an assistant turn has provider-visible payload."""
     return bool(entry.text or entry.thinking_blocks or entry.tool_calls)
+
+
+def _render_truncated(content: str, kept: int) -> str:
+    """Return ``content``'s first ``kept`` chars plus the resume marker."""
+    return content[:kept] + _TRUNCATION_NOTICE.format(kept=kept, total=len(content))

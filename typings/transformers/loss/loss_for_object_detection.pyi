@@ -4,18 +4,30 @@ import torch
 
 def dice_loss(inputs, targets, num_boxes): ...
 def sigmoid_focal_loss(
-    inputs, targets, num_boxes, alpha: float = ..., gamma: float = ...
+    inputs,
+    targets,
+    num_boxes,
+    alpha: float = ...,
+    gamma: float = ...,
 ): ...
 
 class ImageLoss(nn.Module):
     def __init__(self, matcher, num_classes, eos_coef, losses) -> None: ...
     def loss_labels(
-        self, outputs, targets, indices, num_boxes
+        self,
+        outputs,
+        targets,
+        indices,
+        num_boxes,
     ):  # -> dict[str, Tensor]:
         ...
     @torch.no_grad()
     def loss_cardinality(
-        self, outputs, targets, indices, num_boxes
+        self,
+        outputs,
+        targets,
+        indices,
+        num_boxes,
     ):  # -> dict[str, Tensor]:
         ...
     def loss_boxes(self, outputs, targets, indices, num_boxes):  # -> dict[Any, Any]:
@@ -23,7 +35,12 @@ class ImageLoss(nn.Module):
     def loss_masks(self, outputs, targets, indices, num_boxes):  # -> dict[str, Any]:
         ...
     def get_loss(
-        self, loss, outputs, targets, indices, num_boxes
+        self,
+        loss,
+        outputs,
+        targets,
+        indices,
+        num_boxes,
     ):  # -> dict[str, Tensor] | dict[str, Any] | dict[Any, Any]:
         ...
     def forward(self, outputs, targets):  # -> dict[Any, Any]:
@@ -31,7 +48,10 @@ class ImageLoss(nn.Module):
 
 class HungarianMatcher(nn.Module):
     def __init__(
-        self, class_cost: float = ..., bbox_cost: float = ..., giou_cost: float = ...
+        self,
+        class_cost: float = ...,
+        bbox_cost: float = ...,
+        giou_cost: float = ...,
     ) -> None: ...
     @torch.no_grad()
     def forward(self, outputs, targets):  # -> list[tuple[Tensor, Tensor]]:

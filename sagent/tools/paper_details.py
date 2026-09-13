@@ -51,42 +51,6 @@ if TYPE_CHECKING:
 _cache = cachetools.LRUCache[tuple[object, ...], str](maxsize=1024)
 
 
-def _validate_details_args(
-    raw: str,
-    op: str,
-    *,
-    influential_only: bool,
-    year_from: int | None,
-) -> tuple[str, IdType, str] | ToolResult:
-    """Return (normalized_op, kind, canonical) or an error."""
-    if not raw:
-        return ToolResult(call_id="", content="'id' is required.", is_error=True)
-    parsed = normalize_id_arg(raw)
-    if isinstance(parsed, ToolResult):
-        return parsed
-    kind, canonical = parsed
-    op_norm = op.strip().lower()
-    if op_norm not in ("", "references", "citations"):
-        return ToolResult(
-            call_id="",
-            content=(
-                f"Unknown operation {op!r}."
-                " Valid: 'references', 'citations', or omit for metadata."
-            ),
-            is_error=True,
-        )
-    if op_norm != "citations" and (influential_only or year_from is not None):
-        return ToolResult(
-            call_id="",
-            content=(
-                "'influential_only' and 'year_from' only apply to"
-                " operation='citations'."
-            ),
-            is_error=True,
-        )
-    return op_norm, kind, canonical
-
-
 class PaperDetails:
     """Metadata + citation-graph tool for the Semantic Scholar API."""
 
@@ -171,11 +135,19 @@ class PaperDetails:
                 },
             },
             "required": ["ids"],
-        }
+        },
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
-        """Return a short display label for this invocation."""
+        """Return a short display label for this invocation.
+
+        Args:
+          args: Parsed tool arguments.
+
+        Returns:
+          label: Compact invocation label.
+
+        """
         short = summary_ids(args)
         op = str(args.get("operation", "")).strip()
         if op == "references":
@@ -194,7 +166,15 @@ class PaperDetails:
         return None
 
     async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Look up paper metadata, references, or citations."""
+        """Look up paper metadata, references, or citations.
+
+        Args:
+          args: Parsed tool arguments.
+
+        Returns:
+          result: Metadata or citation-graph lookup result.
+
+        """
         operation = str(args.get("operation", ""))
         influential_only = BoolCodec.coerce(args.get("influential_only"), False)
         year_from = opt_int(args, "year_from")
@@ -231,7 +211,10 @@ class PaperDetails:
 
         raw = id_list[0]
         validated = _validate_details_args(
-            raw, op=operation, influential_only=influential_only, year_from=year_from
+            raw,
+            op=operation,
+            influential_only=influential_only,
+            year_from=year_from,
         )
         if isinstance(validated, ToolResult):
             return validated
@@ -284,7 +267,11 @@ class PaperDetails:
             return format_block(rec, abstract_chars=abstract_chars)
         if op == "references":
             listing = await asyncio.to_thread(
-                references, kind, canonical, limit=limit, source=source
+                references,
+                kind,
+                canonical,
+                limit=limit,
+                source=source,
             )
             return _render_listing(listing, abstract_chars)
         listing = await asyncio.to_thread(
@@ -299,7 +286,9 @@ class PaperDetails:
         return _render_listing(listing, abstract_chars)
 
     async def _metadata_batch(
-        self, raw_ids: list[str], abstract_chars: int | None
+        self,
+        raw_ids: list[str],
+        abstract_chars: int | None,
     ) -> ToolResult:
         """Fetch metadata for many ids in one batched S2 request."""
         wire_ids: list[str] = []
@@ -337,3 +326,39 @@ def _render_listing(listing: Listing, abstract_chars: int | None) -> str:
     if not listing.complete:
         body += "\n... (more matches exist; raise 'limit' to see them)"
     return body
+
+
+def _validate_details_args(
+    raw: str,
+    op: str,
+    *,
+    influential_only: bool,
+    year_from: int | None,
+) -> tuple[str, IdType, str] | ToolResult:
+    """Return (normalized_op, kind, canonical) or an error."""
+    if not raw:
+        return ToolResult(call_id="", content="'id' is required.", is_error=True)
+    parsed = normalize_id_arg(raw)
+    if isinstance(parsed, ToolResult):
+        return parsed
+    kind, canonical = parsed
+    op_norm = op.strip().lower()
+    if op_norm not in ("", "references", "citations"):
+        return ToolResult(
+            call_id="",
+            content=(
+                f"Unknown operation {op!r}."
+                " Valid: 'references', 'citations', or omit for metadata."
+            ),
+            is_error=True,
+        )
+    if op_norm != "citations" and (influential_only or year_from is not None):
+        return ToolResult(
+            call_id="",
+            content=(
+                "'influential_only' and 'year_from' only apply to"
+                " operation='citations'."
+            ),
+            is_error=True,
+        )
+    return op_norm, kind, canonical

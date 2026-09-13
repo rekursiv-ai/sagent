@@ -23,10 +23,15 @@ class IdeficsVisionModelOutput(ModelOutput):
 class IdeficsVisionEmbeddings(nn.Module):
     def __init__(self, config: IdeficsVisionConfig) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
-        self, pixel_values: torch.FloatTensor, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values: torch.FloatTensor,
+        interpolate_pos_encoding: bool = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -52,7 +57,9 @@ class IdeficsVisionAttention(nn.Module):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class IdeficsVisionMLP(nn.Module):
@@ -95,5 +102,7 @@ class IdeficsVisionTransformer(nn.Module):
         return_dict: bool | None = ...,
     ) -> tuple | BaseModelOutputWithPooling: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithPooling: ...

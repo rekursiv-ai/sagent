@@ -7,7 +7,7 @@ from ..utils import add_end_docstrings
 logger = ...
 
 @add_end_docstrings(
-    build_pipeline_init_args(has_tokenizer=True, has_image_processor=True)
+    build_pipeline_init_args(has_tokenizer=True, has_image_processor=True),
 )
 class VisualQuestionAnsweringPipeline(Pipeline):
     _load_processor = ...
@@ -25,10 +25,16 @@ class VisualQuestionAnsweringPipeline(Pipeline):
     ):  # -> list[Any] | PipelineIterator | Generator[Any, Any, None] | Tensor | Any | None:
         ...
     def preprocess(
-        self, inputs, padding=..., truncation=..., timeout=...
+        self,
+        inputs,
+        padding=...,
+        truncation=...,
+        timeout=...,
     ):  # -> BatchEncoding | Any:
         ...
     def postprocess(
-        self, model_outputs, top_k=...
+        self,
+        model_outputs,
+        top_k=...,
     ):  # -> list[dict[str, str | Any]] | list[dict[str, Any | str]]:
         ...

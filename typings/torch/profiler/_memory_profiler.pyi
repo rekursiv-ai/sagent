@@ -131,10 +131,16 @@ class CategoryDict:
     def set_by_id(self, key: TensorKey, category: Category) -> None: ...
     def set_by_key(self, key: TensorKey, category: Category) -> None: ...
     def set_by_version(
-        self, key: TensorKey, version: int, category: Category
+        self,
+        key: TensorKey,
+        version: int,
+        category: Category,
     ) -> None: ...
     def setdefault_by_version(
-        self, key: TensorKey, version: int, category: Category
+        self,
+        key: TensorKey,
+        version: int,
+        category: Category,
     ) -> None: ...
     def get(self, key: Key, version: int) -> Category | None: ...
 
@@ -148,5 +154,9 @@ class MemoryProfileTimeline:
     def export_memory_timeline(self, path, device_str) -> None: ...
     def export_memory_timeline_raw(self, path, device_str) -> None: ...
     def export_memory_timeline_html(
-        self, path, device_str, figsize=..., title=...
+        self,
+        path,
+        device_str,
+        figsize=...,
+        title=...,
     ) -> None: ...

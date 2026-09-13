@@ -62,5 +62,8 @@ tag_activation_checkpoint = ...
 def tag_activation_checkpoint_impl(gmod, *args, **kwargs) -> None: ...
 @tag_activation_checkpoint.py_impl(ProxyTorchDispatchMode)
 def proxy_mode_key(
-    proxy_mode: ProxyTorchDispatchMode, gmod: GraphModule, *args: Any, **kwargs: Any
+    proxy_mode: ProxyTorchDispatchMode,
+    gmod: GraphModule,
+    *args: Any,
+    **kwargs: Any,
 ) -> tuple[torch.Tensor]: ...

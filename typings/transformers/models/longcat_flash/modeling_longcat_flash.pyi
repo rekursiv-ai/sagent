@@ -73,7 +73,12 @@ def eager_attention_forward(
 ):  # -> tuple[Tensor, Tensor]:
     ...
 def apply_rotary_pos_emb_interleave(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def yarn_get_mscale(scale=..., mscale=...):  # -> float:

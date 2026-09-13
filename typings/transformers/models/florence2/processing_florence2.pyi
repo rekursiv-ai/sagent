@@ -39,22 +39,34 @@ class Florence2Processor(ProcessorMixin):
     def model_input_names(self):  # -> list[Any]:
         ...
     def post_process_image_text_to_text(
-        self, generated_outputs, skip_special_tokens=..., **kwargs
+        self,
+        generated_outputs,
+        skip_special_tokens=...,
+        **kwargs,
     ): ...
     def post_process_generation(
-        self, text=..., sequence=..., task=..., image_size=...
+        self,
+        text=...,
+        sequence=...,
+        task=...,
+        image_size=...,
     ) -> dict[str, Any]: ...
 
 class Florence2PostProcessor:
     def __init__(self, config, tokenizer) -> None: ...
     def quantize(
-        self, locations: torch.Tensor, size: tuple[int, int]
+        self,
+        locations: torch.Tensor,
+        size: tuple[int, int],
     ) -> torch.Tensor: ...
     def dequantize(
-        self, locations: torch.Tensor, size: tuple[int, int]
+        self,
+        locations: torch.Tensor,
+        size: tuple[int, int],
     ) -> torch.Tensor: ...
     def decode_with_spans(
-        self, token_ids: list[int]
+        self,
+        token_ids: list[int],
     ) -> tuple[str, list[tuple[int, int]]]: ...
     def parse_ocr_from_text_and_spans(
         self,
@@ -64,10 +76,15 @@ class Florence2PostProcessor:
         area_threshold: float = ...,
     ) -> list[dict[str, Any]]: ...
     def parse_phrase_grounding_from_text_and_spans(
-        self, text: str, image_size: tuple[int, int]
+        self,
+        text: str,
+        image_size: tuple[int, int],
     ) -> list[dict[str, Any]]: ...
     def parse_description_with_bboxes_from_text_and_spans(
-        self, text: str, image_size: tuple[int, int], allow_empty_phrase: bool = ...
+        self,
+        text: str,
+        image_size: tuple[int, int],
+        allow_empty_phrase: bool = ...,
     ) -> list[dict[str, Any]]: ...
     def parse_description_with_polygons_from_text_and_spans(
         self,
@@ -80,7 +97,11 @@ class Florence2PostProcessor:
         with_box_at_start: bool = ...,
     ) -> list[dict[str, Any]]: ...
     def __call__(
-        self, text=..., sequence=..., image_size=..., parse_tasks=...
+        self,
+        text=...,
+        sequence=...,
+        image_size=...,
+        parse_tasks=...,
     ) -> dict[str, Any]: ...
 
 __all__ = ["Florence2Processor"]

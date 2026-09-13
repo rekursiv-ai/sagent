@@ -75,7 +75,11 @@ class FalconH1Attention(LlamaAttention):
 
 class FalconH1RMSNormGated(MambaRMSNormGated):
     def __init__(
-        self, hidden_size, eps=..., n_groups=..., norm_before_gate=...
+        self,
+        hidden_size,
+        eps=...,
+        n_groups=...,
+        norm_before_gate=...,
     ) -> None: ...
     def forward(self, hidden_states, gate=...): ...
 
@@ -131,7 +135,8 @@ class FalconH1DecoderLayer(GradientCheckpointingLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring

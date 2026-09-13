@@ -50,7 +50,9 @@ class DPTImageProcessorFast(BeitImageProcessorFast):
         keep_aspect_ratio: bool = ...,
     ) -> torch.Tensor: ...
     def pad_image(
-        self, image: torch.Tensor, size_divisor: int = ...
+        self,
+        image: torch.Tensor,
+        size_divisor: int = ...,
     ) -> torch.Tensor: ...
     def post_process_depth_estimation(
         self,

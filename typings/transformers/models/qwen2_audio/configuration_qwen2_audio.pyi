@@ -24,7 +24,11 @@ class Qwen2AudioEncoderConfig(PretrainedConfig):
 
 class Qwen2AudioConfig(PretrainedConfig):
     def __init__(
-        self, audio_config=..., text_config=..., audio_token_index=..., **kwargs
+        self,
+        audio_config=...,
+        text_config=...,
+        audio_token_index=...,
+        **kwargs,
     ) -> None: ...
 
 __all__ = ["Qwen2AudioConfig", "Qwen2AudioEncoderConfig"]

@@ -366,7 +366,12 @@ def expand_as(g: jit_utils.GraphContext, self, other): ...
 @symbolic_helper.quantized_args(True)
 @symbolic_helper.parse_args("v", "v", "i", "b", "v")
 def embedding(
-    g: jit_utils.GraphContext, weight, indices, padding_idx, scale_grad_by_freq, sparse
+    g: jit_utils.GraphContext,
+    weight,
+    indices,
+    padding_idx,
+    scale_grad_by_freq,
+    sparse,
 ): ...
 @_onnx_symbolic("aten::embedding_bag")
 @symbolic_helper.quantized_args(True)
@@ -401,23 +406,39 @@ def view_as(g: jit_utils.GraphContext, self, other): ...
 @_onnx_symbolic("aten::unsafe_chunk")
 @symbolic_helper.parse_args("v", "i", "i", "i")
 def unsafe_chunk(
-    g: jit_utils.GraphContext, self, chunks, dim, _outputs=...
+    g: jit_utils.GraphContext,
+    self,
+    chunks,
+    dim,
+    _outputs=...,
 ) -> None: ...
 @_onnx_symbolic("aten::split")
 @symbolic_helper.parse_args("v", "v", "i", "i")
 def split(g: jit_utils.GraphContext, self, split_size_or_sizes, dim, _outputs=...): ...
 @_onnx_symbolic("aten::unsafe_split")
 def unsafe_split(
-    g: jit_utils.GraphContext, self, split_size_or_sizes, dim, _outputs=...
+    g: jit_utils.GraphContext,
+    self,
+    split_size_or_sizes,
+    dim,
+    _outputs=...,
 ): ...
 @_onnx_symbolic("aten::split_with_sizes")
 @symbolic_helper.parse_args("v", "is", "i", "i")
 def split_with_sizes(
-    g: jit_utils.GraphContext, self, split_sizes, dim, _outputs=...
+    g: jit_utils.GraphContext,
+    self,
+    split_sizes,
+    dim,
+    _outputs=...,
 ): ...
 @_onnx_symbolic("aten::unsafe_split_with_sizes")
 def unsafe_split_with_sizes(
-    g: jit_utils.GraphContext, self, split_sizes, dim, _outputs=...
+    g: jit_utils.GraphContext,
+    self,
+    split_sizes,
+    dim,
+    _outputs=...,
 ): ...
 @_onnx_symbolic("aten::unbind")
 @symbolic_helper.parse_args("v", "i", "i")
@@ -534,7 +555,11 @@ def logical_not(g: jit_utils.GraphContext, input): ...
 @_onnx_symbolic("aten::where")
 @symbolic_helper.parse_args("v", "v", "v", "i")
 def where(
-    g: jit_utils.GraphContext, condition, self=..., other=..., _outputs=...
+    g: jit_utils.GraphContext,
+    condition,
+    self=...,
+    other=...,
+    _outputs=...,
 ) -> list[Any]: ...
 @_onnx_symbolic("aten::log_softmax")
 @symbolic_helper.parse_args("v", "i", "none")
@@ -556,17 +581,38 @@ def convolution(
 @_onnx_symbolic("aten::conv1d")
 @symbolic_helper.parse_args("v", "v", "v", "is", "v", "is", "i")
 def conv1d(
-    g: jit_utils.GraphContext, input, weight, bias, stride, padding, dilation, groups
+    g: jit_utils.GraphContext,
+    input,
+    weight,
+    bias,
+    stride,
+    padding,
+    dilation,
+    groups,
 ): ...
 @_onnx_symbolic("aten::conv2d")
 @symbolic_helper.parse_args("v", "v", "v", "is", "v", "is", "i")
 def conv2d(
-    g: jit_utils.GraphContext, input, weight, bias, stride, padding, dilation, groups
+    g: jit_utils.GraphContext,
+    input,
+    weight,
+    bias,
+    stride,
+    padding,
+    dilation,
+    groups,
 ): ...
 @_onnx_symbolic("aten::conv3d")
 @symbolic_helper.parse_args("v", "v", "v", "is", "v", "is", "i")
 def conv3d(
-    g: jit_utils.GraphContext, input, weight, bias, stride, padding, dilation, groups
+    g: jit_utils.GraphContext,
+    input,
+    weight,
+    bias,
+    stride,
+    padding,
+    dilation,
+    groups,
 ): ...
 @_onnx_symbolic("aten::conv_transpose1d")
 @symbolic_helper.parse_args("v", "v", "v", "is", "is", "is", "i", "is")
@@ -673,7 +719,11 @@ def selu(g: jit_utils.GraphContext, input): ...
 def index_select(g: jit_utils.GraphContext, self, dim, index): ...
 @_onnx_symbolic("aten::index_put")
 def index_put(
-    g: jit_utils.GraphContext, self, indices_list_value, values, accumulate
+    g: jit_utils.GraphContext,
+    self,
+    indices_list_value,
+    values,
+    accumulate,
 ): ...
 @_onnx_symbolic("aten::index_fill")
 def index_fill(g: jit_utils.GraphContext, self, dim, index, value): ...
@@ -682,7 +732,11 @@ def index_copy(g: jit_utils.GraphContext, self, dim, index, source): ...
 @_onnx_symbolic("aten::bucketize")
 @symbolic_helper.parse_args("v", "v", "b", "b")
 def bucketize(
-    g: jit_utils.GraphContext, self, boundaries, out_int32=..., right=...
+    g: jit_utils.GraphContext,
+    self,
+    boundaries,
+    out_int32=...,
+    right=...,
 ): ...
 @_onnx_symbolic("aten::type_as")
 def type_as(g: jit_utils.GraphContext, self, other): ...
@@ -713,14 +767,20 @@ def clamp_min(g: jit_utils.GraphContext, self, min): ...
 def clamp_max(g: jit_utils.GraphContext, self, max): ...
 @_onnx_symbolic("aten::max")
 def max(
-    g: jit_utils.GraphContext, self, dim_or_y=..., keepdim=...
+    g: jit_utils.GraphContext,
+    self,
+    dim_or_y=...,
+    keepdim=...,
 ) -> tuple[Any, Any]: ...
 @_onnx_symbolic("aten::maximum")
 @symbolic_helper.quantized_args(True, True)
 def maximum(g: jit_utils.GraphContext, input, other) -> tuple[Any, Any]: ...
 @_onnx_symbolic("aten::min")
 def min(
-    g: jit_utils.GraphContext, self, dim_or_y=..., keepdim=...
+    g: jit_utils.GraphContext,
+    self,
+    dim_or_y=...,
+    keepdim=...,
 ) -> tuple[Any, Any]: ...
 @_onnx_symbolic("aten::minimum")
 @symbolic_helper.quantized_args(True, True)
@@ -773,13 +833,23 @@ def empty_like(
 ): ...
 @_onnx_symbolic("aten::new_empty")
 def new_empty(
-    g: jit_utils.GraphContext, self, sizes, dtype, layout, device, pin_memory=...
+    g: jit_utils.GraphContext,
+    self,
+    sizes,
+    dtype,
+    layout,
+    device,
+    pin_memory=...,
 ): ...
 @_onnx_symbolic("aten::scalar_tensor")
 def scalar_tensor(g: jit_utils.GraphContext, scalar, dtype, *options): ...
 @_onnx_symbolic("aten::tensor")
 def tensor(
-    g: jit_utils.GraphContext, data, dtype=..., device=..., requires_grad=...
+    g: jit_utils.GraphContext,
+    data,
+    dtype=...,
+    device=...,
+    requires_grad=...,
 ): ...
 @_onnx_symbolic("aten::as_tensor")
 def as_tensor(g: jit_utils.GraphContext, data, dtype=..., device=...): ...
@@ -799,7 +869,13 @@ def zeros_like(
 ): ...
 @_onnx_symbolic("aten::new_zeros")
 def new_zeros(
-    g: jit_utils.GraphContext, self, sizes, dtype, layout, device, pin_memory=...
+    g: jit_utils.GraphContext,
+    self,
+    sizes,
+    dtype,
+    layout,
+    device,
+    pin_memory=...,
 ): ...
 @_onnx_symbolic("aten::zero")
 def zero(g: jit_utils.GraphContext, self): ...
@@ -819,11 +895,23 @@ def ones_like(
 ): ...
 @_onnx_symbolic("aten::new_ones")
 def new_ones(
-    g: jit_utils.GraphContext, self, sizes, dtype, layout, device, pin_memory=...
+    g: jit_utils.GraphContext,
+    self,
+    sizes,
+    dtype,
+    layout,
+    device,
+    pin_memory=...,
 ): ...
 @_onnx_symbolic("aten::full")
 def full(
-    g: jit_utils.GraphContext, sizes, value, dtype, layout, device, pin_memory=...
+    g: jit_utils.GraphContext,
+    sizes,
+    value,
+    dtype,
+    layout,
+    device,
+    pin_memory=...,
 ): ...
 @_onnx_symbolic("aten::full_like")
 def full_like(
@@ -855,7 +943,10 @@ def slice(g: jit_utils.GraphContext, self, *args) -> Value | None: ...
 @symbolic_helper.quantized_args(True)
 @symbolic_helper.parse_args("v", "f", "f")
 def hardtanh(
-    g: jit_utils.GraphContext, self: _C.Value, min_val: float, max_val: float
+    g: jit_utils.GraphContext,
+    self: _C.Value,
+    min_val: float,
+    max_val: float,
 ): ...
 @_onnx_symbolic("aten::hardswish")
 @symbolic_helper.quantized_args(True)
@@ -895,7 +986,11 @@ def to(g: jit_utils.GraphContext, self, *args): ...
 def repeat(g: jit_utils.GraphContext, self, repeats): ...
 @_onnx_symbolic("aten::repeat_interleave")
 def repeat_interleave(
-    g: jit_utils.GraphContext, self, repeats, dim=..., output_size=...
+    g: jit_utils.GraphContext,
+    self,
+    repeats,
+    dim=...,
+    output_size=...,
 ) -> None: ...
 @_onnx_symbolic("aten::pixel_shuffle")
 @symbolic_helper.parse_args("v", "i")
@@ -905,11 +1000,18 @@ def pixel_shuffle(g: jit_utils.GraphContext, self, upscale_factor) -> None: ...
 def pixel_unshuffle(g: jit_utils.GraphContext, self, downscale_factor) -> None: ...
 @_onnx_symbolic("aten::lstm")
 def lstm(
-    g: jit_utils.GraphContext, *args
+    g: jit_utils.GraphContext,
+    *args,
 ) -> tuple[Any, Any] | tuple[Any, Any, Any] | None: ...
 @_onnx_symbolic("aten::lstm_cell")
 def lstm_cell(
-    g: jit_utils.GraphContext, self, hidden, w_ih, w_hh, b_ih, b_hh
+    g: jit_utils.GraphContext,
+    self,
+    hidden,
+    w_ih,
+    w_hh,
+    b_ih,
+    b_hh,
 ) -> tuple[Any, Any]: ...
 @_onnx_symbolic("aten::detach")
 def detach(g: jit_utils.GraphContext, input): ...
@@ -949,7 +1051,11 @@ def rand_like(
 def rrelu(g: jit_utils.GraphContext, input, lower, upper, training, generator): ...
 @_onnx_symbolic("aten::bernoulli")
 def bernoulli(
-    g: jit_utils.GraphContext, input, p=..., generator=..., out=...
+    g: jit_utils.GraphContext,
+    input,
+    p=...,
+    generator=...,
+    out=...,
 ) -> None: ...
 @_onnx_symbolic("aten::log_sigmoid")
 @symbolic_helper.parse_args("v")
@@ -975,12 +1081,18 @@ def narrow(g: jit_utils.GraphContext, input, dim, start, length) -> Value: ...
 @_onnx_symbolic("aten::argmax")
 @symbolic_helper.parse_args("v", "v", "b")
 def argmax(
-    g: jit_utils.GraphContext, input: torch._C.Value, dim: torch._C.Value, keepdim: bool
+    g: jit_utils.GraphContext,
+    input: torch._C.Value,
+    dim: torch._C.Value,
+    keepdim: bool,
 ): ...
 @_onnx_symbolic("aten::argmin")
 @symbolic_helper.parse_args("v", "v", "b")
 def argmin(
-    g: jit_utils.GraphContext, input: torch._C.Value, dim: torch._C.Value, keepdim: bool
+    g: jit_utils.GraphContext,
+    input: torch._C.Value,
+    dim: torch._C.Value,
+    keepdim: bool,
 ): ...
 @_onnx_symbolic("aten::scatter")
 @symbolic_helper.parse_args("v", "i", "v", "v")
@@ -1012,7 +1124,14 @@ def logsumexp(g: jit_utils.GraphContext, input, dim, keepdim): ...
 def arange(g: jit_utils.GraphContext, *args) -> None: ...
 @_onnx_symbolic("aten::linspace")
 def linspace(
-    g: jit_utils.GraphContext, start, end, steps, dtype, layout, device, pin_memory
+    g: jit_utils.GraphContext,
+    start,
+    end,
+    steps,
+    dtype,
+    layout,
+    device,
+    pin_memory,
 ): ...
 @_onnx_symbolic("aten::lift")
 def lift(g: jit_utils.GraphContext, self): ...
@@ -1061,7 +1180,11 @@ def frobenius_norm(g: jit_utils.GraphContext, self, dim=..., keepdim=...): ...
 @_onnx_symbolic("aten::multinomial")
 @symbolic_helper.parse_args("v", "i", "b", "v")
 def multinomial(
-    g: jit_utils.GraphContext, input, num_samples, replacement=..., generator=...
+    g: jit_utils.GraphContext,
+    input,
+    num_samples,
+    replacement=...,
+    generator=...,
 ): ...
 @_onnx_symbolic("aten::baddbmm")
 def baddbmm(g: jit_utils.GraphContext, self, batch1, batch2, beta, alpha): ...
@@ -1077,7 +1200,13 @@ def gelu(g: jit_utils.GraphContext, self: torch._C.Value, approximate: str = ...
 @symbolic_helper.quantized_args(True, False, False, False)
 @symbolic_helper.parse_args("v", "i", "v", "v", "f", "i")
 def group_norm(
-    g: jit_utils.GraphContext, input, num_groups, weight, bias, eps, cudnn_enabled
+    g: jit_utils.GraphContext,
+    input,
+    num_groups,
+    weight,
+    bias,
+    eps,
+    cudnn_enabled,
 ) -> None: ...
 @_onnx_symbolic("aten::dim")
 def dim(g: jit_utils.GraphContext, self): ...
@@ -1088,7 +1217,11 @@ def take(g: jit_utils.GraphContext, self, index): ...
 @_onnx_symbolic("aten::kl_div")
 @symbolic_helper.parse_args("v", "v", "i", "b")
 def kl_div(
-    g: jit_utils.GraphContext, input, target, reduction, log_target
+    g: jit_utils.GraphContext,
+    input,
+    target,
+    reduction,
+    log_target,
 ) -> list[Any]: ...
 @_onnx_symbolic("aten::mse_loss")
 @symbolic_helper.parse_args("v", "v", "i")
@@ -1123,7 +1256,12 @@ def movedim(g: jit_utils.GraphContext, self, source, destination): ...
 def fill(g: jit_utils.GraphContext, self, value): ...
 @_onnx_symbolic("aten::index_add")
 def index_add(
-    g: jit_utils.GraphContext, self, dim, index, other, alpha=...
+    g: jit_utils.GraphContext,
+    self,
+    dim,
+    index,
+    other,
+    alpha=...,
 ) -> None: ...
 @_onnx_symbolic("aten::roll")
 @symbolic_helper.parse_args("v", "is", "is")
@@ -1157,7 +1295,9 @@ def prim_layout(g: jit_utils.GraphContext, self): ...
 def prim_list_construct(g: jit_utils.GraphContext, *inputs, **kwargs) -> None: ...
 @_onnx_symbolic("prim::ListUnpack")
 def prim_list_unpack(
-    g: jit_utils.GraphContext, *inputs, **kwargs
+    g: jit_utils.GraphContext,
+    *inputs,
+    **kwargs,
 ) -> list[_C.Value] | None: ...
 @_onnx_symbolic("prim::TupleConstruct")
 def prim_tuple_construct(g: jit_utils.GraphContext, *inputs, **kwargs) -> None: ...
@@ -1179,7 +1319,10 @@ def prim_if(g: jit_utils.GraphContext, *inputs, **attrs) -> list[_C.Value]: ...
 def prim_constant(g: jit_utils.GraphContext, *inputs, **attrs) -> None: ...
 @_onnx_symbolic("prim::type")
 def prim_type(
-    g: jit_utils.GraphContext, device_value: _C.Value, *args, **kwargs
+    g: jit_utils.GraphContext,
+    device_value: _C.Value,
+    *args,
+    **kwargs,
 ) -> None: ...
 @_onnx_symbolic("onnx::Placeholder")
 def onnx_placeholder(g: jit_utils.GraphContext, *inputs, **attrs) -> list[Value]: ...
@@ -1189,7 +1332,8 @@ def noop_complex_operators(g: jit_utils.GraphContext, input: _C.Value) -> Value:
 @_onnx_symbolic("aten::_conj")
 @_onnx_symbolic("aten::conj_physical")
 def unsupported_complex_operators(
-    g: jit_utils.GraphContext, input: _C.Value
+    g: jit_utils.GraphContext,
+    input: _C.Value,
 ) -> Value: ...
 @_onnx_symbolic("aten::logit")
 def logit(g: jit_utils.GraphContext, self: torch._C.Value, eps: torch._C.Value): ...

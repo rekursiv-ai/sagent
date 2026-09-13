@@ -34,10 +34,16 @@ class SubprocKind(Enum):
 
 class SubprocPool:
     def __init__(
-        self, nprocs: int, pickler: SubprocPickler | None = ..., kind: SubprocKind = ...
+        self,
+        nprocs: int,
+        pickler: SubprocPickler | None = ...,
+        kind: SubprocKind = ...,
     ) -> None: ...
     def submit(
-        self, job_fn: Callable[_P, _T], *args: _P.args, **kwargs: _P.kwargs
+        self,
+        job_fn: Callable[_P, _T],
+        *args: _P.args,
+        **kwargs: _P.kwargs,
     ) -> Future[_T]: ...
     def quiesce(self) -> None: ...
     def wakeup(self) -> None: ...

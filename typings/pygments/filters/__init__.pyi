@@ -17,7 +17,9 @@ class CodeTagFilter(Filter):
     tag_re: Incomplete
     def __init__(self, **options) -> None: ...
     def filter(
-        self, lexer: Lexer, stream: Iterable[tuple[_TokenType, str]]
+        self,
+        lexer: Lexer,
+        stream: Iterable[tuple[_TokenType, str]],
     ) -> Iterator[tuple[_TokenType, str]]: ...
 
 class SymbolFilter(Filter):
@@ -27,14 +29,18 @@ class SymbolFilter(Filter):
     symbols: Incomplete
     def __init__(self, **options) -> None: ...
     def filter(
-        self, lexer: Lexer, stream: Iterable[tuple[_TokenType, str]]
+        self,
+        lexer: Lexer,
+        stream: Iterable[tuple[_TokenType, str]],
     ) -> Iterator[tuple[_TokenType, str]]: ...
 
 class KeywordCaseFilter(Filter):
     convert: Incomplete
     def __init__(self, **options) -> None: ...
     def filter(
-        self, lexer: Lexer, stream: Iterable[tuple[_TokenType, str]]
+        self,
+        lexer: Lexer,
+        stream: Iterable[tuple[_TokenType, str]],
     ) -> Iterator[tuple[_TokenType, str]]: ...
 
 class NameHighlightFilter(Filter):
@@ -42,7 +48,9 @@ class NameHighlightFilter(Filter):
     tokentype: Incomplete
     def __init__(self, **options) -> None: ...
     def filter(
-        self, lexer: Lexer, stream: Iterable[tuple[_TokenType, str]]
+        self,
+        lexer: Lexer,
+        stream: Iterable[tuple[_TokenType, str]],
     ) -> Iterator[tuple[_TokenType, str]]: ...
 
 class ErrorToken(Exception): ...
@@ -51,14 +59,18 @@ class RaiseOnErrorTokenFilter(Filter):
     exception: Incomplete
     def __init__(self, **options) -> None: ...
     def filter(
-        self, lexer: Lexer, stream: Iterable[tuple[_TokenType, str]]
+        self,
+        lexer: Lexer,
+        stream: Iterable[tuple[_TokenType, str]],
     ) -> Iterator[tuple[_TokenType, str]]: ...
 
 class VisibleWhitespaceFilter(Filter):
     wstt: Incomplete
     def __init__(self, **options) -> None: ...
     def filter(
-        self, lexer: Lexer, stream: Iterable[tuple[_TokenType, str]]
+        self,
+        lexer: Lexer,
+        stream: Iterable[tuple[_TokenType, str]],
     ) -> Iterator[tuple[_TokenType, str]]: ...
 
 class GobbleFilter(Filter):
@@ -66,13 +78,17 @@ class GobbleFilter(Filter):
     def __init__(self, **options) -> None: ...
     def gobble(self, value, left): ...
     def filter(
-        self, lexer: Lexer, stream: Iterable[tuple[_TokenType, str]]
+        self,
+        lexer: Lexer,
+        stream: Iterable[tuple[_TokenType, str]],
     ) -> Iterator[tuple[_TokenType, str]]: ...
 
 class TokenMergeFilter(Filter):
     def __init__(self, **options) -> None: ...
     def filter(
-        self, lexer: Lexer, stream: Iterable[tuple[_TokenType, str]]
+        self,
+        lexer: Lexer,
+        stream: Iterable[tuple[_TokenType, str]],
     ) -> Iterator[tuple[_TokenType, str]]: ...
 
 FILTERS: Incomplete

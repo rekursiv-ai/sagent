@@ -52,6 +52,8 @@ Note: we opted to not use the third-party ``platformdirs`` because we only need
 a very tiny surface: four base directories on Linux, macOS, and Windows.
 """
 
+# house-ignore[xdg-literal] -- This module IS the one place that derives the XDG layout.
+
 from __future__ import annotations
 
 from pathlib import Path

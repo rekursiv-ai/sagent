@@ -12,7 +12,8 @@ logger = ...
 
 @lru_cache(maxsize=10)
 def get_all_supported_aspect_ratios(
-    min_image_tiles: int, max_image_tiles: int
+    min_image_tiles: int,
+    max_image_tiles: int,
 ) -> list[tuple[int, int]]: ...
 @lru_cache(maxsize=100)
 def get_optimal_tiled_canvas(
@@ -80,7 +81,10 @@ class GotOcr2ImageProcessor(BaseImageProcessor):
     ):  # -> list[Any]:
         ...
     def get_number_of_image_patches(
-        self, height: int, width: int, images_kwargs=...
+        self,
+        height: int,
+        width: int,
+        images_kwargs=...,
     ):  # -> int:
         ...
 

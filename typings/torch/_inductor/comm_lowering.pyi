@@ -3,10 +3,13 @@ from . import ir
 log = ...
 
 def can_realize_as_comm_buffer(
-    x: ir.TensorBox, comm_buffer_type: ir.CommBufferType
+    x: ir.TensorBox,
+    comm_buffer_type: ir.CommBufferType,
 ) -> bool: ...
 def realize_as_comm_buffer(
-    x: ir.TensorBox, comm_buffer_type: ir.CommBufferType, group_name: str
+    x: ir.TensorBox,
+    comm_buffer_type: ir.CommBufferType,
+    group_name: str,
 ) -> None: ...
 
 _bufs_to_skip_wait = ...

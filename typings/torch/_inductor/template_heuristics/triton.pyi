@@ -79,7 +79,9 @@ class BaseHeuristicSingleton(type):
     _instances: dict[type[Any], Any] = ...
     _lock: Lock = ...
     def __call__(
-        cls: BaseHeuristicSingleton, *args: Any, **kwargs: Any
+        cls: BaseHeuristicSingleton,
+        *args: Any,
+        **kwargs: Any,
     ) -> BaseConfigHeuristic: ...
 
 class BaseConfigHeuristic(metaclass=BaseHeuristicSingleton):
@@ -97,19 +99,28 @@ class BaseConfigHeuristic(metaclass=BaseHeuristicSingleton):
         op_name: str = ...,
     ) -> Generator[TritonConfig]: ...
     def triton_config(
-        self, num_stages: int, num_warps: int, **kwargs: Any
+        self,
+        num_stages: int,
+        num_warps: int,
+        **kwargs: Any,
     ) -> TritonConfig: ...
     def get_mm_configs(self) -> partial[Generator[TritonConfig]]: ...
     def get_exhaustive_mm_configs(self) -> partial[Generator[TritonConfig]]: ...
     def get_conv_configs(self) -> partial[Generator[TritonConfig]]: ...
     def get_flex_attn_fwd_configs(
-        self, head_dim: int, dtype: Any
+        self,
+        head_dim: int,
+        dtype: Any,
     ) -> list[FlexConfig]: ...
     def get_flex_attn_bwd_configs(
-        self, head_dim: int, dtype: Any
+        self,
+        head_dim: int,
+        dtype: Any,
     ) -> list[FlexConfig]: ...
     def get_flex_decode_configs(
-        self, head_dim: int, dtype: Any
+        self,
+        head_dim: int,
+        dtype: Any,
     ) -> list[FlexDecodeConfig]: ...
 
 class CPUConfigHeuristic(BaseConfigHeuristic):
@@ -129,37 +140,55 @@ class CPUConfigHeuristic(BaseConfigHeuristic):
 class CUDAConfigHeuristic(BaseConfigHeuristic):
     def __init__(self) -> None: ...
     def get_flex_attn_fwd_configs(
-        self, head_dim: int, dtype: Any
+        self,
+        head_dim: int,
+        dtype: Any,
     ) -> list[FlexConfig]: ...
     def get_flex_attn_bwd_configs(
-        self, head_dim: int, dtype: Any
+        self,
+        head_dim: int,
+        dtype: Any,
     ) -> list[FlexConfig]: ...
     def get_flex_decode_configs(
-        self, head_dim: int, dtype: Any
+        self,
+        head_dim: int,
+        dtype: Any,
     ) -> list[FlexDecodeConfig]: ...
 
 class ROCmConfigHeuristic(BaseConfigHeuristic):
     def __init__(self) -> None: ...
     def get_flex_attn_fwd_configs(
-        self, head_dim: int, dtype: Any
+        self,
+        head_dim: int,
+        dtype: Any,
     ) -> list[FlexConfig]: ...
     def get_flex_attn_bwd_configs(
-        self, head_dim: int, dtype: Any
+        self,
+        head_dim: int,
+        dtype: Any,
     ) -> list[FlexConfig]: ...
     def get_flex_decode_configs(
-        self, head_dim: int, dtype: Any
+        self,
+        head_dim: int,
+        dtype: Any,
     ) -> list[FlexDecodeConfig]: ...
 
 class XPUConfigHeuristic(BaseConfigHeuristic):
     def __init__(self) -> None: ...
     def get_flex_attn_fwd_configs(
-        self, head_dim: int, dtype: Any
+        self,
+        head_dim: int,
+        dtype: Any,
     ) -> list[FlexConfig]: ...
     def get_flex_attn_bwd_configs(
-        self, head_dim: int, dtype: Any
+        self,
+        head_dim: int,
+        dtype: Any,
     ) -> list[FlexConfig]: ...
     def get_flex_decode_configs(
-        self, head_dim: int, dtype: Any
+        self,
+        head_dim: int,
+        dtype: Any,
     ) -> list[FlexDecodeConfig]: ...
 
 class MTIAConfigHeuristic(BaseConfigHeuristic): ...
@@ -177,52 +206,77 @@ class MMPlusMMTemplateConfigMixin(MMTemplateConfigMixin):
 
 class TMAWorkspaceMixin(MMTemplateConfigMixin):
     def get_extra_kwargs(
-        self, kernel_inputs: KernelInputs, layout: Layout, op_name: str
+        self,
+        kernel_inputs: KernelInputs,
+        layout: Layout,
+        op_name: str,
     ) -> dict[str, Any]: ...
 
 class TMATemplateConfigMixin(TMAWorkspaceMixin, MMTemplateConfigMixin): ...
 
 class BaseScaledMMConfigMixin(MMTemplateConfigMixin):
     def adjust_kernel_inputs(
-        self, kernel_inputs: KernelInputs, op_name: str
+        self,
+        kernel_inputs: KernelInputs,
+        op_name: str,
     ) -> KernelInputs: ...
 
 class ScaledMMConfigMixin(BaseScaledMMConfigMixin):
     def get_extra_kwargs(
-        self, kernel_inputs: KernelInputs, layout: Layout, op_name: str
+        self,
+        kernel_inputs: KernelInputs,
+        layout: Layout,
+        op_name: str,
     ) -> dict[str, Any]: ...
 
 class ScaledTMAConfigMixin(TMAWorkspaceMixin, BaseScaledMMConfigMixin): ...
 
 @register_template_heuristic(
-    mm_template.uid, "cuda", register=torch.version.hip is None
+    mm_template.uid,
+    "cuda",
+    register=torch.version.hip is None,
 )
 @register_template_heuristic(
-    bmm_template.uid, "cuda", register=torch.version.hip is None
+    bmm_template.uid,
+    "cuda",
+    register=torch.version.hip is None,
 )
 class CUDAMMTemplateConfigHeuristic(MMTemplateConfigMixin, CUDAConfigHeuristic): ...
 
 @register_template_heuristic(
-    mm_template.uid, "cuda", register=torch.version.hip is None, op_name="addmm"
+    mm_template.uid,
+    "cuda",
+    register=torch.version.hip is None,
+    op_name="addmm",
 )
 @register_template_heuristic(
-    bmm_template.uid, "cuda", register=torch.version.hip is None, op_name="baddbmm"
+    bmm_template.uid,
+    "cuda",
+    register=torch.version.hip is None,
+    op_name="baddbmm",
 )
 class CUDAAddMMTemplateConfigHeuristic(
-    AddMMConfigMixin, CUDAMMTemplateConfigHeuristic
+    AddMMConfigMixin,
+    CUDAMMTemplateConfigHeuristic,
 ): ...
 
 @register_template_heuristic(
-    mm_template.uid, "cuda", register=torch.version.hip is None, op_name="mm-ah"
+    mm_template.uid,
+    "cuda",
+    register=torch.version.hip is None,
+    op_name="mm-ah",
 )
 class CUDAMMAHTemplateConfigHeuristic(MMTemplateConfigMixin, CUDAConfigHeuristic):
     def __init__(self) -> None: ...
 
 @register_template_heuristic(
-    persistent_tma_mm_template.uid, "cuda", register=torch.version.hip is None
+    persistent_tma_mm_template.uid,
+    "cuda",
+    register=torch.version.hip is None,
 )
 class CUDAPersistentTMATemplateConfigHeuristic(
-    TMATemplateConfigMixin, CUDAConfigHeuristic
+    TMATemplateConfigMixin,
+    CUDAConfigHeuristic,
 ):
     def __init__(self) -> None: ...
 
@@ -233,51 +287,74 @@ class CUDAPersistentTMATemplateConfigHeuristic(
     op_name="addmm",
 )
 class CUDAAddmmPersistentTMATemplateConfigHeuristic(
-    AddMMConfigMixin, CUDAPersistentTMATemplateConfigHeuristic
+    AddMMConfigMixin,
+    CUDAPersistentTMATemplateConfigHeuristic,
 ): ...
 
 @register_template_heuristic(
-    mm_template.uid, "cuda", register=torch.version.hip is None, op_name="scaled_mm"
+    mm_template.uid,
+    "cuda",
+    register=torch.version.hip is None,
+    op_name="scaled_mm",
 )
 class CUDAScaledMMTemplateConfigHeuristic(ScaledMMConfigMixin, CUDAConfigHeuristic):
     def __init__(self) -> None: ...
 
 @register_template_heuristic(
-    scaled_mm_device_tma_template.uid, "cuda", register=torch.version.hip is None
+    scaled_mm_device_tma_template.uid,
+    "cuda",
+    register=torch.version.hip is None,
 )
 class CUDAScaledTMATemplateConfigHeuristic(ScaledTMAConfigMixin, CUDAConfigHeuristic):
     def __init__(self) -> None: ...
 
 @register_template_heuristic(
-    mm_plus_mm_template.uid, "cuda", register=torch.version.hip is None
+    mm_plus_mm_template.uid,
+    "cuda",
+    register=torch.version.hip is None,
 )
 class CUDAMMPlusMMTemplateConfigHeuristic(
-    MMPlusMMTemplateConfigMixin, CUDAConfigHeuristic
+    MMPlusMMTemplateConfigMixin,
+    CUDAConfigHeuristic,
 ):
     def __init__(self) -> None: ...
 
 @register_template_heuristic(
-    mm_template.uid, "cuda", register=torch.version.hip is None, op_name="int_mm"
+    mm_template.uid,
+    "cuda",
+    register=torch.version.hip is None,
+    op_name="int_mm",
 )
 class CUDAInt8MMTemplateConfigHeuristic(INT8MMTemplateConfigMixin, CUDAConfigHeuristic):
     def __init__(self) -> None: ...
 
 @register_template_heuristic(
-    mm_template.uid, "cuda", register=torch.version.hip is not None
+    mm_template.uid,
+    "cuda",
+    register=torch.version.hip is not None,
 )
 @register_template_heuristic(
-    bmm_template.uid, "cuda", register=torch.version.hip is not None
+    bmm_template.uid,
+    "cuda",
+    register=torch.version.hip is not None,
 )
 class ROCmMMTemplateConfigHeuristic(MMTemplateConfigMixin, ROCmConfigHeuristic): ...
 
 @register_template_heuristic(
-    mm_template.uid, "cuda", register=torch.version.hip is not None, op_name="addmm"
+    mm_template.uid,
+    "cuda",
+    register=torch.version.hip is not None,
+    op_name="addmm",
 )
 @register_template_heuristic(
-    bmm_template.uid, "cuda", register=torch.version.hip is not None, op_name="baddbmm"
+    bmm_template.uid,
+    "cuda",
+    register=torch.version.hip is not None,
+    op_name="baddbmm",
 )
 class ROCmAddMMTemplateConfigHeuristic(
-    AddMMConfigMixin, ROCmMMTemplateConfigHeuristic
+    AddMMConfigMixin,
+    ROCmMMTemplateConfigHeuristic,
 ): ...
 
 @register_template_heuristic("mm-ah", "cuda", register=torch.version.hip is not None)
@@ -285,22 +362,31 @@ class ROCmMMAHTemplateConfigHeuristic(MMTemplateConfigMixin, ROCmConfigHeuristic
     def __init__(self) -> None: ...
 
 @register_template_heuristic(
-    mm_template.uid, "cuda", register=torch.version.hip is not None, op_name="scaled_mm"
+    mm_template.uid,
+    "cuda",
+    register=torch.version.hip is not None,
+    op_name="scaled_mm",
 )
 class ROCmScaledMMTemplateConfigHeuristic(ScaledMMConfigMixin, ROCmConfigHeuristic):
     def __init__(self) -> None: ...
 
 @register_template_heuristic(
-    mm_template.uid, "cuda", register=torch.version.hip is not None, op_name="int_mm"
+    mm_template.uid,
+    "cuda",
+    register=torch.version.hip is not None,
+    op_name="int_mm",
 )
 class ROCmInt8MMTemplateConfigHeuristic(INT8MMTemplateConfigMixin, ROCmConfigHeuristic):
     def __init__(self) -> None: ...
 
 @register_template_heuristic(
-    mm_plus_mm_template.uid, "cuda", register=torch.version.hip is not None
+    mm_plus_mm_template.uid,
+    "cuda",
+    register=torch.version.hip is not None,
 )
 class ROCmMMPlusMMTemplateConfigHeuristic(
-    MMPlusMMTemplateConfigMixin, ROCmConfigHeuristic
+    MMPlusMMTemplateConfigMixin,
+    ROCmConfigHeuristic,
 ):
     def __init__(self) -> None: ...
 
@@ -311,7 +397,8 @@ class CPUMMTemplateConfigHeuristic(MMTemplateConfigMixin, CPUConfigHeuristic): .
 @register_template_heuristic(mm_template.uid, "cpu", op_name="addmm")
 @register_template_heuristic(bmm_template.uid, "cpu", op_name="baddbmm")
 class CPUAddmmTemplateConfigHeuristic(
-    AddMMConfigMixin, CPUMMTemplateConfigHeuristic
+    AddMMConfigMixin,
+    CPUMMTemplateConfigHeuristic,
 ): ...
 
 @register_template_heuristic(mm_template.uid, "cpu", op_name="scaled_mm")
@@ -324,7 +411,8 @@ class CPUInt8MMTemplateConfigHeuristic(INT8MMTemplateConfigMixin, CPUConfigHeuri
 
 @register_template_heuristic(mm_plus_mm_template.uid, "cpu")
 class CPUMMPlusMMTemplateConfigHeuristic(
-    MMPlusMMTemplateConfigMixin, CPUConfigHeuristic
+    MMPlusMMTemplateConfigMixin,
+    CPUConfigHeuristic,
 ):
     def __init__(self) -> None: ...
 
@@ -335,18 +423,21 @@ class XPUMMTemplateConfigHeuristic(MMTemplateConfigMixin, XPUConfigHeuristic): .
 @register_template_heuristic(mm_template.uid, "xpu", op_name="addmm")
 @register_template_heuristic(bmm_template.uid, "xpu", op_name="baddbmm")
 class XPUAddmmTemplateConfigHeuristic(
-    AddMMConfigMixin, XPUMMTemplateConfigHeuristic
+    AddMMConfigMixin,
+    XPUMMTemplateConfigHeuristic,
 ): ...
 
 @register_template_heuristic(persistent_tma_mm_template.uid, "xpu")
 class XPUPersistentTMATemplateConfigHeuristic(
-    TMATemplateConfigMixin, XPUConfigHeuristic
+    TMATemplateConfigMixin,
+    XPUConfigHeuristic,
 ):
     def __init__(self) -> None: ...
 
 @register_template_heuristic(persistent_tma_mm_template.uid, "xpu", op_name="addmm")
 class XPUAddmmPersistentTMATemplateConfigHeuristic(
-    AddMMConfigMixin, XPUPersistentTMATemplateConfigHeuristic
+    AddMMConfigMixin,
+    XPUPersistentTMATemplateConfigHeuristic,
 ): ...
 
 @register_template_heuristic(mm_template.uid, "xpu", op_name="scaled_mm")
@@ -359,7 +450,8 @@ class XPUInt8MMTemplateConfigHeuristic(INT8MMTemplateConfigMixin, XPUConfigHeuri
 
 @register_template_heuristic(mm_plus_mm_template.uid, "xpu")
 class XPUMMPlusMMTemplateConfigHeuristic(
-    MMPlusMMTemplateConfigMixin, XPUConfigHeuristic
+    MMPlusMMTemplateConfigMixin,
+    XPUConfigHeuristic,
 ):
     def __init__(self) -> None: ...
 
@@ -370,7 +462,8 @@ class MTIAMMTemplateConfigHeuristic(MMTemplateConfigMixin, MTIAConfigHeuristic):
 @register_template_heuristic(mm_template.uid, "mtia", op_name="addmm")
 @register_template_heuristic(bmm_template.uid, "mtia", op_name="baddbmm")
 class MTIAAddMMTemplateConfigHeuristic(
-    AddMMConfigMixin, MTIAMMTemplateConfigHeuristic
+    AddMMConfigMixin,
+    MTIAMMTemplateConfigHeuristic,
 ): ...
 
 @register_template_heuristic(mm_template.uid, "mtia", op_name="scaled_mm")
@@ -383,6 +476,7 @@ class MTIAInt8MMTemplateConfigHeuristic(INT8MMTemplateConfigMixin, MTIAConfigHeu
 
 @register_template_heuristic(mm_plus_mm_template.uid, "mtia")
 class MTIAMMPlusMMTemplateConfigHeuristic(
-    MMPlusMMTemplateConfigMixin, MTIAConfigHeuristic
+    MMPlusMMTemplateConfigMixin,
+    MTIAConfigHeuristic,
 ):
     def __init__(self) -> None: ...

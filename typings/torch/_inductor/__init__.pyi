@@ -42,7 +42,9 @@ def aoti_compile_and_package(
     inductor_configs: dict[str, Any] | None = ...,
 ) -> str: ...
 def aoti_load_package(
-    path: FileLike, run_single_threaded: bool = ..., device_index: int = ...
+    path: FileLike,
+    run_single_threaded: bool = ...,
+    device_index: int = ...,
 ) -> AOTICompiledModel: ...
 def aot_compile(
     gm: torch.fx.GraphModule,
@@ -52,7 +54,8 @@ def aot_compile(
     options: dict[str, Any] | None = ...,
 ) -> str | list[str | Weights] | torch.fx.GraphModule: ...
 def list_mode_options(
-    mode: str | None = ..., dynamic: bool | None = ...
+    mode: str | None = ...,
+    dynamic: bool | None = ...,
 ) -> dict[str, Any]: ...
 def list_options() -> list[str]: ...
 def cudagraph_mark_step_begin() -> None: ...
@@ -61,7 +64,9 @@ def standalone_compile(
     example_inputs: list[InputType],
     *,
     dynamic_shapes: Literal[
-        "from_example_inputs", "from_tracing_context", "from_graph"
+        "from_example_inputs",
+        "from_tracing_context",
+        "from_graph",
     ] = ...,
     options: dict[str, Any] | None = ...,
 ) -> CompiledArtifact: ...

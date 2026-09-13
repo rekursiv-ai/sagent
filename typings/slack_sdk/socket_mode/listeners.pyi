@@ -2,7 +2,9 @@ from slack_sdk.socket_mode.request import SocketModeRequest
 
 class WebSocketMessageListener:
     def __call__(
-        self: BaseSocketModeClient, message: dict, raw_message: str | None = ...
+        self: BaseSocketModeClient,
+        message: dict,
+        raw_message: str | None = ...,
     ): ...
 
 class SocketModeRequestListener:

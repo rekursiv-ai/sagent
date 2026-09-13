@@ -29,7 +29,8 @@ class EditablePrecompileCacheArtifact(Generic[T]):
 
 class PrecompileContext(CacheArtifactManager):
     _new_cache_artifacts_by_key: dict[
-        str, EditablePrecompileCacheArtifact[object] | CacheArtifact
+        str,
+        EditablePrecompileCacheArtifact[object] | CacheArtifact,
     ] = ...
     _new_cache_artifacts: CacheArtifactsResult = ...
     _seen_artifacts: OrderedSet[CacheArtifact] = ...
@@ -40,7 +41,11 @@ class PrecompileContext(CacheArtifactManager):
     @override
     @classmethod
     def record_artifact(
-        cls, artifact_type: str, key: str, content: Any, editable: bool = ...
+        cls,
+        artifact_type: str,
+        key: str,
+        content: Any,
+        editable: bool = ...,
     ) -> None: ...
     @classmethod
     def edit_artifact(cls, key: str, edit_fn: Callable[..., Any]) -> None: ...

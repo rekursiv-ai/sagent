@@ -41,14 +41,20 @@ def col2im(
 ): ...
 @_onnx_symbolic("aten::max")
 def max(
-    g: jit_utils.GraphContext, self, dim_or_y=..., keepdim=...
+    g: jit_utils.GraphContext,
+    self,
+    dim_or_y=...,
+    keepdim=...,
 ) -> tuple[Any, Any]: ...
 @_onnx_symbolic("aten::maximum")
 @symbolic_helper.quantized_args(True, True)
 def maximum(g: jit_utils.GraphContext, input, other) -> tuple[Any, Any]: ...
 @_onnx_symbolic("aten::min")
 def min(
-    g: jit_utils.GraphContext, self, dim_or_y=..., keepdim=...
+    g: jit_utils.GraphContext,
+    self,
+    dim_or_y=...,
+    keepdim=...,
 ) -> tuple[Any, Any]: ...
 @_onnx_symbolic("aten::minimum")
 @symbolic_helper.quantized_args(True, True)

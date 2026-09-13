@@ -66,7 +66,10 @@ class JukeboxPriorConfig(PretrainedConfig):
     ) -> None: ...
     @classmethod
     def from_pretrained(
-        cls, pretrained_model_name_or_path: str | os.PathLike, level=..., **kwargs
+        cls,
+        pretrained_model_name_or_path: str | os.PathLike,
+        level=...,
+        **kwargs,
     ):  # -> Self:
         ...
 
@@ -97,7 +100,9 @@ class JukeboxVQVAEConfig(PretrainedConfig):
     ) -> None: ...
     @classmethod
     def from_pretrained(
-        cls, pretrained_model_name_or_path: str | os.PathLike, **kwargs
+        cls,
+        pretrained_model_name_or_path: str | os.PathLike,
+        **kwargs,
     ):  # -> Self:
         ...
 

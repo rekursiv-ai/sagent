@@ -80,12 +80,17 @@ class FlaxBigBirdBlockSparseAttention(nn.Module):
     def transpose_for_scores(x, n_heads, head_size):  # -> Array:
         ...
     def __call__(
-        self, hidden_states, attention_mask, deterministic=..., output_attentions=...
+        self,
+        hidden_states,
+        attention_mask,
+        deterministic=...,
+        output_attentions=...,
     ):  # -> tuple[Array, None] | tuple[Array]:
         ...
     @staticmethod
     def create_masks_for_block_sparse_attn(
-        attention_mask, block_size: int
+        attention_mask,
+        block_size: int,
     ):  # -> tuple[Any, Array, Any, Any]:
         ...
     def bigbird_block_sparse_attention(
@@ -239,7 +244,10 @@ class FlaxBigBirdPreTrainingHeads(nn.Module):
     def setup(self):  # -> None:
         ...
     def __call__(
-        self, hidden_states, pooled_output, shared_embedding=...
+        self,
+        hidden_states,
+        pooled_output,
+        shared_embedding=...,
     ):  # -> tuple[Any, Any]:
         ...
 
@@ -260,11 +268,14 @@ class FlaxBigBirdPreTrainedModel(FlaxPreTrainedModel):
     def enable_gradient_checkpointing(self):  # -> None:
         ...
     def init_weights(
-        self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...
+        self,
+        rng: jax.random.PRNGKey,
+        input_shape: tuple,
+        params: FrozenDict = ...,
     ) -> FrozenDict: ...
     def init_cache(self, batch_size, max_length): ...
     @add_start_docstrings_to_model_forward(
-        BIG_BIRD_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        BIG_BIRD_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     def __call__(
         self,
@@ -498,7 +509,7 @@ class FlaxBigBirdForQuestionAnsweringModule(nn.Module):
 )
 class FlaxBigBirdForQuestionAnswering(FlaxBigBirdPreTrainedModel):
     @add_start_docstrings_to_model_forward(
-        BIG_BIRD_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        BIG_BIRD_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     def __call__(
         self,
@@ -548,7 +559,10 @@ class FlaxBigBirdForCausalLMModule(nn.Module):
 )
 class FlaxBigBirdForCausalLM(FlaxBigBirdPreTrainedModel):
     def prepare_inputs_for_generation(
-        self, input_ids, max_length, attention_mask: jax.Array | None = ...
+        self,
+        input_ids,
+        max_length,
+        attention_mask: jax.Array | None = ...,
     ):  # -> dict[str, Any | Array]:
         ...
     def update_inputs_for_generation(self, model_outputs, model_kwargs): ...

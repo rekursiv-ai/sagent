@@ -41,7 +41,12 @@ class Ernie4_5_MoeRotaryEmbedding(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -77,10 +82,13 @@ class Ernie4_5_MoeStatics(nn.Module):
 class Ernie4_5_MoeSparseMoeBlock(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 class Ernie4_5_MoeDecoderLayer(GradientCheckpointingLayer):

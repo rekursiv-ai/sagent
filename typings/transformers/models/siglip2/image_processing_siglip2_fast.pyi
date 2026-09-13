@@ -14,7 +14,9 @@ logger = ...
 
 def convert_image_to_patches(image: torch.Tensor, patch_size: int) -> torch.Tensor: ...
 def pad_along_first_dim(
-    tensor: torch.Tensor, target_length: int, pad_value: int = ...
+    tensor: torch.Tensor,
+    target_length: int,
+    pad_value: int = ...,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class Siglip2FastImageProcessorKwargs(DefaultFastImageProcessorKwargs):
@@ -36,7 +38,9 @@ class Siglip2ImageProcessorFast(BaseImageProcessorFast):
     def __init__(self, **kwargs: Unpack[Siglip2FastImageProcessorKwargs]) -> None: ...
     @auto_docstring
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[Siglip2FastImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[Siglip2FastImageProcessorKwargs],
     ) -> BatchFeature: ...
 
 __all__ = ["Siglip2ImageProcessorFast"]

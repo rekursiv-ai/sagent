@@ -57,7 +57,9 @@ class GitSelfAttention(nn.Module):
 class GitSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -86,7 +88,9 @@ class GitIntermediate(nn.Module):
 class GitOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -120,7 +124,9 @@ class GitEncoder(nn.Module):
         return_dict: bool | None = ...,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPast: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPast: ...
 
 @auto_docstring
@@ -132,10 +138,15 @@ class GitPreTrainedModel(PreTrainedModel):
 class GitVisionEmbeddings(nn.Module):
     def __init__(self, config: GitVisionConfig) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
-        self, pixel_values: torch.FloatTensor, interpolate_pos_encoding=...
+        self,
+        pixel_values: torch.FloatTensor,
+        interpolate_pos_encoding=...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -166,7 +177,9 @@ class GitVisionAttention(nn.Module):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class GitVisionEncoderLayer(GradientCheckpointingLayer):
@@ -234,7 +247,12 @@ class GitModel(GitPreTrainedModel):
     def set_input_embeddings(self, value):  # -> None:
         ...
     def create_attention_mask(
-        self, tgt, memory, tgt_mask, past_key_values_length, memory_key_padding_mask=...
+        self,
+        tgt,
+        memory,
+        tgt_mask,
+        past_key_values_length,
+        memory_key_padding_mask=...,
     ):  # -> Tensor:
         ...
     @auto_docstring

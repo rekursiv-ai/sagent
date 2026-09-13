@@ -83,12 +83,14 @@ def test_large_read_is_not_silently_elided(tmp_path: Path) -> None:
     messages = [
         UserMessage(text="read it"),
         AssistantMessage(
-            text="", tool_calls=(ToolCall(id="c1", name="Read", args={}),)
+            text="",
+            tool_calls=(ToolCall(id="c1", name="Read", args={}),),
         ),
         ToolResult(call_id="c1", content=result.content),
     ]
     materialized = materialize_messages(
-        messages, tool_result_budget_tokens=_MESSAGE_BUDGET_TOKENS
+        messages,
+        tool_result_budget_tokens=_MESSAGE_BUDGET_TOKENS,
     )
     tool_results = [m for m in materialized if isinstance(m, ToolResult)]
 
@@ -127,21 +129,19 @@ def _notebook(path: Path, cells: int, width: int) -> Path:
                         "outputs": [{"text": [body]}],
                     }
                     for _ in range(cells)
-                ]
-            }
+                ],
+            },
         ),
         encoding="utf-8",
     )
     return path
 
 
+# ``narrow`` and ``wide`` differ ONLY in line width. A bound expressed in lines passes
+# one and fails the other by that ratio, which is the defect: the budget is not counted
+# in lines.
 def _oversized(tmp_path: Path) -> dict[str, tuple[object, Mapping[str, object]]]:
-    """One over-budget invocation per text-producing tool.
-
-    ``narrow`` and ``wide`` differ ONLY in line width. A bound expressed
-    in lines passes one and fails the other by that ratio, which is the
-    defect: the budget is not counted in lines.
-    """
+    """One over-budget invocation per text-producing tool."""
     for i in range(400):
         (tmp_path / f"f{i:04d}.txt").write_text("hit line\n" * 40, encoding="utf-8")
     return {
@@ -184,7 +184,8 @@ _OVERSIZED_CASES: Final = (
 
 @pytest.mark.parametrize("case", _OVERSIZED_CASES)
 def test_a_tool_result_never_exceeds_the_token_budget(
-    case: str, tmp_path: Path
+    case: str,
+    tmp_path: Path,
 ) -> None:
     """No tool may return more than the active model's per-result budget.
 
@@ -225,8 +226,8 @@ def test_unbounded_grep_stays_within_the_result_cap(tmp_path: Path) -> None:
     with with_fake_agent():
         result = asyncio.run(
             Grep().run(
-                {"pattern": "hit", "path": str(tmp_path), "output_mode": "content"}
-            )
+                {"pattern": "hit", "path": str(tmp_path), "output_mode": "content"},
+            ),
         )
     with with_fake_agent() as agent:
         used = agent.approx_text_tokens(result.content)
@@ -270,7 +271,8 @@ def test_a_resume_offset_never_points_behind_what_was_shown(tmp_path: Path) -> N
     rows = 400
     path = tmp_path / "wide.txt"
     path.write_text(
-        "".join(f"hit{i:04d} {'w' * 400}\n" for i in range(rows)), encoding="utf-8"
+        "".join(f"hit{i:04d} {'w' * 400}\n" for i in range(rows)),
+        encoding="utf-8",
     )
     # ``keep_last`` must be a REAL tail (strictly fewer than the matches),
     # or the slice is a no-op and the discarded start never matters. The
@@ -284,8 +286,8 @@ def test_a_resume_offset_never_points_behind_what_was_shown(tmp_path: Path) -> N
                     "path": str(path),
                     "output_mode": "content",
                     "keep_last": rows // 2,
-                }
-            )
+                },
+            ),
         )
     shown = re.findall(r"hit(\d+) ", result.content)
     resume = re.search(r"offset=(\d+)", result.content)

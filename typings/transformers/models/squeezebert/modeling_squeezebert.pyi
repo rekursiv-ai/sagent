@@ -20,7 +20,11 @@ logger = ...
 class SqueezeBertEmbeddings(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, input_ids=..., token_type_ids=..., position_ids=..., inputs_embeds=...
+        self,
+        input_ids=...,
+        token_type_ids=...,
+        position_ids=...,
+        inputs_embeds=...,
     ):  # -> Any:
         ...
 
@@ -45,20 +49,31 @@ class ConvActivation(nn.Module):
 
 class SqueezeBertSelfAttention(nn.Module):
     def __init__(
-        self, config, cin, q_groups=..., k_groups=..., v_groups=...
+        self,
+        config,
+        cin,
+        q_groups=...,
+        k_groups=...,
+        v_groups=...,
     ) -> None: ...
     def transpose_for_scores(self, x): ...
     def transpose_key_for_scores(self, x): ...
     def transpose_output(self, x): ...
     def forward(
-        self, hidden_states, attention_mask, output_attentions
+        self,
+        hidden_states,
+        attention_mask,
+        output_attentions,
     ):  # -> dict[str, Any]:
         ...
 
 class SqueezeBertModule(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states, attention_mask, output_attentions
+        self,
+        hidden_states,
+        attention_mask,
+        output_attentions,
     ):  # -> dict[str, Any]:
         ...
 

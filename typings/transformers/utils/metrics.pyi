@@ -38,9 +38,13 @@ class ContinuousBatchProcessorMetrics:
     def record_kv_cache_memory_metrics(self, cache) -> None: ...
     @traced
     def record_queue_metrics(
-        self, active_requests: int, waiting_requests: int
+        self,
+        active_requests: int,
+        waiting_requests: int,
     ) -> None: ...
     @traced
     def record_request_completion(
-        self, created_time: float, request_id: str
+        self,
+        created_time: float,
+        request_id: str,
     ) -> None: ...

@@ -4,7 +4,11 @@ __all__ = ["LazyModuleMixin"]
 
 class _LazyProtocol(Protocol):
     def register_forward_pre_hook(
-        self, hook, *, prepend=..., with_kwargs=...
+        self,
+        hook,
+        *,
+        prepend=...,
+        with_kwargs=...,
     ) -> None: ...
 
 class LazyModuleMixin:

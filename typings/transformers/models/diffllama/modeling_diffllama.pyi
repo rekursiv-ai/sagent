@@ -30,7 +30,12 @@ class DiffLlamaMLP(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -39,7 +44,9 @@ def lambda_init_fn(layer_idx):  # -> float:
 
 class DiffLlamaAttention(nn.Module):
     def __init__(
-        self, config: DiffLlamaConfig, layer_idx: int | None = ...
+        self,
+        config: DiffLlamaConfig,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -168,16 +175,19 @@ class DiffLlamaForCausalLM(DiffLlamaPreTrainedModel, GenerationMixin):
     ) -> CausalLMOutputWithPast: ...
 
 class DiffLlamaForSequenceClassification(
-    GenericForSequenceClassification, DiffLlamaPreTrainedModel
+    GenericForSequenceClassification,
+    DiffLlamaPreTrainedModel,
 ): ...
 
 class DiffLlamaForQuestionAnswering(
-    GenericForQuestionAnswering, DiffLlamaPreTrainedModel
+    GenericForQuestionAnswering,
+    DiffLlamaPreTrainedModel,
 ):
     base_model_prefix = ...
 
 class DiffLlamaForTokenClassification(
-    GenericForTokenClassification, DiffLlamaPreTrainedModel
+    GenericForTokenClassification,
+    DiffLlamaPreTrainedModel,
 ): ...
 
 __all__ = [

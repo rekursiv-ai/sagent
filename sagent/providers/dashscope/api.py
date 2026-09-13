@@ -23,7 +23,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import ClassVar, override
 
-from sagent.catalog import dashscope as dashscope_catalog
+from sagent.catalog import dashscope
 from sagent.lib.custom_json import MutableJSON
 from sagent.providers.openai.compat import (
     OpenAICompat,
@@ -57,14 +57,12 @@ class _DashScopeModel(OpenAICompatModel):
 
     _reasoning_field: ClassVar[str | None] = "reasoning_content"
 
+    # A thinking prefix is necessary but not sufficient: the ``-instruct`` / ``-coder``
+    # qwen3 ids share the prefix yet are pure non-reasoning models that reject the
+    # toggle, so they are excluded here.
     @override
     def _is_effort_model(self, model_id: str) -> bool:
-        """Check whether Qwen3/QwQ/QvQ models accept ``enable_thinking``.
-
-        A thinking prefix is necessary but not sufficient: the ``-instruct`` /
-        ``-coder`` qwen3 ids share the prefix yet are pure non-reasoning models
-        that reject the toggle, so they are excluded here.
-        """
+        """Check whether Qwen3/QwQ/QvQ models accept ``enable_thinking``."""
         if _is_non_reasoning_variant(model_id):
             return False
         # Prefixes WITHOUT a trailing hyphen match both the hyphenated ids
@@ -76,17 +74,15 @@ class _DashScopeModel(OpenAICompatModel):
             for p in ("qwen3", "qwen-plus", "qwen-max", "qwq", "qvq")
         )
 
+    # DashScope rejects ``reasoning_effort``; it exposes ``enable_thinking`` (on/off)
+    # plus an optional ``thinking_budget`` reasoning-token cap.
     @override
     def _transform_body(
         self,
         body: MutableJSON,
         request: ModelRequest,
     ) -> MutableJSON:
-        """Map sagent's effort onto DashScope's thinking knobs.
-
-        DashScope rejects ``reasoning_effort``; it exposes ``enable_thinking``
-        (on/off) plus an optional ``thinking_budget`` reasoning-token cap.
-        """
+        """Map sagent's effort onto DashScope's thinking knobs."""
         del request
         body.pop("reasoning_effort", None)
         effort = self.settings.thinking_effort
@@ -94,7 +90,7 @@ class _DashScopeModel(OpenAICompatModel):
         # ``-instruct`` / ``-coder`` / ``-turbo`` ids); never send one.
         if self.capability.thinking_effort == frozenset({"none"}):
             return body
-        budget = dashscope_catalog.thinking_budget(effort)
+        budget = dashscope.thinking_budget(effort)
         # Qwen spells "no reasoning" as a toggle, not a zero budget.
         body["enable_thinking"] = budget != "0"
         if budget != "0":
@@ -106,7 +102,7 @@ class _DashScopeModel(OpenAICompatModel):
 # min_pixels/max_pixels; object localization is robust 480-2560 px) and
 # publishes no hard per-image pixel/byte reject the client must preempt, nor a
 # request-body byte ceiling. Use the 0=unlimited sentinel rather than borrowing
-# OpenAI's caps (verified Jun 2026;
+# OpenAI's caps (verified Jun 2026.
 # https://www.alibabacloud.com/help/en/model-studio/vision).
 
 
@@ -128,7 +124,7 @@ class DashScope(OpenAICompat):
     #
     # To add a new model: check the Alibaba Cloud Model Studio docs
     # for context window and max output tokens.
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = dashscope_catalog.models()
+    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = dashscope.models()
     """Per-model capability; transport limits live on ``TRANSPORT``."""
 
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _DashScopeModel

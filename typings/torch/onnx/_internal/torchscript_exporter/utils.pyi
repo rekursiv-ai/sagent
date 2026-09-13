@@ -67,7 +67,8 @@ _params_dict = ...
 @deprecated("Please set training mode before exporting the model", category=None)
 @contextlib.contextmanager
 def select_model_mode_for_export(
-    model, mode: _C_onnx.TrainingMode
+    model,
+    mode: _C_onnx.TrainingMode,
 ) -> Generator[None, Any]: ...
 @deprecated(
     "Please remove usage of this function. Copy its logic if it is required in user code",
@@ -86,7 +87,9 @@ def setup_onnx_logging(verbose: bool) -> Generator[None, Any]: ...
 )
 @contextlib.contextmanager
 def exporter_context(
-    model, mode: _C_onnx.TrainingMode, verbose: bool
+    model,
+    mode: _C_onnx.TrainingMode,
+    verbose: bool,
 ) -> Generator[tuple[None, None, None], Any]: ...
 def export(
     model: torch.nn.Module | torch.jit.ScriptModule | torch.jit.ScriptFunction,
@@ -115,16 +118,22 @@ def warn_on_static_input_change(input_states) -> None: ...
 _qtype_vtype_map = ...
 
 def unpack_quantized_tensor(
-    value, cast_onnx_accepted=...
+    value,
+    cast_onnx_accepted=...,
 ) -> tuple[Tensor, Tensor, Tensor] | tuple[Any | Tensor]: ...
 @deprecated(
-    "Unconvertible ops are not definitive. Please remove usage of this function"
+    "Unconvertible ops are not definitive. Please remove usage of this function",
 )
 def unconvertible_ops(
-    model, args, training: _C_onnx.TrainingMode = ..., opset_version: int | None = ...
+    model,
+    args,
+    training: _C_onnx.TrainingMode = ...,
+    opset_version: int | None = ...,
 ) -> tuple[_C.Graph, list[str]]: ...
 def register_custom_op_symbolic(
-    symbolic_name: str, symbolic_fn: Callable, opset_version: int
+    symbolic_name: str,
+    symbolic_fn: Callable,
+    opset_version: int,
 ) -> None: ...
 def unregister_custom_op_symbolic(symbolic_name: str, opset_version: int) -> None: ...
 def model_signature(model: torch.nn.Module | Callable) -> inspect.Signature: ...

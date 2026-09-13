@@ -34,12 +34,6 @@ from sagent.types.cost import TokenCost, TokenCount
 from sagent.types.model import ModelResponse
 
 
-_CACHE_MISS_RETENTION: int = 500
-"""Cap on ``CostTracker.cache_misses``; a long session must not grow this
-list without bound. 500 entries far outlasts any plausible turn count
-between a user checking the diagnostic."""
-
-
 @dataclasses.dataclass(kw_only=True, slots=True)
 class CostTracker:
     """Per-agent cumulative cost; the only cost store."""
@@ -69,7 +63,7 @@ class CostTracker:
     cache_misses: list[CacheMiss] = dataclasses.field(default_factory=list)
     """Detected avoidable prompt-cache misses, most recent last.
 
-    Bounded to :data:`_CACHE_MISS_RETENTION` entries. See
+    Bounded to :meth:`record_cache_miss`'s ``retention`` entries. See
     ``sagent.agent.cache_waste.summarize_cache_waste`` for the rollup."""
 
     last_response_time: float = dataclasses.field(default_factory=time.time)
@@ -99,16 +93,19 @@ class CostTracker:
         self.calls_by_model[model_id] = self.calls_by_model.get(model_id, 0) + 1
         self.last_model_id = model_id
 
-    def record_cache_miss(self, miss: CacheMiss) -> None:
+    def record_cache_miss(self, miss: CacheMiss, *, retention: int = 500) -> None:
         """Append a detected cache miss, trimming to the retention bound.
 
         Args:
           miss: Miss detected by ``cache_waste.detect_cache_miss``.
+          retention: Cap on ``cache_misses``; a long session must not grow
+            the list without bound. 500 far outlasts any plausible turn
+            count between a user checking the diagnostic.
 
         """
         self.cache_misses.append(miss)
-        if len(self.cache_misses) > _CACHE_MISS_RETENTION:
-            del self.cache_misses[:-_CACHE_MISS_RETENTION]
+        if len(self.cache_misses) > retention:
+            del self.cache_misses[:-retention]
 
     def record_cost(self, response: ModelResponse) -> None:
         """Add one response's cost to the cumulative USD total.

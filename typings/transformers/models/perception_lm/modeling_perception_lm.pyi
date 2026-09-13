@@ -93,7 +93,8 @@ class PerceptionLMModel(PerceptionLMPreTrainedModel):
 
 @auto_docstring
 class PerceptionLMForConditionalGeneration(
-    PerceptionLMPreTrainedModel, GenerationMixin
+    PerceptionLMPreTrainedModel,
+    GenerationMixin,
 ):
     _checkpoint_conversion_mapping = ...
     _tied_weights_keys = ...

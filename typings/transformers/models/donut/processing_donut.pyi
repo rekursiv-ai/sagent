@@ -33,7 +33,10 @@ class DonutProcessor(ProcessorMixin):
     def as_target_processor(self):  # -> Generator[None, Any, None]:
         ...
     def token2json(
-        self, tokens, is_inner_value=..., added_vocab=...
+        self,
+        tokens,
+        is_inner_value=...,
+        added_vocab=...,
     ):  # -> list[dict[Any, Any]] | dict[Any, Any] | dict[str, Any] | list[Any]:
         ...
     @property

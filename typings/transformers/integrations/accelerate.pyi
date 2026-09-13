@@ -19,7 +19,8 @@ def init_empty_weights(include_buffers: bool = ...):  # -> Generator[None, Any, 
     ...
 @contextmanager
 def init_on_device(
-    device: torch.device, include_buffers: bool = ...
+    device: torch.device,
+    include_buffers: bool = ...,
 ):  # -> Generator[None, Any, None]:
     ...
 def find_tied_parameters(model: nn.Module, **kwargs):  # -> list[list[Any]]:

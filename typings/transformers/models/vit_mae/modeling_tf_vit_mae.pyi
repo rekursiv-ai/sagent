@@ -57,7 +57,9 @@ class TFViTMAEEmbeddings(keras.layers.Layer):
         ...
     def interpolate_pos_encoding(self, embeddings, height, width) -> tf.Tensor: ...
     def random_masking(
-        self, sequence: tf.Tensor, noise: tf.Tensor | None = ...
+        self,
+        sequence: tf.Tensor,
+        noise: tf.Tensor | None = ...,
     ):  # -> tuple[Any, Any, Any]:
         ...
     def call(
@@ -94,7 +96,10 @@ class TFViTMAESelfAttention(keras.layers.Layer):
 class TFViTMAESelfOutput(keras.layers.Layer):
     def __init__(self, config: ViTMAEConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -121,7 +126,10 @@ class TFViTMAEIntermediate(keras.layers.Layer):
 class TFViTMAEOutput(keras.layers.Layer):
     def __init__(self, config: ViTMAEConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -190,7 +198,8 @@ class TFViTMAEModel(TFViTMAEPreTrainedModel):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(VIT_MAE_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFViTMAEModelOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFViTMAEModelOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -231,15 +240,22 @@ class TFViTMAEForPreTraining(TFViTMAEPreTrainedModel):
     def get_input_embeddings(self): ...
     def patchify(self, pixel_values, interpolate_pos_encoding: bool = ...): ...
     def unpatchify(
-        self, patchified_pixel_values, original_image_size: tuple[int, int] | None = ...
+        self,
+        patchified_pixel_values,
+        original_image_size: tuple[int, int] | None = ...,
     ): ...
     def forward_loss(
-        self, pixel_values, pred, mask, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values,
+        pred,
+        mask,
+        interpolate_pos_encoding: bool = ...,
     ): ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(VIT_MAE_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFViTMAEForPreTrainingOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFViTMAEForPreTrainingOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,

@@ -12,9 +12,14 @@ BackendType = ...
 
 def backend_registered(backend_name) -> bool: ...
 def register_backend(
-    backend_name, construct_rpc_backend_options_handler, init_backend_handler
+    backend_name,
+    construct_rpc_backend_options_handler,
+    init_backend_handler,
 ) -> BackendType: ...
 def construct_rpc_backend_options(
-    backend, rpc_timeout=..., init_method=..., **kwargs
+    backend,
+    rpc_timeout=...,
+    init_method=...,
+    **kwargs,
 ): ...
 def init_backend(backend, *args, **kwargs): ...

@@ -20,10 +20,15 @@ class TFIdeficsVisionModelOutput(ModelOutput):
 class TFIdeficsVisionEmbeddings(tf.keras.layers.Layer):
     def __init__(self, config: IdeficsVisionConfig, **kwargs) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: tf.Tensor, height: int, width: int
+        self,
+        embeddings: tf.Tensor,
+        height: int,
+        width: int,
     ) -> tf.Tensor: ...
     def call(
-        self, pixel_values: tf.Tensor, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values: tf.Tensor,
+        interpolate_pos_encoding: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...

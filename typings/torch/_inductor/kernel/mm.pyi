@@ -39,7 +39,10 @@ def decomposeK(a, b, k_splits) -> Tensor: ...
 class DecomposeKSugraphTemplate(SubgraphTemplate):
     def __init__(self) -> None: ...
     def generate(
-        self, input_nodes: list[Buffer], layout: Layout, k_split: int
+        self,
+        input_nodes: list[Buffer],
+        layout: Layout,
+        k_split: int,
     ) -> SubgraphChoiceCaller: ...
 
 decompose_k_subgraph_template = ...
@@ -47,7 +50,9 @@ decompose_k_subgraph_template = ...
 class ContiguousTemplate(SubgraphTemplate):
     def __init__(self, name: str, description: str, fn: Any) -> None: ...
     def generate(
-        self, input_nodes: list[Buffer], layout: Layout
+        self,
+        input_nodes: list[Buffer],
+        layout: Layout,
     ) -> SubgraphChoiceCaller: ...
 
 def contiguous_mm(a, b) -> Tensor: ...
@@ -62,11 +67,22 @@ def tuned_mm(mat1, mat2, *, layout=...) -> TensorBox | ShapeAsConstantBuffer: ..
 def tuned_int_mm(mat1, mat2, *, layout=...) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(aten.addmm, type_promotion_kind=None)
 def tuned_addmm(
-    inp, mat1, mat2, *, alpha=..., beta=..., layout=...
+    inp,
+    mat1,
+    mat2,
+    *,
+    alpha=...,
+    beta=...,
+    layout=...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(aten._sparse_semi_structured_mm, type_promotion_kind=None)
 def tuned_sparse_semi_structured_mm(
-    mat1, mat1_meta, mat2, *, out_dtype=..., layout=...
+    mat1,
+    mat1_meta,
+    mat2,
+    *,
+    out_dtype=...,
+    layout=...,
 ) -> TensorBox | ShapeAsConstantBuffer: ...
 @register_lowering(aten._scaled_mm.default, type_promotion_kind=None)
 def tuned_scaled_mm(

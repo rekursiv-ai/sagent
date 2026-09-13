@@ -10,6 +10,6 @@ aten = ...
         aten.native_dropout.default,
         aten.bernoulli_.float,
         aten.bernoulli.default,
-    ]
+    ],
 )
 def random_op_strategy(op_schema: OpSchema) -> StrategyType: ...

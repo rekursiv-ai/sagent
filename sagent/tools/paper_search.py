@@ -120,11 +120,19 @@ class PaperSearch:
                 },
             },
             "required": ["query"],
-        }
+        },
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
-        """Return a short display label for this invocation."""
+        """Return a short display label for this invocation.
+
+        Args:
+          args: Invocation arguments containing the query and source.
+
+        Returns:
+          label: Display label naming the query and non-default source.
+
+        """
         query = str(args.get("query", "")).strip()
         source = str(args.get("source", "") or "fused")
         label = f"PaperSearch {query!r}" if query else "PaperSearch"
@@ -142,7 +150,15 @@ class PaperSearch:
         return None
 
     async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Execute a paper search and return formatted results."""
+        """Execute a paper search and return formatted results.
+
+        Args:
+          args: Search query and optional source, limits, and filters.
+
+        Returns:
+          result: Formatted search results or a validation error.
+
+        """
         query = str(args.get("query", ""))
         source = str(args.get("source", "fused") or "fused")
         limit = validate_limit(opt_int(args, "limit"))

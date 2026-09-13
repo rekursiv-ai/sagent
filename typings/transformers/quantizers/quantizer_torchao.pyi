@@ -22,18 +22,26 @@ class TorchAoHfQuantizer(HfQuantizer):
     def update_dtype(self, dtype):  # -> dtype:
         ...
     def get_state_dict_and_metadata(
-        self, model, safe_serialization: bool | None = ...
+        self,
+        model,
+        safe_serialization: bool | None = ...,
     ):  # -> tuple[dict[Any, Any], dict[Any, Any]] | tuple[None, dict[Any, Any]]:
         ...
     def adjust_target_dtype(self, dtype: torch.dtype) -> torch.dtype: ...
     def adjust_max_memory(
-        self, max_memory: dict[str, int | str]
+        self,
+        max_memory: dict[str, int | str],
     ) -> dict[str, int | str]: ...
     def update_unexpected_keys(
-        self, model, unexpected_keys: list[str]
+        self,
+        model,
+        unexpected_keys: list[str],
     ) -> list[str]: ...
     def param_needs_quantization(
-        self, model: PreTrainedModel, param_name: str, **kwargs
+        self,
+        model: PreTrainedModel,
+        param_name: str,
+        **kwargs,
     ) -> bool: ...
     def create_quantized_param(
         self,

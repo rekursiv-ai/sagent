@@ -10,7 +10,9 @@ LEGACY_INDEX_PATH = ...
 class Index:
     def get_doc_dicts(self, doc_ids: np.ndarray) -> list[dict]: ...
     def get_top_docs(
-        self, question_hidden_states: np.ndarray, n_docs=...
+        self,
+        question_hidden_states: np.ndarray,
+        n_docs=...,
     ) -> tuple[np.ndarray, np.ndarray]: ...
     def is_initialized(self): ...
     def init_index(self): ...
@@ -26,7 +28,9 @@ class LegacyIndex(Index):
     def get_doc_dicts(self, doc_ids: np.ndarray):  # -> list[Any]:
         ...
     def get_top_docs(
-        self, question_hidden_states: np.ndarray, n_docs=...
+        self,
+        question_hidden_states: np.ndarray,
+        n_docs=...,
     ) -> tuple[np.ndarray, np.ndarray]: ...
 
 class HFIndexBase(Index):
@@ -36,7 +40,9 @@ class HFIndexBase(Index):
         ...
     def get_doc_dicts(self, doc_ids: np.ndarray) -> list[dict]: ...
     def get_top_docs(
-        self, question_hidden_states: np.ndarray, n_docs=...
+        self,
+        question_hidden_states: np.ndarray,
+        n_docs=...,
     ) -> tuple[np.ndarray, np.ndarray]: ...
 
 class CanonicalHFIndex(HFIndexBase):
@@ -72,7 +78,10 @@ class RagRetriever:
     ) -> None: ...
     @classmethod
     def from_pretrained(
-        cls, retriever_name_or_path, indexed_dataset=..., **kwargs
+        cls,
+        retriever_name_or_path,
+        indexed_dataset=...,
+        **kwargs,
     ):  # -> Self:
         ...
     def save_pretrained(self, save_directory):  # -> None:
@@ -80,14 +89,22 @@ class RagRetriever:
     def init_retrieval(self):  # -> None:
         ...
     def postprocess_docs(
-        self, docs, input_strings, prefix, n_docs, return_tensors=...
+        self,
+        docs,
+        input_strings,
+        prefix,
+        n_docs,
+        return_tensors=...,
     ):  # -> tuple[Any, Any]:
         ...
     def retrieve(
-        self, question_hidden_states: np.ndarray, n_docs: int
+        self,
+        question_hidden_states: np.ndarray,
+        n_docs: int,
     ) -> tuple[np.ndarray, np.ndarray, list[dict]]: ...
     def set_ctx_encoder_tokenizer(
-        self, ctx_encoder_tokenizer: PreTrainedTokenizer
+        self,
+        ctx_encoder_tokenizer: PreTrainedTokenizer,
     ):  # -> None:
         ...
     def __call__(

@@ -34,7 +34,10 @@ class TensorWithFlatten(Protocol):
     def __tensor_flatten__(self) -> tuple[Sequence[str], object]: ...
     @staticmethod
     def __tensor_unflatten__(
-        inner_tensors: int, flatten_spec: int, outer_size: int, outer_stride: int
+        inner_tensors: int,
+        flatten_spec: int,
+        outer_size: int,
+        outer_stride: int,
     ) -> torch.Tensor: ...
 
     shape: torch._C.Size

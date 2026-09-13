@@ -19,7 +19,10 @@ class NotebookProgressBar:
         width: int = ...,
     ) -> None: ...
     def update(
-        self, value: int, force_update: bool = ..., comment: str | None = ...
+        self,
+        value: int,
+        force_update: bool = ...,
+        comment: str | None = ...,
     ):  # -> None:
         ...
     def update_bar(self, value, comment=...):  # -> None:
@@ -47,7 +50,12 @@ class NotebookProgressCallback(TrainerCallback):
     def on_step_end(self, args, state, control, **kwargs):  # -> None:
         ...
     def on_prediction_step(
-        self, args, state, control, eval_dataloader=..., **kwargs
+        self,
+        args,
+        state,
+        control,
+        eval_dataloader=...,
+        **kwargs,
     ):  # -> None:
         ...
     def on_predict(self, args, state, control, **kwargs):  # -> None:

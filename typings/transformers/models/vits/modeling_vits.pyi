@@ -45,13 +45,20 @@ class VitsWaveNet(torch.nn.Module):
 class VitsPosteriorEncoder(nn.Module):
     def __init__(self, config: VitsConfig) -> None: ...
     def forward(
-        self, inputs, padding_mask, global_conditioning=...
+        self,
+        inputs,
+        padding_mask,
+        global_conditioning=...,
     ):  # -> tuple[Any, Tensor, Tensor]:
         ...
 
 class HifiGanResidualBlock(nn.Module):
     def __init__(
-        self, channels, kernel_size=..., dilation=..., leaky_relu_slope=...
+        self,
+        channels,
+        kernel_size=...,
+        dilation=...,
+        leaky_relu_slope=...,
     ) -> None: ...
     def get_padding(self, kernel_size, dilation=...): ...
     def apply_weight_norm(self):  # -> None:
@@ -76,14 +83,22 @@ class VitsHifiGan(nn.Module):
 class VitsResidualCouplingLayer(nn.Module):
     def __init__(self, config: VitsConfig) -> None: ...
     def forward(
-        self, inputs, padding_mask, global_conditioning=..., reverse=...
+        self,
+        inputs,
+        padding_mask,
+        global_conditioning=...,
+        reverse=...,
     ):  # -> tuple[Tensor, Tensor] | tuple[Tensor, None]:
         ...
 
 class VitsResidualCouplingBlock(nn.Module):
     def __init__(self, config: VitsConfig) -> None: ...
     def forward(
-        self, inputs, padding_mask, global_conditioning=..., reverse=...
+        self,
+        inputs,
+        padding_mask,
+        global_conditioning=...,
+        reverse=...,
     ):  # -> Tensor | Any:
         ...
 
@@ -94,14 +109,22 @@ class VitsDilatedDepthSeparableConv(nn.Module):
 class VitsConvFlow(nn.Module):
     def __init__(self, config: VitsConfig) -> None: ...
     def forward(
-        self, inputs, padding_mask, global_conditioning=..., reverse=...
+        self,
+        inputs,
+        padding_mask,
+        global_conditioning=...,
+        reverse=...,
     ):  # -> tuple[Any, Tensor] | tuple[Any, None]:
         ...
 
 class VitsElementwiseAffine(nn.Module):
     def __init__(self, config: VitsConfig) -> None: ...
     def forward(
-        self, inputs, padding_mask, global_conditioning=..., reverse=...
+        self,
+        inputs,
+        padding_mask,
+        global_conditioning=...,
+        reverse=...,
     ):  # -> tuple[Any, Tensor] | tuple[Any, None]:
         ...
 
@@ -133,7 +156,9 @@ class VitsAttention(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class VitsFeedForward(nn.Module):
@@ -176,7 +201,9 @@ class VitsTextEncoder(nn.Module):
         return_dict: bool | None = ...,
     ) -> tuple[torch.Tensor] | VitsTextEncoderOutput: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | VitsTextEncoderOutput: ...
 
 @auto_docstring

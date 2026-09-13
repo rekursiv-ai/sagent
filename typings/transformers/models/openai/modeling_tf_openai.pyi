@@ -40,7 +40,12 @@ class TFAttention(keras.layers.Layer):
     def merge_heads(self, x): ...
     def split_heads(self, x): ...
     def call(
-        self, x, attention_mask, head_mask, output_attentions, training=...
+        self,
+        x,
+        attention_mask,
+        head_mask,
+        output_attentions,
+        training=...,
     ):  # -> list[Any]:
         ...
     def build(self, input_shape=...):  # -> None:
@@ -170,7 +175,8 @@ class TFOpenAIGPTDoubleHeadsModel(TFOpenAIGPTPreTrainedModel):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(OPENAI_GPT_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFOpenAIGPTDoubleHeadsModelOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFOpenAIGPTDoubleHeadsModelOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -197,7 +203,8 @@ class TFOpenAIGPTDoubleHeadsModel(TFOpenAIGPTPreTrainedModel):
     OPENAI_GPT_START_DOCSTRING,
 )
 class TFOpenAIGPTForSequenceClassification(
-    TFOpenAIGPTPreTrainedModel, TFSequenceClassificationLoss
+    TFOpenAIGPTPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs

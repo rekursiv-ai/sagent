@@ -25,7 +25,8 @@ class DeepseekVLImageProcessorFast(BaseImageProcessorFast):
     do_pad = ...
     valid_kwargs = DeepseekVLFastImageProcessorKwargs
     def __init__(
-        self, **kwargs: Unpack[DeepseekVLFastImageProcessorKwargs]
+        self,
+        **kwargs: Unpack[DeepseekVLFastImageProcessorKwargs],
     ) -> None: ...
     def resize(
         self,

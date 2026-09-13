@@ -12,7 +12,7 @@ logger = ...
 
 @dataclass
 class ShieldGemma2ImageClassifierOutputWithNoAttention(
-    ImageClassifierOutputWithNoAttention
+    ImageClassifierOutputWithNoAttention,
 ):
     probabilities: torch.Tensor | None = ...
 

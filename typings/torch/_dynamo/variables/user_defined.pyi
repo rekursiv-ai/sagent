@@ -61,7 +61,11 @@ class UserDefinedClassVariable(UserDefinedVariable):
     def has_key_in_generic_dict(self, tx: InstructionTranslator, key) -> bool: ...
     def var_getattr(self, tx: InstructionTranslator, name: str) -> VariableTracker: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def call_function(
         self,
@@ -71,7 +75,9 @@ class UserDefinedClassVariable(UserDefinedVariable):
     ) -> VariableTracker: ...
     def is_standard_new(self) -> bool: ...
     def call_obj_hasattr(
-        self, tx: InstructionTranslator, name: str
+        self,
+        tx: InstructionTranslator,
+        name: str,
     ) -> VariableTracker: ...
     def const_getattr(self, tx: InstructionTranslator, name) -> str | Any: ...
 
@@ -103,17 +109,31 @@ class UserDefinedObjectVariable(UserDefinedVariable):
     def torch_function_check(self) -> None: ...
     def get_torch_fn(self, tx) -> VariableTracker: ...
     def call_torch_function(
-        self, tx: InstructionTranslator, fn, types, args, kwargs
+        self,
+        tx: InstructionTranslator,
+        fn,
+        types,
+        args,
+        kwargs,
     ): ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def method_setattr_standard(
-        self, tx: InstructionTranslator, name, value, directly_update_dict=...
+        self,
+        tx: InstructionTranslator,
+        name,
+        value,
+        directly_update_dict=...,
     ) -> ConstantVariable: ...
     def needs_slow_setattr(self) -> bool: ...
     def unpack_var_sequence(
-        self, tx
+        self,
+        tx,
     ) -> list[LazyVariableTracker] | list[VariableTracker]: ...
     def has_force_unpack_var_sequence(self, tx: InstructionTranslator) -> bool: ...
     def force_unpack_var_sequence(self, tx) -> list[Any]: ...
@@ -127,12 +147,15 @@ class UserDefinedObjectVariable(UserDefinedVariable):
     ) -> VariableTracker: ...
     def should_skip_descriptor_setter(self, attr_name) -> bool: ...
     def try_get_descritor_and_setter_py_func(
-        self, attr_name
+        self,
+        attr_name,
     ) -> tuple[Any, FunctionType] | None: ...
     def has_key_in_generic_dict(self, tx: InstructionTranslator, key) -> bool: ...
     def get_source_by_walking_mro(self, name) -> DictGetItemSource: ...
     def var_getattr(
-        self, tx: InstructionTranslator, name
+        self,
+        tx: InstructionTranslator,
+        name,
     ) -> (
         VariableTracker
         | GetAttrVariable
@@ -145,7 +168,9 @@ class UserDefinedObjectVariable(UserDefinedVariable):
         | LazyVariableTracker
     ): ...
     def call_obj_hasattr(
-        self, tx: InstructionTranslator, name: str
+        self,
+        tx: InstructionTranslator,
+        name: str,
     ) -> VariableTracker: ...
 
 class FrozenDataClassVariable(UserDefinedObjectVariable):
@@ -161,13 +186,20 @@ class FrozenDataClassVariable(UserDefinedObjectVariable):
     def as_proxy(self): ...
     def reconstruct(self, codegen: PyCodegen) -> None: ...
     def method_setattr_standard(
-        self, tx: InstructionTranslator, name, value
+        self,
+        tx: InstructionTranslator,
+        name,
+        value,
     ) -> ConstantVariable: ...
 
 class SourcelessGraphModuleVariable(UserDefinedObjectVariable):
     def __init__(self, value, **kwargs) -> None: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
 
 class UserDefinedExceptionObjectVariable(UserDefinedObjectVariable):
@@ -175,7 +207,11 @@ class UserDefinedExceptionObjectVariable(UserDefinedObjectVariable):
     @property
     def fn(self) -> Any: ...
     def call_method(
-        self, tx, name, args, kwargs
+        self,
+        tx,
+        name,
+        args,
+        kwargs,
     ) -> ConstantVariable | ExceptionVariable | VariableTracker: ...
     @property
     def __context__(self) -> ConstantVariable | ExceptionVariable: ...
@@ -190,7 +226,9 @@ class KeyedJaggedTensorVariable(UserDefinedObjectVariable):
     def is_matching_object(obj) -> bool: ...
     def __init__(self, value, **kwargs) -> None: ...
     def var_getattr(
-        self, tx: InstructionTranslator, name
+        self,
+        tx: InstructionTranslator,
+        name,
     ) -> (
         VariableTracker
         | GetAttrVariable
@@ -213,7 +251,11 @@ class RemovableHandleVariable(VariableTracker):
     REMOVED = ...
     def __init__(self, mutation_type=..., idx=..., **kwargs) -> None: ...
     def call_method(
-        self, tx: InstructionTranslator, method_name, args, kwargs
+        self,
+        tx: InstructionTranslator,
+        method_name,
+        args,
+        kwargs,
     ) -> VariableTracker | None: ...
     def reconstruct(self, codegen: PyCodegen) -> None: ...
     def python_type(self) -> type[RemovableHandleClass]: ...
@@ -222,7 +264,11 @@ class UserDefinedDictVariable(UserDefinedObjectVariable):
     _nonvar_fields = ...
     def __init__(self, value, dict_vt=..., **kwargs) -> None: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def unpack_var_sequence(self, tx) -> list[Any]: ...
     def is_underlying_vt_modified(self, side_effects): ...
@@ -243,7 +289,11 @@ class UserDefinedSetVariable(UserDefinedObjectVariable):
     _nonvar_fields = ...
     def __init__(self, value, set_vt=..., **kwargs) -> None: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def as_python_constant(self) -> set[Any]: ...
     def unpack_var_sequence(self, tx) -> list[Any] | list[VariableTracker]: ...
@@ -265,7 +315,11 @@ class UserDefinedListVariable(UserDefinedObjectVariable):
     _nonvar_fields = ...
     def __init__(self, value, list_vt=..., **kwargs) -> None: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def unpack_var_sequence(self, tx) -> list[VariableTracker]: ...
     def is_underlying_vt_modified(self, side_effects): ...
@@ -274,7 +328,11 @@ class UserDefinedTupleVariable(UserDefinedObjectVariable):
     _nonvar_fields = ...
     def __init__(self, value, tuple_vt=..., init_args=..., **kwargs) -> None: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def unpack_var_sequence(self, tx) -> list[VariableTracker]: ...
 

@@ -27,7 +27,12 @@ logger = ...
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -61,7 +66,11 @@ class GraniteMoeHybridAttention(nn.Module):
 class HybridMambaAttentionDynamicCache:
     is_compileable = ...
     def __init__(
-        self, config: GraniteMoeHybridConfig, batch_size, dtype=..., device=...
+        self,
+        config: GraniteMoeHybridConfig,
+        batch_size,
+        dtype=...,
+        device=...,
     ) -> None: ...
     def update(
         self,
@@ -167,7 +176,8 @@ class GraniteMoeHybridDecoderLayer(GradientCheckpointingLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs: Unpack[GraniteFlashAttentionKwargs],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring

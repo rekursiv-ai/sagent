@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator, Sequence
+from typing import cast
+
 import asyncio
 import sys
 
-from sagent.agent import Agent
+from sagent.agent.agent import Agent
 from sagent.providers import Google
 from sagent.tools import AgentSpawn
 from sagent.types.runtime import AssistantMessage, UserMessage
 
 
-async def main() -> None:
-    """Run the parent-with-reviewer-sub-agent example."""
+async def main() -> int:
+    """Run the parent-with-reviewer-sub-agent example.
+
+    Returns:
+      status: Process exit code.
+
+    """
     reviewer = AgentSpawn(
         system="You are a strict reviewer. Return only concrete issues.",
         tools=[],
@@ -31,12 +39,17 @@ async def main() -> None:
         "Write a two-sentence explanation of why typed history entries "
         "help agent tool dispatch."
     )
-    async for _event in agent.run(UserMessage(text=prompt)):
+    async for _ in cast(
+        AsyncGenerator[object, None],
+        agent.run(UserMessage(text=prompt)),
+    ):
         pass
-    for m in reversed(agent.history):
+    history = cast(Sequence[object], agent.history)
+    for m in reversed(history):
         if isinstance(m, AssistantMessage) and m.text:
             sys.stdout.write(f"{m.text}\n")
-            return
+            return 0
+    return 0
 
 
 if __name__ == "__main__":

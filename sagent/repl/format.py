@@ -18,12 +18,16 @@ from typing import TYPE_CHECKING
 import contextlib
 import sys
 
-from rich.cells import chop_cells
-from rich.text import Text
-
 
 if TYPE_CHECKING:
+    from rich.cells import chop_cells
     from rich.console import Console
+    from rich.text import Text
+else:
+    from wrapt import lazy_import
+
+    chop_cells = lazy_import("rich.cells", "chop_cells")  # ~60 ms; _wrap uses it.
+    Text = lazy_import("rich.text", "Text")  # ~60 ms; formatting uses it.
 
 
 def print_user_bar(

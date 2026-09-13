@@ -23,5 +23,7 @@ class Linear(nn.Linear, ReferenceQuantizedModule):
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
     @classmethod
     def from_float(
-        cls, float_linear: nn.Linear, weight_qparams: dict[str, Any]
+        cls,
+        float_linear: nn.Linear,
+        weight_qparams: dict[str, Any],
     ) -> Linear: ...

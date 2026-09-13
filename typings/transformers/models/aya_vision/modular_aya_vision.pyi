@@ -78,7 +78,9 @@ class AyaVisionForConditionalGeneration(LlavaForConditionalGeneration):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | AyaVisionCausalLMOutputWithPast: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | AyaVisionCausalLMOutputWithPast: ...
 
 __all__ = [

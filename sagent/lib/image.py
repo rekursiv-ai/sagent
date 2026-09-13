@@ -121,7 +121,7 @@ def decode_jpeg_turbojpeg(
         # BGR → RGB; flip is a view, ascontiguousarray materializes.
         return np.ascontiguousarray(np.flip(bgr, axis=2))
 
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 -- Image backends expose multiple exception types at this boundary.
         return None
 
 
@@ -185,7 +185,7 @@ def decode_webp_libwebp(
 
         return rgb
 
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 -- Image backends expose multiple exception types at this boundary.
         return None
 
 
@@ -230,7 +230,7 @@ def decode_image_pil(
             _, _, crop_w, crop_h = crop_coords
             image.draft("RGB", (crop_w * 2, crop_h * 2))
 
-        image.load()  # pyright: ignore[reportUnknownMemberType] -- PIL's `core` is rebound to `DeferredError.new() -> Any` in its ImportError fallback, so `load`'s `core.PixelAccess | None` return resolves to Unknown
+        image.load()  # pyright: ignore[reportUnknownMemberType] -- PIL's `core` is rebound to `DeferredError.new() -> Any` in its ImportError fallback, so `load`'s `core.PixelAccess | None` return resolves to Unknown.
 
         if channels_format == "rgb":
             if image.mode == "RGBA":

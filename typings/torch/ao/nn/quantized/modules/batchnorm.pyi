@@ -7,7 +7,12 @@ __all__ = ["BatchNorm2d", "BatchNorm3d"]
 
 class _BatchNorm(torch.nn.modules.batchnorm._BatchNorm):
     def __init__(
-        self, num_features, eps=..., momentum=..., device=..., dtype=...
+        self,
+        num_features,
+        eps=...,
+        momentum=...,
+        device=...,
+        dtype=...,
     ) -> None: ...
     @staticmethod
     def from_float(cls, mod, use_precomputed_fake_quant=...): ...
@@ -17,7 +22,12 @@ class _BatchNorm(torch.nn.modules.batchnorm._BatchNorm):
 class BatchNorm2d(_BatchNorm):
     _NNI_BN_RELU_MODULE = nni.BNReLU2d
     def __init__(
-        self, num_features, eps=..., momentum=..., device=..., dtype=...
+        self,
+        num_features,
+        eps=...,
+        momentum=...,
+        device=...,
+        dtype=...,
     ) -> None: ...
     def forward(self, input: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -27,7 +37,12 @@ class BatchNorm2d(_BatchNorm):
 class BatchNorm3d(_BatchNorm):
     _NNI_BN_RELU_MODULE = nni.BNReLU3d
     def __init__(
-        self, num_features, eps=..., momentum=..., device=..., dtype=...
+        self,
+        num_features,
+        eps=...,
+        momentum=...,
+        device=...,
+        dtype=...,
     ) -> None: ...
     def forward(self, input: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...

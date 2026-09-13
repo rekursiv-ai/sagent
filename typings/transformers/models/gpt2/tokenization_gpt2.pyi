@@ -34,7 +34,9 @@ class GPT2Tokenizer(PreTrainedTokenizer):
     def bpe(self, token):  # -> LiteralString:
         ...
     def build_inputs_with_special_tokens(
-        self, token_ids_0, token_ids_1=...
+        self,
+        token_ids_0,
+        token_ids_1=...,
     ):  # -> list[str | list[str] | Any | None]:
         ...
     def get_special_tokens_mask(
@@ -46,10 +48,15 @@ class GPT2Tokenizer(PreTrainedTokenizer):
     def convert_tokens_to_string(self, tokens):  # -> str:
         ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
     def prepare_for_tokenization(
-        self, text, is_split_into_words=..., **kwargs
+        self,
+        text,
+        is_split_into_words=...,
+        **kwargs,
     ):  # -> tuple[str, dict[str, Any]]:
         ...
 

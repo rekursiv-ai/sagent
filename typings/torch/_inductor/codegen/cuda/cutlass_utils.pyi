@@ -50,7 +50,8 @@ def torch_dtype_to_cutlass_type(
 ) -> cutlass_library.library.DataType: ...
 @functools.lru_cache(32)
 def dtype_match(
-    torch_dtype: torch.dtype | None, cutlass_dtype: cutlass_library.library.DataType
+    torch_dtype: torch.dtype | None,
+    cutlass_dtype: cutlass_library.library.DataType,
 ) -> bool: ...
 def get_accumulator_dtype(
     input_torch_dtypes: list[torch.dtype],

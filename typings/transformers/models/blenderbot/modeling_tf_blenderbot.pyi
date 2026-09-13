@@ -30,7 +30,9 @@ _CONFIG_FOR_DOC = ...
 LARGE_NEGATIVE = ...
 
 def shift_tokens_right(
-    input_ids: tf.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: tf.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ): ...
 
 class TFBlenderbotLearnedPositionalEmbedding(keras.layers.Embedding):
@@ -218,7 +220,7 @@ class TFBlenderbotModel(TFBlenderbotPreTrainedModel):
         ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        BLENDERBOT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        BLENDERBOT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -260,7 +262,8 @@ class BiasLayer(keras.layers.Layer):
     BLENDERBOT_START_DOCSTRING,
 )
 class TFBlenderbotForConditionalGeneration(
-    TFBlenderbotPreTrainedModel, TFCausalLanguageModelingLoss
+    TFBlenderbotPreTrainedModel,
+    TFCausalLanguageModelingLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
@@ -286,7 +289,8 @@ class TFBlenderbotForConditionalGeneration(
     @unpack_inputs
     @add_start_docstrings_to_model_forward(BLENDERBOT_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFSeq2SeqLMOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFSeq2SeqLMOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     @add_end_docstrings(BLENDERBOT_GENERATION_EXAMPLE)
     def call(

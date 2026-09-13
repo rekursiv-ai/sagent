@@ -192,11 +192,14 @@ class FlaxRobertaPreLayerNormPreTrainedModel(FlaxPreTrainedModel):
     def enable_gradient_checkpointing(self):  # -> None:
         ...
     def init_weights(
-        self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...
+        self,
+        rng: jax.random.PRNGKey,
+        input_shape: tuple,
+        params: FrozenDict = ...,
     ) -> FrozenDict: ...
     def init_cache(self, batch_size, max_length): ...
     @add_start_docstrings_to_model_forward(
-        ROBERTA_PRELAYERNORM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ROBERTA_PRELAYERNORM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     def __call__(
         self,
@@ -297,7 +300,7 @@ class FlaxRobertaPreLayerNormForSequenceClassificationModule(nn.Module):
     ROBERTA_PRELAYERNORM_START_DOCSTRING,
 )
 class FlaxRobertaPreLayerNormForSequenceClassification(
-    FlaxRobertaPreLayerNormPreTrainedModel
+    FlaxRobertaPreLayerNormPreTrainedModel,
 ): ...
 
 class FlaxRobertaPreLayerNormForMultipleChoiceModule(nn.Module):
@@ -325,7 +328,7 @@ class FlaxRobertaPreLayerNormForMultipleChoiceModule(nn.Module):
     ROBERTA_PRELAYERNORM_START_DOCSTRING,
 )
 class FlaxRobertaPreLayerNormForMultipleChoice(
-    FlaxRobertaPreLayerNormPreTrainedModel
+    FlaxRobertaPreLayerNormPreTrainedModel,
 ): ...
 
 class FlaxRobertaPreLayerNormForTokenClassificationModule(nn.Module):
@@ -353,7 +356,7 @@ class FlaxRobertaPreLayerNormForTokenClassificationModule(nn.Module):
     ROBERTA_PRELAYERNORM_START_DOCSTRING,
 )
 class FlaxRobertaPreLayerNormForTokenClassification(
-    FlaxRobertaPreLayerNormPreTrainedModel
+    FlaxRobertaPreLayerNormPreTrainedModel,
 ): ...
 
 class FlaxRobertaPreLayerNormForQuestionAnsweringModule(nn.Module):
@@ -381,7 +384,7 @@ class FlaxRobertaPreLayerNormForQuestionAnsweringModule(nn.Module):
     ROBERTA_PRELAYERNORM_START_DOCSTRING,
 )
 class FlaxRobertaPreLayerNormForQuestionAnswering(
-    FlaxRobertaPreLayerNormPreTrainedModel
+    FlaxRobertaPreLayerNormPreTrainedModel,
 ): ...
 
 class FlaxRobertaPreLayerNormForCausalLMModule(nn.Module):
@@ -413,7 +416,10 @@ class FlaxRobertaPreLayerNormForCausalLMModule(nn.Module):
 )
 class FlaxRobertaPreLayerNormForCausalLM(FlaxRobertaPreLayerNormPreTrainedModel):
     def prepare_inputs_for_generation(
-        self, input_ids, max_length, attention_mask: jax.Array | None = ...
+        self,
+        input_ids,
+        max_length,
+        attention_mask: jax.Array | None = ...,
     ):  # -> dict[str, Any | Array]:
         ...
     def update_inputs_for_generation(self, model_outputs, model_kwargs): ...

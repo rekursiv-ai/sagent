@@ -58,7 +58,9 @@ class TapexTokenizer(PreTrainedTokenizer):
         **kwargs,
     ) -> None: ...
     def build_inputs_with_special_tokens(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = ...
+        self,
+        token_ids_0: list[int],
+        token_ids_1: list[int] | None = ...,
     ) -> list[int]: ...
     def get_special_tokens_mask(
         self,
@@ -67,10 +69,15 @@ class TapexTokenizer(PreTrainedTokenizer):
         already_has_special_tokens: bool = ...,
     ) -> list[int]: ...
     def create_token_type_ids_from_sequences(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = ...
+        self,
+        token_ids_0: list[int],
+        token_ids_1: list[int] | None = ...,
     ) -> list[int]: ...
     def prepare_for_tokenization(
-        self, text, is_split_into_words=..., **kwargs
+        self,
+        text,
+        is_split_into_words=...,
+        **kwargs,
     ):  # -> tuple[str, dict[str, Any]]:
         ...
     @property
@@ -83,10 +90,13 @@ class TapexTokenizer(PreTrainedTokenizer):
     def convert_tokens_to_string(self, tokens):  # -> str:
         ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
     @add_end_docstrings(
-        ENCODE_KWARGS_DOCSTRING, TAPEX_ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING
+        ENCODE_KWARGS_DOCSTRING,
+        TAPEX_ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING,
     )
     def __call__(
         self,
@@ -131,7 +141,8 @@ class TapexTokenizer(PreTrainedTokenizer):
         **kwargs,
     ) -> BatchEncoding: ...
     @add_end_docstrings(
-        ENCODE_KWARGS_DOCSTRING, TAPEX_ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING
+        ENCODE_KWARGS_DOCSTRING,
+        TAPEX_ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING,
     )
     def batch_encode_plus(
         self,
@@ -167,7 +178,8 @@ class TapexTokenizer(PreTrainedTokenizer):
         **kwargs,
     ) -> list[int]: ...
     @add_end_docstrings(
-        ENCODE_KWARGS_DOCSTRING, TAPEX_ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING
+        ENCODE_KWARGS_DOCSTRING,
+        TAPEX_ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING,
     )
     def encode_plus(
         self,
@@ -253,11 +265,19 @@ class TapexTokenizer(PreTrainedTokenizer):
         **kwargs,
     ) -> BatchEncoding: ...
     def prepare_table_query(
-        self, table, query, answer=..., truncation_strategy=..., max_length=...
+        self,
+        table,
+        query,
+        answer=...,
+        truncation_strategy=...,
+        max_length=...,
     ):  # -> LiteralString | str:
         ...
     def truncate_table_cells(
-        self, table_content: dict, question: str, answer: list
+        self,
+        table_content: dict,
+        question: str,
+        answer: list,
     ):  # -> None:
         ...
     def truncate_cell(self, cell_value):  # -> int | float | str | None:
@@ -271,11 +291,18 @@ class TapexTokenizer(PreTrainedTokenizer):
     ):  # -> None:
         ...
     def estimate_delete_ratio(
-        self, table_content: dict, question: str, max_length=...
+        self,
+        table_content: dict,
+        question: str,
+        max_length=...,
     ):  # -> tuple[float, Any] | tuple[Any, Any]:
         ...
     def delete_unrelated_rows(
-        self, table_content: dict, question: str, answer: list, delete_ratio: float
+        self,
+        table_content: dict,
+        question: str,
+        answer: list,
+        delete_ratio: float,
     ):  # -> None:
         ...
 

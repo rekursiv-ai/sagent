@@ -19,7 +19,11 @@ logger = ...
 class DbrxRotaryEmbedding(nn.Module):
     inv_freq: torch.Tensor
     def __init__(
-        self, dim, max_position_embeddings=..., base=..., device=...
+        self,
+        dim,
+        max_position_embeddings=...,
+        base=...,
+        device=...,
     ) -> None: ...
     @torch.no_grad()
     def forward(self, x, position_ids, seq_len=...):  # -> tuple[Tensor, Tensor]:
@@ -28,7 +32,12 @@ class DbrxRotaryEmbedding(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -109,10 +118,13 @@ class DbrxRouter(nn.Module):
         moe_normalize_expert_weights: float | None,
     ) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.LongTensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.LongTensor]: ...
 
 class DbrxExpertGLU(nn.Module):
@@ -153,7 +165,9 @@ class DbrxFFN(nn.Module):
     def __init__(self, config: DbrxConfig) -> None: ...
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class DbrxBlock(GradientCheckpointingLayer):

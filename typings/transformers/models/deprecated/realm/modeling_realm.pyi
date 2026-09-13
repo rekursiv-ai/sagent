@@ -29,7 +29,9 @@ _SCORER_CHECKPOINT_FOR_DOC = ...
 _CONFIG_FOR_DOC = ...
 
 def load_tf_weights_in_realm(
-    model, config, tf_checkpoint_path
+    model,
+    config,
+    tf_checkpoint_path,
 ):  # -> RealmReader | transformers.models.deprecated.realm.modeling_realm.<subclass of RealmReader and RealmEmbedder> | RealmEmbedder | RealmKnowledgeAugEncoder | RealmForOpenQA:
     ...
 
@@ -63,7 +65,9 @@ class RealmSelfAttention(nn.Module):
 class RealmSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -93,7 +97,9 @@ class RealmIntermediate(nn.Module):
 class RealmOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -129,7 +135,9 @@ class RealmEncoder(nn.Module):
         return_dict: bool | None = ...,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
 
 class RealmPooler(nn.Module):
@@ -237,10 +245,11 @@ class RealmEmbedder(RealmPreTrainedModel):
     def set_input_embeddings(self, value):  # -> None:
         ...
     @add_start_docstrings_to_model_forward(
-        REALM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        REALM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=RealmEmbedderOutput, config_class=_CONFIG_FOR_DOC
+        output_type=RealmEmbedderOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,
@@ -262,10 +271,11 @@ class RealmEmbedder(RealmPreTrainedModel):
 class RealmScorer(RealmPreTrainedModel):
     def __init__(self, config, query_embedder=...) -> None: ...
     @add_start_docstrings_to_model_forward(
-        REALM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        REALM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=RealmScorerOutput, config_class=_CONFIG_FOR_DOC
+        output_type=RealmScorerOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,
@@ -300,7 +310,7 @@ class RealmKnowledgeAugEncoder(RealmPreTrainedModel):
     def set_output_embeddings(self, new_embeddings):  # -> None:
         ...
     @add_start_docstrings_to_model_forward(
-        REALM_INPUTS_DOCSTRING.format("batch_size, num_candidates, sequence_length")
+        REALM_INPUTS_DOCSTRING.format("batch_size, num_candidates, sequence_length"),
     )
     @replace_return_docstrings(output_type=MaskedLMOutput, config_class=_CONFIG_FOR_DOC)
     def forward(
@@ -323,10 +333,11 @@ class RealmKnowledgeAugEncoder(RealmPreTrainedModel):
 class RealmReader(RealmPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(
-        REALM_INPUTS_DOCSTRING.format("reader_beam_size, sequence_length")
+        REALM_INPUTS_DOCSTRING.format("reader_beam_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=RealmReaderOutput, config_class=_CONFIG_FOR_DOC
+        output_type=RealmReaderOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,
@@ -360,10 +371,11 @@ class RealmForOpenQA(RealmPreTrainedModel):
     def block_embedding_to(self, device):  # -> None:
         ...
     @add_start_docstrings_to_model_forward(
-        REALM_FOR_OPEN_QA_DOCSTRING.format("1, sequence_length")
+        REALM_FOR_OPEN_QA_DOCSTRING.format("1, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=RealmForOpenQAOutput, config_class=_CONFIG_FOR_DOC
+        output_type=RealmForOpenQAOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,

@@ -16,13 +16,21 @@ def quantize_to_mxfp4(w, triton_kernels_hub):  # -> tuple[Any, Any]:
 def swizzle_mxfp4(w, w_scale, triton_kernels_hub):  # -> tuple[Any, Any]:
     ...
 def convert_moe_packed_tensors(
-    blocks, scales, *, dtype: torch.dtype = ..., rows_per_chunk: int = ...
+    blocks,
+    scales,
+    *,
+    dtype: torch.dtype = ...,
+    rows_per_chunk: int = ...,
 ) -> torch.Tensor: ...
 
 class Mxfp4GptOssExperts(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, routing_data, gather_idx, scatter_idx
+        self,
+        hidden_states: torch.Tensor,
+        routing_data,
+        gather_idx,
+        scatter_idx,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -33,11 +41,21 @@ def mlp_forward(self, hidden_states):  # -> tuple[Any, Tensor]:
 def should_convert_module(current_key_name, patterns):  # -> bool:
     ...
 def dequantize(
-    module, param_name, param_value, target_device, dq_param_name, **kwargs
+    module,
+    param_name,
+    param_value,
+    target_device,
+    dq_param_name,
+    **kwargs,
 ):  # -> None:
     ...
 def load_and_swizzle_mxfp4(
-    module, param_name, param_value, target_device, triton_kernels_hub, **kwargs
+    module,
+    param_name,
+    param_value,
+    target_device,
+    triton_kernels_hub,
+    **kwargs,
 ):  # -> None:
     ...
 def replace_with_mxfp4_linear(

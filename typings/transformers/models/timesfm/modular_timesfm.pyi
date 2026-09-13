@@ -55,7 +55,9 @@ class TimesFmAttention(nn.Module):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class TimesFmDecoderLayer(nn.Module):
@@ -68,7 +70,9 @@ class TimesFmDecoderLayer(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor | None, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor | None, torch.Tensor]: ...
 
 @auto_docstring

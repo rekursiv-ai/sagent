@@ -42,7 +42,12 @@ class ConvBertPreTrainedModel(PreTrainedModel):
 
 class SeparableConv1D(nn.Module):
     def __init__(
-        self, config, input_filters, output_filters, kernel_size, **kwargs
+        self,
+        config,
+        input_filters,
+        output_filters,
+        kernel_size,
+        **kwargs,
     ) -> None: ...
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -58,13 +63,17 @@ class ConvBertSelfAttention(nn.Module):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class ConvBertSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -81,7 +90,9 @@ class ConvBertAttention(nn.Module):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor, torch.FloatTensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.FloatTensor | None]: ...
 
 class GroupedLinearLayer(nn.Module):
@@ -97,7 +108,9 @@ class ConvBertIntermediate(nn.Module):
 class ConvBertOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -113,7 +126,9 @@ class ConvBertLayer(GradientCheckpointingLayer):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor, torch.FloatTensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.FloatTensor | None]: ...
     def feed_forward_chunk(self, attention_output):  # -> Any:
         ...
@@ -132,7 +147,9 @@ class ConvBertEncoder(nn.Module):
         return_dict: bool | None = ...,
     ) -> tuple | BaseModelOutputWithCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithCrossAttentions: ...
 
 class ConvBertPredictionHeadTransform(nn.Module):
@@ -173,7 +190,8 @@ class ConvBertModel(ConvBertPreTrainedModel):
 class ConvBertGeneratorPredictions(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, generator_hidden_states: torch.FloatTensor
+        self,
+        generator_hidden_states: torch.FloatTensor,
     ) -> torch.FloatTensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 

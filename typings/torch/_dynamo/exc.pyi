@@ -40,7 +40,10 @@ class ResetRequired(TorchDynamoException):
 
 class ShortenTraceback(TorchDynamoException):
     def __init__(
-        self, *args: Any, first_useful_frame: types.FrameType | None, **kwargs: Any
+        self,
+        *args: Any,
+        first_useful_frame: types.FrameType | None,
+        **kwargs: Any,
     ) -> None: ...
     def remove_dynamo_frames(self) -> typing.Self: ...
 
@@ -87,7 +90,10 @@ class UserErrorType(Enum):
 
 class UserError(Unsupported):
     def __init__(
-        self, error_type: UserErrorType, msg: str, case_name: str | None = ...
+        self,
+        error_type: UserErrorType,
+        msg: str,
+        case_name: str | None = ...,
     ) -> None: ...
 
 class SkipCodeRecursiveException(TorchDynamoException): ...
@@ -132,13 +138,18 @@ def handle_observed_exception(tx: Any) -> None: ...
 exceptions_allowed_to_be_fallback = ...
 
 def unimplemented_with_warning(
-    e: Exception, code: types.CodeType, msg: str
+    e: Exception,
+    code: types.CodeType,
+    msg: str,
 ) -> NoReturn: ...
 
 _NOTHING = ...
 
 def unimplemented(
-    msg: str, *, from_exc: Any = ..., case_name: str | None = ...
+    msg: str,
+    *,
+    from_exc: Any = ...,
+    case_name: str | None = ...,
 ) -> NoReturn: ...
 def unimplemented_v2_with_warning(
     e: Exception,
@@ -149,7 +160,10 @@ def unimplemented_v2_with_warning(
     hints: list[str],
 ) -> NoReturn: ...
 def format_graph_break_message(
-    gb_type: str, context: str, explanation: str, hints: list[str]
+    gb_type: str,
+    context: str,
+    explanation: str,
+    hints: list[str],
 ) -> str: ...
 def get_gbid_documentation_link(gb_type: str) -> str | None: ...
 def unimplemented_v2(
@@ -167,11 +181,13 @@ class KeyErrorMsg:
 
 def augment_exc_message(exc: Exception, msg: str = ..., export: bool = ...) -> None: ...
 def get_exc_message(
-    e: Exception, compile_id: CompileId
+    e: Exception,
+    compile_id: CompileId,
 ) -> tuple[str | None, int | None]: ...
 def get_stack_above_dynamo() -> StackSummary: ...
 def get_real_stack(
-    exc: Exception, frame: DynamoFrameType | None = ...
+    exc: Exception,
+    frame: DynamoFrameType | None = ...,
 ) -> StackSummary | None: ...
 def filter_stack(stack: StackSummary) -> StackSummary: ...
 def remove_resume_prefix(name: str) -> str | None: ...

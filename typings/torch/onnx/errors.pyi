@@ -8,7 +8,10 @@ class OnnxExporterError(RuntimeError): ...
 
 class UnsupportedOperatorError(OnnxExporterError):
     def __init__(
-        self, name: str, version: int, supported_version: int | None
+        self,
+        name: str,
+        version: int,
+        supported_version: int | None,
     ) -> None: ...
 
 class SymbolicValueError(OnnxExporterError):

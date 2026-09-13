@@ -36,7 +36,9 @@ class FalconMambaCache:
         cache_position: torch.LongTensor,
     ) -> torch.Tensor: ...
     def update_ssm_state(
-        self, layer_idx: int, new_ssm_state: torch.Tensor
+        self,
+        layer_idx: int,
+        new_ssm_state: torch.Tensor,
     ):  # -> Tensor:
         ...
     def reset(self):  # -> None:

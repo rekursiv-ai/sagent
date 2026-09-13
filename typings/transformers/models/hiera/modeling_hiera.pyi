@@ -44,7 +44,7 @@ class HieraModelOutput(ModelOutput):
 @auto_docstring(
     custom_intro="""
     Hiera image classification outputs.
-    """
+    """,
 )
 class HieraForImageClassificationOutput(ImageClassifierOutput):
     loss: torch.FloatTensor | None = ...
@@ -72,13 +72,19 @@ class HieraPatchEmbeddings(nn.Module):
         bool_masked_pos: torch.BoolTensor | None = ...,
     ) -> torch.Tensor: ...
     def random_masking(
-        self, pixel_values: torch.FloatTensor, noise: torch.FloatTensor | None = ...
+        self,
+        pixel_values: torch.FloatTensor,
+        noise: torch.FloatTensor | None = ...,
     ) -> tuple[torch.BoolTensor, torch.LongTensor]: ...
     def forward(
-        self, pixel_values: torch.FloatTensor, noise: torch.FloatTensor | None = ...
+        self,
+        pixel_values: torch.FloatTensor,
+        noise: torch.FloatTensor | None = ...,
     ) -> tuple[torch.Tensor, torch.BoolTensor | None, torch.LongTensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.BoolTensor | None, torch.LongTensor | None]: ...
 
 class HieraEmbeddings(nn.Module):
@@ -104,7 +110,9 @@ class HieraEmbeddings(nn.Module):
         interpolate_pos_encoding: bool = ...,
     ) -> tuple[torch.Tensor, torch.BoolTensor | None, torch.LongTensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.BoolTensor | None, torch.LongTensor | None]: ...
 
 class HieraMaskUnitAttention(nn.Module):
@@ -124,11 +132,15 @@ class HieraMaskUnitAttention(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class HieraDropPath(nn.Module):
@@ -161,7 +173,9 @@ class HieraLayer(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class HieraStage(GradientCheckpointingLayer):
@@ -185,11 +199,15 @@ class HieraStage(GradientCheckpointingLayer):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 def undo_windowing(
-    hidden_states: torch.Tensor, shape: list[int], mask_unit_shape: list[int]
+    hidden_states: torch.Tensor,
+    shape: list[int],
+    mask_unit_shape: list[int],
 ) -> torch.Tensor: ...
 
 class HieraEncoder(nn.Module):
@@ -233,7 +251,10 @@ class HieraPooler(nn.Module):
 @auto_docstring
 class HieraModel(HieraPreTrainedModel):
     def __init__(
-        self, config: HieraConfig, add_pooling_layer: bool = ..., is_mae: bool = ...
+        self,
+        config: HieraConfig,
+        add_pooling_layer: bool = ...,
+        is_mae: bool = ...,
     ) -> None: ...
     def get_input_embeddings(self) -> HieraPatchEmbeddings: ...
     @auto_docstring
@@ -258,13 +279,17 @@ class HieraDecoder(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.BoolTensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.BoolTensor]: ...
 
 class HieraMultiScaleHead(nn.Module):
     def __init__(self, config: HieraConfig) -> None: ...
     def apply_fusion_head(
-        self, head: nn.Module, hidden_states: torch.Tensor
+        self,
+        head: nn.Module,
+        hidden_states: torch.Tensor,
     ) -> torch.Tensor: ...
     def forward(self, feature_maps: list[torch.Tensor]) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -273,7 +298,9 @@ class HieraMultiScaleHead(nn.Module):
 class HieraForPreTraining(HieraPreTrainedModel):
     def __init__(self, config: HieraConfig) -> None: ...
     def get_pixel_label_2d(
-        self, pixel_values: torch.Tensor, bool_masked_pos: torch.BoolTensor
+        self,
+        pixel_values: torch.Tensor,
+        bool_masked_pos: torch.BoolTensor,
     ) -> torch.Tensor: ...
     def forward_loss(
         self,

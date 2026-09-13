@@ -270,7 +270,7 @@ def test_is_retryable_cause_depth_capped() -> None:
     a = RuntimeError("a")
     b = RuntimeError("b")
     a.__cause__ = b
-    b.__cause__ = a  # cycle
+    b.__cause__ = a  # Cycle.
     # The depth cap returns False once the cap is hit.
     assert is_retryable(a, _ScriptedModel()) is False
 
@@ -383,7 +383,7 @@ def test_extract_retry_after_far_future_epoch_does_not_explode() -> None:
 def test_extract_retry_after_anthropic_unified_reset() -> None:
     reset = time.time() + 30.0
     err = _HTTPError(
-        _FakeResponse(429, {"anthropic-ratelimit-unified-reset": str(reset)})
+        _FakeResponse(429, {"anthropic-ratelimit-unified-reset": str(reset)}),
     )
     delay = extract_retry_after(err)
     assert delay is not None
@@ -405,7 +405,7 @@ def test_extract_retry_after_unified_reset_ignored_when_allowed() -> None:
                 "anthropic-ratelimit-unified-overage-status": "rejected",
                 "anthropic-ratelimit-unified-reset": str(reset),
             },
-        )
+        ),
     )
     assert extract_retry_after(err) is None
 
@@ -421,7 +421,7 @@ def test_extract_retry_after_unified_reset_honored_when_rejected() -> None:
                 "anthropic-ratelimit-unified-status": "rejected",
                 "anthropic-ratelimit-unified-reset": str(reset),
             },
-        )
+        ),
     )
     delay = extract_retry_after(err)
     assert delay is not None
@@ -433,7 +433,7 @@ def test_extract_retry_after_unified_reset_honored_on_429_without_status() -> No
     # unified status header is present.
     reset = time.time() + 30.0
     err = _HTTPError(
-        _FakeResponse(429, {"anthropic-ratelimit-unified-reset": str(reset)})
+        _FakeResponse(429, {"anthropic-ratelimit-unified-reset": str(reset)}),
     )
     delay = extract_retry_after(err)
     assert delay is not None
@@ -459,7 +459,7 @@ def test_extract_retry_after_unified_warning_status_not_a_limit() -> None:
                 "anthropic-ratelimit-unified-representative-claim": "seven_day",
                 "anthropic-ratelimit-unified-reset": str(reset),
             },
-        )
+        ),
     )
     assert extract_retry_after(err) is None
 
@@ -475,7 +475,7 @@ def test_extract_retry_after_unified_rate_limited_status_honored() -> None:
                 "anthropic-ratelimit-unified-status": "rate_limited",
                 "anthropic-ratelimit-unified-reset": str(reset),
             },
-        )
+        ),
     )
     delay = extract_retry_after(err)
     assert delay is not None
@@ -528,7 +528,7 @@ def test_extract_retry_after_non_google_body_ignored() -> None:
 
 def test_extract_retry_after_invalid_unified_reset_returns_none() -> None:
     err = _HTTPError(
-        _FakeResponse(429, {"anthropic-ratelimit-unified-reset": "not-a-time"})
+        _FakeResponse(429, {"anthropic-ratelimit-unified-reset": "not-a-time"}),
     )
     assert extract_retry_after(err) is None
 
@@ -540,9 +540,9 @@ def test_extract_retry_after_no_relevant_headers() -> None:
 
 def test_extract_retry_after_handles_http_date(monkeypatch: pytest.MonkeyPatch) -> None:
     """RFC 7231 allows ``Retry-After`` as an HTTP-date, not just delta-seconds."""
-    monkeypatch.setattr(time, "time", lambda: 4_102_444_800.0)  # 2100-01-01T00:00:00Z
+    monkeypatch.setattr(time, "time", lambda: 4_102_444_800.0)  # 2100-01-01T00:00:00Z.
     err = _HTTPError(
-        _FakeResponse(429, {"retry-after": "Fri, 01 Jan 2100 00:01:00 GMT"})
+        _FakeResponse(429, {"retry-after": "Fri, 01 Jan 2100 00:01:00 GMT"}),
     )
     delay = extract_retry_after(err)
     assert delay == pytest.approx(60.0)
@@ -562,7 +562,7 @@ def test_extract_retry_after_clamps_anthropic_reset_to_24h(
     monkeypatch.setattr(time, "time", lambda: now)
     far_future = now + 30 * 24 * 60 * 60
     err = _HTTPError(
-        _FakeResponse(429, {"anthropic-ratelimit-unified-reset": str(far_future)})
+        _FakeResponse(429, {"anthropic-ratelimit-unified-reset": str(far_future)}),
     )
     delay = extract_retry_after(err)
     assert delay == pytest.approx(24 * 60 * 60)
@@ -589,7 +589,7 @@ def test_extract_retry_after_clamps_http_date_form(
     """HTTP-date form is bounded by ``_MAX_SERVER_RETRY_AFTER_SEC``."""
     monkeypatch.setattr(time, "time", lambda: 1_700_000_000.0)
     err = _HTTPError(
-        _FakeResponse(429, {"retry-after": "Wed, 21 Oct 2099 07:28:00 GMT"})
+        _FakeResponse(429, {"retry-after": "Wed, 21 Oct 2099 07:28:00 GMT"}),
     )
     delay = extract_retry_after(err)
     assert delay is not None
@@ -833,7 +833,8 @@ async def test_send_with_retry_in_band_rate_limit_outlasts_attempt_cap(
         _InBandRateLimitError() for _ in range(7)
     ]
     model = _ScriptedModel(
-        stream_responses=[*errors, _resp("ok")], is_retryable_provider=True
+        stream_responses=[*errors, _resp("ok")],
+        is_retryable_provider=True,
     )
     notes: list[str] = []
     resp = await send_with_retry(
@@ -933,7 +934,7 @@ async def test_send_with_retry_interactive_halts_on_long_server_delay(
                 "anthropic-ratelimit-unified-status": "rejected",
                 "anthropic-ratelimit-unified-reset": str(time.time() + 15_000.0),
             },
-        )
+        ),
     )
     model = _ScriptedModel(stream_responses=[err], is_retryable_provider=True)
     with pytest.raises(RateLimitError):
@@ -972,10 +973,11 @@ async def test_send_with_retry_in_band_warning_retries_to_success(
                 "anthropic-ratelimit-unified-7d-status": "allowed_warning",
                 "anthropic-ratelimit-unified-reset": str(time.time() + 86_000.0),
             },
-        )
+        ),
     )
     model = _ScriptedModel(
-        stream_responses=[err, _resp("ok")], is_retryable_provider=True
+        stream_responses=[err, _resp("ok")],
+        is_retryable_provider=True,
     )
     response = await send_with_retry(
         model,
@@ -1071,7 +1073,8 @@ async def test_send_with_retry_persistent_loops_on_in_band_rate_limit(
         _InBandRateLimitError() for _ in range(5)
     ]
     model = _PersistentModel(
-        stream_responses=[*errors, _resp("ok")], is_retryable_provider=True
+        stream_responses=[*errors, _resp("ok")],
+        is_retryable_provider=True,
     )
     resp = await send_with_retry(
         model,
@@ -1100,7 +1103,8 @@ async def test_send_with_retry_persistent_loops_on_in_band_overload(
         _InBandRateLimitError("overloaded_error") for _ in range(5)
     ]
     model = _PersistentModel(
-        stream_responses=[*errors, _resp("ok")], is_retryable_provider=True
+        stream_responses=[*errors, _resp("ok")],
+        is_retryable_provider=True,
     )
     resp = await send_with_retry(
         model,
@@ -1381,7 +1385,7 @@ def test_error_diagnostics_includes_status_headers_body() -> None:
                 "x-other": "ignored",
             },
             text='{"type":"error","error":{"type":"rate_limit_error"}}',
-        )
+        ),
     )
     diag = error_diagnostics(err)
     assert "status=429" in diag
@@ -1403,7 +1407,7 @@ def test_service_error_snapshot_allowlists_forensic_fields() -> None:
                 "x-ratelimit-reset": "soon",
             },
             text="bucket details" + "x" * 10_000,
-        )
+        ),
     )
 
     snapshot = service_error_snapshot(err)
@@ -1469,7 +1473,7 @@ def test_error_diagnostics_keeps_whole_body() -> None:
 
 def test_rate_limit_error_carries_diagnostics() -> None:
     original = _HTTPError(
-        _FakeResponse(429, {"retry-after": "14868"}, text='{"weekly":"limit"}')
+        _FakeResponse(429, {"retry-after": "14868"}, text='{"weekly":"limit"}'),
     )
     e = RateLimitError(time.time() + 14_868, original)
     assert "status=429" in e.diagnostics
@@ -1626,7 +1630,10 @@ async def test_send_with_retry_does_not_emit_banner_into_on_text(
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
 
     def _record(
-        retry_at: float, delay_sec: float, server_supplied: bool, error: Exception
+        retry_at: float,
+        delay_sec: float,
+        server_supplied: bool,
+        error: Exception,
     ) -> None:
         del delay_sec, server_supplied, error
         suspensions.append(retry_at)
@@ -1669,7 +1676,10 @@ async def test_send_with_retry_silent_on_short_transient_retry(
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
 
     def _record(
-        retry_at: float, delay_sec: float, server_supplied: bool, error: Exception
+        retry_at: float,
+        delay_sec: float,
+        server_supplied: bool,
+        error: Exception,
     ) -> None:
         del delay_sec, server_supplied, error
         suspensions.append(retry_at)

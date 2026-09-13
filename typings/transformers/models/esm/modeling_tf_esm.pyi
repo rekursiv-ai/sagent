@@ -41,7 +41,11 @@ class TFRotaryEmbedding(keras.layers.Layer):
 
 class TFEsmContactPredictionHead(keras.layers.Layer):
     def __init__(
-        self, in_features: int, bias=..., eos_idx: int = ..., name=...
+        self,
+        in_features: int,
+        bias=...,
+        eos_idx: int = ...,
+        name=...,
     ) -> None: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -198,11 +202,15 @@ class TFEsmMainLayer(keras.layers.Layer):
 )
 class TFEsmModel(TFEsmPreTrainedModel):
     def __init__(
-        self, config: EsmConfig, add_pooling_layer=..., *inputs, **kwargs
+        self,
+        config: EsmConfig,
+        add_pooling_layer=...,
+        *inputs,
+        **kwargs,
     ) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ESM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ESM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -230,7 +238,8 @@ class TFEsmModel(TFEsmPreTrainedModel):
         ...
 
 @add_start_docstrings(
-    """ESM Model with a `language modeling` head on top.""", ESM_START_DOCSTRING
+    """ESM Model with a `language modeling` head on top.""",
+    ESM_START_DOCSTRING,
 )
 class TFEsmForMaskedLM(TFEsmPreTrainedModel, TFMaskedLanguageModelingLoss):
     _keys_to_ignore_on_load_missing = ...
@@ -244,7 +253,7 @@ class TFEsmForMaskedLM(TFEsmPreTrainedModel, TFMaskedLanguageModelingLoss):
         ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ESM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ESM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -284,13 +293,14 @@ class TFEsmLMHead(keras.layers.Layer):
     ESM_START_DOCSTRING,
 )
 class TFEsmForSequenceClassification(
-    TFEsmPreTrainedModel, TFSequenceClassificationLoss
+    TFEsmPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     _keys_to_ignore_on_load_missing = ...
     def __init__(self, config) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ESM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ESM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -323,7 +333,7 @@ class TFEsmForTokenClassification(TFEsmPreTrainedModel, TFTokenClassificationLos
     def __init__(self, config) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ESM_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ESM_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -353,7 +363,9 @@ class TFEsmClassificationHead(keras.layers.Layer):
         ...
 
 def create_position_ids_from_input_ids(
-    input_ids, padding_idx, past_key_values_length=...
+    input_ids,
+    padding_idx,
+    past_key_values_length=...,
 ): ...
 
 __all__ = [

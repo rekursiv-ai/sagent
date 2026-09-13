@@ -28,7 +28,10 @@ R = TypeVar("R")
 class AotAutograd:
     def __init__(self, **kwargs: Any) -> None: ...
     def __call__(
-        self, gm: torch.fx.GraphModule, example_inputs: Iterable[Any], **kwargs: Any
+        self,
+        gm: torch.fx.GraphModule,
+        example_inputs: Iterable[Any],
+        **kwargs: Any,
     ) -> Callable[..., Any]: ...
 
 def aot_autograd(**kwargs: Any) -> AotAutograd: ...

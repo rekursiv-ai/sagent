@@ -23,7 +23,10 @@ class GotOcr2MLPBlock(nn.Module):
 class GotOcr2VisionAttention(nn.Module):
     def __init__(self, config, window_size) -> None: ...
     def get_rel_pos(
-        self, q_size: int, k_size: int, rel_pos: torch.Tensor
+        self,
+        q_size: int,
+        k_size: int,
+        rel_pos: torch.Tensor,
     ) -> torch.Tensor: ...
     def get_decomposed_rel_pos(
         self,
@@ -34,16 +37,22 @@ class GotOcr2VisionAttention(nn.Module):
         k_size: tuple[int, int],
     ) -> torch.Tensor: ...
     def forward(
-        self, hidden_states: torch.Tensor, output_attentions=...
+        self,
+        hidden_states: torch.Tensor,
+        output_attentions=...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class GotOcr2VisionLayer(GradientCheckpointingLayer):
     def __init__(self, config, window_size) -> None: ...
     def window_partition(
-        self, hidden_states: torch.Tensor, window_size: int
+        self,
+        hidden_states: torch.Tensor,
+        window_size: int,
     ) -> tuple[torch.Tensor, tuple[int, int]]: ...
     def window_unpartition(
         self,
@@ -82,7 +91,12 @@ class GotOcr2PatchEmbeddings(nn.Module):
 
 class GotOcr2LayerNorm(nn.LayerNorm):
     def __init__(
-        self, normalized_shape, *, eps=..., data_format=..., **kwargs
+        self,
+        normalized_shape,
+        *,
+        eps=...,
+        data_format=...,
+        **kwargs,
     ) -> None: ...
     def forward(self, features: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...

@@ -31,7 +31,8 @@ class _NormPartial(Partial):
     def __hash__(self) -> int: ...
 
 def replicate_reduction_dims(
-    placements: tuple[Placement, ...], reduction_dims: list[int]
+    placements: tuple[Placement, ...],
+    reduction_dims: list[int],
 ) -> tuple[Placement, ...]: ...
 def map_placements_after_reduction(
     placements: tuple[Placement, ...],
@@ -51,7 +52,8 @@ def common_reduction_strategy(
 LINEAR_REDUCTION_OP_MAP = ...
 
 @register_op_strategy(
-    list(LINEAR_REDUCTION_OP_MAP.keys()), schema_info=RuntimeSchemaInfo(1)
+    list(LINEAR_REDUCTION_OP_MAP.keys()),
+    schema_info=RuntimeSchemaInfo(1),
 )
 def linear_reduction_strategy(op_schema: OpSchema) -> OpStrategy: ...
 @register_op_strategy(aten.cumsum.default, schema_info=RuntimeSchemaInfo(1))
@@ -62,11 +64,13 @@ def cumsum_strategy(op_schema: OpSchema) -> OpStrategy: ...
 )
 def var_reduction_strategy(op_schema: OpSchema) -> OpStrategy: ...
 @register_op_strategy(
-    [aten.linalg_vector_norm.default], schema_info=RuntimeSchemaInfo(1)
+    [aten.linalg_vector_norm.default],
+    schema_info=RuntimeSchemaInfo(1),
 )
 def vector_norm_strategy(op_schema: OpSchema) -> OpStrategy: ...
 @register_op_strategy(
-    [aten._foreach_norm.Scalar], schema_info=RuntimeSchemaInfo(1, needs_pytree=True)
+    [aten._foreach_norm.Scalar],
+    schema_info=RuntimeSchemaInfo(1, needs_pytree=True),
 )
 def foreach_norm_strategy(op_schema: OpSchema) -> TupleStrategy: ...
 @register_op_strategy(
@@ -110,17 +114,20 @@ def nll_loss_forward_strategy(op_schema: OpSchema) -> OpStrategy: ...
 )
 def nll_loss_backward_strategy(op_schema: OpSchema) -> OpStrategy: ...
 @register_op_strategy(
-    [aten.native_layer_norm.default], schema_info=RuntimeSchemaInfo(1)
+    [aten.native_layer_norm.default],
+    schema_info=RuntimeSchemaInfo(1),
 )
 def layer_norm_strategy(op_schema: OpSchema) -> OpStrategy: ...
 @register_op_strategy([aten._fused_rms_norm.default], schema_info=RuntimeSchemaInfo(1))
 def fused_rms_norm_strategy(op_schema: OpSchema) -> OpStrategy: ...
 @register_op_strategy(
-    [aten.native_layer_norm_backward.default], schema_info=RuntimeSchemaInfo(2)
+    [aten.native_layer_norm_backward.default],
+    schema_info=RuntimeSchemaInfo(2),
 )
 def layer_norm_bwd_strategy(op_schema: OpSchema) -> OpStrategy: ...
 @register_op_strategy(
-    [aten._fused_rms_norm_backward.default], schema_info=RuntimeSchemaInfo(2)
+    [aten._fused_rms_norm_backward.default],
+    schema_info=RuntimeSchemaInfo(2),
 )
 def fused_rms_norm_bwd_strategy(op_schema: OpSchema) -> OpStrategy: ...
 def sort_strategy(op_schema: OpSchema, sort_dim: int) -> OpStrategy: ...

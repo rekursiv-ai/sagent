@@ -53,7 +53,9 @@ class Phi4MultimodalVisionAttention(nn.Module):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class Phi4MultimodalVisionEncoderLayer(GradientCheckpointingLayer):
@@ -105,10 +107,15 @@ class Phi4MultimodalVisionPreTrainedModel(PreTrainedModel):
 class Phi4MultimodalVisionEmbeddings(nn.Module):
     def __init__(self, config: Phi4MultimodalVisionConfig) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
-        self, pixel_values: torch.FloatTensor, patch_attention_mask: torch.BoolTensor
+        self,
+        pixel_values: torch.FloatTensor,
+        patch_attention_mask: torch.BoolTensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -133,7 +140,9 @@ class Phi4MultimodalVisionModel(Phi4MultimodalVisionPreTrainedModel):
 class Phi4MultimodalImageEmbedding(nn.Module):
     def __init__(self, config: Phi4MultimodalConfig) -> None: ...
     def get_img_features(
-        self, img_embeds: torch.FloatTensor, attention_mask=...
+        self,
+        img_embeds: torch.FloatTensor,
+        attention_mask=...,
     ) -> torch.FloatTensor: ...
     def forward(
         self,
@@ -153,13 +162,18 @@ class Phi4MultimodalAudioMLP(nn.Module):
 class Phi4MultimodalAudioAttention(nn.Module):
     def __init__(self, config: Phi4MultimodalAudioConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, attention_mask: torch.Tensor, **kwargs
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        **kwargs,
     ):  # -> Any:
         ...
 
 class Phi4MultimodalAudioDepthWiseSeparableConv1d(nn.Module):
     def __init__(
-        self, config: Phi4MultimodalAudioConfig, padding: int = ...
+        self,
+        config: Phi4MultimodalAudioConfig,
+        padding: int = ...,
     ) -> None: ...
     def forward(self, hidden_states):  # -> Any:
         ...
@@ -176,14 +190,18 @@ class Phi4MultimodalAudioConvModule(nn.Module):
 class Phi4MultimodalAudioConformerEncoderLayer(nn.Module):
     def __init__(self, config: Phi4MultimodalAudioConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, attention_mask: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
     ):  # -> Any:
         ...
 
 class Phi4MultimodalAudioNemoConvSubsampling(torch.nn.Module):
     def __init__(self, config: Phi4MultimodalAudioConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, mask: torch.Tensor | None
+        self,
+        hidden_states: torch.Tensor,
+        mask: torch.Tensor | None,
     ):  # -> tuple[Tensor, None] | tuple[Tensor, Tensor]:
         ...
 
@@ -208,20 +226,27 @@ class Phi4MultimodalAudioPreTrainedModel(PreTrainedModel):
 def unfold_tensor(tensor, max_seq_len):  # -> Tensor:
     ...
 def adaptive_enc_mask(
-    x_len, chunk_start_idx, left_window=..., right_window=...
+    x_len,
+    chunk_start_idx,
+    left_window=...,
+    right_window=...,
 ):  # -> Tensor:
     ...
 
 class Phi4MultimodalAudioModel(Phi4MultimodalAudioPreTrainedModel):
     def __init__(self, config: Phi4MultimodalAudioConfig) -> None: ...
     def forward_embeddings(
-        self, hidden_states, masks
+        self,
+        hidden_states,
+        masks,
     ):  # -> tuple[Any, Any | Tensor, Any]:
         ...
     def calculate_hs_mask(self, hidden_states, device, mask):  # -> Tensor:
         ...
     def forward(
-        self, hidden_states: torch.Tensor, mask: torch.Tensor | None
+        self,
+        hidden_states: torch.Tensor,
+        mask: torch.Tensor | None,
     ):  # -> Tensor:
         ...
 
@@ -265,13 +290,20 @@ def eager_attention_forward(
 ):  # -> tuple[Tensor, Tensor]:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Tensor, Tensor]:
     ...
 
 class Phi4MultimodalAttention(nn.Module):
     def __init__(
-        self, config: Phi4MultimodalConfig, layer_idx: int | None = ...
+        self,
+        config: Phi4MultimodalConfig,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -298,7 +330,8 @@ class Phi4MultimodalDecoderLayer(GradientCheckpointingLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class Phi4MultimodalFeatureEmbedding(nn.Module):

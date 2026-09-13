@@ -150,7 +150,10 @@ def test_run_search() -> None:
         records=[AuthorRecord(author_id="42", name="Searched", h_index=100)],
         total=1,
     )
-    with patch("sagent.tools.paper_author.search_authors", return_value=ret) as m:
+    with patch(
+        "sagent.tools.paper_author.search_authors",
+        return_value=ret,
+    ) as m:
         result = asyncio.run(PaperAuthor().run({"query": "q1"}))
     assert "Searched" in result.content
     assert m.call_args.args[0] == "q1"
@@ -159,7 +162,10 @@ def test_run_search() -> None:
 def test_run_search_empty() -> None:
     _clear_cache()
     ret = AuthorSearchResult(records=[], total=0)
-    with patch("sagent.tools.paper_author.search_authors", return_value=ret):
+    with patch(
+        "sagent.tools.paper_author.search_authors",
+        return_value=ret,
+    ):
         result = asyncio.run(PaperAuthor().run({"query": "q2"}))
     assert result.content == "(no results)"
 
@@ -170,7 +176,10 @@ def test_run_search_truncation_notice() -> None:
         records=[AuthorRecord(author_id="1", name="Only", h_index=5)],
         total=10,
     )
-    with patch("sagent.tools.paper_author.search_authors", return_value=ret):
+    with patch(
+        "sagent.tools.paper_author.search_authors",
+        return_value=ret,
+    ):
         result = asyncio.run(PaperAuthor().run({"query": "q3"}))
     assert result.content == (
         "[author:1] Only - h-index:5\n... (showing 1 of 10; tighten filters for more)"
@@ -180,7 +189,10 @@ def test_run_search_truncation_notice() -> None:
 def test_run_search_passes_limit() -> None:
     _clear_cache()
     ret = AuthorSearchResult(records=[], total=0)
-    with patch("sagent.tools.paper_author.search_authors", return_value=ret) as m:
+    with patch(
+        "sagent.tools.paper_author.search_authors",
+        return_value=ret,
+    ) as m:
         _ = asyncio.run(PaperAuthor().run({"query": "q4", "limit": 7}))
     assert m.call_args.kwargs["limit"] == 7
 
@@ -193,9 +205,12 @@ def test_run_search_passes_limit() -> None:
 def test_run_author_metadata() -> None:
     _clear_cache()
     ret: list[AuthorRecord | None] = [
-        AuthorRecord(author_id="12345", name="Yoshua", h_index=200, paper_count=800)
+        AuthorRecord(author_id="12345", name="Yoshua", h_index=200, paper_count=800),
     ]
-    with patch("sagent.tools.paper_author.author_metadata", return_value=ret) as m:
+    with patch(
+        "sagent.tools.paper_author.author_metadata",
+        return_value=ret,
+    ) as m:
         result = asyncio.run(PaperAuthor().run({"ids": ["12345"]}))
     assert "name: Yoshua" in result.content
     assert "h_index: 200" in result.content
@@ -207,7 +222,10 @@ def test_run_single_author_not_found() -> None:
     # "{id}: not found" (the id echoed), not a bare backend message.
     _clear_cache()
     ret: list[AuthorRecord | None] = [None]
-    with patch("sagent.tools.paper_author.author_metadata", return_value=ret):
+    with patch(
+        "sagent.tools.paper_author.author_metadata",
+        return_value=ret,
+    ):
         result = asyncio.run(PaperAuthor().run({"ids": ["99999"]}))
     assert result.content == "99999: not found"
 
@@ -215,7 +233,10 @@ def test_run_single_author_not_found() -> None:
 def test_run_bare_string_id_coerced() -> None:
     _clear_cache()
     ret: list[AuthorRecord | None] = [AuthorRecord(author_id="123", name="Solo")]
-    with patch("sagent.tools.paper_author.author_metadata", return_value=ret):
+    with patch(
+        "sagent.tools.paper_author.author_metadata",
+        return_value=ret,
+    ):
         result = asyncio.run(PaperAuthor().run({"ids": "123"}))
     assert not result.is_error
     assert "name: Solo" in result.content
@@ -233,7 +254,10 @@ def test_run_ids_batches_author_metadata() -> None:
         None,
         AuthorRecord(author_id="3", name="Third", h_index=30),
     ]
-    with patch("sagent.tools.paper_author.author_metadata", return_value=ret) as m:
+    with patch(
+        "sagent.tools.paper_author.author_metadata",
+        return_value=ret,
+    ) as m:
         result = asyncio.run(PaperAuthor().run({"ids": ["1", "2", "3"]}))
     assert m.call_args.args[0] == ["1", "2", "3"]
     assert "name: First" in result.content
@@ -250,7 +274,10 @@ def test_run_recovers_comma_joined_author_ids() -> None:
         AuthorRecord(author_id="1741101", name="A", h_index=1),
         AuthorRecord(author_id="2064160", name="B", h_index=2),
     ]
-    with patch("sagent.tools.paper_author.author_metadata", return_value=ret) as m:
+    with patch(
+        "sagent.tools.paper_author.author_metadata",
+        return_value=ret,
+    ) as m:
         result = asyncio.run(PaperAuthor().run({"ids": "1741101,2064160"}))
     assert not result.is_error
     assert m.call_args.args[0] == ["1741101", "2064160"]
@@ -265,11 +292,14 @@ def test_run_papers() -> None:
     _clear_cache()
     ret = Listing(
         records=[
-            PaperRecord(title="Paper", year=2020, doi="10.1234/p", authors=("A",))
+            PaperRecord(title="Paper", year=2020, doi="10.1234/p", authors=("A",)),
         ],
         complete=True,
     )
-    with patch("sagent.tools.paper_author.author_papers", return_value=ret) as m:
+    with patch(
+        "sagent.tools.paper_author.author_papers",
+        return_value=ret,
+    ) as m:
         result = asyncio.run(
             PaperAuthor().run({"ids": ["7"], "operation": "papers"}),
         )
@@ -280,7 +310,10 @@ def test_run_papers() -> None:
 def test_run_papers_empty() -> None:
     _clear_cache()
     ret = Listing(records=[], complete=True)
-    with patch("sagent.tools.paper_author.author_papers", return_value=ret):
+    with patch(
+        "sagent.tools.paper_author.author_papers",
+        return_value=ret,
+    ):
         result = asyncio.run(
             PaperAuthor().run({"ids": ["8"], "operation": "papers"}),
         )
@@ -293,19 +326,25 @@ def test_run_papers_incomplete_more_matches() -> None:
         records=[PaperRecord(title="P1", year=2021, doi="10.1/a")],
         complete=False,
     )
-    with patch("sagent.tools.paper_author.author_papers", return_value=ret):
+    with patch(
+        "sagent.tools.paper_author.author_papers",
+        return_value=ret,
+    ):
         result = asyncio.run(
             PaperAuthor().run({"ids": ["9"], "operation": "papers"}),
         )
     assert result.content.endswith(
-        "\n... (more matches exist; raise 'limit' or narrow the years)"
+        "\n... (more matches exist; raise 'limit' or narrow the years)",
     )
 
 
 def test_run_papers_passes_year_bounds() -> None:
     _clear_cache()
     ret = Listing(records=[], complete=True)
-    with patch("sagent.tools.paper_author.author_papers", return_value=ret) as m:
+    with patch(
+        "sagent.tools.paper_author.author_papers",
+        return_value=ret,
+    ) as m:
         _ = asyncio.run(
             PaperAuthor().run(
                 {
@@ -314,7 +353,7 @@ def test_run_papers_passes_year_bounds() -> None:
                     "year_from": 2020,
                     "year_to": 2023,
                     "limit": 5,
-                }
+                },
             ),
         )
     assert m.call_args.kwargs == {"limit": 5, "year_from": 2020, "year_to": 2023}
@@ -331,7 +370,10 @@ def test_run_caches_search() -> None:
         records=[AuthorRecord(author_id="1", name="Cached", h_index=1)],
         total=1,
     )
-    with patch("sagent.tools.paper_author.search_authors", return_value=ret) as m:
+    with patch(
+        "sagent.tools.paper_author.search_authors",
+        return_value=ret,
+    ) as m:
         _ = asyncio.run(PaperAuthor().run({"query": "cache_q"}))
         _ = asyncio.run(PaperAuthor().run({"query": "cache_q"}))
     assert m.call_count == 1
@@ -343,7 +385,10 @@ def test_run_ids_batch_caches_when_all_resolve() -> None:
         AuthorRecord(author_id="11", name="First", h_index=10),
         AuthorRecord(author_id="22", name="Second", h_index=20),
     ]
-    with patch("sagent.tools.paper_author.author_metadata", return_value=ret) as m:
+    with patch(
+        "sagent.tools.paper_author.author_metadata",
+        return_value=ret,
+    ) as m:
         _ = asyncio.run(PaperAuthor().run({"ids": ["11", "22"]}))
         _ = asyncio.run(PaperAuthor().run({"ids": ["11", "22"]}))
     assert m.call_count == 1
@@ -356,7 +401,10 @@ def test_run_ids_batch_miss_not_cached() -> None:
         AuthorRecord(author_id="33", name="Only", h_index=5),
         None,
     ]
-    with patch("sagent.tools.paper_author.author_metadata", return_value=ret) as m:
+    with patch(
+        "sagent.tools.paper_author.author_metadata",
+        return_value=ret,
+    ) as m:
         _ = asyncio.run(PaperAuthor().run({"ids": ["33", "44"]}))
         _ = asyncio.run(PaperAuthor().run({"ids": ["33", "44"]}))
     assert m.call_count == 2

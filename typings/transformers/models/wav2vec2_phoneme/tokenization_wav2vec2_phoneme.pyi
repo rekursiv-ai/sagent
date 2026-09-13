@@ -89,7 +89,9 @@ class Wav2Vec2PhonemeCTCTokenizer(PreTrainedTokenizer):
         **kwargs,
     ) -> list[str]: ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
 
 __all__ = ["Wav2Vec2PhonemeCTCTokenizer"]

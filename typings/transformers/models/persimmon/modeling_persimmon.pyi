@@ -32,7 +32,12 @@ class PersimmonRotaryEmbedding(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 
@@ -55,7 +60,9 @@ def eager_attention_forward(
 
 class PersimmonAttention(nn.Module):
     def __init__(
-        self, config: PersimmonConfig, layer_idx: int | None = ...
+        self,
+        config: PersimmonConfig,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -86,7 +93,8 @@ class PersimmonDecoderLayer(GradientCheckpointingLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring
@@ -142,10 +150,12 @@ class PersimmonForCausalLM(PersimmonPreTrainedModel, GenerationMixin):
     ) -> CausalLMOutputWithPast: ...
 
 class PersimmonForSequenceClassification(
-    GenericForSequenceClassification, PersimmonPreTrainedModel
+    GenericForSequenceClassification,
+    PersimmonPreTrainedModel,
 ): ...
 class PersimmonForTokenClassification(
-    GenericForTokenClassification, PersimmonPreTrainedModel
+    GenericForTokenClassification,
+    PersimmonPreTrainedModel,
 ): ...
 
 __all__ = [

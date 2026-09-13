@@ -2,7 +2,7 @@
 # ruff: noqa: EXE003, D300, D205, T201 -- Polyglot shell/Python script; CLI reports.
 # fmt: off
 '''' 2>/dev/null #
-exec uv --quiet --project "$(dirname "$0")/../../../.." run --frozen --no-sync python3 "$0" "$@"
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
 Repair truncated sessions.
 
 A coalesce splice that landed on a barrier's payload absorbed that barrier's
@@ -148,25 +148,6 @@ def kill_refs(tape: Sequence[TapeRecord], poison: ContextSplice) -> list[TapeRef
     return refs
 
 
-def _kill_splice(
-    tape: Sequence[TapeRecord], refs: Sequence[TapeRef], strategy: str
-) -> ContextSplice:
-    """Build an empty-payload splice masking exactly ``refs``."""
-    return ContextSplice(
-        ref=TapeRef(
-            session_id=refs[0].session_id,
-            ordinal=max(r.ref.ordinal for r in tape) + 1,
-        ),
-        mask=tuple(
-            MaskRange(session_id=r.session_id, lo=r.ordinal, hi=r.ordinal)
-            for r in sorted(refs, key=lambda r: r.ordinal)
-        ),
-        insert_after=None,
-        payload=(),
-        strategy=strategy,
-    )
-
-
 def repair_session(session_dir: Path) -> bool:
     """Append a kill-splice undoing any poison splice in ``session_dir``.
 
@@ -210,7 +191,7 @@ def repair_session(session_dir: Path) -> bool:
                     current[1] if current is not None else tape,
                     sorted(set(refs), key=lambda r: r.ordinal),
                     "undo_overbroad_coalesce",
-                )
+                ),
             ],
         )
     return True
@@ -221,6 +202,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     Args:
       argv: Command-line arguments; ``sys.argv[1:]`` when omitted.
+
+    Returns:
+      exit_code: Process exit status after scanning and repairing sessions.
 
     """
     parser = argparse.ArgumentParser(
@@ -260,7 +244,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             f"{session_dir.name}: {visible} visible message(s),"
             f" {len(poison)} poison splice(s) at"
-            f" {[s.ref.ordinal for s in poison]}"
+            f" {[s.ref.ordinal for s in poison]}",
         )
         if not args.dry_run and repair_session(session_dir):
             after = load_session(session_dir)
@@ -282,6 +266,27 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
         "--dry-run",
         action="store_true",
         help="Report damaged sessions without modifying them.",
+    )
+
+
+def _kill_splice(
+    tape: Sequence[TapeRecord],
+    refs: Sequence[TapeRef],
+    strategy: str,
+) -> ContextSplice:
+    """Build an empty-payload splice masking exactly ``refs``."""
+    return ContextSplice(
+        ref=TapeRef(
+            session_id=refs[0].session_id,
+            ordinal=max(r.ref.ordinal for r in tape) + 1,
+        ),
+        mask=tuple(
+            MaskRange(session_id=r.session_id, lo=r.ordinal, hi=r.ordinal)
+            for r in sorted(refs, key=lambda r: r.ordinal)
+        ),
+        insert_after=None,
+        payload=(),
+        strategy=strategy,
     )
 
 

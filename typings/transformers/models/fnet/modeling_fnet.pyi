@@ -30,7 +30,11 @@ def fftn(x): ...
 class FNetEmbeddings(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, input_ids=..., token_type_ids=..., position_ids=..., inputs_embeds=...
+        self,
+        input_ids=...,
+        token_type_ids=...,
+        position_ids=...,
+        inputs_embeds=...,
     ):  # -> Any:
         ...
 
@@ -57,7 +61,9 @@ class FNetIntermediate(nn.Module):
 class FNetOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -71,7 +77,10 @@ class FNetLayer(GradientCheckpointingLayer):
 class FNetEncoder(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states, output_hidden_states=..., return_dict=...
+        self,
+        hidden_states,
+        output_hidden_states=...,
+        return_dict=...,
     ):  # -> tuple[Any | tuple[Any, ...] | tuple[()], ...] | BaseModelOutput:
         ...
 
@@ -115,7 +124,7 @@ class FNetPreTrainedModel(PreTrainedModel):
 @auto_docstring(
     custom_intro="""
     Output type of [`FNetForPreTraining`].
-    """
+    """,
 )
 class FNetForPreTrainingOutput(ModelOutput):
     loss: torch.FloatTensor | None = ...

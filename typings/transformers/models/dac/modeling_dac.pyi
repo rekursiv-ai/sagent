@@ -49,14 +49,20 @@ class DacResidualUnit(nn.Module):
 
 class DacEncoderBlock(nn.Module):
     def __init__(
-        self, config: DacConfig, stride: int = ..., stride_index: int = ...
+        self,
+        config: DacConfig,
+        stride: int = ...,
+        stride_index: int = ...,
     ) -> None: ...
     def forward(self, hidden_state):  # -> Any:
         ...
 
 class DacDecoderBlock(nn.Module):
     def __init__(
-        self, config: DacConfig, stride: int = ..., stride_index: int = ...
+        self,
+        config: DacConfig,
+        stride: int = ...,
+        stride_index: int = ...,
     ) -> None: ...
     def forward(self, hidden_state):  # -> Any:
         ...
@@ -64,15 +70,19 @@ class DacDecoderBlock(nn.Module):
 class DacResidualVectorQuantize(nn.Module):
     def __init__(self, config: DacConfig) -> None: ...
     def forward(
-        self, hidden_state, n_quantizers: int | None = ...
+        self,
+        hidden_state,
+        n_quantizers: int | None = ...,
     ):  # -> tuple[Any | Literal[0], Tensor, Tensor, Any | Literal[0], Any | Literal[0]]:
         ...
     def from_codes(
-        self, audio_codes: torch.Tensor
+        self,
+        audio_codes: torch.Tensor,
     ):  # -> tuple[float | Any, Tensor, Tensor]:
         ...
     def from_latents(
-        self, latents: torch.Tensor
+        self,
+        latents: torch.Tensor,
     ):  # -> tuple[Any | Literal[0], Tensor]:
         ...
 
@@ -99,7 +109,7 @@ class DacPreTrainedModel(PreTrainedAudioTokenizerBase):
 @auto_docstring(
     custom_intro="""
     The DAC (Descript Audio Codec) model.
-    """
+    """,
 )
 class DacModel(DacPreTrainedModel):
     def __init__(self, config: DacConfig) -> None: ...

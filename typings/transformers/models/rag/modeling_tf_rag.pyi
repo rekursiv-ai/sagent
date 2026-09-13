@@ -93,7 +93,8 @@ class TFRagModel(TFRagPreTrainedModel):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(RAG_FORWARD_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFRetrievAugLMOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFRetrievAugLMOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -159,7 +160,8 @@ class TFRagTokenForGeneration(TFRagPreTrainedModel, TFCausalLanguageModelingLoss
     @unpack_inputs
     @add_start_docstrings_to_model_forward(RAG_FORWARD_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFRetrievAugLMMarginOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFRetrievAugLMMarginOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -202,10 +204,21 @@ class TFRagTokenForGeneration(TFRagPreTrainedModel, TFCausalLanguageModelingLoss
         ...
     def shift_tokens_right(self, input_ids, start_token_id=...): ...
     def get_nll(
-        self, seq_logits, doc_scores, target, reduce_loss=..., epsilon=..., n_docs=...
+        self,
+        seq_logits,
+        doc_scores,
+        target,
+        reduce_loss=...,
+        epsilon=...,
+        n_docs=...,
     ): ...
     def hf_compute_loss(
-        self, labels, y_pred, smooth_epsilon=..., from_logits=..., reduce_loss=...
+        self,
+        labels,
+        y_pred,
+        smooth_epsilon=...,
+        from_logits=...,
+        reduce_loss=...,
     ): ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -238,7 +251,8 @@ class TFRagSequenceForGeneration(TFRagPreTrainedModel, TFCausalLanguageModelingL
     @unpack_inputs
     @add_start_docstrings_to_model_forward(RAG_FORWARD_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFRetrievAugLMMarginOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFRetrievAugLMMarginOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
