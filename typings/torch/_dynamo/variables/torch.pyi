@@ -93,12 +93,20 @@ class DispatchKeySetVariable(BaseTorchVariable):
     def create_with_source(cls, value, source) -> Self: ...
     def is_constant_fold_method(self, name) -> bool: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
 
 class FuncTorchInterpreterVariable(BaseTorchVariable):
     @classmethod
     def create_with_source(cls, value, source) -> Self: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...

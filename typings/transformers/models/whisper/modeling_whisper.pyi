@@ -26,19 +26,29 @@ logger = ...
 _HIDDEN_STATES_START_POSITION = ...
 
 def sinusoids(
-    length: int, channels: int, max_timescale: float = ...
+    length: int,
+    channels: int,
+    max_timescale: float = ...,
 ) -> torch.Tensor: ...
 def shift_tokens_right(
-    input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: torch.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ):  # -> Tensor:
     ...
 
 class WhisperPositionalEmbedding(nn.Embedding):
     def __init__(
-        self, num_positions: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_positions: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ) -> None: ...
     def forward(
-        self, input_ids, past_key_values_length=..., position_ids=...
+        self,
+        input_ids,
+        past_key_values_length=...,
+        position_ids=...,
     ):  # -> Tensor:
         ...
 

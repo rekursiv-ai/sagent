@@ -15,12 +15,16 @@ class Filter:
     options: Incomplete
     def __init__(self, **options) -> None: ...
     def filter(
-        self, lexer: Lexer, stream: Iterable[tuple[_TokenType, str]]
+        self,
+        lexer: Lexer,
+        stream: Iterable[tuple[_TokenType, str]],
     ) -> Iterator[tuple[_TokenType, str]]: ...
 
 class FunctionFilter(Filter):
     function: Incomplete
     def __init__(self, **options) -> None: ...
     def filter(
-        self, lexer: Lexer, stream: Iterable[tuple[_TokenType, str]]
+        self,
+        lexer: Lexer,
+        stream: Iterable[tuple[_TokenType, str]],
     ) -> Iterator[tuple[_TokenType, str]]: ...

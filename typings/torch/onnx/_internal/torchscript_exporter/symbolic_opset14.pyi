@@ -53,7 +53,10 @@ def batch_norm(
 ): ...
 @_onnx_symbolic("quantized::hardswish")
 def quantized_hardswish(
-    g: jit_utils.GraphContext, x, op_scale, op_zero_point
+    g: jit_utils.GraphContext,
+    x,
+    op_scale,
+    op_zero_point,
 ) -> Value: ...
 @_onnx_symbolic("aten::scaled_dot_product_attention")
 @symbolic_helper.parse_args("v", "v", "v", "v", "f", "b", "v", "b")

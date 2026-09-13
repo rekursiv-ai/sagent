@@ -36,7 +36,7 @@ class SwinModelOutput(ModelOutput):
 @auto_docstring(
     custom_intro="""
     Swin masked image model outputs.
-    """
+    """,
 )
 class SwinMaskedImageModelingOutput(ModelOutput):
     loss: torch.FloatTensor | None = ...
@@ -52,7 +52,7 @@ class SwinMaskedImageModelingOutput(ModelOutput):
 @auto_docstring(
     custom_intro="""
     Swin outputs for image classification.
-    """
+    """,
 )
 class SwinImageClassifierOutput(ModelOutput):
     loss: torch.FloatTensor | None = ...
@@ -67,7 +67,10 @@ def window_reverse(windows, window_size, height, width): ...
 class SwinEmbeddings(nn.Module):
     def __init__(self, config, use_mask_token=...) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
         self,
@@ -82,25 +85,35 @@ class SwinPatchEmbeddings(nn.Module):
     def maybe_pad(self, pixel_values, height, width):  # -> Tensor:
         ...
     def forward(
-        self, pixel_values: torch.FloatTensor | None
+        self,
+        pixel_values: torch.FloatTensor | None,
     ) -> tuple[torch.Tensor, tuple[int]]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, tuple[int]]: ...
 
 class SwinPatchMerging(nn.Module):
     def __init__(
-        self, input_resolution: tuple[int], dim: int, norm_layer: nn.Module = ...
+        self,
+        input_resolution: tuple[int],
+        dim: int,
+        norm_layer: nn.Module = ...,
     ) -> None: ...
     def maybe_pad(self, input_feature, height, width):  # -> Tensor:
         ...
     def forward(
-        self, input_feature: torch.Tensor, input_dimensions: tuple[int, int]
+        self,
+        input_feature: torch.Tensor,
+        input_dimensions: tuple[int, int],
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class SwinDropPath(nn.Module):
@@ -123,7 +136,9 @@ class SwinSelfAttention(nn.Module):
 class SwinSelfOutput(nn.Module):
     def __init__(self, config, dim) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -165,7 +180,10 @@ class SwinLayer(nn.Module):
     def get_attn_mask(self, height, width, dtype, device):  # -> Tensor | None:
         ...
     def maybe_pad(
-        self, hidden_states, height, width
+        self,
+        hidden_states,
+        height,
+        width,
     ):  # -> tuple[Tensor, tuple[Literal[0], Literal[0], Literal[0], Any, Literal[0], Any]]:
         ...
     def forward(
@@ -177,12 +195,21 @@ class SwinLayer(nn.Module):
         always_partition: bool | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class SwinStage(GradientCheckpointingLayer):
     def __init__(
-        self, config, dim, input_resolution, depth, num_heads, drop_path, downsample
+        self,
+        config,
+        dim,
+        input_resolution,
+        depth,
+        num_heads,
+        drop_path,
+        downsample,
     ) -> None: ...
     def forward(
         self,

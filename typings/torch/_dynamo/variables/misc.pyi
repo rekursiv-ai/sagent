@@ -51,13 +51,22 @@ class ExceptionVariable(VariableTracker):
     def reconstruct(self, codegen: PyCodegen) -> None: ...
     def python_type(self) -> Any: ...
     def call_setattr(
-        self, tx: InstructionTranslator, name_var: VariableTracker, val: VariableTracker
+        self,
+        tx: InstructionTranslator,
+        name_var: VariableTracker,
+        val: VariableTracker,
     ) -> ConstantVariable: ...
     def call_method(
-        self, tx, name, args, kwargs
+        self,
+        tx,
+        name,
+        args,
+        kwargs,
     ) -> ConstantVariable | Self | VariableTracker: ...
     def var_getattr(
-        self, tx, name
+        self,
+        tx,
+        name,
     ) -> (
         ConstantVariable
         | ExceptionVariable
@@ -95,7 +104,9 @@ class CellVariable(VariableTracker):
     pre_existing_contents: VariableTracker | None
     local_name: str | None = ...
     def __init__(
-        self, pre_existing_contents: VariableTracker | None = ..., **kwargs
+        self,
+        pre_existing_contents: VariableTracker | None = ...,
+        **kwargs,
     ) -> None: ...
 
 class NewGlobalVariable(VariableTracker):
@@ -107,13 +118,22 @@ class AutogradFunctionVariable(VariableTracker):
     _nonvar_fields = ...
     def __init__(self, fn_cls, **kwargs) -> None: ...
     def call_apply(
-        self, tx: InstructionTranslator, args, kwargs
+        self,
+        tx: InstructionTranslator,
+        args,
+        kwargs,
     ) -> VariableTracker: ...
     def call_backward(
-        self, tx: InstructionTranslator, args, kwargs
+        self,
+        tx: InstructionTranslator,
+        args,
+        kwargs,
     ) -> VariableTracker: ...
     def call_function(
-        self, tx: InstructionTranslator, args, kwargs
+        self,
+        tx: InstructionTranslator,
+        args,
+        kwargs,
     ) -> AutogradFunctionVariable: ...
     def call_method(
         self,
@@ -150,7 +170,9 @@ class AutogradFunctionContextVariable(UserDefinedObjectVariable):
         kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def var_getattr(
-        self, tx: InstructionTranslator, name
+        self,
+        tx: InstructionTranslator,
+        name,
     ) -> (
         LambdaVariable
         | TupleVariable
@@ -244,7 +266,9 @@ class TypingVariable(VariableTracker):
         kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def var_getattr(
-        self, tx: InstructionTranslator, name: str
+        self,
+        tx: InstructionTranslator,
+        name: str,
     ) -> GetAttrVariable | VariableTracker: ...
     def as_python_constant(self) -> Any: ...
     def reconstruct(self, codegen: PyCodegen) -> None: ...
@@ -261,7 +285,8 @@ class NumpyVariable(VariableTracker):
     def can_constant_fold_through(cls, fn) -> bool: ...
     @classmethod
     def get_constant_collection_for_func(
-        cls, fn
+        cls,
+        fn,
     ) -> type[NumpyTypeInfoVariable | NumpyDTypeVariable] | None: ...
     def call_function(
         self,
@@ -348,7 +373,10 @@ np_constant_collections_map = ...
 class RandomClassVariable(VariableTracker):
     def __init__(self, **kwargs) -> None: ...
     def call_function(
-        self, tx: InstructionTranslator, args, kwargs
+        self,
+        tx: InstructionTranslator,
+        args,
+        kwargs,
     ) -> RandomVariable: ...
 
 class RandomVariable(VariableTracker):

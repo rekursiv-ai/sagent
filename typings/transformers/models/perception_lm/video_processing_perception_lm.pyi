@@ -18,7 +18,8 @@ class PerceptionLMVideoProcessor(BaseVideoProcessor):
     valid_kwargs = PerceptionLMFastVideoProcessorInitKwargs
     model_input_names = ...
     def __init__(
-        self, **kwargs: Unpack[PerceptionLMFastVideoProcessorInitKwargs]
+        self,
+        **kwargs: Unpack[PerceptionLMFastVideoProcessorInitKwargs],
     ) -> None: ...
 
 __all__ = ["PerceptionLMVideoProcessor"]

@@ -200,7 +200,7 @@ def test_is_read_only_git_branch_create_unsafe() -> None:
 
 
 def test_is_read_only_uv_run_basedpyright_unsafe() -> None:
-    # strace on a bare `basedpyright a.py`: mkdir("/tmp/pyright-<pid>-*", 0700)
+    # `strace` on a bare `basedpyright a.py`: mkdir("/tmp/pyright-<pid>-*", 0700)
     # then openat(..., O_WRONLY|O_CREAT|O_TRUNC) inside it. Unconditional, with
     # no flag to gate, so "read-only with a flag denylist" cannot express it.
     trees = parse_bash("uv run basedpyright")
@@ -347,7 +347,10 @@ def test_an_unknown_node_kind_fails_closed() -> None:
     ],
 )
 def test_a_flag_value_is_not_scanned_for_denied_letters(
-    arg: str, deny: frozenset[str], exe: str, denied: bool
+    arg: str,
+    deny: frozenset[str],
+    exe: str,
+    denied: bool,
 ) -> None:
     """A value-taking flag ends the cluster; its value is not more flags."""
     assert _denied(arg, deny, exe=exe) is denied
@@ -371,7 +374,8 @@ def test_a_flag_value_is_not_scanned_for_denied_letters(
     ],
 )
 def test_cd_destination_is_resolved_or_marked_unknowable(
-    command: str, cwd: str
+    command: str,
+    cwd: str,
 ) -> None:
     """Option flags are not destinations, and $HOME/$OLDPWD are not literals."""
     trees = parse_bash(command)

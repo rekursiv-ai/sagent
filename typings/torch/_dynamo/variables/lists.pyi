@@ -58,11 +58,17 @@ class BaseListVariable(VariableTracker):
     def as_python_constant(self) -> Any: ...
     def as_proxy(self) -> Any: ...
     def getitem_const(
-        self, tx: InstructionTranslator, arg: VariableTracker
+        self,
+        tx: InstructionTranslator,
+        arg: VariableTracker,
     ) -> Self | VariableTracker: ...
     def unpack_var_sequence(self, tx) -> list[VariableTracker]: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
 
 class RangeVariable(BaseListVariable):
@@ -77,18 +83,26 @@ class RangeVariable(BaseListVariable):
     def apply_slice(self, slice) -> RangeVariable: ...
     def as_python_constant(self) -> range: ...
     def getitem_const(
-        self, tx: InstructionTranslator, arg: VariableTracker
+        self,
+        tx: InstructionTranslator,
+        arg: VariableTracker,
     ) -> RangeVariable | VariableTracker: ...
     def as_proxy(self) -> range: ...
     def unpack_var_sequence(self, tx=...) -> list[VariableTracker]: ...
     def reconstruct(self, codegen: PyCodegen) -> None: ...
     def call_obj_hasattr(
-        self, tx: InstructionTranslator, name: str
+        self,
+        tx: InstructionTranslator,
+        name: str,
     ) -> VariableTracker: ...
     def range_equals(self, other: RangeVariable) -> bool: ...
     def range_count(self, x: VariableTracker) -> int: ...
     def call_method(
-        self, tx, name, args, kwargs
+        self,
+        tx,
+        name,
+        args,
+        kwargs,
     ) -> (
         DelayGraphBreakVariable
         | RangeIteratorVariable
@@ -100,7 +114,11 @@ class RangeVariable(BaseListVariable):
 
 class CommonListMethodsVariable(BaseListVariable):
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
 
 class ListVariable(CommonListMethodsVariable):
@@ -108,13 +126,21 @@ class ListVariable(CommonListMethodsVariable):
     def debug_repr(self) -> str: ...
     def reconstruct(self, codegen: PyCodegen) -> None: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def var_getattr(
-        self, tx, name
+        self,
+        tx,
+        name,
     ) -> BuiltinVariable | UserDefinedClassVariable | VariableTracker: ...
     def call_obj_hasattr(
-        self, tx: InstructionTranslator, name: str
+        self,
+        tx: InstructionTranslator,
+        name: str,
     ) -> VariableTracker: ...
 
 class DequeVariable(CommonListMethodsVariable):
@@ -125,7 +151,11 @@ class DequeVariable(CommonListMethodsVariable):
     def reconstruct(self, codegen: PyCodegen) -> None: ...
     def var_getattr(self, tx: InstructionTranslator, name) -> VariableTracker: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
 
 class TupleVariable(BaseListVariable):
@@ -133,19 +163,30 @@ class TupleVariable(BaseListVariable):
     def debug_repr(self) -> str: ...
     def reconstruct(self, codegen: PyCodegen) -> None: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def var_getattr(
-        self, tx, name
+        self,
+        tx,
+        name,
     ) -> BuiltinVariable | UserDefinedClassVariable | VariableTracker: ...
     def call_obj_hasattr(
-        self, tx: InstructionTranslator, name: str
+        self,
+        tx: InstructionTranslator,
+        name: str,
     ) -> VariableTracker: ...
 
 class SizeVariable(TupleVariable):
     _nonvar_fields = ...
     def __init__(
-        self, items: list[VariableTracker], proxy: torch.fx.Proxy | None = ..., **kwargs
+        self,
+        items: list[VariableTracker],
+        proxy: torch.fx.Proxy | None = ...,
+        **kwargs,
     ) -> None: ...
     def debug_repr(self) -> str: ...
     def python_type(self) -> type[Size]: ...
@@ -154,13 +195,21 @@ class SizeVariable(TupleVariable):
     def unpack_var_sequence(self, tx) -> list[VariableTracker]: ...
     def numel(self, tx) -> VariableTracker: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def get_item_dyn(
-        self, tx: InstructionTranslator, arg: VariableTracker
+        self,
+        tx: InstructionTranslator,
+        arg: VariableTracker,
     ) -> SizeVariable | VariableTracker: ...
     def call_obj_hasattr(
-        self, tx: InstructionTranslator, name: str
+        self,
+        tx: InstructionTranslator,
+        name: str,
     ) -> VariableTracker: ...
 
 class NamedTupleVariable(TupleVariable):
@@ -175,10 +224,16 @@ class NamedTupleVariable(TupleVariable):
     def as_proxy(self): ...
     def reconstruct(self, codegen: PyCodegen) -> None: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def var_getattr(
-        self, tx: InstructionTranslator, name
+        self,
+        tx: InstructionTranslator,
+        name,
     ) -> (
         Any
         | BuiltinVariable
@@ -188,7 +243,9 @@ class NamedTupleVariable(TupleVariable):
         | UserFunctionVariable
     ): ...
     def call_obj_hasattr(
-        self, tx: InstructionTranslator, name: str
+        self,
+        tx: InstructionTranslator,
+        name: str,
     ) -> VariableTracker: ...
 
 class SliceVariable(VariableTracker):
@@ -199,7 +256,9 @@ class SliceVariable(VariableTracker):
     def as_python_constant(self) -> slice[Any, Any, Any]: ...
     def reconstruct(self, codegen: PyCodegen) -> None: ...
     def var_getattr(
-        self, tx: InstructionTranslator, name
+        self,
+        tx: InstructionTranslator,
+        name,
     ) -> GetAttrVariable | VariableTracker: ...
 
 class ListIteratorVariable(IteratorVariable):
@@ -219,7 +278,12 @@ class TupleIteratorVariable(ListIteratorVariable): ...
 class RangeIteratorVariable(IteratorVariable):
     _nonvar_fields = ...
     def __init__(
-        self, start: int, stop: int, step: int, len_: int, **kwargs
+        self,
+        start: int,
+        stop: int,
+        step: int,
+        len_: int,
+        **kwargs,
     ) -> None: ...
     def call_method(self, tx, name, args, kwargs) -> VariableTracker | Self: ...
     def call_obj_hasattr(self, tx, name) -> ConstantVariable | VariableTracker: ...

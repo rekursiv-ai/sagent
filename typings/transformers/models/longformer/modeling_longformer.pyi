@@ -81,7 +81,11 @@ def create_position_ids_from_input_ids(input_ids, padding_idx): ...
 class LongformerEmbeddings(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, input_ids=..., token_type_ids=..., position_ids=..., inputs_embeds=...
+        self,
+        input_ids=...,
+        token_type_ids=...,
+        position_ids=...,
+        inputs_embeds=...,
     ):  # -> Any:
         ...
     def create_position_ids_from_inputs_embeds(self, inputs_embeds):  # -> Tensor:
@@ -104,7 +108,9 @@ class LongformerSelfAttention(nn.Module):
 class LongformerSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -132,7 +138,9 @@ class LongformerIntermediate(nn.Module):
 class LongformerOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 

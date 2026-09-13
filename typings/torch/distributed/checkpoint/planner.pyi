@@ -95,7 +95,8 @@ class SavePlanner(abc.ABC):
     def create_local_plan(self) -> SavePlan: ...
     @abc.abstractmethod
     def create_global_plan(
-        self, all_plans: list[SavePlan]
+        self,
+        all_plans: list[SavePlan],
     ) -> tuple[list[SavePlan], Metadata]: ...
     @abc.abstractmethod
     def finish_plan(self, new_plan: SavePlan) -> SavePlan: ...

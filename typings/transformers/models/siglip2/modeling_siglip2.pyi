@@ -60,7 +60,9 @@ class Siglip2VisionEmbeddings(nn.Module):
         max_length: int,
     ) -> torch.Tensor: ...
     def forward(
-        self, pixel_values: torch.FloatTensor, spatial_shapes: torch.LongTensor
+        self,
+        pixel_values: torch.FloatTensor,
+        spatial_shapes: torch.LongTensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -85,7 +87,9 @@ class Siglip2Attention(nn.Module):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class Siglip2MLP(nn.Module):
@@ -194,7 +198,9 @@ class Siglip2TextModel(Siglip2PreTrainedModel):
 class Siglip2MultiheadAttentionPoolingHead(nn.Module):
     def __init__(self, config: Siglip2VisionConfig) -> None: ...
     def forward(
-        self, hidden_state: torch.Tensor, attention_mask: torch.Tensor | None = ...
+        self,
+        hidden_state: torch.Tensor,
+        attention_mask: torch.Tensor | None = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 

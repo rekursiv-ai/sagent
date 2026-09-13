@@ -60,6 +60,6 @@ def _limits(*, window: int, response: int) -> Mapping[ContextTag, ModelLimits]:
             "": ModelLimits(
                 max_request_tokens=window,
                 max_response_tokens=response,
-            )
-        }
+            ),
+        },
     )

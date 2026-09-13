@@ -46,7 +46,12 @@ class NemotronRotaryEmbedding(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Tensor, Tensor]:
     ...
 
@@ -119,7 +124,8 @@ class NemotronDecoderLayer(GradientCheckpointingLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring
@@ -173,16 +179,19 @@ class NemotronForCausalLM(NemotronPreTrainedModel, GenerationMixin):
     ) -> CausalLMOutputWithPast: ...
 
 class NemotronForSequenceClassification(
-    GenericForSequenceClassification, NemotronPreTrainedModel
+    GenericForSequenceClassification,
+    NemotronPreTrainedModel,
 ): ...
 
 class NemotronForQuestionAnswering(
-    GenericForQuestionAnswering, NemotronPreTrainedModel
+    GenericForQuestionAnswering,
+    NemotronPreTrainedModel,
 ):
     base_model_prefix = ...
 
 class NemotronForTokenClassification(
-    GenericForTokenClassification, NemotronPreTrainedModel
+    GenericForTokenClassification,
+    NemotronPreTrainedModel,
 ): ...
 
 __all__ = [

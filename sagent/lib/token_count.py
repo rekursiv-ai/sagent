@@ -74,7 +74,7 @@ def approx_request_tokens(request: ModelRequest, model: TokenEstimator) -> int:
     for tool in request.tools or ():
         total += model.approx_text_tokens(tool.description or "")
         total += model.approx_text_tokens(
-            json.dumps(json_unfreeze(tool.directive_schema))
+            json.dumps(json_unfreeze(tool.directive_schema)),
         )
     return total
 
@@ -82,11 +82,19 @@ def approx_request_tokens(request: ModelRequest, model: TokenEstimator) -> int:
 def entry_tokens(entry: TapeEvent, model: TokenEstimator) -> int:
     """Approximate tokens for one history entry across every wire surface.
 
+    Args:
+      entry: History entry whose wire-bearing fields are counted.
+      model: Token estimator providing text and image primitives.
+
+    Returns:
+      tokens: Approximate token count for the entry.
+
     The single per-entry token estimator: tool-call id/name/args JSON,
     thinking blocks, attachments, and text. Both request sizing
     (:func:`approx_request_tokens`) and compaction sizing
     (``compaction.history.estimate_entry_tokens``) route through here so
     the two never drift.
+
     """
     if isinstance(entry, (AgentSendMessage, UserMessage)):
         total = model.approx_text_tokens(entry.text)
@@ -100,7 +108,7 @@ def entry_tokens(entry: TapeEvent, model: TokenEstimator) -> int:
                 json.dumps(
                     {"id": tc.id, "name": tc.name, "args": dict(tc.args)},
                     default=str,
-                )
+                ),
             )
         for tb in entry.thinking_blocks:
             total += _thinking_block_tokens(tb, model)
@@ -112,16 +120,14 @@ def entry_tokens(entry: TapeEvent, model: TokenEstimator) -> int:
     return total
 
 
+# Anthropic emits ``{"type":"thinking","signature":...,"thinking":...}`` and
+# ``{"type":"redacted_thinking"}``; OpenAI / OpenAI-subscription / chat- completions
+# reasoning is stored as ``{"type":"reasoning","text":...}``. All re-ship on the wire in
+# some form (or at minimum count against the model's output-token quota when later sent
+# back as input on a resume), so every text-bearing field must contribute to the request
+# token estimate.
 def _thinking_block_tokens(block: Mapping[str, object], model: TokenEstimator) -> int:
-    """Sum every text-bearing field across the known thinking-block shapes.
-
-    Anthropic emits ``{"type":"thinking","signature":...,"thinking":...}`` and
-    ``{"type":"redacted_thinking"}``; OpenAI / OpenAI-subscription / chat-
-    completions reasoning is stored as ``{"type":"reasoning","text":...}``. All
-    re-ship on the wire in some form (or at minimum count against the model's
-    output-token quota when later sent back as input on a resume), so every
-    text-bearing field must contribute to the request token estimate.
-    """
+    """Sum every text-bearing field across the known thinking-block shapes."""
     total = 0
     for field in ("signature", "thinking", "text"):
         value = block.get(field)
@@ -130,21 +136,18 @@ def _thinking_block_tokens(block: Mapping[str, object], model: TokenEstimator) -
     return total
 
 
+# Images and PDFs are both shipped on the wire by Anthropic and Google providers; both
+# contribute to the request token budget. New descriptors are logged so a silent drop --
+# the previous bug, where PDFs were filtered out and compaction fired late -- can't
+# recur.
+#
+# Returns the provider's modality estimate (pixel area / tile counts). This is a TOKEN
+# count only: request *bytes* are a separate budget (``Model.max_request_bytes``)
+# enforced by the byte-aware compaction gate and the read-tool's rendered-byte bound,
+# never folded into the token estimate -- doing so caused spurious compaction on byte-
+# heavy, token-light requests that fit the window.
 def _attachment_tokens(descriptor: str, data: bytes, model: TokenEstimator) -> int:
-    """Approximate token cost of one ``BytesMessage`` attachment.
-
-    Images and PDFs are both shipped on the wire by Anthropic and Google
-    providers; both contribute to the request token budget. New
-    descriptors are logged so a silent drop -- the previous bug, where
-    PDFs were filtered out and compaction fired late -- can't recur.
-
-    Returns the provider's modality estimate (pixel area / tile counts).
-    This is a TOKEN count only: request *bytes* are a separate budget
-    (``Model.max_request_bytes``) enforced by the byte-aware compaction
-    gate and the read-tool's rendered-byte bound, never folded into the
-    token estimate -- doing so caused spurious compaction on byte-heavy,
-    token-light requests that fit the window.
-    """
+    """Approximate token cost of one ``BytesMessage`` attachment."""
     if descriptor.startswith("image/") or descriptor == "application/pdf":
         return model.approx_image_tokens(data)
     logger.warning("token_count: unknown attachment descriptor %s", descriptor)

@@ -38,7 +38,8 @@ class TuningProcessPool:
     def shutdown(self) -> None: ...
     def target(self, choice: TritonTemplateCaller) -> float: ...
     def benchmark(
-        self, choices: list[TritonTemplateCaller]
+        self,
+        choices: list[TritonTemplateCaller],
     ) -> dict[TritonTemplateCaller, float]: ...
 
 type LayoutOrBuffer = ir.Layout | ir.Buffer
@@ -53,7 +54,8 @@ class TensorMeta:
     name: str | None = ...
     @classmethod
     def from_irnodes(
-        cls, irnodes: LayoutOrBuffer | Sequence[LayoutOrBuffer]
+        cls,
+        irnodes: LayoutOrBuffer | Sequence[LayoutOrBuffer],
     ) -> TensorMeta | list[TensorMeta]: ...
     def to_tensor(self) -> torch.Tensor: ...
 
@@ -67,14 +69,21 @@ class BenchmarkRequest:
         extra_args: Iterable[Any],
     ) -> None: ...
     def make_run_fn(
-        self, *input_tensors: torch.Tensor, out: torch.Tensor
+        self,
+        *input_tensors: torch.Tensor,
+        out: torch.Tensor,
     ) -> Callable[[], None]: ...
     def cleanup_run_fn(self) -> None: ...
     def do_bench(
-        self, fn, *input_tensors: torch.Tensor, out: torch.Tensor | None = ...
+        self,
+        fn,
+        *input_tensors: torch.Tensor,
+        out: torch.Tensor | None = ...,
     ) -> float: ...
     def benchmark(
-        self, *input_tensors: torch.Tensor, out: torch.Tensor | None = ...
+        self,
+        *input_tensors: torch.Tensor,
+        out: torch.Tensor | None = ...,
     ) -> float: ...
 
 class _TestBenchmarkRequest(BenchmarkRequest):
@@ -87,17 +96,25 @@ class _TestBenchmarkRequest(BenchmarkRequest):
         crash: bool = ...,
     ) -> None: ...
     def benchmark(
-        self, *input_tensors: torch.Tensor, out: torch.Tensor | None = ...
+        self,
+        *input_tensors: torch.Tensor,
+        out: torch.Tensor | None = ...,
     ) -> float: ...
 
 class GPUDeviceBenchmarkMixin:
     def do_bench(
-        self, fn, *input_tensors: torch.Tensor, out: torch.Tensor | None = ...
+        self,
+        fn,
+        *input_tensors: torch.Tensor,
+        out: torch.Tensor | None = ...,
     ) -> float: ...
 
 class CPUDeviceBenchmarkMixin:
     def do_bench(
-        self, fn, *input_tensors: torch.Tensor, out: torch.Tensor | None = ...
+        self,
+        fn,
+        *input_tensors: torch.Tensor,
+        out: torch.Tensor | None = ...,
     ) -> float: ...
 
 class TritonBenchmarkRequest(BenchmarkRequest):
@@ -118,7 +135,9 @@ class TritonBenchmarkRequest(BenchmarkRequest):
         kpack: int = ...,
     ) -> None: ...
     def make_run_fn(
-        self, *input_tensors: torch.Tensor, out: torch.Tensor
+        self,
+        *input_tensors: torch.Tensor,
+        out: torch.Tensor,
     ) -> Callable[[], None]: ...
     def precompile(self) -> None: ...
 
@@ -136,7 +155,9 @@ class CUDABenchmarkRequest(GPUDeviceBenchmarkMixin, BenchmarkRequest):
     ) -> None: ...
     def precompile(self) -> None: ...
     def make_run_fn(
-        self, *input_tensors: torch.Tensor, out: torch.Tensor
+        self,
+        *input_tensors: torch.Tensor,
+        out: torch.Tensor,
     ) -> Callable[[], None]: ...
     def update_workspace_size(self) -> None: ...
     def ensure_dll_loaded(self) -> None: ...
@@ -153,7 +174,9 @@ class CppBenchmarkRequest(CPUDeviceBenchmarkMixin, BenchmarkRequest):
     ) -> None: ...
     def precompile(self) -> None: ...
     def make_run_fn(
-        self, *input_tensors: torch.Tensor, out: torch.Tensor
+        self,
+        *input_tensors: torch.Tensor,
+        out: torch.Tensor,
     ) -> Callable[[], None]: ...
     def cleanup_run_fn(self) -> None: ...
 
@@ -167,7 +190,9 @@ class CuteDSLBenchmarkRequest(GPUDeviceBenchmarkMixin, BenchmarkRequest):
         source_code: PartialRender,
     ) -> None: ...
     def make_run_fn(
-        self, *input_tensors: torch.Tensor, out: torch.Tensor
+        self,
+        *input_tensors: torch.Tensor,
+        out: torch.Tensor,
     ) -> Callable[[], None]: ...
     def cleanup_run_fn(self) -> None: ...
 

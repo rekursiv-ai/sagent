@@ -27,7 +27,6 @@ else:
 # request-byte wire-limit: distinct from a token context-window overflow
 # and from rate limits. Anthropic, OpenAI, and Google all surface their
 # byte ceilings as 413. Body phrases catch the rare status-less variants.
-_REQUEST_TOO_LARGE_STATUS: Final = 413
 # Unambiguous byte-limit phrases: each names the REQUEST/PAYLOAD/ENTITY size,
 # never the token window. These win over any co-occurring context phrase.
 # The looser prefix "request exceeds the maximum" is deliberately NOT here --
@@ -80,7 +79,7 @@ _GUARDED_CONTEXT_OVERFLOW_PHRASES: Final = (
 tool-schema validation errors, where a bare match is a false positive."""
 
 _CONTEXT_OVERFLOW_CODES: Final = frozenset(
-    {"context_length_exceeded", "string_above_max_length"}
+    {"context_length_exceeded", "string_above_max_length"},
 )
 """Vendor ``error.code`` values that name the condition outright."""
 
@@ -145,7 +144,7 @@ def is_request_too_large(status: int | None, body: str) -> bool:
         return True
     if _names_token_overflow(lower):
         return False
-    return status == _REQUEST_TOO_LARGE_STATUS
+    return status == 413
 
 
 def is_context_overflow_text(body: str) -> bool:
@@ -194,23 +193,11 @@ def is_context_overflow_text(body: str) -> bool:
     return _names_token_overflow(lower)
 
 
-def _names_token_overflow(lower: str) -> bool:
-    """Unambiguous token-overflow signals in an already-lowercased body.
-
-    Excludes :data:`_AMBIGUOUS_CONTEXT_OVERFLOW_PHRASES`, so this is also
-    what :func:`is_request_too_large` reads to veto byte classification --
-    a phrase naming neither unit must not decide that question.
-    """
-    if any(phrase in lower for phrase in _CONTEXT_OVERFLOW_PHRASES):
-        return True
-    return any(
-        phrase in lower and any(marker in lower for marker in markers)
-        for phrase, markers in _GUARDED_CONTEXT_OVERFLOW_PHRASES
-    )
-
-
 def raise_if_request_too_large(
-    status: int | None, body: str, *, cause: BaseException | None = None
+    status: int | None,
+    body: str,
+    *,
+    cause: BaseException | None = None,
 ) -> None:
     """Raise :class:`RequestTooLargeError` when the error is the byte limit.
 
@@ -247,7 +234,7 @@ class StreamingResponseNotReadError(UserFacingError):
             "the provider error body. The underlying HTTP error was hidden by "
             "the provider SDK while formatting a streaming response. Retry "
             "after running /compact, use /clear for a fresh session, or switch "
-            "providers with /model."
+            "providers with /model.",
         )
 
 
@@ -286,3 +273,16 @@ def find_response_not_read(exc: BaseException) -> httpx2.ResponseNotRead | None:
             if link is not None
         )
     return None
+
+
+# Excludes :data:`_AMBIGUOUS_CONTEXT_OVERFLOW_PHRASES`, so this is also what
+# :func:`is_request_too_large` reads to veto byte classification -- a phrase naming
+# neither unit must not decide that question.
+def _names_token_overflow(lower: str) -> bool:
+    """Unambiguous token-overflow signals in an already-lowercased body."""
+    if any(phrase in lower for phrase in _CONTEXT_OVERFLOW_PHRASES):
+        return True
+    return any(
+        phrase in lower and any(marker in lower for marker in markers)
+        for phrase, markers in _GUARDED_CONTEXT_OVERFLOW_PHRASES
+    )

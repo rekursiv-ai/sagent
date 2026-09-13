@@ -18,7 +18,13 @@ logger = ...
 
 def load_tf_weights_in_gpt2(model, config, gpt2_checkpoint_path): ...
 def eager_attention_forward(
-    module, query, key, value, attention_mask, head_mask=..., **kwargs
+    module,
+    query,
+    key,
+    value,
+    attention_mask,
+    head_mask=...,
+    **kwargs,
 ):  # -> tuple[Tensor, Any]:
     ...
 
@@ -43,7 +49,8 @@ class DecisionTransformerGPT2Attention(nn.Module):
 class DecisionTransformerGPT2MLP(nn.Module):
     def __init__(self, intermediate_size, config) -> None: ...
     def forward(
-        self, hidden_states: tuple[torch.FloatTensor] | None
+        self,
+        hidden_states: tuple[torch.FloatTensor] | None,
     ) -> torch.FloatTensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
@@ -100,7 +107,9 @@ class DecisionTransformerGPT2Model(DecisionTransformerGPT2PreTrainedModel):
         return_dict: bool | None = ...,
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
 
 @dataclass
@@ -122,7 +131,7 @@ class DecisionTransformerPreTrainedModel(PreTrainedModel):
 @auto_docstring(
     custom_intro="""
     The Decision Transformer Model
-    """
+    """,
 )
 class DecisionTransformerModel(DecisionTransformerPreTrainedModel):
     def __init__(self, config) -> None: ...

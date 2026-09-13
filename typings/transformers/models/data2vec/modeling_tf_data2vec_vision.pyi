@@ -49,7 +49,9 @@ class TFData2VecVisionEmbeddings(keras.layers.Layer):
     def build(self, input_shape=...):  # -> None:
         ...
     def call(
-        self, pixel_values: tf.Tensor, bool_masked_pos: tf.Tensor | None = ...
+        self,
+        pixel_values: tf.Tensor,
+        bool_masked_pos: tf.Tensor | None = ...,
     ) -> tf.Tensor: ...
 
 class TFData2VecVisionPatchEmbeddings(keras.layers.Layer):
@@ -60,7 +62,10 @@ class TFData2VecVisionPatchEmbeddings(keras.layers.Layer):
 
 class TFData2VecVisionSelfAttention(keras.layers.Layer):
     def __init__(
-        self, config: Data2VecVisionConfig, window_size: tuple | None = ..., **kwargs
+        self,
+        config: Data2VecVisionConfig,
+        window_size: tuple | None = ...,
+        **kwargs,
     ) -> None: ...
     def transpose_for_scores(self, tensor: tf.Tensor, batch_size: int) -> tf.Tensor: ...
     def call(
@@ -88,7 +93,10 @@ class TFData2VecVisionSelfOutput(keras.layers.Layer):
 
 class TFData2VecVisionAttention(keras.layers.Layer):
     def __init__(
-        self, config: Data2VecVisionConfig, window_size: tuple | None = ..., **kwargs
+        self,
+        config: Data2VecVisionConfig,
+        window_size: tuple | None = ...,
+        **kwargs,
     ) -> None: ...
     def prune_heads(self, heads): ...
     def call(
@@ -135,7 +143,10 @@ class TFData2VecVisionLayer(keras.layers.Layer):
 
 class TFData2VecVisionRelativePositionBias(keras.layers.Layer):
     def __init__(
-        self, config: Data2VecVisionConfig, window_size: tuple, **kwargs
+        self,
+        config: Data2VecVisionConfig,
+        window_size: tuple,
+        **kwargs,
     ) -> None: ...
     def build(self, input_shape):  # -> None:
         ...
@@ -144,7 +155,10 @@ class TFData2VecVisionRelativePositionBias(keras.layers.Layer):
 
 class TFData2VecVisionEncoder(keras.layers.Layer):
     def __init__(
-        self, config: Data2VecVisionConfig, window_size: tuple | None = ..., **kwargs
+        self,
+        config: Data2VecVisionConfig,
+        window_size: tuple | None = ...,
+        **kwargs,
     ) -> None: ...
     def call(
         self,
@@ -161,7 +175,10 @@ class TFData2VecVisionEncoder(keras.layers.Layer):
 class TFData2VecVisionMainLayer(keras.layers.Layer):
     config_class = Data2VecVisionConfig
     def __init__(
-        self, config: Data2VecVisionConfig, add_pooling_layer: bool = ..., **kwargs
+        self,
+        config: Data2VecVisionConfig,
+        add_pooling_layer: bool = ...,
+        **kwargs,
     ) -> None: ...
     def get_input_embeddings(self) -> keras.layers.Layer: ...
     @unpack_inputs
@@ -233,7 +250,8 @@ class TFData2VecVisionModel(TFData2VecVisionPreTrainedModel):
     DATA2VEC_VISION_START_DOCSTRING,
 )
 class TFData2VecVisionForImageClassification(
-    TFData2VecVisionPreTrainedModel, TFSequenceClassificationLoss
+    TFData2VecVisionPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config: Data2VecVisionConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
@@ -274,7 +292,10 @@ class TFData2VecVisionConvModule(keras.layers.Layer):
 
 class TFAdaptiveAvgPool2D(keras.layers.Layer):
     def __init__(
-        self, output_dims: tuple[int, int], input_ordering: str = ..., **kwargs
+        self,
+        output_dims: tuple[int, int],
+        input_ordering: str = ...,
+        **kwargs,
     ) -> None: ...
     def pseudo_1d_pool(self, inputs: tf.Tensor, h_pooling: bool): ...
     def call(self, inputs: tf.Tensor): ...
@@ -321,7 +342,8 @@ class TFData2VecVisionForSemanticSegmentation(TFData2VecVisionPreTrainedModel):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(DATA2VEC_VISION_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFSemanticSegmenterOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFSemanticSegmenterOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,

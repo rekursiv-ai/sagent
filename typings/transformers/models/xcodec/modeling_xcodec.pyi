@@ -26,14 +26,22 @@ class XcodecDecoderOutput(ModelOutput):
 
 class ResidualUnit(nn.Module):
     def __init__(
-        self, config: XcodecConfig, in_channels: int, out_channels: int, dilation: int
+        self,
+        config: XcodecConfig,
+        in_channels: int,
+        out_channels: int,
+        dilation: int,
     ) -> None: ...
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class SemanticEncoderBlock(nn.Module):
     def __init__(
-        self, config: XcodecConfig, in_channels: int, out_channels: int, stride: int
+        self,
+        config: XcodecConfig,
+        in_channels: int,
+        out_channels: int,
+        stride: int,
     ) -> None: ...
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -45,7 +53,11 @@ class SemanticEncoder(nn.Module):
 
 class SemanticDecoderBlock(nn.Module):
     def __init__(
-        self, config: XcodecConfig, in_channels: int, out_channels: int, stride: int
+        self,
+        config: XcodecConfig,
+        in_channels: int,
+        out_channels: int,
+        stride: int,
     ) -> None: ...
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -98,7 +110,9 @@ class XcodecModel(XcodecPreTrainedModel):
     ) -> torch.Tensor | XcodecEncoderOutput: ...
     @auto_docstring
     def decode(
-        self, audio_codes: torch.Tensor, return_dict: bool | None = ...
+        self,
+        audio_codes: torch.Tensor,
+        return_dict: bool | None = ...,
     ) -> torch.Tensor | XcodecDecoderOutput: ...
     @auto_docstring
     def forward(

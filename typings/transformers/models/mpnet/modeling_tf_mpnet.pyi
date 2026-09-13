@@ -43,7 +43,11 @@ class TFMPNetEmbeddings(keras.layers.Layer):
         ...
     def create_position_ids_from_input_ids(self, input_ids): ...
     def call(
-        self, input_ids=..., position_ids=..., inputs_embeds=..., training=...
+        self,
+        input_ids=...,
+        position_ids=...,
+        inputs_embeds=...,
+        training=...,
     ): ...
 
 class TFMPNetPooler(keras.layers.Layer):
@@ -92,7 +96,10 @@ class TFMPNetIntermediate(keras.layers.Layer):
 class TFMPNetOutput(keras.layers.Layer):
     def __init__(self, config: MPNetConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -163,7 +170,7 @@ class TFMPNetModel(TFMPNetPreTrainedModel):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        MPNET_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MPNET_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -208,7 +215,7 @@ class TFMPNetForMaskedLM(TFMPNetPreTrainedModel, TFMaskedLanguageModelingLoss):
     def get_prefix_bias_name(self): ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        MPNET_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MPNET_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -242,13 +249,14 @@ class TFMPNetClassificationHead(keras.layers.Layer):
     MPNET_START_DOCSTRING,
 )
 class TFMPNetForSequenceClassification(
-    TFMPNetPreTrainedModel, TFSequenceClassificationLoss
+    TFMPNetPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     _keys_to_ignore_on_load_missing = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        MPNET_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MPNET_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -279,7 +287,7 @@ class TFMPNetForMultipleChoice(TFMPNetPreTrainedModel, TFMultipleChoiceLoss):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        MPNET_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        MPNET_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -311,7 +319,7 @@ class TFMPNetForTokenClassification(TFMPNetPreTrainedModel, TFTokenClassificatio
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        MPNET_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MPNET_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -343,7 +351,7 @@ class TFMPNetForQuestionAnswering(TFMPNetPreTrainedModel, TFQuestionAnsweringLos
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        MPNET_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        MPNET_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,

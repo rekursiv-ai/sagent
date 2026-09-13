@@ -14,7 +14,11 @@ logger = ...
 
 def filter_logits(logits, top_k=..., top_p=..., filter_value=...): ...
 def get_relevant_lyric_tokens(
-    full_tokens, max_n_lyric_tokens, total_length, offset, duration
+    full_tokens,
+    max_n_lyric_tokens,
+    total_length,
+    offset,
+    duration,
 ):  # -> tuple[Tensor | Any, Any | list[int]]:
     ...
 def get_starts(total_length, n_ctx, hop_length):  # -> list[Any]:
@@ -24,7 +28,14 @@ def get_alignment(music_tokens, labels, prior, config):  # -> list[Any]:
 def save_temp_audio(fname, lvl, metas, aud):  # -> None:
     ...
 def get_mask(
-    mask, query_length, key_value_length, blocks, spread, device, sample, sample_t
+    mask,
+    query_length,
+    key_value_length,
+    blocks,
+    spread,
+    device,
+    sample,
+    sample_t,
 ):  # -> Tensor | None:
     ...
 
@@ -44,7 +55,13 @@ class JukeboxResnet1D(nn.Module):
 
 class JukeboxEncoderConvBlock(nn.Module):
     def __init__(
-        self, config, embed_dim, hidden_dim, depth, down_t, stride_t
+        self,
+        config,
+        embed_dim,
+        hidden_dim,
+        depth,
+        down_t,
+        stride_t,
     ) -> None: ...
     def forward(self, hidden_states):  # -> Any:
         ...
@@ -70,7 +87,13 @@ class JukeboxDecoderConvBock(nn.Module):
 
 class JukeboxDecoder(nn.Module):
     def __init__(
-        self, config, hidden_dim, depth, levels, downs_t, strides_t
+        self,
+        config,
+        hidden_dim,
+        depth,
+        levels,
+        downs_t,
+        strides_t,
     ) -> None: ...
     def forward(self, hidden_states, all_levels=...):  # -> Any:
         ...
@@ -80,13 +103,18 @@ class JukeboxBottleneckBlock(nn.Module):
     def init_codebook(self, hidden_states):  # -> None:
         ...
     def update_codebook(
-        self, hidden_states, latent_states
+        self,
+        hidden_states,
+        latent_states,
     ):  # -> dict[str, Tensor | Any]:
         ...
     def preprocess(self, hidden_states):  # -> tuple[Any, Any]:
         ...
     def postprocess(
-        self, latent_states, dequantised_states, x_shape
+        self,
+        latent_states,
+        dequantised_states,
+        x_shape,
     ):  # -> tuple[Any, Any]:
         ...
     def quantise(self, latent_states):  # -> tuple[Tensor, Tensor]:
@@ -98,7 +126,9 @@ class JukeboxBottleneckBlock(nn.Module):
     def decode(self, music_tokens):  # -> Tensor:
         ...
     def forward(
-        self, hidden_states, update_codebook=...
+        self,
+        hidden_states,
+        update_codebook=...,
     ):  # -> tuple[Any, Any, Any, dict[str, Tensor]]:
         ...
 
@@ -109,7 +139,8 @@ class JukeboxBottleneck(nn.Module):
     def decode(self, music_tokens, start_level=..., end_level=...):  # -> list[Any]:
         ...
     def forward(
-        self, input_audio
+        self,
+        input_audio,
     ):  # -> tuple[list[Any], list[Any], list[Any], list[Any]]:
         ...
 
@@ -124,19 +155,30 @@ class JukeboxVQVAE(PreTrainedModel):
     base_model_prefix = ...
     def __init__(self, config: JukeboxVQVAEConfig) -> None: ...
     def decode(
-        self, music_tokens, start_level=..., end_level=..., bs_chunks=...
+        self,
+        music_tokens,
+        start_level=...,
+        end_level=...,
+        bs_chunks=...,
     ) -> torch.Tensor: ...
     def encode(
-        self, input_audio, start_level=..., end_level=..., bs_chunks=...
+        self,
+        input_audio,
+        start_level=...,
+        end_level=...,
+        bs_chunks=...,
     ):  # -> list[Tensor]:
         ...
     def sample(self, n_samples):  # -> Tensor:
         ...
     def forward(
-        self, raw_audio: torch.FloatTensor
+        self,
+        raw_audio: torch.FloatTensor,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class JukeboxMLP(nn.Module):
@@ -161,19 +203,31 @@ class JukeboxAttention(nn.Module):
     def summary_spread_attn(self, query, key, value, sample): ...
     def prime_attn(self, query, key, value, sample): ...
     def factored_qkv(
-        self, hidden_states, last_encoder_hidden_states=..., sample=...
+        self,
+        hidden_states,
+        last_encoder_hidden_states=...,
+        sample=...,
     ):  # -> tuple[Any | Tensor, Any | Tensor, Any | Tensor, bool]:
         ...
     def prime_qkv(
-        self, hidden_states, last_encoder_hidden_states=..., sample=...
+        self,
+        hidden_states,
+        last_encoder_hidden_states=...,
+        sample=...,
     ):  # -> tuple[Any, Any, Any, bool]:
         ...
     def decode_qkv(
-        self, hidden_states, last_encoder_hidden_states=..., sample=...
+        self,
+        hidden_states,
+        last_encoder_hidden_states=...,
+        sample=...,
     ):  # -> tuple[Any, Any, Any, bool]:
         ...
     def forward(
-        self, hidden_states, last_encoder_hidden_states=..., sample=...
+        self,
+        hidden_states,
+        last_encoder_hidden_states=...,
+        sample=...,
     ):  # -> Any:
         ...
     def del_cache(self):  # -> None:
@@ -188,7 +242,10 @@ class JukeboxLayerStack(nn.Module):
     def set_record_attn(self, record_attn):  # -> None:
         ...
     def forward(
-        self, hidden_states, last_encoder_hidden_states=..., sample=...
+        self,
+        hidden_states,
+        last_encoder_hidden_states=...,
+        sample=...,
     ):  # -> Any:
         ...
     def del_cache(self):  # -> None:
@@ -221,7 +278,12 @@ class JukeboxConditionalAutoregressive(nn.Module):
     ):  # -> tuple[tuple[Any, Any] | Any, Any] | tuple[tuple[Any, Any] | Any, None]:
         ...
     def get_emb(
-        self, sample_t, n_samples, tokens, audio_conditioning, metadata_conditioning
+        self,
+        sample_t,
+        n_samples,
+        tokens,
+        audio_conditioning,
+        metadata_conditioning,
     ):  # -> tuple[Any, Any]:
         ...
     def sample(
@@ -281,15 +343,24 @@ class JukeboxPrior(PreTrainedModel):
         vqvae_decoder=...,
     ) -> None: ...
     def get_metadata(
-        self, labels, start, total_length, offset, get_indices=...
+        self,
+        labels,
+        start,
+        total_length,
+        offset,
+        get_indices=...,
     ):  # -> tuple[Tensor | Any, list[Any] | None] | Tensor:
         ...
     def set_metadata_lyric_tokens(
-        self, labels
+        self,
+        labels,
     ):  # -> tuple[Tensor, list[Any]] | tuple[Any, None]:
         ...
     def get_music_tokens_conds(
-        self, music_tokens, start, end
+        self,
+        music_tokens,
+        start,
+        end,
     ):  # -> list[Tensor | Any] | None:
         ...
     def prior_preprocess(self, tokens, conds):  # -> tuple[Tensor, Tensor]:
@@ -301,7 +372,9 @@ class JukeboxPrior(PreTrainedModel):
     def encode(self, hidden_states, start_level=..., end_level=..., bs_chunks=...): ...
     def decode(self, music_tokens, start_level=..., end_level=..., bs_chunks=...): ...
     def get_cond(
-        self, music_tokens_conds, metadata
+        self,
+        music_tokens_conds,
+        metadata,
     ):  # -> tuple[Any | None, Any | None, Any | None]:
         ...
     def sample(
@@ -357,15 +430,26 @@ class JukeboxModel(JukeboxPreTrainedModel):
     def set_shared_params(self, model_config):  # -> None:
         ...
     def decode(
-        self, music_tokens, start_level=..., end_level=..., bs_chunks=...
+        self,
+        music_tokens,
+        start_level=...,
+        end_level=...,
+        bs_chunks=...,
     ):  # -> Tensor:
         ...
     def encode(
-        self, input_audio, start_level=..., end_level=..., bs_chunks=...
+        self,
+        input_audio,
+        start_level=...,
+        end_level=...,
+        bs_chunks=...,
     ):  # -> list[Tensor]:
         ...
     def split_batch(
-        self, obj, n_samples, split_size
+        self,
+        obj,
+        n_samples,
+        split_size,
     ):  # -> tuple[Tensor, ...] | list[tuple[Any, ...]]:
         ...
     def sample_partial_window(
@@ -401,28 +485,40 @@ class JukeboxModel(JukeboxPreTrainedModel):
     ): ...
     @add_start_docstrings(...)
     def ancestral_sample(
-        self, labels, n_samples=..., **sampling_kwargs
+        self,
+        labels,
+        n_samples=...,
+        **sampling_kwargs,
     ) -> list[torch.LongTensor]: ...
     @add_start_docstrings(
         ...,
         JUKEBOX_SAMPLING_INPUT_DOCSTRING,
     )
     def continue_sample(
-        self, music_tokens, labels, **sampling_kwargs
+        self,
+        music_tokens,
+        labels,
+        **sampling_kwargs,
     ) -> list[torch.LongTensor]: ...
     @add_start_docstrings(
         ...,
         JUKEBOX_SAMPLING_INPUT_DOCSTRING,
     )
     def upsample(
-        self, music_tokens, labels, **sampling_kwargs
+        self,
+        music_tokens,
+        labels,
+        **sampling_kwargs,
     ) -> list[torch.LongTensor]: ...
     @add_start_docstrings(
         ...,
         JUKEBOX_SAMPLING_INPUT_DOCSTRING,
     )
     def primed_sample(
-        self, raw_audio, labels, **sampling_kwargs
+        self,
+        raw_audio,
+        labels,
+        **sampling_kwargs,
     ) -> list[torch.LongTensor]: ...
 
 __all__ = ["JukeboxModel", "JukeboxPreTrainedModel", "JukeboxPrior", "JukeboxVQVAE"]

@@ -204,7 +204,7 @@ class TFXLNetModel(TFXLNetPreTrainedModel):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        XLNET_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        XLNET_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -241,15 +241,20 @@ class TFXLNetLMHeadModel(TFXLNetPreTrainedModel, TFCausalLanguageModelingLoss):
         ...
     def get_prefix_bias_name(self): ...
     def prepare_inputs_for_generation(
-        self, inputs, past_key_values=..., use_mems=..., **kwargs
+        self,
+        inputs,
+        past_key_values=...,
+        use_mems=...,
+        **kwargs,
     ):  # -> dict[str, Any | None]:
         ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        XLNET_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        XLNET_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFXLNetLMHeadModelOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFXLNetLMHeadModelOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -277,12 +282,13 @@ class TFXLNetLMHeadModel(TFXLNetPreTrainedModel, TFCausalLanguageModelingLoss):
     XLNET_START_DOCSTRING,
 )
 class TFXLNetForSequenceClassification(
-    TFXLNetPreTrainedModel, TFSequenceClassificationLoss
+    TFXLNetPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        XLNET_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        XLNET_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -318,7 +324,7 @@ class TFXLNetForMultipleChoice(TFXLNetPreTrainedModel, TFMultipleChoiceLoss):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        XLNET_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        XLNET_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -354,7 +360,7 @@ class TFXLNetForTokenClassification(TFXLNetPreTrainedModel, TFTokenClassificatio
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        XLNET_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        XLNET_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -387,12 +393,13 @@ class TFXLNetForTokenClassification(TFXLNetPreTrainedModel, TFTokenClassificatio
     XLNET_START_DOCSTRING,
 )
 class TFXLNetForQuestionAnsweringSimple(
-    TFXLNetPreTrainedModel, TFQuestionAnsweringLoss
+    TFXLNetPreTrainedModel,
+    TFQuestionAnsweringLoss,
 ):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        XLNET_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        XLNET_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,

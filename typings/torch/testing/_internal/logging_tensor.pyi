@@ -44,9 +44,14 @@ class GatherTraceback(logging.Filter):
 
 @contextlib.contextmanager
 def capture_logs(
-    is_mode=..., python_tb=..., script_tb=..., cpp_tb=...
+    is_mode=...,
+    python_tb=...,
+    script_tb=...,
+    cpp_tb=...,
 ) -> Iterator[list[str]]: ...
 @contextlib.contextmanager
 def capture_logs_with_logging_tensor_mode(
-    python_tb=..., script_tb=..., cpp_tb=...
+    python_tb=...,
+    script_tb=...,
+    cpp_tb=...,
 ) -> Generator[list[str], Any]: ...

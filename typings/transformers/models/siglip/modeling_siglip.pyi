@@ -70,10 +70,15 @@ class SiglipOutput(ModelOutput):
 class SiglipVisionEmbeddings(nn.Module):
     def __init__(self, config: SiglipVisionConfig) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
-        self, pixel_values: torch.FloatTensor, interpolate_pos_encoding=...
+        self,
+        pixel_values: torch.FloatTensor,
+        interpolate_pos_encoding=...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -108,7 +113,9 @@ class SiglipAttention(nn.Module):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class SiglipMLP(nn.Module):

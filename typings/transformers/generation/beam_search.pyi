@@ -144,5 +144,8 @@ class BeamHypotheses:
     ):  # -> None:
         ...
     def is_done(
-        self, best_sum_logprobs: float, cur_len: int, decoder_prompt_len: int = ...
+        self,
+        best_sum_logprobs: float,
+        cur_len: int,
+        decoder_prompt_len: int = ...,
     ) -> bool: ...

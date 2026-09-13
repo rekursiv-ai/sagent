@@ -57,7 +57,9 @@ class MobileBertSelfAttention(nn.Module):
 class MobileBertSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, residual_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        residual_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -85,7 +87,9 @@ class MobileBertIntermediate(nn.Module):
 class OutputBottleneck(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, residual_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        residual_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -112,7 +116,9 @@ class Bottleneck(nn.Module):
 class FFNOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, residual_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        residual_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -168,7 +174,9 @@ class MobileBertOnlyMLMHead(nn.Module):
 class MobileBertPreTrainingHeads(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, sequence_output: torch.Tensor, pooled_output: torch.Tensor
+        self,
+        sequence_output: torch.Tensor,
+        pooled_output: torch.Tensor,
     ) -> tuple[torch.Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> tuple[torch.Tensor]: ...
 
@@ -217,7 +225,8 @@ class MobileBertForPreTraining(MobileBertPreTrainedModel):
     def set_output_embeddings(self, new_embeddings):  # -> None:
         ...
     def resize_token_embeddings(
-        self, new_num_tokens: int | None = ...
+        self,
+        new_num_tokens: int | None = ...,
     ) -> nn.Embedding: ...
     @auto_docstring
     def forward(
@@ -244,7 +253,8 @@ class MobileBertForMaskedLM(MobileBertPreTrainedModel):
     def set_output_embeddings(self, new_embeddings):  # -> None:
         ...
     def resize_token_embeddings(
-        self, new_num_tokens: int | None = ...
+        self,
+        new_num_tokens: int | None = ...,
     ) -> nn.Embedding: ...
     @auto_docstring
     def forward(

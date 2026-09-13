@@ -6,5 +6,8 @@ from ..kernel_inputs import KernelInputs
 
 class AddMMConfigMixin(TemplateConfigHeuristics):
     def get_extra_kwargs(
-        self, kernel_inputs: KernelInputs, layout: Layout, op_name: str
+        self,
+        kernel_inputs: KernelInputs,
+        layout: Layout,
+        op_name: str,
     ) -> dict[str, Any]: ...

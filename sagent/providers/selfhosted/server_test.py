@@ -179,7 +179,7 @@ def test_build_chat_messages_assistant_with_tool_call_remaps_id() -> None:
     assert tcs[0]["id"] == "call_0"
     assert cast(MutableJSON, tcs[0]["function"])["name"] == "Bash"
     assert cast(MutableJSON, tcs[0]["function"])["arguments"] == json.dumps(
-        {"cmd": "ls"}
+        {"cmd": "ls"},
     )
 
 
@@ -377,7 +377,7 @@ def test_self_hosted_model_properties() -> None:
     # Structural-only stub: the model reads ``hosted_*`` and ``tokenizer``
     # here, so only ``native_model`` stays absent.
     stub = _StubProvider()
-    m = SelfHostedModel(provider=stub)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type] -- partial protocol stub
+    m = SelfHostedModel(provider=stub)  # pyright: ignore[reportArgumentType] -- The test double implements only the provider surface exercised by this constructor.  # ty: ignore[invalid-argument-type] -- The test double implements only the provider surface exercised by this constructor.
     assert m.limits.max_request_tokens == 1234
     assert m.capability.model_id == "stub/qwen"
     assert m.limits.max_response_tokens == 567

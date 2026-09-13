@@ -35,7 +35,10 @@ def clone_me(x: torch.Tensor | None) -> torch.Tensor | None: ...
 def remove_optimized_module_prefix(name: str) -> str: ...
 def extract_graph_and_tracker(fn, *args, **kwargs) -> tuple[Any, None]: ...
 def collect_results(
-    model: torch.nn.Module, prediction: Any, loss: Any, example_inputs: Any
+    model: torch.nn.Module,
+    prediction: Any,
+    loss: Any,
+    example_inputs: Any,
 ) -> list[Any]: ...
 def requires_bwd_pass(out: Any) -> bool: ...
 @overload
@@ -48,39 +51,54 @@ def reduce_to_scalar_loss(out: Any) -> torch.Tensor | float: ...
 def debug_dir() -> str: ...
 def debug_dump(name: str, code: types.CodeType, extra: str = ...) -> None: ...
 def debug_insert_nops(
-    frame: DynamoFrameType, cache_size: int, hooks: Any, _: Any, *, skip: int = ...
+    frame: DynamoFrameType,
+    cache_size: int,
+    hooks: Any,
+    _: Any,
+    *,
+    skip: int = ...,
 ) -> ConvertFrameReturn: ...
 
 class CompileCounter:
     def __init__(self) -> None: ...
     def __call__(
-        self, gm: torch.fx.GraphModule, example_inputs: list[torch.Tensor]
+        self,
+        gm: torch.fx.GraphModule,
+        example_inputs: list[torch.Tensor],
     ) -> Callable[..., Any]: ...
     def clear(self) -> None: ...
 
 class CompileCounterWithBackend:
     def __init__(self, backend: str) -> None: ...
     def __call__(
-        self, gm: torch.fx.GraphModule, example_inputs: list[torch.Tensor]
+        self,
+        gm: torch.fx.GraphModule,
+        example_inputs: list[torch.Tensor],
     ) -> Callable[..., Any]: ...
     def clear(self) -> None: ...
 
 class EagerAndRecordGraphs:
     def __init__(self) -> None: ...
     def __call__(
-        self, gm: torch.fx.GraphModule, example_inputs: list[torch.Tensor]
+        self,
+        gm: torch.fx.GraphModule,
+        example_inputs: list[torch.Tensor],
     ) -> Callable[..., Any]: ...
 
 class AotEagerAndRecordGraphs:
     def __init__(self) -> None: ...
     def __call__(
-        self, gm: torch.fx.GraphModule, example_inputs: list[torch.Tensor]
+        self,
+        gm: torch.fx.GraphModule,
+        example_inputs: list[torch.Tensor],
     ) -> Callable[..., Any]: ...
 
 class InductorAndRecordGraphs:
     def __init__(self) -> None: ...
     def __call__(
-        self, gm, example_inputs
+        self,
+        gm,
+        example_inputs,
     ) -> Callable[[list[object]], Sequence[Tensor]] | str | list[str] | Weights: ...
 
 def strip_comment(code: str) -> str: ...
@@ -96,10 +114,14 @@ def standard_test(
     expected_frame_count: int = ...,
 ) -> None: ...
 def dummy_fx_compile(
-    gm: fx.GraphModule, example_inputs: list[torch.Tensor]
+    gm: fx.GraphModule,
+    example_inputs: list[torch.Tensor],
 ) -> Callable[..., Any]: ...
 def format_speedup(
-    speedup: float, pvalue: float, is_correct: bool = ..., pvalue_threshold: float = ...
+    speedup: float,
+    pvalue: float,
+    is_correct: bool = ...,
+    pvalue_threshold: float = ...,
 ) -> str: ...
 def rand_strided(
     size: Sequence[int],

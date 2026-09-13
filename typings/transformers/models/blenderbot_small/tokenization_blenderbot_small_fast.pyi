@@ -19,11 +19,15 @@ class BlenderbotSmallTokenizerFast(PreTrainedTokenizerFast):
         **kwargs,
     ) -> None: ...
     def build_inputs_with_special_tokens(
-        self, token_ids_0, token_ids_1=...
+        self,
+        token_ids_0,
+        token_ids_1=...,
     ):  # -> list[str | list[str] | Any | None]:
         ...
     def create_token_type_ids_from_sequences(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = ...
+        self,
+        token_ids_0: list[int],
+        token_ids_1: list[int] | None = ...,
     ) -> list[int]: ...
 
 __all__ = ["BlenderbotSmallTokenizerFast"]

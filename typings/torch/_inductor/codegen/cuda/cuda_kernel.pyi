@@ -39,13 +39,23 @@ class CUDAKernel(Kernel):
     overrides = OpOverrides
     def __init__(self, *args, **kwargs) -> None: ...
     def find_symbol(
-        self, node: IRNode, attr: ValidLayoutAttrs, dim: int
+        self,
+        node: IRNode,
+        attr: ValidLayoutAttrs,
+        dim: int,
     ) -> str | None: ...
     def find_layout_arg(
-        self, node: IRNode, attr: ValidLayoutAttrs, dim: int
+        self,
+        node: IRNode,
+        attr: ValidLayoutAttrs,
+        dim: int,
     ) -> LayoutArg | None: ...
     def add_layout_arg(
-        self, symbol: ValidLayoutSymbols, node: IRNode, attr: ValidLayoutAttrs, dim: int
+        self,
+        symbol: ValidLayoutSymbols,
+        node: IRNode,
+        attr: ValidLayoutAttrs,
+        dim: int,
     ) -> None: ...
     def init_layout_args(self) -> None: ...
     def get_layout_args(self) -> tuple[Expr | int, ...]: ...

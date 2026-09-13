@@ -55,7 +55,9 @@ class FunctionSpec:
 
 def bind_args_cached(func, tx, fn_source, args, kwargs) -> dict[Any, Any]: ...
 def wrap_bound_arg(
-    tx: InstructionTranslator, val, source=...
+    tx: InstructionTranslator,
+    val,
+    source=...,
 ) -> VariableTracker | Any | LazyVariableTracker: ...
 def wrap_args_kwargs(tx: InstructionTranslator, result) -> None: ...
 def init_cellvars(parent, result: dict[str, VariableTracker], code) -> None: ...
@@ -74,7 +76,9 @@ class BaseUserFunctionVariable(VariableTracker):
         kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def call_obj_hasattr(
-        self, tx: InstructionTranslator, name: str
+        self,
+        tx: InstructionTranslator,
+        name: str,
     ) -> VariableTracker: ...
     def inspect_parameter_names(self) -> list[str]: ...
     def closure_vars(self, tx) -> dict[Any, Any]: ...
@@ -94,10 +98,14 @@ class UserFunctionVariable(BaseUserFunctionVariable):
     def get_source(self) -> AttrSource | Source | None: ...
     def bind_args(self, parent, args, kwargs) -> dict[str, VariableTracker]: ...
     def var_getattr(
-        self, tx: InstructionTranslator, name: str
+        self,
+        tx: InstructionTranslator,
+        name: str,
     ) -> GetAttrVariable | LazyVariableTracker | Any: ...
     def call_obj_hasattr(
-        self, tx: InstructionTranslator, name: str
+        self,
+        tx: InstructionTranslator,
+        name: str,
     ) -> VariableTracker: ...
     def call_function(
         self,
@@ -152,7 +160,7 @@ class LocalGeneratorObjectVariable(VariableTracker):
     ) -> VariableTracker: ...
 
 class ContextlibContextManagerLocalGeneratorObjectVariable(
-    LocalGeneratorObjectVariable
+    LocalGeneratorObjectVariable,
 ): ...
 
 class LocalGeneratorFunctionVariable(BaseUserFunctionVariable):
@@ -166,7 +174,7 @@ class LocalGeneratorFunctionVariable(BaseUserFunctionVariable):
     ) -> VariableTracker: ...
 
 class FunctionDecoratedByContextlibContextManagerVariable(
-    LocalGeneratorFunctionVariable
+    LocalGeneratorFunctionVariable,
 ):
     def __init__(self, vt, **kwargs) -> None: ...
 
@@ -182,7 +190,9 @@ class UserMethodVariable(UserFunctionVariable):
     ) -> VariableTracker: ...
     def inspect_parameter_names(self) -> list[str]: ...
     def var_getattr(
-        self, tx: InstructionTranslator, name: str
+        self,
+        tx: InstructionTranslator,
+        name: str,
     ) -> GetAttrVariable | LazyVariableTracker: ...
 
 class WrappedUserMethodVariable(UserMethodVariable):
@@ -206,7 +216,11 @@ class WrappedUserFunctionVariable(UserFunctionVariable):
     def reconstruct(self, codegen) -> None: ...
 
 def invoke_and_store_as_constant(
-    tx: InstructionTranslator, fn, name, args, kwargs
+    tx: InstructionTranslator,
+    fn,
+    name,
+    args,
+    kwargs,
 ) -> VariableTracker: ...
 
 class NestedUserFunctionVariable(BaseUserFunctionVariable):
@@ -228,10 +242,17 @@ class NestedUserFunctionVariable(BaseUserFunctionVariable):
     def python_type(self) -> type[FunctionType]: ...
     def get_function(self) -> FunctionType: ...
     def call_setattr(
-        self, tx: InstructionTranslator, name_var: VariableTracker, val: VariableTracker
+        self,
+        tx: InstructionTranslator,
+        name_var: VariableTracker,
+        val: VariableTracker,
     ) -> ConstantVariable: ...
     def call_method(
-        self, tx, name, args, kwargs
+        self,
+        tx,
+        name,
+        args,
+        kwargs,
     ) -> ConstantVariable | VariableTracker: ...
     def has_closure(self) -> bool: ...
     def const_getattr(self, tx, name) -> Any: ...
@@ -264,7 +285,9 @@ class SkipFunctionVariable(VariableTracker):
     ) -> VariableTracker: ...
     def call_obj_hasattr(self, tx: InstructionTranslator, name) -> VariableTracker: ...
     def var_getattr(
-        self, tx: InstructionTranslator, name: str
+        self,
+        tx: InstructionTranslator,
+        name: str,
     ) -> GetAttrVariable | LazyVariableTracker | Any: ...
 
 class WrappedSkipFunctionVariable(SkipFunctionVariable):
@@ -296,15 +319,20 @@ class CollectiveFunctionRewriteVariable(UserFunctionVariable):
     def __init__(self, fn, *, replacement_var, **kwargs) -> None: ...
     @staticmethod
     def create(
-        tx: InstructionTranslator, old_fn, source, **options
+        tx: InstructionTranslator,
+        old_fn,
+        source,
+        **options,
     ) -> CollectiveFunctionRewriteVariable: ...
     @staticmethod
     def can_rewrite(variable) -> TypeIs[FunctionType] | bool: ...
     @staticmethod
     def rewrite(
-        tx: InstructionTranslator, fn
+        tx: InstructionTranslator,
+        fn,
     ) -> tuple[
-        Callable[..., Tensor] | Callable[..., list[Tensor]] | Any, AttrSource
+        Callable[..., Tensor] | Callable[..., list[Tensor]] | Any,
+        AttrSource,
     ]: ...
     def call_function(
         self,
@@ -342,10 +370,14 @@ class FunctoolsPartialVariable(VariableTracker):
         kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def call_obj_hasattr(
-        self, tx: InstructionTranslator, name: str
+        self,
+        tx: InstructionTranslator,
+        name: str,
     ) -> VariableTracker: ...
     def var_getattr(
-        self, tx: InstructionTranslator, name: str
+        self,
+        tx: InstructionTranslator,
+        name: str,
     ) -> VariableTracker | ListVariable | ConstDictVariable | GetAttrVariable: ...
     def as_python_constant(self) -> partial[Any]: ...
     def guard_as_python_constant(self) -> partial[Any]: ...
@@ -366,7 +398,11 @@ class PolyfilledFunctionVariable(VariableTracker):
         kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def as_python_constant(self) -> _F: ...
 
@@ -386,13 +422,20 @@ class DynamoTritonHOPifier(TritonHOPifier):
     def check_grid(self, grid) -> tuple[torch.fx.proxy.Proxy, ...]: ...
     def call_grid(self, grid, meta, tx): ...
     def call_user_defined_fn(
-        self, user_fn, args, kwargs, tx, variable
+        self,
+        user_fn,
+        args,
+        kwargs,
+        tx,
+        variable,
     ) -> VariableTracker: ...
     def wrap_user_defined_obj(self, user_obj, tx, variable, name): ...
     def maybe_unpack_configs(self, configs, tx) -> list[Any]: ...
     def maybe_unpack_heuristic_result(self, result: Any) -> Any: ...
     def call_getitem(
-        self, variable: TritonKernelVariable, args: Sequence[Any]
+        self,
+        variable: TritonKernelVariable,
+        args: Sequence[Any],
     ) -> TritonKernelVariable: ...
     def call_HOP(self, variable, grids, combined_args_raw, tx) -> ConstantVariable: ...
 
@@ -411,7 +454,11 @@ class TritonKernelVariable(VariableTracker):
         kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def specialize_symbolic(self, arg: Any) -> Any: ...
 

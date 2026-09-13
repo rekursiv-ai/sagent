@@ -14,9 +14,6 @@ import re
 import yaml
 
 
-_FRONTMATTER_RE = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n", re.DOTALL)
-
-
 def walk_up(cwd: Path) -> list[Path]:
     """Return [root, ..., parent, cwd] -- ancestors root-first.
 
@@ -52,7 +49,7 @@ def parse_frontmatter(raw: str) -> tuple[dict[str, Any], str]:
 
     """
     raw = raw.removeprefix("\ufeff")
-    m = _FRONTMATTER_RE.match(raw)
+    m = re.match(r"\A---\r?\n(.*?)\r?\n---\r?\n", raw, flags=re.DOTALL)
     if m is None:
         return {}, raw
     body = raw[m.end() :]

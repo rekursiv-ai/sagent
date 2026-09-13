@@ -35,7 +35,9 @@ class Pop2PianoFeatureExtractor(SequenceFeatureExtractor):
         n_extend: np.ndarray,
     ): ...
     def preprocess_mel(
-        self, audio: np.ndarray, beatstep: np.ndarray
+        self,
+        audio: np.ndarray,
+        beatstep: np.ndarray,
     ):  # -> tuple[NDArray[Any], Any]:
         ...
     def pad(

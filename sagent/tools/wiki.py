@@ -31,13 +31,10 @@ from sagent.types.runtime import ToolResult
 
 logger = logging.getLogger(__name__)
 
-_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-_WIKILINK_RE = re.compile(r"\[\[([a-z0-9][a-z0-9-]*)\]\]")
 _FRONTMATTER_RE = re.compile(
     r"\A---\s*\n(?P<body>.*?)\n---\s*\n",
     re.DOTALL,
 )
-_REQUIRED_FRONTMATTER: Final = ("title", "tags", "sources", "updated")
 
 
 def find_root(start: str | Path) -> Path | None:
@@ -60,11 +57,6 @@ def find_root(start: str | Path) -> Path | None:
         if (wiki_dir / "SCHEMA.md").is_file():
             return wiki_dir
     return None
-
-
-def _pages_dir(root: Path) -> Path:
-    """Return the ``pages/`` directory under a wiki root."""
-    return root / "pages"
 
 
 def list_pages(root: Path) -> list[str]:
@@ -93,7 +85,7 @@ def valid_slug(slug: str) -> bool:
       is_valid: True iff ``slug`` is lowercase alphanumeric with hyphens.
 
     """
-    return _SLUG_RE.fullmatch(slug) is not None
+    return re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug) is not None
 
 
 def read_page(root: Path, slug: str) -> str | None:
@@ -117,25 +109,6 @@ def read_page(root: Path, slug: str) -> str | None:
         return fp.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
-
-
-def _iter_page_files(root: Path) -> Iterable[Path]:
-    """Yield page files under ``<root>/pages/`` in sorted order."""
-    pd = _pages_dir(root)
-    if pd.exists():
-        yield from sorted(pd.glob("*.md"))
-
-
-def _parse_frontmatter_keys(text: str) -> set[str]:
-    """Extract the set of top-level keys from a page's YAML frontmatter."""
-    m = _FRONTMATTER_RE.match(text)
-    if m is None:
-        return set()
-    return {
-        line.split(":", 1)[0].strip()
-        for line in m.group("body").splitlines()
-        if line.strip() and not line.lstrip().startswith("#") and ":" in line
-    }
 
 
 def lint(root: Path) -> dict[str, list[str]]:
@@ -164,12 +137,12 @@ def lint(root: Path) -> dict[str, list[str]]:
         except (OSError, UnicodeDecodeError):
             continue
         keys = _parse_frontmatter_keys(text)
-        missing = [k for k in _REQUIRED_FRONTMATTER if k not in keys]
+        missing = [k for k in ("title", "tags", "sources", "updated") if k not in keys]
         if missing:
             errors["missing_frontmatter"].append(
                 f"{fp.name}: missing {', '.join(missing)}",
             )
-        for m in _WIKILINK_RE.finditer(text):
+        for m in re.finditer(r"\[\[([a-z0-9][a-z0-9-]*)\]\]", text):
             target = m.group(1)
             if target not in known:
                 errors["broken_links"].append(
@@ -207,7 +180,7 @@ class Wiki:
                 },
             },
             "required": ["operation"],
-        }
+        },
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -261,7 +234,11 @@ class Wiki:
         )
 
     def _run(
-        self, *, operation: str, slug: str = "", cwd: str = ""
+        self,
+        *,
+        operation: str,
+        slug: str = "",
+        cwd: str = "",
     ) -> str | ToolResult:
         """Locate the wiki root and route to the operation handler."""
         if operation not in _OPERATIONS:
@@ -312,7 +289,9 @@ def _read_page_op(root: Path, slug: str) -> str | ToolResult:
         )
     if not valid_slug(slug):
         return ToolResult(
-            call_id="", content=f"Invalid page slug: {slug!r}", is_error=True
+            call_id="",
+            content=f"Invalid page slug: {slug!r}",
+            is_error=True,
         )
     content = read_page(root, slug)
     if content is None:
@@ -346,3 +325,27 @@ def _lint_op(root: Path) -> str:
         parts.append("Missing frontmatter:")
         parts.extend(f"  {e}" for e in missing)
     return "\n".join(parts)
+
+
+def _pages_dir(root: Path) -> Path:
+    """Return the ``pages/`` directory under a wiki root."""
+    return root / "pages"
+
+
+def _iter_page_files(root: Path) -> Iterable[Path]:
+    """Yield page files under ``<root>/pages/`` in sorted order."""
+    pd = _pages_dir(root)
+    if pd.exists():
+        yield from sorted(pd.glob("*.md"))
+
+
+def _parse_frontmatter_keys(text: str) -> set[str]:
+    """Extract the set of top-level keys from a page's YAML frontmatter."""
+    m = _FRONTMATTER_RE.match(text)
+    if m is None:
+        return set()
+    return {
+        line.split(":", 1)[0].strip()
+        for line in m.group("body").splitlines()
+        if line.strip() and not line.lstrip().startswith("#") and ":" in line
+    }

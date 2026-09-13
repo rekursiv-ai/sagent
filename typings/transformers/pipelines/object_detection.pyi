@@ -16,20 +16,32 @@ class ObjectDetectionPipeline(Pipeline):
     def __init__(self, *args, **kwargs) -> None: ...
     @overload
     def __call__(
-        self, image: str | Image.Image, *args: Any, **kwargs: Any
+        self,
+        image: str | Image.Image,
+        *args: Any,
+        **kwargs: Any,
     ) -> list[dict[str, Any]]: ...
     @overload
     def __call__(
-        self, image: list[str] | list[Image.Image], *args: Any, **kwargs: Any
+        self,
+        image: list[str] | list[Image.Image],
+        *args: Any,
+        **kwargs: Any,
     ) -> list[list[dict[str, Any]]]: ...
     def __call__(
-        self, *args, **kwargs
+        self,
+        *args,
+        **kwargs,
     ) -> list[dict[str, Any]] | list[list[dict[str, Any]]]: ...
     def preprocess(
-        self, image, timeout=...
+        self,
+        image,
+        timeout=...,
     ):  # -> BatchEncoding | Any | transformers.feature_extraction_utils.BatchFeature | transformers.image_processing_base.BatchFeature:
         ...
     def postprocess(
-        self, model_outputs, threshold=...
+        self,
+        model_outputs,
+        threshold=...,
     ):  # -> list[dict[str, Any | str | dict[str, int]]] | list[dict[str, Any]]:
         ...

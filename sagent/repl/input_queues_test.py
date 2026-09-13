@@ -83,7 +83,8 @@ def test_has_any() -> None:
 
 def test_clear_empties_both_panes() -> None:
     queues = InputQueues(
-        queue=QueuedInputBlock(text="q"), deferred=QueuedInputBlock(text="d")
+        queue=QueuedInputBlock(text="q"),
+        deferred=QueuedInputBlock(text="d"),
     )
     queues.clear()
     assert not queues.has_any()
@@ -146,7 +147,7 @@ def test_commit_queue_false_when_empty() -> None:
 def test_commit_deferred_on_idle_pushes_deferred_message() -> None:
     attachment = BytesMessage(data=b"pdf", descriptor="application/pdf")
     queues = InputQueues(
-        deferred=QueuedInputBlock(text="read", attachments=(attachment,))
+        deferred=QueuedInputBlock(text="read", attachments=(attachment,)),
     )
     agent = _FakeAgent()
     assert queues.commit_deferred_on_idle(cast(Agent, agent))

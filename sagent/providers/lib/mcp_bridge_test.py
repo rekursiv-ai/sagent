@@ -35,7 +35,8 @@ else:
     # would put the 430ms back onto every worker's collection.
     ClientSession = lazy_import("mcp", "ClientSession")
     streamable_http_client = lazy_import(
-        "mcp.client.streamable_http", "streamable_http_client"
+        "mcp.client.streamable_http",
+        "streamable_http_client",
     )
     ImageContent = lazy_import("mcp.types", "ImageContent")
     TextContent = lazy_import("mcp.types", "TextContent")
@@ -196,7 +197,7 @@ async def test_unknown_tool_path_returns_404() -> None:
 
         def probe() -> int:
             try:
-                urllib.request.urlopen(f"{base}/not-a-route", timeout=2)  # noqa: S310 -- local server probe
+                urllib.request.urlopen(f"{base}/not-a-route", timeout=2)  # noqa: S310 -- The test probes a local fixture server, never an external URL.
             except urllib.error.HTTPError as exc:
                 try:
                     return exc.code
@@ -280,7 +281,7 @@ async def test_call_tool_detaches_background_args() -> None:
         assert tool.seen_args is not None, "detached tool must actually run"
         results = bridge.drain_detached_results()
         assert len(results) == 1
-        assert bridge.drain_detached_results() == []  # drained once
+        assert bridge.drain_detached_results() == []  # Drained once.
     finally:
         await bridge.stop()
 
@@ -575,7 +576,7 @@ async def test_bridge_serves_http_after_another_bridge_stops() -> None:
 
         def probe(url: str) -> int:
             try:
-                urllib.request.urlopen(url, timeout=2)  # noqa: S310 -- local probe
+                urllib.request.urlopen(url, timeout=2)  # noqa: S310 -- The test probes a local fixture server, never an external URL.
             except urllib.error.HTTPError as exc:
                 try:
                     return exc.code
@@ -668,8 +669,8 @@ def test_json_encoded_url_round_trip() -> None:
             "sagent": {
                 "type": "http",
                 "url": "http://127.0.0.1:42/mcp",
-            }
-        }
+            },
+        },
     }
     raw = json.dumps(config)
     assert json.loads(raw) == config

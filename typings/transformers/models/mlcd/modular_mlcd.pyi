@@ -44,7 +44,9 @@ class MLCDMLP(CLIPMLP): ...
 
 class MLCDRotaryEmbedding(VisionRotaryEmbedding):
     def forward(
-        self, num_patches_height: int, num_patches_width: int
+        self,
+        num_patches_height: int,
+        num_patches_width: int,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -63,7 +65,9 @@ class MLCDAttention(CLIPAttention):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class MLCDEncoderLayer(CLIPEncoderLayer):

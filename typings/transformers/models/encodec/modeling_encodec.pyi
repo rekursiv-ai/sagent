@@ -60,7 +60,10 @@ class EncodecLSTM(nn.Module):
 
 class EncodecResnetBlock(nn.Module):
     def __init__(
-        self, config: EncodecConfig, dim: int, dilations: list[int]
+        self,
+        config: EncodecConfig,
+        dim: int,
+        dilations: list[int],
     ) -> None: ...
     def forward(self, hidden_states):  # -> Any:
         ...
@@ -91,10 +94,13 @@ class EncodecVectorQuantization(nn.Module):
 class EncodecResidualVectorQuantizer(nn.Module):
     def __init__(self, config: EncodecConfig) -> None: ...
     def get_num_quantizers_for_bandwidth(
-        self, bandwidth: float | None = ...
+        self,
+        bandwidth: float | None = ...,
     ) -> int: ...
     def encode(
-        self, embeddings: torch.Tensor, bandwidth: float | None = ...
+        self,
+        embeddings: torch.Tensor,
+        bandwidth: float | None = ...,
     ) -> torch.Tensor: ...
     def decode(self, codes: torch.Tensor) -> torch.Tensor: ...
 
@@ -107,7 +113,7 @@ class EncodecPreTrainedModel(PreTrainedAudioTokenizerBase):
 @auto_docstring(
     custom_intro="""
     The EnCodec neural audio codec model.
-    """
+    """,
 )
 class EncodecModel(EncodecPreTrainedModel):
     def __init__(self, config: EncodecConfig) -> None: ...

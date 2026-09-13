@@ -30,15 +30,23 @@ class XGLMScaledWordEmbedding(nn.Embedding):
 
 class XGLMSinusoidalPositionalEmbedding(nn.Module):
     def __init__(
-        self, num_positions: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_positions: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ) -> None: ...
     def make_weights(
-        self, num_embeddings: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ):  # -> None:
         ...
     @staticmethod
     def get_embedding(
-        num_embeddings: int, embedding_dim: int, padding_idx: int | None = ...
+        num_embeddings: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ):  # -> Tensor:
         ...
     @torch.no_grad()
@@ -98,7 +106,9 @@ class XGLMPreTrainedModel(PreTrainedModel):
 @auto_docstring
 class XGLMModel(XGLMPreTrainedModel):
     def __init__(
-        self, config: XGLMConfig, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: XGLMConfig,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     @auto_docstring
     def forward(

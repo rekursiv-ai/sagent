@@ -128,6 +128,9 @@ def _empty_headers() -> dict[str, str]:
 def reset_id_counter(start: int) -> None:
     """Advance the ``SessionMessage`` id counter to ``start`` (forward-only).
 
+    Args:
+      start: Minimum next identifier to emit.
+
     Concurrent resumes share the same process-global counter; rewinding
     it backwards (e.g. resume B sets the counter to 51 while resume A
     has already minted ids up to 100) creates collision between later
@@ -139,8 +142,9 @@ def reset_id_counter(start: int) -> None:
     one id and either accepting it (it was already past ``start``,
     replace with a counter that re-emits it on the next call) or
     discarding it (was below ``start``, replace with ``count(start)``).
+
     """
-    global _id_counter  # noqa: PLW0603 -- module-level counter requires global statement
+    global _id_counter  # noqa: PLW0603 -- The module-level allocator must update its shared counter atomically.
     # Peek AND replace under one acquisition. Releasing between them lets a
     # mint take the value this reset is about to re-issue, which is the
     # duplicate id the lock exists to prevent -- and minting now contends for
@@ -153,7 +157,9 @@ def reset_id_counter(start: int) -> None:
             _id_counter = itertools.count(start)
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(
+    frozen=True, slots=True
+)  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class BytesMessage:
     """Binary payload (image, PDF)."""
 
@@ -229,6 +235,12 @@ class AgentSendMessage(SessionMessage):
 def labeled_agent_send_text(entry: AgentSendMessage) -> str:
     """Return ``entry.text`` prefixed with its ``[from <source>]: `` label.
 
+    Args:
+      entry: Agent-authored message to label.
+
+    Returns:
+      text: The original or prefixed message text.
+
     The single source of truth for agent-send attribution labels, shared by
     the splice-build coalescer (``types.tape._merge_user``) and the wire
     materializer (``request_materialization._label_agent_sends``) so the
@@ -236,6 +248,7 @@ def labeled_agent_send_text(entry: AgentSendMessage) -> str:
     re-labeling an already-labeled body is a no-op (idempotent); ``startswith``
     not substring ``in`` so a body legitimately quoting the marker is still
     labeled.
+
     """
     prefix = f"[from {entry.source}]: "
     return entry.text if entry.text.startswith(prefix) else f"{prefix}{entry.text}"
@@ -269,7 +282,7 @@ class AssistantMessage(SessionMessage):
         for tc in self.tool_calls:
             if tc.id in seen:
                 raise ValueError(
-                    f"duplicate tool_call id in AssistantMessage: {tc.id!r}"
+                    f"duplicate tool_call id in AssistantMessage: {tc.id!r}",
                 )
             seen.add(tc.id)
 
@@ -398,7 +411,9 @@ DETACHED_ARRIVED_SYSTEM_NOTE = (
 )
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(
+    frozen=True, slots=True
+)  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class CompactStarted:
     """Compaction task has been spawned."""
 
@@ -429,12 +444,19 @@ class CompactComplete:
     def from_override(cls, override: ContextSplice) -> CompactComplete:
         """Build the completion event from a compactor's override.
 
+        Args:
+          override: Compactor-produced context splice.
+
+        Returns:
+          completion: Completion event populated from ``override``.
+
         Both compaction tails -- the async ``_compact_and_post`` and the
         synchronous ``compact_now`` overflow-recovery path -- emit
         ``CompactComplete`` for the same override. Deriving every field
         here keeps them from drifting: a field added to the event is
         populated for both callers, and the token counts can never be
         silently dropped (which rendered ``~0 → ~0 tokens`` in the REPL).
+
         """
         return cls(
             records=(override,),
@@ -507,27 +529,37 @@ class AgentSendDeferredMessage:
     """Image/PDF payloads to merge alongside ``text``."""
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(
+    frozen=True, slots=True
+)  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class Quit:
     """Shut down the agent."""
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(
+    frozen=True, slots=True
+)  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class Halt:
     """Cancel model call, wait for user. Tools keep running."""
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(
+    frozen=True, slots=True
+)  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class Clear:
     """Detach tools, wipe history, wait for user."""
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(
+    frozen=True, slots=True
+)  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class ClearComplete:
     """Published after the runtime finishes processing a ``Clear``."""
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(
+    frozen=True, slots=True
+)  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class Kill:
     """Cancel one or all tool tasks."""
 
@@ -535,7 +567,9 @@ class Kill:
     """Specific call to cancel, or ``None`` to cancel all."""
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(
+    frozen=True, slots=True
+)  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class Detach:
     """Stub one or all tools, let them finish in background."""
 
@@ -543,7 +577,9 @@ class Detach:
     """Specific call to detach, or ``None`` for all."""
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(
+    frozen=True, slots=True
+)  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class Undetach:
     """Re-gate model on a detached tool's completion."""
 
@@ -593,12 +629,16 @@ class BudgetReset:
     """Post-reset output cap."""
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(
+    frozen=True, slots=True
+)  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class ModelCallStarted:
     """Model streaming call has been spawned."""
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(
+    frozen=True, slots=True
+)  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class ModelResponsePartial:
     """Streaming text chunk from the model."""
 
@@ -606,7 +646,9 @@ class ModelResponsePartial:
     """Newly arrived text chunk."""
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(
+    frozen=True, slots=True
+)  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class ModelResponseThinking:
     """Streaming thinking chunk from the model."""
 
@@ -637,7 +679,9 @@ class ModelResponseComplete:
     """Tokens served from cache."""
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(
+    frozen=True, slots=True
+)  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class ModelResponseCancelled:
     """Model call was cancelled mid-stream."""
 
@@ -645,7 +689,9 @@ class ModelResponseCancelled:
     """Approximate chars streamed before cancel."""
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(
+    frozen=True, slots=True
+)  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class ModelResponseError:
     """Unrecoverable failure (creds expired, retries exhausted)."""
 
@@ -735,17 +781,23 @@ class NoticeMessage:
     """Sanitized provider error snapshot for forensics, when applicable."""
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(
+    frozen=True, slots=True
+)  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class ModelIdle:
     """Model finished with no tool calls."""
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(
+    frozen=True, slots=True
+)  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class AgentIdle:
     """Agent has fully drained: about to block on inbox with no work."""
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(
+    frozen=True, slots=True
+)  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class CohortStarted:
     """Tool cohort has been spawned."""
 
@@ -809,12 +861,16 @@ class LazyEvent:
     """The message to commit on the next real turn."""
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(
+    frozen=True, slots=True
+)  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class CohortComplete:
     """All tool results for the current cohort have arrived."""
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(
+    frozen=True, slots=True
+)  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class Compact:
     """Trigger context compaction."""
 
@@ -822,7 +878,9 @@ class Compact:
     """Free-form compaction instructions for the compactor."""
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(
+    frozen=True, slots=True
+)  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class Recompact:
     """Alias for ``/compact``; trigger context compaction."""
 
@@ -830,7 +888,9 @@ class Recompact:
     """Free-form compaction instructions for the compactor."""
 
 
-@dataclass(frozen=True, slots=True)  # check-dataclass: ignore[kw_only]
+@dataclass(
+    frozen=True, slots=True
+)  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class SaveSession:
     """Signals observers to persist session state."""
 

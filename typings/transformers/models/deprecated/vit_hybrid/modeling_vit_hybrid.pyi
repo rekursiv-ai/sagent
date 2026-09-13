@@ -29,7 +29,10 @@ _IMAGE_CLASS_EXPECTED_OUTPUT = ...
 class ViTHybridEmbeddings(nn.Module):
     def __init__(self, config: ViTHybridConfig, use_mask_token: bool = ...) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
         self,
@@ -42,7 +45,9 @@ class ViTHybridEmbeddings(nn.Module):
 class ViTHybridPatchEmbeddings(nn.Module):
     def __init__(self, config, feature_size=...) -> None: ...
     def forward(
-        self, pixel_values: torch.Tensor, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values: torch.Tensor,
+        interpolate_pos_encoding: bool = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -56,7 +61,9 @@ class ViTHybridSelfAttention(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
 
 class ViTHybridSdpaSelfAttention(ViTHybridSelfAttention):
@@ -68,13 +75,17 @@ class ViTHybridSdpaSelfAttention(ViTHybridSelfAttention):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
 
 class ViTHybridSelfOutput(nn.Module):
     def __init__(self, config: ViTHybridConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -88,7 +99,9 @@ class ViTHybridAttention(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
 
 class ViTHybridSdpaAttention(ViTHybridAttention):
@@ -102,7 +115,9 @@ class ViTHybridIntermediate(nn.Module):
 class ViTHybridOutput(nn.Module):
     def __init__(self, config: ViTHybridConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -117,7 +132,9 @@ class ViTHybridLayer(GradientCheckpointingLayer):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
 
 class ViTHybridEncoder(nn.Module):

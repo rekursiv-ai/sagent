@@ -38,7 +38,12 @@ class Exaone4RotaryEmbedding(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -141,10 +146,12 @@ class Exaone4ForCausalLM(Exaone4PreTrainedModel, GenerationMixin):
     ) -> CausalLMOutputWithPast: ...
 
 class Exaone4ForSequenceClassification(
-    GenericForSequenceClassification, Exaone4PreTrainedModel
+    GenericForSequenceClassification,
+    Exaone4PreTrainedModel,
 ): ...
 class Exaone4ForTokenClassification(
-    GenericForTokenClassification, Exaone4PreTrainedModel
+    GenericForTokenClassification,
+    Exaone4PreTrainedModel,
 ): ...
 
 class Exaone4ForQuestionAnswering(GenericForQuestionAnswering, Exaone4PreTrainedModel):

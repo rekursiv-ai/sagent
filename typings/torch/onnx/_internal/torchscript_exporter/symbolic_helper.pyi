@@ -115,7 +115,8 @@ type _ValueDescriptor = Literal["v", "i", "is", "f", "fs", "b", "s", "t", "none"
 def parse_args(
     *arg_descriptors: _ValueDescriptor,
 ) -> Callable[
-    [Callable[_Concatenate[_U, _P], _T]], Callable[_Concatenate[_U, _P], _T]
+    [Callable[_Concatenate[_U, _P], _T]],
+    Callable[_Concatenate[_U, _P], _T],
 ]: ...
 def quantized_args(
     *arg_q_descriptors: bool,
@@ -138,7 +139,11 @@ def quantize_helper(
     axis: _C.Value | None = ...,
 ) -> _C.Value: ...
 def requantize_bias_helper(
-    g: jit_utils.GraphContext, bias, input_scale, weight_scale, axis=...
+    g: jit_utils.GraphContext,
+    bias,
+    input_scale,
+    weight_scale,
+    axis=...,
 ): ...
 def args_have_same_dtype(args) -> bool: ...
 

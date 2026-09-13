@@ -125,14 +125,11 @@ _WRITES = [
 ]
 
 
+# ``.git`` is excluded: git rewrites its index and reflog as a side effect of reading,
+# which would report every ``git`` command as a mutator and tell us nothing about the
+# working tree the concurrent Bash calls actually share.
 def _snapshot(root: Path) -> dict[str, str]:
-    """Content hash of every path under ``root``.
-
-    ``.git`` is excluded: git rewrites its index and reflog as a side
-    effect of reading, which would report every ``git`` command as a
-    mutator and tell us nothing about the working tree the concurrent
-    Bash calls actually share.
-    """
+    """Content hash of every path under ``root``."""
     out: dict[str, str] = {}
     for p in sorted(root.rglob("*")):
         rel = str(p.relative_to(root))
@@ -149,21 +146,21 @@ def _snapshot(root: Path) -> dict[str, str]:
     return out
 
 
+# Outside a repo every ``git`` invocation exits before doing anything, so ``git log
+# --output=FILE`` looked harmless for the same reason a misspelled command does -- the
+# fixture, not the classifier, was reporting.
 def _git_init(root: Path) -> None:
-    """Make ``root`` a committed git repo, so ``git`` subcommands run.
-
-    Outside a repo every ``git`` invocation exits before doing anything,
-    so ``git log --output=FILE`` looked harmless for the same reason a
-    misspelled command does -- the fixture, not the classifier, was
-    reporting.
-    """
+    """Make ``root`` a committed git repo, so ``git`` subcommands run."""
     git = shutil.which("git")
     if git is None:
         return
     ident = ["-c", "user.email=t@t", "-c", "user.name=t"]
     for argv in (["init", "-q"], ["add", "."], [*ident, "commit", "-qm", "x"]):
-        _ = subprocess.run(  # noqa: S603 -- fixed argv
-            [git, *argv], cwd=root, capture_output=True, check=True
+        _ = subprocess.run(  # noqa: S603 -- Argv is a fixed list built here, never from user input.
+            [git, *argv],
+            cwd=root,
+            capture_output=True,
+            check=True,
         )
 
 
@@ -179,7 +176,7 @@ def _mutation_result(command: str) -> tuple[bool, int]:
         _ = (root / "script.sed").write_text("w out.txt")
         _git_init(root)
         before = _snapshot(root)
-        result = subprocess.run(  # noqa: S603 -- fixed argv over a fixed command table
+        result = subprocess.run(  # noqa: S603 -- The command table is fixed by the test and never user input.
             ["/bin/bash", "-c", command],
             cwd=td,
             timeout=10,

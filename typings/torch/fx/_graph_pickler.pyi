@@ -24,7 +24,8 @@ class GraphPickler(pickle.Pickler):
     def __init__(self, file: io.BytesIO, options: Options | None = ...) -> None: ...
     @override
     def reducer_override(
-        self, obj: object
+        self,
+        obj: object,
     ) -> tuple[Callable[..., Any], tuple[Any, ...]]: ...
     @override
     def persistent_id(self, obj: object) -> str | None: ...
@@ -47,9 +48,12 @@ class _ShapeEnvPickleData:
     data: dict[str, object]
     @classmethod
     def reduce_helper(
-        cls, pickler: GraphPickler, obj: ShapeEnv
+        cls,
+        pickler: GraphPickler,
+        obj: ShapeEnv,
     ) -> tuple[
-        Callable[[Self, _UnpickleState], ShapeEnv], tuple[Self, _UnpickleStateToken]
+        Callable[[Self, _UnpickleState], ShapeEnv],
+        tuple[Self, _UnpickleStateToken],
     ]: ...
     def __init__(self, env: ShapeEnv) -> None: ...
     def unpickle(self, unpickle_state: _UnpickleState) -> ShapeEnv: ...
@@ -57,9 +61,12 @@ class _ShapeEnvPickleData:
 class _SymNodePickleData:
     @classmethod
     def reduce_helper(
-        cls, pickler: GraphPickler, obj: _SymNodeT
+        cls,
+        pickler: GraphPickler,
+        obj: _SymNodeT,
     ) -> tuple[
-        Callable[[Self, _UnpickleState], _SymNodeT], tuple[Self, _UnpickleStateToken]
+        Callable[[Self, _UnpickleState], _SymNodeT],
+        tuple[Self, _UnpickleStateToken],
     ]: ...
     def __init__(self, node: SymNode) -> None: ...
     def unpickle_sym_int(self, unpickle_state: _UnpickleState) -> torch.SymInt: ...
@@ -68,9 +75,12 @@ class _TensorPickleData:
     metadata: MetaTensorDesc[FakeTensor]
     @classmethod
     def reduce_helper(
-        cls, pickler: GraphPickler, obj: FakeTensor
+        cls,
+        pickler: GraphPickler,
+        obj: FakeTensor,
     ) -> tuple[
-        Callable[[Self, _UnpickleState], FakeTensor], tuple[Self, _UnpickleStateToken]
+        Callable[[Self, _UnpickleState], FakeTensor],
+        tuple[Self, _UnpickleStateToken],
     ]: ...
     def __init__(self, describer: MetaTensorDescriber, t: Tensor) -> None: ...
     def unpickle(self, unpickle_state: _UnpickleState) -> FakeTensor: ...
@@ -78,10 +88,13 @@ class _TensorPickleData:
 class _TorchNumpyPickleData:
     @classmethod
     def reduce_helper(
-        cls, pickler: GraphPickler, obj: object
+        cls,
+        pickler: GraphPickler,
+        obj: object,
     ) -> (
         tuple[
-            Callable[[Self, _UnpickleState], object], tuple[Self, _UnpickleStateToken]
+            Callable[[Self, _UnpickleState], object],
+            tuple[Self, _UnpickleStateToken],
         ]
         | None
     ): ...
@@ -93,7 +106,9 @@ class _TorchNumpyPickleData:
 class _GraphModulePickleData:
     @classmethod
     def reduce_helper(
-        cls, pickler: GraphPickler, obj: torch.fx.GraphModule
+        cls,
+        pickler: GraphPickler,
+        obj: torch.fx.GraphModule,
     ) -> tuple[
         Callable[[Self, _UnpickleState], torch.fx.GraphModule],
         tuple[Self, _UnpickleStateToken],
@@ -118,7 +133,9 @@ class _NodePickleData:
 class _OpPickleData:
     @classmethod
     def reduce_helper(
-        cls, pickler: GraphPickler, op: object
+        cls,
+        pickler: GraphPickler,
+        op: object,
     ) -> tuple[Callable[[_UnpickleState], object], tuple[_UnpickleStateToken]]: ...
     @classmethod
     def pickle(cls, op: object, options: Options) -> _OpPickleData: ...
@@ -136,7 +153,8 @@ class _OpOverloadPickleData(_OpPickleData):
 class _OpOverloadPacketPickleData(_OpPickleData):
     def __init__(self, name: str) -> None: ...
     def unpickle(
-        self, unpickle_state: _UnpickleState
+        self,
+        unpickle_state: _UnpickleState,
     ) -> torch._ops.OpOverloadPacket: ...
 
 class _OpBuiltinPickleData(_OpPickleData):
@@ -150,13 +168,17 @@ class _OpOperatorPickleData(_OpPickleData):
 class _GraphPickleData:
     def __init__(self, graph: torch.fx.Graph, options: Options) -> None: ...
     def unpickle(
-        self, gm: torch.fx.GraphModule, unpickle_state: _UnpickleState
+        self,
+        gm: torch.fx.GraphModule,
+        unpickle_state: _UnpickleState,
     ) -> torch.fx.Graph: ...
 
 class _TracingContextPickleData:
     @classmethod
     def reduce_helper(
-        cls, pickler: GraphPickler, obj: torch._guards.TracingContext
+        cls,
+        pickler: GraphPickler,
+        obj: torch._guards.TracingContext,
     ) -> tuple[
         Callable[[Self, _UnpickleState], torch._guards.TracingContext],
         tuple[Self, _UnpickleStateToken],

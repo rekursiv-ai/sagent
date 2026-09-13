@@ -32,7 +32,10 @@ class ConditionalDetrFastImageProcessorKwargs(DefaultFastImageProcessorKwargs):
 SUPPORTED_ANNOTATION_FORMATS = ...
 
 def convert_coco_poly_to_mask(
-    segmentations, height: int, width: int, device: torch.device
+    segmentations,
+    height: int,
+    width: int,
+    device: torch.device,
 ) -> torch.Tensor: ...
 def prepare_coco_detection_annotation(
     image,
@@ -68,11 +71,14 @@ class ConditionalDetrImageProcessorFast(BaseImageProcessorFast):
     model_input_names = ...
     valid_kwargs = ConditionalDetrFastImageProcessorKwargs
     def __init__(
-        self, **kwargs: Unpack[ConditionalDetrFastImageProcessorKwargs]
+        self,
+        **kwargs: Unpack[ConditionalDetrFastImageProcessorKwargs],
     ) -> None: ...
     @classmethod
     def from_dict(
-        cls, image_processor_dict: dict[str, Any], **kwargs
+        cls,
+        image_processor_dict: dict[str, Any],
+        **kwargs,
     ):  # -> tuple[Self, dict[str, Any]] | Self:
         ...
     def prepare_annotation(
@@ -101,7 +107,9 @@ class ConditionalDetrImageProcessorFast(BaseImageProcessorFast):
     ):  # -> dict[Any, Any]:
         ...
     def normalize_annotation(
-        self, annotation: dict, image_size: tuple[int, int]
+        self,
+        annotation: dict,
+        image_size: tuple[int, int],
     ) -> dict: ...
     def pad(
         self,
@@ -131,7 +139,9 @@ class ConditionalDetrImageProcessorFast(BaseImageProcessorFast):
     ):  # -> list[Any]:
         ...
     def post_process_semantic_segmentation(
-        self, outputs, target_sizes: list[tuple[int, int]] | None = ...
+        self,
+        outputs,
+        target_sizes: list[tuple[int, int]] | None = ...,
     ):  # -> list[Tensor]:
         ...
     def post_process_instance_segmentation(

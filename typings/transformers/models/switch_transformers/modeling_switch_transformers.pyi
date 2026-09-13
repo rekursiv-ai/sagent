@@ -18,7 +18,8 @@ logger = ...
 
 def router_z_loss_func(router_logits: torch.Tensor) -> float: ...
 def load_balancing_loss_func(
-    router_probs: torch.Tensor, expert_indices: torch.Tensor
+    router_probs: torch.Tensor,
+    expert_indices: torch.Tensor,
 ) -> float: ...
 
 class SwitchTransformersTop1Router(nn.Module):
@@ -37,7 +38,9 @@ class SwitchTransformersDenseActDense(nn.Module):
 
 class SwitchTransformersSparseMLP(nn.Module):
     def __init__(
-        self, config: SwitchTransformersConfig, expert_class: nn.Module = ...
+        self,
+        config: SwitchTransformersConfig,
+        expert_class: nn.Module = ...,
     ) -> None: ...
     def forward(self, hidden_states):  # -> tuple[Any, tuple[Any, Tensor]]:
         ...
@@ -57,7 +60,11 @@ class SwitchTransformersAttention(nn.Module):
     def prune_heads(self, heads):  # -> None:
         ...
     def compute_bias(
-        self, query_length, key_length, device=..., cache_position=...
+        self,
+        query_length,
+        key_length,
+        device=...,
+        cache_position=...,
     ):  # -> Any:
         ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
@@ -78,7 +85,10 @@ class SwitchTransformersAttention(nn.Module):
 
 class SwitchTransformersLayerSelfAttention(nn.Module):
     def __init__(
-        self, config, has_relative_attention_bias=..., layer_idx: int | None = ...
+        self,
+        config,
+        has_relative_attention_bias=...,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -208,7 +218,8 @@ class SwitchTransformersModel(SwitchTransformersPreTrainedModel):
 
 @auto_docstring(custom_intro=...)
 class SwitchTransformersForConditionalGeneration(
-    SwitchTransformersPreTrainedModel, GenerationMixin
+    SwitchTransformersPreTrainedModel,
+    GenerationMixin,
 ):
     _tied_weights_keys = ...
     def __init__(self, config: SwitchTransformersConfig) -> None: ...

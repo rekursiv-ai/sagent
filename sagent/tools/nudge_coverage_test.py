@@ -48,7 +48,7 @@ _NECESSARY: frozenset[str] = frozenset(
         "-fls",
         "-v",
         "-q",
-    }
+    },
 )
 
 # A representative slice of each utility's real alphabet. Hard-coded
@@ -215,7 +215,8 @@ def test_grep_counts_lines_and_head_counts_bytes() -> None:
     ],
 )
 def test_a_decoy_statement_does_not_change_the_verdict(
-    command: str, expected: set[str]
+    command: str,
+    expected: set[str],
 ) -> None:
     assert _nudging_tools(command) == expected, command
 
@@ -375,7 +376,9 @@ def test_detection_survives_a_translation_failure() -> None:
     ],
 )
 def test_every_documented_flag_still_nudges(
-    exe: str, tool: str, flags: tuple[str, ...]
+    exe: str,
+    tool: str,
+    flags: tuple[str, ...],
 ) -> None:
     """Sweep each utility's REAL flag alphabet, not a hand-picked sample.
 
@@ -422,7 +425,9 @@ def test_every_documented_flag_still_nudges(
     ],
 )
 def test_a_worked_example_matches_the_command_it_replaces(
-    command: str, tool: str, expected: str
+    command: str,
+    tool: str,
+    expected: str,
 ) -> None:
     """A wrong worked example is worse than none -- it gets acted on.
 
@@ -518,7 +523,8 @@ def test_a_find_without_a_name_predicate_still_renders_its_root() -> None:
     ],
 )
 def test_an_inexpressible_shape_offers_no_worked_example(
-    command: str, tool: str
+    command: str,
+    tool: str,
 ) -> None:
     """Translation failure must drop the example, never invent one."""
     trees = parse_bash(command)
@@ -633,7 +639,9 @@ def test_a_group_without_a_redirect_still_nudges() -> None:
     ],
 )
 def test_a_cd_prefix_reaches_the_worked_example(
-    command: str, tool: str, expected: str
+    command: str,
+    tool: str,
+    expected: str,
 ) -> None:
     """``cd`` is tracked by the walk, so a renderer that drops it lies.
 
@@ -660,7 +668,8 @@ def test_a_cd_prefix_reaches_the_worked_example(
     ],
 )
 def test_a_cd_that_does_not_take_effect_is_not_applied(
-    command: str, expected: str
+    command: str,
+    expected: str,
 ) -> None:
     """Only a ``cd`` the shell actually performed may reach the example."""
     trees = parse_bash(command)
@@ -701,7 +710,8 @@ def test_a_flag_value_is_not_an_operand(command: str) -> None:
     ],
 )
 def test_a_value_flag_does_not_suppress_a_real_operand(
-    command: str, expected: str
+    command: str,
+    expected: str,
 ) -> None:
     assert expected in _nudging_tools(command), command
 

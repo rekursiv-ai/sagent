@@ -20,7 +20,8 @@ else:
     mLSTMStateType = ...
     external_xlstm = ...
     def soft_cap(
-        values: torch.Tensor, cap_value: float | torch.Tensor | None = ...
+        values: torch.Tensor,
+        cap_value: float | torch.Tensor | None = ...,
     ) -> torch.Tensor: ...
     def mlstm_chunkwise_recurrent_fw_C(
         matK: torch.Tensor,
@@ -183,7 +184,9 @@ else:
             | tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
         ): ...
         def __call__(
-            self, *args: Any, **kwargs: Any
+            self,
+            *args: Any,
+            **kwargs: Any,
         ) -> (
             torch.Tensor
             | tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
@@ -223,19 +226,27 @@ else:
     class xLSTMLayer(nn.Module):
         def __init__(self, config: xLSTMConfig) -> None: ...
         def forward(
-            self, x: torch.Tensor, state: mLSTMLayerStateType | None = ...
+            self,
+            x: torch.Tensor,
+            state: mLSTMLayerStateType | None = ...,
         ) -> tuple[torch.Tensor, mLSTMLayerStateType | None]: ...
         def __call__(
-            self, *args: Any, **kwargs: Any
+            self,
+            *args: Any,
+            **kwargs: Any,
         ) -> tuple[torch.Tensor, mLSTMLayerStateType | None]: ...
 
     class xLSTMBlock(nn.Module):
         def __init__(self, config: xLSTMConfig) -> None: ...
         def forward(
-            self, x: torch.Tensor, state: mLSTMStateType | None = ...
+            self,
+            x: torch.Tensor,
+            state: mLSTMStateType | None = ...,
         ) -> tuple[torch.Tensor, mLSTMStateType]: ...
         def __call__(
-            self, *args: Any, **kwargs: Any
+            self,
+            *args: Any,
+            **kwargs: Any,
         ) -> tuple[torch.Tensor, mLSTMStateType]: ...
 
 def small_init_method(dim):  # -> Callable[..., Tensor]:

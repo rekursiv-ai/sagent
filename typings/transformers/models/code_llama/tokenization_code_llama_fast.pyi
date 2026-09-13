@@ -69,18 +69,30 @@ class CodeLlamaTokenizerFast(PreTrainedTokenizerFast):
     def add_bos_token(self, value):  # -> None:
         ...
     def set_infilling_processor(
-        self, reset, suffix_first=..., add_special_tokens=...
+        self,
+        reset,
+        suffix_first=...,
+        add_special_tokens=...,
     ):  # -> None:
         ...
     def encode_plus(
-        self, text, text_pair=..., suffix_first=..., add_special_tokens=..., **kwargs
+        self,
+        text,
+        text_pair=...,
+        suffix_first=...,
+        add_special_tokens=...,
+        **kwargs,
     ):  # -> BatchEncoding:
         ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
     def build_inputs_with_special_tokens(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = ...
+        self,
+        token_ids_0: list[int],
+        token_ids_1: list[int] | None = ...,
     ) -> list[int]: ...
 
 __all__ = ["CodeLlamaTokenizerFast"]

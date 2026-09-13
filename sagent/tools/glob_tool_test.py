@@ -9,6 +9,7 @@ import pytest
 
 from sagent.lib.tool_validation import validate_tool_input
 from sagent.testing import with_fake_agent
+from sagent.tools import glob_tool
 from sagent.tools.glob_tool import (
     Glob,
     _long_line,
@@ -16,16 +17,14 @@ from sagent.tools.glob_tool import (
 from sagent.tools.lib.bash import parse_bash
 from sagent.types.runtime import ToolResult
 
-import sagent.tools.glob_tool as glob_tool_module
 
-
-glob_tool = Glob()
+glob_tool_instance = Glob()
 
 
 async def _run_glob(args: Mapping[str, object], cwd: Path) -> ToolResult:
     with with_fake_agent() as agent:
         agent.tool_state.bash_cwd = str(cwd)
-        return await glob_tool.run(args)
+        return await glob_tool_instance.run(args)
 
 
 @pytest.mark.asyncio
@@ -109,7 +108,8 @@ async def test_glob_max_results_truncates(tmp_path: Path) -> None:
     for i in range(10):
         (tmp_path / f"f{i:02d}.py").write_text("")
     result = await _run_glob(
-        {"pattern": "*.py", "path": str(tmp_path), "max_results": 3}, tmp_path
+        {"pattern": "*.py", "path": str(tmp_path), "max_results": 3},
+        tmp_path,
     )
     assert "7 more; pass offset=3 to continue" in result.content
 
@@ -174,15 +174,18 @@ async def test_glob_invalid_sort_errors(tmp_path: Path) -> None:
 
 
 def test_summary_basic() -> None:
-    assert glob_tool.summary({"pattern": "*.py"}) == "Glob *.py"
+    assert glob_tool_instance.summary({"pattern": "*.py"}) == "Glob *.py"
 
 
 def test_summary_with_path() -> None:
-    assert glob_tool.summary({"pattern": "*.py", "path": "/x"}) == "Glob *.py in /x"
+    assert (
+        glob_tool_instance.summary({"pattern": "*.py", "path": "/x"})
+        == "Glob *.py in /x"
+    )
 
 
 def test_prompt_empty() -> None:
-    assert glob_tool.prompt() == ""
+    assert glob_tool_instance.prompt() == ""
 
 
 def test_long_line_format(tmp_path: Path) -> None:
@@ -190,7 +193,7 @@ def test_long_line_format(tmp_path: Path) -> None:
     f.write_text("hello")
     out = _long_line(f)
     assert "x.py" in out
-    assert "5" in out  # 5 bytes file
+    assert "5" in out  # 5 bytes file.
 
 
 def test_long_line_missing_file(tmp_path: Path) -> None:
@@ -221,7 +224,7 @@ def test_long_line_missing_file(tmp_path: Path) -> None:
 def test_bash_match_find_nudges(command: str) -> None:
     trees = parse_bash(command)
     assert trees is not None
-    hint = glob_tool.bash_match(trees) or ""
+    hint = glob_tool_instance.bash_match(trees) or ""
     assert hint.startswith("find via Bash is a bad UX."), command
 
 
@@ -236,7 +239,7 @@ def test_bash_match_find_nudges(command: str) -> None:
 def test_bash_match_find_suggests_a_concrete_call(command: str, call: str) -> None:
     trees = parse_bash(command)
     assert trees is not None
-    assert call in (glob_tool.bash_match(trees) or ""), command
+    assert call in (glob_tool_instance.bash_match(trees) or ""), command
 
 
 @pytest.mark.parametrize(
@@ -247,7 +250,7 @@ def test_an_untranslatable_predicate_drops_only_the_example(command: str) -> Non
     """Detection must survive what the translator cannot render."""
     trees = parse_bash(command)
     assert trees is not None
-    hint = glob_tool.bash_match(trees) or ""
+    hint = glob_tool_instance.bash_match(trees) or ""
     assert hint.startswith("find via Bash is a bad UX.")
     assert "Try: Glob" not in hint
 
@@ -267,7 +270,7 @@ def test_an_untranslatable_predicate_drops_only_the_example(command: str) -> Non
 def test_bash_match_find_that_acts_is_silent(command: str) -> None:
     trees = parse_bash(command)
     assert trees is not None
-    assert glob_tool.bash_match(trees) is None, command
+    assert glob_tool_instance.bash_match(trees) is None, command
 
 
 def test_the_find_denylist_has_exactly_one_definition() -> None:
@@ -277,7 +280,7 @@ def test_the_find_denylist_has_exactly_one_definition() -> None:
     not Glob's, so the same predicate was a writer to ``is_read_only``
     and a nudgeable listing here.
     """
-    src = Path(glob_tool_module.__file__).read_text()
+    src = Path(glob_tool.__file__).read_text()
     assert "FIND_DENY_FLAGS" in src
     assert "-exec" not in src, "glob_tool re-lists the find denylist"
 
@@ -285,19 +288,21 @@ def test_the_find_denylist_has_exactly_one_definition() -> None:
 def test_bash_match_env_prefix_no_nudge() -> None:
     trees = parse_bash("FOO=1 find . -name '*.py'")
     assert trees is not None
-    assert glob_tool.bash_match(trees) is None
+    assert glob_tool_instance.bash_match(trees) is None
 
 
 def test_bash_match_non_find_no_nudge() -> None:
     trees = parse_bash("ls -la")
     assert trees is not None
-    assert glob_tool.bash_match(trees) is None
+    assert glob_tool_instance.bash_match(trees) is None
 
 
 def test_schema_admits_the_unlimited_default() -> None:
     """``_run`` implements 0 as unlimited, so the schema must permit it."""
     err = validate_tool_input(
-        "Glob", Glob.directive_schema, {"pattern": "*.py", "max_results": 0}
+        "Glob",
+        Glob.directive_schema,
+        {"pattern": "*.py", "max_results": 0},
     )
     assert err is None, f"schema rejects the documented unlimited default: {err}"
 

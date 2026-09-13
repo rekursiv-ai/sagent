@@ -15,7 +15,8 @@ class MllamaProcessorKwargs(ProcessingKwargs, total=False):
     _defaults = ...
 
 def get_cross_attention_token_mask(
-    input_ids: list[int], image_token_id: int
+    input_ids: list[int],
+    image_token_id: int,
 ) -> list[list[int]]: ...
 def convert_sparse_cross_attention_mask_to_dense(
     cross_attention_token_mask: list[list[list[int]]],

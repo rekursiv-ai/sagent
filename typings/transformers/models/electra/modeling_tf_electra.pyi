@@ -57,7 +57,10 @@ class TFElectraSelfAttention(keras.layers.Layer):
 class TFElectraSelfOutput(keras.layers.Layer):
     def __init__(self, config: ElectraConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -88,7 +91,10 @@ class TFElectraIntermediate(keras.layers.Layer):
 class TFElectraOutput(keras.layers.Layer):
     def __init__(self, config: ElectraConfig, **kwargs) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -175,7 +181,11 @@ class TFElectraMainLayer(keras.layers.Layer):
     def set_input_embeddings(self, value):  # -> None:
         ...
     def get_extended_attention_mask(
-        self, attention_mask, input_shape, dtype, past_key_values_length=...
+        self,
+        attention_mask,
+        input_shape,
+        dtype,
+        past_key_values_length=...,
     ): ...
     def get_head_mask(self, head_mask): ...
     @unpack_inputs
@@ -216,7 +226,7 @@ class TFElectraModel(TFElectraPreTrainedModel):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ELECTRA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ELECTRA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -251,10 +261,11 @@ class TFElectraForPreTraining(TFElectraPreTrainedModel):
     def __init__(self, config, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ELECTRA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ELECTRA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFElectraForPreTrainingOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFElectraForPreTrainingOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -297,7 +308,7 @@ class TFElectraForMaskedLM(TFElectraPreTrainedModel, TFMaskedLanguageModelingLos
     def get_prefix_bias_name(self): ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ELECTRA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ELECTRA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="google/electra-small-generator",
@@ -335,12 +346,13 @@ class TFElectraClassificationHead(keras.layers.Layer):
     ELECTRA_START_DOCSTRING,
 )
 class TFElectraForSequenceClassification(
-    TFElectraPreTrainedModel, TFSequenceClassificationLoss
+    TFElectraPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ELECTRA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ELECTRA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="bhadresh-savani/electra-base-emotion",
@@ -374,7 +386,7 @@ class TFElectraForMultipleChoice(TFElectraPreTrainedModel, TFMultipleChoiceLoss)
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ELECTRA_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        ELECTRA_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -403,12 +415,13 @@ class TFElectraForMultipleChoice(TFElectraPreTrainedModel, TFMultipleChoiceLoss)
     ELECTRA_START_DOCSTRING,
 )
 class TFElectraForTokenClassification(
-    TFElectraPreTrainedModel, TFTokenClassificationLoss
+    TFElectraPreTrainedModel,
+    TFTokenClassificationLoss,
 ):
     def __init__(self, config, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ELECTRA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ELECTRA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=...,
@@ -442,7 +455,7 @@ class TFElectraForQuestionAnswering(TFElectraPreTrainedModel, TFQuestionAnswerin
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ELECTRA_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ELECTRA_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="bhadresh-savani/electra-base-squad2",

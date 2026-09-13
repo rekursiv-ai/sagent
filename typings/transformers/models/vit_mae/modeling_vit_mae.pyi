@@ -43,7 +43,9 @@ class ViTMAEForPreTrainingOutput(ModelOutput):
     attentions: tuple[torch.FloatTensor] | None = ...
 
 def get_2d_sincos_pos_embed(
-    embed_dim, grid_size, add_cls_token=...
+    embed_dim,
+    grid_size,
+    add_cls_token=...,
 ):  # -> NDArray[float64] | NDArray[Any]:
     ...
 def get_2d_sincos_pos_embed_from_grid(embed_dim, grid):  # -> NDArray[Any]:
@@ -56,12 +58,18 @@ class ViTMAEEmbeddings(nn.Module):
     def initialize_weights(self):  # -> None:
         ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def random_masking(self, sequence, noise=...):  # -> tuple[Tensor, Tensor, Tensor]:
         ...
     def forward(
-        self, pixel_values, noise=..., interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values,
+        noise=...,
+        interpolate_pos_encoding: bool = ...,
     ):  # -> tuple[Tensor, Tensor, Tensor]:
         ...
 
@@ -85,16 +93,22 @@ def eager_attention_forward(
 class ViTMAESelfAttention(nn.Module):
     def __init__(self, config: ViTMAEConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, head_mask: torch.Tensor | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        head_mask: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class ViTMAESelfOutput(nn.Module):
     def __init__(self, config: ViTMAEConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -103,7 +117,9 @@ class ViTMAEAttention(nn.Module):
     def prune_heads(self, heads: set[int]):  # -> None:
         ...
     def forward(
-        self, hidden_states: torch.Tensor, head_mask: torch.Tensor | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        head_mask: torch.Tensor | None = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -115,21 +131,27 @@ class ViTMAEIntermediate(nn.Module):
 class ViTMAEOutput(nn.Module):
     def __init__(self, config: ViTMAEConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class ViTMAELayer(GradientCheckpointingLayer):
     def __init__(self, config: ViTMAEConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, head_mask: torch.Tensor | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        head_mask: torch.Tensor | None = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class ViTMAEEncoder(nn.Module):
     def __init__(self, config: ViTMAEConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, head_mask: torch.Tensor | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        head_mask: torch.Tensor | None = ...,
     ) -> BaseModelOutput: ...
     def __call__(self, *args: Any, **kwargs: Any) -> BaseModelOutput: ...
 
@@ -180,7 +202,9 @@ class ViTMAEForPreTraining(ViTMAEPreTrainedModel):
     def get_input_embeddings(self):  # -> ViTMAEPatchEmbeddings:
         ...
     def patchify(
-        self, pixel_values, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values,
+        interpolate_pos_encoding: bool = ...,
     ):  # -> Tensor:
         ...
     def unpatchify(
@@ -190,7 +214,11 @@ class ViTMAEForPreTraining(ViTMAEPreTrainedModel):
     ):  # -> Tensor:
         ...
     def forward_loss(
-        self, pixel_values, pred, mask, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values,
+        pred,
+        mask,
+        interpolate_pos_encoding: bool = ...,
     ): ...
     @can_return_tuple
     @auto_docstring

@@ -12,7 +12,8 @@ __all__ = [
 ]
 
 def average_parameters(
-    params: Iterator[torch.nn.Parameter], process_group: ProcessGroup
+    params: Iterator[torch.nn.Parameter],
+    process_group: ProcessGroup,
 ) -> None: ...
 def get_params_to_average(
     params: Iterable[torch.nn.Parameter] | Iterable[dict[str, torch.nn.Parameter]],

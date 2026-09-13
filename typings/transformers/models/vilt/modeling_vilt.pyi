@@ -31,7 +31,10 @@ class ViltForImagesAndTextClassificationOutput(ModelOutput):
 class ViltEmbeddings(nn.Module):
     def __init__(self, config) -> None: ...
     def visual_embed(
-        self, pixel_values, pixel_mask, max_image_length=...
+        self,
+        pixel_values,
+        pixel_mask,
+        max_image_length=...,
     ):  # -> tuple[Any, Tensor, tuple[Tensor, tuple[Any, Any]]]:
         ...
     def forward(
@@ -50,7 +53,11 @@ class ViltEmbeddings(nn.Module):
 class TextEmbeddings(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, input_ids=..., token_type_ids=..., position_ids=..., inputs_embeds=...
+        self,
+        input_ids=...,
+        token_type_ids=...,
+        position_ids=...,
+        inputs_embeds=...,
     ):  # -> Any:
         ...
 
@@ -62,14 +69,20 @@ class ViltPatchEmbeddings(nn.Module):
 class ViltSelfAttention(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states, attention_mask=..., head_mask=..., output_attentions=...
+        self,
+        hidden_states,
+        attention_mask=...,
+        head_mask=...,
+        output_attentions=...,
     ):  # -> tuple[Tensor, Any] | tuple[Tensor]:
         ...
 
 class ViltSelfOutput(nn.Module):
     def __init__(self, config: ViltConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -78,7 +91,11 @@ class ViltAttention(nn.Module):
     def prune_heads(self, heads):  # -> None:
         ...
     def forward(
-        self, hidden_states, attention_mask=..., head_mask=..., output_attentions=...
+        self,
+        hidden_states,
+        attention_mask=...,
+        head_mask=...,
+        output_attentions=...,
     ):  # -> Any:
         ...
 
@@ -90,14 +107,20 @@ class ViltIntermediate(nn.Module):
 class ViltOutput(nn.Module):
     def __init__(self, config: ViltConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class ViltLayer(GradientCheckpointingLayer):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states, attention_mask=..., head_mask=..., output_attentions=...
+        self,
+        hidden_states,
+        attention_mask=...,
+        head_mask=...,
+        output_attentions=...,
     ):  # -> Any:
         ...
 

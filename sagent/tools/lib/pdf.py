@@ -33,8 +33,8 @@ if TYPE_CHECKING:
 PDF_MAGIC: Final = b"%PDF-"
 MAX_PDF_BYTES = (
     50 * 1024 * 1024
-)  # config-globals: ignore -- 50 MB hard cap before rasterizing
-MAX_INLINE_PAGES = 10  # config-globals: ignore -- inline page cap
+)  # house-ignore[globals] -- 50 MB hard cap before rasterizing.
+MAX_INLINE_PAGES = 10  # house-ignore[globals] -- Inline page cap.
 # Conservative ceiling on the cumulative rendered JPEG bytes a single read
 # may emit. A single fresh read's bytes are this turn's, not history, so
 # compaction cannot shed them; bounding here stops one read from authoring an
@@ -42,11 +42,11 @@ MAX_INLINE_PAGES = 10  # config-globals: ignore -- inline page cap
 # provider request limit (~20 MB) with headroom for system prompt + history.
 MAX_RENDERED_BYTES = (
     12 * 1024 * 1024
-)  # config-globals: ignore -- cumulative rendered-bytes cap
+)  # house-ignore[globals] -- Cumulative rendered-bytes cap.
 # pypdfium2 page.render(scale=N) renders at N * 72 DPI. 2 = 144 DPI,
 # which is a good vision/OCR sweet spot.
-_RENDER_SCALE = 2  # config-globals: ignore -- render-scale dial (N * 72 DPI)
-_JPEG_QUALITY = 85  # config-globals: ignore -- jpeg-quality dial
+_RENDER_SCALE = 2  # house-ignore[globals] -- Render-scale dial (N * 72 DPI).
+_JPEG_QUALITY = 85  # house-ignore[globals] -- Jpeg-quality dial.
 
 
 class PdfError(Exception):
@@ -62,16 +62,20 @@ def is_pdf(path: Path) -> bool:
         return False
 
 
-_PAGE_RANGE_RE = re.compile(r"^(\d+)(?:-(\d*))?$")
-
-
 def parse_page_range(spec: str) -> tuple[int, int | None] | None:
     """Parse ``"N"`` / ``"N-M"`` / ``"N-"`` into ``(first, last_or_None)``.
 
     1-indexed and inclusive. Returns ``None`` on malformed input or when
     ``first > last``.
+
+    Args:
+      spec: Page range specification.
+
+    Returns:
+      page_range: Inclusive 1-indexed bounds, or ``None`` when malformed.
+
     """
-    m = _PAGE_RANGE_RE.match(spec.strip())
+    m = re.fullmatch(r"^(\d+)(?:-(\d*))?$", spec.strip())
     if not m:
         return None
     first = int(m.group(1))
@@ -87,20 +91,16 @@ def parse_page_range(spec: str) -> tuple[int, int | None] | None:
     return (first, last)
 
 
-def _open(path: Path) -> pdfium.PdfDocument:
-    if path.stat().st_size > MAX_PDF_BYTES:
-        raise PdfError(f"PDF exceeds {MAX_PDF_BYTES // (1024 * 1024)} MB cap")
-    try:
-        return pdfium.PdfDocument(str(path))
-    except pdfium.PdfiumError as e:
-        msg = str(e).lower()
-        if "password" in msg:
-            raise PdfError("password-protected PDF not supported") from e
-        raise PdfError(f"corrupt or invalid PDF: {e}") from e
-
-
 def get_pdf_page_count(path: Path) -> int | None:
-    """Page count, or ``None`` if the file is unreadable as PDF."""
+    """Return the page count, or ``None`` if the file is unreadable as PDF.
+
+    Args:
+      path: PDF file to inspect.
+
+    Returns:
+      page_count: Number of pages, or ``None`` for an unreadable PDF.
+
+    """
     if not is_pdf(path):
         return None
     with _PDFIUM_LOCK:
@@ -144,6 +144,12 @@ def extract_pdf_pages(
           the continuation range without re-opening the PDF -- a re-open can
           transiently fail and silently mark a partial read as complete.
 
+    Args:
+      path: PDF file to rasterize.
+      first: Inclusive 1-indexed first page, defaulting to page 1.
+      last: Inclusive 1-indexed last page, defaulting to the final page.
+      max_total_bytes: Maximum cumulative JPEG size, or zero for unlimited.
+
     Raises:
       PdfError: On out-of-range / unsupported / invalid input, or when even
           the first requested page exceeds ``max_total_bytes``.
@@ -178,7 +184,7 @@ def extract_pdf_pages(
                         raise PdfError(
                             f"page {i + 1} alone exceeds the request byte budget "
                             f"({len(jpeg)} > {max_total_bytes} bytes); the page is "
-                            f"too dense to inline."
+                            f"too dense to inline.",
                         )
                     # Truncate: return the prefix that fits. The caller adds a
                     # continuation hint for the remaining range.
@@ -196,3 +202,15 @@ def _encode_jpeg(img: Image.Image) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=_JPEG_QUALITY, optimize=True)
     return buf.getvalue()
+
+
+def _open(path: Path) -> pdfium.PdfDocument:
+    if path.stat().st_size > MAX_PDF_BYTES:
+        raise PdfError(f"PDF exceeds {MAX_PDF_BYTES // (1024 * 1024)} MB cap")
+    try:
+        return pdfium.PdfDocument(str(path))
+    except pdfium.PdfiumError as e:
+        msg = str(e).lower()
+        if "password" in msg:
+            raise PdfError("password-protected PDF not supported") from e
+        raise PdfError(f"corrupt or invalid PDF: {e}") from e

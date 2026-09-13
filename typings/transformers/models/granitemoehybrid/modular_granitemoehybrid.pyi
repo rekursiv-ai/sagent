@@ -46,7 +46,8 @@ class GraniteMoeHybridDecoderLayer(GraniteMoeSharedDecoderLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs: Unpack[GraniteFlashAttentionKwargs],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class GraniteMoeHybridPreTrainedModel(GraniteMoeSharedPreTrainedModel):

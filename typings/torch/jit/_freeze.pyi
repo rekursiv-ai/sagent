@@ -7,11 +7,16 @@ functionalities in `torch.jit`.
 """
 
 def freeze(
-    mod, preserved_attrs: list[str] | None = ..., optimize_numerics: bool = ...
+    mod,
+    preserved_attrs: list[str] | None = ...,
+    optimize_numerics: bool = ...,
 ) -> RecursiveScriptModule: ...
 def run_frozen_optimizations(
-    mod, optimize_numerics: bool = ..., preserved_methods: list[str] | None = ...
+    mod,
+    optimize_numerics: bool = ...,
+    preserved_methods: list[str] | None = ...,
 ) -> None: ...
 def optimize_for_inference(
-    mod: ScriptModule, other_methods: list[str] | None = ...
+    mod: ScriptModule,
+    other_methods: list[str] | None = ...,
 ) -> ScriptModule: ...

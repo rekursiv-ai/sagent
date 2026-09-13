@@ -38,7 +38,7 @@ _RATIO_ALLOWED: Final = frozenset(
         # The single no-agent fallback, and the test seam mirroring it.
         "agent/state.py",
         "testing.py",
-    }
+    },
 )
 
 
@@ -71,24 +71,20 @@ _BANNED_NAMES: Final = (
 )
 
 
+# ``examples/`` is excluded: its models are deliberately offline and tokenizer-free, so
+# a ratio there IS the estimator, not a conversion away from one.
+#
+# Dot-prefixed directories are skipped because this walk is over a WORKING TREE, not the
+# shipped package: a developer venv at ``sagent/.venv`` put 38k site-packages files in
+# scope, one of which is latin-1 by design (joblib's encoding fixture) and raised
+# UnicodeDecodeError before any assertion ran. That also covers ``.export/``, whose
+# staged copy would otherwise double every hit.
+#
+# Cached because all nine tests in this module walk the same tree, and re-reading it per
+# test was the module's entire runtime.
 @cache
 def _sources() -> tuple[tuple[str, str], ...]:
-    """Return ``(relative_path, text)`` for every shipped non-test module.
-
-    ``examples/`` is excluded: its models are deliberately offline and
-    tokenizer-free, so a ratio there IS the estimator, not a conversion
-    away from one.
-
-    Dot-prefixed directories are skipped because this walk is over a
-    WORKING TREE, not the shipped package: a developer venv at
-    ``sagent/.venv`` put 38k site-packages files in scope, one of which is
-    latin-1 by design (joblib's encoding fixture) and raised
-    UnicodeDecodeError before any assertion ran. That also covers
-    ``.export/``, whose staged copy would otherwise double every hit.
-
-    Cached because all nine tests in this module walk the same tree, and
-    re-reading it per test was the module's entire runtime.
-    """
+    """Return ``(relative_path, text)`` for every shipped non-test module."""
     found: list[tuple[str, str]] = []
     for path in sorted(_CWD.rglob("*.py")):
         rel = path.relative_to(_CWD)
@@ -116,17 +112,16 @@ def test_the_deleted_constants_stay_deleted(banned: str) -> None:
     )
 
 
+# ``len(sequence) // n`` takes a FRACTION of a collection -- a retry step, a midpoint.
+# Only ``len(<str>) // <const>`` is the tokenizer guess, so both a literal divisor and a
+# textually-named argument are required.
 def _ratio_divisions(text: str, rel: str) -> list[int]:
-    """Line numbers where ``text`` divides a string length by a constant.
-
-    ``len(sequence) // n`` takes a FRACTION of a collection -- a retry step,
-    a midpoint. Only ``len(<str>) // <const>`` is the tokenizer guess, so
-    both a literal divisor and a textually-named argument are required.
-    """
+    """Line numbers where ``text`` divides a string length by a constant."""
     lines: list[int] = []
     for node in ast.walk(ast.parse(text, rel)):
         if not isinstance(node, ast.BinOp) or not isinstance(
-            node.op, (ast.FloorDiv, ast.Div)
+            node.op,
+            (ast.FloorDiv, ast.Div),
         ):
             continue
         if not isinstance(node.left, ast.Call):

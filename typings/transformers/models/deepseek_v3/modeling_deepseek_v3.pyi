@@ -63,7 +63,12 @@ class DeepseekV3MoE(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -79,7 +84,12 @@ def eager_attention_forward(
 ):  # -> tuple[Tensor, Tensor]:
     ...
 def apply_rotary_pos_emb_interleave(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def yarn_get_mscale(scale=..., mscale=...):  # -> float:
@@ -168,10 +178,12 @@ class DeepseekV3ForCausalLM(DeepseekV3PreTrainedModel, GenerationMixin):
     ) -> CausalLMOutputWithPast: ...
 
 class DeepseekV3ForSequenceClassification(
-    GenericForSequenceClassification, DeepseekV3PreTrainedModel
+    GenericForSequenceClassification,
+    DeepseekV3PreTrainedModel,
 ): ...
 class DeepseekV3ForTokenClassification(
-    GenericForTokenClassification, DeepseekV3PreTrainedModel
+    GenericForTokenClassification,
+    DeepseekV3PreTrainedModel,
 ): ...
 
 __all__ = [

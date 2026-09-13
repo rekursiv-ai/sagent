@@ -14,7 +14,9 @@ from ..pattern_matcher import (
 )
 
 def efficient_conv_bn_eval(
-    bn: nn.modules.batchnorm._BatchNorm, conv: nn.modules.conv._ConvNd, x: torch.Tensor
+    bn: nn.modules.batchnorm._BatchNorm,
+    conv: nn.modules.conv._ConvNd,
+    x: torch.Tensor,
 ) -> Any: ...
 def efficient_conv_bn_eval_decomposed(
     bn_weight,
@@ -37,7 +39,9 @@ def efficient_conv_bn_eval_decomposed(
     ),
 )
 def efficient_conv_bn_eval_graph_transform_inlined(
-    match: Match, *args, **kwargs
+    match: Match,
+    *args,
+    **kwargs,
 ) -> None: ...
 @register_graph_pattern(
     CallFunctionVarArgs([torch.ops.aten.batch_norm.default]),
@@ -48,7 +52,9 @@ def efficient_conv_bn_eval_graph_transform_inlined(
     ),
 )
 def efficient_conv_bn_eval_graph_transform_decomposed(
-    match: Match, *args, **kwargs
+    match: Match,
+    *args,
+    **kwargs,
 ) -> None: ...
 @register_graph_pattern(
     CallModuleVarArgs(
@@ -58,7 +64,7 @@ def efficient_conv_bn_eval_graph_transform_decomposed(
             nn.BatchNorm2d,
             nn.BatchNorm3d,
             nn.SyncBatchNorm,
-        ]
+        ],
     ),
     pass_dict=efficient_conv_bn_eval_pass,
     extra_check=lambda match: (

@@ -47,12 +47,18 @@ class TFFunnelAttentionStructure:
     cls_token_type_id: int = ...
     def __init__(self, config) -> None: ...
     def init_attention_inputs(
-        self, inputs_embeds, attention_mask=..., token_type_ids=..., training=...
+        self,
+        inputs_embeds,
+        attention_mask=...,
+        token_type_ids=...,
+        training=...,
     ):  # -> tuple[tuple[Any, Any, Any, Any] | list[Any], Any | None, Any | None, Any | None]:
         ...
     def token_type_ids_to_mat(self, token_type_ids): ...
     def get_position_embeds(
-        self, seq_len, training=...
+        self,
+        seq_len,
+        training=...,
     ):  # -> tuple[Any, Any, Any, Any] | list[Any]:
         ...
     def stride_pool_pos(self, pos_id, block_index): ...
@@ -60,15 +66,21 @@ class TFFunnelAttentionStructure:
     def stride_pool(self, tensor, axis):  # -> list[Any] | tuple[Any, ...] | None:
         ...
     def pool_tensor(
-        self, tensor, mode=..., stride=...
+        self,
+        tensor,
+        mode=...,
+        stride=...,
     ):  # -> list[Any] | tuple[Any, ...] | None:
         ...
     def pre_attention_pooling(
-        self, output, attention_inputs
+        self,
+        output,
+        attention_inputs,
     ):  # -> tuple[list[Any] | tuple[Any, ...] | Any | None, tuple[Any | list[Any] | tuple[Any, ...] | None, Any | list[Any] | tuple[Any, ...] | None, Any | list[Any] | tuple[Any, ...] | None, Any | list[Any] | tuple[Any, ...] | None]]:
         ...
     def post_attention_pooling(
-        self, attention_inputs
+        self,
+        attention_inputs,
     ):  # -> tuple[Any, Any | list[Any] | tuple[Any, ...] | None, list[Any] | tuple[Any, ...] | Any | None, Any | list[Any] | tuple[Any, ...] | None]:
         ...
 
@@ -77,14 +89,27 @@ class TFFunnelRelMultiheadAttention(keras.layers.Layer):
     def build(self, input_shape=...):  # -> None:
         ...
     def relative_positional_attention(
-        self, position_embeds, q_head, context_len, cls_mask=...
+        self,
+        position_embeds,
+        q_head,
+        context_len,
+        cls_mask=...,
     ): ...
     def relative_token_type_attention(
-        self, token_type_mat, q_head, cls_mask=...
+        self,
+        token_type_mat,
+        q_head,
+        cls_mask=...,
     ):  # -> Literal[0]:
         ...
     def call(
-        self, query, key, value, attention_inputs, output_attentions=..., training=...
+        self,
+        query,
+        key,
+        value,
+        attention_inputs,
+        output_attentions=...,
+        training=...,
     ):  # -> tuple[Any, Any] | tuple[Any]:
         ...
 
@@ -97,7 +122,13 @@ class TFFunnelPositionwiseFFN(keras.layers.Layer):
 class TFFunnelLayer(keras.layers.Layer):
     def __init__(self, config, block_index, **kwargs) -> None: ...
     def call(
-        self, query, key, value, attention_inputs, output_attentions=..., training=...
+        self,
+        query,
+        key,
+        value,
+        attention_inputs,
+        output_attentions=...,
+        training=...,
     ):  # -> tuple[Any, Any] | tuple[Any]:
         ...
     def build(self, input_shape=...):  # -> None:
@@ -234,7 +265,7 @@ FUNNEL_INPUTS_DOCSTRING = ...
 class TFFunnelBaseModel(TFFunnelPreTrainedModel):
     def __init__(self, config: FunnelConfig, *inputs, **kwargs) -> None: ...
     @add_start_docstrings_to_model_forward(
-        FUNNEL_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        FUNNEL_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="funnel-transformer/small-base",
@@ -266,7 +297,7 @@ class TFFunnelModel(TFFunnelPreTrainedModel):
     def __init__(self, config: FunnelConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        FUNNEL_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        FUNNEL_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="funnel-transformer/small",
@@ -297,10 +328,11 @@ class TFFunnelForPreTraining(TFFunnelPreTrainedModel):
     def __init__(self, config: FunnelConfig, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        FUNNEL_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        FUNNEL_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFFunnelForPreTrainingOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFFunnelForPreTrainingOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -326,7 +358,7 @@ class TFFunnelForMaskedLM(TFFunnelPreTrainedModel, TFMaskedLanguageModelingLoss)
     def get_prefix_bias_name(self) -> str: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        FUNNEL_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        FUNNEL_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="funnel-transformer/small",
@@ -354,12 +386,13 @@ class TFFunnelForMaskedLM(TFFunnelPreTrainedModel, TFMaskedLanguageModelingLoss)
     FUNNEL_START_DOCSTRING,
 )
 class TFFunnelForSequenceClassification(
-    TFFunnelPreTrainedModel, TFSequenceClassificationLoss
+    TFFunnelPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config: FunnelConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        FUNNEL_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        FUNNEL_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="funnel-transformer/small-base",
@@ -379,7 +412,8 @@ class TFFunnelForSequenceClassification(
         training: bool = ...,
     ) -> tuple[tf.Tensor] | TFSequenceClassifierOutput: ...
     def serving_output(
-        self, output: TFSequenceClassifierOutput
+        self,
+        output: TFSequenceClassifierOutput,
     ) -> TFSequenceClassifierOutput: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -395,7 +429,7 @@ class TFFunnelForMultipleChoice(TFFunnelPreTrainedModel, TFMultipleChoiceLoss):
         ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        FUNNEL_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        FUNNEL_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="funnel-transformer/small-base",
@@ -415,7 +449,8 @@ class TFFunnelForMultipleChoice(TFFunnelPreTrainedModel, TFMultipleChoiceLoss):
         training: bool = ...,
     ) -> tuple[tf.Tensor] | TFMultipleChoiceModelOutput: ...
     def serving_output(
-        self, output: TFMultipleChoiceModelOutput
+        self,
+        output: TFMultipleChoiceModelOutput,
     ) -> TFMultipleChoiceModelOutput: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -425,12 +460,13 @@ class TFFunnelForMultipleChoice(TFFunnelPreTrainedModel, TFMultipleChoiceLoss):
     FUNNEL_START_DOCSTRING,
 )
 class TFFunnelForTokenClassification(
-    TFFunnelPreTrainedModel, TFTokenClassificationLoss
+    TFFunnelPreTrainedModel,
+    TFTokenClassificationLoss,
 ):
     def __init__(self, config: FunnelConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        FUNNEL_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        FUNNEL_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="funnel-transformer/small",
@@ -450,7 +486,8 @@ class TFFunnelForTokenClassification(
         training: bool = ...,
     ) -> tuple[tf.Tensor] | TFTokenClassifierOutput: ...
     def serving_output(
-        self, output: TFTokenClassifierOutput
+        self,
+        output: TFTokenClassifierOutput,
     ) -> TFTokenClassifierOutput: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -463,7 +500,7 @@ class TFFunnelForQuestionAnswering(TFFunnelPreTrainedModel, TFQuestionAnsweringL
     def __init__(self, config: FunnelConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        FUNNEL_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        FUNNEL_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="funnel-transformer/small",
@@ -484,7 +521,8 @@ class TFFunnelForQuestionAnswering(TFFunnelPreTrainedModel, TFQuestionAnsweringL
         training: bool = ...,
     ) -> tuple[tf.Tensor] | TFQuestionAnsweringModelOutput: ...
     def serving_output(
-        self, output: TFQuestionAnsweringModelOutput
+        self,
+        output: TFQuestionAnsweringModelOutput,
     ) -> TFQuestionAnsweringModelOutput: ...
     def build(self, input_shape=...):  # -> None:
         ...

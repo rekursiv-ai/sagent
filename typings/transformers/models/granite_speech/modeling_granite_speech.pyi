@@ -39,7 +39,9 @@ class GraniteSpeechConformerFeedForward(nn.Module):
 class GraniteSpeechConformerAttention(nn.Module):
     def __init__(self, config: GraniteSpeechEncoderConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, attention_dists: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        attention_dists: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -56,7 +58,9 @@ class GraniteSpeechConformerConvModule(nn.Module):
 class GraniteSpeechConformerBlock(nn.Module):
     def __init__(self, config: GraniteSpeechEncoderConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, attention_dists: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        attention_dists: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -73,7 +77,8 @@ class GraniteSpeechPreTrainedModel(PreTrainedModel):
 
 @auto_docstring(custom_intro=...)
 class GraniteSpeechForConditionalGeneration(
-    GraniteSpeechPreTrainedModel, GenerationMixin
+    GraniteSpeechPreTrainedModel,
+    GenerationMixin,
 ):
     def __init__(self, config: GraniteSpeechConfig) -> None: ...
     def set_input_embeddings(self, value):  # -> None:

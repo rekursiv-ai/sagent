@@ -8,7 +8,9 @@ log = ...
 CONFIG_PREFIX: str = ...
 
 def get_config_request_key(
-    arch: str, cuda_version: str, instantiation_level: str
+    arch: str,
+    cuda_version: str,
+    instantiation_level: str,
 ) -> str: ...
 @clear_on_fresh_cache
 @functools.cache

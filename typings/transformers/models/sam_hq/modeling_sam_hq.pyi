@@ -48,7 +48,10 @@ class SamHQImageSegmentationOutput(ModelOutput):
 class SamHQVisionAttention(nn.Module):
     def __init__(self, config, window_size) -> None: ...
     def get_rel_pos(
-        self, q_size: int, k_size: int, rel_pos: torch.Tensor
+        self,
+        q_size: int,
+        k_size: int,
+        rel_pos: torch.Tensor,
     ) -> torch.Tensor: ...
     def get_decomposed_rel_pos(
         self,
@@ -59,10 +62,14 @@ class SamHQVisionAttention(nn.Module):
         k_size: tuple[int, int],
     ) -> torch.Tensor: ...
     def forward(
-        self, hidden_states: torch.Tensor, output_attentions=...
+        self,
+        hidden_states: torch.Tensor,
+        output_attentions=...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class SamHQMLPBlock(nn.Module):
@@ -73,7 +80,9 @@ class SamHQMLPBlock(nn.Module):
 class SamHQVisionSdpaAttention(SamHQVisionAttention):
     def __init__(self, config, window_size) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, output_attentions=...
+        self,
+        hidden_states: torch.Tensor,
+        output_attentions=...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -82,7 +91,9 @@ SAM_HQ_VISION_ATTENTION_CLASSES = ...
 class SamHQVisionLayer(GradientCheckpointingLayer):
     def __init__(self, config, window_size) -> None: ...
     def window_partition(
-        self, hidden_states: torch.Tensor, window_size: int
+        self,
+        hidden_states: torch.Tensor,
+        window_size: int,
     ) -> tuple[torch.Tensor, tuple[int, int]]: ...
     def window_unpartition(
         self,
@@ -127,7 +138,12 @@ class SamHQVisionEncoder(SamHQPreTrainedModel):
 
 class SamHQLayerNorm(nn.LayerNorm):
     def __init__(
-        self, normalized_shape, *, eps=..., data_format=..., **kwargs
+        self,
+        normalized_shape,
+        *,
+        eps=...,
+        data_format=...,
+        **kwargs,
     ) -> None: ...
     def forward(self, features: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -248,7 +264,9 @@ class SamHQPromptEncoder(nn.Module):
         input_masks: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 @auto_docstring(custom_intro=...)

@@ -7,7 +7,9 @@ from tensorboard.compat.proto.tensor_shape_pb2 import TensorShapeProto
 import torch
 
 def attr_value_proto(
-    dtype: object, shape: Sequence[int] | None, s: str | None
+    dtype: object,
+    shape: Sequence[int] | None,
+    s: str | None,
 ) -> dict[str, AttrValue]: ...
 def tensor_shape_proto(outputsize: Sequence[int]) -> TensorShapeProto: ...
 def node_proto(

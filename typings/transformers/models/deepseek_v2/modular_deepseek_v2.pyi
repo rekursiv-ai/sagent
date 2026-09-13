@@ -65,7 +65,9 @@ class DeepseekV2Config(LlamaConfig):
     ) -> None: ...
 
 def apply_rotary_emb(
-    xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    freqs_cis: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class DeepseekV2MoEGate(nn.Module):
@@ -86,7 +88,10 @@ class DeepseekV2MoE(nn.Module):
 
 class DeepseekV2MLP(LlamaMLP):
     def __init__(
-        self, config: DeepseekV2Config, hidden_size=..., intermediate_size=...
+        self,
+        config: DeepseekV2Config,
+        hidden_size=...,
+        intermediate_size=...,
     ) -> None: ...
 
 class DeepseekV2RMSNorm(LlamaRMSNorm): ...
@@ -96,7 +101,9 @@ class DeepseekV2RotaryEmbedding(Llama4TextRotaryEmbedding):
 
 class DeepseekV2Attention(nn.Module):
     def __init__(
-        self, config: DeepseekV2Config, layer_idx: int | None = ...
+        self,
+        config: DeepseekV2Config,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(

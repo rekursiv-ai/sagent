@@ -71,13 +71,19 @@ def get_lock_dir() -> str: ...
 def sha256_hash(data: bytes) -> str: ...
 def code_hash(code: str | bytes, extra: str | bytes = ...) -> str: ...
 def get_path(
-    basename: str, extension: str, specified_dir: str = ...
+    basename: str,
+    extension: str,
+    specified_dir: str = ...,
 ) -> tuple[str, str, str]: ...
 def get_hash(content: str | bytes, extra: str = ..., hash_type: str = ...) -> str: ...
 
 class WritableTempFile:
     def __init__(
-        self, mode: str = ..., *, encoding: Any = ..., suffix: Any = ...
+        self,
+        mode: str = ...,
+        *,
+        encoding: Any = ...,
+        suffix: Any = ...,
     ) -> None: ...
     def __enter__(self) -> _TemporaryFileWrapper[Any]: ...
     def __exit__(
@@ -97,7 +103,10 @@ def write(
 ) -> tuple[str, str]: ...
 def write_text(text: str) -> str: ...
 def write_atomic(
-    path_: str, content: str | bytes, make_dirs: bool = ..., encode_utf_8: bool = ...
+    path_: str,
+    content: str | bytes,
+    make_dirs: bool = ...,
+    encode_utf_8: bool = ...,
 ) -> None: ...
 
 @dataclasses.dataclass
@@ -109,14 +118,18 @@ def extract_tensor_metadata_for_cache_key(t: Tensor) -> TensorMetadata: ...
 
 class FxGraphCachePickler(pickle.Pickler):
     def __init__(
-        self, gm: torch.fx.GraphModule, has_user_defined_triton_kernels: bool = ...
+        self,
+        gm: torch.fx.GraphModule,
+        has_user_defined_triton_kernels: bool = ...,
     ) -> None: ...
     def dumps(self, obj: Any) -> bytes: ...
     def get_hash(self, obj: Any) -> str: ...
     def debug_lines(self, inp: FxGraphHashDetails) -> list[str]: ...
 
 def build_code_hash(
-    roots: list[str] | None, prefix: str, hasher: hashlib._Hash
+    roots: list[str] | None,
+    prefix: str,
+    hasher: hashlib._Hash,
 ) -> None: ...
 def torch_key_cache(func: Callable[[], bytes]) -> Callable[[], bytes]: ...
 @torch_key_cache
@@ -314,7 +327,10 @@ class HalideCodeCache(CppPythonBindingsCodeCache):
     def find_header(name: str) -> str: ...
     @classmethod
     def generate_halide_async(
-        cls, meta: HalideMeta, source_code: str, submit_fn: Any = ...
+        cls,
+        meta: HalideMeta,
+        source_code: str,
+        submit_fn: Any = ...,
     ) -> Callable[[], Any]: ...
     @classmethod
     def generate_halide(cls, *args: Any, **kwargs: Any) -> Callable[[], Any]: ...
@@ -345,7 +361,9 @@ class PyCodeCache:
     @classmethod
     @functools.cache
     def stack_frames_for_code(
-        cls, path: str, lineno: int
+        cls,
+        path: str,
+        lineno: int,
     ) -> list[dict[str, Any]] | None: ...
 
 @torch_key_cache
@@ -384,18 +402,24 @@ class CUDACodeCache:
     @staticmethod
     @lru_cache(maxsize=4)
     def get_kernel_binary_remote_cache(
-        caching_enabled: bool, caching_available: bool
+        caching_enabled: bool,
+        caching_available: bool,
     ) -> None: ...
     @classmethod
     @lru_cache(None)
     def write(cls, source_code: str, dst_file_ext: str) -> tuple[str, str]: ...
     @classmethod
     def compile(
-        cls, source_code: str, dst_file_ext: str, extra_args: list[str] | None = ...
+        cls,
+        source_code: str,
+        dst_file_ext: str,
+        extra_args: list[str] | None = ...,
     ) -> tuple[str, str, str]: ...
     @classmethod
     def load(
-        cls, source_code: str, dst_file_ext: str
+        cls,
+        source_code: str,
+        dst_file_ext: str,
     ) -> tuple[DLLWrapper, str, str]: ...
 
 @clear_on_fresh_cache
@@ -415,11 +439,16 @@ class ROCmCodeCache:
     def write(cls, source_code: str, dst_file_ext: str) -> tuple[str, str]: ...
     @classmethod
     def compile(
-        cls, source_code: str, dst_file_ext: str, extra_args: list[str] | None = ...
+        cls,
+        source_code: str,
+        dst_file_ext: str,
+        extra_args: list[str] | None = ...,
     ) -> tuple[str, str, str]: ...
     @classmethod
     def load(
-        cls, source_code: str, dst_file_ext: str
+        cls,
+        source_code: str,
+        dst_file_ext: str,
     ) -> tuple[DLLWrapper, str, str]: ...
 
 class CodeCacheFuture:
@@ -427,7 +456,9 @@ class CodeCacheFuture:
 
 class LambdaFuture(CodeCacheFuture):
     def __init__(
-        self, result_fn: Callable[..., Any], future: Future[Any] | None = ...
+        self,
+        result_fn: Callable[..., Any],
+        future: Future[Any] | None = ...,
     ) -> None: ...
     def result(self) -> Callable[..., Any]: ...
 

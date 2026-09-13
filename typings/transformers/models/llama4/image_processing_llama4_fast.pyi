@@ -15,14 +15,18 @@ from ...utils import auto_docstring
 
 def get_factors(dividend: int) -> set[int]: ...
 def get_max_res_without_distortion(
-    image_size: tuple[int, int], target_size: tuple[int, int]
+    image_size: tuple[int, int],
+    target_size: tuple[int, int],
 ) -> tuple[int, int]: ...
 def split_to_tiles(
-    images: torch.Tensor, num_tiles_height: int, num_tiles_width: int
+    images: torch.Tensor,
+    num_tiles_height: int,
+    num_tiles_width: int,
 ) -> torch.Tensor: ...
 @lru_cache(maxsize=1)
 def find_supported_resolutions(
-    max_num_chunks: int, patch_size: SizeDict
+    max_num_chunks: int,
+    patch_size: SizeDict,
 ) -> torch.Tensor: ...
 def pad_to_best_fit(
     images: torch.Tensor,
@@ -65,7 +69,9 @@ class Llama4ImageProcessorFast(BaseImageProcessorFast):
     ) -> torch.Tensor: ...
     @auto_docstring
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[Llama4ImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[Llama4ImageProcessorKwargs],
     ) -> BatchFeature: ...
 
 __all__ = ["Llama4ImageProcessorFast"]

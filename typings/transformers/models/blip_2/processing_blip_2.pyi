@@ -15,7 +15,11 @@ class Blip2Processor(ProcessorMixin):
     image_processor_class = ...
     tokenizer_class = ...
     def __init__(
-        self, image_processor, tokenizer, num_query_tokens=..., **kwargs
+        self,
+        image_processor,
+        tokenizer,
+        num_query_tokens=...,
+        **kwargs,
     ) -> None: ...
     def __call__(
         self,

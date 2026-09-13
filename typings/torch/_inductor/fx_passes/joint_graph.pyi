@@ -34,7 +34,9 @@ class UniformValueConstantFolder(ConstantFolder):
     def __init__(self, gm, skip_constructors=...) -> None: ...
     def insertable_tensor_check(self, t: torch.Tensor) -> bool: ...
     def add_node_replacement(
-        self, node: torch.fx.Node, tensor: torch.Tensor
+        self,
+        node: torch.fx.Node,
+        tensor: torch.Tensor,
     ) -> None: ...
     def insert_placerholder_values(self, env: dict[torch.fx.Node, Any]) -> None: ...
 
@@ -55,7 +57,13 @@ def joint_graph_passes(graph: torch.fx.GraphModule) -> GraphModule: ...
     pass_dict=patterns,
 )
 def fix_iota_device(
-    match: Match, length, start, step, dtype, device, requires_grad
+    match: Match,
+    length,
+    start,
+    step,
+    dtype,
+    device,
+    requires_grad,
 ) -> None: ...
 @register_graph_pattern(
     CallFunction(
@@ -70,7 +78,10 @@ def fix_iota_device(
     pass_dict=patterns,
 )
 def pointless_convert(
-    match: Match, arg, dtype1: torch.dtype, dtype2: torch.dtype
+    match: Match,
+    arg,
+    dtype1: torch.dtype,
+    dtype2: torch.dtype,
 ) -> None: ...
 def definitely_equal(
     old_sizes: Sequence[torch.SymInt | int],
@@ -102,8 +113,20 @@ def pointless_permute_pair(match: Match, arg, perm1, perm2) -> None: ...
 @register_graph_pattern(CallFunction(aten.bmm, Arg(), Arg()), pass_dict=patterns)
 def bmm_to_mm(match: Match, mat1: torch.fx.Node, mat2: torch.fx.Node) -> None: ...
 def mul_softmax_pattern(
-    match: Match, *, inp, other, dim, keepdim, dtype=...
+    match: Match,
+    *,
+    inp,
+    other,
+    dim,
+    keepdim,
+    dtype=...,
 ) -> None: ...
 def div_softmax_pattern(
-    match: Match, *, inp, other, dim, keepdim, dtype=...
+    match: Match,
+    *,
+    inp,
+    other,
+    dim,
+    keepdim,
+    dtype=...,
 ) -> None: ...

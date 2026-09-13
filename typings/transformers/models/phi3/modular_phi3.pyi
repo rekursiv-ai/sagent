@@ -25,7 +25,12 @@ class Phi3MLP(nn.Module):
     def forward(self, hidden_states: torch.FloatTensor) -> torch.FloatTensor: ...
 
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Tensor, Tensor]:
     ...
 
@@ -56,7 +61,8 @@ class Phi3DecoderLayer(MistralDecoderLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class Phi3PreTrainedModel(MistralPreTrainedModel): ...

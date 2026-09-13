@@ -25,7 +25,9 @@ _CHECKPOINT_FOR_DOC = ...
 LARGE_NEGATIVE = ...
 
 def shift_tokens_right(
-    input_ids: tf.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: tf.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ): ...
 
 class TFConv1dSubsampler(keras.layers.Layer):
@@ -43,11 +45,15 @@ class TFSpeech2TextSinusoidalPositionalEmbedding(keras.layers.Layer):
         **kwargs,
     ) -> None: ...
     def call(
-        self, input_ids: tf.Tensor, past_key_values_length: int = ...
+        self,
+        input_ids: tf.Tensor,
+        past_key_values_length: int = ...,
     ) -> tf.Tensor: ...
     @staticmethod
     def create_position_ids_from_input_ids(
-        input_ids: tf.Tensor, padding_idx: int, past_key_values_length: int | None = ...
+        input_ids: tf.Tensor,
+        padding_idx: int,
+        past_key_values_length: int | None = ...,
     ) -> tf.Tensor: ...
 
 class TFSpeech2TextAttention(keras.layers.Layer):
@@ -239,7 +245,8 @@ class TFSpeech2TextModel(TFSpeech2TextPreTrainedModel):
     SPEECH_TO_TEXT_START_DOCSTRING,
 )
 class TFSpeech2TextForConditionalGeneration(
-    TFSpeech2TextPreTrainedModel, TFCausalLanguageModelingLoss
+    TFSpeech2TextPreTrainedModel,
+    TFCausalLanguageModelingLoss,
 ):
     def __init__(self, config: Speech2TextConfig) -> None: ...
     def get_encoder(self):  # -> TFSpeech2TextEncoder:
@@ -250,7 +257,8 @@ class TFSpeech2TextForConditionalGeneration(
     @unpack_inputs
     @add_start_docstrings_to_model_forward(SPEECH_TO_TEXT_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFSeq2SeqLMOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFSeq2SeqLMOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -290,7 +298,8 @@ class TFSpeech2TextForConditionalGeneration(
     def build(self, input_shape=...):  # -> None:
         ...
     def tf_to_pt_weight_rename(
-        self, tf_weight
+        self,
+        tf_weight,
     ):  # -> tuple[Literal['lm_head.weight'], Literal['model.decoder.embed_tokens.weight']] | tuple[Any]:
         ...
 

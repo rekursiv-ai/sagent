@@ -79,14 +79,16 @@ class TestLoadIndex:
 class TestBuildSystemSection:
     def test_mentions_path(self, tmp_path: Path) -> None:
         out = memory.build_system_section(
-            "/some/cwd", projects_dir=tmp_path / "projects"
+            "/some/cwd",
+            projects_dir=tmp_path / "projects",
         )
         assert "auto memory" in out
         assert "memory" in out.lower()
 
     def test_empty_index_note(self, tmp_path: Path) -> None:
         out = memory.build_system_section(
-            "/nonexistent", projects_dir=tmp_path / "projects"
+            "/nonexistent",
+            projects_dir=tmp_path / "projects",
         )
         assert "no memories yet" in out.lower()
 

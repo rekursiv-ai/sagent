@@ -43,15 +43,26 @@ class OpsHandler(Generic[T]):
     def floor_to_int(self, x: T, dtype: torch.dtype) -> T: ...
     def round_to_int(self, x: T, dtype: torch.dtype) -> T: ...
     def to_dtype_bitcast(
-        self, x: T, dtype: torch.dtype, src_dtype: torch.dtype
+        self,
+        x: T,
+        dtype: torch.dtype,
+        src_dtype: torch.dtype,
     ) -> T: ...
     def identity(self, x: T) -> T: ...
     def indirect_indexing(
-        self, x: T, size: sympy.Expr, check: bool = ..., wrap_neg=...
+        self,
+        x: T,
+        size: sympy.Expr,
+        check: bool = ...,
+        wrap_neg=...,
     ) -> sympy.Expr: ...
     def load(self, name: str, index: sympy.Expr) -> T: ...
     def store(
-        self, name: str, index: sympy.Expr, value: T, mode: StoreMode = ...
+        self,
+        name: str,
+        index: sympy.Expr,
+        value: T,
+        mode: StoreMode = ...,
     ) -> None: ...
     def reduction(
         self,
@@ -203,7 +214,11 @@ class OpsHandler(Generic[T]):
     def remainder(self, x0: T, x1: T) -> T: ...
     def square(self, x0: T) -> T: ...
     def check_bounds(
-        self, expr: sympy.Expr, size: sympy.Expr, lower: bool, upper: bool
+        self,
+        expr: sympy.Expr,
+        size: sympy.Expr,
+        lower: bool,
+        upper: bool,
     ) -> None: ...
     def halide_clamp(self, value: T, size: sympy.Expr, check: bool) -> T: ...
     def inline_asm_elementwise(
@@ -342,7 +357,9 @@ class OpCounterCSE(DefaultHandler):
 class ExtractConstantsHandler(NoopHandler):
     def __init__(self, device: torch.device | None) -> None: ...
     def constant(
-        self, value: Any, dtype: torch.dtype
+        self,
+        value: Any,
+        dtype: torch.dtype,
     ) -> torch._inductor.ir.Constant: ...
 
 class SimpleCSEHandler(WrapperHandler):

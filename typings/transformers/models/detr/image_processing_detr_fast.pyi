@@ -27,7 +27,10 @@ logger = ...
 SUPPORTED_ANNOTATION_FORMATS = ...
 
 def convert_coco_poly_to_mask(
-    segmentations, height: int, width: int, device: torch.device
+    segmentations,
+    height: int,
+    width: int,
+    device: torch.device,
 ) -> torch.Tensor: ...
 def prepare_coco_detection_annotation(
     image,
@@ -70,7 +73,9 @@ class DetrImageProcessorFast(BaseImageProcessorFast):
     def __init__(self, **kwargs: Unpack[DetrFastImageProcessorKwargs]) -> None: ...
     @classmethod
     def from_dict(
-        cls, image_processor_dict: dict[str, Any], **kwargs
+        cls,
+        image_processor_dict: dict[str, Any],
+        **kwargs,
     ):  # -> tuple[Self, dict[str, Any]] | Self:
         ...
     def prepare_annotation(
@@ -99,7 +104,9 @@ class DetrImageProcessorFast(BaseImageProcessorFast):
     ):  # -> dict[Any, Any]:
         ...
     def normalize_annotation(
-        self, annotation: dict, image_size: tuple[int, int]
+        self,
+        annotation: dict,
+        image_size: tuple[int, int],
     ) -> dict: ...
     def pad(
         self,
@@ -121,11 +128,20 @@ class DetrImageProcessorFast(BaseImageProcessorFast):
     def post_process(self, outputs, target_sizes):  # -> list[dict[str, Tensor | str]]:
         ...
     def post_process_segmentation(
-        self, outputs, target_sizes, threshold=..., mask_threshold=...
+        self,
+        outputs,
+        target_sizes,
+        threshold=...,
+        mask_threshold=...,
     ):  # -> list[Any]:
         ...
     def post_process_instance(
-        self, results, outputs, orig_target_sizes, max_target_sizes, threshold=...
+        self,
+        results,
+        outputs,
+        orig_target_sizes,
+        max_target_sizes,
+        threshold=...,
     ): ...
     def post_process_panoptic(
         self,
@@ -144,7 +160,9 @@ class DetrImageProcessorFast(BaseImageProcessorFast):
     ):  # -> list[Any]:
         ...
     def post_process_semantic_segmentation(
-        self, outputs, target_sizes: list[tuple[int, int]] | None = ...
+        self,
+        outputs,
+        target_sizes: list[tuple[int, int]] | None = ...,
     ):  # -> list[Tensor]:
         ...
     def post_process_instance_segmentation(

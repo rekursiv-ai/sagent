@@ -56,7 +56,9 @@ class DPTImageProcessorFast(BaseImageProcessorFast):
         **kwargs: Unpack[DPTFastImageProcessorKwargs],
     ) -> BatchFeature: ...
     def post_process_semantic_segmentation(
-        self, outputs, target_sizes: list[tuple] | None = ...
+        self,
+        outputs,
+        target_sizes: list[tuple] | None = ...,
     ):  # -> list[Any]:
         ...
     def resize(
@@ -69,7 +71,9 @@ class DPTImageProcessorFast(BaseImageProcessorFast):
         keep_aspect_ratio: bool = ...,
     ) -> torch.Tensor: ...
     def pad_image(
-        self, image: torch.Tensor, size_divisor: int = ...
+        self,
+        image: torch.Tensor,
+        size_divisor: int = ...,
     ) -> torch.Tensor: ...
     def post_process_depth_estimation(
         self,

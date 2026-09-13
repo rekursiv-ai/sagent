@@ -23,7 +23,7 @@ def _row() -> ModelCapability:
             {
                 "": ModelLimits(max_request_tokens=200_000),
                 "+1m": ModelLimits(max_request_tokens=1_000_000),
-            }
+            },
         ),
         prices=PriceCatalog({PriceCatalogProduct(): TokenPrice(request=5.0)}),
         thinking_effort=frozenset({"none", "low", "high"}),
@@ -77,7 +77,7 @@ def test_the_meet_only_removes() -> None:
 
 def test_the_meet_cannot_grant() -> None:
     met = ModelCapability(thinking_effort=frozenset({"none"})) & ModelCapability(
-        thinking_effort=frozenset({"none", "max"})
+        thinking_effort=frozenset({"none", "max"}),
     )
     assert met.thinking_effort == frozenset({"none"})
 
@@ -272,7 +272,8 @@ def test_adopt_drops_a_knob_the_new_model_rejects() -> None:
 
 def test_narrowest_is_the_unset_value_of_every_axis_that_offers_one() -> None:
     assert ModelSettings.narrowest(_row()) == ModelSettings(
-        capability=_row(), cache_ttl_sec=300.0
+        capability=_row(),
+        cache_ttl_sec=300.0,
     )
 
 
@@ -314,7 +315,8 @@ def test_narrowest_climbs_an_axis_that_withholds_its_unset_value() -> None:
     ids=["bare", "self"],
 )
 def test_narrowest_builds_against_what_it_narrowed(
-    models: ModelCapability, transport: ModelCapability
+    models: ModelCapability,
+    transport: ModelCapability,
 ) -> None:
     """Construction validates, so an unselectable narrowest would raise here."""
     capability = models & transport

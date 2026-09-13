@@ -79,15 +79,24 @@ def sigmoid_focal_loss(
 ) -> Tensor: ...
 def pair_wise_dice_loss(inputs: Tensor, labels: Tensor) -> Tensor: ...
 def pair_wise_sigmoid_focal_loss(
-    inputs: Tensor, labels: Tensor, alpha: float = ..., gamma: float = ...
+    inputs: Tensor,
+    labels: Tensor,
+    alpha: float = ...,
+    gamma: float = ...,
 ) -> Tensor: ...
 
 class DetrAttention(nn.Module):
     def __init__(
-        self, embed_dim: int, num_heads: int, dropout: float = ..., bias: bool = ...
+        self,
+        embed_dim: int,
+        num_heads: int,
+        dropout: float = ...,
+        bias: bool = ...,
     ) -> None: ...
     def with_pos_embed(
-        self, tensor: torch.Tensor, object_queries: Tensor | None
+        self,
+        tensor: torch.Tensor,
+        object_queries: Tensor | None,
     ):  # -> Tensor:
         ...
     def forward(
@@ -100,7 +109,9 @@ class DetrAttention(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class DetrDecoderLayer(GradientCheckpointingLayer):
@@ -135,11 +146,18 @@ class DetrDecoder(nn.Module):
 
 class MaskFormerHungarianMatcher(nn.Module):
     def __init__(
-        self, cost_class: float = ..., cost_mask: float = ..., cost_dice: float = ...
+        self,
+        cost_class: float = ...,
+        cost_mask: float = ...,
+        cost_dice: float = ...,
     ) -> None: ...
     @torch.no_grad()
     def forward(
-        self, masks_queries_logits, class_queries_logits, mask_labels, class_labels
+        self,
+        masks_queries_logits,
+        class_queries_logits,
+        mask_labels,
+        class_labels,
     ) -> list[tuple[Tensor]]: ...
     def __repr__(self):  # -> str:
         ...
@@ -175,7 +193,9 @@ class MaskFormerLoss(nn.Module):
     ) -> dict[str, Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> dict[str, Tensor]: ...
     def get_num_masks(
-        self, class_labels: torch.Tensor, device: torch.device
+        self,
+        class_labels: torch.Tensor,
+        device: torch.device,
     ) -> torch.Tensor: ...
 
 class MaskFormerFPNConvLayer(nn.Module):
@@ -196,14 +216,21 @@ class MaskFormerFPNLayer(nn.Module):
 
 class MaskFormerFPNModel(nn.Module):
     def __init__(
-        self, in_features: int, lateral_widths: list[int], feature_size: int = ...
+        self,
+        in_features: int,
+        lateral_widths: list[int],
+        feature_size: int = ...,
     ) -> None: ...
     def forward(self, features: list[Tensor]) -> list[Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> list[Tensor]: ...
 
 class MaskFormerPixelDecoder(nn.Module):
     def __init__(
-        self, *args, feature_size: int = ..., mask_feature_size: int = ..., **kwargs
+        self,
+        *args,
+        feature_size: int = ...,
+        mask_feature_size: int = ...,
+        **kwargs,
     ) -> None: ...
     def forward(
         self,
@@ -237,7 +264,11 @@ class PredictionBlock(nn.Module):
 
 class MaskformerMLPPredictionHead(nn.Module):
     def __init__(
-        self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int = ...
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        output_dim: int,
+        num_layers: int = ...,
     ) -> None: ...
     def forward(self, input: Tensor) -> Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> Tensor: ...
@@ -251,7 +282,9 @@ class MaskFormerPixelLevelModule(nn.Module):
         return_dict: bool = ...,
     ) -> MaskFormerPixelLevelModuleOutput: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> MaskFormerPixelLevelModuleOutput: ...
 
 class MaskFormerTransformerModule(nn.Module):
@@ -296,7 +329,8 @@ class MaskFormerForInstanceSegmentation(MaskFormerPreTrainedModel):
     ) -> dict[str, Tensor]: ...
     def get_loss(self, loss_dict: dict[str, Tensor]) -> Tensor: ...
     def get_logits(
-        self, outputs: MaskFormerModelOutput
+        self,
+        outputs: MaskFormerModelOutput,
     ) -> tuple[Tensor, Tensor, dict[str, Tensor]]: ...
     @auto_docstring
     def forward(

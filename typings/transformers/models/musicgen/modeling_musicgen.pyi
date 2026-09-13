@@ -37,7 +37,9 @@ class MusicgenUnconditionalInput(ModelOutput):
     guidance_scale: float | None = ...
 
 def shift_tokens_right(
-    input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: torch.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ):  # -> Tensor:
     ...
 
@@ -50,7 +52,9 @@ class MusicgenSinusoidalPositionalEmbedding(nn.Module):
         ...
     @torch.no_grad()
     def forward(
-        self, input_ids: torch.Tensor, past_key_values_length: int = ...
+        self,
+        input_ids: torch.Tensor,
+        past_key_values_length: int = ...,
     ):  # -> Tensor | Any:
         ...
 
@@ -329,7 +333,8 @@ class MusicgenForConditionalGeneration(MusicgenPreTrainedModel, GenerationMixin)
     ):  # -> GenerateNonBeamOutput | LongTensor | Any | Tensor:
         ...
     def get_unconditional_inputs(
-        self, num_samples=...
+        self,
+        num_samples=...,
     ):  # -> MusicgenUnconditionalInput:
         ...
 

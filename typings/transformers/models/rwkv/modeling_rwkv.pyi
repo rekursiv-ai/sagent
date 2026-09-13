@@ -20,28 +20,48 @@ def load_wkv_cuda_kernel(context_length):  # -> None:
 class RwkvLinearAttention(torch.autograd.Function):
     @staticmethod
     def forward(
-        ctx, time_decay, time_first, key, value, state=..., return_state=...
+        ctx,
+        time_decay,
+        time_first,
+        key,
+        value,
+        state=...,
+        return_state=...,
     ):  # -> tuple[Tensor, list[Tensor] | None]:
         ...
     @staticmethod
     def backward(
-        ctx, g_output, g_state=...
+        ctx,
+        g_output,
+        g_state=...,
     ):  # -> tuple[Tensor, Tensor, Tensor, Tensor, None, None]:
         ...
 
 def rwkv_linear_attention_cpu(
-    time_decay, time_first, key, value, state=..., return_state=...
+    time_decay,
+    time_first,
+    key,
+    value,
+    state=...,
+    return_state=...,
 ):  # -> tuple[Tensor, list[Tensor | Any] | None]:
     ...
 def rwkv_linear_attention(
-    time_decay, time_first, key, value, state=..., return_state=...
+    time_decay,
+    time_first,
+    key,
+    value,
+    state=...,
+    return_state=...,
 ):  # -> tuple[Tensor, list[Tensor | Any] | None] | Any | None:
     ...
 
 class RwkvSelfAttention(nn.Module):
     def __init__(self, config, layer_id=...) -> None: ...
     def extract_key_value(
-        self, hidden, state=...
+        self,
+        hidden,
+        state=...,
     ):  # -> tuple[Tensor, Any, Any, Any | None]:
         ...
     def forward(self, hidden, state=..., use_cache=...):  # -> tuple[Any, Any | None]:
@@ -55,7 +75,11 @@ class RwkvFeedForward(nn.Module):
 class RwkvBlock(GradientCheckpointingLayer):
     def __init__(self, config, layer_id) -> None: ...
     def forward(
-        self, hidden, state=..., use_cache=..., output_attentions=...
+        self,
+        hidden,
+        state=...,
+        use_cache=...,
+        output_attentions=...,
     ):  # -> tuple[Any, Any, Any] | tuple[Any, Any, None]:
         ...
 
@@ -72,7 +96,7 @@ class RwkvPreTrainedModel(PreTrainedModel):
 @auto_docstring(
     custom_intro="""
     Class for the RWKV model outputs.
-    """
+    """,
 )
 class RwkvOutput(ModelOutput):
     last_hidden_state: torch.FloatTensor | None = ...
@@ -118,7 +142,12 @@ class RwkvForCausalLM(RwkvPreTrainedModel, GenerationMixin):
     def set_output_embeddings(self, new_embeddings):  # -> None:
         ...
     def prepare_inputs_for_generation(
-        self, input_ids, state=..., inputs_embeds=..., use_cache=..., **kwargs
+        self,
+        input_ids,
+        state=...,
+        inputs_embeds=...,
+        use_cache=...,
+        **kwargs,
     ):  # -> dict[str, Any]:
         ...
     @auto_docstring

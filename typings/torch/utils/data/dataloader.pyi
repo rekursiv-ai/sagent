@@ -25,7 +25,11 @@ class _DatasetKind:
     Iterable = ...
     @staticmethod
     def create_fetcher(
-        kind, dataset, auto_collation, collate_fn, drop_last
+        kind,
+        dataset,
+        auto_collation,
+        collate_fn,
+        drop_last,
     ) -> _MapDatasetFetcher | _IterableDatasetFetcher: ...
 
 class _InfiniteConstantSampler(Sampler):

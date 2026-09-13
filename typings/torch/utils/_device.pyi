@@ -14,7 +14,8 @@ class DeviceContext(TorchFunctionMode):
     def __torch_function__(self, func, types, args=..., kwargs=...): ...
 
 def device_decorator(
-    device, func
+    device,
+    func,
 ) -> (
     _Wrapped[..., Any, ..., Generator[Any, Any, Any]] | _Wrapped[..., Any, ..., Any]
 ): ...

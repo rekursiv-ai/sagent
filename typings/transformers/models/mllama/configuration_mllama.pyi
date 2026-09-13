@@ -53,7 +53,11 @@ class MllamaTextConfig(PretrainedConfig):
 
 class MllamaConfig(PretrainedConfig):
     def __init__(
-        self, vision_config=..., text_config=..., image_token_index=..., **kwargs
+        self,
+        vision_config=...,
+        text_config=...,
+        image_token_index=...,
+        **kwargs,
     ) -> None: ...
 
 __all__ = ["MllamaConfig"]

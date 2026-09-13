@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 _SPINNER: Final = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _WAIT_REASON_THRESHOLD_SEC = (
-    15.0  # config-globals: ignore -- wait-reason display threshold, tunable
+    15.0  # house-ignore[globals] -- Wait-reason display threshold, tunable.
 )
 
 

@@ -5,7 +5,10 @@ import numpy as np
 logger = ...
 
 def load_pytorch_checkpoint_in_flax_state_dict(
-    flax_model, pytorch_checkpoint_path, is_sharded, allow_missing_keys=...
+    flax_model,
+    pytorch_checkpoint_path,
+    is_sharded,
+    allow_missing_keys=...,
 ): ...
 def rename_key_and_reshape_tensor(
     pt_tuple_key: tuple[str],

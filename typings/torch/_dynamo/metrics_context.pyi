@@ -26,7 +26,8 @@ class TopN:
     def __iter__(self) -> Iterator[tuple[Any, int]]: ...
 
 type OnExitType = Callable[
-    [int, int, dict[str, Any], type[BaseException] | None, BaseException | None], None
+    [int, int, dict[str, Any], type[BaseException] | None, BaseException | None],
+    None,
 ]
 
 class MetricsContext:
@@ -50,6 +51,9 @@ class MetricsContext:
 class RuntimeMetricsContext:
     def __init__(self, on_exit: OnExitType) -> None: ...
     def increment(
-        self, metric: str, value: int, extra: dict[str, Any] | None = ...
+        self,
+        metric: str,
+        value: int,
+        extra: dict[str, Any] | None = ...,
     ) -> None: ...
     def finish(self) -> None: ...

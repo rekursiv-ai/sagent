@@ -62,33 +62,49 @@ class ComboKernel(Kernel):
         grid_expr = SequentialComboKernelGrid
         @classmethod
         def codegen_pid_range(
-            cls, kernel: ComboKernel, num: int, code: IndentedBuffer
+            cls,
+            kernel: ComboKernel,
+            num: int,
+            code: IndentedBuffer,
         ) -> None: ...
 
     class RoundRobinDispatch:
         grid_expr = RoundRobinComboKernelGrid
         @classmethod
         def codegen_pid_range(
-            cls, kernel: ComboKernel, num: int, code: IndentedBuffer
+            cls,
+            kernel: ComboKernel,
+            num: int,
+            code: IndentedBuffer,
         ) -> None: ...
 
     def __init__(
-        self, enable_autotune: bool = ..., mixed_sizes: bool = ...
+        self,
+        enable_autotune: bool = ...,
+        mixed_sizes: bool = ...,
     ) -> None: ...
     def create_sub_kernel(self, triton_kernel: TritonKernel) -> TritonKernel: ...
     @staticmethod
     def create_triton_kernel(
-        tiling: dict[str, sympy.Expr], features: SIMDKernelFeatures, optimize_mask: bool
+        tiling: dict[str, sympy.Expr],
+        features: SIMDKernelFeatures,
+        optimize_mask: bool,
     ) -> TritonKernel: ...
     def codegen_static_numels_sub_kernel(
-        self, code: IndentedBuffer, sub_kernel: TritonKernel, num: int
+        self,
+        code: IndentedBuffer,
+        sub_kernel: TritonKernel,
+        num: int,
     ) -> list[str]: ...
     def min_x_blocks_sub_kernel(self, sub_kernel: TritonKernel, num: int) -> None: ...
     def select_heuristics(
-        self, sub_kernel: TritonKernel
+        self,
+        sub_kernel: TritonKernel,
     ) -> tuple[str, dict[str, int]]: ...
     def select_combo_heuristics(
-        self, heuristics_list: list[str], size_hints_list: list[dict[str, int]]
+        self,
+        heuristics_list: list[str],
+        size_hints_list: list[dict[str, int]],
     ) -> tuple[str, dict[str, int], TritonKernel]: ...
     def get_mutated_args_sub_kernels(self) -> list[str]: ...
     def select_dispatch_strategy(self) -> None: ...
@@ -104,17 +120,25 @@ class ComboKernel(Kernel):
     def codegen_blocks(self, code: IndentedBuffer) -> None: ...
     def get_block_args(self) -> list[ConstexprArg]: ...
     def add_numel_to_args(
-        self, argdefs: list[ArgName], signature: list[Any]
+        self,
+        argdefs: list[ArgName],
+        signature: list[Any],
     ) -> list[ArgName]: ...
     def add_numel_to_call_args(
-        self, name: str, call_args: list[Any], arg_types: list[Any]
+        self,
+        name: str,
+        call_args: list[Any],
+        arg_types: list[Any],
     ) -> None: ...
     def kernel_benchmark_extra_args(self) -> list[str]: ...
     def codegen_kernel(self, name: str | None = ...) -> str: ...
     def codegen_kernel_benchmark(self, num_gb: float) -> IndentedBuffer: ...
     def imports_for_benchmark_kernel(self) -> str: ...
     def uniquify_block_sizes(
-        self, code: IndentedBuffer, num_kernel: int, uniquify: list[str]
+        self,
+        code: IndentedBuffer,
+        num_kernel: int,
+        uniquify: list[str],
     ) -> IndentedBuffer: ...
     def call_kernel(self, code: IndentedBuffer, name: str) -> None: ...
     def combo_grid_meta(self) -> dict[str, Any]: ...

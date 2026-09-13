@@ -60,7 +60,10 @@ class TFConvNextStage(keras.layers.Layer):
 class TFConvNextEncoder(keras.layers.Layer):
     def __init__(self, config, **kwargs) -> None: ...
     def call(
-        self, hidden_states, output_hidden_states=..., return_dict=...
+        self,
+        hidden_states,
+        output_hidden_states=...,
+        return_dict=...,
     ):  # -> tuple[Any | tuple[Any, ...] | tuple[()], ...] | TFBaseModelOutput:
         ...
     def build(self, input_shape=...):  # -> None:
@@ -70,7 +73,10 @@ class TFConvNextEncoder(keras.layers.Layer):
 class TFConvNextMainLayer(keras.layers.Layer):
     config_class = ConvNextConfig
     def __init__(
-        self, config: ConvNextConfig, add_pooling_layer: bool = ..., **kwargs
+        self,
+        config: ConvNextConfig,
+        add_pooling_layer: bool = ...,
+        **kwargs,
     ) -> None: ...
     @unpack_inputs
     def call(
@@ -100,7 +106,8 @@ class TFConvNextModel(TFConvNextPreTrainedModel):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(CONVNEXT_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFBaseModelOutputWithPooling, config_class=_CONFIG_FOR_DOC
+        output_type=TFBaseModelOutputWithPooling,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -117,13 +124,15 @@ class TFConvNextModel(TFConvNextPreTrainedModel):
     CONVNEXT_START_DOCSTRING,
 )
 class TFConvNextForImageClassification(
-    TFConvNextPreTrainedModel, TFSequenceClassificationLoss
+    TFConvNextPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config: ConvNextConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(CONVNEXT_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFSequenceClassifierOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFSequenceClassifierOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,

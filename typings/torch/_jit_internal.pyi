@@ -53,7 +53,13 @@ def get_annotation_str(annotation) -> str | None: ...
 def get_type_hint_captures(fn) -> dict[Any, Any]: ...
 def createResolutionCallbackForClassMethods(cls) -> Callable[..., Any | None]: ...
 def boolean_dispatch(
-    arg_name, arg_index, default, if_true, if_false, module_name, func_name
+    arg_name,
+    arg_index,
+    default,
+    if_true,
+    if_false,
+    module_name,
+    func_name,
 ) -> Callable[..., Any]: ...
 
 class FunctionModifiers:

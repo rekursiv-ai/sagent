@@ -26,7 +26,6 @@ import yaml
 
 
 _RECIPE_PATH: Final = "sagent/assets/sagent.yaml"
-_RE_INCLUDE = re.compile(r"\{\{include:\s*(.+?)\}\}")
 
 
 def main() -> int:
@@ -64,19 +63,17 @@ def main() -> int:
     if missing_entry_points:
         raise SystemExit(
             "wheel is missing required console scripts: "
-            + ", ".join(missing_entry_points)
+            + ", ".join(missing_entry_points),
         )
     return 0
 
 
+# Derived from ``[tool.hatch.build.targets.wheel]`` in ``pyproject.toml``: every ``.py``
+# under each configured package, minus the wheel ``exclude`` globs. Reading the build
+# config here keeps the check from drifting when modules are added, renamed, or
+# restructured.
 def _expected_modules() -> frozenset[str]:
-    """Return package ``.py`` paths that must appear in the wheel.
-
-    Derived from ``[tool.hatch.build.targets.wheel]`` in ``pyproject.toml``:
-    every ``.py`` under each configured package, minus the wheel ``exclude``
-    globs. Reading the build config here keeps the check from drifting when
-    modules are added, renamed, or restructured.
-    """
+    """Return package ``.py`` paths that must appear in the wheel."""
     config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
     wheel = (
         config.get("tool", {})
@@ -133,7 +130,7 @@ def _recipe_assets(recipe: dict[str, object]) -> list[str]:
         for key, value in values.items():
             if not isinstance(value, str):
                 raise SystemExit(
-                    f"invalid {_RECIPE_PATH}: {section_name}.{key} must be a string"
+                    f"invalid {_RECIPE_PATH}: {section_name}.{key} must be a string",
                 )
             assets.append(_normalize_asset(value, f"{section_name}.{key}"))
     return assets
@@ -153,7 +150,7 @@ def _validate_asset(
     if wheel_path not in names:
         raise SystemExit("wheel is missing recipe asset: " + " -> ".join(chain))
     text = archive.read(wheel_path).decode()
-    for match in _RE_INCLUDE.finditer(text):
+    for match in re.finditer(r"\{\{include:\s*(.+?)\}\}", text):
         included = _normalize_asset(match.group(1).strip(), " -> ".join(chain))
         _validate_asset(archive, names, included, chain)
 
@@ -163,7 +160,7 @@ def _normalize_asset(path: str, context: str) -> str:
     parsed = PurePosixPath(path)
     if parsed.is_absolute() or ".." in parsed.parts:
         raise SystemExit(
-            f"invalid {_RECIPE_PATH}: {context} must stay inside sagent/assets"
+            f"invalid {_RECIPE_PATH}: {context} must stay inside sagent/assets",
         )
     return parsed.as_posix()
 

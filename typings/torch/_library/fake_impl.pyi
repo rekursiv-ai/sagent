@@ -15,11 +15,17 @@ class FakeImplHolder:
     @kernel.setter
     def kernel(self, value): ...
     def register(
-        self, func: Callable, source: str, lib, *, allow_override=...
+        self,
+        func: Callable,
+        source: str,
+        lib,
+        *,
+        allow_override=...,
     ) -> RegistrationHandle: ...
 
 def construct_meta_kernel(
-    qualname: str, fake_impl_holder: FakeImplHolder
+    qualname: str,
+    fake_impl_holder: FakeImplHolder,
 ) -> Callable: ...
 def get_none() -> None: ...
 

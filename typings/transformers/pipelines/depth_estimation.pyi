@@ -18,7 +18,9 @@ class DepthEstimationPipeline(Pipeline):
     def __call__(self, inputs: str | Image.Image, **kwargs: Any) -> dict[str, Any]: ...
     @overload
     def __call__(
-        self, inputs: list[str | Image.Image], **kwargs: Any
+        self,
+        inputs: list[str | Image.Image],
+        **kwargs: Any,
     ) -> list[dict[str, Any]]: ...
     def __call__(
         self,
@@ -26,7 +28,9 @@ class DepthEstimationPipeline(Pipeline):
         **kwargs: Any,
     ) -> dict[str, Any] | list[dict[str, Any]]: ...
     def preprocess(
-        self, image, timeout=...
+        self,
+        image,
+        timeout=...,
     ):  # -> transformers.feature_extraction_utils.BatchFeature | Any | transformers.image_processing_base.BatchFeature:
         ...
     def postprocess(self, model_outputs):  # -> list[Any]:

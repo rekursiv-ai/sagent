@@ -26,7 +26,11 @@ class PromptDepthAnythingLayer(nn.Module):
 class PromptDepthAnythingFeatureFusionLayer(DepthAnythingFeatureFusionLayer):
     def __init__(self, config: PromptDepthAnythingConfig) -> None: ...
     def forward(
-        self, hidden_state, residual=..., size=..., prompt_depth=...
+        self,
+        hidden_state,
+        residual=...,
+        size=...,
+        prompt_depth=...,
     ):  # -> Any:
         ...
 
@@ -36,7 +40,10 @@ class PromptDepthAnythingFeatureFusionStage(DepthAnythingFeatureFusionStage):
 
 class PromptDepthAnythingDepthEstimationHead(DepthAnythingDepthEstimationHead):
     def forward(
-        self, hidden_states: list[torch.Tensor], patch_height: int, patch_width: int
+        self,
+        hidden_states: list[torch.Tensor],
+        patch_height: int,
+        patch_width: int,
     ) -> torch.Tensor: ...
 
 @auto_docstring
@@ -48,7 +55,10 @@ class PromptDepthAnythingPreTrainedModel(PreTrainedModel):
 
 class PromptDepthAnythingReassembleLayer(nn.Module):
     def __init__(
-        self, config: PromptDepthAnythingConfig, channels: int, factor: int
+        self,
+        config: PromptDepthAnythingConfig,
+        channels: int,
+        factor: int,
     ) -> None: ...
     def forward(self, hidden_state):  # -> Any:
         ...

@@ -37,13 +37,19 @@ class ReenterWith:
     stack_index: int
     target_values: tuple[Any, ...] | None = ...
     def try_except_torch_function_mode(
-        self, code_options: dict[str, Any], cleanup: list[Instruction]
+        self,
+        code_options: dict[str, Any],
+        cleanup: list[Instruction],
     ) -> list[Instruction]: ...
     def try_finally(
-        self, code_options: dict[str, Any], cleanup: list[Instruction]
+        self,
+        code_options: dict[str, Any],
+        cleanup: list[Instruction],
     ) -> list[Instruction]: ...
     def __call__(
-        self, code_options: dict[str, Any], cleanup: list[Instruction]
+        self,
+        code_options: dict[str, Any],
+        cleanup: list[Instruction],
     ) -> tuple[list[Instruction], Instruction | None]: ...
 
 @dataclasses.dataclass

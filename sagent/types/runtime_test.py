@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from sagent.types import runtime as types_runtime
+from sagent.types import runtime
 from sagent.types.runtime import (
     AssistantMessage,
     Recompact,
@@ -46,7 +46,7 @@ def test_assistant_message_rejects_duplicate_tool_call_ids() -> None:
             tool_calls=(
                 ToolCall(id="x", name="a", args={}),
                 ToolCall(id="x", name="b", args={}),
-            )
+            ),
         )
 
 
@@ -56,7 +56,7 @@ def test_assistant_message_accepts_unique_tool_call_ids() -> None:
         tool_calls=(
             ToolCall(id="a", name="t1", args={}),
             ToolCall(id="b", name="t2", args={}),
-        )
+        ),
     )
     assert tuple(tc.id for tc in msg.tool_calls) == ("a", "b")
 
@@ -122,7 +122,7 @@ def test_a_mint_during_a_reset_does_not_reuse_an_id() -> None:
         _ = peeked.wait(2.0)
         minted_mid_reset.append(UserMessage(text="concurrent").id)
 
-    with patch.object(types_runtime, "_id_counter", pausing_counter()):
+    with patch.object(runtime, "_id_counter", pausing_counter()):
         minter = threading.Thread(target=do_mint)
         minter.start()
         reset_id_counter(61)
@@ -136,7 +136,7 @@ def test_a_mint_during_a_reset_does_not_reuse_an_id() -> None:
 
 def test_id_counter_lock_module_attribute_exists() -> None:
     """Locks the no-regress contract: the threading lock must exist."""
-    assert isinstance(types_runtime._id_counter_lock, type(threading.Lock()))
+    assert isinstance(runtime._id_counter_lock, type(threading.Lock()))
 
 
 if __name__ == "__main__":

@@ -26,13 +26,17 @@ class ShardingSpec(ABC):
     ) -> sharded_tensor_meta.ShardedTensorMetadata: ...
     @abstractmethod
     def shard(
-        self, tensor: torch.Tensor, src_rank: int = ..., process_group=...
+        self,
+        tensor: torch.Tensor,
+        src_rank: int = ...,
+        process_group=...,
     ) -> ShardedTensor: ...
 
 _CUSTOM_SHARDING_SPEC_OPS: dict[str, dict[Callable, Callable]] = ...
 
 def custom_sharding_spec_op(
-    sharding_spec_class, func
+    sharding_spec_class,
+    func,
 ) -> partial[_Wrapped[..., Any, ..., Any]]: ...
 
 @dataclass
@@ -45,5 +49,8 @@ class EnumerableShardingSpec(ShardingSpec):
         tensor_properties: sharded_tensor_meta.TensorProperties,
     ) -> sharded_tensor_meta.ShardedTensorMetadata: ...
     def shard(
-        self, tensor: torch.Tensor, src_rank: int = ..., process_group=...
+        self,
+        tensor: torch.Tensor,
+        src_rank: int = ...,
+        process_group=...,
     ) -> ShardedTensor: ...

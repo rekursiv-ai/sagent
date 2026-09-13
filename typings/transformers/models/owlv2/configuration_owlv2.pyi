@@ -53,7 +53,10 @@ class Owlv2Config(PretrainedConfig):
     ) -> None: ...
     @classmethod
     def from_text_vision_configs(
-        cls, text_config: dict, vision_config: dict, **kwargs
+        cls,
+        text_config: dict,
+        vision_config: dict,
+        **kwargs,
     ):  # -> Self:
         ...
 

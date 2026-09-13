@@ -5,7 +5,12 @@ MULTI_SEP_TOKENS_TOKENIZERS_SET = ...
 logger = ...
 
 def squad_convert_example_to_features(
-    example, max_seq_length, doc_stride, max_query_length, padding_strategy, is_training
+    example,
+    max_seq_length,
+    doc_stride,
+    max_query_length,
+    padding_strategy,
+    is_training,
 ):  # -> list[Any]:
     ...
 def squad_convert_example_to_features_init(

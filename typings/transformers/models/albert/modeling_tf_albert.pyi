@@ -117,7 +117,10 @@ class TFAlbertPreTrainedModel(TFPreTrainedModel):
 
 class TFAlbertMLMHead(keras.layers.Layer):
     def __init__(
-        self, config: AlbertConfig, input_embeddings: keras.layers.Layer, **kwargs
+        self,
+        config: AlbertConfig,
+        input_embeddings: keras.layers.Layer,
+        **kwargs,
     ) -> None: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -133,7 +136,10 @@ class TFAlbertMLMHead(keras.layers.Layer):
 class TFAlbertMainLayer(keras.layers.Layer):
     config_class = AlbertConfig
     def __init__(
-        self, config: AlbertConfig, add_pooling_layer: bool = ..., **kwargs
+        self,
+        config: AlbertConfig,
+        add_pooling_layer: bool = ...,
+        **kwargs,
     ) -> None: ...
     def get_input_embeddings(self) -> keras.layers.Layer: ...
     def set_input_embeddings(self, value: tf.Variable):  # -> None:
@@ -174,7 +180,7 @@ class TFAlbertModel(TFAlbertPreTrainedModel):
     def __init__(self, config: AlbertConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ALBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ALBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -207,10 +213,11 @@ class TFAlbertForPreTraining(TFAlbertPreTrainedModel, TFAlbertPreTrainingLoss):
     def get_lm_head(self) -> keras.layers.Layer: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ALBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ALBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFAlbertForPreTrainingOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFAlbertForPreTrainingOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -243,10 +250,11 @@ class TFAlbertForMaskedLM(TFAlbertPreTrainedModel, TFMaskedLanguageModelingLoss)
     def get_lm_head(self) -> keras.layers.Layer: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ALBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ALBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFMaskedLMOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFMaskedLMOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -270,14 +278,15 @@ class TFAlbertForMaskedLM(TFAlbertPreTrainedModel, TFMaskedLanguageModelingLoss)
     ALBERT_START_DOCSTRING,
 )
 class TFAlbertForSequenceClassification(
-    TFAlbertPreTrainedModel, TFSequenceClassificationLoss
+    TFAlbertPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     _keys_to_ignore_on_load_missing = ...
     def __init__(self, config: AlbertConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ALBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ALBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="vumichien/albert-base-v2-imdb",
@@ -308,14 +317,15 @@ class TFAlbertForSequenceClassification(
     ALBERT_START_DOCSTRING,
 )
 class TFAlbertForTokenClassification(
-    TFAlbertPreTrainedModel, TFTokenClassificationLoss
+    TFAlbertPreTrainedModel,
+    TFTokenClassificationLoss,
 ):
     _keys_to_ignore_on_load_unexpected = ...
     _keys_to_ignore_on_load_missing = ...
     def __init__(self, config: AlbertConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ALBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ALBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -348,7 +358,7 @@ class TFAlbertForQuestionAnswering(TFAlbertPreTrainedModel, TFQuestionAnsweringL
     def __init__(self, config: AlbertConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ALBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        ALBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint="vumichien/albert-base-v2-squad2",
@@ -387,7 +397,7 @@ class TFAlbertForMultipleChoice(TFAlbertPreTrainedModel, TFMultipleChoiceLoss):
     def __init__(self, config: AlbertConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        ALBERT_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        ALBERT_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,

@@ -43,10 +43,16 @@ class OptimizerVariable(UserDefinedObjectVariable):
         **kwargs,
     ) -> None: ...
     def call_method(
-        self, tx, name, args: list[VariableTracker], kwargs: dict[str, VariableTracker]
+        self,
+        tx,
+        name,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
     ) -> VariableTracker: ...
     def var_getattr(
-        self, tx: InstructionTranslator, name
+        self,
+        tx: InstructionTranslator,
+        name,
     ) -> (
         GetAttrVariable
         | VariableTracker
@@ -60,14 +66,22 @@ class OptimizerVariable(UserDefinedObjectVariable):
     ): ...
     def graph_break_if_pending_mutation(self, tx) -> None: ...
     def get_python_args(
-        self, *args, **kwargs
+        self,
+        *args,
+        **kwargs,
     ) -> tuple[
-        list[complex | Any | list[Any]], dict[str, complex | Any | list[Any]]
+        list[complex | Any | list[Any]],
+        dict[str, complex | Any | list[Any]],
     ]: ...
     def move_step_if_cpu(self) -> None: ...
     def map_sources_and_install_guards(self, tx) -> None: ...
     def wrap_tensor(self, tx: InstructionTranslator, tensor_value) -> Any: ...
     def update_list_args(
-        self, tx: InstructionTranslator, args, kwargs, py_args, py_kwargs
+        self,
+        tx: InstructionTranslator,
+        args,
+        kwargs,
+        py_args,
+        py_kwargs,
     ) -> None: ...
     def create_finalizer(self, tx) -> None: ...

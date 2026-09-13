@@ -32,7 +32,10 @@ class FlaxViTSelfAttention(nn.Module):
     def setup(self):  # -> None:
         ...
     def __call__(
-        self, hidden_states, deterministic: bool = ..., output_attentions: bool = ...
+        self,
+        hidden_states,
+        deterministic: bool = ...,
+        output_attentions: bool = ...,
     ):  # -> tuple[Array, Any] | tuple[Array]:
         ...
 
@@ -49,7 +52,10 @@ class FlaxViTAttention(nn.Module):
     def setup(self):  # -> None:
         ...
     def __call__(
-        self, hidden_states, deterministic=..., output_attentions: bool = ...
+        self,
+        hidden_states,
+        deterministic=...,
+        output_attentions: bool = ...,
     ):  # -> tuple[Any, Any | Array] | tuple[Any]:
         ...
 
@@ -73,7 +79,10 @@ class FlaxViTLayer(nn.Module):
     def setup(self):  # -> None:
         ...
     def __call__(
-        self, hidden_states, deterministic: bool = ..., output_attentions: bool = ...
+        self,
+        hidden_states,
+        deterministic: bool = ...,
+        output_attentions: bool = ...,
     ):  # -> tuple[Any, Any | Array] | tuple[Any]:
         ...
 
@@ -129,10 +138,13 @@ class FlaxViTPreTrainedModel(FlaxPreTrainedModel):
         **kwargs,
     ) -> None: ...
     def init_weights(
-        self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...
+        self,
+        rng: jax.random.PRNGKey,
+        input_shape: tuple,
+        params: FrozenDict = ...,
     ) -> FrozenDict: ...
     @add_start_docstrings_to_model_forward(
-        VIT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        VIT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     def __call__(
         self,

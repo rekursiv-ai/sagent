@@ -57,7 +57,10 @@ class CppMicroGemm:
 
     ALLOCATE_WEIGHT_BUFFER = ...
     def codegen_allocate_weight_buffer(
-        self, buffer_name: str, buffer_dtype: str, *size_args
+        self,
+        buffer_name: str,
+        buffer_dtype: str,
+        *size_args,
     ) -> str: ...
     def is_woq_int4(self) -> Literal[False]: ...
 
@@ -87,21 +90,41 @@ def generate_gemm_config(
 class CppMicroGemmRef(CppMicroGemm):
     TEMPLATE_ENTRY = ...
     def __init__(
-        self, name, input_dtype, input2_dtype, output_dtype, compute_dtype, alpha
+        self,
+        name,
+        input_dtype,
+        input2_dtype,
+        output_dtype,
+        compute_dtype,
+        alpha,
     ) -> None: ...
     def codegen_define(self, kernel: CppTemplateKernel) -> str: ...
 
 def is_int8_woq_gemm_small_m_dim_corner_case(config, m, n, k): ...
 def check_int8_woq_small_m_dim(
-    config, m, n, k, alpha, num_threads, **kwargs
+    config,
+    m,
+    n,
+    k,
+    alpha,
+    num_threads,
+    **kwargs,
 ) -> bool: ...
 def do_not_use_with_small_m_for_int8_woq(
-    config, m, n, k, alpha, num_threads, **kwargs
+    config,
+    m,
+    n,
+    k,
+    alpha,
+    num_threads,
+    **kwargs,
 ) -> bool: ...
 
 @register_micro_gemm(
     *generate_gemm_config(
-        VecAVX512, [(8, 48, 1), (8, 32, 1), (16, 16, 1)], input_dtype=torch.float
+        VecAVX512,
+        [(8, 48, 1), (8, 32, 1), (16, 16, 1)],
+        input_dtype=torch.float,
     ),
     *generate_gemm_config(
         VecAVX512,
@@ -134,7 +157,9 @@ def do_not_use_with_small_m_for_int8_woq(
         extra_check=check_int8_woq_small_m_dim,
     ),
     *generate_gemm_config(
-        VecAVX2, [(4, 24, 1), (4, 16, 1), (8, 8, 1)], input_dtype=torch.float
+        VecAVX2,
+        [(4, 24, 1), (4, 16, 1), (8, 8, 1)],
+        input_dtype=torch.float,
     ),
     *generate_gemm_config(
         VecAVX2,
@@ -258,7 +283,13 @@ class CppMicroGemmAMX(CppMicroGemm):
     def get_b_layout(self) -> Literal[LayoutType.VNNI4, LayoutType.VNNI2]: ...
 
 def check_brgemm_extra(
-    config, m, n, k, alpha, num_threads, **kwargs
+    config,
+    m,
+    n,
+    k,
+    alpha,
+    num_threads,
+    **kwargs,
 ) -> Literal[False]: ...
 
 @register_micro_gemm(
@@ -268,7 +299,7 @@ def check_brgemm_extra(
         input_dtype=torch.half,
         output_dtype=torch.float,
         extra_check=check_brgemm_extra,
-    )
+    ),
 )
 class CppMicroBrgemm(CppMicroGemm):
     TEMPLATE_ENTRY = ...
@@ -277,7 +308,13 @@ class CppMicroBrgemm(CppMicroGemm):
     def get_b_layout(self) -> Literal[LayoutType.VNNI2]: ...
 
 def check_woq_int4_extra(
-    config, m, n, k, alpha, num_threads, **kwargs
+    config,
+    m,
+    n,
+    k,
+    alpha,
+    num_threads,
+    **kwargs,
 ) -> Literal[False]: ...
 
 @register_micro_gemm(
@@ -289,7 +326,7 @@ def check_woq_int4_extra(
         output_dtype=torch.float,
         compute_dtype=torch.float,
         extra_check=check_woq_int4_extra,
-    )
+    ),
 )
 class CppMicroGemmWoQInt4Avx512(CppMicroGemmFP32Vec):
     TEMPLATE_ENTRY = ...
@@ -307,7 +344,7 @@ class CppMicroGemmWoQInt4Avx512(CppMicroGemmFP32Vec):
         output_dtype=torch.float,
         compute_dtype=torch.float,
         extra_check=check_amx_extra,
-    )
+    ),
 )
 class CppMicroGemmWoQInt4Amx(CppMicroGemmAMX):
     TEMPLATE_ENTRY = ...

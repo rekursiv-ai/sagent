@@ -18,9 +18,15 @@ them back into an :class:`OutputSpec` for the renderer.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
-from rich.cells import chop_cells
+
+if TYPE_CHECKING:
+    from rich.cells import chop_cells
+else:
+    from wrapt import lazy_import
+
+    chop_cells = lazy_import("rich.cells", "chop_cells")  # ~60 ms; _fit uses it.
 
 
 __all__ = [

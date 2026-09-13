@@ -26,7 +26,9 @@ aten = ...
 class _ToTorchTensor(torch.autograd.Function):
     @staticmethod
     def forward(
-        ctx, input: DTensor, grad_placements: Sequence[Placement] | None
+        ctx,
+        input: DTensor,
+        grad_placements: Sequence[Placement] | None,
     ) -> Tensor: ...
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> tuple[DTensor, None]: ...
@@ -44,7 +46,8 @@ class _FromTorchTensor(torch.autograd.Function):
     ) -> DTensor: ...
     @staticmethod
     def backward(
-        ctx, grad_output: DTensor
+        ctx,
+        grad_output: DTensor,
     ) -> tuple[Tensor, None, None, None, None, None]: ...
 
 class DTensor(torch.Tensor):
@@ -55,7 +58,11 @@ class DTensor(torch.Tensor):
     @staticmethod
     @torch._disable_dynamo
     def __new__(
-        cls, local_tensor: torch.Tensor, spec: DTensorSpec, *, requires_grad: bool
+        cls,
+        local_tensor: torch.Tensor,
+        spec: DTensorSpec,
+        *,
+        requires_grad: bool,
     ) -> Self: ...
     @torch._disable_dynamo
     @mark_subclass_constructor_exportable_experimental
@@ -63,11 +70,16 @@ class DTensor(torch.Tensor):
     def __tensor_flatten__(self) -> tuple[list[str], tuple[DTensorSpec, bool]]: ...
     @staticmethod
     def __tensor_unflatten__(
-        inner_tensors, flatten_spec, outer_size, outer_stride
+        inner_tensors,
+        flatten_spec,
+        outer_size,
+        outer_stride,
     ) -> DTensor: ...
     def __coerce_tangent_metadata__(self) -> Self | DTensor: ...
     def __coerce_same_metadata_as_tangent__(
-        self, flatten_spec, expected_type=...
+        self,
+        flatten_spec,
+        expected_type=...,
     ) -> DTensor | None: ...
     @classmethod
     @torch._disable_dynamo
@@ -83,7 +95,9 @@ class DTensor(torch.Tensor):
         stride: tuple[int, ...] | None = ...,
     ) -> DTensor: ...
     def to_local(
-        self, *, grad_placements: Sequence[Placement] | None = ...
+        self,
+        *,
+        grad_placements: Sequence[Placement] | None = ...,
     ) -> torch.Tensor: ...
     def redistribute(
         self,
@@ -95,7 +109,9 @@ class DTensor(torch.Tensor):
         backward_dtype: torch.dtype | None = ...,
     ) -> DTensor: ...
     def full_tensor(
-        self, *, grad_placements: Sequence[Placement] | None = ...
+        self,
+        *,
+        grad_placements: Sequence[Placement] | None = ...,
     ) -> torch.Tensor: ...
     @property
     def device_mesh(self) -> DeviceMesh: ...

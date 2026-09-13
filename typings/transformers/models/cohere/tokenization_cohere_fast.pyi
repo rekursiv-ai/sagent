@@ -39,7 +39,10 @@ class CohereTokenizerFast(PreTrainedTokenizerFast):
     def add_bos_token(self, value):  # -> None:
         ...
     def apply_tool_use_template(
-        self, conversation: list[dict[str, str]], tools: list[dict], **kwargs
+        self,
+        conversation: list[dict[str, str]],
+        tools: list[dict],
+        **kwargs,
     ) -> str | list[int]: ...
     def apply_grounded_generation_template(
         self,
@@ -49,7 +52,9 @@ class CohereTokenizerFast(PreTrainedTokenizerFast):
         **kwargs,
     ) -> str | list[int]: ...
     def build_inputs_with_special_tokens(
-        self, token_ids_0, token_ids_1=...
+        self,
+        token_ids_0,
+        token_ids_1=...,
     ):  # -> list[str | list[str] | Any | None]:
         ...
 

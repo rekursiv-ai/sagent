@@ -15,7 +15,12 @@ logger = ...
 def rescale_stride(stride, ratio):  # -> list[Any]:
     ...
 def chunk_iter(
-    inputs, feature_extractor, chunk_len, stride_left, stride_right, dtype=...
+    inputs,
+    feature_extractor,
+    chunk_len,
+    stride_left,
+    stride_right,
+    dtype=...,
 ):  # -> Generator[dict[str | Any, Any | tuple[Any, Any | Literal[0], Any | Literal[0]]], Any, None]:
     ...
 
@@ -36,7 +41,9 @@ class AutomaticSpeechRecognitionPipeline(ChunkPipeline):
         **kwargs,
     ) -> None: ...
     def __call__(
-        self, inputs: np.ndarray | bytes | str | dict, **kwargs: Any
+        self,
+        inputs: np.ndarray | bytes | str | dict,
+        **kwargs: Any,
     ) -> list[dict[str, Any]]: ...
     def preprocess(self, inputs, chunk_length_s=..., stride_length_s=...): ...
     def postprocess(

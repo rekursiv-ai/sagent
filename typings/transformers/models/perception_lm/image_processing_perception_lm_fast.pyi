@@ -29,11 +29,14 @@ class PerceptionLMImageProcessorFast(BaseImageProcessorFast):
     size = ...
     valid_kwargs = PerceptionLMFastImageProcessorKwargs
     def __init__(
-        self, **kwargs: Unpack[PerceptionLMFastImageProcessorKwargs]
+        self,
+        **kwargs: Unpack[PerceptionLMFastImageProcessorKwargs],
     ) -> None: ...
     @auto_docstring
     def preprocess(
-        self, images, **kwargs: Unpack[PerceptionLMFastImageProcessorKwargs]
+        self,
+        images,
+        **kwargs: Unpack[PerceptionLMFastImageProcessorKwargs],
     ) -> BatchFeature: ...
     def resize(
         self,

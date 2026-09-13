@@ -11,7 +11,8 @@ def replace_with_awq_linear(
     has_been_replaced=...,
 ) -> bool: ...
 def get_modules_to_fuse(
-    model, quantization_config
+    model,
+    quantization_config,
 ):  # -> dict[str, list[str] | bool] | dict[str, list[str] | bool | float]:
     ...
 def fuse_awq_modules(model, quantization_config): ...

@@ -49,7 +49,9 @@ class ViltImageProcessor(BaseImageProcessor):
     ) -> None: ...
     @classmethod
     def from_dict(
-        cls, image_processor_dict: dict[str, Any], **kwargs
+        cls,
+        image_processor_dict: dict[str, Any],
+        **kwargs,
     ):  # -> tuple[Self, dict[str, Any]] | Self:
         ...
     def resize(

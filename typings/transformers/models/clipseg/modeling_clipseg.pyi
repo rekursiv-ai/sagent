@@ -55,10 +55,15 @@ class CLIPSegImageSegmentationOutput(ModelOutput):
 class CLIPSegVisionEmbeddings(nn.Module):
     def __init__(self, config: CLIPSegVisionConfig) -> None: ...
     def interpolate_pos_encoding(
-        self, embeddings: torch.Tensor, height: int, width: int
+        self,
+        embeddings: torch.Tensor,
+        height: int,
+        width: int,
     ) -> torch.Tensor: ...
     def forward(
-        self, pixel_values: torch.FloatTensor, interpolate_pos_encoding=...
+        self,
+        pixel_values: torch.FloatTensor,
+        interpolate_pos_encoding=...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -94,7 +99,9 @@ class CLIPSegAttention(nn.Module):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class CLIPSegMLP(nn.Module):
@@ -205,7 +212,9 @@ class CLIPSegModel(CLIPSegPreTrainedModel):
     @filter_out_non_signature_kwargs()
     @auto_docstring
     def get_image_features(
-        self, pixel_values: torch.FloatTensor, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values: torch.FloatTensor,
+        interpolate_pos_encoding: bool = ...,
     ) -> torch.FloatTensor: ...
     @auto_docstring
     def forward(

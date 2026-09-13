@@ -80,11 +80,15 @@ def is_sym_node(node: _HasMeta) -> bool: ...
 def set_proxy_slot(obj: Tensor, tracer: _ProxyTracer, proxy: _ProxyTensor) -> None: ...
 @overload
 def set_proxy_slot(
-    obj: _AnyScriptObjectType, tracer: _ProxyTracer, proxy: Proxy
+    obj: _AnyScriptObjectType,
+    tracer: _ProxyTracer,
+    proxy: Proxy,
 ) -> None: ...
 @overload
 def set_proxy_slot(
-    obj: PySymType, tracer: _ProxyTracer, proxy: _PySymProxyType
+    obj: PySymType,
+    tracer: _ProxyTracer,
+    proxy: _PySymProxyType,
 ) -> None: ...
 
 class _DisableUpdateTensorTracker(threading.local):
@@ -94,7 +98,9 @@ _disable_update_tensor_tracker_tls = ...
 _FAKE_TENSOR_ID_TO_PROXY_MAP_FOR_EXPORT: dict[int, torch.fx.Node] = ...
 
 def set_proxy_slot(
-    obj: PySymType | _AnyScriptObjectType | Tensor, tracer: _ProxyTracer, proxy: object
+    obj: PySymType | _AnyScriptObjectType | Tensor,
+    tracer: _ProxyTracer,
+    proxy: object,
 ) -> None: ...
 def has_proxy_slot(obj: Tensor, tracer: _ProxyTracer) -> bool: ...
 
@@ -104,7 +110,9 @@ type _PySymProxyType = Thunk[Proxy]
 def get_proxy_slot(obj: Tensor, tracer: _ProxyTracer) -> _ProxyTensor: ...
 @overload
 def get_proxy_slot(
-    obj: Tensor, tracer: _ProxyTracer, default: U
+    obj: Tensor,
+    tracer: _ProxyTracer,
+    default: U,
 ) -> _ProxyTensor | U: ...
 @overload
 def get_proxy_slot(
@@ -117,7 +125,9 @@ def get_proxy_slot(
 def get_proxy_slot(obj: _AnyScriptObjectType, tracer: _ProxyTracer) -> Proxy: ...
 @overload
 def get_proxy_slot(
-    obj: _AnyScriptObjectType, tracer: _ProxyTracer, default: U
+    obj: _AnyScriptObjectType,
+    tracer: _ProxyTracer,
+    default: U,
 ) -> Proxy | U: ...
 @overload
 def get_proxy_slot(
@@ -130,7 +140,9 @@ def get_proxy_slot(
 def get_proxy_slot(obj: PySymType, tracer: _ProxyTracer) -> _PySymProxyType: ...
 @overload
 def get_proxy_slot(
-    obj: PySymType, tracer: _ProxyTracer, default: T
+    obj: PySymType,
+    tracer: _ProxyTracer,
+    default: T,
 ) -> T | _PySymProxyType: ...
 @overload
 def get_proxy_slot(
@@ -168,10 +180,17 @@ def maybe_disable_thunkify() -> Generator[None]: ...
 def maybe_enable_thunkify() -> Generator[None]: ...
 def set_meta(proxy: Proxy, val: _ExtractValType) -> Proxy: ...
 def thunkify(
-    tracer: _ProxyTracer, f: Callable[_P, R], *args: _P.args, **kwargs: _P.kwargs
+    tracer: _ProxyTracer,
+    f: Callable[_P, R],
+    *args: _P.args,
+    **kwargs: _P.kwargs,
 ) -> Thunk[R]: ...
 def track_tensor(
-    tensor: Tensor, proxy: Proxy, *, constant: Tensor | None, tracer: _ProxyTracer
+    tensor: Tensor,
+    proxy: Proxy,
+    *,
+    constant: Tensor | None,
+    tracer: _ProxyTracer,
 ) -> None: ...
 
 type _NestedProxys = Proxy | Sequence[_NestedProxys] | Mapping[object, _NestedProxys]
@@ -199,14 +218,17 @@ def fetch_sym_proxy(
 def fetch_object_proxy(tracer: _ProxyTracer, t: Tensor) -> _ProxyTensor | Tensor: ...
 @overload
 def fetch_object_proxy(
-    tracer: _ProxyTracer, t: _AnyScriptObjectType
+    tracer: _ProxyTracer,
+    t: _AnyScriptObjectType,
 ) -> Proxy | _AnyScriptObjectType: ...
 @overload
 def fetch_object_proxy(
-    tracer: _ProxyTracer, t: PySymType
+    tracer: _ProxyTracer,
+    t: PySymType,
 ) -> _PySymProxyType | PySymType: ...
 def fetch_object_proxy(
-    tracer: _ProxyTracer, t: Tensor | _AnyScriptObjectType | PySymType
+    tracer: _ProxyTracer,
+    t: Tensor | _AnyScriptObjectType | PySymType,
 ) -> object: ...
 
 HANDLED_TYPES = ...
@@ -225,7 +247,9 @@ class _SymNodeDict:
     def __getitem__(self, key: PySymType) -> _PySymProxyType: ...
     def __contains__(self, key: PySymType) -> bool: ...
     def get(
-        self, key: PySymType, default: _PySymProxyType | None = ...
+        self,
+        key: PySymType,
+        default: _PySymProxyType | None = ...,
     ) -> _PySymProxyType: ...
     def __iter__(self) -> Any: ...
     def __len__(self) -> int: ...
@@ -246,7 +270,10 @@ class PythonKeyTracer(Tracer):
         kwargs: dict[str, Any],
     ) -> Any: ...
     def getattr(
-        self, attr: str, attr_val: object, parameter_proxy_cache: dict[str, Proxy]
+        self,
+        attr: str,
+        attr_val: object,
+        parameter_proxy_cache: dict[str, Proxy],
     ) -> object: ...
     def create_arg(self, a: object) -> fx.node.Node: ...
     @overload
@@ -268,7 +295,9 @@ class PythonKeyTracer(Tracer):
 
 @torch._disable_dynamo
 def dispatch_trace(
-    root: Module | Callable, tracer: Tracer, concrete_args: tuple[Any, ...] | None = ...
+    root: Module | Callable,
+    tracer: Tracer,
+    concrete_args: tuple[Any, ...] | None = ...,
 ) -> GraphModule: ...
 def wrap_key(
     f: Callable[[Unpack[_Ts]], R],
@@ -361,18 +390,29 @@ class DecompositionInterpreter(fx.Interpreter):
         **kwargs: object,
     ) -> None: ...
     def placeholder(
-        self, target: str, args: tuple[object, ...], kwargs: dict[str, object]
+        self,
+        target: str,
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
     ) -> object: ...
     def get_attr(
-        self, target: str, args: tuple[object, ...], kwargs: dict[str, object]
+        self,
+        target: str,
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
     ) -> object: ...
     def output(
-        self, target: str, args: tuple[object, ...], kwargs: dict[str, object]
+        self,
+        target: str,
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
     ) -> object: ...
     def run(self, *args: object, **kwargs: object) -> object: ...
 
 def wrapper_and_args_for_make_fx(
-    func: Callable[..., R], args: tuple[object, ...], kwargs: dict[str, object]
+    func: Callable[..., R],
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
 ) -> tuple[Callable[[list[object]], R], list[object]]: ...
 @contextmanager
 def disable_autocast_cache() -> Generator[None]: ...
@@ -386,10 +426,15 @@ class _ModuleStackTracer(PythonKeyTracer):
     def __init__(self, scope_root: GraphModule) -> None: ...
     def path_of_module(self, mod: Module) -> str: ...
     def getattr(
-        self, attr: str, attr_val: object, parameter_proxy_cache: dict[str, Proxy]
+        self,
+        attr: str,
+        attr_val: object,
+        parameter_proxy_cache: dict[str, Proxy],
     ) -> object: ...
     def trace(
-        self, root: Module | Callable, concrete_args: dict[str, object] | None
+        self,
+        root: Module | Callable,
+        concrete_args: dict[str, object] | None,
     ) -> fx.Graph: ...
     def call_module(
         self,
@@ -436,7 +481,9 @@ def get_torch_dispatch_modes() -> list[TorchDispatchMode]: ...
 def get_innermost_proxy_mode() -> ProxyTorchDispatchMode | None: ...
 def get_proxy_mode() -> ProxyTorchDispatchMode | None: ...
 def handle_sym_dispatch(
-    func: Callable[_P, R], args: _P.args, kwargs: _P.kwargs
+    func: Callable[_P, R],
+    args: _P.args,
+    kwargs: _P.kwargs,
 ) -> R: ...
 @contextmanager
 def disable_proxy_modes_tracing() -> Generator[ProxyTorchDispatchMode]: ...

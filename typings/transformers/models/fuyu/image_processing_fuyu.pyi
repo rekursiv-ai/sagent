@@ -14,7 +14,8 @@ def make_list_of_list_of_images(
 
 class FuyuBatchFeature(BatchFeature):
     def convert_to_tensors(
-        self, tensor_type: str | TensorType | None = ...
+        self,
+        tensor_type: str | TensorType | None = ...,
     ):  # -> Self:
         ...
     def to(self, *args, **kwargs) -> BatchFeature: ...
@@ -83,7 +84,9 @@ class FuyuImageProcessor(BaseImageProcessor):
         patch_size: dict[str, int] | None = ...,
     ) -> int: ...
     def patchify_image(
-        self, image: torch.Tensor, patch_size: dict[str, int] | None = ...
+        self,
+        image: torch.Tensor,
+        patch_size: dict[str, int] | None = ...,
     ) -> torch.Tensor: ...
     def preprocess_with_tokenizer_info(
         self,

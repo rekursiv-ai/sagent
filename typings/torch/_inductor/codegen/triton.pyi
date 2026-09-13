@@ -45,7 +45,9 @@ class OpDtypeSupport:
     convert_outputs: dict[str, bool] = ...
     @classmethod
     def register_upcast(
-        cls, func: Callable[..., str], convert_output: bool
+        cls,
+        func: Callable[..., str],
+        convert_output: bool,
     ) -> None: ...
 
 @lru_cache(None)
@@ -108,7 +110,10 @@ class BlockDescriptorOptions:
         get_max_block: Callable[[str], int],
     ) -> BlockDescriptorOptions: ...
     def replace_offset(
-        self, expr: sympy.Expr, replacement: sympy.Expr, symt: SymT
+        self,
+        expr: sympy.Expr,
+        replacement: sympy.Expr,
+        symt: SymT,
     ) -> sympy.Expr: ...
     def remove_roffsets(self, expr: sympy.Expr) -> sympy.Expr: ...
     def compute_boundary_check(
@@ -137,14 +142,19 @@ class TensorDescriptorOptions(BlockDescriptorOptions):
 @dataclasses.dataclass
 class BlockPtrOptions(BlockDescriptorOptions):
     def replace_offset(
-        self, expr: sympy.Expr, replacement: sympy.Expr, symt: SymT
+        self,
+        expr: sympy.Expr,
+        replacement: sympy.Expr,
+        symt: SymT,
     ) -> sympy.Expr: ...
     def remove_roffsets(self, expr: sympy.Expr) -> sympy.Expr: ...
     def format(self, name: str, roffset=...) -> str: ...
     def advance_roffset(self, symt: SymT) -> sympy.Expr: ...
 
 def triton_reshape(
-    value: str, old_shape: Sequence[sympy.Expr], new_shape: Sequence[sympy.Expr]
+    value: str,
+    old_shape: Sequence[sympy.Expr],
+    new_shape: Sequence[sympy.Expr],
 ) -> str: ...
 
 class TritonPrinter(PythonPrinter): ...
@@ -213,7 +223,12 @@ class TritonOverrides(OpOverrides):
     def where(a, b, c) -> str: ...
     @staticmethod
     def inline_asm_elementwise(
-        *inputs, asm, constraints=..., dtype=..., is_pure=..., pack=...
+        *inputs,
+        asm,
+        constraints=...,
+        dtype=...,
+        is_pure=...,
+        pack=...,
     ) -> str: ...
     @staticmethod
     @maybe_upcast_float32()
@@ -412,7 +427,8 @@ class TMACompatibilityChecker:
     def __post_init__(self) -> None: ...
     def can_use_tma(self) -> bool: ...
     def are_block_parameters_compatible(
-        self, block_params: BlockParameters
+        self,
+        block_params: BlockParameters,
     ) -> bool: ...
 
 class TritonKernel(SIMDKernel[TritonCSEVariable]):
@@ -458,15 +474,28 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
         other=...,
     ) -> tuple[str, str]: ...
     def codegen_block_ptr_store_line(
-        self, name, indexing, block_ptr, value, other=...
+        self,
+        name,
+        indexing,
+        block_ptr,
+        value,
+        other=...,
     ) -> str: ...
     def check_bounds(
-        self, expr: sympy.Expr, size: sympy.Expr, lower: bool, upper: bool
+        self,
+        expr: sympy.Expr,
+        size: sympy.Expr,
+        lower: bool,
+        upper: bool,
     ) -> None: ...
     def get_load_buffer(self, indexing) -> IndentedBuffer: ...
     def load(self, name: str, index: sympy.Expr) -> TritonCSEVariable: ...
     def store(
-        self, name: str, index: sympy.Expr, value: CSEVariable, mode: StoreMode = ...
+        self,
+        name: str,
+        index: sympy.Expr,
+        value: CSEVariable,
+        mode: StoreMode = ...,
     ) -> None: ...
     def guard_cooperative_store(self, name, buffer): ...
     def bucketize(
@@ -481,10 +510,15 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
     ) -> CSEVariable: ...
     def reduction_resize(self, value) -> str: ...
     def reduction_resize_and_shape(
-        self, value, shape
+        self,
+        value,
+        shape,
     ) -> tuple[str, BlockShapeType]: ...
     def reduction_collapse_dims(
-        self, buffer, value: CSEVariable, dtype: torch.dtype
+        self,
+        buffer,
+        value: CSEVariable,
+        dtype: torch.dtype,
     ) -> CSEVariable: ...
     def reduction(
         self,
@@ -494,7 +528,13 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
         value: CSEVariable | tuple[CSEVariable, ...],
     ) -> CSEVariable | tuple[CSEVariable, ...]: ...
     def welford_reduce(
-        self, result_var, reduction_type, value, where_cond, acc_type, dtype
+        self,
+        result_var,
+        reduction_type,
+        value,
+        where_cond,
+        acc_type,
+        dtype,
     ) -> tuple[Any, ...]: ...
     def welford_reduce_final_reduction(
         self,
@@ -509,20 +549,34 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
         dtype,
     ) -> tuple[Any, ...]: ...
     def online_softmax_reduce_final_reduction(
-        self, buffer, result_max, result_sum, peer_max, peer_sum, dim, dtype
+        self,
+        buffer,
+        result_max,
+        result_sum,
+        peer_max,
+        peer_sum,
+        dim,
+        dtype,
     ) -> tuple[Any, Any]: ...
     def max_rsplit(self) -> int: ...
     def codegen_cooperative_reduction_peer_combine(
-        self, result_var, dtype, default_val
+        self,
+        result_var,
+        dtype,
+        default_val,
     ) -> CSEVariable: ...
     def store_reduction(
-        self, name: str, index: sympy.Expr, value: CSEVariable | tuple[CSEVariable, ...]
+        self,
+        name: str,
+        index: sympy.Expr,
+        value: CSEVariable | tuple[CSEVariable, ...],
     ) -> None: ...
     def scan(
         self,
         dtypes: tuple[torch.dtype, ...],
         combine_fn: Callable[
-            [tuple[CSEVariable, ...], tuple[CSEVariable, ...]], tuple[CSEVariable, ...]
+            [tuple[CSEVariable, ...], tuple[CSEVariable, ...]],
+            tuple[CSEVariable, ...],
         ],
         values: tuple[CSEVariable, ...],
     ) -> tuple[CSEVariable, ...]: ...
@@ -550,7 +604,9 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
     def codegen_iteration_ranges_entry(self, entry: IterationRangesEntry) -> None: ...
     def iteration_ranges_ranges_code(self, entry: IterationRangesRoot) -> str: ...
     def iteration_ranges_scalar_code(
-        self, entry: IterationRangesRoot, value: Any
+        self,
+        entry: IterationRangesRoot,
+        value: Any,
     ) -> str: ...
     def iteration_ranges_get_pid(self, entry: IterationRangesRoot) -> str: ...
     def needs_yz_grid_overflow(self, entry: IterationRangesRoot) -> bool: ...
@@ -561,7 +617,9 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
     def codegen_reduction_numels(self, buffer: IndentedBuffer) -> None: ...
     def codegen_reduction_indices(self, buffer: IndentedBuffer) -> None: ...
     def iteration_ranges_codegen_header(
-        self, entry: IterationRangesRoot, code: IndentedBuffer
+        self,
+        entry: IterationRangesRoot,
+        code: IndentedBuffer,
     ) -> None: ...
 
 class TritonScheduling(SIMDScheduling):
@@ -570,15 +628,21 @@ class TritonScheduling(SIMDScheduling):
     def __init__(self, scheduler: Scheduler | None) -> None: ...
     @classmethod
     def get_backend_features(
-        cls, device: torch.device
+        cls,
+        device: torch.device,
     ) -> OrderedSet[BackendFeature]: ...
     def codegen_comment(self, node_schedule) -> None: ...
     def define_kernel(self, src_code, node_schedule, kernel) -> str: ...
     def benchmark_fused_nodes(
-        self, nodes, n_spills_threshold=...
+        self,
+        nodes,
+        n_spills_threshold=...,
     ) -> tuple[float, str]: ...
     def benchmark_codegened_module(
-        self, mod, n_spills_threshold=..., node_names: OrderedSet[str] | None = ...
+        self,
+        mod,
+        n_spills_threshold=...,
+        node_names: OrderedSet[str] | None = ...,
     ) -> tuple[float, str]: ...
     def create_kernel_choices(
         self,
@@ -593,7 +657,8 @@ class TritonScheduling(SIMDScheduling):
         kernel_kwargs: dict[str, Any],
     ) -> list[TritonKernel]: ...
     def benchmark_combo_kernel(
-        self, node_list
+        self,
+        node_list,
     ) -> tuple[float | Literal[0], float, list[Any]]: ...
 
 def debug_triton_code(node: BaseSchedulerNode) -> list[str]: ...

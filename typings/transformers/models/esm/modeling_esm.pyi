@@ -31,10 +31,14 @@ class RotaryEmbedding(torch.nn.Module):
     inv_freq: torch.Tensor
     def __init__(self, dim: int) -> None: ...
     def forward(
-        self, q: torch.Tensor, k: torch.Tensor
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class EsmContactPredictionHead(nn.Module):
@@ -45,7 +49,11 @@ class EsmContactPredictionHead(nn.Module):
 class EsmEmbeddings(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, input_ids=..., attention_mask=..., position_ids=..., inputs_embeds=...
+        self,
+        input_ids=...,
+        attention_mask=...,
+        position_ids=...,
+        inputs_embeds=...,
     ):  # -> Any:
         ...
     def create_position_ids_from_inputs_embeds(self, inputs_embeds):  # -> Tensor:
@@ -66,7 +74,11 @@ def eager_attention_forward(
 
 class EsmSelfAttention(nn.Module):
     def __init__(
-        self, config, position_embedding_type=..., layer_idx=..., is_cross_attention=...
+        self,
+        config,
+        position_embedding_type=...,
+        layer_idx=...,
+        is_cross_attention=...,
     ) -> None: ...
     def forward(
         self,

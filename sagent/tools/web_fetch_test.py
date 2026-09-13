@@ -103,7 +103,9 @@ def test_run_appends_truncation_notice_when_body_exceeds_limit() -> None:
     over = result_token_budget() * 8
     with (
         patch.object(
-            web, "fetch_with_reader_fallback", return_value=(b"z" * over, False)
+            web,
+            "fetch_with_reader_fallback",
+            return_value=(b"z" * over, False),
         ),
         patch.object(web, "_extract_text", return_value="z" * over),
         patch("socket.getaddrinfo", return_value=_addrinfo("93.184.216.34")),
@@ -185,7 +187,7 @@ def test_run_post_rejects_both_json_and_form() -> None:
                 "method": "POST",
                 "json": {"a": 1},
                 "form": {"b": "2"},
-            }
+            },
         ),
     )
     assert result.is_error
@@ -216,7 +218,7 @@ def test_run_explicit_transport_passes_through() -> None:
         side_effect=fake_fetch_web,
     ):
         result = asyncio.run(
-            WebFetch().run({"url": "https://example.com", "transport": "zendriver"})
+            WebFetch().run({"url": "https://example.com", "transport": "zendriver"}),
         )
     assert not result.is_error
     assert captured["transport"] == "zendriver"
@@ -224,7 +226,7 @@ def test_run_explicit_transport_passes_through() -> None:
 
 def test_run_rejects_invalid_transport() -> None:
     result = asyncio.run(
-        WebFetch().run({"url": "https://example.com", "transport": "requests"})
+        WebFetch().run({"url": "https://example.com", "transport": "requests"}),
     )
     assert result.is_error
     assert "Invalid transport" in result.content
@@ -271,7 +273,7 @@ def test_run_explicit_extractor_passes_through() -> None:
         side_effect=fake_fetch_web,
     ):
         result = asyncio.run(
-            WebFetch().run({"url": "https://example.com", "extractor": "trafilatura"})
+            WebFetch().run({"url": "https://example.com", "extractor": "trafilatura"}),
         )
     assert not result.is_error
     assert captured["extractor"] == "trafilatura"
@@ -288,7 +290,7 @@ def test_run_rejects_non_string_url() -> None:
 
 def test_run_rejects_invalid_extractor() -> None:
     result = asyncio.run(
-        WebFetch().run({"url": "https://example.com", "extractor": "readability"})
+        WebFetch().run({"url": "https://example.com", "extractor": "readability"}),
     )
     assert result.is_error
     assert "Invalid extractor" in result.content
@@ -349,7 +351,7 @@ def test_run_cache_separates_transports() -> None:
         tool = WebFetch()
         _ = asyncio.run(tool.run({"url": "https://example.com"}))
         _ = asyncio.run(
-            tool.run({"url": "https://example.com", "transport": "zendriver"})
+            tool.run({"url": "https://example.com", "transport": "zendriver"}),
         )
     assert mock_web.call_count == 2
 
@@ -363,7 +365,7 @@ def test_run_cache_separates_extractors() -> None:
         tool = WebFetch()
         _ = asyncio.run(tool.run({"url": "https://example.com"}))
         _ = asyncio.run(
-            tool.run({"url": "https://example.com", "extractor": "trafilatura"})
+            tool.run({"url": "https://example.com", "extractor": "trafilatura"}),
         )
     assert mock_web.call_count == 2
 
@@ -388,7 +390,7 @@ def test_run_post_json_passes_through() -> None:
                     "url": "https://api/x",
                     "method": "POST",
                     "json": {"q": "test"},
-                }
+                },
             ),
         )
     assert captured["method"] == "POST"
@@ -414,7 +416,7 @@ def test_run_post_form_passes_through() -> None:
                     "url": "https://api/x",
                     "method": "POST",
                     "form": {"a": "b"},
-                }
+                },
             ),
         )
     form_body = captured["form_body"]

@@ -102,14 +102,20 @@ class MistralCommonTokenizer(PushToHubMixin):
     ) -> list[str]: ...
     @overload
     def convert_ids_to_tokens(
-        self, ids: int, skip_special_tokens: bool = ...
+        self,
+        ids: int,
+        skip_special_tokens: bool = ...,
     ) -> str: ...
     @overload
     def convert_ids_to_tokens(
-        self, ids: list[int], skip_special_tokens: bool = ...
+        self,
+        ids: list[int],
+        skip_special_tokens: bool = ...,
     ) -> list[str]: ...
     def convert_ids_to_tokens(
-        self, ids: int | list[int], skip_special_tokens: bool = ...
+        self,
+        ids: int | list[int],
+        skip_special_tokens: bool = ...,
     ) -> str | list[str]: ...
     def convert_tokens_to_ids(self, tokens: str | list[str]) -> int | list[int]: ...
     def tokenize(self, text: TextInput, **kwargs) -> list[str]: ...
@@ -120,7 +126,8 @@ class MistralCommonTokenizer(PushToHubMixin):
         already_has_special_tokens: bool = ...,
     ) -> list[int]: ...
     @add_end_docstrings(
-        ENCODE_KWARGS_DOCSTRING, ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING
+        ENCODE_KWARGS_DOCSTRING,
+        ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING,
     )
     def prepare_for_model(
         self,
@@ -180,7 +187,8 @@ class MistralCommonTokenizer(PushToHubMixin):
         **kwargs,
     ) -> str | list[int] | list[str] | list[list[int]] | BatchEncoding: ...
     @add_end_docstrings(
-        ENCODE_KWARGS_DOCSTRING, ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING
+        ENCODE_KWARGS_DOCSTRING,
+        ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING,
     )
     def __call__(
         self,

@@ -42,7 +42,10 @@ class PagedAttentionCache:
     ) -> None: ...
     @traced
     def get_seqlens_k(
-        self, request_id: str, past_length: int, query_length: int
+        self,
+        request_id: str,
+        past_length: int,
+        query_length: int,
     ) -> dict[str, int]: ...
     @traced
     def update(

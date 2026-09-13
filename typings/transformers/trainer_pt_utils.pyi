@@ -31,7 +31,9 @@ def torch_pad_and_concatenate(tensor1, tensor2, padding_index=...):  # -> Tensor
 def numpy_pad_and_concatenate(array1, array2, padding_index=...):  # -> NDArray[Any]:
     ...
 def nested_concat(
-    tensors, new_tensors, padding_index=...
+    tensors,
+    new_tensors,
+    padding_index=...,
 ):  # -> list[Any] | tuple[Any, ...] | Tensor | Mapping[Any, object] | NDArray[Any]:
     ...
 def find_batch_size(tensors):  # -> int | None:
@@ -43,7 +45,8 @@ def nested_detach(
 ):  # -> list[Any] | tuple[Any, ...] | Mapping[Any, object] | Tensor:
     ...
 def nested_xla_mesh_reduce(
-    tensors, name
+    tensors,
+    name,
 ):  # -> list[Any] | tuple[Any, ...] | Mapping[Any, object]:
     ...
 def distributed_concat(tensor: Any, num_total_examples: int | None = ...) -> Any: ...
@@ -65,7 +68,9 @@ class DistributedSamplerWithLoop(DistributedSampler):
 
 class EvalLoopContainer:
     def __init__(
-        self, do_nested_concat: bool = ..., padding_index: int = ...
+        self,
+        do_nested_concat: bool = ...,
+        padding_index: int = ...,
     ) -> None: ...
     def add(self, tensors) -> None: ...
     def to_cpu_and_numpy(self) -> None: ...
@@ -82,22 +87,30 @@ class SequentialDistributedSampler(Sampler):
         ...
 
 def get_tpu_sampler(
-    dataset: torch.utils.data.Dataset, batch_size: int
+    dataset: torch.utils.data.Dataset,
+    batch_size: int,
 ):  # -> RandomSampler | DistributedSampler[Any]:
     ...
 def nested_new_like(
-    arrays, num_samples, padding_index=...
+    arrays,
+    num_samples,
+    padding_index=...,
 ):  # -> list[Any] | tuple[Any, ...] | NDArray[Any]:
     ...
 def expand_like(arrays, new_seq_length, padding_index=...): ...
 def nested_truncate(
-    tensors, limit
+    tensors,
+    limit,
 ):  # -> list[Any] | tuple[Any, ...] | Mapping[Any, object]:
     ...
 
 class DistributedTensorGatherer:
     def __init__(
-        self, world_size, num_samples, make_multiple_of=..., padding_index=...
+        self,
+        world_size,
+        num_samples,
+        make_multiple_of=...,
+        padding_index=...,
     ) -> None: ...
     def add_arrays(self, arrays):  # -> None:
         ...
@@ -113,7 +126,10 @@ class LabelSmoother:
     def __call__(self, model_output, labels, shift_labels=...): ...
 
 def get_length_grouped_indices(
-    lengths, batch_size, mega_batch_mult=..., generator=...
+    lengths,
+    batch_size,
+    mega_batch_mult=...,
+    generator=...,
 ):  # -> list[Any]:
     ...
 
@@ -186,7 +202,9 @@ def save_state(self):  # -> None:
 def get_model_param_count(model, trainable_only=...):  # -> int:
     ...
 def get_parameter_names(
-    model, forbidden_layer_types, forbidden_layer_names=...
+    model,
+    forbidden_layer_types,
+    forbidden_layer_names=...,
 ):  # -> list[Any]:
     ...
 def get_module_class_from_name(module, name): ...
@@ -231,6 +249,9 @@ class LayerWiseDummyScheduler(LRScheduler):
         ...
 
 def set_rng_state_for_device(
-    device_name, device_module, checkpoint_rng_state, is_distributed
+    device_name,
+    device_module,
+    checkpoint_rng_state,
+    is_distributed,
 ):  # -> None:
     ...

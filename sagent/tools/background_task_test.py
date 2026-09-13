@@ -98,7 +98,7 @@ class _DummyInner:
             "type": "object",
             "properties": {"x": {"type": "string"}},
             "required": ["x"],
-        }
+        },
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -203,13 +203,10 @@ def test_summary_with_and_without_id() -> None:
     )
 
 
+# Uses ``asyncio.Future`` rather than ``asyncio.sleep`` so the autouse ``_fast_sleep``
+# patcher (in ``conftest.py``) can't make the body return early.
 async def _slow() -> ToolResult:
-    """Long-running task body for foreground tests.
-
-    Uses ``asyncio.Future`` rather than ``asyncio.sleep`` so the
-    autouse ``_fast_sleep`` patcher (in ``conftest.py``) can't make
-    the body return early.
-    """
+    """Long-running task body for foreground tests."""
     await asyncio.get_running_loop().create_future()
     return ToolResult(call_id="", content="done")
 
@@ -294,7 +291,7 @@ async def test_list_reports_completed_and_cancelled() -> None:
 
     with with_fake_agent() as agent:
         done_task: asyncio.Task[ToolResult] = asyncio.create_task(quick())
-        await done_task  # let it finish
+        await done_task  # Let it finish.
         cancelled_task: asyncio.Task[ToolResult] = asyncio.create_task(_slow())
         # Cancel; await with suppression so .cancelled() flips before the
         # tool inspects the task state.
@@ -304,7 +301,10 @@ async def test_list_reports_completed_and_cancelled() -> None:
         agent.register_background(
             "j-done",
             BackgroundTaskEntry(
-                task=done_task, tool_name="Dummy", queue_id="j-done", started=0.0
+                task=done_task,
+                tool_name="Dummy",
+                queue_id="j-done",
+                started=0.0,
             ),
         )
         agent.register_background(
@@ -370,7 +370,10 @@ async def test_cancel_success_clears_registry() -> None:
         agent.register_background(
             "j",
             BackgroundTaskEntry(
-                task=task, tool_name="Dummy", queue_id="j", started=0.0
+                task=task,
+                tool_name="Dummy",
+                queue_id="j",
+                started=0.0,
             ),
         )
         result = await t.run({"operation": "cancel", "id": "j"})
@@ -569,7 +572,10 @@ async def test_foreground_success_returns_tool_result() -> None:
         agent.register_background(
             "j",
             BackgroundTaskEntry(
-                task=task, tool_name="Dummy", queue_id="j", started=0.0
+                task=task,
+                tool_name="Dummy",
+                queue_id="j",
+                started=0.0,
             ),
         )
 
@@ -598,7 +604,10 @@ async def test_foreground_wait_cancellation_leaves_job_running() -> None:
         agent.register_background(
             "j",
             BackgroundTaskEntry(
-                task=task, tool_name="Dummy", queue_id="j", started=0.0
+                task=task,
+                tool_name="Dummy",
+                queue_id="j",
+                started=0.0,
             ),
         )
         foreground = asyncio.create_task(t.run({"operation": "foreground", "id": "j"}))
@@ -626,7 +635,10 @@ async def test_foreground_cancelled_task_returns_tool_error() -> None:
         agent.register_background(
             "j",
             BackgroundTaskEntry(
-                task=task, tool_name="Dummy", queue_id="j", started=0.0
+                task=task,
+                tool_name="Dummy",
+                queue_id="j",
+                started=0.0,
             ),
         )
 
@@ -650,7 +662,10 @@ async def test_foreground_crashed_task_returns_tool_error() -> None:
         agent.register_background(
             "j",
             BackgroundTaskEntry(
-                task=task, tool_name="Dummy", queue_id="j", started=0.0
+                task=task,
+                tool_name="Dummy",
+                queue_id="j",
+                started=0.0,
             ),
         )
 
@@ -685,8 +700,8 @@ async def test_foreground_running_background_job_returns_result_stub_stays() -> 
             await finish_background.wait()
             agent.runtime.inbox.push_back(
                 DetachedResult(
-                    result=ToolResult(call_id="j-running", content="queued payload")
-                )
+                    result=ToolResult(call_id="j-running", content="queued payload"),
+                ),
             )
             agent.cancel_background("j-running")
 
@@ -710,7 +725,7 @@ async def test_foreground_running_background_job_returns_result_stub_stays() -> 
         observers = ForegroundAwareObservers(agent.runtime.observers)
         agent.runtime.observers = observers
         foreground = asyncio.create_task(
-            t.run({"operation": "foreground", "id": "j-running"})
+            t.run({"operation": "foreground", "id": "j-running"}),
         )
         try:
             await asyncio.wait_for(foreground_waiting.wait(), timeout=1.0)
@@ -753,7 +768,10 @@ async def test_foreground_reads_pre_existing_spliced_result() -> None:
         agent.register_background(
             "j",
             BackgroundTaskEntry(
-                task=task, tool_name="Dummy", queue_id="j", started=0.0
+                task=task,
+                tool_name="Dummy",
+                queue_id="j",
+                started=0.0,
             ),
         )
         agent.runtime.append_history(
@@ -775,7 +793,10 @@ async def test_foreground_propagates_error_via_detached_result() -> None:
         agent.register_background(
             "j",
             BackgroundTaskEntry(
-                task=task, tool_name="Dummy", queue_id="j", started=0.0
+                task=task,
+                tool_name="Dummy",
+                queue_id="j",
+                started=0.0,
             ),
         )
 

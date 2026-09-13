@@ -10,7 +10,12 @@ class CLIPSegProcessor(ProcessorMixin):
     tokenizer_class = ...
     def __init__(self, image_processor=..., tokenizer=..., **kwargs) -> None: ...
     def __call__(
-        self, text=..., images=..., visual_prompt=..., return_tensors=..., **kwargs
+        self,
+        text=...,
+        images=...,
+        visual_prompt=...,
+        return_tensors=...,
+        **kwargs,
     ):  # -> dict[str, Any] | BatchEncoding:
         ...
     @property

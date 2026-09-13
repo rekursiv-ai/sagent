@@ -21,10 +21,14 @@ class TimmWrapperImageProcessor(BaseImageProcessor):
     def to_dict(self) -> dict[str, Any]: ...
     @classmethod
     def get_image_processor_dict(
-        cls, pretrained_model_name_or_path: str | os.PathLike, **kwargs
+        cls,
+        pretrained_model_name_or_path: str | os.PathLike,
+        **kwargs,
     ) -> tuple[dict[str, Any], dict[str, Any]]: ...
     def preprocess(
-        self, images: ImageInput, return_tensors: str | TensorType | None = ...
+        self,
+        images: ImageInput,
+        return_tensors: str | TensorType | None = ...,
     ) -> BatchFeature: ...
     def save_pretrained(self, *args, **kwargs):  # -> None:
         ...

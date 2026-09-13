@@ -14,10 +14,16 @@ from ...utils import ModelOutput, auto_docstring
 logger = ...
 
 def remove_keypoints_from_borders(
-    keypoints: torch.Tensor, scores: torch.Tensor, border: int, height: int, width: int
+    keypoints: torch.Tensor,
+    scores: torch.Tensor,
+    border: int,
+    height: int,
+    width: int,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 def top_k_keypoints(
-    keypoints: torch.Tensor, scores: torch.Tensor, k: int
+    keypoints: torch.Tensor,
+    scores: torch.Tensor,
+    k: int,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 def simple_nms(scores: torch.Tensor, nms_radius: int) -> torch.Tensor: ...
 
@@ -51,20 +57,26 @@ class SuperPointEncoder(nn.Module):
         return_dict: bool | None = ...,
     ) -> tuple | BaseModelOutputWithNoAttention: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithNoAttention: ...
 
 class SuperPointInterestPointDecoder(nn.Module):
     def __init__(self, config: SuperPointConfig) -> None: ...
     def forward(self, encoded: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class SuperPointDescriptorDecoder(nn.Module):
     def __init__(self, config: SuperPointConfig) -> None: ...
     def forward(
-        self, encoded: torch.Tensor, keypoints: torch.Tensor
+        self,
+        encoded: torch.Tensor,
+        keypoints: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -75,7 +87,8 @@ class SuperPointPreTrainedModel(PreTrainedModel):
     main_input_name = ...
     supports_gradient_checkpointing = ...
     def extract_one_channel_pixel_values(
-        self, pixel_values: torch.FloatTensor
+        self,
+        pixel_values: torch.FloatTensor,
     ) -> torch.FloatTensor: ...
 
 @auto_docstring(custom_intro=...)

@@ -46,7 +46,12 @@ class TFHubertGroupNorm(keras.layers.Layer):
 
 class TFHubertWeightNormConv1D(keras.layers.Conv1D):
     def __init__(
-        self, filters, kernel_size, groups, explicit_padding, **kwargs
+        self,
+        filters,
+        kernel_size,
+        groups,
+        explicit_padding,
+        **kwargs,
     ) -> None: ...
     def build(self, input_shape):  # -> None:
         ...
@@ -54,7 +59,10 @@ class TFHubertWeightNormConv1D(keras.layers.Conv1D):
 
 class TFHubertNoLayerNormConvLayer(keras.layers.Layer):
     def __init__(
-        self, config: HubertConfig, layer_id: int = ..., **kwargs: Any
+        self,
+        config: HubertConfig,
+        layer_id: int = ...,
+        **kwargs: Any,
     ) -> None: ...
     def call(self, hidden_states: tf.Tensor) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -62,7 +70,10 @@ class TFHubertNoLayerNormConvLayer(keras.layers.Layer):
 
 class TFHubertLayerNormConvLayer(keras.layers.Layer):
     def __init__(
-        self, config: HubertConfig, layer_id: int = ..., **kwargs: Any
+        self,
+        config: HubertConfig,
+        layer_id: int = ...,
+        **kwargs: Any,
     ) -> None: ...
     def call(self, hidden_states: tf.Tensor) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -70,7 +81,10 @@ class TFHubertLayerNormConvLayer(keras.layers.Layer):
 
 class TFHubertGroupNormConvLayer(keras.layers.Layer):
     def __init__(
-        self, config: HubertConfig, layer_id: int = ..., **kwargs: Any
+        self,
+        config: HubertConfig,
+        layer_id: int = ...,
+        **kwargs: Any,
     ) -> None: ...
     def call(self, hidden_states: tf.Tensor) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -224,7 +238,8 @@ class TFHubertModel(TFHubertPreTrainedModel):
     def __init__(self, config: HubertConfig, *inputs, **kwargs) -> None: ...
     @add_start_docstrings_to_model_forward(HUBERT_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFBaseModelOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFBaseModelOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     @unpack_inputs
     def call(
@@ -255,7 +270,8 @@ class TFHubertForCTC(TFHubertPreTrainedModel):
         ...
     @add_start_docstrings_to_model_forward(HUBERT_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFCausalLMOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFCausalLMOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     @unpack_inputs
     def call(

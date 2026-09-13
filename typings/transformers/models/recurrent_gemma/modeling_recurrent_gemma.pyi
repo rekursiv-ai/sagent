@@ -31,7 +31,12 @@ class RecurrentGemmaRotaryEmbedding(nn.Module):
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -47,7 +52,9 @@ class RecurrentGemmaSdpaAttention(nn.Module):
         use_cache: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class SqrtBoundDerivative(torch.autograd.Function):
@@ -59,10 +66,14 @@ class SqrtBoundDerivative(torch.autograd.Function):
 class RecurrentGemmaRglru(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, activations: torch.Tensor, position_ids: torch.Tensor
+        self,
+        activations: torch.Tensor,
+        position_ids: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class RecurrentGemmaRecurrentBlock(nn.Module):
@@ -76,7 +87,9 @@ class RecurrentGemmaRecurrentBlock(nn.Module):
         use_cache: bool = ...,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]: ...
 
 TEMPORAL_BLOCK_CLASSES = ...
@@ -97,7 +110,9 @@ class RecurrentGemmaDecoderLayer(GradientCheckpointingLayer):
         use_cache: bool | None = ...,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]: ...
 
 @auto_docstring

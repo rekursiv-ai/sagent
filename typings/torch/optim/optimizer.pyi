@@ -16,7 +16,8 @@ type StateDict = dict[str, Any]
 type DeviceDict = dict[torch.device | None, torch.Tensor]
 type DeviceDtypeDict = dict[tuple[torch.device, torch.dtype] | None, torch.Tensor]
 type GlobalOptimizerPreHook = Callable[
-    [Optimizer, Args, Kwargs], tuple[Args, Kwargs] | None
+    [Optimizer, Args, Kwargs],
+    tuple[Args, Kwargs] | None,
 ]
 type GlobalOptimizerPostHook = Callable[[Optimizer, Args, Kwargs], None]
 __all__ = [
@@ -60,10 +61,12 @@ class Optimizer:
     _optimizer_step_post_hooks: dict[int, OptimizerPostHook]
     _optimizer_state_dict_pre_hooks: OrderedDict[int, Callable[[Optimizer], None]]
     _optimizer_state_dict_post_hooks: OrderedDict[
-        int, Callable[[Optimizer, StateDict], StateDict | None]
+        int,
+        Callable[[Optimizer, StateDict], StateDict | None],
     ]
     _optimizer_load_state_dict_pre_hooks: OrderedDict[
-        int, Callable[[Optimizer, StateDict], StateDict | None]
+        int,
+        Callable[[Optimizer, StateDict], StateDict | None],
     ]
     _optimizer_load_state_dict_post_hooks: OrderedDict[int, Callable[[Optimizer], None]]
     def __init__(self, params: ParamsT, defaults: dict[str, Any]) -> None: ...
@@ -75,7 +78,9 @@ class Optimizer:
     def register_step_pre_hook(self, hook: OptimizerPreHook) -> RemovableHandle: ...
     def register_step_post_hook(self, hook: OptimizerPostHook) -> RemovableHandle: ...
     def register_state_dict_pre_hook(
-        self, hook: Callable[[Optimizer], None], prepend: bool = ...
+        self,
+        hook: Callable[[Optimizer], None],
+        prepend: bool = ...,
     ) -> RemovableHandle: ...
     def register_state_dict_post_hook(
         self,
@@ -90,7 +95,9 @@ class Optimizer:
         prepend: bool = ...,
     ) -> RemovableHandle: ...
     def register_load_state_dict_post_hook(
-        self, hook: Callable[[Optimizer], None], prepend: bool = ...
+        self,
+        hook: Callable[[Optimizer], None],
+        prepend: bool = ...,
     ) -> RemovableHandle: ...
     @torch._disable_dynamo
     def load_state_dict(self, state_dict: StateDict) -> None: ...
@@ -100,7 +107,8 @@ class Optimizer:
     def step(self, closure: None = ...) -> None: ...
     @overload
     def step(
-        self, closure: Callable[[], torch.Tensor | float]
+        self,
+        closure: Callable[[], torch.Tensor | float],
     ) -> torch.Tensor | float: ...
     def step(
         self,

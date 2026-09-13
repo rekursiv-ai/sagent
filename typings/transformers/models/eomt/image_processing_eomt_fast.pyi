@@ -19,7 +19,8 @@ class EomtImageProcessorFastKwargs(DefaultFastImageProcessorKwargs):
 
 def get_target_size(size_dict: dict[str, int]) -> tuple[int, int]: ...
 def reorder_patches_and_offsets(
-    patches: list[torch.Tensor], offsets: list[list[int]]
+    patches: list[torch.Tensor],
+    offsets: list[list[int]],
 ) -> tuple[list[torch.Tensor], list[list[int]]]: ...
 
 @auto_docstring

@@ -49,15 +49,24 @@ class TvltForPreTrainingOutput(ModelOutput):
     attentions: tuple[torch.FloatTensor, ...] | None = ...
 
 def generate_pixel_mask_noise(
-    pixel_values, pixel_mask=..., mask_ratio=...
+    pixel_values,
+    pixel_mask=...,
+    mask_ratio=...,
 ):  # -> tuple[Tensor, int]:
     ...
 def generate_audio_mask_noise(
-    audio_values, audio_mask=..., mask_ratio=..., mask_type=..., freq_len=...
+    audio_values,
+    audio_mask=...,
+    mask_ratio=...,
+    mask_type=...,
+    freq_len=...,
 ):  # -> tuple[Tensor | Any, int]:
     ...
 def random_masking(
-    sequence, noise, len_keep, attention_masks=...
+    sequence,
+    noise,
+    len_keep,
+    attention_masks=...,
 ):  # -> tuple[Tensor, Tensor | None, Any | Tensor, Tensor]:
     ...
 
@@ -85,14 +94,20 @@ class TvltSelfAttention(nn.Module):
     def __init__(self, config) -> None: ...
     def transpose_for_scores(self, x): ...
     def forward(
-        self, hidden_states, attention_mask=..., head_mask=..., output_attentions=...
+        self,
+        hidden_states,
+        attention_mask=...,
+        head_mask=...,
+        output_attentions=...,
     ):  # -> tuple[Tensor, Any] | tuple[Tensor]:
         ...
 
 class TvltSelfOutput(nn.Module):
     def __init__(self, config: TvltConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -101,7 +116,11 @@ class TvltAttention(nn.Module):
     def prune_heads(self, heads):  # -> None:
         ...
     def forward(
-        self, hidden_states, attention_mask=..., head_mask=..., output_attentions=...
+        self,
+        hidden_states,
+        attention_mask=...,
+        head_mask=...,
+        output_attentions=...,
     ):  # -> Any:
         ...
 
@@ -113,14 +132,20 @@ class TvltIntermediate(nn.Module):
 class TvltOutput(nn.Module):
     def __init__(self, config: TvltConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class TvltLayer(GradientCheckpointingLayer):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states, attention_mask=..., head_mask=..., output_attentions=...
+        self,
+        hidden_states,
+        attention_mask=...,
+        head_mask=...,
+        output_attentions=...,
     ):  # -> Any:
         ...
 
@@ -158,7 +183,8 @@ class TvltModel(TvltPreTrainedModel):
         ...
     @add_start_docstrings_to_model_forward(TVLT_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TvltModelOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TvltModelOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,
@@ -200,7 +226,8 @@ class TvltForPreTraining(TvltPreTrainedModel):
         ...
     @add_start_docstrings_to_model_forward(TVLT_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TvltForPreTrainingOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TvltForPreTrainingOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,
@@ -239,7 +266,8 @@ class TvltForAudioVisualClassification(TvltPreTrainedModel):
     def __init__(self, config) -> None: ...
     @add_start_docstrings_to_model_forward(TVLT_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=SequenceClassifierOutput, config_class=_CONFIG_FOR_DOC
+        output_type=SequenceClassifierOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,

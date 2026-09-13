@@ -29,7 +29,10 @@ class Benchmarker:
     ) -> float: ...
     @time_and_count
     def benchmark_cpu(
-        self: Self, _callable: Callable[[], Any], warmup: int = ..., rep: int = ...
+        self: Self,
+        _callable: Callable[[], Any],
+        warmup: int = ...,
+        rep: int = ...,
     ) -> float: ...
     @time_and_count
     def benchmark_gpu(self: Self, *args: Any, **kwargs: Any) -> float: ...
@@ -39,17 +42,21 @@ class TritonBenchmarker(Benchmarker):
     def triton_do_bench(self: Self) -> Callable[..., Any]: ...
     @time_and_count
     def benchmark_gpu(
-        self: Self, _callable: Callable[[], Any], **kwargs: Any
+        self: Self,
+        _callable: Callable[[], Any],
+        **kwargs: Any,
     ) -> float: ...
 
 class InductorBenchmarker(TritonBenchmarker):
     @cached_property
     def L2_cache_size(self: Self) -> int: ...
     def get_event_pairs(
-        self: Self, iters: int
+        self: Self,
+        iters: int,
     ) -> list[tuple[torch.cuda.Event, torch.cuda.Event]]: ...
     def get_event_pairs_min_timing(
-        self: Self, event_pairs: list[tuple[torch.cuda.Event, torch.cuda.Event]]
+        self: Self,
+        event_pairs: list[tuple[torch.cuda.Event, torch.cuda.Event]],
     ) -> float: ...
     @time_and_count
     def benchmark_gpu(

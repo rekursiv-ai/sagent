@@ -33,7 +33,7 @@ __all__ = [
 # Provider cache breakpoints operate at coarse granularity (Anthropic's own
 # minimum cacheable block is on this order); a delta at or below this is
 # breakpoint-placement noise, not a real miss worth reporting.
-_NOISE_FLOOR_TOKENS = 1024  # config-globals: ignore -- cache-miss noise-floor dial
+_NOISE_FLOOR_TOKENS = 1024  # house-ignore[globals] -- Cache-miss noise-floor dial.
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

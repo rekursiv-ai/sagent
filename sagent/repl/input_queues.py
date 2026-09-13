@@ -53,13 +53,17 @@ class InputQueues:
         return self.queue is not None or self.deferred is not None
 
     def stage_queue(
-        self, text: str, attachments: tuple[BytesMessage, ...] = ()
+        self,
+        text: str,
+        attachments: tuple[BytesMessage, ...] = (),
     ) -> None:
         """Coalesce ``text`` into the queue pane (append after existing)."""
         self.queue = _coalesce(self.queue, text, attachments)
 
     def stage_deferred(
-        self, text: str, attachments: tuple[BytesMessage, ...] = ()
+        self,
+        text: str,
+        attachments: tuple[BytesMessage, ...] = (),
     ) -> None:
         """Coalesce ``text`` into the deferred pane (append after existing)."""
         self.deferred = _coalesce(self.deferred, text, attachments)
@@ -72,10 +76,14 @@ class InputQueues:
     def render_lines(self) -> list[str]:
         """Return pane lines top-to-bottom: deferred above queue.
 
+        Returns:
+          lines: Pane text lines in display order.
+
         The deferred message carries a ``[deferred]`` prefix; the queue
         message carries none. Empty panes contribute nothing. Order
         matches the spec's vertical layout (deferred pane above queue
         pane, both above the input pane).
+
         """
         lines: list[str] = []
         if self.deferred is not None:
@@ -101,14 +109,22 @@ class InputQueues:
         return True
 
     def commit_deferred_on_idle(self, agent: Agent) -> bool:
-        """Dispatch the deferred pane's message to the inbox, if present."""
+        """Dispatch the deferred pane's message to the inbox, if present.
+
+        Args:
+          agent: Agent whose inbox receives the deferred message.
+
+        Returns:
+          committed: Whether a deferred message was dispatched.
+
+        """
         if self.deferred is None:
             return False
         agent.runtime.inbox.push_back(
             UserDeferredMessage(
                 text=self.deferred.text,
                 attachments=self.deferred.attachments,
-            )
+            ),
         )
         self.deferred = None
         return True
@@ -116,10 +132,14 @@ class InputQueues:
     def peek_tail_preview(self) -> str:
         """Return every staged pane's text for discard messages.
 
+        Returns:
+          preview: Newline-separated non-empty pane text.
+
         Read-only. Both panes are shown, queue first (Enter-staged is
         nearer dispatch than Tab-staged): the discard notice counts both,
         so returning only one destroyed the other without the operator
         ever seeing what they would have to re-type.
+
         """
         texts = [
             block.text

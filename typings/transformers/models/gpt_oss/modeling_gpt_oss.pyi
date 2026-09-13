@@ -31,7 +31,10 @@ class GptOssRMSNorm(nn.Module):
 class GptOssExperts(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, router_indices=..., routing_weights=...
+        self,
+        hidden_states: torch.Tensor,
+        router_indices=...,
+        routing_weights=...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -56,7 +59,12 @@ class GptOssRotaryEmbedding(nn.Module):
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Tensor, Tensor]:
     ...
 def eager_attention_forward(
@@ -165,10 +173,12 @@ class GptOssForCausalLM(GptOssPreTrainedModel, GenerationMixin):
     ) -> MoeCausalLMOutputWithPast: ...
 
 class GptOssForSequenceClassification(
-    GenericForSequenceClassification, GptOssPreTrainedModel
+    GenericForSequenceClassification,
+    GptOssPreTrainedModel,
 ): ...
 class GptOssForTokenClassification(
-    GenericForTokenClassification, GptOssPreTrainedModel
+    GenericForTokenClassification,
+    GptOssPreTrainedModel,
 ): ...
 
 __all__ = [

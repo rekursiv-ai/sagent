@@ -10,7 +10,7 @@ import subprocess
 import pytest
 
 from sagent.testing import with_fake_agent
-from sagent.tools import play_audio as pa
+from sagent.tools import play_audio
 from sagent.tools.play_audio import PlayAudio
 
 
@@ -31,7 +31,7 @@ def play_calls(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
         seen.append(p)
         return None
 
-    monkeypatch.setattr(pa, "_play", fake_play)
+    monkeypatch.setattr(play_audio, "_play", fake_play)
     return seen
 
 
@@ -113,12 +113,13 @@ async def test_run_absolute_path_success(wav: Path, play_calls: list[Path]) -> N
 
 @pytest.mark.asyncio
 async def test_run_play_soft_fail_reported(
-    wav: Path, monkeypatch: pytest.MonkeyPatch
+    wav: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def _soft_fail(_: Path) -> str:
         return "no audio backend worked"
 
-    monkeypatch.setattr(pa, "_play", _soft_fail)
+    monkeypatch.setattr(play_audio, "_play", _soft_fail)
     t = PlayAudio()
     with with_fake_agent():
         result = await t.run({"path": str(wav)})
@@ -132,7 +133,7 @@ def test_play_via_cmd_no_path_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
         return None
 
     monkeypatch.setattr("shutil.which", _none)
-    out = pa._play_via_cmd(Path("/x.wav"), ["aplay"])
+    out = play_audio._play_via_cmd(Path("/x.wav"), ["aplay"])
     assert out is not None
     assert "not on PATH" in out
 
@@ -142,7 +143,10 @@ def test_play_via_cmd_success(monkeypatch: pytest.MonkeyPatch) -> None:
         return f"/usr/bin/{exe}"
 
     completed: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
-        args=[], returncode=0, stdout="", stderr=""
+        args=[],
+        returncode=0,
+        stdout="",
+        stderr="",
     )
 
     def _run(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
@@ -150,7 +154,7 @@ def test_play_via_cmd_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("shutil.which", _which)
     monkeypatch.setattr("subprocess.run", _run)
-    assert pa._play_via_cmd(Path("/x.wav"), ["aplay"]) is None
+    assert play_audio._play_via_cmd(Path("/x.wav"), ["aplay"]) is None
 
 
 def test_play_via_cmd_nonzero_returns_reason(
@@ -160,7 +164,10 @@ def test_play_via_cmd_nonzero_returns_reason(
         return f"/usr/bin/{exe}"
 
     completed: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
-        args=[], returncode=2, stdout="", stderr=""
+        args=[],
+        returncode=2,
+        stdout="",
+        stderr="",
     )
 
     def _run(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
@@ -168,7 +175,7 @@ def test_play_via_cmd_nonzero_returns_reason(
 
     monkeypatch.setattr("shutil.which", _which)
     monkeypatch.setattr("subprocess.run", _run)
-    out = pa._play_via_cmd(Path("/x.wav"), ["aplay"])
+    out = play_audio._play_via_cmd(Path("/x.wav"), ["aplay"])
     assert out is not None
     assert "exit 2" in out
 
@@ -182,7 +189,7 @@ def test_play_via_cmd_exception_collected(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setattr("shutil.which", _which)
     monkeypatch.setattr("subprocess.run", _boom)
-    out = pa._play_via_cmd(Path("/x.wav"), ["aplay"])
+    out = play_audio._play_via_cmd(Path("/x.wav"), ["aplay"])
     assert out is not None
     assert "aplay" in out
 
@@ -195,8 +202,8 @@ def test_play_dispatch_linux(monkeypatch: pytest.MonkeyPatch) -> None:
         captured.append((path, candidates))
         return None
 
-    monkeypatch.setattr(pa, "_play_via_cmd", fake_via_cmd)
-    assert pa._play(Path("/x.wav")) is None
+    monkeypatch.setattr(play_audio, "_play_via_cmd", fake_via_cmd)
+    assert play_audio._play(Path("/x.wav")) is None
     assert captured[0][0] == Path("/x.wav")
     assert [c[0] for c in captured[0][1]] == ["aplay", "paplay", "play"]
 
@@ -209,8 +216,8 @@ def test_play_dispatch_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
         captured.extend(candidates)
         return None
 
-    monkeypatch.setattr(pa, "_play_via_cmd", fake_via_cmd)
-    assert pa._play(Path("/x.wav")) is None
+    monkeypatch.setattr(play_audio, "_play_via_cmd", fake_via_cmd)
+    assert play_audio._play(Path("/x.wav")) is None
     assert captured == [["afplay"]]
 
 
@@ -220,8 +227,8 @@ def test_play_dispatch_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     def _stub(_: Path) -> str | None:
         return None
 
-    monkeypatch.setattr(pa, "_play_windows", _stub)
-    assert pa._play(Path("/x.wav")) is None
+    monkeypatch.setattr(play_audio, "_play_windows", _stub)
+    assert play_audio._play(Path("/x.wav")) is None
 
 
 def test_play_windows_no_module(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -229,7 +236,7 @@ def test_play_windows_no_module(monkeypatch: pytest.MonkeyPatch) -> None:
         raise ImportError("not on POSIX")
 
     monkeypatch.setattr("importlib.import_module", boom)
-    out = pa._play_windows(Path("/x.wav"))
+    out = play_audio._play_windows(Path("/x.wav"))
     assert out is not None
     assert "winsound unavailable" in out
 
@@ -240,7 +247,7 @@ def test_play_windows_runtime_error() -> None:
     fake_ws.SND_NODEFAULT = 2
     fake_ws.PlaySound.side_effect = RuntimeError("hw fail")
     with patch("importlib.import_module", return_value=fake_ws):
-        out = pa._play_windows(Path("/x.wav"))
+        out = play_audio._play_windows(Path("/x.wav"))
     assert out is not None
     assert "winsound.PlaySound failed" in out
 
@@ -250,7 +257,7 @@ def test_play_windows_success() -> None:
     fake_ws.SND_FILENAME = 1
     fake_ws.SND_NODEFAULT = 2
     with patch("importlib.import_module", return_value=fake_ws):
-        assert pa._play_windows(Path("/x.wav")) is None
+        assert play_audio._play_windows(Path("/x.wav")) is None
 
 
 if __name__ == "__main__":

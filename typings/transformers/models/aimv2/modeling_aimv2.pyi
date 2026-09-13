@@ -49,7 +49,12 @@ class Aimv2VisionEmbeddings(nn.Module):
     def __init__(self, config: Aimv2VisionConfig) -> None: ...
     @staticmethod
     def build_2d_sincos_position_embedding(
-        height, width, embed_dim=..., temperature=..., device=..., dtype=...
+        height,
+        width,
+        embed_dim=...,
+        temperature=...,
+        device=...,
+        dtype=...,
     ) -> torch.Tensor: ...
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -85,7 +90,9 @@ class Aimv2Attention(nn.Module):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class Aimv2EncoderLayer(GradientCheckpointingLayer):
@@ -174,7 +181,9 @@ class Aimv2Model(Aimv2PreTrainedModel):
     @filter_out_non_signature_kwargs()
     @auto_docstring
     def get_image_features(
-        self, pixel_values: torch.FloatTensor, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values: torch.FloatTensor,
+        interpolate_pos_encoding: bool = ...,
     ) -> torch.FloatTensor: ...
     @auto_docstring
     @can_return_tuple

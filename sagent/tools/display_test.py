@@ -62,7 +62,8 @@ def test_budget_counts_logical_lines_and_keeps_them_whole() -> None:
     """
     body = "\n".join(f"{i}" + "x" * 39 for i in range(5))
     got = format_output(
-        body, OutputSpec(show=True, head_rows=1, tail_rows=1, max_width=10)
+        body,
+        OutputSpec(show=True, head_rows=1, tail_rows=1, max_width=10),
     )
     assert "".join(got[:4]) == "0" + "x" * 39, got
     assert got[4].startswith("\u22ef"), got
@@ -79,26 +80,33 @@ def test_the_elision_marker_is_never_wrapped() -> None:
     """The marker is ours, not content; chopping it hides the count."""
     body = "\n".join(str(i) for i in range(10))
     got = format_output(
-        body, OutputSpec(show=True, head_rows=1, tail_rows=1, max_width=4)
+        body,
+        OutputSpec(show=True, head_rows=1, tail_rows=1, max_width=4),
     )
     assert "\u22ef 8 lines \u22ef" in got, got
 
 
 def test_chop_keeps_the_head_and_marks_the_cut() -> None:
     assert format_output(
-        "abcdef", OutputSpec(show=True, unbounded=True, wrap="chop"), width=4
+        "abcdef",
+        OutputSpec(show=True, unbounded=True, wrap="chop"),
+        width=4,
     ) == ["abc\u2026"]
 
 
 def test_chop_leaves_a_fitting_line_unmarked() -> None:
     assert format_output(
-        "abc", OutputSpec(show=True, unbounded=True, wrap="chop"), width=4
+        "abc",
+        OutputSpec(show=True, unbounded=True, wrap="chop"),
+        width=4,
     ) == ["abc"]
 
 
 def test_max_width_overrides_the_caller_width() -> None:
     got = format_output(
-        "abcdef", OutputSpec(show=True, unbounded=True, max_width=2), width=99
+        "abcdef",
+        OutputSpec(show=True, unbounded=True, max_width=2),
+        width=99,
     )
     assert got == ["ab", "cd", "ef"]
 
@@ -112,7 +120,11 @@ def test_row_spec_reads_flat_attributes() -> None:
         output_wrap = "chop"
 
     assert row_spec(_Tool()).output == OutputSpec(
-        show=True, head_rows=2, tail_rows=3, max_width=40, wrap="chop"
+        show=True,
+        head_rows=2,
+        tail_rows=3,
+        max_width=40,
+        wrap="chop",
     )
 
 
@@ -140,7 +152,11 @@ def test_command_knobs_bound_the_input_row() -> None:
 
     display = row_spec(_Tool())
     assert display.command == OutputSpec(
-        show=True, head_rows=3, tail_rows=1, max_width=0, wrap="wrap"
+        show=True,
+        head_rows=3,
+        tail_rows=1,
+        max_width=0,
+        wrap="wrap",
     )
     assert display.command_lang == "bash"
 

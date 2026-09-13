@@ -37,15 +37,15 @@ from sagent.types.tape import (
 )
 
 
+# Reproduces the on-disk shape the coalesce bug left behind: a barrier carrying the
+# conversation, then a ``user_coalesce`` that absorbed the barrier's whole-tape mask
+# while injecting only the merged user message.
 def _write_truncated_session(
-    session_dir: Path, *, session_id: str = "poisoned"
+    session_dir: Path,
+    *,
+    session_id: str = "poisoned",
 ) -> None:
-    """Persist a session whose tape carries the truncating coalesce splice.
-
-    Reproduces the on-disk shape the coalesce bug left behind: a barrier
-    carrying the conversation, then a ``user_coalesce`` that absorbed the
-    barrier's whole-tape mask while injecting only the merged user message.
-    """
+    """Persist a session whose tape carries the truncating coalesce splice."""
     refs = [TapeRef(session_id=session_id, ordinal=i) for i in range(5)]
     conversation = (
         UserMessage(text="the original question"),
@@ -88,15 +88,13 @@ def test_poison_splices_finds_the_truncating_coalesce(tmp_path: Path) -> None:
     assert [s.ref.ordinal for s in found] == [4]
 
 
+# The barrier the coalesce absorbed was synthesized inside ``load_session`` and never
+# written, so on disk the coalesce masks plain history records and the absorbed splice
+# is absent entirely. A detector that compares payload lengths against the absorbed
+# splice therefore sees nothing -- which is what happened on the first pass over the
+# real session file.
 def _write_incident_shape(session_dir: Path, *, session_id: str = "incident") -> int:
-    """Persist the REAL on-disk shape of the truncation, returning its size.
-
-    The barrier the coalesce absorbed was synthesized inside ``load_session``
-    and never written, so on disk the coalesce masks plain history records and
-    the absorbed splice is absent entirely. A detector that compares payload
-    lengths against the absorbed splice therefore sees nothing -- which is what
-    happened on the first pass over the real session file.
-    """
+    """Persist the REAL on-disk shape of the truncation, returning its size."""
     count = 12
     refs = [TapeRef(session_id=session_id, ordinal=i) for i in range(count)]
     history = [
@@ -168,7 +166,7 @@ def test_poison_splices_ignores_a_lossless_barrier(tmp_path: Path) -> None:
             ReferrableTapeEvent(
                 ref=refs[1],
                 event=AssistantMessage(
-                    tool_calls=(ToolCall(id="c1", name="Bash", args={}),)
+                    tool_calls=(ToolCall(id="c1", name="Bash", args={}),),
                 ),
             ),
         ],
@@ -292,13 +290,17 @@ def test_the_mint_and_the_append_happen_under_one_lock(tmp_path: Path) -> None:
             held.append("release")
 
     def tracking_load(
-        session_dir: Path, *, preserve_corrupt: bool = True
+        session_dir: Path,
+        *,
+        preserve_corrupt: bool = True,
     ) -> tuple[SessionMeta, list[TapeRecord], ToolState] | None:
         held.append("load")
         return load_session(session_dir, preserve_corrupt=preserve_corrupt)
 
     def tracking_append(
-        path: Path, *, tape_delta: Sequence[TapeRecord] | None = None
+        path: Path,
+        *,
+        tape_delta: Sequence[TapeRecord] | None = None,
     ) -> None:
         held.append("append")
         append_session(path, tape_delta=tape_delta)

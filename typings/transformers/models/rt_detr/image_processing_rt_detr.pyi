@@ -100,7 +100,11 @@ class RTDetrImageProcessor(BaseImageProcessor):
         **kwargs,
     ) -> np.ndarray: ...
     def resize_annotation(
-        self, annotation, orig_size, size, resample: PILImageResampling = ...
+        self,
+        annotation,
+        orig_size,
+        size,
+        resample: PILImageResampling = ...,
     ) -> dict: ...
     def rescale(
         self,
@@ -110,7 +114,9 @@ class RTDetrImageProcessor(BaseImageProcessor):
         input_data_format: str | ChannelDimension | None = ...,
     ) -> np.ndarray: ...
     def normalize_annotation(
-        self, annotation: dict, image_size: tuple[int, int]
+        self,
+        annotation: dict,
+        image_size: tuple[int, int],
     ) -> dict: ...
     def pad(
         self,

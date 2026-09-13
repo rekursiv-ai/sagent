@@ -34,7 +34,9 @@ class PixtralImageProcessorFast(BaseImageProcessorFast):
     def __init__(self, **kwargs: Unpack[PixtralFastImageProcessorKwargs]) -> None: ...
     @auto_docstring
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[PixtralFastImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[PixtralFastImageProcessorKwargs],
     ) -> BatchFeature: ...
     def resize(
         self,

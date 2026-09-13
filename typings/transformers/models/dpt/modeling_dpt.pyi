@@ -41,22 +41,31 @@ class BaseModelOutputWithPoolingAndIntermediateActivations(ModelOutput):
 
 class DPTViTHybridEmbeddings(nn.Module):
     def __init__(
-        self, config: DPTConfig, feature_size: tuple[int, int] | None = ...
+        self,
+        config: DPTConfig,
+        feature_size: tuple[int, int] | None = ...,
     ) -> None: ...
     def forward(
-        self, pixel_values: torch.Tensor, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values: torch.Tensor,
+        interpolate_pos_encoding: bool = ...,
     ) -> BaseModelOutputWithIntermediateActivations: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> BaseModelOutputWithIntermediateActivations: ...
 
 class DPTViTEmbeddings(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, pixel_values: torch.Tensor
+        self,
+        pixel_values: torch.Tensor,
     ) -> BaseModelOutputWithIntermediateActivations: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> BaseModelOutputWithIntermediateActivations: ...
 
 class DPTViTPatchEmbeddings(nn.Module):
@@ -79,16 +88,22 @@ def eager_attention_forward(
 class DPTSelfAttention(nn.Module):
     def __init__(self, config: DPTConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, head_mask: torch.Tensor | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        head_mask: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class DPTViTSelfOutput(nn.Module):
     def __init__(self, config: DPTConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -97,7 +112,9 @@ class DPTViTAttention(nn.Module):
     def prune_heads(self, heads: set[int]):  # -> None:
         ...
     def forward(
-        self, hidden_states: torch.Tensor, head_mask: torch.Tensor | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        head_mask: torch.Tensor | None = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -109,14 +126,18 @@ class DPTViTIntermediate(nn.Module):
 class DPTViTOutput(nn.Module):
     def __init__(self, config: DPTConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 class DPTViTLayer(GradientCheckpointingLayer):
     def __init__(self, config: DPTConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, head_mask: torch.Tensor | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        head_mask: torch.Tensor | None = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -133,7 +154,10 @@ class DPTViTEncoder(nn.Module):
 class DPTReassembleStage(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: list[torch.Tensor], patch_height=..., patch_width=...
+        self,
+        hidden_states: list[torch.Tensor],
+        patch_height=...,
+        patch_width=...,
     ) -> list[torch.Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> list[torch.Tensor]: ...
 
@@ -155,7 +179,9 @@ class DPTPreActResidualLayer(nn.Module):
 class DPTFeatureFusionLayer(nn.Module):
     def __init__(self, config: DPTConfig, align_corners: bool = ...) -> None: ...
     def forward(
-        self, hidden_state: torch.Tensor, residual: torch.Tensor | None = ...
+        self,
+        hidden_state: torch.Tensor,
+        residual: torch.Tensor | None = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 

@@ -36,9 +36,6 @@ logger = logging.getLogger(__name__)
 
 
 _DEFAULT_ACCOUNT: Final = "default"
-# ``\Z``, not ``$``: ``$`` also matches before a trailing newline, so
-# ``"work\n"`` would pass and reach the filesystem as a credential name.
-_ACCOUNT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")
 
 
 def resolve_account(account: str | None) -> str:
@@ -57,7 +54,9 @@ def resolve_account(account: str | None) -> str:
 
     """
     name = account or _DEFAULT_ACCOUNT
-    if not _ACCOUNT_RE.match(name):
+    # ``\Z``, not ``$``: ``$`` also matches before a trailing newline, so
+    # ``"work\n"`` would pass and reach the filesystem as a credential name.
+    if not re.match(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z", name):
         raise ValueError(
             f"Invalid account name {name!r}: use alphanumerics, ``_``, or ``-``.",
         )
@@ -177,17 +176,17 @@ class AuthCodeHandler(http_server.BaseHTTPRequestHandler):
         code = (params.get("code") or [""])[0]
         err = (params.get("error") or [""])[0]
         if err:
-            listener._error = err  # noqa: SLF001 -- handler callback pokes listener internals
-        elif state != listener._expected_state:  # noqa: SLF001 -- handler callback pokes listener internals
-            listener._error = "state mismatch"  # noqa: SLF001 -- handler callback pokes listener internals
+            listener._error = err  # noqa: SLF001 -- The test reaches the private OAuth seam under test.
+        elif state != listener._expected_state:  # noqa: SLF001 -- The test reaches the private OAuth seam under test.
+            listener._error = "state mismatch"  # noqa: SLF001 -- The test reaches the private OAuth seam under test.
         elif not code:
             # Matching state with no code is not a success: the flow has
             # nothing to exchange. ``parse_manual_auth_code`` rejects the
             # same input, so the two entry points agree.
-            listener._error = "authorization code missing"  # noqa: SLF001 -- handler callback pokes listener internals
+            listener._error = "authorization code missing"  # noqa: SLF001 -- The test reaches the private OAuth seam under test.
         else:
-            listener._code = code  # noqa: SLF001 -- handler callback pokes listener internals
-        ok = not listener._error  # noqa: SLF001 -- handler callback pokes listener internals
+            listener._code = code  # noqa: SLF001 -- The test reaches the private OAuth seam under test.
+        ok = not listener._error  # noqa: SLF001 -- The test reaches the private OAuth seam under test.
         self.send_response(200 if ok else 400)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
@@ -201,7 +200,7 @@ class AuthCodeHandler(http_server.BaseHTTPRequestHandler):
             )
         )
         self.wfile.write(body)
-        listener._done.set()  # noqa: SLF001 -- handler callback pokes listener internals
+        listener._done.set()  # noqa: SLF001 -- The test reaches the private OAuth seam under test.
 
 
 class AuthCodeListener:
@@ -348,21 +347,6 @@ _LOCK_REGISTRY: dict[str, _PathLock] = {}
 _LOCK_REGISTRY_GUARD = threading.Lock()
 
 
-def _path_lock_for(lock_path: Path) -> _PathLock:
-    """Return the singleton ``_PathLock`` for ``lock_path``, creating it once."""
-    # Resolved unconditionally: ``resolve`` is non-strict, and keying a
-    # not-yet-created path raw would change the key the moment the first
-    # acquisition creates it -- one file, two locks.
-    key = str(lock_path.resolve())
-    with _LOCK_REGISTRY_GUARD:
-        existing = _LOCK_REGISTRY.get(key)
-        if existing is not None:
-            return existing
-        new = _PathLock(path=lock_path)
-        _LOCK_REGISTRY[key] = new
-        return new
-
-
 @asynccontextmanager
 async def credential_file_lock(cred_path: Path) -> AsyncGenerator[None]:
     """Hold an exclusive cross-process lock around an OAuth refresh sequence.
@@ -395,6 +379,9 @@ async def credential_file_lock(cred_path: Path) -> AsyncGenerator[None]:
       cred_path: Credential file path. The lock targets
           ``<cred_path>.lock`` next to it.
 
+    Yields:
+      lock: An acquired lock held until the context exits.
+
     """
     lock_path = cred_path.with_suffix(cred_path.suffix + ".lock")
     fd = _path_lock_for(lock_path).open_fd()
@@ -410,3 +397,18 @@ async def credential_file_lock(cred_path: Path) -> AsyncGenerator[None]:
         yield
     finally:
         os.close(fd)
+
+
+def _path_lock_for(lock_path: Path) -> _PathLock:
+    """Return the singleton ``_PathLock`` for ``lock_path``, creating it once."""
+    # Resolved unconditionally: ``resolve`` is non-strict, and keying a
+    # not-yet-created path raw would change the key the moment the first
+    # acquisition creates it -- one file, two locks.
+    key = str(lock_path.resolve())
+    with _LOCK_REGISTRY_GUARD:
+        existing = _LOCK_REGISTRY.get(key)
+        if existing is not None:
+            return existing
+        new = _PathLock(path=lock_path)
+        _LOCK_REGISTRY[key] = new
+        return new

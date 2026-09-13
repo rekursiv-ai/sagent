@@ -159,7 +159,10 @@ class TFAutoModelWithLMHead(_TFAutoModelWithLMHead):
         ...
     @classmethod
     def from_pretrained(
-        cls, pretrained_model_name_or_path, *model_args, **kwargs
+        cls,
+        pretrained_model_name_or_path,
+        *model_args,
+        **kwargs,
     ):  # -> Any:
         ...
 

@@ -27,17 +27,21 @@ aten = ...
 type DispatchReturn = tuple[Callable, ViewAndMutationMeta]
 
 def aot_stage1_graph_capture(
-    aot_state: AOTState, orig_flat_fn: FlatFn
+    aot_state: AOTState,
+    orig_flat_fn: FlatFn,
 ) -> AOTGraphCapture: ...
 def aot_stage2_export(
-    aot_state: AOTState, aot_graph_capture: AOTGraphCapture
+    aot_state: AOTState,
+    aot_graph_capture: AOTGraphCapture,
 ) -> DispatchReturn: ...
 def sanitize_aot_config(input: AOTConfig) -> AOTConfig: ...
 def aot_stage2_compile(
-    aot_state: AOTState, aot_graph_capture: AOTGraphCapture
+    aot_state: AOTState,
+    aot_graph_capture: AOTGraphCapture,
 ) -> DispatchReturn: ...
 def aot_stage2_inference(
-    aot_state: AOTState, aot_graph_capture: AOTGraphCapture
+    aot_state: AOTState,
+    aot_graph_capture: AOTGraphCapture,
 ) -> DispatchReturn: ...
 def collect_fw_donated_buffer_idxs(
     fw_ins: list[FakeTensor | None],
@@ -63,7 +67,9 @@ class InvokeSubgraphHopGraphs:
 
 def prepare_for_partitioner(mod, num_primals, num_fw_outputs) -> GraphModule: ...
 def run_joint_graph_passes_on_hops(
-    joint_gm: torch.fx.GraphModule, joint_inputs: Any, aot_config: AOTConfig
+    joint_gm: torch.fx.GraphModule,
+    joint_inputs: Any,
+    aot_config: AOTConfig,
 ) -> torch.fx.GraphModule: ...
 def maybe_log_graph(
     gm,
@@ -83,5 +89,6 @@ def maybe_inline_graph_saved_tensors_hooks(
     static_input_indices,
 ): ...
 def aot_stage2_autograd(
-    aot_state: AOTState, aot_graph_capture: AOTGraphCapture
+    aot_state: AOTState,
+    aot_graph_capture: AOTGraphCapture,
 ) -> DispatchReturn: ...

@@ -34,13 +34,17 @@ def test_unknown_tokenizer_keeps_coarse_fallback() -> None:
     [("gpt-5.6-sol", 0, 6), ("gpt-6-astra", 0, 8), ("unknown-vendor", 32, 255)],
 )
 def test_image_estimation_needs_no_model_instance(
-    model_id: str, max_edge: int, expected: int
+    model_id: str,
+    max_edge: int,
+    expected: int,
 ) -> None:
     image = BytesIO()
     Image.new("RGB", (33, 65)).save(image, format="PNG")
     assert (
         token_count.approx_image_tokens(
-            image.getvalue(), model_id=model_id, max_edge=max_edge
+            image.getvalue(),
+            model_id=model_id,
+            max_edge=max_edge,
         )
         == expected
     )

@@ -38,13 +38,20 @@ def contrastive_loss(logits: tf.Tensor) -> tf.Tensor: ...
 def groupvit_loss(similarity: tf.Tensor) -> tf.Tensor: ...
 def hard_softmax(logits: tf.Tensor, dim: int) -> tf.Tensor: ...
 def gumbel_softmax(
-    logits: tf.Tensor, tau: float = ..., hard: bool = ..., dim: int = ...
+    logits: tf.Tensor,
+    tau: float = ...,
+    hard: bool = ...,
+    dim: int = ...,
 ) -> tf.Tensor: ...
 def resize_attention_map(
-    attentions: tf.Tensor, height: int, width: int, align_corners: bool = ...
+    attentions: tf.Tensor,
+    height: int,
+    width: int,
+    align_corners: bool = ...,
 ) -> tf.Tensor: ...
 def get_grouping_from_attentions(
-    attentions: tuple[tf.Tensor], hw_shape: tuple[int]
+    attentions: tuple[tf.Tensor],
+    hw_shape: tuple[int],
 ) -> tf.Tensor: ...
 
 @dataclass
@@ -62,7 +69,10 @@ class TFGroupViTModelOutput(ModelOutput):
 class TFGroupViTCrossAttentionLayer(keras.layers.Layer):
     def __init__(self, config: GroupViTVisionConfig, **kwargs) -> None: ...
     def call(
-        self, query: tf.Tensor, key: tf.Tensor, training: bool = ...
+        self,
+        query: tf.Tensor,
+        key: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -77,7 +87,10 @@ class TFGroupViTAssignAttention(keras.layers.Layer):
         training: bool = ...,
     ) -> tf.Tensor: ...
     def call(
-        self, query: tf.Tensor, key: tf.Tensor, training: bool = ...
+        self,
+        query: tf.Tensor,
+        key: tf.Tensor,
+        training: bool = ...,
     ):  # -> tuple[Any, Any]:
         ...
     def build(self, input_shape=...):  # -> None:
@@ -93,7 +106,10 @@ class TFGroupViTTokenAssign(keras.layers.Layer):
     ) -> None: ...
     def project_group_token(self, group_tokens: tf.Tensor) -> tf.Tensor: ...
     def call(
-        self, image_tokens: tf.Tensor, group_tokens: tf.Tensor, training: bool = ...
+        self,
+        image_tokens: tf.Tensor,
+        group_tokens: tf.Tensor,
+        training: bool = ...,
     ):  # -> tuple[Any, Any]:
         ...
     def build(self, input_shape=...):  # -> None:
@@ -150,7 +166,9 @@ class TFGroupViTStage(keras.layers.Layer):
         ...
     def split_x(self, x: tf.Tensor) -> tf.Tensor: ...
     def concat_x(
-        self, x: tf.Tensor, group_token: tf.Tensor | None = ...
+        self,
+        x: tf.Tensor,
+        group_token: tf.Tensor | None = ...,
     ) -> tf.Tensor: ...
     def call(
         self,
@@ -354,10 +372,11 @@ class TFGroupViTTextModel(TFGroupViTPreTrainedModel):
     def __init__(self, config: GroupViTTextConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        GROUPVIT_TEXT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        GROUPVIT_TEXT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFBaseModelOutputWithPooling, config_class=GroupViTTextConfig
+        output_type=TFBaseModelOutputWithPooling,
+        config_class=GroupViTTextConfig,
     )
     def call(
         self,
@@ -379,7 +398,8 @@ class TFGroupViTVisionModel(TFGroupViTPreTrainedModel):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(GROUPVIT_VISION_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFBaseModelOutputWithPooling, config_class=GroupViTVisionConfig
+        output_type=TFBaseModelOutputWithPooling,
+        config_class=GroupViTVisionConfig,
     )
     def call(
         self,
@@ -398,7 +418,7 @@ class TFGroupViTModel(TFGroupViTPreTrainedModel):
     def __init__(self, config: GroupViTConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        GROUPVIT_TEXT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        GROUPVIT_TEXT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     def get_text_features(
         self,
@@ -422,10 +442,11 @@ class TFGroupViTModel(TFGroupViTPreTrainedModel):
     ) -> tf.Tensor: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        GROUPVIT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        GROUPVIT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFGroupViTModelOutput, config_class=GroupViTConfig
+        output_type=TFGroupViTModelOutput,
+        config_class=GroupViTConfig,
     )
     def call(
         self,
@@ -441,7 +462,8 @@ class TFGroupViTModel(TFGroupViTPreTrainedModel):
         training: bool = ...,
     ) -> TFGroupViTModelOutput | tuple[tf.Tensor]: ...
     def serving_output(
-        self, output: TFGroupViTModelOutput
+        self,
+        output: TFGroupViTModelOutput,
     ) -> TFGroupViTModelOutput: ...
     def build(self, input_shape=...):  # -> None:
         ...

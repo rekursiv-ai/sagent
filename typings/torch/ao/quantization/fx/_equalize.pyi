@@ -10,14 +10,21 @@ import torch
 CUSTOM_MODULE_SUPP_LIST: list[Any] = ...
 
 def reshape_scale(
-    scale: torch.Tensor, axis: int, input: torch.Tensor
+    scale: torch.Tensor,
+    axis: int,
+    input: torch.Tensor,
 ) -> torch.Tensor: ...
 
 qsheme_mapping_per_tensor_to_per_channel = ...
 
 class _InputEqualizationObserver(nn.Module):
     def __init__(
-        self, dtype=..., qscheme=..., quant_min=..., quant_max=..., factory_kwargs=...
+        self,
+        dtype=...,
+        qscheme=...,
+        quant_min=...,
+        quant_max=...,
+        factory_kwargs=...,
     ) -> None: ...
     def forward(self, x_orig) -> Any: ...
     def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
@@ -29,7 +36,12 @@ class _InputEqualizationObserver(nn.Module):
 
 class _WeightEqualizationObserver(nn.Module):
     def __init__(
-        self, dtype=..., qscheme=..., quant_min=..., quant_max=..., factory_kwargs=...
+        self,
+        dtype=...,
+        qscheme=...,
+        quant_min=...,
+        quant_max=...,
+        factory_kwargs=...,
     ) -> None: ...
     def forward(self, w_orig) -> Any: ...
     def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
@@ -39,11 +51,12 @@ class _WeightEqualizationObserver(nn.Module):
     with_args = ...
 
 def calculate_equalization_scale(
-    input_obs: _InputEqualizationObserver, weight_obs: _WeightEqualizationObserver
+    input_obs: _InputEqualizationObserver,
+    weight_obs: _WeightEqualizationObserver,
 ) -> torch.Tensor: ...
 
 class EqualizationQConfig(
-    namedtuple("EqualizationQConfig", ["input_activation", "weight"])
+    namedtuple("EqualizationQConfig", ["input_activation", "weight"]),
 ):
     __slots__ = ...
     def __new__(cls, input_activation=..., weight=...) -> Self: ...
@@ -58,16 +71,21 @@ def custom_module_supports_equalization(module) -> bool: ...
 def node_supports_equalization(node: Node, modules) -> bool: ...
 def is_equalization_observer(observer: nn.Module) -> bool: ...
 def get_op_node_and_weight_eq_obs(
-    input_eq_obs_node: Node, model: GraphModule, modules: dict[str, nn.Module]
+    input_eq_obs_node: Node,
+    model: GraphModule,
+    modules: dict[str, nn.Module],
 ) -> tuple[Node | None, _WeightEqualizationObserver | None]: ...
 def maybe_get_weight_eq_obs_node(
-    op_node: Node, modules: dict[str, nn.Module]
+    op_node: Node,
+    modules: dict[str, nn.Module],
 ) -> Node | None: ...
 def maybe_get_next_input_eq_obs(
-    node: Node, modules: dict[str, nn.Module]
+    node: Node,
+    modules: dict[str, nn.Module],
 ) -> _InputEqualizationObserver | None: ...
 def maybe_get_next_equalization_scale(
-    node: Node, modules: dict[str, nn.Module]
+    node: Node,
+    modules: dict[str, nn.Module],
 ) -> torch.Tensor | None: ...
 def scale_input_observer(node: Node, modules: dict[str, nn.Module]) -> None: ...
 def scale_weight_node(
@@ -84,11 +102,13 @@ def scale_weight_functional(
     next_equalization_scale: torch.Tensor | None,
 ) -> None: ...
 def clear_weight_quant_obs_node(
-    op_node: Node, modules: dict[str, nn.Module]
+    op_node: Node,
+    modules: dict[str, nn.Module],
 ) -> None: ...
 def remove_node(model: GraphModule, node: Node, prev_node: Node) -> None: ...
 def update_obs_for_equalization(
-    model: GraphModule, modules: dict[str, nn.Module]
+    model: GraphModule,
+    modules: dict[str, nn.Module],
 ) -> dict[str, _WeightEqualizationObserver]: ...
 def convert_eq_obs(
     model: GraphModule,
@@ -96,8 +116,11 @@ def convert_eq_obs(
     weight_eq_obs_dict: dict[str, _WeightEqualizationObserver],
 ) -> None: ...
 def get_layer_sqnr_dict(
-    model_a: nn.Module, model_b: nn.Module, x: torch.Tensor
+    model_a: nn.Module,
+    model_b: nn.Module,
+    x: torch.Tensor,
 ) -> dict[str, float]: ...
 def get_equalization_qconfig_dict(
-    layer_sqnr_dict: dict[str, float], num_layers_to_equalize: int
+    layer_sqnr_dict: dict[str, float],
+    num_layers_to_equalize: int,
 ) -> Any: ...

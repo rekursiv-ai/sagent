@@ -53,7 +53,9 @@ class BlipTextSelfAttention(nn.Module):
 class BlipTextSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -81,7 +83,9 @@ class BlipTextIntermediate(nn.Module):
 class BlipTextOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -119,7 +123,9 @@ class BlipTextEncoder(nn.Module):
         cache_position: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPastAndCrossAttentions: ...
 
 class BlipTextPooler(nn.Module):
@@ -179,7 +185,9 @@ class BlipTextModel(BlipTextPreTrainedModel):
         cache_position: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPoolingAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | BaseModelOutputWithPoolingAndCrossAttentions: ...
 
 class BlipTextLMHeadModel(BlipTextPreTrainedModel, GenerationMixin):
@@ -214,10 +222,16 @@ class BlipTextLMHeadModel(BlipTextPreTrainedModel, GenerationMixin):
         cache_position: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor] | CausalLMOutputWithCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor] | CausalLMOutputWithCrossAttentions: ...
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=..., attention_mask=..., **model_kwargs
+        self,
+        input_ids,
+        past_key_values=...,
+        attention_mask=...,
+        **model_kwargs,
     ):  # -> dict[Any, Any]:
         ...
 

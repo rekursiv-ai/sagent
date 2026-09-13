@@ -24,5 +24,6 @@ def find_sequential_partitions(
     filter_fn: Callable[[Node], bool] | None = ...,
 ) -> list[tuple[SourcePartition, ...]]: ...
 def bfs_trace_with_node_process(
-    model: ExportedProgram | torch.fx.GraphModule, node_op: Callable
+    model: ExportedProgram | torch.fx.GraphModule,
+    node_op: Callable,
 ) -> None: ...

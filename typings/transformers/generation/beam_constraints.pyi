@@ -70,7 +70,8 @@ class ConstraintListState:
     def reset(self, token_ids: list[int] | None):  # -> None:
         ...
     def add(
-        self, token_id: int
+        self,
+        token_id: int,
     ):  # -> tuple[Literal[True], Literal[False]] | tuple[Any | Literal[False], Any | Literal[False]]:
         ...
     def copy(self, stateful=...):  # -> ConstraintListState:

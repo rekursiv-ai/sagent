@@ -41,10 +41,16 @@ def construct_full_unpacked_stream(
 def original_to_transformed_h_coords(original_coords, scale_h): ...
 def original_to_transformed_w_coords(original_coords, scale_w): ...
 def scale_point_to_transformed_image(
-    x: float, y: float, scale_factor: float
+    x: float,
+    y: float,
+    scale_factor: float,
 ) -> list[int]: ...
 def scale_bbox_to_transformed_image(
-    top: float, left: float, bottom: float, right: float, scale_factor: float
+    top: float,
+    left: float,
+    bottom: float,
+    right: float,
+    scale_factor: float,
 ) -> list[int]: ...
 
 @requires(backends=("vision",))
@@ -75,7 +81,10 @@ class FuyuProcessor(ProcessorMixin):
     def post_process_box_coordinates(self, outputs, target_sizes=...):  # -> list[Any]:
         ...
     def post_process_image_text_to_text(
-        self, generated_outputs, skip_special_tokens=..., **kwargs
+        self,
+        generated_outputs,
+        skip_special_tokens=...,
+        **kwargs,
     ): ...
     @property
     def model_input_names(self):  # -> list[Any]:

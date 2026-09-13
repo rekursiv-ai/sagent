@@ -38,7 +38,10 @@ class DeepseekV2MoE(nn.Module):
 
 class DeepseekV2MLP(nn.Module):
     def __init__(
-        self, config: DeepseekV2Config, hidden_size=..., intermediate_size=...
+        self,
+        config: DeepseekV2Config,
+        hidden_size=...,
+        intermediate_size=...,
     ) -> None: ...
     def forward(self, x):  # -> Any:
         ...
@@ -71,12 +74,16 @@ def eager_attention_forward(
 ):  # -> tuple[Tensor, Tensor]:
     ...
 def apply_rotary_emb(
-    xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    freqs_cis: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class DeepseekV2Attention(nn.Module):
     def __init__(
-        self, config: DeepseekV2Config, layer_idx: int | None = ...
+        self,
+        config: DeepseekV2Config,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -159,7 +166,8 @@ class DeepseekV2ForCausalLM(DeepseekV2PreTrainedModel, GenerationMixin):
     ) -> CausalLMOutputWithPast: ...
 
 class DeepseekV2ForSequenceClassification(
-    GenericForSequenceClassification, DeepseekV2PreTrainedModel
+    GenericForSequenceClassification,
+    DeepseekV2PreTrainedModel,
 ): ...
 
 __all__ = [

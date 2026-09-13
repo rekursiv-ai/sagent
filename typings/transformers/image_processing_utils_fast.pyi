@@ -47,7 +47,8 @@ def safe_squeeze(tensor: torch.Tensor, axis: int | None = ...) -> torch.Tensor: 
 def max_across_indices(values: Iterable[Any]) -> list[Any]: ...
 def get_max_height_width(images: list[torch.Tensor]) -> tuple[int, ...]: ...
 def divide_to_patches(
-    image: np.ndarray | torch.Tensor, patch_size: int
+    image: np.ndarray | torch.Tensor,
+    patch_size: int,
 ) -> list[np.ndarray | torch.Tensor]: ...
 
 class DefaultFastImageProcessorKwargs(TypedDict, total=False):
@@ -140,7 +141,10 @@ class BaseImageProcessorFast(BaseImageProcessor):
         image_std: float | list[float],
     ) -> torch.Tensor: ...
     def center_crop(
-        self, image: torch.Tensor, size: SizeDict, **kwargs
+        self,
+        image: torch.Tensor,
+        size: SizeDict,
+        **kwargs,
     ) -> torch.Tensor: ...
     def convert_to_rgb(self, image: ImageInput) -> ImageInput: ...
     def filter_out_unused_kwargs(self, kwargs: dict):  # -> dict[Any, Any]:

@@ -43,12 +43,19 @@ class FunnelAttentionStructure(nn.Module):
     ) -> tuple[torch.Tensor]: ...
     def token_type_ids_to_mat(self, token_type_ids: torch.Tensor) -> torch.Tensor: ...
     def get_position_embeds(
-        self, seq_len: int, dtype: torch.dtype, device: torch.device
+        self,
+        seq_len: int,
+        dtype: torch.dtype,
+        device: torch.device,
     ) -> tuple[torch.Tensor] | list[list[torch.Tensor]]: ...
     def stride_pool_pos(self, pos_id: torch.Tensor, block_index: int):  # -> Tensor:
         ...
     def relative_pos(
-        self, pos: torch.Tensor, stride: int, pooled_pos=..., shift: int = ...
+        self,
+        pos: torch.Tensor,
+        stride: int,
+        pooled_pos=...,
+        shift: int = ...,
     ) -> torch.Tensor: ...
     def stride_pool(
         self,
@@ -62,20 +69,30 @@ class FunnelAttentionStructure(nn.Module):
         stride: int = ...,
     ) -> torch.Tensor: ...
     def pre_attention_pooling(
-        self, output, attention_inputs: tuple[torch.Tensor]
+        self,
+        output,
+        attention_inputs: tuple[torch.Tensor],
     ) -> tuple[torch.Tensor, tuple[torch.Tensor]]: ...
     def post_attention_pooling(
-        self, attention_inputs: tuple[torch.Tensor]
+        self,
+        attention_inputs: tuple[torch.Tensor],
     ) -> tuple[torch.Tensor]: ...
 
 class FunnelRelMultiheadAttention(nn.Module):
     def __init__(self, config: FunnelConfig, block_index: int) -> None: ...
     def relative_positional_attention(
-        self, position_embeds, q_head, context_len, cls_mask=...
+        self,
+        position_embeds,
+        q_head,
+        context_len,
+        cls_mask=...,
     ):  # -> Tensor:
         ...
     def relative_token_type_attention(
-        self, token_type_mat, q_head, cls_mask=...
+        self,
+        token_type_mat,
+        q_head,
+        cls_mask=...,
     ):  # -> Tensor | Literal[0]:
         ...
     def forward(
@@ -160,7 +177,7 @@ class FunnelClassificationHead(nn.Module):
 @auto_docstring(
     custom_intro="""
     Output type of [`FunnelForPreTraining`].
-    """
+    """,
 )
 class FunnelForPreTrainingOutput(ModelOutput):
     loss: torch.FloatTensor | None = ...

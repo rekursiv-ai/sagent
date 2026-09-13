@@ -169,7 +169,10 @@ class DeviceOpOverrides:
     def cpp_device_ptr(self) -> str: ...
     def tma_descriptor_helpers(self) -> str: ...
     def cpp_scratch(
-        self, idx: int, workspace: TritonScratchWorkspace, prefix: str | None = ...
+        self,
+        idx: int,
+        workspace: TritonScratchWorkspace,
+        prefix: str | None = ...,
     ) -> tuple[list[str], str] | None: ...
 
 device_op_overrides_dict: dict[str, DeviceOpOverrides] = ...
@@ -202,11 +205,14 @@ def get_backend_features(
     device: torch.device | str | None,
 ) -> OrderedSet[BackendFeature]: ...
 def has_backend_feature(
-    device: torch.device | str | None, feature: BackendFeature
+    device: torch.device | str | None,
+    feature: BackendFeature,
 ) -> bool: ...
 def get_scheduling_for_device(device: str) -> SchedulingConstructor | None: ...
 def get_wrapper_codegen_for_device(
-    device: str, cpp_wrapper: bool = ..., fx_wrapper: bool = ...
+    device: str,
+    cpp_wrapper: bool = ...,
+    fx_wrapper: bool = ...,
 ) -> WrapperConstructor | None: ...
 def get_custom_backend_pass_for_device(device: str) -> CustomGraphModulePass | None: ...
 def get_custom_backend_config_for_device(device: str) -> ConfigModule | None: ...
@@ -218,23 +224,29 @@ def index_prevent_reordering(
     sizes: Sequence[sympy.Expr],
 ) -> list[sympy.Expr]: ...
 def register_device_op_overrides(
-    device: str, device_op_overrides: DeviceOpOverrides
+    device: str,
+    device_op_overrides: DeviceOpOverrides,
 ) -> None: ...
 def get_device_op_overrides(device: str) -> DeviceOpOverrides: ...
 
 DTYPE_TO_COMPUTATION_DTYPE: dict[torch.dtype, torch.dtype] = ...
 
 def deduce_output_dtype_by_name(
-    op_name: str, *args: Any, **kwargs: Any
+    op_name: str,
+    *args: Any,
+    **kwargs: Any,
 ) -> torch.dtype | None: ...
 def check_dtype(
-    buffer: IndentedBuffer, var: CSEVariableType, dtype: torch.dtype
+    buffer: IndentedBuffer,
+    var: CSEVariableType,
+    dtype: torch.dtype,
 ) -> None: ...
 
 class DataTypePropagation:
     def __init__(self, body: LoopBody) -> None: ...
     def deduce_node_dtype_by_inputs(
-        self, node: torch.fx.Node
+        self,
+        node: torch.fx.Node,
     ) -> torch.dtype | None: ...
     def deduce_node_dtype_by_subgraph(self, node: torch.fx.Node) -> torch.dtype: ...
     def deduce_node_dtype(self, node: torch.fx.Node) -> torch.dtype | None: ...
@@ -247,7 +259,11 @@ class DataTypePropagation:
 
 class PythonPrinter(_PythonPrinter):
     def doprint(
-        self, expr: sympy.Expr, *, simplify: bool = ..., p: bool = ...
+        self,
+        expr: sympy.Expr,
+        *,
+        simplify: bool = ...,
+        p: bool = ...,
     ) -> str: ...
     def parenthesize(self, item: sympy.Expr, level: int, strict: bool = ...) -> str: ...
 
@@ -322,11 +338,19 @@ class OpOverrides(BasicMathOpsMixin, OpDecompositions, OpsHandler[Any]):
         wrap_neg: bool = ...,
     ) -> sympy.Symbol: ...
     def check_bounds(
-        self, expr: sympy.Expr, size: sympy.Expr, lower: bool, upper: bool
+        self,
+        expr: sympy.Expr,
+        size: sympy.Expr,
+        lower: bool,
+        upper: bool,
     ) -> None: ...
     def load(self, name: str, index: sympy.Expr) -> OpVarT: ...
     def store(
-        self, name: str, index: sympy.Expr, value: OpVarT, mode: StoreMode = ...
+        self,
+        name: str,
+        index: sympy.Expr,
+        value: OpVarT,
+        mode: StoreMode = ...,
     ) -> None: ...
     def store_reduction(self, name: str, index: sympy.Expr, value: OpVarT) -> None: ...
     def reduction(
@@ -340,7 +364,8 @@ class OpOverrides(BasicMathOpsMixin, OpDecompositions, OpsHandler[Any]):
         self,
         dtypes: tuple[torch.dtype, ...],
         combine_fn: Callable[
-            [tuple[OpVarT, ...], tuple[OpVarT, ...]], tuple[OpVarT, ...]
+            [tuple[OpVarT, ...], tuple[OpVarT, ...]],
+            tuple[OpVarT, ...],
         ],
         values: tuple[OpVarT, ...],
     ) -> tuple[OpVarT, ...]: ...
@@ -423,7 +448,8 @@ class KernelArgs:
     def wrap_ptr_arg(self, buf: str, dtype: torch.dtype) -> str: ...
     def wrap_size_arg(self, size: SymbolLike) -> str: ...
     def cpp_argdefs(
-        self, dtype_to_cpp_type: dict[torch.dtype, str] | None = ...
+        self,
+        dtype_to_cpp_type: dict[torch.dtype, str] | None = ...,
     ) -> tuple[list[str], list[str], list[str]]: ...
     def python_argdefs(
         self,
@@ -447,7 +473,9 @@ class CSEVariable:
 AugmentedKeyT = TypeVar("AugmentedKeyT", default=str)
 CSEVariableType = TypeVar("CSEVariableType", bound=CSEVariable, default=CSEVariable)
 type ReductionCacheKey = tuple[
-    torch.dtype, ReductionType, CSEVariable | tuple[CSEVariable, ...]
+    torch.dtype,
+    ReductionType,
+    CSEVariable | tuple[CSEVariable, ...],
 ]
 
 class CSE(Generic[CSEVariableType, AugmentedKeyT]):
@@ -510,7 +538,9 @@ class Kernel(CodeGen, Generic[CSEVariableType]):
     suffix: str = ...
     overrides: Callable[[], OpsHandler[Any]] | None = ...
     def __init__(
-        self, args: KernelArgs | None = ..., increase_kernel_count: bool = ...
+        self,
+        args: KernelArgs | None = ...,
+        increase_kernel_count: bool = ...,
     ) -> None: ...
     @contextlib.contextmanager
     def set_current_node(self, node: SchedulerNode) -> Iterator[None]: ...
@@ -524,10 +554,17 @@ class Kernel(CodeGen, Generic[CSEVariableType]):
     def load(self, name: str, index: sympy.Expr) -> CSEVariable: ...
     def indirect_load(self, name: str, index: sympy.Expr) -> CSEVariable: ...
     def store_reduction(
-        self, name: str, index: sympy.Expr, value: CSEVariable
+        self,
+        name: str,
+        index: sympy.Expr,
+        value: CSEVariable,
     ) -> None: ...
     def store(
-        self, name: str, index: sympy.Expr, value: CSEVariable, mode: StoreMode = ...
+        self,
+        name: str,
+        index: sympy.Expr,
+        value: CSEVariable,
+        mode: StoreMode = ...,
     ) -> None: ...
     def reduction(
         self,
@@ -540,7 +577,8 @@ class Kernel(CodeGen, Generic[CSEVariableType]):
         self,
         dtypes: tuple[torch.dtype, ...],
         combine_fn: Callable[
-            [tuple[CSEVariable, ...], tuple[CSEVariable, ...]], tuple[CSEVariable, ...]
+            [tuple[CSEVariable, ...], tuple[CSEVariable, ...]],
+            tuple[CSEVariable, ...],
         ],
         values: tuple[CSEVariable, ...],
     ) -> tuple[CSEVariable, ...]: ...
@@ -572,7 +610,11 @@ class Kernel(CodeGen, Generic[CSEVariableType]):
         mask: CSEVariable | str | None = ...,
     ) -> str: ...
     def check_bounds(
-        self, expr: sympy.Expr, size: sympy.Expr, lower: bool, upper: bool
+        self,
+        expr: sympy.Expr,
+        size: sympy.Expr,
+        lower: bool,
+        upper: bool,
     ) -> None: ...
     def index_to_str(self, index: sympy.Expr) -> str: ...
     def __enter__(self) -> Self: ...
@@ -586,7 +628,8 @@ class Kernel(CodeGen, Generic[CSEVariableType]):
     def remove_buffer(self, name: str) -> None: ...
     def remove_inplace_buffer(self, name: str) -> None: ...
     def rename_indexing(
-        self, index: list[sympy.Expr] | tuple[sympy.Expr, ...] | sympy.Expr
+        self,
+        index: list[sympy.Expr] | tuple[sympy.Expr, ...] | sympy.Expr,
     ) -> sympy.Expr: ...
     def create_cse_var(self, *args: Any, **kwargs: Any) -> CSEVariable: ...
     def arg_name(self, node: IRNode) -> str | None: ...
@@ -603,21 +646,27 @@ def jinja2_env() -> Any: ...
 class KernelTemplate:
     @staticmethod
     def indent_except_first(
-        source: str, num_indents: int, indents_spacing: int = ...
+        source: str,
+        num_indents: int,
+        indents_spacing: int = ...,
     ) -> str: ...
     def __init__(self, name: str) -> None: ...
     @property
     def uid(self) -> str: ...
     def choice_or_none(self, **kwargs: Any) -> ChoiceCaller | None: ...
     def maybe_append_choice(
-        self, choices: list[Any], **kwargs: Any
+        self,
+        choices: list[Any],
+        **kwargs: Any,
     ) -> NotImplementedError | None: ...
     def generate(self, **kwargs: Any) -> ChoiceCaller: ...
 
 class CSEProxy(DefaultHandler):
     name = ...
     def __init__(
-        self, kernel: Kernel[Any], parent_handler: OpsHandler[Any]
+        self,
+        kernel: Kernel[Any],
+        parent_handler: OpsHandler[Any],
     ) -> None: ...
     def indirect_indexing(
         self,
@@ -627,14 +676,25 @@ class CSEProxy(DefaultHandler):
         wrap_neg: bool = ...,
     ) -> sympy.Symbol: ...
     def check_bounds(
-        self, expr: sympy.Expr, size: sympy.Expr, lower: bool, upper: bool
+        self,
+        expr: sympy.Expr,
+        size: sympy.Expr,
+        lower: bool,
+        upper: bool,
     ) -> None: ...
     def load(self, name: str, index: sympy.Expr) -> CSEVariable: ...
     def store(
-        self, name: str, index: sympy.Expr, value: CSEVariable, mode: StoreMode = ...
+        self,
+        name: str,
+        index: sympy.Expr,
+        value: CSEVariable,
+        mode: StoreMode = ...,
     ) -> None: ...
     def store_reduction(
-        self, name: str, index: sympy.Expr, value: CSEVariable
+        self,
+        name: str,
+        index: sympy.Expr,
+        value: CSEVariable,
     ) -> None: ...
     def reduction(
         self,
@@ -647,7 +707,8 @@ class CSEProxy(DefaultHandler):
         self,
         dtypes: tuple[torch.dtype, ...],
         combine_fn: Callable[
-            [tuple[CSEVariable, ...], tuple[CSEVariable, ...]], tuple[CSEVariable, ...]
+            [tuple[CSEVariable, ...], tuple[CSEVariable, ...]],
+            tuple[CSEVariable, ...],
         ],
         values: tuple[CSEVariable, ...],
     ) -> tuple[CSEVariable, ...]: ...

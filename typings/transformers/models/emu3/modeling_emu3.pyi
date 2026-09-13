@@ -21,7 +21,12 @@ from ...utils.generic import check_model_inputs
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -106,7 +111,9 @@ class Emu3VQVAEConv3d(nn.Module):
 class Emu3VQVAESpatialNorm(nn.Module):
     def __init__(self, in_channels: int, out_channels: int) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, quant_states: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        quant_states: torch.Tensor,
     ):  # -> Tensor:
         ...
 
@@ -133,7 +140,9 @@ class Emu3VQVAEResnetBlock(nn.Module):
         quant_channels: int | None = ...,
     ) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, quant_channels: torch.Tensor | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        quant_channels: torch.Tensor | None = ...,
     ):  # -> Tensor:
         ...
 
@@ -146,7 +155,9 @@ class Emu3VQVAEAttentionBlock(nn.Module):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 class Emu3VQVAEGroupNorm(nn.GroupNorm):
@@ -171,7 +182,9 @@ class Emu3VQVAEDownBlock(nn.Module):
 class Emu3VQVAEUpBlock(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.FloatTensor, quant_states: torch.FloatTensor
+        self,
+        hidden_states: torch.FloatTensor,
+        quant_states: torch.FloatTensor,
     ):  # -> FloatTensor:
         ...
 
@@ -183,7 +196,9 @@ class Emu3VQVAEEncoder(nn.Module):
 class Emu3VQVAEDecoder(nn.Module):
     def __init__(self, config: Emu3VQVAEConfig) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, quant_states: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        quant_states: torch.Tensor,
     ):  # -> Tensor:
         ...
 
@@ -199,7 +214,9 @@ class Emu3VQVAE(PreTrainedModel):
     _no_split_modules = ...
     def __init__(self, config: Emu3VQVAEConfig) -> None: ...
     def encode(
-        self, pixel_values: torch.Tensor, image_sizes: torch.Tensor
+        self,
+        pixel_values: torch.Tensor,
+        image_sizes: torch.Tensor,
     ):  # -> list[Any]:
         ...
     def decode(self, hidden_states: torch.Tensor):  # -> Any:
@@ -303,16 +320,23 @@ class Emu3Model(Emu3PreTrainedModel):
     def get_decoder(self):  # -> Emu3TextModel:
         ...
     def get_image_tokens(
-        self, pixel_values: torch.FloatTensor, image_sizes: torch.LongTensor
+        self,
+        pixel_values: torch.FloatTensor,
+        image_sizes: torch.LongTensor,
     ):  # -> Tensor:
         ...
     def get_image_features(
-        self, pixel_values: torch.FloatTensor, image_sizes: torch.LongTensor
+        self,
+        pixel_values: torch.FloatTensor,
+        image_sizes: torch.LongTensor,
     ):  # -> tuple[Tensor, ...]:
         ...
     @torch.no_grad
     def decode_image_tokens(
-        self, image_tokens: torch.LongTensor, height: int, width: int
+        self,
+        image_tokens: torch.LongTensor,
+        height: int,
+        width: int,
     ):  # -> Any:
         ...
     def get_placeholder_mask(

@@ -26,7 +26,13 @@ def clvp_loss(similarity: torch.Tensor) -> torch.Tensor: ...
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, v, cos, sin, position_ids, unsqueeze_dim=...
+    q,
+    k,
+    v,
+    cos,
+    sin,
+    position_ids,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any, Any]:
     ...
 
@@ -119,7 +125,8 @@ class ClvpSequenceSummary(nn.Module):
 class ClvpDecoderMLP(nn.Module):
     def __init__(self, intermediate_size, config) -> None: ...
     def forward(
-        self, hidden_states: tuple[torch.FloatTensor] | None
+        self,
+        hidden_states: tuple[torch.FloatTensor] | None,
     ) -> torch.FloatTensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
@@ -267,7 +274,8 @@ class ClvpModelForConditionalGeneration(ClvpPreTrainedModel, GenerationMixin):
     config: ClvpConfig
     def __init__(self, config: ClvpConfig) -> None: ...
     def fix_speech_decoder_output(
-        self, speech_ids: torch.LongTensor
+        self,
+        speech_ids: torch.LongTensor,
     ) -> torch.LongTensor: ...
     def get_text_features(
         self,

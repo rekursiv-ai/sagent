@@ -26,7 +26,10 @@ logger = ...
 
 class RoFormerSinusoidalPositionalEmbedding(nn.Embedding):
     def __init__(
-        self, num_positions: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_positions: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ) -> None: ...
     @torch.no_grad()
     def forward(
@@ -60,14 +63,19 @@ class RoFormerSelfAttention(nn.Module):
         ...
     @staticmethod
     def apply_rotary_position_embeddings(
-        sinusoidal_pos, query_layer, key_layer, value_layer=...
+        sinusoidal_pos,
+        query_layer,
+        key_layer,
+        value_layer=...,
     ):  # -> tuple[Any, Any, Any] | tuple[Any, Any]:
         ...
 
 class RoFormerSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -97,7 +105,9 @@ class RoFormerIntermediate(nn.Module):
 class RoFormerOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -218,7 +228,10 @@ class RoFormerForMaskedLM(RoFormerPreTrainedModel):
         return_dict: bool | None = ...,
     ) -> MaskedLMOutput | tuple[torch.Tensor]: ...
     def prepare_inputs_for_generation(
-        self, input_ids, attention_mask=..., **model_kwargs
+        self,
+        input_ids,
+        attention_mask=...,
+        **model_kwargs,
     ):  # -> dict[str, Tensor | Any]:
         ...
 

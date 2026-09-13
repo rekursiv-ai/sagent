@@ -54,35 +54,33 @@ if TYPE_CHECKING:
 class _MonokaiStyle(Style):
     """Monokai Extended color palette (syntect-derived hex values)."""
 
-    styles = {  # noqa: RUF012 -- Pygments Style requires mutable class-level dict
+    styles = {  # noqa: RUF012 -- Pygments requires this mutable class-level style mapping.
         Token: "#f8f8f2",
-        Keyword: "#f92672",  # rgb(249,38,114) - pink
-        Keyword.Type: "#66d9ef",  # storage/type - cyan
-        Name.Builtin: "#a6e22e",  # rgb(166,226,46) - green
+        Keyword: "#f92672",  # rgb(249,38,114) - pink.
+        Keyword.Type: "#66d9ef",  # storage/type - cyan.
+        Name.Builtin: "#a6e22e",  # rgb(166,226,46) - green.
         Name.Class: "#a6e22e",
         Name.Function: "#a6e22e",
         Name.Attribute: "#a6e22e",
         Name.Decorator: "#a6e22e",
         Name.Variable: "#ffffff",
-        Number: "#ae84ff",  # rgb(190,132,255) - purple
-        String: "#e6db74",  # rgb(230,219,116) - yellow
+        Number: "#ae84ff",  # rgb(190,132,255) - purple.
+        String: "#e6db74",  # rgb(230,219,116) - yellow.
         String.Escape: "#ae84ff",
-        Comment: "#75715e",  # rgb(117,113,94) - gray
-        Operator: "#f92672",  # pink
-        Punctuation: "#f8f8f2",  # near-white
+        Comment: "#75715e",  # rgb(117,113,94) - gray.
+        Operator: "#f92672",  # Pink.
+        Punctuation: "#f8f8f2",  # near-white.
         Name.Namespace: "#f92672",
         Name.Tag: "#f92672",
     }
 
 
-_DIFF_CONTEXT_LINES = 3  # config-globals: ignore -- diff context lines, display pref
+_DIFF_CONTEXT_LINES = 3  # house-ignore[globals] -- Diff context lines, display pref.
 _DIFF_FORMATTER: Terminal256Formatter[str] = Terminal256Formatter(style=_MonokaiStyle)
 
 # Diff background colors (dark mode).
 _DIFF_ADDED_STYLE: Final = "on rgb(34,92,43)"  # Dark green.
 _DIFF_REMOVED_STYLE: Final = "on rgb(122,41,54)"  # Dark red.
-_DIFF_ADDED_WORD_STYLE: Final = "on rgb(56,166,96)"  # Brighter green.
-_DIFF_REMOVED_WORD_STYLE: Final = "on rgb(179,89,107)"  # Brighter red.
 
 # Muted gray for diff gutter line numbers.
 _GUTTER_FG: Final = "rgb(160,160,160)"
@@ -94,7 +92,7 @@ _GUTTER_FG: Final = "rgb(160,160,160)"
 # noise overwhelms the surrounding context and the line diff is
 # clearer. Adjust together with the diff fixtures.
 _WORD_DIFF_THRESHOLD = (
-    0.4  # config-globals: ignore -- word-diff fallback threshold, display pref
+    0.4  # house-ignore[globals] -- Word-diff fallback threshold, display pref.
 )
 
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
@@ -102,7 +100,6 @@ _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 # with ``-``/``+`` but are not hunk content. Without this filter
 # ``_pair_word_diffs`` would pair the headers against the first hunk's
 # remove/add and emit a nonsense word diff against ``a/foo`` vs ``b/foo``.
-_FILE_HEADER_RE = re.compile(r"^(?:---|\+\+\+)(?:\s|$)")
 _WORD_RE = re.compile(r"(\s+|\w+|[^\s\w]+)")
 
 _md = MarkdownIt()
@@ -120,7 +117,9 @@ def render_diff_detail(console: Console, diff: str, file_path: str = "") -> None
 
     """
     lexer = _get_lexer(file_path)
-    lines = [ln for ln in diff.splitlines() if not _FILE_HEADER_RE.match(ln)]
+    lines = [
+        ln for ln in diff.splitlines() if not re.match(r"^(?:---|\+\+\+)(?:\s|$)", ln)
+    ]
 
     added = sum(1 for ln in lines if ln.startswith("+"))
     removed = sum(1 for ln in lines if ln.startswith("-"))
@@ -266,16 +265,14 @@ def _highlight(code: str, lexer: Lexer) -> Text:
     return Text.from_ansi(highlight(code, lexer, _DIFF_FORMATTER).rstrip("\n"))
 
 
+# Each tuple is ``(kind, text)`` where kind is ``"="`` (unchanged), ``"-"`` (in
+# removed), or ``"+"`` (in added). Returns None if the ratio of changed chars exceeds
+# the threshold.
 def _word_diff_pair(
     removed: str,
     added: str,
 ) -> list[tuple[str, str]] | None:
-    """Return word-level diff parts, or None if change is too large.
-
-    Each tuple is ``(kind, text)`` where kind is ``"="`` (unchanged),
-    ``"-"`` (in removed), or ``"+"`` (in added). Returns None if the
-    ratio of changed chars exceeds the threshold.
-    """
+    """Return word-level diff parts, or None if change is too large."""
     r_words = _WORD_RE.findall(removed)
     a_words = _WORD_RE.findall(added)
     matcher = difflib.SequenceMatcher(a=r_words, b=a_words, autojunk=False)
@@ -306,18 +303,15 @@ def _word_diff_pair(
     return parts
 
 
+# Uses :class:`difflib.SequenceMatcher` on the line sequences so a deletion in the
+# middle doesn't shift all subsequent pairings. Falls back to positional pairing inside
+# each ``replace`` region - once ``difflib`` has localized a block as "no shared lines",
+# word diff is our last shot at showing structure.
 def _align_blocks(
     removed: list[str],
     added: list[str],
 ) -> list[tuple[int, int]]:
-    """Return (removed_idx, added_idx) pairs aligned by similarity.
-
-    Uses :class:`difflib.SequenceMatcher` on the line sequences so a
-    deletion in the middle doesn't shift all subsequent pairings.
-    Falls back to positional pairing inside each ``replace`` region
-    - once ``difflib`` has localized a block as "no shared lines",
-    word diff is our last shot at showing structure.
-    """
+    """Return (removed_idx, added_idx) pairs aligned by similarity."""
     sm = difflib.SequenceMatcher(a=removed, b=added, autojunk=False)
     alignments: list[tuple[int, int]] = []
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
@@ -338,14 +332,12 @@ def _align_blocks(
     return alignments
 
 
+# Returns a map: diff index → (partner diff index, word parts). Only indices where word
+# diff is viable (below threshold).
 def _pair_word_diffs(
     diff_lines: list[str],
 ) -> dict[int, tuple[int, list[tuple[str, str]]]]:
-    """Pair adjacent -/+ blocks for word-level highlighting.
-
-    Returns a map: diff index → (partner diff index, word parts).
-    Only indices where word diff is viable (below threshold).
-    """
+    """Pair adjacent -/+ blocks for word-level highlighting."""
     pairs: dict[int, tuple[int, list[tuple[str, str]]]] = {}
     i = 0
     while i < len(diff_lines):
@@ -415,7 +407,7 @@ def _render_word_diff_line(
 ) -> None:
     """Render a line with word-level highlighting on changed spans."""
     line_bg = _DIFF_ADDED_STYLE if is_add else _DIFF_REMOVED_STYLE
-    word_bg = _DIFF_ADDED_WORD_STYLE if is_add else _DIFF_REMOVED_WORD_STYLE
+    word_bg = "on rgb(56,166,96)" if is_add else "on rgb(179,89,107)"
     keep = "+" if is_add else "-"
     filtered = [(kind, text) for kind, text in parts if kind in ("=", keep)]
     content_str = "".join(text for _, text in filtered)

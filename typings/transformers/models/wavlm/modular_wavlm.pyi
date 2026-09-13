@@ -44,7 +44,9 @@ class WavLMAttention(nn.Module):
         index=...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def torch_multi_head_self_attention(
         self,
@@ -59,7 +61,9 @@ class WavLMFeedForward(Wav2Vec2FeedForward): ...
 
 class WavLMEncoderLayer(GradientCheckpointingLayer):
     def __init__(
-        self, config: WavLMConfig, has_relative_position_bias: bool = ...
+        self,
+        config: WavLMConfig,
+        has_relative_position_bias: bool = ...,
     ) -> None: ...
     def forward(
         self,
@@ -73,7 +77,9 @@ class WavLMEncoderLayer(GradientCheckpointingLayer):
 
 class WavLMEncoderLayerStableLayerNorm(GradientCheckpointingLayer):
     def __init__(
-        self, config: WavLMConfig, has_relative_position_bias: bool = ...
+        self,
+        config: WavLMConfig,
+        has_relative_position_bias: bool = ...,
     ) -> None: ...
     def forward(
         self,

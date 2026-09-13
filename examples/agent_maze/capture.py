@@ -25,7 +25,194 @@ from sagent.types.model import Model
 
 
 _CWD: Final = Path(__file__).resolve().parent
-MODEL = "claude-sonnet-4-6"  # config-globals: ignore -- model choice, user retunes
+MODEL = "claude-sonnet-4-6"  # house-ignore[globals] -- Model choice, user retunes.
+
+
+def metrics(eng: Engine) -> dict[str, Any]:
+    """Return metrics about the engine state.
+
+    Args:
+      eng: Engine whose event and world state provide the metrics.
+
+    Returns:
+      metrics: Summary values for the completed or partial run.
+
+    """
+    ev = eng.events
+    msgs = [e for e in ev if e["kind"] == "message" and e.get("status") == "delivered"]
+    presses = [e for e in ev if e["kind"] == "press"]
+    failed = [e for e in presses if e.get("outcome") not in (None, "armed")]
+    opened = eng.world.locks_open()
+    total = len(eng.world.locks)
+    return {
+        "solved": eng.all_locks_open(),
+        "locks_open": opened,
+        "locks_total": total,
+        "team_size": len(eng.world.agents),
+        "messages": len(msgs),
+        # HEADLINE: coordination cost per lock opened (None when nothing opened -> STUCK).
+        "msgs_per_lock": round(len(msgs) / opened, 1) if opened else None,
+        "presses": len(presses),
+        "failed_press": len(failed),
+        "interactions": eng.t + len(msgs),  # `world` actions + delivered messages.
+        "termination": "solved" if eng.all_locks_open() else "budget",
+    }
+
+
+def arm_payload(eng: Engine) -> dict[str, Any]:
+    """Return the serialized payload for one engine run.
+
+    Args:
+      eng: Engine whose scene, events, and metrics are captured.
+
+    Returns:
+      payload: Replay data, agent lineage, and run metrics.
+
+    """
+    return {
+        "scene": eng.scene,
+        "events": eng.events,
+        "roster": _roster(eng),
+        "lineage": _lineage(eng),
+        "metrics": metrics(eng),
+    }
+
+
+async def run_arm(
+    rows: list[str],
+    meta: SpawnMeta,
+    *,
+    mesh: bool,
+    told: bool,
+    wall_s: float = 300.0,
+    max_agents: int = 8,
+    rounds: int = 28,
+    budget_t: int = 140,
+) -> Engine:
+    """Run one coordination arm and return its engine.
+
+    Args:
+      rows: Maze rows used to initialize the arena.
+      meta: Spawn metadata for the maze level.
+      mesh: Whether agents may communicate and spawn across the mesh.
+      told: Whether the system prompt describes the topology.
+      wall_s: Maximum wall-clock runtime in seconds.
+      max_agents: Maximum number of agents in the arena.
+      rounds: Maximum model tool-call rounds per agent.
+      budget_t: Maximum logical interactions.
+
+    Returns:
+      engine: Engine containing the arm's event log and final world state.
+
+    """
+    arena = Arena(
+        rows,
+        meta,
+        _make_model,
+        mesh=mesh,
+        told=told,
+        model_id=MODEL,
+        max_agents=max_agents,
+        rounds=rounds,
+        budget_t=budget_t,
+    )
+    return await arena.run(wall_s=wall_s)
+
+
+def pick(engs: list[Engine], *, best: bool) -> Engine:
+    """Return the best/worst engine by solve/lock/interaction metrics.
+
+    Args:
+      engs: Candidate engines to rank.
+      best: Whether to select the best run rather than the worst run.
+
+    Returns:
+      engine: Selected candidate according to the requested ranking.
+
+
+    Best mesh: solved, then MOST locks opened, then fewest interactions.
+    Worst tree: least locks opened, then most interactions.
+
+    """
+    if best:
+        return min(
+            engs,
+            key=lambda e: (
+                not e.all_locks_open(),
+                -e.world.locks_open(),
+                _interactions(e),
+            ),
+        )
+    return min(engs, key=lambda e: (e.world.locks_open(), -_interactions(e)))
+
+
+async def capture(
+    *,
+    num_locks: int = 4,
+    decoys: int = 2,
+    k: int = 2,
+    write: bool = True,
+    max_agents: int = 8,
+    rounds: int = 28,
+    budget_t: int = 140,
+) -> dict[str, Any]:
+    """Run all coordination modes and return captured results.
+
+    Args:
+      num_locks: Number of locks to place in the generated maze.
+      decoys: Number of decoy features in the generated maze.
+      k: Number of runs per coordination mode and arm.
+      write: Whether to write the replay artifact.
+      max_agents: Maximum number of agents in each arena.
+      rounds: Maximum model tool-call rounds per agent.
+      budget_t: Maximum logical interactions per arena.
+
+    Returns:
+      data: Captured metadata and payloads for every coordination mode.
+
+    """
+    rows, meta = make_spawn_level(num_locks=num_locks, decoys=decoys)
+    data: dict[str, Any] = {
+        "meta": {
+            "grid": rows,
+            "width": len(rows[0]),
+            "height": len(rows),
+            "model": MODEL,
+            "locks": num_locks,
+        },
+        "modes": {},
+    }
+    for told in (True, False):
+        label = "told" if told else "discover"
+        arms: dict[str, Any] = {}
+        for arm, best in (("mesh", True), ("tree", False)):
+            engs: list[Engine] = [
+                await run_arm(
+                    rows,
+                    meta,
+                    mesh=arm == "mesh",
+                    told=told,
+                    max_agents=max_agents,
+                    rounds=rounds,
+                    budget_t=budget_t,
+                )
+                for _ in range(k)
+            ]
+            chosen = pick(engs, best=best)
+            arms[arm] = arm_payload(chosen)
+            m = chosen.world.locks_open()
+            print(  # noqa: T201 -- This capture CLI emits its result directly to stdout.
+                f"  {label}/{arm}: kept {m}/{num_locks} locks, "
+                f"interactions={_interactions(chosen)} (of {k} runs)",
+                flush=True,
+            )
+        data["modes"][label] = arms
+    if write:
+        out = _CWD / "web" / "data.js"
+        out.parent.mkdir(exist_ok=True)
+        out.write_text("window.MAZE = " + json.dumps(data) + ";\n", encoding="utf-8")
+        print(f"wrote {out}")  # noqa: T201 -- This capture CLI emits its result directly to stdout.
+    return data
 
 
 def _key() -> str:
@@ -60,139 +247,6 @@ def _roster(eng: Engine) -> list[str]:
     return roster
 
 
-def metrics(eng: Engine) -> dict[str, Any]:
-    """Return metrics about the engine state."""
-    ev = eng.events
-    msgs = [e for e in ev if e["kind"] == "message" and e.get("status") == "delivered"]
-    presses = [e for e in ev if e["kind"] == "press"]
-    failed = [e for e in presses if e.get("outcome") not in (None, "armed")]
-    opened = eng.world.locks_open()
-    total = len(eng.world.locks)
-    return {
-        "solved": eng.all_locks_open(),
-        "locks_open": opened,
-        "locks_total": total,
-        "team_size": len(eng.world.agents),
-        "messages": len(msgs),
-        # HEADLINE: coordination cost per lock opened (None when nothing opened -> STUCK).
-        "msgs_per_lock": round(len(msgs) / opened, 1) if opened else None,
-        "presses": len(presses),
-        "failed_press": len(failed),
-        "interactions": eng.t + len(msgs),  # world actions + delivered messages
-        "termination": "solved" if eng.all_locks_open() else "budget",
-    }
-
-
-def arm_payload(eng: Engine) -> dict[str, Any]:
-    """Return the arm payload."""
-    return {
-        "scene": eng.scene,
-        "events": eng.events,
-        "roster": _roster(eng),
-        "lineage": _lineage(eng),
-        "metrics": metrics(eng),
-    }
-
-
-async def run_arm(
-    rows: list[str],
-    meta: SpawnMeta,
-    *,
-    mesh: bool,
-    told: bool,
-    wall_s: float = 300.0,
-    max_agents: int = 8,
-    rounds: int = 28,
-    budget_t: int = 140,
-) -> Engine:
-    """Run an arm and return the results."""
-    arena = Arena(
-        rows,
-        meta,
-        _make_model,
-        mesh=mesh,
-        told=told,
-        model_id=MODEL,
-        max_agents=max_agents,
-        rounds=rounds,
-        budget_t=budget_t,
-    )
-    return await arena.run(wall_s=wall_s)
-
-
 def _interactions(eng: Engine) -> int:
     m = metrics(eng)
     return int(m["interactions"])
-
-
-def pick(engs: list[Engine], *, best: bool) -> Engine:
-    """Return the best/worst engine by solve/lock/interaction metrics.
-
-    Best mesh: solved, then MOST locks opened, then fewest interactions.
-    Worst tree: least locks opened, then most interactions.
-    """
-    if best:
-        return min(
-            engs,
-            key=lambda e: (
-                not e.all_locks_open(),
-                -e.world.locks_open(),
-                _interactions(e),
-            ),
-        )
-    return min(engs, key=lambda e: (e.world.locks_open(), -_interactions(e)))
-
-
-async def capture(
-    *,
-    num_locks: int = 4,
-    decoys: int = 2,
-    k: int = 2,
-    write: bool = True,
-    max_agents: int = 8,
-    rounds: int = 28,
-    budget_t: int = 140,
-) -> dict[str, Any]:
-    """Run all coordination modes and return captured results."""
-    rows, meta = make_spawn_level(num_locks=num_locks, decoys=decoys)
-    data: dict[str, Any] = {
-        "meta": {
-            "grid": rows,
-            "width": len(rows[0]),
-            "height": len(rows),
-            "model": MODEL,
-            "locks": num_locks,
-        },
-        "modes": {},
-    }
-    for told in (True, False):
-        label = "told" if told else "discover"
-        arms: dict[str, Any] = {}
-        for arm, best in (("mesh", True), ("tree", False)):
-            engs: list[Engine] = [
-                await run_arm(
-                    rows,
-                    meta,
-                    mesh=arm == "mesh",
-                    told=told,
-                    max_agents=max_agents,
-                    rounds=rounds,
-                    budget_t=budget_t,
-                )
-                for _ in range(k)
-            ]
-            chosen = pick(engs, best=best)
-            arms[arm] = arm_payload(chosen)
-            m = chosen.world.locks_open()
-            print(  # noqa: T201
-                f"  {label}/{arm}: kept {m}/{num_locks} locks, "
-                f"interactions={_interactions(chosen)} (of {k} runs)",
-                flush=True,
-            )
-        data["modes"][label] = arms
-    if write:
-        out = _CWD / "web" / "data.js"
-        out.parent.mkdir(exist_ok=True)
-        out.write_text("window.MAZE = " + json.dumps(data) + ";\n", encoding="utf-8")
-        print(f"wrote {out}")  # noqa: T201
-    return data

@@ -12,7 +12,8 @@ class BitNetHfQuantizer(HfQuantizer):
     def validate_environment(self, *args, **kwargs):  # -> None:
         ...
     def adjust_max_memory(
-        self, max_memory: dict[str, int | str]
+        self,
+        max_memory: dict[str, int | str],
     ) -> dict[str, int | str]: ...
     def adjust_target_dtype(self, target_dtype: torch.dtype) -> torch.dtype: ...
     def is_serializable(self, safe_serialization=...):  # -> Literal[True]:

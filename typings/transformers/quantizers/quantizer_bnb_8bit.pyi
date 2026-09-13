@@ -14,19 +14,26 @@ class Bnb8BitHfQuantizer(HfQuantizer):
     def validate_environment(self, *args, **kwargs):  # -> None:
         ...
     def adjust_max_memory(
-        self, max_memory: dict[str, int | str]
+        self,
+        max_memory: dict[str, int | str],
     ) -> dict[str, int | str]: ...
     def update_dtype(self, dtype: torch.dtype) -> torch.dtype: ...
     def update_device_map(
-        self, device_map
+        self,
+        device_map,
     ):  # -> dict[str, int] | dict[str, str] | dict[str, Any]:
         ...
     def adjust_target_dtype(self, target_dtype: torch.dtype) -> torch.dtype: ...
     def update_unexpected_keys(
-        self, model, unexpected_keys: list[str]
+        self,
+        model,
+        unexpected_keys: list[str],
     ) -> list[str]: ...
     def param_needs_quantization(
-        self, model: PreTrainedModel, param_name: str, **kwargs
+        self,
+        model: PreTrainedModel,
+        param_name: str,
+        **kwargs,
     ) -> bool: ...
     def create_quantized_param(
         self,

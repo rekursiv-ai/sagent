@@ -35,7 +35,11 @@ class BambaFlashAttentionKwargs(TypedDict, total=False):
 class HybridMambaAttentionDynamicCache:
     is_compileable = ...
     def __init__(
-        self, config: BambaConfig, batch_size, dtype=..., device=...
+        self,
+        config: BambaConfig,
+        batch_size,
+        dtype=...,
+        device=...,
     ) -> None: ...
     def update(
         self,
@@ -71,7 +75,12 @@ def eager_attention_forward(
 ):  # -> tuple[Tensor, Tensor]:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Tensor, Tensor]:
     ...
 
@@ -147,7 +156,10 @@ class BambaRMSNorm(nn.Module):
 
 class BambaDecoderLayer(GradientCheckpointingLayer):
     def __init__(
-        self, config: BambaConfig, layer_idx: int, layer_type: str = ...
+        self,
+        config: BambaConfig,
+        layer_idx: int,
+        layer_type: str = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -162,7 +174,8 @@ class BambaDecoderLayer(GradientCheckpointingLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs: Unpack[BambaFlashAttentionKwargs],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 @auto_docstring

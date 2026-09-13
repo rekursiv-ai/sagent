@@ -21,7 +21,9 @@ static_input_logger = ...
 def coerce_tangent_and_suggest_memory_format(
     x: Tensor,
 ) -> tuple[
-    Any | Tensor, list[MemoryFormatMeta | None] | MemoryFormatMeta | None, bool
+    Any | Tensor,
+    list[MemoryFormatMeta | None] | MemoryFormatMeta | None,
+    bool,
 ]: ...
 def run_functionalized_fw_and_collect_metadata(
     f,

@@ -9,7 +9,8 @@ from .utils import PushToHubMixin
 """Configuration base class and utilities."""
 logger = ...
 SpecificPretrainedConfigType = TypeVar(
-    "SpecificPretrainedConfigType", bound=PretrainedConfig
+    "SpecificPretrainedConfigType",
+    bound=PretrainedConfig,
 )
 
 class PretrainedConfig(PushToHubMixin):
@@ -83,7 +84,10 @@ class PretrainedConfig(PushToHubMixin):
     def torch_dtype(self, value):  # -> None:
         ...
     def save_pretrained(
-        self, save_directory: str | os.PathLike, push_to_hub: bool = ..., **kwargs
+        self,
+        save_directory: str | os.PathLike,
+        push_to_hub: bool = ...,
+        **kwargs,
     ):  # -> None:
         ...
     @classmethod
@@ -99,7 +103,9 @@ class PretrainedConfig(PushToHubMixin):
     ) -> Self: ...
     @classmethod
     def get_config_dict(
-        cls, pretrained_model_name_or_path: str | os.PathLike, **kwargs
+        cls,
+        pretrained_model_name_or_path: str | os.PathLike,
+        **kwargs,
     ) -> tuple[dict[str, Any], dict[str, Any]]: ...
     @classmethod
     def from_dict(cls, config_dict: dict[str, Any], **kwargs) -> Self: ...
@@ -114,7 +120,9 @@ class PretrainedConfig(PushToHubMixin):
     def to_dict(self) -> dict[str, Any]: ...
     def to_json_string(self, use_diff: bool = ...) -> str: ...
     def to_json_file(
-        self, json_file_path: str | os.PathLike, use_diff: bool = ...
+        self,
+        json_file_path: str | os.PathLike,
+        use_diff: bool = ...,
     ):  # -> None:
         ...
     def update(self, config_dict: dict[str, Any]):  # -> None:
@@ -140,6 +148,7 @@ def recursive_diff_dict(dict_a, dict_b, config_obj=...):  # -> dict[Any, Any]:
 ALLOWED_LAYER_TYPES = ...
 
 def layer_type_validation(
-    layer_types: list[str], num_hidden_layers: int | None = ...
+    layer_types: list[str],
+    num_hidden_layers: int | None = ...,
 ):  # -> None:
     ...

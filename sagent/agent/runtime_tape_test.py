@@ -472,7 +472,9 @@ def test_replay_tape_seeds_mimic_counter_past_loaded_ids() -> None:
             ReferrableTapeEvent(
                 ref=TapeRef(session_id="old", ordinal=0),
                 event=AssistantMessage(
-                    tool_calls=(ToolCall(id=existing, name="DetachedArrived", args={}),)
+                    tool_calls=(
+                        ToolCall(id=existing, name="DetachedArrived", args={}),
+                    ),
                 ),
             ),
             ReferrableTapeEvent(
@@ -486,7 +488,7 @@ def test_replay_tape_seeds_mimic_counter_past_loaded_ids() -> None:
     minted = [
         runtime._sanitize_forged_arrivals(
             AssistantMessage(
-                tool_calls=(ToolCall(id="forged", name="DetachedArrived", args={}),)
+                tool_calls=(ToolCall(id="forged", name="DetachedArrived", args={}),),
             ),
         )
         .tool_calls[0]

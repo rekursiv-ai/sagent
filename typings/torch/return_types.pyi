@@ -164,7 +164,7 @@ class _scaled_dot_product_cudnn_attention(
         Tensor,
         Tensor,
         Tensor,
-    ]
+    ],
 ):
     @property
     def output(self) -> Tensor: ...
@@ -231,7 +231,7 @@ class _scaled_dot_product_flash_attention(
         Tensor,
         Tensor,
         Tensor,
-    ]
+    ],
 ):
     @property
     def output(self) -> Tensor: ...

@@ -35,7 +35,9 @@ _R = TypeVar("_R")
 def is_compiling() -> bool: ...
 def wrap_inline(fn: Callable[_P, _R]) -> Callable[_P, _R]: ...
 def call_hook(
-    hook: Callable[..., torch.Tensor | None], *args: Any, **kwargs: Any
+    hook: Callable[..., torch.Tensor | None],
+    *args: Any,
+    **kwargs: Any,
 ) -> torch.Tensor: ...
 def wrap_numpy(f: Callable[_P, _R]) -> Callable[_P, _R]: ...
 
@@ -58,31 +60,47 @@ def untyped_storage_size(x: torch.Tensor) -> int: ...
 class FakeCompiledAutogradEngine:
     @staticmethod
     def queue_callback(
-        final_callbacks: list[Callable[[], None]], cb: Callable[[], None]
+        final_callbacks: list[Callable[[], None]],
+        cb: Callable[[], None],
     ) -> None: ...
     @staticmethod
     def exec_final_callbacks(final_callbacks: list[Callable[[], None]]) -> None: ...
 
 def call_hook_from_backward_state(
-    *args: Any, bw_state: Any, hook_name: str, **kwargs: Any
+    *args: Any,
+    bw_state: Any,
+    hook_name: str,
+    **kwargs: Any,
 ) -> Any: ...
 def call_module_hooks_from_backward_state(
-    _: Any, result: Any, *args: Any, bw_state: Any, hooks_name: str, module_name: str
+    _: Any,
+    result: Any,
+    *args: Any,
+    bw_state: Any,
+    hooks_name: str,
+    module_name: str,
 ) -> Any: ...
 def get_nonrecursive_disable_wrapper(fn: Callable[_P, _R]) -> Callable[_P, _R]: ...
 def wrap_dunder_call_ctx_manager(
-    self: Any, func: Callable[_P, _R]
+    self: Any,
+    func: Callable[_P, _R],
 ) -> Callable[_P, _R]: ...
 def unwrap_maybe_dynamic_int(x: torch.Tensor | int) -> int: ...
 def call_accumulate_grad(
-    variable: torch.Tensor, grad: torch.Tensor, has_post_hooks: bool
+    variable: torch.Tensor,
+    grad: torch.Tensor,
+    has_post_hooks: bool,
 ) -> None: ...
 def wrap_inline_with_error_on_graph_break(
-    fn: Callable[_P, _R], error_on_graph_break: bool
+    fn: Callable[_P, _R],
+    error_on_graph_break: bool,
 ) -> Callable[_P, _R]: ...
 def filter_out_const_values(
-    tup: tuple[Any, ...], masks: list[bool]
+    tup: tuple[Any, ...],
+    masks: list[bool],
 ) -> tuple[Any, ...]: ...
 def insert_const_values_with_mask(
-    tup: tuple[Any, ...], masks: list[bool], values: tuple[Any, ...]
+    tup: tuple[Any, ...],
+    masks: list[bool],
+    values: tuple[Any, ...],
 ) -> tuple[Any, ...]: ...

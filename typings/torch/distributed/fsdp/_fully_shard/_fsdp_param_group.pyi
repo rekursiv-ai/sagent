@@ -19,7 +19,9 @@ type _ModuleToHandleDict = dict[nn.Module, RemovableHandle]
 class FSDPCommContext:
     def lazy_init(self, device: torch.device) -> None: ...
     def get_all_gather_streams(
-        self, async_op: bool, training_state: TrainingState
+        self,
+        async_op: bool,
+        training_state: TrainingState,
     ) -> tuple[torch.Stream, torch.Stream]: ...
 
 class AllGatherState(NamedTuple):
@@ -54,7 +56,10 @@ class FSDPParamGroup:
     def wait_for_unshard(self) -> None: ...
     def reshard(self) -> None: ...
     def pre_forward(
-        self, module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]
+        self,
+        module: nn.Module,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
     ) -> tuple[tuple[Any, ...], dict[str, Any]]: ...
     def post_forward(self, module: nn.Module, input: Any, output: Any) -> Any: ...
     def pre_backward(self, default_prefetch: bool, *unused: Any) -> None: ...
@@ -68,13 +73,16 @@ class FSDPParamGroup:
     def is_unsharded(self) -> bool: ...
     @contextlib.contextmanager
     def use_training_state(
-        self, training_state: TrainingState
+        self,
+        training_state: TrainingState,
     ) -> Generator[None, Any]: ...
 
 class RegisterPostBackwardFunction(torch.autograd.Function):
     @staticmethod
     def forward(
-        ctx, param_group: FSDPParamGroup, *inputs: torch.Tensor
+        ctx,
+        param_group: FSDPParamGroup,
+        *inputs: torch.Tensor,
     ) -> tuple[Tensor, ...]: ...
     @staticmethod
     def backward(ctx, *grads: torch.Tensor) -> tuple[None, *tuple[Tensor, ...]]: ...

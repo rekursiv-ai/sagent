@@ -31,7 +31,10 @@ class AutoVideoProcessor:
     @classmethod
     @replace_list_option_in_docstrings(VIDEO_PROCESSOR_MAPPING_NAMES)
     def from_pretrained(
-        cls, pretrained_model_name_or_path, *inputs, **kwargs
+        cls,
+        pretrained_model_name_or_path,
+        *inputs,
+        **kwargs,
     ):  # -> Any:
         ...
     @staticmethod

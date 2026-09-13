@@ -57,7 +57,8 @@ class NatImageClassifierOutput(ModelOutput):
 class NatEmbeddings(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, pixel_values: torch.FloatTensor | None
+        self,
+        pixel_values: torch.FloatTensor | None,
     ) -> tuple[torch.Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> tuple[torch.Tensor]: ...
 
@@ -72,7 +73,9 @@ class NatDownsampler(nn.Module):
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class NatDropPath(nn.Module):
@@ -85,14 +88,18 @@ class NeighborhoodAttention(nn.Module):
     def __init__(self, config, dim, num_heads, kernel_size) -> None: ...
     def transpose_for_scores(self, x): ...
     def forward(
-        self, hidden_states: torch.Tensor, output_attentions: bool | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> tuple[torch.Tensor]: ...
 
 class NeighborhoodAttentionOutput(nn.Module):
     def __init__(self, config, dim) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -101,7 +108,9 @@ class NeighborhoodAttentionModule(nn.Module):
     def prune_heads(self, heads):  # -> None:
         ...
     def forward(
-        self, hidden_states: torch.Tensor, output_attentions: bool | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> tuple[torch.Tensor]: ...
 
@@ -118,22 +127,37 @@ class NatOutput(nn.Module):
 class NatLayer(nn.Module):
     def __init__(self, config, dim, num_heads, drop_path_rate=...) -> None: ...
     def maybe_pad(
-        self, hidden_states, height, width
+        self,
+        hidden_states,
+        height,
+        width,
     ):  # -> tuple[Tensor | Any, tuple[Literal[0], Literal[0], Literal[0], int, Literal[0], int] | tuple[Literal[0], Literal[0], Literal[0], Literal[0], Literal[0], Literal[0]]]:
         ...
     def forward(
-        self, hidden_states: torch.Tensor, output_attentions: bool | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class NatStage(nn.Module):
     def __init__(
-        self, config, dim, depth, num_heads, drop_path_rate, downsample
+        self,
+        config,
+        dim,
+        depth,
+        num_heads,
+        drop_path_rate,
+        downsample,
     ) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, output_attentions: bool | None = ...
+        self,
+        hidden_states: torch.Tensor,
+        output_attentions: bool | None = ...,
     ) -> tuple[torch.Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> tuple[torch.Tensor]: ...
 

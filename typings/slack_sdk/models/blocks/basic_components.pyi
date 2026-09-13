@@ -13,7 +13,9 @@ class TextObject(JsonObject):
     def subtype(self) -> str | None: ...
     @classmethod
     def parse(
-        cls, text: str | dict[str, Any] | TextObject, default_type: str = ...
+        cls,
+        text: str | dict[str, Any] | TextObject,
+        default_type: str = ...,
     ) -> TextObject | None: ...
     def __init__(
         self,
@@ -75,7 +77,8 @@ class Option(JsonObject):
     ) -> None: ...
     @classmethod
     def parse_all(
-        cls, options: Sequence[dict[str, Any] | Option] | None
+        cls,
+        options: Sequence[dict[str, Any] | Option] | None,
     ) -> list[Option] | None: ...
     def to_dict(self, option_type: str = ...) -> dict[str, Any]: ...
     @staticmethod
@@ -95,7 +98,8 @@ class OptionGroup(JsonObject):
     ) -> None: ...
     @classmethod
     def parse_all(
-        cls, option_groups: Sequence[dict[str, Any] | OptionGroup] | None
+        cls,
+        option_groups: Sequence[dict[str, Any] | OptionGroup] | None,
     ) -> list[OptionGroup] | None: ...
     def to_dict(self, option_type: str = ...) -> dict[str, Any]: ...
 
@@ -129,7 +133,8 @@ class ConfirmObject(JsonObject):
 class DispatchActionConfig(JsonObject):
     @classmethod
     def parse(
-        cls, config: DispatchActionConfig | dict[str, Any]
+        cls,
+        config: DispatchActionConfig | dict[str, Any],
     ) -> DispatchActionConfig | None: ...
     def __init__(self, *, trigger_actions_on: list[Any] | None = ...) -> None: ...
     def to_dict(self) -> dict[str, Any]: ...
@@ -140,7 +145,8 @@ class FeedbackButtonObject(JsonObject):
     value_max_length = ...
     @classmethod
     def parse(
-        cls, feedback_button: FeedbackButtonObject | dict[str, Any]
+        cls,
+        feedback_button: FeedbackButtonObject | dict[str, Any],
     ) -> FeedbackButtonObject | None: ...
     def __init__(
         self,

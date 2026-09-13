@@ -13,7 +13,7 @@ import httpx2
 import pytest
 import tiktoken
 
-from sagent.catalog import openai as openai_catalog
+from sagent.catalog import openai
 from sagent.providers.openai.api import OpenAI
 from sagent.types.capability import (
     ThinkingEffort,
@@ -32,7 +32,7 @@ async def test_every_catalog_row_is_a_model_the_vendor_serves() -> None:
     # Bounded concurrency: firing one connection per row made the slowest
     # response the whole test's fate, and `ReadTimeout` under that fan-out was
     # the observed failure rather than any catalog defect.
-    model_ids = tuple(openai_catalog.models())
+    model_ids = tuple(openai.models())
     gate = asyncio.Semaphore(8)
 
     async def _probe(client: httpx2.AsyncClient, model_id: str) -> bool:
@@ -41,7 +41,7 @@ async def test_every_catalog_row_is_a_model_the_vendor_serves() -> None:
 
     async with httpx2.AsyncClient(timeout=60.0) as client:
         verdicts = await asyncio.gather(
-            *(_probe(client, model_id) for model_id in model_ids)
+            *(_probe(client, model_id) for model_id in model_ids),
         )
     assert all(verdicts), "some catalog probes never completed successfully"
 
@@ -91,7 +91,7 @@ def test_openai_from_env_reads_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_openai_default_model_known() -> None:
     p = OpenAI.from_key("k")
-    m = p.model()  # picks DEFAULT_MODEL.
+    m = p.model()  # Picks DEFAULT_MODEL.
     assert m.tagged_model_id == OpenAI.DEFAULT_MODEL
 
 
@@ -157,7 +157,7 @@ def test_openai_gpt_6_astra_profile() -> None:
     assert m.capability.prices[PriceCatalogProduct()].cache_write == 12.5
     assert m.capability.prices[PriceCatalogProduct()].cache_read == 1.0
     assert m.capability.service_tier == frozenset(
-        {"auto", "default", "flex", "priority"}
+        {"auto", "default", "flex", "priority"},
     )
     assert OpenAI.from_key("k").model("gpt-6-astra+1m").limits.max_request_tokens == (
         1_050_000
@@ -172,7 +172,7 @@ def test_openai_gpt_6_astra_cannot_be_asked_not_to_think() -> None:
     """
     m = OpenAI.from_key("k").model("gpt-6-astra")
     assert m.capability.thinking_effort == frozenset(
-        {"low", "medium", "high", "xhigh", "max"}
+        {"low", "medium", "high", "xhigh", "max"},
     )
     with pytest.raises(ValueError, match="thinking_effort"):
         m.settings.thinking_effort = "none"
@@ -184,8 +184,8 @@ def test_openai_gpt_6_keeps_the_native_effort_ladder() -> None:
     Falling back to the pre-5.6 ladder would silently downgrade ``max``
     to ``high`` and lose the top rung the model actually serves.
     """
-    assert openai_catalog.reasoning_effort("max", model_id="gpt-6-astra") == "max"
-    assert openai_catalog.reasoning_effort("xhigh", model_id="gpt-6-astra") == "xhigh"
+    assert openai.reasoning_effort("max", model_id="gpt-6-astra") == "max"
+    assert openai.reasoning_effort("xhigh", model_id="gpt-6-astra") == "xhigh"
 
 
 @pytest.mark.parametrize("effort", ["none", "min"])
@@ -198,7 +198,7 @@ def test_openai_gpt_6_effort_floor_never_emits_a_rejected_value(
     reachable without that check, so returning ``none`` here would leave
     the guarantee resting on call order rather than on the mapping.
     """
-    assert openai_catalog.reasoning_effort(effort, model_id="gpt-6-astra") == "low"
+    assert openai.reasoning_effort(effort, model_id="gpt-6-astra") == "low"
 
 
 def test_openai_default_model_opts_into_full_window() -> None:
@@ -367,7 +367,7 @@ def test_openai_valid_service_tiers() -> None:
     p = OpenAI.from_key("k")
     m = p.model("gpt-5.5")
     assert m.capability.service_tier == frozenset(
-        {"auto", "default", "flex", "priority"}
+        {"auto", "default", "flex", "priority"},
     )
 
 

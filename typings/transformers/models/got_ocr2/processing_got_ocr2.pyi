@@ -30,7 +30,8 @@ class GotOcr2ProcessorKwargs(ProcessingKwargs, total=False):
     _defaults = ...
 
 def preprocess_box_annotation(
-    box: list | tuple, image_size: tuple[int, int]
+    box: list | tuple,
+    image_size: tuple[int, int],
 ) -> list: ...
 
 class GotOcr2Processor(ProcessorMixin):
@@ -38,7 +39,11 @@ class GotOcr2Processor(ProcessorMixin):
     image_processor_class = ...
     tokenizer_class = ...
     def __init__(
-        self, image_processor=..., tokenizer=..., chat_template=..., **kwargs
+        self,
+        image_processor=...,
+        tokenizer=...,
+        chat_template=...,
+        **kwargs,
     ) -> None: ...
     def __call__(
         self,

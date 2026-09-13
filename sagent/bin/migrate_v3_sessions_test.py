@@ -51,7 +51,7 @@ def test_iter_v4_records_user_text() -> None:
             "id": 5,
             "parent_id": 3,
             "timestamp": 1_700_000_000.0,
-        }
+        },
     ]
 
 
@@ -120,7 +120,7 @@ def test_iter_v4_records_assistant_multipart() -> None:
         ],
         "_id": 10,
         "_parent_id": 7,
-        "_timestamp": 1_700_000_002_000_000_000,  # ns-scale -> downshift.
+        "_timestamp": 1_700_000_002_000_000_000,  # Nanosecond timestamps are downshifted to seconds.
     }
     out = _records(json.dumps(rec))
     converted = out[0]
@@ -136,7 +136,7 @@ def test_iter_v4_records_assistant_multipart() -> None:
     assert tc0["id"] == "q1"
     assert tc0["name"] == "Echo"
     assert tc0["args"] == {"msg": "hi"}
-    # ns -> seconds downshift.
+    # Nanosecond timestamps are downshifted to seconds.
     assert isinstance(converted["timestamp"], float)
     assert converted["timestamp"] == 1_700_000_002.0
 
@@ -242,9 +242,9 @@ def test_migrate_file_writes_v4_jsonl(tmp_path: Path) -> None:
     src = tmp_path / "session.jsonl"
     src.write_text(
         json.dumps(
-            {"kind": "message", "descriptor": "text/x-user-message", "content": "hi"}
+            {"kind": "message", "descriptor": "text/x-user-message", "content": "hi"},
         )
-        + "\n"
+        + "\n",
     )
     dst = tmp_path / "session.v4.jsonl"
     n = migrate_file(src, dst)
@@ -254,7 +254,7 @@ def test_migrate_file_writes_v4_jsonl(tmp_path: Path) -> None:
 
 
 def test_main_handles_missing_path(tmp_path: Path, capsys: object) -> None:
-    del capsys  # logging output is not asserted on.
+    del capsys  # Logging output is not asserted on.
     missing = tmp_path / "nope.jsonl"
     rc = main([str(missing)])
     assert rc == 1
@@ -265,9 +265,9 @@ def test_main_directory_walk(tmp_path: Path) -> None:
     nested.mkdir()
     (nested / "session.jsonl").write_text(
         json.dumps(
-            {"kind": "message", "descriptor": "text/x-user-message", "content": "hi"}
+            {"kind": "message", "descriptor": "text/x-user-message", "content": "hi"},
         )
-        + "\n"
+        + "\n",
     )
     rc = main([str(tmp_path)])
     assert rc == 0
@@ -279,9 +279,9 @@ def test_main_skip_existing(tmp_path: Path) -> None:
     nested.mkdir()
     (nested / "session.jsonl").write_text(
         json.dumps(
-            {"kind": "message", "descriptor": "text/x-user-message", "content": "hi"}
+            {"kind": "message", "descriptor": "text/x-user-message", "content": "hi"},
         )
-        + "\n"
+        + "\n",
     )
     dst = nested / "session.v4.jsonl"
     dst.write_text("PRE-EXISTING\n")

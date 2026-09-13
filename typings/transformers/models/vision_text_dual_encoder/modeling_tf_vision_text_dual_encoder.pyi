@@ -36,7 +36,7 @@ class TFVisionTextDualEncoderModel(TFPreTrainedModel):
     def tf_to_pt_weight_rename(self, tf_weight):  # -> tuple[str] | tuple[Any]:
         ...
     @add_start_docstrings_to_model_forward(
-        VISION_TEXT_DUAL_ENCODER_TEXT_INPUTS_DOCSTRING
+        VISION_TEXT_DUAL_ENCODER_TEXT_INPUTS_DOCSTRING,
     )
     def get_text_features(
         self,
@@ -49,7 +49,7 @@ class TFVisionTextDualEncoderModel(TFPreTrainedModel):
         return_dict=...,
     ): ...
     @add_start_docstrings_to_model_forward(
-        VISION_TEXT_DUAL_ENCODER_VISION_INPUTS_DOCSTRING
+        VISION_TEXT_DUAL_ENCODER_VISION_INPUTS_DOCSTRING,
     )
     def get_image_features(
         self,

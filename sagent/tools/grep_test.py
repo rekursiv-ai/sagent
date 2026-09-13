@@ -36,9 +36,11 @@ def _setup_tree(root: Path) -> None:
 
 @contextmanager
 def _no_rg_fake_agent() -> Generator[FakeAgent]:
-    """Force the Python fallback by clearing ``_RG_PATH``."""
+    """Force the Python fallback by hiding ripgrep."""
     with ExitStack() as stack:
-        stack.enter_context(patch("sagent.tools.grep._RG_PATH", None))
+        stack.enter_context(
+            patch("sagent.tools.grep._rg_path", return_value=None),
+        )
         yield stack.enter_context(with_fake_agent())
 
 
@@ -96,7 +98,8 @@ async def test_grep_glob_filter(tmp_path: Path) -> None:
 async def test_grep_no_matches(tmp_path: Path) -> None:
     _setup_tree(tmp_path)
     result = await _run_grep(
-        {"pattern": "ZZZZ_nothing", "path": str(tmp_path)}, tmp_path
+        {"pattern": "ZZZZ_nothing", "path": str(tmp_path)},
+        tmp_path,
     )
     assert "(no matches)" in result.content
 
@@ -847,7 +850,9 @@ async def test_grep_rejects_negative_pagination(field: str, tmp_path: Path) -> N
 )
 @pytest.mark.asyncio
 async def test_backends_agree(
-    tmp_path: Path, output_mode: str, knobs: dict[str, int]
+    tmp_path: Path,
+    output_mode: str,
+    knobs: dict[str, int],
 ) -> None:
     """Ripgrep and the Python fallback are documented as interchangeable.
 
@@ -938,7 +943,8 @@ async def test_long_matching_line_is_not_dropped(tmp_path: Path) -> None:
     the model cannot read -- while the Python fallback returns it whole.
     """
     (tmp_path / "min.js").write_text(
-        "y" * 3000 + "NEEDLE" + "y" * 3000 + "\n", encoding="utf-8"
+        "y" * 3000 + "NEEDLE" + "y" * 3000 + "\n",
+        encoding="utf-8",
     )
     result = await _run_grep(
         {"pattern": "NEEDLE", "path": str(tmp_path), "output_mode": "content"},
@@ -964,7 +970,9 @@ def test_run_reports_bad_context_arg_as_error(bad: object, tmp_path: Path) -> No
 def test_context_knobs_reject_floats() -> None:
     """Context knobs are line counts; ``2.5`` is not one."""
     err = validate_tool_input(
-        "Grep", grep.directive_schema, {"pattern": "x", "-B": 2.5}
+        "Grep",
+        grep.directive_schema,
+        {"pattern": "x", "-B": 2.5},
     )
     assert err is not None, "a float context arg passed schema validation"
 
@@ -993,7 +1001,8 @@ async def test_pcre_is_not_silently_downgraded_to_python_re(tmp_path: Path) -> N
     """
     (tmp_path / "a.txt").write_text("ab\n", encoding="utf-8")
     result = await _run_grep_py(
-        {"pattern": "(?<=a)b", "path": str(tmp_path), "pcre": True}, tmp_path
+        {"pattern": "(?<=a)b", "path": str(tmp_path), "pcre": True},
+        tmp_path,
     )
     assert result.is_error, result.content
     assert "pcre" in result.content.lower(), result.content
@@ -1025,7 +1034,8 @@ async def test_offset_applies_with_context_lines(tmp_path: Path) -> None:
     produced, so context rows page like any others.
     """
     (tmp_path / "a.txt").write_text(
-        "".join(f"hit{i}\n" for i in range(10)), encoding="utf-8"
+        "".join(f"hit{i}\n" for i in range(10)),
+        encoding="utf-8",
     )
     result = await _run_grep(
         {

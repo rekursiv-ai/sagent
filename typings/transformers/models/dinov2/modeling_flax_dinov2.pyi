@@ -26,7 +26,12 @@ class FlaxDinov2Embeddings(nn.Module):
     def setup(self):  # -> None:
         ...
     def interpolate_pos_encoding(
-        self, config, hidden_states, height, width, position_embeddings
+        self,
+        config,
+        hidden_states,
+        height,
+        width,
+        position_embeddings,
     ):  # -> Array:
         ...
     def __call__(self, pixel_values, deterministic=...): ...
@@ -37,7 +42,10 @@ class FlaxDinov2SelfAttention(nn.Module):
     def setup(self):  # -> None:
         ...
     def __call__(
-        self, hidden_states, deterministic: bool = ..., output_attentions: bool = ...
+        self,
+        hidden_states,
+        deterministic: bool = ...,
+        output_attentions: bool = ...,
     ):  # -> tuple[Array, Any] | tuple[Array]:
         ...
 
@@ -54,7 +62,10 @@ class FlaxDinov2Attention(nn.Module):
     def setup(self):  # -> None:
         ...
     def __call__(
-        self, hidden_states, deterministic=..., output_attentions: bool = ...
+        self,
+        hidden_states,
+        deterministic=...,
+        output_attentions: bool = ...,
     ):  # -> tuple[Any, Any | Array] | tuple[Any]:
         ...
 
@@ -92,7 +103,10 @@ class FlaxDinov2Layer(nn.Module):
     def setup(self):  # -> None:
         ...
     def __call__(
-        self, hidden_states, deterministic: bool = ..., output_attentions: bool = ...
+        self,
+        hidden_states,
+        deterministic: bool = ...,
+        output_attentions: bool = ...,
     ):  # -> tuple[Any, Any | Array] | tuple[Any]:
         ...
 
@@ -141,10 +155,13 @@ class FlaxDinov2PreTrainedModel(FlaxPreTrainedModel):
         **kwargs,
     ) -> None: ...
     def init_weights(
-        self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...
+        self,
+        rng: jax.random.PRNGKey,
+        input_shape: tuple,
+        params: FrozenDict = ...,
     ) -> FrozenDict: ...
     @add_start_docstrings_to_model_forward(
-        DINOV2_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        DINOV2_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     def __call__(
         self,

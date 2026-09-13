@@ -120,7 +120,10 @@ def split_with_sizes_copy(
 @torch.library.impl(lib, "chunk_cat", "MTIA")
 @torch.library.impl(lib, "chunk_cat", "PrivateUse1")
 def chunk_cat(
-    tensors: list[torch.Tensor], dim: int, num_chunks: int, out: torch.Tensor
+    tensors: list[torch.Tensor],
+    dim: int,
+    num_chunks: int,
+    out: torch.Tensor,
 ) -> None: ...
 @torch.no_grad()
 def foreach_all_gather(

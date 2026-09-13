@@ -38,7 +38,10 @@ class CppTemplateKernel(CppKernel):
     def unroll_pragma(self, unroll) -> str: ...
     def define_buffer(self, name, sizes: list[Any], dtype=...) -> str: ...
     def define_stack_allocated_buffer(
-        self, name, sizes: list[Any], dtype=...
+        self,
+        name,
+        sizes: list[Any],
+        dtype=...,
     ) -> str: ...
     def reinit_buffer_if_null(self, name) -> str: ...
     def release_buffer(self, name) -> str: ...
@@ -86,7 +89,8 @@ class CppTemplateCaller(ir.ChoiceCaller):
         input_nodes: list[ir.Buffer],
         layout: ir.Layout,
         make_kernel_render: Callable[
-            [ir.CppTemplateBuffer, bool, list[ir.IRNode] | None], str
+            [ir.CppTemplateBuffer, bool, list[ir.IRNode] | None],
+            str,
         ],
         bmreq: CppBenchmarkRequest,
         template: CppTemplate,

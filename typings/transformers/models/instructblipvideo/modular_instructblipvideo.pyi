@@ -49,7 +49,7 @@ class InstructBlipVideoPreTrainedModel(InstructBlipPreTrainedModel): ...
 class InstructBlipVideoVisionModel(InstructBlipVisionModel): ...
 class InstructBlipVideoQFormerModel(InstructBlipQFormerModel): ...
 class InstructBlipVideoForConditionalGenerationModelOutput(
-    InstructBlipForConditionalGenerationModelOutput
+    InstructBlipForConditionalGenerationModelOutput,
 ): ...
 
 class InstructBlipVideoModel(InstructBlipModel):
@@ -71,7 +71,9 @@ class InstructBlipVideoModel(InstructBlipModel):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple | InstructBlipVideoForConditionalGenerationModelOutput: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | InstructBlipVideoForConditionalGenerationModelOutput: ...
 
 class InstructBlipVideoForConditionalGeneration(InstructBlipForConditionalGeneration):
@@ -94,7 +96,9 @@ class InstructBlipVideoForConditionalGeneration(InstructBlipForConditionalGenera
     ):  # -> None:
         ...
     def get_placeholder_mask(
-        self, input_ids: torch.LongTensor, inputs_embeds: torch.FloatTensor
+        self,
+        input_ids: torch.LongTensor,
+        inputs_embeds: torch.FloatTensor,
     ):  # -> Any:
         ...
     def forward(
@@ -116,7 +120,9 @@ class InstructBlipVideoForConditionalGeneration(InstructBlipForConditionalGenera
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | InstructBlipVideoForConditionalGenerationModelOutput: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | InstructBlipVideoForConditionalGenerationModelOutput: ...
     @torch.no_grad()
     def generate(

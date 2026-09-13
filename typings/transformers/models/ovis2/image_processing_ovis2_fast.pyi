@@ -35,7 +35,9 @@ class Ovis2ImageProcessorFast(BaseImageProcessorFast):
     valid_kwargs = Ovis2ImageProcessorKwargs
     @auto_docstring
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[Ovis2ImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[Ovis2ImageProcessorKwargs],
     ) -> BatchFeature: ...
     def crop_image_to_patches(
         self,

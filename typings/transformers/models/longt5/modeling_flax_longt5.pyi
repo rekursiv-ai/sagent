@@ -29,7 +29,9 @@ _CONFIG_FOR_DOC = ...
 remat = ...
 
 def shift_tokens_right(
-    input_ids: jnp.ndarray, pad_token_id: int, decoder_start_token_id: int
+    input_ids: jnp.ndarray,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ) -> jnp.ndarray: ...
 
 class FlaxLongT5LayerNorm(nn.Module):
@@ -109,7 +111,9 @@ class FlaxLongT5TransientGlobalAttention(nn.Module):
         ...
     def compute_bias(self, block_length: int): ...
     def compute_side_bias(
-        self, attention_mask: np.ndarray, global_segment_ids: np.ndarray
+        self,
+        attention_mask: np.ndarray,
+        global_segment_ids: np.ndarray,
     ) -> np.ndarray: ...
     def __call__(
         self,
@@ -290,7 +294,10 @@ class FlaxLongT5PreTrainedModel(FlaxPreTrainedModel):
     def enable_gradient_checkpointing(self):  # -> None:
         ...
     def init_weights(
-        self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...
+        self,
+        rng: jax.random.PRNGKey,
+        input_shape: tuple,
+        params: FrozenDict = ...,
     ) -> FrozenDict: ...
     @add_start_docstrings_to_model_forward(LONGT5_INPUTS_DOCSTRING)
     def __call__(
@@ -309,7 +316,8 @@ class FlaxLongT5PreTrainedModel(FlaxPreTrainedModel):
     def init_cache(self, batch_size, max_length, encoder_outputs): ...
     @add_start_docstrings(LONGT5_ENCODE_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=FlaxBaseModelOutput, config_class=LongT5Config
+        output_type=FlaxBaseModelOutput,
+        config_class=LongT5Config,
     )
     def encode(
         self,
@@ -396,7 +404,8 @@ class FlaxLongT5ForConditionalGenerationModule(nn.Module):
 class FlaxLongT5ForConditionalGeneration(FlaxLongT5PreTrainedModel):
     @add_start_docstrings(LONGT5_DECODE_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=FlaxCausalLMOutputWithCrossAttentions, config_class=LongT5Config
+        output_type=FlaxCausalLMOutputWithCrossAttentions,
+        config_class=LongT5Config,
     )
     def decode(
         self,

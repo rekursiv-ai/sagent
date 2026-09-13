@@ -10,7 +10,7 @@ from ..utils import (
 logger = ...
 
 @add_end_docstrings(
-    build_pipeline_init_args(has_tokenizer=True, has_image_processor=True)
+    build_pipeline_init_args(has_tokenizer=True, has_image_processor=True),
 )
 class ImageToTextPipeline(Pipeline):
     _pipeline_calls_generate = ...
@@ -22,18 +22,27 @@ class ImageToTextPipeline(Pipeline):
     def __init__(self, *args, **kwargs) -> None: ...
     @overload
     def __call__(
-        self, inputs: str | Image.Image, **kwargs: Any
+        self,
+        inputs: str | Image.Image,
+        **kwargs: Any,
     ) -> list[dict[str, Any]]: ...
     @overload
     def __call__(
-        self, inputs: list[str] | list[Image.Image], **kwargs: Any
+        self,
+        inputs: list[str] | list[Image.Image],
+        **kwargs: Any,
     ) -> list[list[dict[str, Any]]]: ...
     def __call__(
-        self, inputs: str | list[str] | Image.Image | list[Image.Image], **kwargs
+        self,
+        inputs: str | list[str] | Image.Image | list[Image.Image],
+        **kwargs,
     ):  # -> list[Any] | PipelineIterator | Generator[Any, Any, None] | Tensor | Any | None:
         ...
     def preprocess(
-        self, image, prompt=..., timeout=...
+        self,
+        image,
+        prompt=...,
+        timeout=...,
     ):  # -> transformers.feature_extraction_utils.BatchFeature | Any | transformers.image_processing_base.BatchFeature:
         ...
     def postprocess(self, model_outputs):  # -> list[Any]:

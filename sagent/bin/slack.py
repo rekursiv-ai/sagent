@@ -75,6 +75,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 import httpx2
 
 from sagent.agent import Agent
+from sagent.agent.runtime import AgentRuntime
 from sagent.agent.state import agent_registry
 from sagent.bin.cli import (
     DEFAULT_TOOLS,
@@ -99,6 +100,9 @@ from sagent.types.runtime import (
 )
 
 
+_CWD: Final = Path(__file__).resolve().parent
+
+
 if TYPE_CHECKING:
     from slack_sdk.socket_mode.async_client import AsyncBaseSocketModeClient
     from slack_sdk.socket_mode.request import SocketModeRequest
@@ -110,96 +114,10 @@ logger = logging.getLogger(__name__)
 # Agent-sent messages retained for reaction lookups. Reactions land on
 # recent messages, so the tail is what matters; the cache is a lookup
 # table, not a transcript.
-_SENT_MESSAGE_CACHE: Final = 512
 
 _AGENT_TOOL_NAMES = [
     name for name in DEFAULT_TOOLS if name not in ("AgentSpawn", "AgentSend")
 ]
-
-
-def _extract_event(payload: MutableJSON | None) -> MutableJSON | None:
-    """Pull the inner ``event`` dict from a Socket Mode envelope."""
-    if not isinstance(payload, dict):
-        return None
-    ev = payload.get("event")
-    if not isinstance(ev, dict):
-        return None
-    return cast(MutableJSON, ev)
-
-
-def _strip_mention(text: str, self_user_id: str) -> str:
-    """Remove the bot's ``<@U...>`` mention from text."""
-    if not self_user_id:
-        return text.strip()
-    return text.replace(f"<@{self_user_id}>", "").strip()
-
-
-def _extract_agent_mention(text: str) -> str | None:
-    """Return the agent label that ``text`` opens with, or ``None``."""
-    for word in text.split():
-        clean = word.rstrip(",:;.!?")
-        if not clean:
-            break
-        if clean in agent_registry:
-            return clean
-        lower = clean.lower()
-        for label in agent_registry:
-            if label.lower() == lower:
-                return label
-        break
-    return None
-
-
-def _manifest_path(session_dir: Path) -> Path:
-    """Return the manifest.json path inside a session directory."""
-    return session_dir / "manifest.json"
-
-
-def _new_session_dir(root: Path) -> Path:
-    """Create a timestamped session directory under ``root``."""
-    name = _time.strftime("%Y%m%d_%H%M%S")
-    d = root / name
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _latest_session_dir(root: Path) -> Path | None:
-    """Return the most recently modified session directory under ``root``."""
-    if not root.is_dir():
-        return None
-    candidates = sorted(
-        (d for d in root.iterdir() if d.is_dir() and (d / "manifest.json").exists()),
-        key=lambda d: d.stat().st_mtime,
-        reverse=True,
-    )
-    return candidates[0] if candidates else None
-
-
-def _save_manifest(
-    session_dir: Path,
-    agents: dict[str, dict[str, str]],
-) -> None:
-    """Persist ``{label: {persona, system}}`` to ``manifest.json``."""
-    session_dir.mkdir(parents=True, exist_ok=True)
-    _ = _manifest_path(session_dir).write_text(
-        json.dumps(agents, indent=2),
-        encoding="utf-8",
-    )
-
-
-def _load_manifest(session_dir: Path) -> dict[str, dict[str, str]]:
-    """Load ``{label: {persona, system}}`` from ``manifest.json``."""
-    path = _manifest_path(session_dir)
-    if not path.exists():
-        return {}
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    result: dict[str, dict[str, str]] = {}
-    for k, v in raw.items():
-        if isinstance(v, str):
-            result[k] = {"persona": v, "system": ""}
-        else:
-            result[k] = dict(v)
-    return result
 
 
 def load_persona(persona_dir: Path, persona_name: str) -> str:
@@ -220,29 +138,6 @@ def load_persona(persona_dir: Path, persona_name: str) -> str:
     if default.exists():
         return default.read_text(encoding="utf-8")
     return f"You are {persona_name}."
-
-
-def _list_personas(persona_dir: Path) -> list[str]:
-    """List available persona names (stems of ``.md`` files)."""
-    if not persona_dir.is_dir():
-        return []
-    return sorted(p.stem for p in persona_dir.glob("*.md"))
-
-
-class _AgentSlack(Slack):
-    """Slack tool that advertises active peer agents in its prompt."""
-
-    @override
-    def prompt(self) -> str:
-        """Return tool-prompt text listing peer agents this one can @-mention."""
-        others = sorted(k for k in agent_registry if k != self._username)
-        if not others:
-            return ""
-        names = ", ".join(others)
-        return (
-            f"Active agents you can message by @-mentioning at the start"
-            f" of your Slack message: {names}"
-        )
 
 
 class SlackAdapter:
@@ -320,7 +215,7 @@ class SlackAdapter:
                 profile.get("display_name")
                 or user_obj.get("real_name")
                 or user_obj.get("name")
-                or user_id
+                or user_id,
             )
             self._user_names[user_id] = name
         except (KeyError, AttributeError, OSError, SlackApiError):
@@ -370,7 +265,9 @@ class SlackAdapter:
         if result.startswith("id="):
             self._router_log_channel = result[3:]
             logger.info(
-                "Created router log channel: #%s (%s)", name, self._router_log_channel
+                "Created router log channel: #%s (%s)",
+                name,
+                self._router_log_channel,
             )
         else:
             self._router_log_channel = ""
@@ -425,7 +322,7 @@ class SlackAdapter:
             if username in agent_registry:
                 sender_agent = username
             else:
-                return  # foreign bot
+                return  # Foreign bot.
         elif subtype is not None:
             return
 
@@ -440,7 +337,7 @@ class SlackAdapter:
         # Cache agent messages for reaction lookups.
         if sender_agent and ts:
             self._sent_messages[(channel, ts)] = (sender_agent, clean, thread_ts)
-            while len(self._sent_messages) > _SENT_MESSAGE_CACHE:
+            while len(self._sent_messages) > 512:
                 _ = self._sent_messages.popitem(last=False)
 
         # 1. Log channel → owning agent (skip self-routing).
@@ -663,28 +560,18 @@ class SlackAdapter:
             session_dir=self._session_dir / label,
             persistent_retry=True,
         )
-        child._lifecycle = "serviced"  # noqa: SLF001 -- cross-layer serviced flag
-        child._is_subagent = True  # noqa: SLF001 -- cross-layer subagent flag
+        child._lifecycle = "serviced"  # noqa: SLF001 -- The runtime adapter updates this private lifecycle flag across its layer boundary.
+        child._is_subagent = True  # noqa: SLF001 -- The runtime adapter updates this private lifecycle flag across its layer boundary.
         agent_registry[label] = child
         self._active_agents[label] = {"persona": "custom", "system": system_text}
         _save_manifest(self._session_dir, self._active_agents)
 
         log_queue: asyncio.Queue[str | None] = asyncio.Queue()
 
-        async def _run_child(c: Agent = child) -> None:
-            try:
-                fwd = _make_log_forwarder(log_queue)
-                c.runtime.observers.append(fwd)
-                try:
-                    await c.serve_forever()
-                finally:
-                    if fwd in c.runtime.observers:
-                        c.runtime.observers.remove(fwd)
-                    log_queue.put_nowait(None)
-            finally:
-                _ = agent_registry.pop(c.name, None)
-
-        for coro in (_run_child(), log_tap(log_queue, label, self)):
+        for coro in (
+            _run_child(child, log_queue),
+            log_tap(log_queue, label, self),
+        ):
             task = asyncio.create_task(coro)
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
@@ -788,13 +675,277 @@ class SlackAdapter:
     async def _find_channel(self, name: str) -> str | None:
         """Look up a Slack channel ID by its bare name."""
         slack = Slack(token=self._bot_token)
-        result = await slack._list_channels(1000)  # noqa: SLF001 -- no public channel-list API on Slack wrapper
+        result = await slack._list_channels(1000)  # noqa: SLF001 -- The installed Slack wrapper exposes channel listing only through this private API.
         if isinstance(result, ToolResult):
             return None
         for line in result.splitlines():
             if f"#{name}" in line:
                 return line.split()[0]
         return None
+
+
+class LogChannelAdapter(Protocol):
+    """Minimal adapter surface required by :func:`log_tap`."""
+
+    @property
+    def bot_token(self) -> str:
+        """Slack bot token used to construct outgoing Slack clients."""
+        ...
+
+    async def ensure_log_channel(
+        self,
+        agent_name: str,
+        source_channel: str = "",
+    ) -> str | None:
+        """Create or find the per-agent log channel and return its ID."""
+        ...
+
+
+async def log_tap(
+    events: asyncio.Queue[str | None],
+    agent_name: str,
+    adapter: LogChannelAdapter,
+) -> None:
+    """Forward rendered log lines from ``events`` to the agent's log channel.
+
+    Args:
+      events: Queue producing rendered lines; ``None`` flushes the buffer.
+      agent_name: Owning agent label, used to resolve the log channel.
+      adapter: Adapter that creates/finds the per-agent log channel.
+
+    """
+    channel_id: str | None = None
+    slack: Slack | None = None
+    source_channel: str = ""
+    buffer: list[str] = []
+    while True:
+        rendered = await events.get()
+        if rendered is None:
+            # Terminal sentinel: the producer has ended, so flush what is
+            # left and RETURN. Continuing left one tap task alive per
+            # agent for the life of the process.
+            if buffer and channel_id and slack:
+                await _flush_log(buffer, channel_id, slack)
+            buffer.clear()
+            return
+        if not source_channel:
+            source_channel = _extract_channel_from_text(rendered)
+        if channel_id is None:
+            channel_id = await adapter.ensure_log_channel(
+                agent_name,
+                source_channel=source_channel,
+            )
+            if channel_id is None:
+                continue
+            slack = Slack(token=adapter.bot_token)
+        buffer.append(rendered)
+        # Flush as soon as a message's worth has accumulated. A serviced
+        # agent runs for days, so waiting for the terminal sentinel meant
+        # its log channel stayed empty for the whole session while the
+        # buffer grew without bound.
+        # Buffered characters that trigger a flush mid-session. Roughly one
+        # Slack message, so a live agent's log channel stays current instead of
+        # filling only when the agent exits.
+        if slack is not None and sum(len(x) + 1 for x in buffer) >= 3_500:
+            await _flush_log(buffer, channel_id, slack)
+            buffer.clear()
+
+
+def parse_slack_args(
+    parser: argparse.ArgumentParser,
+    argv: list[str] | None = None,
+) -> tuple[argparse.Namespace, list[str]]:
+    """Add shared Slack service flags and delegate to ``parse_agent_args``.
+
+    These flags cover Slack tokens, persona, logging, session, and agent-model
+    configuration for the service entry point.
+
+    Args:
+      parser: Argparse parser to extend in place.
+      argv: Optional argument list; defaults to ``sys.argv[1:]``.
+
+    Returns:
+      parsed: Tuple of ``(namespace, remaining_args)`` from ``parse_known_args``.
+
+    """
+    _ = parser.add_argument(
+        "--app-token",
+        default="",
+        help="Slack app token (xapp-...). Default: $SLACK_APP_TOKEN.",
+    )
+    _ = parser.add_argument(
+        "--bot-token",
+        default="",
+        help="Slack bot token (xoxb-...). Default: $SLACK_BOT_TOKEN.",
+    )
+    _ = parser.add_argument(
+        "--persona-dir",
+        default=str(_CWD.parent / "assets" / "slack"),
+        help="Directory of persona .md files.",
+    )
+    _ = parser.add_argument(
+        "--log-prefix",
+        default="",
+        help="Prefix for log channel names (e.g. 'agent-' -> #agent-sara-log).",
+    )
+    _ = parser.add_argument(
+        "--router-log-channel",
+        dest="router_log_channel",
+        default="router-log",
+        help="Channel name for router decision logs (default: router-log). Created if needed.",
+    )
+    _ = parser.add_argument(
+        "--cwd",
+        default=None,
+        help="Working directory.",
+    )
+    _ = parser.add_argument(
+        "--session-dir",
+        dest="session_dir",
+        default=str(data_dir() / "rekursiv-ai" / "sagent" / "slack"),
+        help="Directory for session persistence (default: ~/.sagent/slack).",
+    )
+    _ = parser.add_argument(
+        "--continue",
+        dest="resume",
+        action="store_true",
+        default=False,
+        help="Resume agents from a previous session.",
+    )
+    return parse_agent_args(parser, argv)
+
+
+def main() -> int:
+    """Parse args, run the Slack service, and return the process exit code.
+
+    Returns:
+      exit_code: Process exit status after the service stops.
+
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    parser = argparse.ArgumentParser(
+        description=(__doc__ or "").split("\n", 2)[2],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    args, remaining = parse_slack_args(parser)
+    if remaining:
+        parser.error(f"unrecognized arguments: {' '.join(remaining)}")
+    try:
+        asyncio.run(_run(args))
+    except KeyboardInterrupt:
+        _ = sys.stderr.write("\n[interrupted]\n")
+    return 0
+
+
+def _extract_event(payload: MutableJSON | None) -> MutableJSON | None:
+    """Pull the inner ``event`` dict from a Socket Mode envelope."""
+    if not isinstance(payload, dict):
+        return None
+    ev = payload.get("event")
+    if not isinstance(ev, dict):
+        return None
+    return cast(MutableJSON, ev)
+
+
+def _strip_mention(text: str, self_user_id: str) -> str:
+    """Remove the bot's ``<@U...>`` mention from text."""
+    if not self_user_id:
+        return text.strip()
+    return text.replace(f"<@{self_user_id}>", "").strip()
+
+
+def _extract_agent_mention(text: str) -> str | None:
+    """Return the agent label that ``text`` opens with, or ``None``."""
+    for word in text.split():
+        clean = word.rstrip(",:;.!?")
+        if not clean:
+            break
+        if clean in agent_registry:
+            return clean
+        lower = clean.lower()
+        for label in agent_registry:
+            if label.lower() == lower:
+                return label
+        break
+    return None
+
+
+def _manifest_path(session_dir: Path) -> Path:
+    """Return the manifest.json path inside a session directory."""
+    return session_dir / "manifest.json"
+
+
+def _new_session_dir(root: Path) -> Path:
+    """Create a timestamped session directory under ``root``."""
+    name = _time.strftime("%Y%m%d_%H%M%S")
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _latest_session_dir(root: Path) -> Path | None:
+    """Return the most recently modified session directory under ``root``."""
+    if not root.is_dir():
+        return None
+    candidates = sorted(
+        (d for d in root.iterdir() if d.is_dir() and (d / "manifest.json").exists()),
+        key=lambda d: d.stat().st_mtime,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def _save_manifest(
+    session_dir: Path,
+    agents: dict[str, dict[str, str]],
+) -> None:
+    """Persist ``{label: {persona, system}}`` to ``manifest.json``."""
+    session_dir.mkdir(parents=True, exist_ok=True)
+    _ = _manifest_path(session_dir).write_text(
+        json.dumps(agents, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _load_manifest(session_dir: Path) -> dict[str, dict[str, str]]:
+    """Load ``{label: {persona, system}}`` from ``manifest.json``."""
+    path = _manifest_path(session_dir)
+    if not path.exists():
+        return {}
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    result: dict[str, dict[str, str]] = {}
+    for k, v in raw.items():
+        if isinstance(v, str):
+            result[k] = {"persona": v, "system": ""}
+        else:
+            result[k] = dict(v)
+    return result
+
+
+def _list_personas(persona_dir: Path) -> list[str]:
+    """List available persona names (stems of ``.md`` files)."""
+    if not persona_dir.is_dir():
+        return []
+    return sorted(p.stem for p in persona_dir.glob("*.md"))
+
+
+class _AgentSlack(Slack):
+    """Slack tool that advertises active peer agents in its prompt."""
+
+    @override
+    def prompt(self) -> str:
+        """Return tool-prompt text listing peer agents this one can @-mention."""
+        others = sorted(k for k in agent_registry if k != self._username)
+        if not others:
+            return ""
+        names = ", ".join(others)
+        return (
+            f"Active agents you can message by @-mentioning at the start"
+            f" of your Slack message: {names}"
+        )
 
 
 def _extract_channel_from_text(text: str) -> str:
@@ -805,12 +956,9 @@ def _extract_channel_from_text(text: str) -> str:
     return ""
 
 
-# Buffered characters that trigger a flush mid-session. Roughly one
-# Slack message, so a live agent's log channel stays current instead of
-# filling only when the agent exits.
-_LOG_FLUSH_CHARS: Final = 3_500
-
-
+# Splits at line boundaries where it can and WITHIN a line when it must: one rendered
+# tool result can exceed the whole per-message limit on its own, and appending it whole
+# made Slack reject the send rather than deliver a shortened one.
 async def _flush_log(
     buffer: list[str],
     channel_id: str,
@@ -818,18 +966,12 @@ async def _flush_log(
     *,
     msg_limit: int = 3900,
 ) -> None:
-    """Flush buffered log lines to Slack, splitting to fit ``msg_limit``.
-
-    Splits at line boundaries where it can and WITHIN a line when it
-    must: one rendered tool result can exceed the whole per-message
-    limit on its own, and appending it whole made Slack reject the send
-    rather than deliver a shortened one.
-    """
+    """Flush buffered log lines to Slack, splitting to fit ``msg_limit``."""
     chunk: list[str] = []
     chunk_len = 0
     for line in buffer:
         for piece in _split_line(line, msg_limit):
-            piece_len = len(piece) + 1  # +1 for newline join
+            piece_len = len(piece) + 1  # +1 for newline join.
             if chunk and chunk_len + piece_len > msg_limit:
                 _ = await slack.send(channel_id, "\n".join(chunk))
                 chunk = []
@@ -904,134 +1046,6 @@ def _render_event(event: RuntimeEvent) -> str | None:
     return None
 
 
-class LogChannelAdapter(Protocol):
-    """Minimal adapter surface required by :func:`log_tap`."""
-
-    @property
-    def bot_token(self) -> str:
-        """Slack bot token used to construct outgoing Slack clients."""
-        ...
-
-    async def ensure_log_channel(
-        self,
-        agent_name: str,
-        source_channel: str = "",
-    ) -> str | None:
-        """Create or find the per-agent log channel and return its ID."""
-        ...
-
-
-async def log_tap(
-    events: asyncio.Queue[str | None],
-    agent_name: str,
-    adapter: LogChannelAdapter,
-) -> None:
-    """Forward rendered log lines from ``events`` to the agent's log channel.
-
-    Args:
-      events: Queue producing rendered lines; ``None`` flushes the buffer.
-      agent_name: Owning agent label, used to resolve the log channel.
-      adapter: Adapter that creates/finds the per-agent log channel.
-
-    """
-    channel_id: str | None = None
-    slack: Slack | None = None
-    source_channel: str = ""
-    buffer: list[str] = []
-    while True:
-        rendered = await events.get()
-        if rendered is None:
-            # Terminal sentinel: the producer has ended, so flush what is
-            # left and RETURN. Continuing left one tap task alive per
-            # agent for the life of the process.
-            if buffer and channel_id and slack:
-                await _flush_log(buffer, channel_id, slack)
-            buffer.clear()
-            return
-        if not source_channel:
-            source_channel = _extract_channel_from_text(rendered)
-        if channel_id is None:
-            channel_id = await adapter.ensure_log_channel(
-                agent_name,
-                source_channel=source_channel,
-            )
-            if channel_id is None:
-                continue
-            slack = Slack(token=adapter.bot_token)
-        buffer.append(rendered)
-        # Flush as soon as a message's worth has accumulated. A serviced
-        # agent runs for days, so waiting for the terminal sentinel meant
-        # its log channel stayed empty for the whole session while the
-        # buffer grew without bound.
-        if slack is not None and sum(len(x) + 1 for x in buffer) >= _LOG_FLUSH_CHARS:
-            await _flush_log(buffer, channel_id, slack)
-            buffer.clear()
-
-
-def parse_slack_args(
-    parser: argparse.ArgumentParser,
-    argv: list[str] | None = None,
-) -> tuple[argparse.Namespace, list[str]]:
-    """Add shared Slack service flags and delegate to ``parse_agent_args``.
-
-    These flags cover Slack tokens, persona, logging, session, and agent-model
-    configuration for the service entry point.
-
-    Args:
-      parser: Argparse parser to extend in place.
-      argv: Optional argument list; defaults to ``sys.argv[1:]``.
-
-    Returns:
-      parsed: Tuple of ``(namespace, remaining_args)`` from ``parse_known_args``.
-
-    """
-    _ = parser.add_argument(
-        "--app-token",
-        default="",
-        help="Slack app token (xapp-...). Default: $SLACK_APP_TOKEN.",
-    )
-    _ = parser.add_argument(
-        "--bot-token",
-        default="",
-        help="Slack bot token (xoxb-...). Default: $SLACK_BOT_TOKEN.",
-    )
-    _ = parser.add_argument(
-        "--persona-dir",
-        default=str(Path(__file__).resolve().parent.parent / "assets" / "slack"),
-        help="Directory of persona .md files.",
-    )
-    _ = parser.add_argument(
-        "--log-prefix",
-        default="",
-        help="Prefix for log channel names (e.g. 'agent-' -> #agent-sara-log).",
-    )
-    _ = parser.add_argument(
-        "--router-log-channel",
-        dest="router_log_channel",
-        default="router-log",
-        help="Channel name for router decision logs (default: router-log). Created if needed.",
-    )
-    _ = parser.add_argument(
-        "--cwd",
-        default=None,
-        help="Working directory.",
-    )
-    _ = parser.add_argument(
-        "--session-dir",
-        dest="session_dir",
-        default=str(data_dir() / "rekursiv-ai" / "sagent" / "slack"),
-        help="Directory for session persistence (default: ~/.sagent/slack).",
-    )
-    _ = parser.add_argument(
-        "--continue",
-        dest="resume",
-        action="store_true",
-        default=False,
-        help="Resume agents from a previous session.",
-    )
-    return parse_agent_args(parser, argv)
-
-
 def _resolve_tokens(args: argparse.Namespace) -> tuple[str, str]:
     """Return ``(app_token, bot_token)`` from CLI flags or env, exiting on miss."""
     app = args.app_token or os.environ.get("SLACK_APP_TOKEN", "")
@@ -1071,7 +1085,7 @@ async def _run(args: argparse.Namespace) -> None:
     _ = sys.stderr.write(f"[personas] {persona_dir}\n")
 
     session_root = Path(args.session_dir)
-    session_root.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 -- one-time sync mkdir is negligible
+    session_root.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240 -- This one-time directory creation precedes the async session loop.
     if args.resume:
         candidate = _latest_session_dir(session_root)
         if candidate is None:
@@ -1129,24 +1143,30 @@ async def _run(args: argparse.Namespace) -> None:
     logger.info("Shutdown complete")
 
 
-def main() -> int:
-    """Parse args, run the Slack service, and return the process exit code."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
-    parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    args, remaining = parse_slack_args(parser)
-    if remaining:
-        parser.error(f"unrecognized arguments: {' '.join(remaining)}")
+class _ChildAgent(Protocol):
+    """Minimal child-agent surface required by the lifecycle task."""
+
+    name: str
+    runtime: AgentRuntime
+
+    async def serve_forever(self) -> None: ...
+
+
+async def _run_child(
+    child: _ChildAgent,
+    log_queue: asyncio.Queue[str | None],
+) -> None:
     try:
-        asyncio.run(_run(args))
-    except KeyboardInterrupt:
-        _ = sys.stderr.write("\n[interrupted]\n")
-    return 0
+        fwd = _make_log_forwarder(log_queue)
+        child.runtime.observers.append(fwd)
+        try:
+            await child.serve_forever()
+        finally:
+            if fwd in child.runtime.observers:
+                child.runtime.observers.remove(fwd)
+            log_queue.put_nowait(None)
+    finally:
+        _ = agent_registry.pop(child.name, None)
 
 
 if __name__ == "__main__":

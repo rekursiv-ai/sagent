@@ -44,7 +44,7 @@ def _engine() -> Engine:
 def _register(labels: list[str]) -> dict[str, _FakeAgent]:
     fakes = {lbl: _FakeAgent() for lbl in labels}
     for lbl, fake in fakes.items():
-        agent_registry[lbl] = cast(Any, fake)  # stand-in for a runtime AgentLike
+        agent_registry[lbl] = cast(Any, fake)  # stand-in for a runtime AgentLike.
     return fakes
 
 
@@ -68,8 +68,8 @@ def test_mesh_say_delivers_and_logs() -> None:
     try:
         res = _run(
             CommsTool(eng, mesh=True).run(
-                {"action": "say", "to": "a1", "content": "hi"}
-            )
+                {"action": "say", "to": "a1", "content": "hi"},
+            ),
         )
         assert not res.is_error
         assert len(fakes["a1"].runtime.inbox.msgs) == 1
@@ -86,10 +86,10 @@ def test_mesh_broadcast_is_n_delivered_sends() -> None:
     tok = agent_label_var.set("a0")
     try:
         res = _run(
-            CommsTool(eng, mesh=True).run({"action": "broadcast", "content": "yo"})
+            CommsTool(eng, mesh=True).run({"action": "broadcast", "content": "yo"}),
         )
         assert not res.is_error
-        assert len(_msgs(eng)) == 2  # to a1 + a2 (not self) — broadcast counts as N
+        assert len(_msgs(eng)) == 2  # To a1 + a2 (not self) -- broadcast counts as N.
         assert len(fakes["a1"].runtime.inbox.msgs) == 1
         assert len(fakes["a2"].runtime.inbox.msgs) == 1
     finally:
@@ -105,7 +105,7 @@ def test_tree_worker_cannot_reach_peer_or_broadcast() -> None:
         comms = CommsTool(eng, mesh=False, coordinator="lead")
         assert _run(comms.run({"action": "say", "to": "w2", "content": "x"})).is_error
         assert not _run(
-            comms.run({"action": "say", "to": "lead", "content": "x"})
+            comms.run({"action": "say", "to": "lead", "content": "x"}),
         ).is_error
         assert _run(comms.run({"action": "broadcast", "content": "x"})).is_error
     finally:
@@ -120,8 +120,8 @@ def test_say_unknown_agent_is_dropped() -> None:
     try:
         res = _run(
             CommsTool(eng, mesh=True).run(
-                {"action": "say", "to": "ghost", "content": "x"}
-            )
+                {"action": "say", "to": "ghost", "content": "x"},
+            ),
         )
         assert res.is_error
         assert _msgs(eng)[-1]["status"] == "dropped"
@@ -145,7 +145,7 @@ def test_spawn_tree_blocks_non_coordinator() -> None:
         tool = SpawnTool(eng, fake, mesh=False, coordinator="a0", max_agents=8)
         res = _run(tool.run({"x": 7, "y": 4}))
         assert res.is_error
-        assert not calls  # a worker cannot spawn in tree mode
+        assert not calls  # A worker cannot spawn in tree mode.
     finally:
         agent_label_var.reset(tok)
         _clear(["a0", "w1"])

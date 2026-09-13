@@ -13,10 +13,13 @@ from ...utils import ModelOutput, auto_docstring
 logger = ...
 
 def concat_pairs(
-    tensor_tuple0: tuple[torch.Tensor], tensor_tuple1: tuple[torch.Tensor]
+    tensor_tuple0: tuple[torch.Tensor],
+    tensor_tuple1: tuple[torch.Tensor],
 ) -> tuple[torch.Tensor]: ...
 def normalize_keypoints(
-    keypoints: torch.Tensor, height: int, width: int
+    keypoints: torch.Tensor,
+    height: int,
+    width: int,
 ) -> torch.Tensor: ...
 def log_sinkhorn_iterations(
     log_cost_matrix: torch.Tensor,
@@ -25,7 +28,9 @@ def log_sinkhorn_iterations(
     num_iterations: int,
 ) -> torch.Tensor: ...
 def log_optimal_transport(
-    scores: torch.Tensor, reg_param: torch.Tensor, iterations: int
+    scores: torch.Tensor,
+    reg_param: torch.Tensor,
+    iterations: int,
 ) -> torch.Tensor: ...
 def arange_like(x, dim: int) -> torch.Tensor: ...
 
@@ -42,7 +47,10 @@ class KeypointMatchingOutput(ModelOutput):
 
 class SuperGlueMultiLayerPerceptron(nn.Module):
     def __init__(
-        self, config: SuperGlueConfig, in_channels: int, out_channels: int
+        self,
+        config: SuperGlueConfig,
+        in_channels: int,
+        out_channels: int,
     ) -> None: ...
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -56,7 +64,9 @@ class SuperGlueKeypointEncoder(nn.Module):
         output_hidden_states: bool | None = ...,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor] | None]: ...
 
 class SuperGlueSelfAttention(nn.Module):
@@ -105,12 +115,18 @@ class SuperGlueAttentionalPropagation(nn.Module):
         output_attentions: bool = ...,
         output_hidden_states: bool = ...,
     ) -> tuple[
-        torch.Tensor, tuple[torch.Tensor] | None, tuple[torch.Tensor] | None
+        torch.Tensor,
+        tuple[torch.Tensor] | None,
+        tuple[torch.Tensor] | None,
     ]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[
-        torch.Tensor, tuple[torch.Tensor] | None, tuple[torch.Tensor] | None
+        torch.Tensor,
+        tuple[torch.Tensor] | None,
+        tuple[torch.Tensor] | None,
     ]: ...
 
 class SuperGlueAttentionalGNN(nn.Module):
@@ -123,7 +139,9 @@ class SuperGlueAttentionalGNN(nn.Module):
         output_hidden_states: bool | None = ...,
     ) -> tuple[torch.Tensor, tuple | None, tuple | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, tuple | None, tuple | None]: ...
 
 class SuperGlueFinalProjection(nn.Module):

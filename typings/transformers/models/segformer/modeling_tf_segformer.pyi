@@ -34,7 +34,12 @@ class TFSegformerDropPath(keras.layers.Layer):
 
 class TFSegformerOverlapPatchEmbeddings(keras.layers.Layer):
     def __init__(
-        self, patch_size, stride, num_channels, hidden_size, **kwargs
+        self,
+        patch_size,
+        stride,
+        num_channels,
+        hidden_size,
+        **kwargs,
     ) -> None: ...
     def call(self, pixel_values: tf.Tensor) -> tuple[tf.Tensor, int, int]: ...
     def build(self, input_shape=...):  # -> None:
@@ -102,7 +107,11 @@ class TFSegformerMixFFN(keras.layers.Layer):
         **kwargs,
     ) -> None: ...
     def call(
-        self, hidden_states: tf.Tensor, height: int, width: int, training: bool = ...
+        self,
+        hidden_states: tf.Tensor,
+        height: int,
+        width: int,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -177,7 +186,7 @@ class TFSegformerModel(TFSegformerPreTrainedModel):
     def __init__(self, config: SegformerConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        SEGFORMER_INPUTS_DOCSTRING.format("(batch_size, sequence_length)")
+        SEGFORMER_INPUTS_DOCSTRING.format("(batch_size, sequence_length)"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -202,12 +211,13 @@ class TFSegformerModel(TFSegformerPreTrainedModel):
     SEGFORMER_START_DOCSTRING,
 )
 class TFSegformerForImageClassification(
-    TFSegformerPreTrainedModel, TFSequenceClassificationLoss
+    TFSegformerPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config: SegformerConfig, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        SEGFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        SEGFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_IMAGE_CLASS_CHECKPOINT,
@@ -235,7 +245,9 @@ class TFSegformerMLP(keras.layers.Layer):
 class TFSegformerDecodeHead(TFSegformerPreTrainedModel):
     def __init__(self, config: SegformerConfig, **kwargs) -> None: ...
     def call(
-        self, encoder_hidden_states: tf.Tensor, training: bool = ...
+        self,
+        encoder_hidden_states: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -249,10 +261,11 @@ class TFSegformerForSemanticSegmentation(TFSegformerPreTrainedModel):
     def hf_compute_loss(self, logits, labels): ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        SEGFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        SEGFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @replace_return_docstrings(
-        output_type=TFSemanticSegmenterOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFSemanticSegmenterOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,

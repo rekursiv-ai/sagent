@@ -30,16 +30,7 @@ from sagent.tools.core import locked_file_write
 
 
 def _drive(work: Callable[[], Awaitable[None]], runs: int = 3) -> list[str]:
-    """Run ``work`` on ``runs`` successive fresh loops.
-
-    Args:
-      work: Builds the coroutine to run on each loop.
-      runs: How many loops to drive.
-
-    Returns:
-      failures: One message per loop that raised ``RuntimeError``.
-
-    """
+    """Run ``work`` on ``runs`` successive fresh loops."""
     failures: list[str] = []
     for _ in range(runs):
         loop = asyncio.new_event_loop()
@@ -92,8 +83,8 @@ def test_openai_subscription_sdk_is_not_shared_across_loops() -> None:
     as its Anthropic and Google peers.
     """
     provider = OpenAISubscription(
-        access_token="t",  # noqa: S106 -- fixture; no network call is made
-        refresh_token="r",  # noqa: S106 -- fixture; no network call is made
+        access_token="t",  # noqa: S106 -- The safety test uses sentinel credentials to exercise rejection paths..
+        refresh_token="r",  # noqa: S106 -- The safety test uses sentinel credentials to exercise rejection paths..
         account_id="a",
         expires_at=time.time() + 9_999,
     )

@@ -17,7 +17,11 @@ logger = ...
 class VitDetEmbeddings(nn.Module):
     def __init__(self, config) -> None: ...
     def get_absolute_positions(
-        self, abs_pos_embeddings, has_cls_token, height, width
+        self,
+        abs_pos_embeddings,
+        has_cls_token,
+        height,
+        width,
     ):  # -> Tensor:
         ...
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor: ...
@@ -27,18 +31,27 @@ class VitDetEmbeddings(nn.Module):
 def get_rel_pos(q_size, k_size, rel_pos):  # -> Tensor:
     ...
 def add_decomposed_relative_positions(
-    attn, queries, rel_pos_h, rel_pos_w, q_size, k_size
+    attn,
+    queries,
+    rel_pos_h,
+    rel_pos_w,
+    q_size,
+    k_size,
 ): ...
 
 class VitDetAttention(nn.Module):
     def __init__(self, config, input_size=...) -> None: ...
     def forward(
-        self, hidden_state, output_attentions=...
+        self,
+        hidden_state,
+        output_attentions=...,
     ):  # -> tuple[Any, Any] | tuple[Any]:
         ...
 
 def drop_path(
-    input: torch.Tensor, drop_prob: float = ..., training: bool = ...
+    input: torch.Tensor,
+    drop_prob: float = ...,
+    training: bool = ...,
 ) -> torch.Tensor: ...
 
 class VitDetDropPath(nn.Module):
@@ -53,7 +66,11 @@ class VitDetLayerNorm(nn.Module):
 
 class VitDetResBottleneckBlock(nn.Module):
     def __init__(
-        self, config, in_channels, out_channels, bottleneck_channels
+        self,
+        config,
+        in_channels,
+        out_channels,
+        bottleneck_channels,
     ) -> None: ...
     def forward(self, x): ...
 
@@ -81,7 +98,9 @@ class VitDetLayer(GradientCheckpointingLayer):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
 
 class VitDetEncoder(nn.Module):

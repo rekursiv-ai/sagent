@@ -1,4 +1,9 @@
-r"""Demo: run the REPL against a real provider/model.
+#!/bin/sh
+# ruff: noqa: EXE003, D300, D205 -- Polyglot shell/Python script.
+# fmt: off
+'''' 2>/dev/null #
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
+Demo: run the REPL against a real provider/model.
 
 Builds an ``Agent``, attaches the REPL bundle (rich console +
 prompt-toolkit input), and drives it interactively. No session
@@ -7,15 +12,16 @@ dispatch loop in production.
 
 Usage::
 
-    uv --quiet run --frozen python -m \
-        examples.repl_demo \
+    uv --quiet run --frozen python -m
+        examples.repl_demo
         --provider Anthropic --auth env --model claude-haiku-4-5
 
 Or with the offline echo for iteration without an API key::
 
-    uv --quiet run --frozen python -m \
+    uv --quiet run --frozen python -m
         examples.repl_demo --offline
-"""
+'''
+# fmt: on
 
 from __future__ import annotations
 
@@ -37,6 +43,41 @@ from sagent.types.runtime import (
     RuntimeEvent,
     UserMessage,
 )
+
+
+def main() -> int:
+    """Parse CLI flags and drive the REPL against the chosen model.
+
+    Returns:
+      status: Zero after the REPL exits.
+
+    """
+    parser = argparse.ArgumentParser(
+        description=(__doc__ or "").split("\n", 2)[2],
+    )
+    _add_arguments(parser)
+    args = parser.parse_args()
+
+    if args.offline:
+        model = _OfflineEcho()
+    else:
+        provider = build_provider(args.provider, args.auth, account=args.account)
+        model = provider.model(args.model)
+
+    sys.stderr.write(f"{model.tagged_model_id}\n")
+
+    agent = Agent(model=model)
+    asyncio.run(run_repl(agent))
+    return 0
+
+
+def _add_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register command-line flags on ``parser``."""
+    _ = parser.add_argument("--offline", action="store_true")
+    _ = parser.add_argument("--provider", default="Anthropic")
+    _ = parser.add_argument("--auth", default="env")
+    _ = parser.add_argument("--model", default=None)
+    _ = parser.add_argument("--account", default=None)
 
 
 class _OfflineEcho(MockModelCaps):
@@ -98,27 +139,6 @@ class _OfflineEcho(MockModelCaps):
         )
 
 
-def main() -> None:
-    """Parse CLI flags and drive the REPL against the chosen model."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    _ = parser.add_argument("--offline", action="store_true")
-    _ = parser.add_argument("--provider", default="Anthropic")
-    _ = parser.add_argument("--auth", default="env")
-    _ = parser.add_argument("--model", default=None)
-    _ = parser.add_argument("--account", default=None)
-    args = parser.parse_args()
-
-    if args.offline:
-        model = _OfflineEcho()
-    else:
-        provider = build_provider(args.provider, args.auth, account=args.account)
-        model = provider.model(args.model)
-
-    sys.stderr.write(f"{model.tagged_model_id}\n")
-
-    agent = Agent(model=model)
-    asyncio.run(run_repl(agent))
-
-
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
+# vim: ft=python

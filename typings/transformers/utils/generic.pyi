@@ -90,12 +90,15 @@ def can_return_loss(model_class):  # -> bool:
 def find_labels(model_class):  # -> list[str]:
     ...
 def flatten_dict(
-    d: MutableMapping, parent_key: str = ..., delimiter: str = ...
+    d: MutableMapping,
+    parent_key: str = ...,
+    delimiter: str = ...,
 ):  # -> dict[str | Any, Any]:
     ...
 @contextmanager
 def working_or_temp_dir(
-    working_dir, use_temp_dir: bool = ...
+    working_dir,
+    use_temp_dir: bool = ...,
 ):  # -> Generator[str | Any, Any, None]:
     ...
 def transpose(array, axes=...):  # -> NDArray[Any] | Array:
@@ -132,7 +135,9 @@ class TransformersKwargs(TypedDict, total=False):
 def is_timm_config_dict(config_dict: dict[str, Any]) -> bool: ...
 def is_timm_local_checkpoint(pretrained_model_path: str) -> bool: ...
 def set_attribute_for_modules(
-    module: torch.nn.Module, key: str, value: Any
+    module: torch.nn.Module,
+    key: str,
+    value: Any,
 ):  # -> None:
     ...
 def del_attribute_from_modules(module: torch.nn.Module, key: str):  # -> None:

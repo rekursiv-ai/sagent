@@ -60,7 +60,10 @@ class WeightedRandomSampler(Sampler[int]):
 
 class BatchSampler(Sampler[list[int]]):
     def __init__(
-        self, sampler: Sampler[int] | Iterable[int], batch_size: int, drop_last: bool
+        self,
+        sampler: Sampler[int] | Iterable[int],
+        batch_size: int,
+        drop_last: bool,
     ) -> None: ...
     def __iter__(self) -> Iterator[list[int]]: ...
     def __len__(self) -> int: ...

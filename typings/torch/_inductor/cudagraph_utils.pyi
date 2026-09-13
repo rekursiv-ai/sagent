@@ -89,7 +89,8 @@ def log_data_ptr_mismatch(
     mismatch: CheckInvariantStatus,
 ) -> str: ...
 def maybe_warning_due_to_dynamic_shape(
-    fn_cache: dict[tuple[int, ...], Callable[..., Any]], new_int_key: Any
+    fn_cache: dict[tuple[int, ...], Callable[..., Any]],
+    new_int_key: Any,
 ) -> bool: ...
 
 @dataclasses.dataclass(frozen=True)
@@ -107,5 +108,6 @@ class CudagraphMetadata:
     constants: dict[str, torch.Tensor]
 
 def get_partition_cudagraph_metadata(
-    partition_map: GraphPartitionMap, metadata: CudagraphMetadata
+    partition_map: GraphPartitionMap,
+    metadata: CudagraphMetadata,
 ) -> CudagraphMetadata: ...

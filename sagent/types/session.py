@@ -34,7 +34,7 @@ class Session:
         if self.dir is not None and self.dir.name != self.id:
             raise ValueError(
                 f"Session.dir must be named for its session: dir={self.dir.name!r}"
-                f" but id={self.id!r}"
+                f" but id={self.id!r}",
             )
 
     @classmethod

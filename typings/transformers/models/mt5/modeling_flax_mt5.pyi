@@ -12,7 +12,9 @@ logger = ...
 _CONFIG_FOR_DOC = ...
 
 def shift_tokens_right(
-    input_ids: jnp.ndarray, pad_token_id: int, decoder_start_token_id: int
+    input_ids: jnp.ndarray,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ) -> jnp.ndarray: ...
 
 class FlaxMT5Model(FlaxT5Model):

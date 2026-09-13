@@ -40,14 +40,25 @@ class TFEmbeddings(keras.layers.Layer):
     def build(self, input_shape=...):  # -> None:
         ...
     def call(
-        self, input_ids=..., position_ids=..., inputs_embeds=..., training=...
+        self,
+        input_ids=...,
+        position_ids=...,
+        inputs_embeds=...,
+        training=...,
     ): ...
 
 class TFMultiHeadSelfAttention(keras.layers.Layer):
     def __init__(self, config, **kwargs) -> None: ...
     def prune_heads(self, heads): ...
     def call(
-        self, query, key, value, mask, head_mask, output_attentions, training=...
+        self,
+        query,
+        key,
+        value,
+        mask,
+        head_mask,
+        output_attentions,
+        training=...,
     ):  # -> tuple[Any, Any] | tuple[Any]:
         ...
     def build(self, input_shape=...):  # -> None:
@@ -62,7 +73,12 @@ class TFFFN(keras.layers.Layer):
 class TFTransformerBlock(keras.layers.Layer):
     def __init__(self, config, **kwargs) -> None: ...
     def call(
-        self, x, attn_mask, head_mask, output_attentions, training=...
+        self,
+        x,
+        attn_mask,
+        head_mask,
+        output_attentions,
+        training=...,
     ):  # -> tuple[Any, Any] | tuple[Any]:
         ...
     def build(self, input_shape=...):  # -> None:
@@ -122,7 +138,7 @@ class TFDistilBertModel(TFDistilBertPreTrainedModel):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        DISTILBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        DISTILBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -162,7 +178,8 @@ class TFDistilBertLMHead(keras.layers.Layer):
     DISTILBERT_START_DOCSTRING,
 )
 class TFDistilBertForMaskedLM(
-    TFDistilBertPreTrainedModel, TFMaskedLanguageModelingLoss
+    TFDistilBertPreTrainedModel,
+    TFMaskedLanguageModelingLoss,
 ):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     def get_lm_head(self):  # -> TFDistilBertLMHead:
@@ -170,7 +187,7 @@ class TFDistilBertForMaskedLM(
     def get_prefix_bias_name(self): ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        DISTILBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        DISTILBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -197,12 +214,13 @@ class TFDistilBertForMaskedLM(
     DISTILBERT_START_DOCSTRING,
 )
 class TFDistilBertForSequenceClassification(
-    TFDistilBertPreTrainedModel, TFSequenceClassificationLoss
+    TFDistilBertPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        DISTILBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        DISTILBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -229,12 +247,13 @@ class TFDistilBertForSequenceClassification(
     DISTILBERT_START_DOCSTRING,
 )
 class TFDistilBertForTokenClassification(
-    TFDistilBertPreTrainedModel, TFTokenClassificationLoss
+    TFDistilBertPreTrainedModel,
+    TFTokenClassificationLoss,
 ):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        DISTILBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        DISTILBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -264,7 +283,7 @@ class TFDistilBertForMultipleChoice(TFDistilBertPreTrainedModel, TFMultipleChoic
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        DISTILBERT_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
+        DISTILBERT_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -291,12 +310,13 @@ class TFDistilBertForMultipleChoice(TFDistilBertPreTrainedModel, TFMultipleChoic
     DISTILBERT_START_DOCSTRING,
 )
 class TFDistilBertForQuestionAnswering(
-    TFDistilBertPreTrainedModel, TFQuestionAnsweringLoss
+    TFDistilBertPreTrainedModel,
+    TFQuestionAnsweringLoss,
 ):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        DISTILBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        DISTILBERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,

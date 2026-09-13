@@ -65,7 +65,11 @@ class ImageTextToTextPipeline(Pipeline):
         **kwargs,
     ) -> list[dict[str, Any]] | list[list[dict[str, Any]]]: ...
     def preprocess(
-        self, inputs=..., timeout=..., continue_final_message=..., **processing_kwargs
+        self,
+        inputs=...,
+        timeout=...,
+        continue_final_message=...,
+        **processing_kwargs,
     ): ...
     def postprocess(
         self,

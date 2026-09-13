@@ -35,10 +35,14 @@ class CamembertTokenizer(PreTrainedTokenizer):
     def __setstate__(self, d):  # -> None:
         ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
     def build_inputs_with_special_tokens(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = ...
+        self,
+        token_ids_0: list[int],
+        token_ids_1: list[int] | None = ...,
     ) -> list[int]: ...
     def get_special_tokens_mask(
         self,
@@ -47,7 +51,9 @@ class CamembertTokenizer(PreTrainedTokenizer):
         already_has_special_tokens: bool = ...,
     ) -> list[int]: ...
     def create_token_type_ids_from_sequences(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = ...
+        self,
+        token_ids_0: list[int],
+        token_ids_1: list[int] | None = ...,
     ) -> list[int]: ...
 
 __all__ = ["CamembertTokenizer"]

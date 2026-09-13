@@ -82,7 +82,11 @@ class OwlViTImageProcessor(BaseImageProcessor):
     ):  # -> list[Any]:
         ...
     def post_process_image_guided_detection(
-        self, outputs, threshold=..., nms_threshold=..., target_sizes=...
+        self,
+        outputs,
+        threshold=...,
+        nms_threshold=...,
+        target_sizes=...,
     ):  # -> list[Any]:
         ...
 

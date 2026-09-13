@@ -97,7 +97,9 @@ class LlavaNextVideoModel(LlavaNextModel):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple | LlavaNextVideoModelOutputWithPast: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | LlavaNextVideoModelOutputWithPast: ...
 
 class LlavaNextVideoForConditionalGeneration(LlavaNextForConditionalGeneration):
@@ -130,7 +132,9 @@ class LlavaNextVideoForConditionalGeneration(LlavaNextForConditionalGeneration):
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | LlavaNextVideoCausalLMOutputWithPast: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | LlavaNextVideoCausalLMOutputWithPast: ...
     def prepare_inputs_for_generation(
         self,

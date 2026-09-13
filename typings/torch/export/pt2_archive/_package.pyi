@@ -76,5 +76,6 @@ def load_pt2(
     load_weights_from_disk: bool = ...,
 ) -> PT2ArchiveContents: ...
 def load_weights_to_pt2_contents(
-    pt2_contents: PT2ArchiveContents, weights_map: dict[str, Any]
+    pt2_contents: PT2ArchiveContents,
+    weights_map: dict[str, Any],
 ) -> None: ...

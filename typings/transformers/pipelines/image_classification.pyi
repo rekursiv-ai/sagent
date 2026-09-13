@@ -33,11 +33,15 @@ class ImageClassificationPipeline(Pipeline):
     def __init__(self, *args, **kwargs) -> None: ...
     @overload
     def __call__(
-        self, inputs: str | Image.Image, **kwargs: Any
+        self,
+        inputs: str | Image.Image,
+        **kwargs: Any,
     ) -> list[dict[str, Any]]: ...
     @overload
     def __call__(
-        self, inputs: list[str] | list[Image.Image], **kwargs: Any
+        self,
+        inputs: list[str] | list[Image.Image],
+        **kwargs: Any,
     ) -> list[list[dict[str, Any]]]: ...
     def __call__(
         self,
@@ -45,10 +49,15 @@ class ImageClassificationPipeline(Pipeline):
         **kwargs: Any,
     ) -> list[dict[str, Any]] | list[list[dict[str, Any]]]: ...
     def preprocess(
-        self, image, timeout=...
+        self,
+        image,
+        timeout=...,
     ):  # -> transformers.feature_extraction_utils.BatchFeature | Any | transformers.image_processing_base.BatchFeature:
         ...
     def postprocess(
-        self, model_outputs, function_to_apply=..., top_k=...
+        self,
+        model_outputs,
+        function_to_apply=...,
+        top_k=...,
     ):  # -> list[dict[str, Any | str]]:
         ...

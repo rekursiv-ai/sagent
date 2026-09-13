@@ -31,11 +31,14 @@ class PoolFormerImageProcessorFast(BaseImageProcessorFast):
     do_normalize = ...
     valid_kwargs = PoolFormerFastImageProcessorKwargs
     def __init__(
-        self, **kwargs: Unpack[PoolFormerFastImageProcessorKwargs]
+        self,
+        **kwargs: Unpack[PoolFormerFastImageProcessorKwargs],
     ) -> None: ...
     @auto_docstring
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[PoolFormerFastImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[PoolFormerFastImageProcessorKwargs],
     ) -> BatchFeature: ...
     def resize(
         self,
@@ -47,7 +50,10 @@ class PoolFormerImageProcessorFast(BaseImageProcessorFast):
         **kwargs,
     ) -> torch.Tensor: ...
     def center_crop(
-        self, image: torch.Tensor, size: SizeDict, **kwargs
+        self,
+        image: torch.Tensor,
+        size: SizeDict,
+        **kwargs,
     ) -> torch.Tensor: ...
 
 __all__ = ["PoolFormerImageProcessorFast"]

@@ -26,7 +26,12 @@ class DeepseekV3RMSNorm(LlamaRMSNorm): ...
 class DeepseekV3RotaryEmbedding(LlamaRotaryEmbedding): ...
 
 def apply_rotary_pos_emb_interleave(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def yarn_get_mscale(scale=..., mscale=...):  # -> float:
@@ -81,10 +86,12 @@ class DeepseekV3Model(LlamaModel):
 
 class DeepseekV3ForCausalLM(LlamaForCausalLM): ...
 class DeepseekV3ForSequenceClassification(
-    GenericForSequenceClassification, DeepseekV3PreTrainedModel
+    GenericForSequenceClassification,
+    DeepseekV3PreTrainedModel,
 ): ...
 class DeepseekV3ForTokenClassification(
-    GenericForTokenClassification, DeepseekV3PreTrainedModel
+    GenericForTokenClassification,
+    DeepseekV3PreTrainedModel,
 ): ...
 
 __all__ = [

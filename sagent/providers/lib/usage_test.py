@@ -19,7 +19,7 @@ def test_anthropic_usage_parses_windows() -> None:
             "anthropic-ratelimit-unified-7d-utilization": "0.89",
             "anthropic-ratelimit-unified-7d-reset": "1780750800",
             "anthropic-ratelimit-unified-7d-status": "allowed_warning",
-        }
+        },
     )
     assert snap is not None
     labels = {w.label: w for w in snap.windows}
@@ -35,7 +35,7 @@ def test_anthropic_usage_marks_rejected_window_blocked() -> None:
         {
             "anthropic-ratelimit-unified-7d-utilization": "1.0",
             "anthropic-ratelimit-unified-7d-status": "rejected",
-        }
+        },
     )
     assert snap is not None
     assert snap.windows[0].blocked is True
@@ -49,7 +49,7 @@ def test_anthropic_usage_omnibus_rejected_blocks_all_windows() -> None:
         {
             "anthropic-ratelimit-unified-status": "rejected",
             "anthropic-ratelimit-unified-5h-utilization": "0.6",
-        }
+        },
     )
     assert snap is not None
     assert all(w.blocked for w in snap.windows)
@@ -99,12 +99,12 @@ def test_openai_usage_derives_utilization() -> None:
             "x-ratelimit-reset-requests": "6m0s",
             "x-ratelimit-limit-tokens": "100000",
             "x-ratelimit-remaining-tokens": "100000",
-        }
+        },
     )
     after = time.time()
     assert snap is not None
     by = {w.label: w for w in snap.windows}
-    assert by["requests"].utilization == 0.75  # 1 - 250/1000
+    assert by["requests"].utilization == 0.75  # 1 - 250/1000.
     # resets_at is a wall-clock epoch (delay 360s applied to now).
     reset = by["requests"].resets_at
     assert reset is not None
@@ -117,7 +117,7 @@ def test_openai_usage_blocked_when_remaining_zero() -> None:
         {
             "x-ratelimit-limit-requests": "1000",
             "x-ratelimit-remaining-requests": "0",
-        }
+        },
     )
     assert snap is not None
     assert snap.windows[0].blocked is True
@@ -136,7 +136,7 @@ def test_openai_usage_reset_milliseconds() -> None:
 
 def test_openai_usage_reset_bare_zero_is_now() -> None:
     snap = openai_usage(
-        {"x-ratelimit-limit-tokens": "100", "x-ratelimit-reset-tokens": "0"}
+        {"x-ratelimit-limit-tokens": "100", "x-ratelimit-reset-tokens": "0"},
     )
     assert snap is not None
     reset = snap.windows[0].resets_at

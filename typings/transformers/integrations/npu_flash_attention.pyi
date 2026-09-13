@@ -7,7 +7,13 @@ def get_attn_mask_npu(device): ...
 def is_npu_fa2_top_left_aligned_causal_mask():  # -> bool:
     ...
 def npu_flash_attn_func(
-    q, k, v, dropout_p=..., softmax_scale=..., causal=..., **kwargs
+    q,
+    k,
+    v,
+    dropout_p=...,
+    softmax_scale=...,
+    causal=...,
+    **kwargs,
 ): ...
 def npu_flash_attn_varlen_func(
     q,

@@ -70,10 +70,15 @@ class Qwen3OmniMoeProcessor(ProcessorMixin):
     ):  # -> list[Any]:
         ...
     def get_chunked_index(
-        self, token_indices: np.ndarray, tokens_per_chunk: int
+        self,
+        token_indices: np.ndarray,
+        tokens_per_chunk: int,
     ) -> list[tuple[int, int]]: ...
     def apply_chat_template(
-        self, conversations, chat_template=..., **kwargs
+        self,
+        conversations,
+        chat_template=...,
+        **kwargs,
     ):  # -> str:
         ...
     @property

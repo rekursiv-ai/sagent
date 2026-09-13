@@ -64,7 +64,9 @@ class Tracer(TracerBase):
     def create_arg(self, a: Any) -> Argument: ...
     @compatibility(is_backward_compatible=True)
     def is_leaf_module(
-        self, m: torch.nn.Module, module_qualified_name: str
+        self,
+        m: torch.nn.Module,
+        module_qualified_name: str,
     ) -> bool: ...
     @compatibility(is_backward_compatible=True)
     def path_of_module(self, mod: torch.nn.Module) -> str: ...
@@ -78,11 +80,17 @@ class Tracer(TracerBase):
     ) -> Any: ...
     @compatibility(is_backward_compatible=False)
     def getattr(
-        self, attr: str, attr_val: Any, parameter_proxy_cache: dict[str, Any]
+        self,
+        attr: str,
+        attr_val: Any,
+        parameter_proxy_cache: dict[str, Any],
     ) -> Parameter | Tensor | Any: ...
     @compatibility(is_backward_compatible=False)
     def create_args_for_root(
-        self, root_fn, is_module, concrete_args=...
+        self,
+        root_fn,
+        is_module,
+        concrete_args=...,
     ) -> (
         tuple[Any, list[Any]]
         | tuple[Callable[..., list[Any]], list[Any]]
@@ -129,7 +137,11 @@ class _Patcher:
         deduplicate: bool = ...,
     ) -> None: ...
     def patch_method(
-        self, cls: type, name: str, new_fn: Callable, deduplicate: bool = ...
+        self,
+        cls: type,
+        name: str,
+        new_fn: Callable,
+        deduplicate: bool = ...,
     ) -> None: ...
     def visit_once(self, thing: Any) -> bool: ...
     def revert_all_patches(self) -> list[_PatchedFn]: ...

@@ -48,7 +48,10 @@ class SingleSentenceClassificationProcessor(DataProcessor):
         ...
     @classmethod
     def create_from_examples(
-        cls, texts_or_text_and_labels, labels=..., **kwargs
+        cls,
+        texts_or_text_and_labels,
+        labels=...,
+        **kwargs,
     ):  # -> Self:
         ...
     def add_examples_from_csv(

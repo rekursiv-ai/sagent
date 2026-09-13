@@ -28,11 +28,17 @@ class verbose:
     def __exit__(self, exc_type, exc_val, exc_tb) -> Literal[False]: ...
 
 def set_flags(
-    _enabled=..., _deterministic=..., _allow_tf32=..., _fp32_precision=...
+    _enabled=...,
+    _deterministic=...,
+    _allow_tf32=...,
+    _fp32_precision=...,
 ) -> tuple[bool, bool, bool, str]: ...
 @contextmanager
 def flags(
-    enabled=..., deterministic=..., allow_tf32=..., fp32_precision=...
+    enabled=...,
+    deterministic=...,
+    allow_tf32=...,
+    fp32_precision=...,
 ) -> Generator[None, Any]: ...
 
 class MkldnnModule(PropModule):

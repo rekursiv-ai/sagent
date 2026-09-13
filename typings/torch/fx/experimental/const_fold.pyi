@@ -22,7 +22,8 @@ class FoldedGraphModule(torch.fx.GraphModule):
     def run_folding(self) -> None: ...
 
 def get_unique_attr_name_in_module(
-    mod_traced: torch.fx.GraphModule, name: str
+    mod_traced: torch.fx.GraphModule,
+    name: str,
 ) -> str: ...
 def split_const_subgraphs(
     module: torch.nn.Module | torch.fx.GraphModule,

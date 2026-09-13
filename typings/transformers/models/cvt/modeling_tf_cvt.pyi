@@ -114,17 +114,26 @@ class TFCvtSelfAttention(keras.layers.Layer):
         **kwargs,
     ) -> None: ...
     def rearrange_for_multi_head_attention(
-        self, hidden_state: tf.Tensor
+        self,
+        hidden_state: tf.Tensor,
     ) -> tf.Tensor: ...
     def call(
-        self, hidden_state: tf.Tensor, height: int, width: int, training: bool = ...
+        self,
+        hidden_state: tf.Tensor,
+        height: int,
+        width: int,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
 
 class TFCvtSelfOutput(keras.layers.Layer):
     def __init__(
-        self, config: CvtConfig, embed_dim: int, drop_rate: float, **kwargs
+        self,
+        config: CvtConfig,
+        embed_dim: int,
+        drop_rate: float,
+        **kwargs,
     ) -> None: ...
     def call(self, hidden_state: tf.Tensor, training: bool = ...) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -150,14 +159,22 @@ class TFCvtAttention(keras.layers.Layer):
     ) -> None: ...
     def prune_heads(self, heads): ...
     def call(
-        self, hidden_state: tf.Tensor, height: int, width: int, training: bool = ...
+        self,
+        hidden_state: tf.Tensor,
+        height: int,
+        width: int,
+        training: bool = ...,
     ): ...
     def build(self, input_shape=...):  # -> None:
         ...
 
 class TFCvtIntermediate(keras.layers.Layer):
     def __init__(
-        self, config: CvtConfig, embed_dim: int, mlp_ratio: int, **kwargs
+        self,
+        config: CvtConfig,
+        embed_dim: int,
+        mlp_ratio: int,
+        **kwargs,
     ) -> None: ...
     def call(self, hidden_state: tf.Tensor) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -173,7 +190,10 @@ class TFCvtOutput(keras.layers.Layer):
         **kwargs,
     ) -> None: ...
     def call(
-        self, hidden_state: tf.Tensor, input_tensor: tf.Tensor, training: bool = ...
+        self,
+        hidden_state: tf.Tensor,
+        input_tensor: tf.Tensor,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -199,7 +219,11 @@ class TFCvtLayer(keras.layers.Layer):
         **kwargs,
     ) -> None: ...
     def call(
-        self, hidden_state: tf.Tensor, height: int, width: int, training: bool = ...
+        self,
+        hidden_state: tf.Tensor,
+        height: int,
+        width: int,
+        training: bool = ...,
     ) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -207,7 +231,9 @@ class TFCvtLayer(keras.layers.Layer):
 class TFCvtStage(keras.layers.Layer):
     def __init__(self, config: CvtConfig, stage: int, **kwargs) -> None: ...
     def call(
-        self, hidden_state: tf.Tensor, training: bool = ...
+        self,
+        hidden_state: tf.Tensor,
+        training: bool = ...,
     ):  # -> tuple[Any, Any | None]:
         ...
     def build(self, input_shape=...):  # -> None:
@@ -258,7 +284,8 @@ class TFCvtModel(TFCvtPreTrainedModel):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(TFCVT_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFBaseModelOutputWithCLSToken, config_class=_CONFIG_FOR_DOC
+        output_type=TFBaseModelOutputWithCLSToken,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,
@@ -279,7 +306,8 @@ class TFCvtForImageClassification(TFCvtPreTrainedModel, TFSequenceClassification
     @unpack_inputs
     @add_start_docstrings_to_model_forward(TFCVT_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFImageClassifierOutputWithNoAttention, config_class=_CONFIG_FOR_DOC
+        output_type=TFImageClassifierOutputWithNoAttention,
+        config_class=_CONFIG_FOR_DOC,
     )
     def call(
         self,

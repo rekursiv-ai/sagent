@@ -388,7 +388,9 @@ def log2(a) -> Any: ...
 def log10(a) -> Any: ...
 @out_wrapper()
 def log_softmax(
-    a: TensorLikeType, dim: int, dtype: torch.dtype | None = ...
+    a: TensorLikeType,
+    dim: int,
+    dtype: torch.dtype | None = ...,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.logsumexp)
 @out_wrapper()
@@ -397,7 +399,9 @@ def log_softmax(
     type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT,
 )
 def logsumexp(
-    self: TensorLikeType, dim: DimsType, keepdim: bool = ...
+    self: TensorLikeType,
+    dim: DimsType,
+    keepdim: bool = ...,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.nan_to_num)
 @out_wrapper()
@@ -461,14 +465,17 @@ def div(
 ) -> TensorLikeType | Any | None: ...
 def eq(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
 def pow(
-    a: TensorLikeType | NumberType, b: TensorLikeType | NumberType
+    a: TensorLikeType | NumberType,
+    b: TensorLikeType | NumberType,
 ) -> TensorLikeType: ...
 @out_wrapper()
 def float_power(
-    a: TensorLikeType | NumberType, b: TensorLikeType | NumberType
+    a: TensorLikeType | NumberType,
+    b: TensorLikeType | NumberType,
 ) -> Tensor: ...
 def floor_divide(
-    a: TensorLikeType | NumberType, b: TensorLikeType | NumberType
+    a: TensorLikeType | NumberType,
+    b: TensorLikeType | NumberType,
 ) -> Tensor | None: ...
 def fmax(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
 def fmin(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
@@ -533,7 +540,8 @@ def true_divide(a: TensorLikeType, b: TensorLikeType) -> TensorLikeType: ...
 )
 def xlogy(a: TensorLikeType | NumberType, b: TensorLikeType | NumberType) -> Tensor: ...
 def trunc_divide(
-    a: TensorLikeType | NumberType, b: TensorLikeType | NumberType
+    a: TensorLikeType | NumberType,
+    b: TensorLikeType | NumberType,
 ) -> Any: ...
 @register_decomposition(aten.addcdiv)
 @out_wrapper()
@@ -575,12 +583,14 @@ def clamp(
 @register_decomposition(aten.clamp_min)
 @out_wrapper()
 def clamp_min(
-    self: TensorLikeType, min: TensorOrNumberLikeType | None = ...
+    self: TensorLikeType,
+    min: TensorOrNumberLikeType | None = ...,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.clamp_max)
 @out_wrapper()
 def clamp_max(
-    self: TensorLikeType, max: TensorOrNumberLikeType | None = ...
+    self: TensorLikeType,
+    max: TensorOrNumberLikeType | None = ...,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.where)
 @out_wrapper()
@@ -596,7 +606,9 @@ def where(
 @register_decomposition(aten.clone)
 @out_wrapper()
 def clone(
-    a: TensorLikeType, *, memory_format: torch.memory_format = ...
+    a: TensorLikeType,
+    *,
+    memory_format: torch.memory_format = ...,
 ) -> TensorLikeType: ...
 def copy_to(a: Tensor, b: Tensor, *, allow_cross_device=...) -> Any: ...
 @register_decomposition(aten.item)
@@ -605,12 +617,16 @@ def to(a: TensorLikeType, *args, **kwargs) -> TensorLikeType: ...
 @register_decomposition(aten.all)
 @out_wrapper()
 def all(
-    a: TensorLikeType, dim: DimsType | None = ..., keepdim: bool = ...
+    a: TensorLikeType,
+    dim: DimsType | None = ...,
+    keepdim: bool = ...,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.any)
 @out_wrapper()
 def any(
-    a: TensorLikeType, dim: DimsType | None = ..., keepdim: bool = ...
+    a: TensorLikeType,
+    dim: DimsType | None = ...,
+    keepdim: bool = ...,
 ) -> TensorLikeType: ...
 @register_decomposition([aten.sum.dim_IntList, aten.sum.IntList_out])
 def sum(
@@ -711,13 +727,16 @@ def addr(
     alpha: NumberType = ...,
 ) -> TensorLikeType: ...
 def atleast_1d(
-    arg: TensorLikeType | Sequence[TensorLikeType], *args: TensorLikeType
+    arg: TensorLikeType | Sequence[TensorLikeType],
+    *args: TensorLikeType,
 ) -> TensorLikeType | tuple[TensorLikeType, ...]: ...
 def atleast_2d(
-    arg: TensorLikeType | Sequence[TensorLikeType], *args: TensorLikeType
+    arg: TensorLikeType | Sequence[TensorLikeType],
+    *args: TensorLikeType,
 ) -> TensorLikeType | tuple[TensorLikeType, ...]: ...
 def atleast_3d(
-    arg: TensorLikeType | Sequence[TensorLikeType], *args: TensorLikeType
+    arg: TensorLikeType | Sequence[TensorLikeType],
+    *args: TensorLikeType,
 ) -> TensorLikeType | tuple[TensorLikeType, ...]: ...
 def as_strided(
     a: TensorLikeType,
@@ -752,7 +771,9 @@ def conj(input: TensorLikeType) -> TensorLikeType: ...
 @register_decomposition(aten.constant_pad_nd)
 @out_wrapper()
 def constant_pad_nd(
-    input: TensorLikeType, pad: list[int], value: NumberType = ...
+    input: TensorLikeType,
+    pad: list[int],
+    value: NumberType = ...,
 ) -> TensorLikeType: ...
 def contiguous(a: Tensor, *, memory_format: torch.memory_format = ...) -> Tensor: ...
 @out_wrapper()
@@ -761,10 +782,14 @@ def dstack(tensors: TensorSequenceType) -> TensorLikeType: ...
 def expand(a: Tensor, *shape, implicit: bool = ...) -> Tensor: ...
 def expand_as(a: Tensor, b: Tensor) -> Tensor: ...
 def chunk(
-    a: TensorLikeType, chunks: int, dim: int = ...
+    a: TensorLikeType,
+    chunks: int,
+    dim: int = ...,
 ) -> tuple[TensorLikeType, ...]: ...
 def flatten(
-    a: TensorLikeType, start_dim: int = ..., end_dim: int = ...
+    a: TensorLikeType,
+    start_dim: int = ...,
+    end_dim: int = ...,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.flip)
 @out_wrapper()
@@ -772,7 +797,10 @@ def flip(a: TensorLikeType, dims: DimsSequenceType) -> TensorLikeType: ...
 def fliplr(a: TensorLikeType) -> TensorLikeType: ...
 def flipud(a: TensorLikeType) -> TensorLikeType: ...
 def narrow(
-    a: TensorLikeType, dim: int, start: int | TensorLikeType, length: int
+    a: TensorLikeType,
+    dim: int,
+    start: int | TensorLikeType,
+    length: int,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.native_group_norm.default)
 def native_group_norm(
@@ -796,14 +824,20 @@ def native_layer_norm(
 ) -> tuple[Tensor, Tensor, Tensor]: ...
 @torch._subclasses.fake_impls.register_op_impl(aten.native_layer_norm.default)
 def native_layer_norm_fake(
-    fake_mode, func, *args, **kwargs
+    fake_mode,
+    func,
+    *args,
+    **kwargs,
 ) -> tuple[Tensor, Tensor, Tensor]: ...
 @register_decomposition(aten.permute)
 def permute(a: TensorLikeType, *dims) -> TensorLikeType: ...
 @register_decomposition(aten.renorm)
 @out_wrapper()
 def renorm(
-    input: TensorLikeType, p: RealNumberType, dim: int, maxnorm: RealNumberType
+    input: TensorLikeType,
+    p: RealNumberType,
+    dim: int,
+    maxnorm: RealNumberType,
 ) -> TensorLikeType: ...
 @aten.stft.center.py_impl(DispatchKey.CompositeImplicitAutograd)
 def stft(
@@ -840,19 +874,25 @@ def reshape_as(self: TensorLikeType, other: TensorLikeType) -> TensorLikeType: .
 @register_decomposition(aten.roll)
 @out_wrapper()
 def roll(
-    a: TensorLikeType, shifts: DimsType, dims: DimsType = ...
+    a: TensorLikeType,
+    shifts: DimsType,
+    dims: DimsType = ...,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.rot90)
 @out_wrapper()
 def rot90(
-    a: TensorLikeType, k: int = ..., dims: DimsSequenceType = ...
+    a: TensorLikeType,
+    k: int = ...,
+    dims: DimsSequenceType = ...,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.stack)
 @out_wrapper()
 def stack(tensors: TensorSequenceType, dim: int = ...) -> TensorLikeType: ...
 @out_wrapper()
 def softmax(
-    a: TensorLikeType, dim: int, dtype: torch.dtype | None = ...
+    a: TensorLikeType,
+    dim: int,
+    dtype: torch.dtype | None = ...,
 ) -> TensorLikeType: ...
 @out_wrapper()
 def hstack(tensors: TensorSequenceType) -> TensorLikeType: ...
@@ -863,19 +903,31 @@ def unflatten(a: TensorLikeType, dim: int, sizes: ShapeType) -> TensorLikeType: 
 def unbind(t: TensorLikeType, dim: int = ...) -> TensorSequenceType: ...
 @out_wrapper()
 def index_copy(
-    x: TensorLike, dim: int, index: TensorLike, tensor: TensorLike
+    x: TensorLike,
+    dim: int,
+    index: TensorLike,
+    tensor: TensorLike,
 ) -> Tensor: ...
 def index_copy_(
-    x: TensorLike, dim: int, index: TensorLike, tensor: TensorLike
+    x: TensorLike,
+    dim: int,
+    index: TensorLike,
+    tensor: TensorLike,
 ) -> TensorLike: ...
 @register_decomposition(aten.index_fill)
 @out_wrapper()
 def index_fill(
-    x: TensorLike, dim: int, index: TensorLike, value: NumberType | TensorLike
+    x: TensorLike,
+    dim: int,
+    index: TensorLike,
+    value: NumberType | TensorLike,
 ) -> TensorLike: ...
 @register_decomposition(aten.index_fill_)
 def index_fill_(
-    x: TensorLike, dim: int, index: TensorLike, value: NumberType | TensorLike
+    x: TensorLike,
+    dim: int,
+    index: TensorLike,
+    value: NumberType | TensorLike,
 ) -> TensorLike: ...
 @out_wrapper()
 def index_add(
@@ -893,16 +945,22 @@ def index_select(x: TensorLike, dim: int, index: TensorLike) -> Tensor: ...
 def squeeze(a: TensorLikeType, dim: DimsType | None = ...) -> TensorLikeType: ...
 @register_decomposition(aten.split_with_sizes)
 def split_with_sizes(
-    self: Tensor, split_sizes: list[int], dim: int = ...
+    self: Tensor,
+    split_sizes: list[int],
+    dim: int = ...,
 ) -> list[Tensor]: ...
 def tensor_split(
-    a: TensorLikeType, indices_or_sections: Tensor | DimsType, dim: int = ...
+    a: TensorLikeType,
+    indices_or_sections: Tensor | DimsType,
+    dim: int = ...,
 ) -> tuple[TensorLikeType, ...]: ...
 def hsplit(
-    a: TensorLikeType, indices_or_sections: DimsType
+    a: TensorLikeType,
+    indices_or_sections: DimsType,
 ) -> tuple[TensorLikeType, ...]: ...
 def vsplit(
-    a: TensorLikeType, indices_or_sections: DimsType
+    a: TensorLikeType,
+    indices_or_sections: DimsType,
 ) -> tuple[TensorLikeType, ...]: ...
 @register_decomposition(aten.diag.out)
 @out_wrapper()
@@ -918,12 +976,18 @@ def diagonal_scatter(
 ) -> TensorLikeType: ...
 @register_decomposition(aten.diagonal)
 def diagonal(
-    self: TensorLikeType, offset: int = ..., dim1: int = ..., dim2: int = ...
+    self: TensorLikeType,
+    offset: int = ...,
+    dim1: int = ...,
+    dim2: int = ...,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.diag_embed)
 @out_wrapper()
 def diag_embed(
-    t: TensorLikeType, offset: int = ..., dim1: int = ..., dim2: int = ...
+    t: TensorLikeType,
+    offset: int = ...,
+    dim1: int = ...,
+    dim2: int = ...,
 ) -> TensorLikeType: ...
 def block_diag(*tensors: list[TensorLikeType]) -> TensorLikeType: ...
 def dsplit(a: TensorLikeType, sections: DimsType) -> TensorSequenceType: ...
@@ -939,12 +1003,18 @@ swap_axes = ...
 
 @register_decomposition(aten.unfold)
 def unfold(
-    self: TensorLikeType, dimension: int, size: int, step: int
+    self: TensorLikeType,
+    dimension: int,
+    size: int,
+    step: int,
 ) -> TensorLikeType: ...
 @register_decomposition(aten.unfold_copy)
 @out_wrapper()
 def unfold_copy(
-    self: TensorLikeType, dimension: int, size: int, step: int
+    self: TensorLikeType,
+    dimension: int,
+    size: int,
+    step: int,
 ) -> Tensor: ...
 @register_decomposition(aten.cumsum)
 def cumsum(
@@ -970,7 +1040,9 @@ def view_as(self: TensorLikeType, other: TensorLikeType) -> TensorLikeType: ...
 def ravel(a: TensorLikeType) -> TensorLikeType: ...
 @out_wrapper()
 def take_along_dim(
-    a: torch.Tensor, indices: torch.Tensor, dim: int | None = ...
+    a: torch.Tensor,
+    indices: torch.Tensor,
+    dim: int | None = ...,
 ) -> torch.Tensor: ...
 @out_wrapper()
 def empty(
@@ -1242,11 +1314,15 @@ def scalar_tensor(
 @register_decomposition(aten.masked_fill)
 @out_wrapper()
 def masked_fill(
-    a: TensorLikeType, mask: TensorLikeType, value: TensorOrNumberLikeType
+    a: TensorLikeType,
+    mask: TensorLikeType,
+    value: TensorOrNumberLikeType,
 ) -> Tensor: ...
 @register_decomposition(aten.masked_fill_)
 def masked_fill_(
-    a: TensorLikeType, mask: TensorLikeType, value: TensorOrNumberLikeType
+    a: TensorLikeType,
+    mask: TensorLikeType,
+    value: TensorOrNumberLikeType,
 ) -> TensorLikeType: ...
 def allclose(
     a: TensorLikeType,
@@ -1382,7 +1458,10 @@ def vdot(self, other) -> Tensor: ...
 @register_decomposition(aten.select_scatter)
 @out_wrapper()
 def select_scatter(
-    x: TensorLikeType, src: TensorLikeType, dim: int, index: int
+    x: TensorLikeType,
+    src: TensorLikeType,
+    dim: int,
+    index: int,
 ) -> Tensor: ...
 
 abs_ = ...
@@ -1494,5 +1573,10 @@ unsqueeze_copy = ...
 view_copy = ...
 
 def tensor(
-    data, *, dtype=..., device=..., pin_memory=..., requires_grad=...
+    data,
+    *,
+    dtype=...,
+    device=...,
+    pin_memory=...,
+    requires_grad=...,
 ) -> Tensor | NotImplementedType: ...

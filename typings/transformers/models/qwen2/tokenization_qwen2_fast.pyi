@@ -20,7 +20,9 @@ class Qwen2TokenizerFast(PreTrainedTokenizerFast):
         **kwargs,
     ) -> None: ...
     def save_vocabulary(
-        self, save_directory: str, filename_prefix: str | None = ...
+        self,
+        save_directory: str,
+        filename_prefix: str | None = ...,
     ) -> tuple[str]: ...
 
 __all__ = ["Qwen2TokenizerFast"]

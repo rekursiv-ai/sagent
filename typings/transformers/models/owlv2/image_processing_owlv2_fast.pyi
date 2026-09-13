@@ -38,13 +38,19 @@ class Owlv2ImageProcessorFast(BaseImageProcessorFast):
     ):  # -> list[Any]:
         ...
     def post_process_image_guided_detection(
-        self, outputs, threshold=..., nms_threshold=..., target_sizes=...
+        self,
+        outputs,
+        threshold=...,
+        nms_threshold=...,
+        target_sizes=...,
     ):  # -> list[Any]:
         ...
     def __init__(self, **kwargs: Unpack[Owlv2FastImageProcessorKwargs]) -> None: ...
     @auto_docstring
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[Owlv2FastImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[Owlv2FastImageProcessorKwargs],
     ):  # -> BatchFeature:
         ...
     def pad(

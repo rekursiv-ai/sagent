@@ -60,7 +60,12 @@ def eager_attention_forward(
 ):  # -> tuple[Tensor, Tensor]:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 
@@ -128,13 +133,18 @@ class Qwen3VLMoeVisionRotaryEmbedding(nn.Module):
 
 class Qwen3VLMoeVisionPatchMerger(nn.Module):
     def __init__(
-        self, config: Qwen3VLMoeVisionConfig, use_postshuffle_norm=...
+        self,
+        config: Qwen3VLMoeVisionConfig,
+        use_postshuffle_norm=...,
     ) -> None: ...
     def forward(self, x: torch.Tensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
 def apply_rotary_pos_emb_vision(
-    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 class Qwen3VLMoeVisionAttention(nn.Module):
@@ -169,7 +179,10 @@ class Qwen3VLMoeVisionModel(Qwen3VLMoePreTrainedModel):
     def fast_pos_embed_interpolate(self, grid_thw):  # -> Tensor:
         ...
     def forward(
-        self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, **kwargs
+        self,
+        hidden_states: torch.Tensor,
+        grid_thw: torch.Tensor,
+        **kwargs,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 

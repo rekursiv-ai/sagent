@@ -17,20 +17,30 @@ _CHECKPOINT_FOR_DOC = ...
 
 class Speech2Text2SinusoidalPositionalEmbedding(nn.Module):
     def __init__(
-        self, num_positions: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_positions: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ) -> None: ...
     def make_weights(
-        self, num_embeddings: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ):  # -> None:
         ...
     @staticmethod
     def get_embedding(
-        num_embeddings: int, embedding_dim: int, padding_idx: int | None = ...
+        num_embeddings: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ):  # -> Tensor:
         ...
     @torch.no_grad()
     def forward(
-        self, input_ids: torch.Tensor, past_key_values_length: int = ...
+        self,
+        input_ids: torch.Tensor,
+        past_key_values_length: int = ...,
     ):  # -> Tensor:
         ...
     def create_position_ids_from_input_ids(
@@ -130,7 +140,8 @@ class Speech2Text2ForCausalLM(Speech2Text2PreTrainedModel):
     def get_decoder(self):  # -> Speech2Text2Decoder:
         ...
     @replace_return_docstrings(
-        output_type=CausalLMOutputWithCrossAttentions, config_class=_CONFIG_FOR_DOC
+        output_type=CausalLMOutputWithCrossAttentions,
+        config_class=_CONFIG_FOR_DOC,
     )
     def forward(
         self,

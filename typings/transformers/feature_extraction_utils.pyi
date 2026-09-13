@@ -12,7 +12,8 @@ Feature extraction saving/loading class for common feature extractors.
 logger = ...
 type PreTrainedFeatureExtractor = SequenceFeatureExtractor
 SpecificFeatureExtractorType = TypeVar(
-    "SpecificFeatureExtractorType", bound=FeatureExtractionMixin
+    "SpecificFeatureExtractorType",
+    bound=FeatureExtractionMixin,
 )
 
 class BatchFeature(UserDict):
@@ -28,7 +29,8 @@ class BatchFeature(UserDict):
     def __setstate__(self, state):  # -> None:
         ...
     def convert_to_tensors(
-        self, tensor_type: str | TensorType | None = ...
+        self,
+        tensor_type: str | TensorType | None = ...,
     ):  # -> Self:
         ...
     def to(self, *args, **kwargs) -> BatchFeature: ...
@@ -48,16 +50,23 @@ class FeatureExtractionMixin(PushToHubMixin):
         **kwargs,
     ) -> Self: ...
     def save_pretrained(
-        self, save_directory: str | os.PathLike, push_to_hub: bool = ..., **kwargs
+        self,
+        save_directory: str | os.PathLike,
+        push_to_hub: bool = ...,
+        **kwargs,
     ):  # -> list[str]:
         ...
     @classmethod
     def get_feature_extractor_dict(
-        cls, pretrained_model_name_or_path: str | os.PathLike, **kwargs
+        cls,
+        pretrained_model_name_or_path: str | os.PathLike,
+        **kwargs,
     ) -> tuple[dict[str, Any], dict[str, Any]]: ...
     @classmethod
     def from_dict(
-        cls, feature_extractor_dict: dict[str, Any], **kwargs
+        cls,
+        feature_extractor_dict: dict[str, Any],
+        **kwargs,
     ) -> FeatureExtractionMixin | tuple[FeatureExtractionMixin, dict[str, Any]]: ...
     def to_dict(self) -> dict[str, Any]: ...
     @classmethod

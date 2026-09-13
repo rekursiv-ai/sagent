@@ -21,10 +21,14 @@ class ATenConfigHeuristics(TemplateConfigHeuristics): ...
 @register_template_heuristic(aten_baddbmm.uid, None, op_name="baddbmm")
 class ATenAddMMConfigHeuristics(ATenConfigHeuristics):
     def get_extra_kwargs(
-        self, kernel_inputs: KernelInputs, layout: Layout, op_name: str
+        self,
+        kernel_inputs: KernelInputs,
+        layout: Layout,
+        op_name: str,
     ) -> dict[str, Any]: ...
 
 @register_template_heuristic(aten_bias_addmm.uid, None, op_name="addmm")
 class ATenBiasAddMMConfigHeuristics(
-    ATenAddMMConfigHeuristics, GemmMaxAutotuneTemplateConfigHeuristics
+    ATenAddMMConfigHeuristics,
+    GemmMaxAutotuneTemplateConfigHeuristics,
 ): ...

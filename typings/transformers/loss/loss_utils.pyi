@@ -26,14 +26,24 @@ def ForMaskedLMLoss(
 ):  # -> Tensor:
     ...
 def ForSequenceClassificationLoss(
-    labels: torch.Tensor, pooled_logits: torch.Tensor, config, **kwargs
+    labels: torch.Tensor,
+    pooled_logits: torch.Tensor,
+    config,
+    **kwargs,
 ) -> torch.Tensor: ...
 def ForQuestionAnsweringLoss(
-    start_logits, end_logits, start_positions, end_positions, **kwargs
+    start_logits,
+    end_logits,
+    start_positions,
+    end_positions,
+    **kwargs,
 ):  # -> Tensor | None:
     ...
 def ForTokenClassification(
-    logits: torch.Tensor, labels, config, **kwargs
+    logits: torch.Tensor,
+    labels,
+    config,
+    **kwargs,
 ):  # -> Tensor:
     ...
 

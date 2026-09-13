@@ -37,10 +37,20 @@ def as_nested_tensor(
 to_padded_tensor = ...
 
 def nested_tensor(
-    tensor_list, *, dtype=..., layout=..., device=..., requires_grad=..., pin_memory=...
+    tensor_list,
+    *,
+    dtype=...,
+    layout=...,
+    device=...,
+    requires_grad=...,
+    pin_memory=...,
 ) -> Tensor: ...
 def narrow(
-    tensor: Tensor, dim: int, start: int | Tensor, length: int | Tensor, layout=...
+    tensor: Tensor,
+    dim: int,
+    start: int | Tensor,
+    length: int | Tensor,
+    layout=...,
 ) -> Tensor: ...
 def nested_tensor_from_jagged(
     values: Tensor,

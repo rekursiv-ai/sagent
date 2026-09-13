@@ -28,14 +28,26 @@ class Phi4MultimodalImageProcessorFast(BaseImageProcessorFast):
     valid_kwargs = Phi4MultimodalFastImageProcessorKwargs
     model_input_names = ...
     def __init__(
-        self, **kwargs: Unpack[Phi4MultimodalFastImageProcessorKwargs]
+        self,
+        **kwargs: Unpack[Phi4MultimodalFastImageProcessorKwargs],
     ) -> None: ...
     def find_closest_aspect_ratio(
-        self, aspect_ratio, target_ratios, width, height, image_size
+        self,
+        aspect_ratio,
+        target_ratios,
+        width,
+        height,
+        image_size,
     ):  # -> tuple[Literal[1], Literal[1]]:
         ...
     def dynamic_preprocess(
-        self, image, image_size, patch_size, mask_size, max_num=..., min_num=...
+        self,
+        image,
+        image_size,
+        patch_size,
+        mask_size,
+        max_num=...,
+        min_num=...,
     ):  # -> tuple[Any, Tensor]:
         ...
     def pad_to_max_num_crops(self, images, max_crops=...):  # -> Tensor:

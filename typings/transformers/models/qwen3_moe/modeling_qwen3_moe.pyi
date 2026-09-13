@@ -26,7 +26,12 @@ from ...utils.generic import check_model_inputs
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -156,14 +161,17 @@ class Qwen3MoeForCausalLM(Qwen3MoePreTrainedModel, GenerationMixin):
     ) -> MoeCausalLMOutputWithPast: ...
 
 class Qwen3MoeForSequenceClassification(
-    GenericForSequenceClassification, Qwen3MoePreTrainedModel
+    GenericForSequenceClassification,
+    Qwen3MoePreTrainedModel,
 ): ...
 class Qwen3MoeForTokenClassification(
-    GenericForTokenClassification, Qwen3MoePreTrainedModel
+    GenericForTokenClassification,
+    Qwen3MoePreTrainedModel,
 ): ...
 
 class Qwen3MoeForQuestionAnswering(
-    GenericForQuestionAnswering, Qwen3MoePreTrainedModel
+    GenericForQuestionAnswering,
+    Qwen3MoePreTrainedModel,
 ):
     base_model_prefix = ...
 

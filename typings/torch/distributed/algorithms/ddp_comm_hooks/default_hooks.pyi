@@ -13,13 +13,16 @@ __all__ = [
 ]
 
 def allreduce_hook(
-    process_group: dist.ProcessGroup, bucket: dist.GradBucket
+    process_group: dist.ProcessGroup,
+    bucket: dist.GradBucket,
 ) -> torch.futures.Future[torch.Tensor]: ...
 def fp16_compress_hook(
-    process_group: dist.ProcessGroup, bucket: dist.GradBucket
+    process_group: dist.ProcessGroup,
+    bucket: dist.GradBucket,
 ) -> torch.futures.Future[torch.Tensor]: ...
 def bf16_compress_hook(
-    process_group: dist.ProcessGroup, bucket: dist.GradBucket
+    process_group: dist.ProcessGroup,
+    bucket: dist.GradBucket,
 ) -> torch.futures.Future[torch.Tensor]: ...
 def fp16_compress_wrapper(
     hook: Callable[[Any, dist.GradBucket], torch.futures.Future[torch.Tensor]],

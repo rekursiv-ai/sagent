@@ -16,14 +16,20 @@ T = TypeVar("T", dict, list, tuple)
 
 @overload
 def scatter(
-    inputs: torch.Tensor, target_gpus: Sequence[int | torch.device], dim: int = ...
+    inputs: torch.Tensor,
+    target_gpus: Sequence[int | torch.device],
+    dim: int = ...,
 ) -> tuple[torch.Tensor, ...]: ...
 @overload
 def scatter(
-    inputs: T, target_gpus: Sequence[int | torch.device], dim: int = ...
+    inputs: T,
+    target_gpus: Sequence[int | torch.device],
+    dim: int = ...,
 ) -> list[T]: ...
 def scatter(
-    inputs, target_gpus, dim=...
+    inputs,
+    target_gpus,
+    dim=...,
 ) -> (
     Any
     | list[Any]

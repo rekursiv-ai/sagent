@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import AsyncGenerator, Mapping, Sequence
+from typing import cast
 
 import asyncio
 import sys
 
-from sagent.agent import Agent
+from sagent.agent.agent import Agent
 from sagent.lib.custom_json import json_freeze
 from sagent.providers import Google
 from sagent.types.runtime import (
@@ -34,7 +35,7 @@ class CharacterCount:
                 },
             },
             "required": ["text"],
-        }
+        },
     )
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -76,8 +77,13 @@ class CharacterCount:
         return ToolResult(call_id="", content=str(len(str(args.get("text", "")))))
 
 
-async def main() -> None:
-    """Run the example agent."""
+async def main() -> int:
+    """Run the example agent.
+
+    Returns:
+      status: Process exit code.
+
+    """
     agent = Agent(
         model=Google.from_env().model("gemini-3.1-pro-preview"),
         system="Use CharacterCount whenever exact string length matters.",
@@ -87,12 +93,17 @@ async def main() -> None:
         "How many characters are in 'agentic systems'? Use the"
         " tool, then answer in one sentence."
     )
-    async for _event in agent.run(UserMessage(text=prompt)):
+    async for _ in cast(
+        AsyncGenerator[object, None],
+        agent.run(UserMessage(text=prompt)),
+    ):
         pass
-    for m in reversed(agent.history):
+    history = cast(Sequence[object], agent.history)
+    for m in reversed(history):
         if isinstance(m, AssistantMessage) and m.text:
             sys.stdout.write(f"{m.text}\n")
-            return
+            return 0
+    return 0
 
 
 if __name__ == "__main__":

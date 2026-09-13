@@ -18,12 +18,17 @@ _constant_types = ...
 
 class SourceContext(torch._C._jit_tree_views.SourceRangeFactory):
     def __init__(
-        self, source, filename, file_lineno, leading_whitespace_len
+        self,
+        source,
+        filename,
+        file_lineno,
+        leading_whitespace_len,
     ) -> None: ...
 
 def get_annotations(obj) -> dict[str, AnnotationForm] | dict[Any, Any]: ...
 def infer_concrete_type_builder(
-    nn_module, share_types=...
+    nn_module,
+    share_types=...,
 ) -> ConcreteModuleTypeBuilder: ...
 
 class ConcreteTypeStore:
@@ -35,7 +40,9 @@ class ConcreteTypeStore:
 concrete_type_store = ...
 
 def create_methods_and_properties_from_stubs(
-    concrete_type, method_stubs, property_stubs
+    concrete_type,
+    method_stubs,
+    property_stubs,
 ) -> None: ...
 def create_hooks_from_stubs(concrete_type, hook_stubs, pre_hook_stubs) -> None: ...
 def get_module_concrete_type(nn_module, share_types=...) -> ConcreteModuleType: ...

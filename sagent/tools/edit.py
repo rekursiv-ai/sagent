@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Final
+from typing import TYPE_CHECKING, Annotated
 
 import difflib
 import re
@@ -26,21 +26,15 @@ from sagent.tools.core import (
     resolve_tool_path,
 )
 from sagent.tools.display import Toggle, Wrap
-from sagent.tools.lib.bash import (
-    Node,
-    resolve_cwd_path,
-    walk_commands,
-)
+from sagent.tools.lib.bash import resolve_cwd_path, walk_commands
 from sagent.tools.tool_spec import CLI_SETTABLE
 from sagent.types.runtime import ToolResult
 
 
-# Simple ``s/OLD/NEW/[g]`` - no escaped delimiters, no alternate
-# delimiter, no address ranges. If the sed script is more complex
-# than this, we bail.
-_SED_S_PATTERN = re.compile(r"^s/([^/\\]*)/([^/\\]*)/([gi]*)$")
-
-_HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)((?:,\d+)?) \+(\d+)((?:,\d+)?) @@")
+if TYPE_CHECKING:
+    from bashlex.ast import (
+        node as Node,  # noqa: N812 -- PascalCase for the type name; bashlex spells it lowercase.
+    )
 
 
 def make_diff(old: str, new: str, offset: int) -> str:
@@ -63,11 +57,11 @@ def make_diff(old: str, new: str, offset: int) -> str:
             new.splitlines(),
             lineterm="",
             n=3,
-        )
-    )[2:]  # skip --- / +++ headers
+        ),
+    )[2:]  # Skip --- / +++ headers.
     result: list[str] = []
     for line in lines:
-        m = _HUNK_HEADER_RE.match(line)
+        m = re.match(r"^@@ -(\d+)((?:,\d+)?) \+(\d+)((?:,\d+)?) @@", line)
         if m:
             old_start = int(m.group(1)) + offset
             new_start = int(m.group(3)) + offset
@@ -75,9 +69,6 @@ def make_diff(old: str, new: str, offset: int) -> str:
         else:
             result.append(line)
     return "\n".join(result)
-
-
-_NUDGE: Final = "sed via Bash is a bad UX. Use the Edit tool."
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -106,7 +97,7 @@ class Edit:
                 },
             },
             "required": ["file_path", "old_string", "new_string"],
-        }
+        },
     )
 
     async def run(self, args: Mapping[str, object]) -> ToolResult:
@@ -188,12 +179,16 @@ class Edit:
             # text.count("") returns len+1; text.replace("", …) inserts
             # between every char. Silently destroys the file - reject.
             return ToolResult(
-                call_id="", content="old_string cannot be empty.", is_error=True
+                call_id="",
+                content="old_string cannot be empty.",
+                is_error=True,
             )
         p = Path(file_path)
         if not p.exists():
             return ToolResult(
-                call_id="", content=f"File not found: {file_path}", is_error=True
+                call_id="",
+                content=f"File not found: {file_path}",
+                is_error=True,
             )
         if p.is_dir():
             return ToolResult(
@@ -242,7 +237,9 @@ class Edit:
         count = text.count(old_string)
         if count == 0:
             return ToolResult(
-                call_id="", content="old_string not found in file.", is_error=True
+                call_id="",
+                content="old_string not found in file.",
+                is_error=True,
             )
         if count > 1 and not replace_all:
             return ToolResult(
@@ -301,14 +298,12 @@ class Edit:
         return None
 
 
+# ``cwd`` is the enclosing ``cd`` prefix. Edit resolves a relative ``file_path`` against
+# the AGENT's cwd, not the shell's, so a nudge that drops it points the caller at a
+# different file -- the same failure every sibling matcher resolves through
+# ``resolve_cwd_path``.
 def _match_sed(cwd: str, args: tuple[str, ...]) -> str | None:
-    """Match a simple ``sed -i 's/OLD/NEW/[g]' FILE`` for an Edit nudge.
-
-    ``cwd`` is the enclosing ``cd`` prefix. Edit resolves a relative
-    ``file_path`` against the AGENT's cwd, not the shell's, so a nudge
-    that drops it points the caller at a different file -- the same
-    failure every sibling matcher resolves through ``resolve_cwd_path``.
-    """
+    """Match a simple ``sed -i 's/OLD/NEW/[g]' FILE`` for an Edit nudge."""
     in_place = False
     script: str | None = None
     file: str | None = None
@@ -335,7 +330,9 @@ def _match_sed(cwd: str, args: tuple[str, ...]) -> str | None:
         i += 1
     if not in_place or script is None or file is None:
         return None
-    m = _SED_S_PATTERN.match(script)
+    # Simple ``s/OLD/NEW/[g]`` only: no escaped delimiters, no alternate
+    # delimiter, no address ranges. Anything more complex is not nudged.
+    m = re.match(r"^s/([^/\\]*)/([^/\\]*)/([gi]*)$", script)
     if m is None:
         return None
     if "i" in m.group(3):
@@ -343,7 +340,7 @@ def _match_sed(cwd: str, args: tuple[str, ...]) -> str | None:
         return None
     target = resolve_cwd_path(cwd, file)
     return (
-        f"{_NUDGE} Replaces: `sed {' '.join(shlex.quote(a) for a in args)}`."
+        f"sed via Bash is a bad UX. Use the Edit tool. Replaces: `sed {' '.join(shlex.quote(a) for a in args)}`."
         f" Try: Edit file_path={target!r}"
         f" old_string={m.group(1)!r} new_string={m.group(2)!r}"
         f"{' replace_all=true' if 'g' in m.group(3) else ''}"

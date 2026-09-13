@@ -22,7 +22,9 @@ class SerializableCallable(abc.ABC):
     def deserialize_compile_artifacts(cls, data: bytes) -> Any: ...
 
 def bind_locals(
-    signature: inspect.Signature, *args: Any, **kwargs: Any
+    signature: inspect.Signature,
+    *args: Any,
+    **kwargs: Any,
 ) -> dict[str, Any]: ...
 
 @dataclass
@@ -54,11 +56,13 @@ class BundledAOTAutogradSerializableCallable(SerializableCallable):
     def __getattr__(self, attr: Any) -> Any: ...
     @classmethod
     def from_backend_id(
-        cls, backend_id: str
+        cls,
+        backend_id: str,
     ) -> BundledAOTAutogradSerializableCallable: ...
     @classmethod
     def serialize_compile_artifacts(
-        cls, fn: BundledAOTAutogradSerializableCallable
+        cls,
+        fn: BundledAOTAutogradSerializableCallable,
     ) -> bytes: ...
     @classmethod
     def deserialize_compile_artifacts(cls, data: bytes) -> Any: ...

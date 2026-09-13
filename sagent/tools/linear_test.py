@@ -90,8 +90,8 @@ def test_list_issues_renders(monkeypatch: pytest.MonkeyPatch) -> None:
                     "team": "ENG",
                     "assignee_email": "x@y",
                     "limit": 5,
-                }
-            )
+                },
+            ),
         )
     assert "[ENG-1] [Todo] Foo" in result.content
 
@@ -135,7 +135,7 @@ def test_get_issue_renders(monkeypatch: pytest.MonkeyPatch) -> None:
                     "user": {"name": "Bob"},
                     "createdAt": "t2",
                 },
-            ]
+            ],
         },
     }
     payload = _gql_response({"issue": issue})
@@ -187,8 +187,8 @@ def test_create_issue_success(monkeypatch: pytest.MonkeyPatch) -> None:
                             "title": "T",
                             "url": "u",
                         },
-                    }
-                }
+                    },
+                },
             ),
             FetchSession(),
         ),
@@ -201,7 +201,7 @@ def test_create_issue_success(monkeypatch: pytest.MonkeyPatch) -> None:
                     "team": "ENG",
                     "title": "T",
                     "description": "D",
-                }
+                },
             ),
         )
     assert result.content == "Created ENG-5: T - u"
@@ -247,8 +247,8 @@ def test_update_issue_success(monkeypatch: pytest.MonkeyPatch) -> None:
                     "url": "u",
                     "state": {"name": "Done"},
                 },
-            }
-        }
+            },
+        },
     )
     with patch(
         "sagent.tools.linear.fetch",
@@ -262,7 +262,7 @@ def test_update_issue_success(monkeypatch: pytest.MonkeyPatch) -> None:
                     "title": "NewT",
                     "description": "D",
                     "state_id": "s",
-                }
+                },
             ),
         )
     assert "Updated ENG-1: NewT" in result.content
@@ -293,7 +293,7 @@ def test_add_comment_requires_id_and_body(monkeypatch: pytest.MonkeyPatch) -> No
 def test_add_comment_success(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LINEAR_API_KEY", "k")
     payload = _gql_response(
-        {"commentCreate": {"success": True, "comment": {"id": "c1"}}}
+        {"commentCreate": {"success": True, "comment": {"id": "c1"}}},
     )
     with patch(
         "sagent.tools.linear.fetch",

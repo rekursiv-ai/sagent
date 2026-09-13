@@ -46,7 +46,9 @@ class MobileNetV1PreTrainedModel(PreTrainedModel):
 @auto_docstring
 class MobileNetV1Model(MobileNetV1PreTrainedModel):
     def __init__(
-        self, config: MobileNetV1Config, add_pooling_layer: bool = ...
+        self,
+        config: MobileNetV1Config,
+        add_pooling_layer: bool = ...,
     ) -> None: ...
     @auto_docstring
     def forward(

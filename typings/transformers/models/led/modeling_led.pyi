@@ -17,14 +17,18 @@ from ...utils.deprecation import deprecate_kwarg
 logger = ...
 
 def shift_tokens_right(
-    input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: torch.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ):  # -> Tensor:
     ...
 
 class LEDLearnedPositionalEmbedding(nn.Embedding):
     def __init__(self, num_embeddings: int, embedding_dim: int) -> None: ...
     def forward(
-        self, input_ids_shape: torch.Size, past_key_values_length: int = ...
+        self,
+        input_ids_shape: torch.Size,
+        past_key_values_length: int = ...,
     ):  # -> Tensor:
         ...
 
@@ -55,7 +59,9 @@ class LEDEncoderAttention(nn.Module):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]: ...
 
 class LEDDecoderAttention(nn.Module):
@@ -114,7 +120,11 @@ class LEDDecoderLayer(GradientCheckpointingLayer):
 
 class LEDClassificationHead(nn.Module):
     def __init__(
-        self, input_dim: int, inner_dim: int, num_classes: int, pooler_dropout: float
+        self,
+        input_dim: int,
+        inner_dim: int,
+        num_classes: int,
+        pooler_dropout: float,
     ) -> None: ...
     def forward(self, hidden_states: torch.Tensor):  # -> Tensor:
         ...
@@ -194,7 +204,9 @@ class LEDSeq2SeqQuestionAnsweringModelOutput(ModelOutput):
 
 class LEDEncoder(LEDPreTrainedModel):
     def __init__(
-        self, config: LEDConfig, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: LEDConfig,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -210,7 +222,9 @@ class LEDEncoder(LEDPreTrainedModel):
 
 class LEDDecoder(LEDPreTrainedModel):
     def __init__(
-        self, config: LEDConfig, embed_tokens: nn.Embedding | None = ...
+        self,
+        config: LEDConfig,
+        embed_tokens: nn.Embedding | None = ...,
     ) -> None: ...
     def forward(
         self,

@@ -51,7 +51,8 @@ class SeedOssModel(LlamaModel): ...
 
 class SeedOssForCausalLM(LlamaForCausalLM):
     def forward(
-        self, **super_kwargs: Unpack[TransformersKwargs]
+        self,
+        **super_kwargs: Unpack[TransformersKwargs],
     ) -> CausalLMOutputWithPast: ...
     def __call__(self, *args: Any, **kwargs: Any) -> CausalLMOutputWithPast: ...
 

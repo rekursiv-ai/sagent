@@ -39,7 +39,8 @@ class ReadsWrites:
     visited: set[Any]
 
 def livevars_analysis(
-    instructions: list[Instruction], instruction: Instruction
+    instructions: list[Instruction],
+    instruction: Instruction,
 ) -> set[Any]: ...
 
 @dataclasses.dataclass

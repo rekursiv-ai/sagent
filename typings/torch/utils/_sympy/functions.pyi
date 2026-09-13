@@ -47,7 +47,9 @@ class FloorDiv(sympy.Function):
     def divisor(self) -> sympy.Basic: ...
     @classmethod
     def eval(
-        cls, base: sympy.Integer, divisor: sympy.Integer
+        cls,
+        base: sympy.Integer,
+        divisor: sympy.Integer,
     ) -> sympy.Basic | None: ...
 
 class ModularIndexing(sympy.Function):
@@ -56,7 +58,10 @@ class ModularIndexing(sympy.Function):
     precedence: int = ...
     @classmethod
     def eval(
-        cls, base: sympy.Integer, divisor: sympy.Integer, modulus: sympy.Integer
+        cls,
+        base: sympy.Integer,
+        divisor: sympy.Integer,
+        modulus: sympy.Integer,
     ) -> sympy.Basic | None: ...
 
 class Where(sympy.Function):
@@ -64,7 +69,10 @@ class Where(sympy.Function):
     precedence: int = ...
     @classmethod
     def eval(
-        cls, c: sympy.Basic, p: sympy.Basic, q: sympy.Basic
+        cls,
+        c: sympy.Basic,
+        p: sympy.Basic,
+        q: sympy.Basic,
     ) -> sympy.Basic | None: ...
 
 class PythonMod(sympy.Function):
@@ -153,7 +161,9 @@ class PowByNatural(sympy.Function):
     precedence: int = ...
     @classmethod
     def eval(
-        cls, base, exp
+        cls,
+        base,
+        exp,
     ) -> One | NegativeOne | Zero | Integer | Expr | ComplexInfinity | None: ...
 
 class FloatPow(sympy.Function):

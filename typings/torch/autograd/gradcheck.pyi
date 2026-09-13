@@ -22,10 +22,20 @@ class GradcheckError(RuntimeError): ...
     category=FutureWarning,
 )
 def get_numerical_jacobian(
-    fn, inputs, target=..., eps=..., grad_out=...
+    fn,
+    inputs,
+    target=...,
+    eps=...,
+    grad_out=...,
 ) -> tuple[Tensor, ...]: ...
 def get_numerical_jacobian_wrt_specific_input(
-    fn, input_idx, inputs, outputs, eps, input=..., is_forward_ad=...
+    fn,
+    input_idx,
+    inputs,
+    outputs,
+    eps,
+    input=...,
+    is_forward_ad=...,
 ) -> tuple[torch.Tensor, ...]: ...
 
 FAILED_NONDET_MSG = ...
@@ -35,7 +45,10 @@ FAILED_NONDET_MSG = ...
     category=FutureWarning,
 )
 def get_analytical_jacobian(
-    inputs, output, nondet_tol=..., grad_out=...
+    inputs,
+    output,
+    nondet_tol=...,
+    grad_out=...,
 ) -> tuple[tuple[Tensor, ...], bool, bool, bool]: ...
 
 FAILED_BATCHED_GRAD_MSG = ...

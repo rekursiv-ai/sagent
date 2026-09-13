@@ -37,7 +37,8 @@ def simple_sympify(
     | BooleanAtom
 ): ...
 def sympy_generic_le(
-    lower, upper
+    lower,
+    upper,
 ) -> (
     NotImplementedType
     | GreaterThan
@@ -73,17 +74,22 @@ class ValueRanges(Generic[_T]):
 
     @overload
     def __init__(
-        self: ValueRanges[sympy.Expr], lower: ExprIn, upper: ExprIn
+        self: ValueRanges[sympy.Expr],
+        lower: ExprIn,
+        upper: ExprIn,
     ) -> None: ...
     @overload
     def __init__(
-        self: ValueRanges[SympyBoolean], lower: BoolIn, upper: BoolIn
+        self: ValueRanges[SympyBoolean],
+        lower: BoolIn,
+        upper: BoolIn,
     ) -> None: ...
     def __init__(self, lower: AllIn, upper: AllIn) -> None: ...
     def boolify(self) -> ValueRanges[SympyBoolean]: ...
     def __contains__(self, x: AllIn) -> bool: ...
     def issubset(
-        self, other
+        self,
+        other,
     ) -> (
         NotImplementedType
         | GreaterThan
@@ -96,20 +102,24 @@ class ValueRanges(Generic[_T]):
     def tighten(self, other) -> ValueRanges: ...
     @overload
     def __and__(
-        self: ValueRanges[sympy.Expr], other: ValueRanges[sympy.Expr]
+        self: ValueRanges[sympy.Expr],
+        other: ValueRanges[sympy.Expr],
     ) -> ValueRanges[sympy.Expr]: ...
     @overload
     def __and__(
-        self: ValueRanges[SympyBoolean], other: ValueRanges[SympyBoolean]
+        self: ValueRanges[SympyBoolean],
+        other: ValueRanges[SympyBoolean],
     ) -> ValueRanges[SympyBoolean]: ...
     def __and__(self: AllVR, other: AllVR) -> AllVR: ...
     @overload
     def __or__(
-        self: ValueRanges[sympy.Expr], other: ValueRanges[sympy.Expr]
+        self: ValueRanges[sympy.Expr],
+        other: ValueRanges[sympy.Expr],
     ) -> ValueRanges[sympy.Expr]: ...
     @overload
     def __or__(
-        self: ValueRanges[SympyBoolean], other: ValueRanges[SympyBoolean]
+        self: ValueRanges[SympyBoolean],
+        other: ValueRanges[SympyBoolean],
     ) -> ValueRanges[SympyBoolean]: ...
     def __or__(self: AllVR, other: AllVR) -> AllVR: ...
     def is_singleton(self) -> bool: ...
@@ -147,16 +157,22 @@ class ValueRanges(Generic[_T]):
     @overload
     @staticmethod
     def coordinatewise_increasing_map(
-        x: ExprIn | ExprVR, y: ExprIn | ExprVR, fn: ExprFn2
+        x: ExprIn | ExprVR,
+        y: ExprIn | ExprVR,
+        fn: ExprFn2,
     ) -> ExprVR: ...
     @overload
     @staticmethod
     def coordinatewise_increasing_map(
-        x: BoolIn | BoolVR, y: BoolIn | BoolVR, fn: BoolFn2
+        x: BoolIn | BoolVR,
+        y: BoolIn | BoolVR,
+        fn: BoolFn2,
     ) -> BoolVR: ...
     @staticmethod
     def coordinatewise_increasing_map(
-        x: AllIn | AllVR, y: AllIn | AllVR, fn: AllFn2
+        x: AllIn | AllVR,
+        y: AllIn | AllVR,
+        fn: AllFn2,
     ) -> AllVR: ...
     @classmethod
     def coordinatewise_monotone_map(cls, x, y, fn) -> ValueRanges[Expr]: ...
@@ -166,7 +182,9 @@ class SymPyValueRangeAnalysis:
     def constant(value, dtype) -> ValueRanges[Boolean] | ValueRanges[Expr]: ...
     @staticmethod
     def to_dtype(
-        a, dtype, src_dtype=...
+        a,
+        dtype,
+        src_dtype=...,
     ) -> ValueRanges[Boolean] | ValueRanges[Expr]: ...
     @staticmethod
     def trunc_to_int(a, dtype): ...
@@ -272,5 +290,6 @@ class SymPyValueRangeAnalysis:
     def trunc(x): ...
 
 def bound_sympy(
-    expr: sympy.Expr, ranges: dict[sympy.Symbol, ValueRanges] | None = ...
+    expr: sympy.Expr,
+    ranges: dict[sympy.Symbol, ValueRanges] | None = ...,
 ) -> ValueRanges: ...

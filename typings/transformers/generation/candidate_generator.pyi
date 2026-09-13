@@ -11,10 +11,14 @@ from ..tokenization_utils_base import PreTrainedTokenizerBase
 
 class CandidateGenerator:
     def get_candidates(
-        self, input_ids: torch.LongTensor
+        self,
+        input_ids: torch.LongTensor,
     ) -> tuple[torch.LongTensor, torch.FloatTensor | None]: ...
     def update_candidate_strategy(
-        self, input_ids: torch.LongTensor, scores: torch.FloatTensor, num_matches: int
+        self,
+        input_ids: torch.LongTensor,
+        scores: torch.FloatTensor,
+        num_matches: int,
     ): ...
 
 class AssistedCandidateGenerator(CandidateGenerator):
@@ -28,10 +32,14 @@ class AssistedCandidateGenerator(CandidateGenerator):
         logits_processor: LogitsProcessorList | None = ...,
     ) -> None: ...
     def get_candidates(
-        self, input_ids: torch.LongTensor
+        self,
+        input_ids: torch.LongTensor,
     ) -> tuple[torch.LongTensor, torch.FloatTensor | None]: ...
     def update_candidate_strategy(
-        self, input_ids: torch.LongTensor, scores: torch.FloatTensor, num_matches: int
+        self,
+        input_ids: torch.LongTensor,
+        scores: torch.FloatTensor,
+        num_matches: int,
     ):  # -> None:
         ...
 
@@ -48,10 +56,14 @@ class AssistedCandidateGeneratorDifferentTokenizers(AssistedCandidateGenerator):
         logits_processor: LogitsProcessorList | None = ...,
     ) -> None: ...
     def convert_source_tokens_to_target_tokens(
-        self, input_ids, source_tokenizer, destination_tokenizer
+        self,
+        input_ids,
+        source_tokenizer,
+        destination_tokenizer,
     ): ...
     def get_candidates(
-        self, input_ids: torch.LongTensor
+        self,
+        input_ids: torch.LongTensor,
     ) -> tuple[torch.LongTensor, torch.FloatTensor | None]: ...
 
 class _PruneReindexingLMHead(nn.Module):
@@ -61,7 +73,9 @@ class _PruneReindexingLMHead(nn.Module):
 
 class _MapInputEmbedding(nn.Module):
     def __init__(
-        self, original_embedding: nn.Embedding, assistant_overlap_token_ids
+        self,
+        original_embedding: nn.Embedding,
+        assistant_overlap_token_ids,
     ) -> None: ...
     def forward(self, input_ids: torch.LongTensor) -> torch.FloatTensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
@@ -86,7 +100,8 @@ class AssistantToTargetTranslator:
         assistant_candidate_ids: torch.LongTensor,
     ) -> torch.LongTensor: ...
     def get_target_logits(
-        self, assistant_logits: torch.FloatTensor
+        self,
+        assistant_logits: torch.FloatTensor,
     ) -> torch.FloatTensor: ...
 
 class AssistantVocabTranslatorCache:
@@ -105,7 +120,7 @@ class AssistantVocabTranslatorCache:
         ...
 
 class UniversalSpeculativeDecodingGenerator(
-    AssistedCandidateGeneratorDifferentTokenizers
+    AssistedCandidateGeneratorDifferentTokenizers,
 ):
     def __init__(
         self,
@@ -120,7 +135,8 @@ class UniversalSpeculativeDecodingGenerator(
         logits_processor: LogitsProcessorList | None = ...,
     ) -> None: ...
     def get_candidates(
-        self, input_ids: torch.LongTensor
+        self,
+        input_ids: torch.LongTensor,
     ) -> tuple[torch.LongTensor, torch.FloatTensor | None]: ...
 
 class PromptLookupCandidateGenerator(CandidateGenerator):
@@ -134,10 +150,14 @@ class PromptLookupCandidateGenerator(CandidateGenerator):
         vocab_size: int | None = ...,
     ) -> None: ...
     def get_candidates(
-        self, input_ids: torch.LongTensor
+        self,
+        input_ids: torch.LongTensor,
     ) -> tuple[torch.LongTensor, torch.FloatTensor | None]: ...
     def update_candidate_strategy(
-        self, input_ids: torch.LongTensor, scores: torch.FloatTensor, num_matches: int
+        self,
+        input_ids: torch.LongTensor,
+        scores: torch.FloatTensor,
+        num_matches: int,
     ):  # -> None:
         ...
 
@@ -152,5 +172,6 @@ class EarlyExitCandidateGenerator(AssistedCandidateGenerator):
         logits_processor: LogitsProcessorList | None = ...,
     ) -> None: ...
     def get_candidates(
-        self, input_ids: torch.LongTensor
+        self,
+        input_ids: torch.LongTensor,
     ) -> tuple[torch.LongTensor, torch.FloatTensor | None]: ...

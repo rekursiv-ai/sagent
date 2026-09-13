@@ -107,7 +107,9 @@ class ModernBertUnpaddedRotaryEmbedding(RotaryEmbedding):
         max_seqlen: int | None = ...,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]: ...
     def extra_repr(self) -> str: ...
 
@@ -169,7 +171,9 @@ MODERNBERT_ATTENTION_FUNCTION = ...
 
 class ModernBertAttention(nn.Module):
     def __init__(
-        self, config: ModernBertConfig, layer_id: int | None = ...
+        self,
+        config: ModernBertConfig,
+        layer_id: int | None = ...,
     ) -> None: ...
     def forward(
         self,
@@ -181,7 +185,9 @@ class ModernBertAttention(nn.Module):
 
 class ModernBertEncoderLayer(GradientCheckpointingLayer):
     def __init__(
-        self, config: ModernBertConfig, layer_id: int | None = ...
+        self,
+        config: ModernBertConfig,
+        layer_id: int | None = ...,
     ) -> None: ...
     @torch.compile(dynamic=True)
     def compiled_mlp(self, hidden_states: torch.Tensor) -> torch.Tensor: ...

@@ -30,12 +30,16 @@ def upcast_masked_softmax(
     ...
 @torch.jit.script
 def upcast_softmax(
-    x: torch.Tensor, scale: float, softmax_dtype: torch.dtype
+    x: torch.Tensor,
+    scale: float,
+    softmax_dtype: torch.dtype,
 ):  # -> Tensor:
     ...
 @torch.jit.script
 def masked_softmax(
-    x: torch.Tensor, mask: torch.Tensor, mask_value: torch.Tensor
+    x: torch.Tensor,
+    mask: torch.Tensor,
+    mask_value: torch.Tensor,
 ):  # -> Tensor:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -71,7 +75,9 @@ class GPTBigCodeAttention(nn.Module):
         | tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor, ...]]
     ): ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> (
         tuple[torch.Tensor, torch.Tensor | None]
         | tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor, ...]]
@@ -80,7 +86,8 @@ class GPTBigCodeAttention(nn.Module):
 class GPTBigCodeMLP(nn.Module):
     def __init__(self, intermediate_size, config) -> None: ...
     def forward(
-        self, hidden_states: tuple[torch.FloatTensor] | None
+        self,
+        hidden_states: tuple[torch.FloatTensor] | None,
     ) -> torch.FloatTensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 
@@ -104,7 +111,9 @@ class GPTBigCodeBlock(nn.Module):
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
     ): ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> (
         tuple[torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor]

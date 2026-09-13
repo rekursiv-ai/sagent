@@ -24,7 +24,12 @@ from ...utils.generic import check_model_inputs
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -142,10 +147,12 @@ class SmolLM3ForCausalLM(SmolLM3PreTrainedModel, GenerationMixin):
     ) -> CausalLMOutputWithPast: ...
 
 class SmolLM3ForSequenceClassification(
-    GenericForSequenceClassification, SmolLM3PreTrainedModel
+    GenericForSequenceClassification,
+    SmolLM3PreTrainedModel,
 ): ...
 class SmolLM3ForTokenClassification(
-    GenericForTokenClassification, SmolLM3PreTrainedModel
+    GenericForTokenClassification,
+    SmolLM3PreTrainedModel,
 ): ...
 
 class SmolLM3ForQuestionAnswering(GenericForQuestionAnswering, SmolLM3PreTrainedModel):

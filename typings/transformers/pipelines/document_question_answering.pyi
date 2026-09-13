@@ -17,7 +17,9 @@ logger = ...
 def normalize_box(box, width, height):  # -> list[int]:
     ...
 def apply_tesseract(
-    image: Image.Image, lang: str | None, tesseract_config: str | None
+    image: Image.Image,
+    lang: str | None,
+    tesseract_config: str | None,
 ):  # -> tuple[list[Any], list[Any]]:
     ...
 
@@ -27,7 +29,7 @@ class ModelType(ExplicitEnum):
     VisionEncoderDecoder = ...
 
 @add_end_docstrings(
-    build_pipeline_init_args(has_image_processor=True, has_tokenizer=True)
+    build_pipeline_init_args(has_image_processor=True, has_tokenizer=True),
 )
 class DocumentQuestionAnsweringPipeline(ChunkPipeline):
     _pipeline_calls_generate = ...
@@ -47,11 +49,15 @@ class DocumentQuestionAnsweringPipeline(ChunkPipeline):
     ) -> list[dict[str, Any]]: ...
     @overload
     def __call__(
-        self, image: dict[str, Any], **kwargs: Any
+        self,
+        image: dict[str, Any],
+        **kwargs: Any,
     ) -> list[dict[str, Any]]: ...
     @overload
     def __call__(
-        self, image: list[dict[str, Any]], **kwargs: Any
+        self,
+        image: list[dict[str, Any]],
+        **kwargs: Any,
     ) -> list[list[dict[str, Any]]]: ...
     def __call__(
         self,
@@ -74,7 +80,9 @@ class DocumentQuestionAnsweringPipeline(ChunkPipeline):
         ...
     def postprocess(self, model_outputs, top_k=..., **kwargs): ...
     def postprocess_encoder_decoder_single(
-        self, model_outputs, **kwargs
+        self,
+        model_outputs,
+        **kwargs,
     ):  # -> dict[str, None]:
         ...
     def postprocess_extractive_qa(

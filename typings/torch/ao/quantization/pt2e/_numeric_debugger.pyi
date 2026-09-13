@@ -36,7 +36,8 @@ class QuantizationComparisonResult:
     @property
     def sqnr(self) -> object: ...
     def loss(
-        self, loss_function: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+        self,
+        loss_function: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
     ) -> object: ...
     def __post_init__(self) -> None: ...
 

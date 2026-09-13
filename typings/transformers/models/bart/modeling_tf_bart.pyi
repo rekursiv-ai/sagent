@@ -33,7 +33,9 @@ _CONFIG_FOR_DOC = ...
 LARGE_NEGATIVE = ...
 
 def shift_tokens_right(
-    input_ids: tf.Tensor, pad_token_id: int, decoder_start_token_id: int
+    input_ids: tf.Tensor,
+    pad_token_id: int,
+    decoder_start_token_id: int,
 ): ...
 
 class TFBartLearnedPositionalEmbedding(keras.layers.Embedding):
@@ -115,7 +117,8 @@ class TFBartPretrainedModel(TFPreTrainedModel):
     def dummy_inputs(self):  # -> dict[str, Any]:
         ...
     def tf_to_pt_weight_rename(
-        self, tf_weight
+        self,
+        tf_weight,
     ):  # -> tuple[Literal['model.shared.weight'], Literal['model.decoder.embed_tokens.weight']] | tuple[Any]:
         ...
 
@@ -181,7 +184,10 @@ class TFBartDecoder(keras.layers.Layer):
 class TFBartMainLayer(keras.layers.Layer):
     config_class = BartConfig
     def __init__(
-        self, config: BartConfig, load_weight_prefix=..., **kwargs
+        self,
+        config: BartConfig,
+        load_weight_prefix=...,
+        **kwargs,
     ) -> None: ...
     def get_input_embeddings(self): ...
     def set_input_embeddings(self, new_embeddings):  # -> None:
@@ -218,14 +224,18 @@ class TFBartMainLayer(keras.layers.Layer):
 class TFBartModel(TFBartPretrainedModel):
     _requires_load_weight_prefix = ...
     def __init__(
-        self, config: BartConfig, load_weight_prefix=..., *inputs, **kwargs
+        self,
+        config: BartConfig,
+        load_weight_prefix=...,
+        *inputs,
+        **kwargs,
     ) -> None: ...
     def get_encoder(self):  # -> TFBartEncoder:
         ...
     def get_decoder(self):  # -> TFBartDecoder:
         ...
     @add_start_docstrings_to_model_forward(
-        BART_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        BART_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -268,7 +278,8 @@ class BiasLayer(keras.layers.Layer):
     BART_START_DOCSTRING,
 )
 class TFBartForConditionalGeneration(
-    TFBartPretrainedModel, TFCausalLanguageModelingLoss
+    TFBartPretrainedModel,
+    TFCausalLanguageModelingLoss,
 ):
     _keys_to_ignore_on_load_missing = ...
     _requires_load_weight_prefix = ...
@@ -286,7 +297,8 @@ class TFBartForConditionalGeneration(
         ...
     @add_start_docstrings_to_model_forward(BART_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFSeq2SeqLMOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFSeq2SeqLMOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     @add_end_docstrings(BART_GENERATION_EXAMPLE)
     @unpack_inputs
@@ -336,14 +348,20 @@ class TFBartForConditionalGeneration(
     BART_START_DOCSTRING,
 )
 class TFBartForSequenceClassification(
-    TFBartPretrainedModel, TFSequenceClassificationLoss
+    TFBartPretrainedModel,
+    TFSequenceClassificationLoss,
 ):
     def __init__(
-        self, config: BartConfig, load_weight_prefix=..., *inputs, **kwargs
+        self,
+        config: BartConfig,
+        load_weight_prefix=...,
+        *inputs,
+        **kwargs,
     ) -> None: ...
     @add_start_docstrings_to_model_forward(BART_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFSeq2SeqSequenceClassifierOutput, config_class=_CONFIG_FOR_DOC
+        output_type=TFSeq2SeqSequenceClassifierOutput,
+        config_class=_CONFIG_FOR_DOC,
     )
     @unpack_inputs
     def call(

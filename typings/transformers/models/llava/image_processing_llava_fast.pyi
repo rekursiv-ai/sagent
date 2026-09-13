@@ -31,7 +31,9 @@ class LlavaImageProcessorFast(BaseImageProcessorFast):
     def __init__(self, **kwargs: Unpack[LlavaFastImageProcessorKwargs]) -> None: ...
     @auto_docstring
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[LlavaFastImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[LlavaFastImageProcessorKwargs],
     ) -> BatchFeature: ...
     def pad_to_square(
         self,

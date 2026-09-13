@@ -8,7 +8,12 @@ prims = ...
 
 @SymbolicGridFn
 def flex_decoding_grid(
-    batch_size, kv_heads, gqa_group_size, n_keys, d_model, meta
+    batch_size,
+    kv_heads,
+    gqa_group_size,
+    n_keys,
+    d_model,
+    meta,
 ) -> tuple[Any, Any, Literal[1]]: ...
 
 flex_decoding_template = ...

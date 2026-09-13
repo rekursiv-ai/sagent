@@ -32,7 +32,12 @@ _onnx_symbolic = ...
 @_onnx_symbolic("aten::grid_sampler")
 @symbolic_helper.parse_args("v", "v", "i", "i", "b")
 def grid_sampler(
-    g: jit_utils.GraphContext, input, grid, mode_enum, padding_mode_enum, align_corners
+    g: jit_utils.GraphContext,
+    input,
+    grid,
+    mode_enum,
+    padding_mode_enum,
+    align_corners,
 ): ...
 @_onnx_symbolic("aten::scatter_add")
 @symbolic_helper.parse_args("v", "i", "v", "v")

@@ -54,7 +54,10 @@ class TFGPTJAttention(keras.layers.Layer):
 
 class TFGPTJMLP(keras.layers.Layer):
     def __init__(
-        self, intermediate_size: int, config: GPTJConfig, **kwargs
+        self,
+        intermediate_size: int,
+        config: GPTJConfig,
+        **kwargs,
     ) -> None: ...
     def call(self, hidden_states: tf.Tensor) -> tf.Tensor: ...
     def build(self, input_shape=...):  # -> None:
@@ -148,12 +151,16 @@ class TFGPTJModel(TFGPTJPreTrainedModel):
 class TFGPTJForCausalLM(TFGPTJPreTrainedModel, TFCausalLanguageModelingLoss):
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     def prepare_inputs_for_generation(
-        self, inputs, past_key_values=..., use_cache=..., **kwargs
+        self,
+        inputs,
+        past_key_values=...,
+        use_cache=...,
+        **kwargs,
     ):  # -> dict[str, Any | None]:
         ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        GPTJ_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        GPTJ_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -184,13 +191,14 @@ class TFGPTJForCausalLM(TFGPTJPreTrainedModel, TFCausalLanguageModelingLoss):
     GPTJ_START_DOCSTRING,
 )
 class TFGPTJForSequenceClassification(
-    TFGPTJPreTrainedModel, TFSequenceClassificationLoss
+    TFGPTJPreTrainedModel,
+    TFSequenceClassificationLoss,
 ):
     _keys_to_ignore_on_load_missing = ...
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        GPTJ_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        GPTJ_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -225,7 +233,7 @@ class TFGPTJForQuestionAnswering(TFGPTJPreTrainedModel, TFQuestionAnsweringLoss)
     def __init__(self, config, *inputs, **kwargs) -> None: ...
     @unpack_inputs
     @add_start_docstrings_to_model_forward(
-        GPTJ_INPUTS_DOCSTRING.format("batch_size, sequence_length")
+        GPTJ_INPUTS_DOCSTRING.format("batch_size, sequence_length"),
     )
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,

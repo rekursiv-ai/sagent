@@ -57,7 +57,8 @@ class BltTransformerLayer(GradientCheckpointingLayer):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = ...,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor: ...
@@ -75,7 +76,12 @@ def eager_attention_forward(
 def rotate_half(x):  # -> Tensor:
     ...
 def apply_rotary_pos_emb(
-    q, k, cos, sin, position_ids=..., unsqueeze_dim=...
+    q,
+    k,
+    cos,
+    sin,
+    position_ids=...,
+    unsqueeze_dim=...,
 ):  # -> tuple[Any, Any]:
     ...
 
@@ -96,7 +102,10 @@ class BltSelfAttention(nn.Module):
 
 class BltCrossAttention(nn.Module):
     def __init__(
-        self, config: BltConfig, layer_idx: int, hidden_size: int | None = ...
+        self,
+        config: BltConfig,
+        layer_idx: int,
+        hidden_size: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -178,7 +187,8 @@ class BltGlobalTransformer(BltPreTrainedModel):
         ...
 
 def process_patch_lengths(
-    patch_lengths: torch.Tensor, max_patch_length: int | None
+    patch_lengths: torch.Tensor,
+    max_patch_length: int | None,
 ) -> torch.Tensor: ...
 
 class BltPatcher(BltPreTrainedModel):
@@ -201,7 +211,10 @@ class BltPatcher(BltPreTrainedModel):
         ...
     @staticmethod
     def patch_lengths_from_entropies(
-        entropies, sequence_length, patch_size=..., threshold=...
+        entropies,
+        sequence_length,
+        patch_size=...,
+        threshold=...,
     ):  # -> Tensor:
         ...
 

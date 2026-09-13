@@ -20,7 +20,11 @@ class OverlappedOptimizer(ABC):
 @register_overlapped(Optimizer)
 class _OverlappedStandardOptimizer(OverlappedOptimizer):
     def __init__(
-        self, optim_cls: type, params, *optim_args, **optim_kwargs
+        self,
+        optim_cls: type,
+        params,
+        *optim_args,
+        **optim_kwargs,
     ) -> None: ...
     def register_ddp(self, ddp_inst: DistributedDataParallel) -> None: ...
     def register_fsdp(self, fsdp: FullyShardedDataParallel) -> None: ...

@@ -29,33 +29,48 @@ class InformerFeatureEmbedder(nn.Module):
 class InformerStdScaler(nn.Module):
     def __init__(self, config: InformerConfig) -> None: ...
     def forward(
-        self, data: torch.Tensor, observed_indicator: torch.Tensor
+        self,
+        data: torch.Tensor,
+        observed_indicator: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 class InformerMeanScaler(nn.Module):
     def __init__(self, config: InformerConfig) -> None: ...
     def forward(
-        self, data: torch.Tensor, observed_indicator: torch.Tensor
+        self,
+        data: torch.Tensor,
+        observed_indicator: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 class InformerNOPScaler(nn.Module):
     def __init__(self, config: InformerConfig) -> None: ...
     def forward(
-        self, data: torch.Tensor, observed_indicator: torch.Tensor | None = ...
+        self,
+        data: torch.Tensor,
+        observed_indicator: torch.Tensor | None = ...,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
 class InformerSinusoidalPositionalEmbedding(nn.Embedding):
     def __init__(
-        self, num_positions: int, embedding_dim: int, padding_idx: int | None = ...
+        self,
+        num_positions: int,
+        embedding_dim: int,
+        padding_idx: int | None = ...,
     ) -> None: ...
     @torch.no_grad()
     def forward(
@@ -153,7 +168,9 @@ class InformerEncoderLayer(GradientCheckpointingLayer):
         output_attentions: bool | None = ...,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]: ...
 
 class InformerDecoderLayer(GradientCheckpointingLayer):
@@ -172,7 +189,8 @@ class InformerDecoderLayer(GradientCheckpointingLayer):
         use_cache: bool | None = ...,
         cache_position: torch.Tensor | None = ...,
     ) -> tuple[
-        torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None
+        torch.FloatTensor,
+        tuple[torch.FloatTensor, torch.FloatTensor] | None,
     ]: ...
 
 class InformerEncoder(InformerPreTrainedModel):
@@ -206,14 +224,19 @@ class InformerDecoder(InformerPreTrainedModel):
         cache_position: torch.LongTensor | None = ...,
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple | BaseModelOutputWithPastAndCrossAttentions: ...
 
 @auto_docstring
 class InformerModel(InformerPreTrainedModel):
     def __init__(self, config: InformerConfig) -> None: ...
     def get_lagged_subsequences(
-        self, sequence: torch.Tensor, subsequences_length: int, shift: int = ...
+        self,
+        sequence: torch.Tensor,
+        subsequences_length: int,
+        shift: int = ...,
     ) -> torch.Tensor: ...
     def create_network_inputs(
         self,
@@ -252,10 +275,13 @@ class InformerModel(InformerPreTrainedModel):
     ) -> Seq2SeqTSModelOutput | tuple: ...
 
 def weighted_average(
-    input_tensor: torch.Tensor, weights: torch.Tensor | None = ..., dim=...
+    input_tensor: torch.Tensor,
+    weights: torch.Tensor | None = ...,
+    dim=...,
 ) -> torch.Tensor: ...
 def nll(
-    input: torch.distributions.Distribution, target: torch.Tensor
+    input: torch.distributions.Distribution,
+    target: torch.Tensor,
 ) -> torch.Tensor: ...
 
 @auto_docstring
@@ -269,7 +295,11 @@ class InformerForPrediction(InformerPreTrainedModel):
         ...
     @torch.jit.ignore
     def output_distribution(
-        self, params, loc=..., scale=..., trailing_n=...
+        self,
+        params,
+        loc=...,
+        scale=...,
+        trailing_n=...,
     ) -> torch.distributions.Distribution: ...
     @auto_docstring
     def forward(

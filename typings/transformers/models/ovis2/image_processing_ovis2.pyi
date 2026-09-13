@@ -11,7 +11,8 @@ logger = ...
 
 @lru_cache(maxsize=10)
 def get_all_supported_aspect_ratios(
-    min_image_tiles: int, max_image_tiles: int
+    min_image_tiles: int,
+    max_image_tiles: int,
 ) -> list[tuple[int, int]]: ...
 @lru_cache(maxsize=100)
 def get_optimal_tiled_canvas(
@@ -21,10 +22,16 @@ def get_optimal_tiled_canvas(
     max_image_tiles: int,
 ) -> tuple[int, int]: ...
 def compute_patch_covering_area(
-    left: int, upper: int, right: int, lower: int, side: int
+    left: int,
+    upper: int,
+    right: int,
+    lower: int,
+    side: int,
 ) -> float: ...
 def split_image_into_grid(
-    h: int, w: int, grid: tuple[int, int]
+    h: int,
+    w: int,
+    grid: tuple[int, int],
 ) -> list[tuple[int, int, int, int]]: ...
 @lru_cache(maxsize=100)
 def get_min_tile_covering_grid(

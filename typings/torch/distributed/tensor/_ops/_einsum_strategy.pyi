@@ -15,5 +15,8 @@ class EinsumDims:
     def parse_dims(cls, input_dims: list[str], output_dim: str) -> EinsumDims: ...
 
 def gen_einsum_strategies(
-    equation: str, mesh: DeviceMesh, *, linearity: bool = ...
+    equation: str,
+    mesh: DeviceMesh,
+    *,
+    linearity: bool = ...,
 ) -> OpStrategy: ...

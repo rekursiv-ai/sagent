@@ -59,7 +59,11 @@ class TFSamMLPBlock(keras.layers.Layer):
 
 class TFSamLayerNorm(keras.layers.Layer):
     def __init__(
-        self, normalized_shape, eps=..., data_format=..., **kwargs
+        self,
+        normalized_shape,
+        eps=...,
+        data_format=...,
+        **kwargs,
     ) -> None: ...
     def build(self, input_shape):  # -> None:
         ...
@@ -147,7 +151,10 @@ class TFSamMaskEmbedding(keras.layers.Layer):
 
 class TFSamPromptEncoder(keras.layers.Layer):
     def __init__(
-        self, config: SamPromptEncoderConfig, shared_patch_embedding, **kwargs
+        self,
+        config: SamPromptEncoderConfig,
+        shared_patch_embedding,
+        **kwargs,
     ) -> None: ...
     def build(self, input_shape=...):  # -> None:
         ...
@@ -165,7 +172,10 @@ class TFSamVisionAttention(keras.layers.Layer):
     def build(self, input_shape=...):  # -> None:
         ...
     def get_rel_pos(
-        self, q_size: int, k_size: int, rel_pos: tf.Tensor
+        self,
+        q_size: int,
+        k_size: int,
+        rel_pos: tf.Tensor,
     ) -> tf.Tensor: ...
     def get_decomposed_rel_pos(
         self,
@@ -176,13 +186,18 @@ class TFSamVisionAttention(keras.layers.Layer):
         k_size: tuple[int, int],
     ) -> tf.Tensor: ...
     def call(
-        self, hidden_states: tf.Tensor, output_attentions=..., training=...
+        self,
+        hidden_states: tf.Tensor,
+        output_attentions=...,
+        training=...,
     ) -> tf.Tensor: ...
 
 class TFSamVisionLayer(keras.layers.Layer):
     def __init__(self, config, window_size, **kwargs) -> None: ...
     def window_partition(
-        self, hidden_states: tf.Tensor, window_size: int
+        self,
+        hidden_states: tf.Tensor,
+        window_size: int,
     ) -> tuple[tf.Tensor, tuple[int, int]]: ...
     def window_unpartition(
         self,
@@ -245,7 +260,8 @@ class TFSamVisionModel(TFSamPreTrainedModel):
     @unpack_inputs
     @add_start_docstrings_to_model_forward(SAM_VISION_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=TFSamVisionEncoderOutput, config_class=SamVisionConfig
+        output_type=TFSamVisionEncoderOutput,
+        config_class=SamVisionConfig,
     )
     def call(
         self,
@@ -300,7 +316,8 @@ class TFSamModel(TFSamPreTrainedModel):
         **kwargs,
     ) -> TFSamImageSegmentationOutput | tuple[tf.Tensor]: ...
     def serving_output(
-        self, output: TFSamImageSegmentationOutput
+        self,
+        output: TFSamImageSegmentationOutput,
     ) -> TFSamImageSegmentationOutput: ...
     def build(self, input_shape=...):  # -> None:
         ...

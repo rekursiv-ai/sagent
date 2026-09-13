@@ -47,33 +47,43 @@ class BatchPointwiseOpsFusionFactory(BatchFusion):
 @register_fusion("batch_linear_post_grad", pre_grad=False)
 class PostGradBatchLinearFusion(BatchFusion):
     def match(
-        self, node: torch.fx.Node
+        self,
+        node: torch.fx.Node,
     ) -> tuple[str, int, int, int, bool, str] | None: ...
     def fuse(
-        self, graph: torch.fx.GraphModule, subset: list[torch.fx.Node]
+        self,
+        graph: torch.fx.GraphModule,
+        subset: list[torch.fx.Node],
     ) -> None: ...
 
 @register_fusion("group_linear", pre_grad=False)
 class GroupLinearFusion(GroupFusion):
     def match(self, node: torch.fx.Node) -> tuple[str, bool] | None: ...
     def fuse(
-        self, graph: torch.fx.GraphModule, subset: list[torch.fx.Node]
+        self,
+        graph: torch.fx.GraphModule,
+        subset: list[torch.fx.Node],
     ) -> None: ...
 
 class BatchPointwiseMathOpsPostGradFusion(BatchPointwiseOpsFusionFactory):
     def __init__(self, op, **kwargs) -> None: ...
     def match(
-        self, node: torch.fx.Node
+        self,
+        node: torch.fx.Node,
     ) -> tuple[Any, str, str, str, str, str, str] | None: ...
     def fuse(
-        self, graph: torch.fx.GraphModule, subset: list[torch.fx.Node]
+        self,
+        graph: torch.fx.GraphModule,
+        subset: list[torch.fx.Node],
     ) -> None: ...
 
 @register_fusion("batch_linear_lhs")
 class BatchLinearLHSFusion(BatchFusion):
     def match(self, node: torch.fx.Node) -> tuple[str, bool, Any] | None: ...
     def fuse(
-        self, graph: torch.fx.GraphModule, subset: list[torch.fx.Node]
+        self,
+        graph: torch.fx.GraphModule,
+        subset: list[torch.fx.Node],
     ) -> None: ...
 
 def is_linear_node_can_be_fused(node: torch.fx.Node) -> bool: ...
@@ -81,40 +91,52 @@ def is_linear_node_can_be_fused(node: torch.fx.Node) -> bool: ...
 @register_fusion("batch_linear")
 class PreGradBatchLinearFusion(BatchFusion):
     def match(
-        self, node: torch.fx.Node
+        self,
+        node: torch.fx.Node,
     ) -> tuple[Literal[batch_linear], Argument, str, str, bool, str] | None: ...
     def fuse(
-        self, graph: torch.fx.GraphModule, subset: list[torch.fx.Node]
+        self,
+        graph: torch.fx.GraphModule,
+        subset: list[torch.fx.Node],
     ) -> None: ...
 
 @register_fusion("batch_layernorm")
 class BatchLayernormFusion(BatchFusion):
     def match(
-        self, node: torch.fx.Node
+        self,
+        node: torch.fx.Node,
     ) -> tuple[Literal[batch_layernorm], str, str, str, str, str, str] | None: ...
     def fuse(
-        self, graph: torch.fx.GraphModule, subset: list[torch.fx.Node]
+        self,
+        graph: torch.fx.GraphModule,
+        subset: list[torch.fx.Node],
     ) -> None: ...
 
 class BatchPointwiseOpsPreGradFusion(BatchPointwiseOpsFusionFactory):
     def __init__(self, op, **kwargs) -> None: ...
     def match(self, node: torch.fx.Node) -> tuple[Any, str, str, str] | None: ...
     def fuse(
-        self, graph: torch.fx.GraphModule, subset: list[torch.fx.Node]
+        self,
+        graph: torch.fx.GraphModule,
+        subset: list[torch.fx.Node],
     ) -> None: ...
 
 class BatchPointwiseOpsPostGradFusion(BatchPointwiseOpsFusionFactory):
     def __init__(self, op, **kwargs) -> None: ...
     def match(self, node: torch.fx.Node) -> tuple[Any, str, str, str] | None: ...
     def fuse(
-        self, graph: torch.fx.GraphModule, subset: list[torch.fx.Node]
+        self,
+        graph: torch.fx.GraphModule,
+        subset: list[torch.fx.Node],
     ) -> None: ...
 
 class BatchMathOpsPreGradFusion(BatchPointwiseOpsFusionFactory):
     def __init__(self, op, **kwargs) -> None: ...
     def match(self, node: torch.fx.Node) -> str | None: ...
     def fuse(
-        self, graph: torch.fx.GraphModule, subset: list[torch.fx.Node]
+        self,
+        graph: torch.fx.GraphModule,
+        subset: list[torch.fx.Node],
     ) -> None: ...
 
 @register_fusion("batch_tanh")
@@ -177,7 +199,8 @@ class _OrderedSet:
     def __iter__(self) -> Iterator[Any]: ...
 
 def find_independent_subset_greedy(
-    node_list: Iterable[torch.fx.Node], graph_search_options: dict[str, Any]
+    node_list: Iterable[torch.fx.Node],
+    graph_search_options: dict[str, Any],
 ) -> Iterator[Iterable[torch.fx.Node]]: ...
 def get_fusion_candidates(
     rule: GroupBatchFusionBase,
@@ -185,9 +208,11 @@ def get_fusion_candidates(
     fused_set: OrderedSet[torch.fx.Node],
 ) -> collections.defaultdict[Any, list[torch.fx.Node]]: ...
 def apply_group_batch_fusion(
-    graph: torch.fx.GraphModule, rule: GroupBatchFusionBase
+    graph: torch.fx.GraphModule,
+    rule: GroupBatchFusionBase,
 ) -> None: ...
 def generate_fusion_from_config(
-    config_options: dict[str, Any], pre_grad=...
+    config_options: dict[str, Any],
+    pre_grad=...,
 ) -> list[GroupBatchFusionBase]: ...
 def group_batch_fusion_passes(graph: torch.fx.Graph, pre_grad=...) -> None: ...

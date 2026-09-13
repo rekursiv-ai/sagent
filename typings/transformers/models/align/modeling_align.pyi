@@ -55,7 +55,8 @@ def align_loss(similarity: torch.Tensor) -> torch.Tensor: ...
 def round_filters(config: AlignVisionConfig, num_channels: int):  # -> int:
     ...
 def correct_pad(
-    kernel_size: int | tuple, adjust: bool = ...
+    kernel_size: int | tuple,
+    adjust: bool = ...,
 ):  # -> tuple[Any, Any, Any, Any]:
     ...
 
@@ -79,7 +80,11 @@ class AlignVisionDepthwiseConv2d(nn.Conv2d):
 
 class AlignVisionExpansionLayer(nn.Module):
     def __init__(
-        self, config: AlignVisionConfig, in_dim: int, out_dim: int, stride: int
+        self,
+        config: AlignVisionConfig,
+        in_dim: int,
+        out_dim: int,
+        stride: int,
     ) -> None: ...
     def forward(self, hidden_states: torch.FloatTensor) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
@@ -118,7 +123,9 @@ class AlignVisionFinalBlockLayer(nn.Module):
         id_skip: bool,
     ) -> None: ...
     def forward(
-        self, embeddings: torch.FloatTensor, hidden_states: torch.FloatTensor
+        self,
+        embeddings: torch.FloatTensor,
+        hidden_states: torch.FloatTensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -147,7 +154,9 @@ class AlignVisionEncoder(nn.Module):
         return_dict: bool | None = ...,
     ) -> BaseModelOutputWithPoolingAndNoAttention: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> BaseModelOutputWithPoolingAndNoAttention: ...
 
 class AlignTextEmbeddings(nn.Module):
@@ -189,7 +198,9 @@ class AlignTextSelfAttention(nn.Module):
 class AlignTextSelfOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -215,7 +226,9 @@ class AlignTextIntermediate(nn.Module):
 class AlignTextOutput(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        input_tensor: torch.Tensor,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -263,7 +276,9 @@ class AlignTextModel(AlignPreTrainedModel):
     config: AlignTextConfig
     _no_split_modules = ...
     def __init__(
-        self, config: AlignTextConfig, add_pooling_layer: bool = ...
+        self,
+        config: AlignTextConfig,
+        add_pooling_layer: bool = ...,
     ) -> None: ...
     def get_input_embeddings(self):  # -> Embedding:
         ...
@@ -319,7 +334,8 @@ class AlignModel(AlignPreTrainedModel):
     @filter_out_non_signature_kwargs()
     @auto_docstring
     def get_image_features(
-        self, pixel_values: torch.FloatTensor
+        self,
+        pixel_values: torch.FloatTensor,
     ) -> torch.FloatTensor: ...
     @can_return_tuple
     @auto_docstring

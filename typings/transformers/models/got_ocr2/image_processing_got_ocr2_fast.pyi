@@ -35,7 +35,9 @@ class GotOcr2ImageProcessorFast(BaseImageProcessorFast):
     def __init__(self, **kwargs: Unpack[GotOcr2FastImageProcessorKwargs]) -> None: ...
     @auto_docstring
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[GotOcr2FastImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[GotOcr2FastImageProcessorKwargs],
     ) -> BatchFeature: ...
     def crop_image_to_patches(
         self,
@@ -48,7 +50,10 @@ class GotOcr2ImageProcessorFast(BaseImageProcessorFast):
     ):  # -> Tensor:
         ...
     def get_number_of_image_patches(
-        self, height: int, width: int, images_kwargs=...
+        self,
+        height: int,
+        width: int,
+        images_kwargs=...,
     ):  # -> int:
         ...
 

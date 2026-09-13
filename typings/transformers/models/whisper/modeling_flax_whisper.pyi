@@ -181,12 +181,16 @@ class FlaxWhisperPreTrainedModel(FlaxPreTrainedModel):
     def enable_gradient_checkpointing(self):  # -> None:
         ...
     def init_weights(
-        self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...
+        self,
+        rng: jax.random.PRNGKey,
+        input_shape: tuple,
+        params: FrozenDict = ...,
     ) -> FrozenDict: ...
     def init_cache(self, batch_size, max_length, encoder_outputs): ...
     @add_start_docstrings(WHISPER_ENCODE_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=FlaxBaseModelOutput, config_class=WhisperConfig
+        output_type=FlaxBaseModelOutput,
+        config_class=WhisperConfig,
     )
     def encode(
         self,
@@ -266,13 +270,15 @@ class FlaxWhisperForConditionalGenerationModule(nn.Module):
         ...
 
 @add_start_docstrings(
-    "The Whisper Model with a language modeling head.", WHISPER_START_DOCSTRING
+    "The Whisper Model with a language modeling head.",
+    WHISPER_START_DOCSTRING,
 )
 class FlaxWhisperForConditionalGeneration(FlaxWhisperPreTrainedModel):
     dtype: jnp.dtype = ...
     @add_start_docstrings(WHISPER_DECODE_INPUTS_DOCSTRING)
     @replace_return_docstrings(
-        output_type=FlaxCausalLMOutputWithCrossAttentions, config_class=WhisperConfig
+        output_type=FlaxCausalLMOutputWithCrossAttentions,
+        config_class=WhisperConfig,
     )
     def decode(
         self,
@@ -338,7 +344,10 @@ class FlaxWhisperForAudioClassificationModule(nn.Module):
 class FlaxWhisperForAudioClassification(FlaxWhisperPreTrainedModel):
     dtype: jnp.dtype = ...
     def init_weights(
-        self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = ...
+        self,
+        rng: jax.random.PRNGKey,
+        input_shape: tuple,
+        params: FrozenDict = ...,
     ) -> FrozenDict: ...
     @add_start_docstrings_to_model_forward(WHISPER_INPUTS_DOCSTRING)
     def __call__(

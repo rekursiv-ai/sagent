@@ -19,7 +19,10 @@ def aot_dispatch_base_graph(
     *,
     fw_metadata: ViewAndMutationMeta,
 ) -> tuple[
-    torch.fx.GraphModule, list[FxValue], list[AOTInput], SubclassMeta | None
+    torch.fx.GraphModule,
+    list[FxValue],
+    list[AOTInput],
+    SubclassMeta | None,
 ]: ...
 def aot_dispatch_autograd_graph(
     flat_fn: TraceFn,

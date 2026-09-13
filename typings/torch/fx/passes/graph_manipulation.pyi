@@ -30,7 +30,8 @@ class size_bytes(NamedTuple):
 
 @compatibility(is_backward_compatible=False)
 def get_size_of_all_nodes(
-    fx_module: GraphModule, args: list[torch.Tensor] | None = ...
+    fx_module: GraphModule,
+    args: list[torch.Tensor] | None = ...,
 ) -> None: ...
 @compatibility(is_backward_compatible=False)
 def get_tensor_meta(node: Node) -> Any: ...

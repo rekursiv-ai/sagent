@@ -9,7 +9,12 @@ __all__ = ["BNReLU2d", "BNReLU3d"]
 class BNReLU2d(nnq.BatchNorm2d):
     _FLOAT_MODULE = torch.ao.nn.intrinsic.BNReLU2d
     def __init__(
-        self, num_features, eps=..., momentum=..., device=..., dtype=...
+        self,
+        num_features,
+        eps=...,
+        momentum=...,
+        device=...,
+        dtype=...,
     ) -> None: ...
     def forward(self, input) -> Any: ...
     def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
@@ -21,7 +26,12 @@ class BNReLU2d(nnq.BatchNorm2d):
 class BNReLU3d(nnq.BatchNorm3d):
     _FLOAT_MODULE = torch.ao.nn.intrinsic.BNReLU3d
     def __init__(
-        self, num_features, eps=..., momentum=..., device=..., dtype=...
+        self,
+        num_features,
+        eps=...,
+        momentum=...,
+        device=...,
+        dtype=...,
     ) -> None: ...
     def forward(self, input) -> Any: ...
     def __call__(self, *args: Any, **kwargs: Any) -> Any: ...

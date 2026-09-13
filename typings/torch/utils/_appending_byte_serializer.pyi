@@ -30,5 +30,7 @@ class AppendingByteSerializer(Generic[T]):
     def to_bytes(self) -> bytes: ...
     @staticmethod
     def to_list(
-        data: bytes, *, deserialize_fn: Callable[[BytesReader], T]
+        data: bytes,
+        *,
+        deserialize_fn: Callable[[BytesReader], T],
     ) -> list[T]: ...

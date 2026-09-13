@@ -82,7 +82,7 @@ def inject_background_status(
         lines.append(f"- [{qid}] {job.tool_name}: {status} ({elapsed}s {when})")
     if lines:
         text = "Active background tasks (re-surfaced post-compaction):\n" + "\n".join(
-            lines
+            lines,
         )
         append_to_first_user(history, text)
 

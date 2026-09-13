@@ -27,7 +27,9 @@ def lambda_init_fn(layer_idx):  # -> float:
 
 class DiffLlamaAttention(nn.Module):
     def __init__(
-        self, config: DiffLlamaConfig, layer_idx: int | None = ...
+        self,
+        config: DiffLlamaConfig,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(

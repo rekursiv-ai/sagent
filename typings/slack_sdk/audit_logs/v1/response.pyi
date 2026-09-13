@@ -12,5 +12,10 @@ class AuditLogsResponse:
     @property
     def typed_body(self) -> LogsResponse | None: ...
     def __init__(
-        self, *, url: str, status_code: int, raw_body: str | None, headers: dict
+        self,
+        *,
+        url: str,
+        status_code: int,
+        raw_body: str | None,
+        headers: dict,
     ) -> None: ...

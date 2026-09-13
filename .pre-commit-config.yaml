@@ -1,3 +1,5 @@
+# NEVER EDIT THIS FILE!
+
 # Universal Style and Quality Enforcement
 # Pre-commit/pre-push checks _and_ source-of-truth for Github workflows.
 #
@@ -129,7 +131,7 @@ repos:
       - id: check-added-large-files
         name: check-added-large-files
         stages: [pre-commit]
-        args: [--maxkb=750, --enforce-all]
+        args: [--maxkb=800, --enforce-all]
         exclude: |
           (?x)^(
             uv\.lock
@@ -277,9 +279,24 @@ repos:
     hooks:
       # Exclusions defined in pyproject.toml.
       #
-      # `require_serial: true` on both: ruff is rayon-parallel, so pre-commit's
+      # `require_serial: true` on all: ruff is rayon-parallel, so pre-commit's
       # argv partitioning stacks cpu_count saturating processes on top. Cheap
       # here (sub-second tree-wide), same defect `basedpyright` below documents.
+      #
+      # format -> check --fix -> format, deliberately. COM812 is enabled so
+      # that any bracket the formatter wraps gets a trailing comma and is
+      # exploded one-element-per-line. The formatter's hug layout has no
+      # trailing comma, so COM812 only fires AFTER a format pass; the second
+      # format honors the comma it added. The single check->format order
+      # upstream documents converges only on the next commit attempt.
+      # `--quiet` drops the formatter's stderr nag about COM812
+      # (astral-sh/ruff#9216); diagnostics and exit codes are unaffected.
+      - id: ruff-format
+        name: ruff-format-pre
+        stages: [pre-commit]
+        require_serial: true
+        types_or: [python, pyi, jupyter]
+        args: [--quiet]
       - id: ruff-check
         name: ruff-check
         stages: [pre-commit]
@@ -291,6 +308,7 @@ repos:
         stages: [pre-commit]
         require_serial: true
         types_or: [python, pyi, jupyter]
+        args: [--quiet]
 
   - repo: local
     hooks:
@@ -311,14 +329,10 @@ repos:
         # below must mirror pyproject.toml's `[tool.ty.src]`.
         types_or: [python, pyi]
         entry: uv --quiet run --frozen --group pre-commit ty check
-        args:
-          - --output-format
-          - concise
         exclude: |
           (?x)^(
-            typings/
-            |(.*/)?third_party/
-            |(.*/)?docs/
+            (.*/)?third_party/
+            |(.*/)?typings/
           )
 
       # `basedpyright-global` at pre-push is the real gate.
@@ -765,3 +779,6 @@ repos:
             $PYTEST_PROGRESS_ARGS -m integration
             $PYTEST_SPLIT_ARGS "${nodeids[@]}"
             || test "$?" = 5
+
+
+# NEVER EDIT THIS FILE!

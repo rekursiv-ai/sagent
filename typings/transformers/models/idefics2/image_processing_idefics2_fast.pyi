@@ -15,11 +15,13 @@ from ...utils import auto_docstring
 logger = ...
 
 def get_resize_output_image_size(
-    image: torch.Tensor, size: SizeDict
+    image: torch.Tensor,
+    size: SizeDict,
 ) -> tuple[int, int]: ...
 def get_max_height_width(images_list: list[list[torch.Tensor]]) -> tuple[int, int]: ...
 def make_pixel_mask(
-    image: torch.Tensor, output_size: tuple[int, int]
+    image: torch.Tensor,
+    output_size: tuple[int, int],
 ) -> torch.Tensor: ...
 
 class Idefics2FastImageProcessorKwargs(DefaultFastImageProcessorKwargs):
@@ -49,11 +51,16 @@ class Idefics2ImageProcessorFast(BaseImageProcessorFast):
     ) -> torch.Tensor: ...
     def split_images(self, images: torch.Tensor) -> list[torch.Tensor]: ...
     def pad(
-        self, image: torch.Tensor, padded_size: tuple[int, int], fill: int = ...
+        self,
+        image: torch.Tensor,
+        padded_size: tuple[int, int],
+        fill: int = ...,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
     @auto_docstring
     def preprocess(
-        self, images: ImageInput, **kwargs: Unpack[Idefics2FastImageProcessorKwargs]
+        self,
+        images: ImageInput,
+        **kwargs: Unpack[Idefics2FastImageProcessorKwargs],
     ) -> BatchFeature: ...
 
 __all__ = ["Idefics2ImageProcessorFast"]

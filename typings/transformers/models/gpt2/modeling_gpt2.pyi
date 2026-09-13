@@ -25,7 +25,13 @@ logger = ...
 
 def load_tf_weights_in_gpt2(model, config, gpt2_checkpoint_path): ...
 def eager_attention_forward(
-    module, query, key, value, attention_mask, head_mask=..., **kwargs
+    module,
+    query,
+    key,
+    value,
+    attention_mask,
+    head_mask=...,
+    **kwargs,
 ):  # -> tuple[Tensor, Any]:
     ...
 
@@ -50,7 +56,8 @@ class GPT2Attention(nn.Module):
 class GPT2MLP(nn.Module):
     def __init__(self, intermediate_size, config) -> None: ...
     def forward(
-        self, hidden_states: tuple[torch.FloatTensor] | None
+        self,
+        hidden_states: tuple[torch.FloatTensor] | None,
     ) -> torch.FloatTensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.FloatTensor: ...
 

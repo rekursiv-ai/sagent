@@ -49,7 +49,7 @@ def validate_tool_input(
         "\nThis tool call was not executed because its JSON directive was missing "
         "or misstated required fields. Do not repeat the same empty or incomplete "
         "call. Either retry this tool with the required fields, choose a different "
-        "tool that fits the task, or explain why the required value is unavailable."
+        "tool that fits the task, or explain why the required value is unavailable.",
     )
     return "\n".join(parts)
 

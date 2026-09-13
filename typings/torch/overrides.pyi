@@ -51,7 +51,10 @@ def wrap_torch_function(
     dispatcher: Callable,
 ) -> Callable[..., _Wrapped[..., Any, ..., Any]]: ...
 def handle_torch_function(
-    public_api: Callable, relevant_args: Iterable[Any], *args, **kwargs
+    public_api: Callable,
+    relevant_args: Iterable[Any],
+    *args,
+    **kwargs,
 ) -> Any: ...
 
 has_torch_function = ...

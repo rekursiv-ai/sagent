@@ -29,7 +29,8 @@ inductor_config = ...
 use_buck = ...
 
 def wrap_compiler_debug(
-    unconfigured_compiler_fn: _CompileFxCallable, compiler_name: str
+    unconfigured_compiler_fn: _CompileFxCallable,
+    compiler_name: str,
 ) -> _CompileFxCallable: ...
 def maybe_fbcode_instructions() -> str: ...
 def generate_compiler_repro_string(
@@ -63,7 +64,9 @@ def dump_compiler_graph_state(
     accuracy: str | bool | None = ...,
 ) -> None: ...
 def dump_to_minify(
-    gm: torch.fx.GraphModule, args: Sequence[Any], compiler_name: str
+    gm: torch.fx.GraphModule,
+    args: Sequence[Any],
+    compiler_name: str,
 ) -> None: ...
 def isolate_fails(
     fx_g: torch.fx.GraphModule,
@@ -76,7 +79,9 @@ def isolate_fails(
     check_str: str | None = ...,
 ) -> bool: ...
 def inductor_fails(
-    fx_g: torch.fx.GraphModule, args: Sequence[Any], check_str: str | None = ...
+    fx_g: torch.fx.GraphModule,
+    args: Sequence[Any],
+    check_str: str | None = ...,
 ) -> bool: ...
 def inductor_accuracy_fails(
     fx_g: torch.fx.GraphModule,
@@ -90,7 +95,9 @@ def inductor_accuracy_fails(
 backend_aot_accuracy_fails = ...
 
 def repro_common(
-    options: Any, mod: nn.Module, load_args: Any
+    options: Any,
+    mod: nn.Module,
+    load_args: Any,
 ) -> tuple[torch.fx.GraphModule, Sequence[Any]]: ...
 
 ACCURACY_FAILS: dict[str, Callable[[torch.fx.GraphModule, Any], bool]] = ...
@@ -103,7 +110,9 @@ def repro_analyze(options: Any, mod: nn.Module, load_args: Any) -> None:
     class ReaderInterp(fx.Interpreter): ...
 
 def repro_get_args(
-    options: Any, mod: nn.Module, load_args: Any
+    options: Any,
+    mod: nn.Module,
+    load_args: Any,
 ) -> tuple[torch.fx.GraphModule, list[Any]]: ...
 def repro_run(options: Any, mod: nn.Module, load_args: Any) -> None: ...
 def run_repro(

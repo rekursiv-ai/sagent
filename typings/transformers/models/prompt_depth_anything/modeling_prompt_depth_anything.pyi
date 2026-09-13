@@ -22,7 +22,11 @@ class PromptDepthAnythingPreActResidualLayer(nn.Module):
 class PromptDepthAnythingFeatureFusionLayer(nn.Module):
     def __init__(self, config: PromptDepthAnythingConfig) -> None: ...
     def forward(
-        self, hidden_state, residual=..., size=..., prompt_depth=...
+        self,
+        hidden_state,
+        residual=...,
+        size=...,
+        prompt_depth=...,
     ):  # -> Any:
         ...
 
@@ -34,7 +38,10 @@ class PromptDepthAnythingFeatureFusionStage(nn.Module):
 class PromptDepthAnythingDepthEstimationHead(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: list[torch.Tensor], patch_height: int, patch_width: int
+        self,
+        hidden_states: list[torch.Tensor],
+        patch_height: int,
+        patch_width: int,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -47,7 +54,10 @@ class PromptDepthAnythingPreTrainedModel(PreTrainedModel):
 
 class PromptDepthAnythingReassembleLayer(nn.Module):
     def __init__(
-        self, config: PromptDepthAnythingConfig, channels: int, factor: int
+        self,
+        config: PromptDepthAnythingConfig,
+        channels: int,
+        factor: int,
     ) -> None: ...
     def forward(self, hidden_state):  # -> Any:
         ...
@@ -55,7 +65,10 @@ class PromptDepthAnythingReassembleLayer(nn.Module):
 class PromptDepthAnythingReassembleStage(nn.Module):
     def __init__(self, config) -> None: ...
     def forward(
-        self, hidden_states: list[torch.Tensor], patch_height=..., patch_width=...
+        self,
+        hidden_states: list[torch.Tensor],
+        patch_height=...,
+        patch_width=...,
     ) -> list[torch.Tensor]: ...
     def __call__(self, *args: Any, **kwargs: Any) -> list[torch.Tensor]: ...
 

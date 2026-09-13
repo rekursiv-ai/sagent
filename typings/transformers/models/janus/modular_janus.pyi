@@ -124,7 +124,9 @@ class JanusCausalLMOutputWithPast(IdeficsCausalLMOutputWithPast): ...
 
 class JanusVisionEmbeddings(SiglipVisionEmbeddings):
     def forward(
-        self, pixel_values: torch.Tensor, interpolate_pos_encoding: bool = ...
+        self,
+        pixel_values: torch.Tensor,
+        interpolate_pos_encoding: bool = ...,
     ) -> torch.Tensor: ...
     def __call__(self, *args: Any, **kwargs: Any) -> torch.Tensor: ...
 
@@ -160,7 +162,8 @@ class JanusVisionAlignerMLP(nn.Module):
 class JanusVQVAEVectorQuantizer(ChameleonVQVAEVectorQuantizer):
     def __init__(self, config: JanusVQVAEConfig) -> None: ...
     def get_codebook_entry(
-        self, image_tokens: torch.LongTensor
+        self,
+        image_tokens: torch.LongTensor,
     ) -> torch.FloatTensor: ...
 
 class JanusVQVAEResnetBlock(ChameleonVQVAEEncoderResnetBlock): ...
@@ -195,7 +198,8 @@ class JanusVQVAE(ChameleonVQVAE):
     @can_return_tuple
     @auto_docstring
     def forward(
-        self, pixel_values: torch.FloatTensor
+        self,
+        pixel_values: torch.FloatTensor,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]: ...
 
 class JanusVQVAEAlignerMLP(nn.Module):
@@ -250,7 +254,8 @@ class JanusForConditionalGeneration(JanusPreTrainedModel, GenerationMixin):
     def set_input_embeddings(self, value):  # -> None:
         ...
     def prepare_embeddings_for_image_generation(
-        self, inputs: torch.Tensor
+        self,
+        inputs: torch.Tensor,
     ) -> torch.Tensor: ...
     @can_return_tuple
     @auto_docstring

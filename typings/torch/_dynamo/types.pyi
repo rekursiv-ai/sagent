@@ -97,5 +97,7 @@ class ProfilerEndHook(Protocol):
 
 class BytecodeHook(Protocol):
     def __call__(
-        self, code: types.CodeType, new_code: types.CodeType
+        self,
+        code: types.CodeType,
+        new_code: types.CodeType,
     ) -> types.CodeType | None: ...

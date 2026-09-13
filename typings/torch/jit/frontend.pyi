@@ -31,10 +31,20 @@ class Builder:
     def __call__(self, ctx, node) -> Any: ...
 
 def build_class_def(
-    ctx, py_def, methods, properties, self_name, assigns
+    ctx,
+    py_def,
+    methods,
+    properties,
+    self_name,
+    assigns,
 ) -> ClassDef: ...
 def build_def(
-    ctx, py_def, type_line, def_name, self_name=..., pdt_arg_types=...
+    ctx,
+    py_def,
+    type_line,
+    def_name,
+    self_name=...,
+    pdt_arg_types=...,
 ) -> Def: ...
 
 _vararg_kwarg_err = ...

@@ -63,7 +63,9 @@ class Pix2StructVisionLayer(GradientCheckpointingLayer):
         output_attentions: bool = ...,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
     def __call__(
-        self, *args: Any, **kwargs: Any
+        self,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]: ...
 
 class Pix2StructVisionEncoder(nn.Module):
@@ -124,7 +126,11 @@ class Pix2StructTextAttention(nn.Module):
         layer_idx: int | None = ...,
     ) -> None: ...
     def compute_bias(
-        self, query_length, key_length, device=..., cache_position=...
+        self,
+        query_length,
+        key_length,
+        device=...,
+        cache_position=...,
     ):  # -> Any:
         ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
@@ -145,7 +151,10 @@ class Pix2StructTextAttention(nn.Module):
 
 class Pix2StructTextLayerSelfAttention(nn.Module):
     def __init__(
-        self, config, has_relative_attention_bias=..., layer_idx: int | None = ...
+        self,
+        config,
+        has_relative_attention_bias=...,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(
@@ -181,7 +190,10 @@ class Pix2StructTextLayerCrossAttention(nn.Module):
 
 class Pix2StructTextBlock(GradientCheckpointingLayer):
     def __init__(
-        self, config, has_relative_attention_bias=..., layer_idx: int | None = ...
+        self,
+        config,
+        has_relative_attention_bias=...,
+        layer_idx: int | None = ...,
     ) -> None: ...
     @deprecate_kwarg("past_key_value", new_name="past_key_values", version="4.58")
     def forward(

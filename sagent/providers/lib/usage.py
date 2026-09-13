@@ -49,10 +49,10 @@ def anthropic_usage(headers: Mapping[str, str]) -> UsageSnapshot | None:
     windows: list[UsageWindow] = []
     for window in ("5h", "7d"):
         util = _finite_float(
-            headers.get(f"anthropic-ratelimit-unified-{window}-utilization")
+            headers.get(f"anthropic-ratelimit-unified-{window}-utilization"),
         )
         reset = _finite_float(
-            headers.get(f"anthropic-ratelimit-unified-{window}-reset")
+            headers.get(f"anthropic-ratelimit-unified-{window}-reset"),
         )
         status = headers.get(f"anthropic-ratelimit-unified-{window}-status")
         if util is None and reset is None and status is None and not omnibus_blocked:
@@ -66,7 +66,7 @@ def anthropic_usage(headers: Mapping[str, str]) -> UsageSnapshot | None:
                 utilization=None if util is None else max(0.0, min(1.0, util)),
                 resets_at=reset,
                 blocked=omnibus_blocked or window_blocked,
-            )
+            ),
         )
     if not windows:
         return None
@@ -105,7 +105,7 @@ def openai_usage(headers: Mapping[str, str]) -> UsageSnapshot | None:
                 utilization=util,
                 resets_at=None if delay is None else time.time() + delay,
                 blocked=remaining is not None and remaining <= 0,
-            )
+            ),
         )
     if not windows:
         return None
@@ -128,24 +128,19 @@ def _finite_float(raw: str | None) -> float | None:
     return value if math.isfinite(value) else None
 
 
-# Duration segments like ``"6m"``, ``"0s"``, ``"500ms"``. ``ms`` precedes the
-# single-letter alternatives so it is matched before a bare ``m`` + ``s``.
-_DURATION_SEGMENT = re.compile(r"(\d+(?:\.\d+)?)(ms|[dhms])")
-
-
+# Returns the duration as seconds-from-now (a delta); the caller converts it to a wall-
+# clock epoch. A bare ``"0"`` (reset is now) yields ``0.0``.
 def _openai_reset_seconds(raw: str | None) -> float | None:
-    """Parse an OpenAI reset duration (e.g. ``"6m0s"``, ``"500ms"``) to seconds.
-
-    Returns the duration as seconds-from-now (a delta); the caller converts it
-    to a wall-clock epoch. A bare ``"0"`` (reset is now) yields ``0.0``.
-    """
+    """Parse an OpenAI reset duration (e.g. ``"6m0s"``, ``"500ms"``) to seconds."""
     if raw is None:
         return None
     text = raw.strip().lower()
     if not text:
         return None
     unit_sec = {"d": 86_400.0, "h": 3_600.0, "m": 60.0, "s": 1.0, "ms": 0.001}
-    matches = list(_DURATION_SEGMENT.finditer(text))
+    # Duration segments like ``"6m"``, ``"0s"``, ``"500ms"``. ``ms`` precedes the
+    # single-letter alternatives so it is matched before a bare ``m`` + ``s``.
+    matches = list(re.finditer(r"(\d+(?:\.\d+)?)(ms|[dhms])", text))
     consumed = sum(len(m.group(0)) for m in matches)
     if consumed != len(text):
         # Allow a bare numeric (e.g. ``"0"``) meaning seconds; reject the rest.
