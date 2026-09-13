@@ -341,8 +341,8 @@ def _honor_dotfile_rule(matches: list[Path], *, pattern: str, root: Path) -> lis
 
 
 def _plain_line(p: Path) -> str:
-    """Render one resolved path, newline-terminated for the token bound."""
-    return f"{p.resolve()}\n"
+    resolved = p.resolve()
+    return f"{resolved}\n"
 
 
 def _long_line(p: Path) -> str:

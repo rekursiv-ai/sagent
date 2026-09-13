@@ -840,31 +840,22 @@ def _request_entries(
     entries = _elide_skill_results(entries)
     entries = _drop_orphan_tool_results(entries)
     if tool_result_cap_chars > 0:
-        entries = _cap_tool_results(entries, cap_chars=tool_result_cap_chars)
+        entries = [
+            dataclasses.replace(
+                entry,
+                content=f"{_COMPACTOR_TOOL_RESULT_NOTICE}\n{entry.content[:tool_result_cap_chars]}",
+            )
+            if (
+                isinstance(entry, ToolResult)
+                and len(entry.content) > tool_result_cap_chars
+                and not entry.content.startswith(_COMPACTOR_TOOL_RESULT_NOTICE)
+            )
+            else entry
+            for entry in entries
+        ]
     if entries and not isinstance(entries[0], (AgentSendMessage, UserMessage)):
         return [UserMessage(text="[earlier messages elided]"), *entries]
     return entries
-
-
-def _cap_tool_results(
-    entries: list[ModelContextEvent],
-    *,
-    cap_chars: int,
-) -> list[ModelContextEvent]:
-    """Truncate any ``ToolResult`` body above ``cap_chars``, idempotently."""
-    return [
-        dataclasses.replace(
-            entry,
-            content=f"{_COMPACTOR_TOOL_RESULT_NOTICE}\n{entry.content[:cap_chars]}",
-        )
-        if (
-            isinstance(entry, ToolResult)
-            and len(entry.content) > cap_chars
-            and not entry.content.startswith(_COMPACTOR_TOOL_RESULT_NOTICE)
-        )
-        else entry
-        for entry in entries
-    ]
 
 
 # Skill bodies are derived from ``(name, cwd)`` via the live catalog; summarizing them

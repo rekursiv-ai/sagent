@@ -83,7 +83,9 @@ def render_status_pane(agent: Agent) -> str:
         else 0.0
     )
     reason = (
-        _wait_reason(agent, current_turn_elapsed) if _has_live_activity(agent) else ""
+        _wait_reason(agent, current_turn_elapsed)
+        if agent.activity.active or agent.activity.current_compact_start > 0.0
+        else ""
     )
     bracket = f"[{metrics}{f'; {reason}' if reason else ''}]"
     if activity.current_compact_start > 0.0:
@@ -95,10 +97,6 @@ def render_status_pane(agent: Agent) -> str:
         frame = _SPINNER[int(live_delta * 5) % len(_SPINNER)]
         return f"{frame} {bracket}"
     return bracket
-
-
-def _has_live_activity(agent: Agent) -> bool:
-    return agent.activity.active or agent.activity.current_compact_start > 0.0
 
 
 def _wait_reason(agent: Agent, elapsed: float) -> str:

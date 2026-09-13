@@ -76,7 +76,7 @@ def infer_provider(
           be mapped.
 
     """
-    if _is_local_model_path(model_id):
+    if model_id.startswith(("/", "./", "../", "~/")):
         return ("SelfHosted", model_id)
 
     prefer_account = current_provider in _ACCOUNT_PROVIDERS
@@ -171,8 +171,3 @@ def default_auth_for_provider(provider_name: str) -> str:
     if hasattr(cls, "from_key"):
         return "key"
     raise AttributeError(f"provider {provider_name!r} has no default auth method")
-
-
-def _is_local_model_path(model_id: str) -> bool:
-    """Return whether ``model_id`` looks like a local HF snapshot path."""
-    return model_id.startswith(("/", "./", "../", "~/"))

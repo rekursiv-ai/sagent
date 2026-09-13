@@ -111,7 +111,10 @@ def coerce_kwargs(cls: type, overrides: Mapping[str, str]) -> dict[str, object]:
         for name, p in params.items()
         if name != "self"
         and p.kind is p.KEYWORD_ONLY
-        and _is_cli_settable(hints.get(name))
+        and (
+            get_origin(hints.get(name)) is Annotated
+            and CLI_SETTABLE in get_args(hints.get(name))[1:]
+        )
     ]
     kwargs: dict[str, object] = {}
     for key, raw in overrides.items():
@@ -122,13 +125,6 @@ def coerce_kwargs(cls: type, overrides: Mapping[str, str]) -> dict[str, object]:
             )
         kwargs[key] = _coerce(cls.__name__, key, _unwrap(hints[key]), raw)
     return kwargs
-
-
-def _is_cli_settable(annotation: object) -> bool:
-    """Whether a parameter opted into command-line configuration."""
-    return (
-        get_origin(annotation) is Annotated and CLI_SETTABLE in get_args(annotation)[1:]
-    )
 
 
 # Two wrappers hide it. ``Annotated[T, ...]`` carries the ``CLI_SETTABLE`` marker, and a

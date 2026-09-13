@@ -105,11 +105,6 @@ _CREDENTIALS_SCHEMA: Final[JSON] = {
 }
 
 
-def _resolved_creds_path() -> Path:
-    """Resolve Gemini CLI's vendor credential path."""
-    return _CREDS_PATH.expanduser()
-
-
 class GoogleCLICredentials(TypedDict):
     """OAuth credentials from the Gemini CLI credentials file."""
 
@@ -909,7 +904,7 @@ class _GoogleCLIModel(ModelDefaults):
             src = self._tmpdir / ".gemini" / "oauth_creds.json"
             if not src.exists():
                 return
-            target = credentials_path(_resolved_creds_path(), self._provider.account)
+            target = credentials_path(_CREDS_PATH.expanduser(), self._provider.account)
             async with credential_file_lock(target):
                 # Re-check expiry under the cross-process lock so a sibling
                 # that just wrote a fresher token won't get clobbered.

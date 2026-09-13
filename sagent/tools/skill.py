@@ -202,7 +202,7 @@ class Skill:
               skills, or empty string when none are discovered.
 
         """
-        return format_listing(_discover_for_state(get_tool_state()))
+        return format_listing(discover(get_tool_state().bash_cwd))
 
     async def post_compact_restore(
         self,
@@ -397,8 +397,3 @@ def _scan_skill_dir(
     for sub in sorted(skill_dir.iterdir()):
         if sub.is_dir():
             _scan_skill_dir(sub, source, out, visited)
-
-
-def _discover_for_state(tool_state: ToolState) -> list[SkillInfo]:
-    """Discover skills for the active tool state."""
-    return discover(tool_state.bash_cwd)

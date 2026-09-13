@@ -383,7 +383,7 @@ def _begin_navigation(queues: InputQueues, nav: NavState, buf: Buffer) -> None:
         )
     stops.extend(
         Stop(kind=StopKind.HISTORY, loaded=entry, current=entry)
-        for entry in reversed(_history_strings(buf))
+        for entry in reversed(list(buf.history.get_strings()))
     )
     if len(stops) == 1:
         return  # Nothing above the input -- no-op.
@@ -486,11 +486,6 @@ def _kb_newline(event: KeyPressEvent) -> None:
 
 
 # The walk reads the REPL history file (prompt-toolkit ``FileHistory``).
-def _history_strings(buf: Buffer) -> list[str]:
-    """Return the sagent input history entries, oldest-first."""
-    return list(buf.history.get_strings())
-
-
 def _kb_history_prefix_back(event: KeyPressEvent) -> None:
     """Walk history backward to the next entry matching the pre-cursor prefix."""
     buf = event.current_buffer

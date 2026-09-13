@@ -295,7 +295,23 @@ async def run_live(config_name: str, trials: int) -> dict[str, Any]:
             "end_correct": len(end_correct),
         },
         "panels": {"low_tier": low, "high_tier": high, "self_mutate": hero},
-        "self_mutate_trials": [_slim(s) for s in self_runs],
+        "self_mutate_trials": [
+            {
+                k: s[k]
+                for k in (
+                    "swapped",
+                    "first_verdict",
+                    "final_verdict",
+                    "correct",
+                    "self_report",
+                    "cost_usd",
+                    "n_runs",
+                    "n_checks",
+                    "error",
+                )
+            }
+            for s in self_runs
+        ],
         "hist": hist,
     }
     out = _CWD / "web" / "data.js"
@@ -441,23 +457,6 @@ def _provider(provider_name: str):
     if provider_name == "Google":
         return Google.from_key(key) if key else Google.from_env()
     return Anthropic.from_key(key) if key else Anthropic.from_env()
-
-
-def _slim(s: dict[str, Any]) -> dict[str, Any]:
-    return {
-        k: s[k]
-        for k in (
-            "swapped",
-            "first_verdict",
-            "final_verdict",
-            "correct",
-            "self_report",
-            "cost_usd",
-            "n_runs",
-            "n_checks",
-            "error",
-        )
-    }
 
 
 def _pick_provider() -> str:

@@ -1036,7 +1036,16 @@ def _build_provider_model_fallback(
     allow_providers: tuple[str, ...],
 ) -> tuple[Provider, Model, str]:
     """Try another subscription provider for implicit startup auth failures."""
-    if not _allow_implicit_provider_fallback(args):
+    if any(
+        bool(getattr(args, name, False))
+        for name in (
+            "provider_explicit",
+            "provider_from_resume",
+            "auth_explicit",
+            "account_explicit",
+            "model_explicit",
+        )
+    ):
         raise RuntimeError(
             _credential_error_message(
                 str(args.provider),
@@ -1073,20 +1082,6 @@ def _build_provider_model_fallback(
             account=args.account,
         ),
     ) from error
-
-
-def _allow_implicit_provider_fallback(args: argparse.Namespace) -> bool:
-    """Return whether startup may change provider instead of failing."""
-    return not any(
-        bool(getattr(args, name, False))
-        for name in (
-            "provider_explicit",
-            "provider_from_resume",
-            "auth_explicit",
-            "account_explicit",
-            "model_explicit",
-        )
-    )
 
 
 def _credential_fallback_providers(
