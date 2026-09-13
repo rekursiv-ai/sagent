@@ -361,7 +361,11 @@ class Read:
                 continue
             if inv.exe == "sed" and not _sed_reads(inv.args):
                 continue
-            if any(_has_glob(a) for a in inv.args if not a.startswith("-")):
+            if any(
+                (any(ch in a for ch in "*?["))
+                for a in inv.args
+                if not a.startswith("-")
+            ):
                 continue
             hint = f"{inv.exe} via Bash is a bad UX. Use the Read tool."
             return f"{hint} Replaces: `{render_command(inv)}`.{_read_call(inv)}"
@@ -547,11 +551,6 @@ def _window_text(
             f" Use offset={shown_through + 1} to continue.)"
         )
     return body
-
-
-def _has_glob(arg: str) -> bool:
-    """Whether a positional is a shell glob rather than a literal path."""
-    return any(ch in arg for ch in "*?[")
 
 
 # Runs after detection, so an unrecognised flag costs the caller a worked example rather

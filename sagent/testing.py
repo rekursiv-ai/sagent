@@ -251,11 +251,6 @@ class _NullModel:
         return AssistantMessage(text="")
 
 
-def _new_runtime() -> sagent.agent.runtime.AgentRuntime:
-    """Build a fresh ``AgentRuntime`` wired to a null model."""
-    return sagent.agent.runtime.AgentRuntime(model=_NullModel())
-
-
 class _NullRichModel(MockModelCaps):
     """Rich-``Model`` stand-in backing ``FakeAgent.model``.
 
@@ -296,7 +291,7 @@ class FakeAgent:
     """Divisor backing :meth:`approx_text_tokens`."""
 
     runtime: sagent.agent.runtime.AgentRuntime = field(
-        default_factory=_new_runtime,
+        default_factory=lambda: sagent.agent.runtime.AgentRuntime(model=_NullModel()),
     )
     """Real ``AgentRuntime`` with a null model; its observers list
     captures every published event."""

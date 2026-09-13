@@ -121,10 +121,6 @@ def _next_message_id() -> int:
         return next(_id_counter)
 
 
-def _empty_headers() -> dict[str, str]:
-    return {}
-
-
 def reset_id_counter(start: int) -> None:
     """Advance the ``SessionMessage`` id counter to ``start`` (forward-only).
 
@@ -712,7 +708,7 @@ class ServiceErrorSnapshot:
     status: int | None = None
     """HTTP status code, when known."""
 
-    headers: Mapping[str, str] = dataclasses.field(default_factory=_empty_headers)
+    headers: Mapping[str, str] = dataclasses.field(default_factory=dict[str, str])
     """Allowlisted diagnostic response headers."""
 
     body: str = ""

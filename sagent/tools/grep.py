@@ -550,7 +550,11 @@ def _search_args(inv: Invocation) -> tuple[str, ...] | None:
     # Ask through ``operands`` so a producer's flag VALUE is not counted
     # as a second path -- ``head -n 20 f`` spends its ``20`` on the flag.
     source = inv.piped_from
-    paths = [a for a in operands(source.exe, source.args) if not _is_sed_script(a)]
+    paths = [
+        a
+        for a in operands(source.exe, source.args)
+        if not bool(_SED_SCRIPT.fullmatch(a))
+    ]
     if len(paths) != 1:
         return None
     return (*inv.args, paths[0])
@@ -558,11 +562,6 @@ def _search_args(inv: Invocation) -> tuple[str, ...] | None:
 
 # ``sed -n '1,50p' f`` puts the script in operand position, so a producer's path cannot
 # be recovered by counting operands alone.
-def _is_sed_script(arg: str) -> bool:
-    """Whether ``arg`` is a bare ``sed`` script rather than a path."""
-    return bool(_SED_SCRIPT.fullmatch(arg))
-
-
 # A ``sed`` address plus command (``5p``, ``1,50p``, ``10,$p``) or a
 # substitution -- the spellings that appear where a path would.
 _SED_SCRIPT: Final = re.compile(r"\d+(,(\d+|\$))?[a-z]|s/.*/.*/[a-z]*")

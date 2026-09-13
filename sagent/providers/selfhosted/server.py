@@ -403,7 +403,9 @@ class SelfHosted:
                 model_id,
                 _module_device(model),
             )
-            model = _compile_model(model)
+            model = cast(
+                "nn.Module", cast(Callable[[object], object], torch.compile)(model)
+            )
             logger.info(
                 "Compiled SelfHosted model model_id=%s elapsed_sec=%.2f",
                 model_id,
@@ -838,11 +840,6 @@ def _generate(
 def _disable_generate_cache(device: str) -> bool:
     """Return whether generation should avoid KV caching."""
     return device.startswith("mps")
-
-
-def _compile_model(model: nn.Module) -> nn.Module:
-    """Wrap a model with torch.compile."""
-    return cast("nn.Module", cast(Callable[[object], object], torch.compile)(model))
 
 
 def _module_device(model: nn.Module) -> str:

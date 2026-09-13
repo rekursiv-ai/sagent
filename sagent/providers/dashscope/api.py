@@ -47,11 +47,6 @@ from sagent.types.model import (
 _NON_REASONING_MARKERS = frozenset({"instruct", "coder"})
 
 
-def _is_non_reasoning_variant(model_id: str) -> bool:
-    """Check whether ``model_id`` carries a non-reasoning marker as a hyphen segment."""
-    return bool(_NON_REASONING_MARKERS.intersection(model_id.split("-")))
-
-
 class _DashScopeModel(OpenAICompatModel):
     """DashScope backend - reasoning_content, enable_thinking routing."""
 
@@ -63,7 +58,7 @@ class _DashScopeModel(OpenAICompatModel):
     @override
     def _is_effort_model(self, model_id: str) -> bool:
         """Check whether Qwen3/QwQ/QvQ models accept ``enable_thinking``."""
-        if _is_non_reasoning_variant(model_id):
+        if bool(_NON_REASONING_MARKERS.intersection(model_id.split("-"))):
             return False
         # Prefixes WITHOUT a trailing hyphen match both the hyphenated ids
         # (``qwen3-32b``) and the dotted generation ids (``qwen3.6-plus``, the

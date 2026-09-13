@@ -1363,7 +1363,7 @@ class Agent:
 
         The runtime publishes a boot ``AgentIdle`` at the top of the first
         ``run_forever`` iteration -- before any work, with empty history.
-        That boot edge is suppressed by :func:`_is_work_idle`; the method
+        That boot edge is suppressed while history is empty; the method
         returns only on the first idle where the agent has actually
         produced work.
 
@@ -1393,7 +1393,7 @@ class Agent:
             # produced no work idle, so returning lets the caller surface the
             # error instead of blocking until the (still-live) loop is shut down.
             if isinstance(event, runtime.ModelResponseError) or (
-                isinstance(event, runtime.AgentIdle) and _is_work_idle(self.history)
+                isinstance(event, runtime.AgentIdle) and bool(self.history)
             ):
                 first_idle.set()
 
@@ -2225,11 +2225,6 @@ def _context_overflow_error(
 # marker of that boot edge. Shared by :meth:`Agent.drive_until_first_idle` (which must
 # not return on boot) and the persistent-child forwarder (which must not spam a boot
 # ping).
-def _is_work_idle(history: list[runtime.ModelContextEvent]) -> bool:
-    """Return True when an ``AgentIdle`` reflects real work, not the boot transition."""
-    return bool(history)
-
-
 # The default result extractor for :meth:`Agent.drive_until_first_idle` when the caller
 # supplies none. ``AgentSpawn`` passes its own ``AgentSend``-aware extractor instead.
 def _default_last_assistant_result(

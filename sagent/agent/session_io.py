@@ -858,7 +858,7 @@ def load_session(
                 # records that supplied their own ref.
                 ordinal_cursor = max(
                     ordinal_cursor,
-                    _record_ordinal(tape[-1]) + 1 if tape else 0,
+                    (tape[-1].ref.ordinal) + 1 if tape else 0,
                 )
     except OSError:
         logger.warning("Could not read session file, starting fresh.")
@@ -961,6 +961,10 @@ def restore_model(
         return None
 
 
+# Only descriptors that match the wire-known media prefixes round-trip; unknown
+# descriptors are dropped silently rather than constructing a ``BytesMessage`` the
+# downstream provider would reject (or worse, mis-route if a tampered session injects a
+# non-attachment descriptor).
 def _att_to_json(att: BytesMessage) -> dict[str, str]:
     """Encode one ``BytesMessage`` as a ``{mime, data(base64)}`` dict."""
     return {
@@ -969,10 +973,6 @@ def _att_to_json(att: BytesMessage) -> dict[str, str]:
     }
 
 
-# Only descriptors that match the wire-known media prefixes round-trip; unknown
-# descriptors are dropped silently rather than constructing a ``BytesMessage`` the
-# downstream provider would reject (or worse, mis-route if a tampered session injects a
-# non-attachment descriptor).
 def _att_from_json(raw: object) -> BytesMessage | None:
     """Decode one ``{mime, data(base64)}`` dict; return ``None`` on malformed input."""
     if not isinstance(raw, dict):
@@ -1180,6 +1180,13 @@ def _mask_from_json(raw_mask: object) -> tuple[MaskRange, ...]:
     return tuple(ranges)
 
 
+def _tape_record_to_json(record: TapeRecord) -> dict[str, object]:
+    """Dispatch by record type to the appropriate JSON encoder."""
+    if isinstance(record, ReferrableTapeEvent):
+        return _history_record_to_json(record)
+    return _splice_to_json(record)
+
+
 def _history_record_to_json(record: ReferrableTapeEvent) -> dict[str, object]:
     """Encode a ``ReferrableTapeEvent`` as a ``kind=history`` JSON record."""
     return {
@@ -1212,13 +1219,6 @@ def _splice_to_json(splice: ContextSplice) -> dict[str, object]:
         "preserved_tail_count": splice.preserved_tail_count,
         "paired_externally": sorted(splice.paired_externally),
     }
-
-
-def _tape_record_to_json(record: TapeRecord) -> dict[str, object]:
-    """Dispatch by record type to the appropriate JSON encoder."""
-    if isinstance(record, ReferrableTapeEvent):
-        return _history_record_to_json(record)
-    return _splice_to_json(record)
 
 
 def _splice_from_json(
@@ -2008,6 +2008,10 @@ def _sort_tape_by_ordinal(tape: list[TapeRecord]) -> list[TapeRecord]:
     return sorted(tape, key=lambda record: record.ref.ordinal)
 
 
+# Membership is by full ``TapeRef`` identity (session_id + ordinal), not raw ordinal: on
+# a multi-session tape, distinct sessions can share an ordinal, so an ordinal-only test
+# would judge a splice masking only ``A:0`` as also masking ``B:0`` and wrongly classify
+# a non-barrier as a barrier (discarding a valid ``ToolState`` snapshot).
 def _has_later_barrier(
     barrier_candidates: Sequence[tuple[ContextSplice, int]],
     tape: Sequence[TapeRecord],
@@ -2021,10 +2025,6 @@ def _has_later_barrier(
     )
 
 
-# Membership is by full ``TapeRef`` identity (session_id + ordinal), not raw ordinal: on
-# a multi-session tape, distinct sessions can share an ordinal, so an ordinal-only test
-# would judge a splice masking only ``A:0`` as also masking ``B:0`` and wrongly classify
-# a non-barrier as a barrier (discarding a valid ``ToolState`` snapshot).
 def _is_barrier_splice(splice: ContextSplice, tape: Sequence[TapeRecord]) -> bool:
     """Return True when ``splice`` masks every earlier tape record."""
     earlier = [record.ref for record in tape if record.ref.ordinal < splice.ref.ordinal]
@@ -2037,10 +2037,6 @@ def _next_tape_ref(tape: Sequence[TapeRecord]) -> TapeRef:
     """Return the next ordinal ref for ``tape``'s session."""
     last = max(tape, key=lambda record: record.ref.ordinal)
     return TapeRef(session_id=last.ref.session_id, ordinal=last.ref.ordinal + 1)
-
-
-def _record_ordinal(record: TapeRecord) -> int:
-    return record.ref.ordinal
 
 
 def _seed_id_counter(tape: Sequence[TapeRecord]) -> None:

@@ -203,19 +203,6 @@ def _att_v4(descriptor: str, data: bytes) -> dict[str, str]:
     }
 
 
-def _convert_user_text(rec: Mapping[str, object]) -> dict[str, object]:
-    """Translate a v3 ``text/x-user-message`` to a v4 user record."""
-    return {
-        "kind": "history",
-        "type": "user",
-        "text": _part_text(rec),
-        "attachments": [],
-        "id": _id(rec),
-        "parent_id": _parent_id(rec),
-        "timestamp": _legacy_ts_to_seconds(rec.get("_timestamp")),
-    }
-
-
 def _legacy_ts_to_seconds(raw: object) -> float:
     """Normalize a v3 timestamp (seconds or nanoseconds) to float seconds."""
     if isinstance(raw, (int, float)):
@@ -363,7 +350,15 @@ def _convert_message(rec: Mapping[str, object]) -> dict[str, object] | None:
     """Dispatch a v3 message record to the per-descriptor converter."""
     descriptor = str(rec.get("descriptor") or "")
     if descriptor == "text/x-user-message":
-        return _convert_user_text(rec)
+        return {
+            "kind": "history",
+            "type": "user",
+            "text": _part_text(rec),
+            "attachments": [],
+            "id": _id(rec),
+            "parent_id": _parent_id(rec),
+            "timestamp": _legacy_ts_to_seconds(rec.get("_timestamp")),
+        }
     if descriptor == "multipart/x-user-message":
         return _convert_user_multipart(rec)
     if descriptor == "multipart/x-model-message":

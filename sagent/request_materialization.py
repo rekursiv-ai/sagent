@@ -208,7 +208,11 @@ def materialize_messages(
                 # role is not assistant".
                 if (
                     not kept_call_ids
-                    and _assistant_has_payload(materialized)
+                    and bool(
+                        materialized.text
+                        or materialized.thinking_blocks
+                        or materialized.tool_calls
+                    )
                     and (next_newer is None or wire_role(next_newer) != "assistant")
                 ):
                     out_reversed.append(materialized)
@@ -343,11 +347,6 @@ def _same_source(left: ModelContextEvent, right: ModelContextEvent) -> bool:
     if isinstance(left, AgentSendMessage) and isinstance(right, AgentSendMessage):
         return left.source == right.source
     return True
-
-
-def _assistant_has_payload(entry: AssistantMessage) -> bool:
-    """Return whether an assistant turn has provider-visible payload."""
-    return bool(entry.text or entry.thinking_blocks or entry.tool_calls)
 
 
 def _render_truncated(content: str, kept: int) -> str:

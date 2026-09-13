@@ -1046,7 +1046,11 @@ async def _raw_message_stream(
     sdk: anthropic.AsyncAnthropic,
     kwargs: dict[str, object],
 ) -> AsyncStream[RawMessageStreamEvent]:
-    body = {key: value for key, value in kwargs.items() if not _is_request_option(key)}
+    body = {
+        key: value
+        for key, value in kwargs.items()
+        if key not in {"extra_headers", "extra_body", "extra_query", "timeout"}
+    }
     body["stream"] = True
     body = {
         key: value
@@ -1110,10 +1114,6 @@ async def _raise_anthropic_status_error(
         body = json.loads(body_text)
     message = body_text or f"Error code: {response.status_code}"
     raise sdk._make_status_error(message, body=body, response=response)  # noqa: SLF001 -- provider must preserve the SDK's status exception taxonomy.
-
-
-def _is_request_option(key: str) -> bool:
-    return key in {"extra_headers", "extra_body", "extra_query", "timeout"}
 
 
 def _cache_mark(ttl: str) -> dict[str, str]:
@@ -1265,7 +1265,8 @@ def _assistant_blocks(
     blocks: list[dict[str, object]] = [
         dict(tb)
         for tb in entry.thinking_blocks
-        if _is_native_thinking(tb) and not _is_orphan_thinking(tb)
+        if (tb.get("type") in ("thinking", "redacted_thinking"))
+        and not _is_orphan_thinking(tb)
     ]
     if entry.text:
         blocks.append({"type": "text", "text": entry.text})
@@ -1282,11 +1283,6 @@ def _is_orphan_thinking(block: Mapping[str, object]) -> bool:
         and bool(block.get("signature"))
         and not block.get("thinking")
     )
-
-
-def _is_native_thinking(block: Mapping[str, object]) -> bool:
-    """Check whether a block is an Anthropic-native thinking-block type the API accepts."""
-    return block.get("type") in ("thinking", "redacted_thinking")
 
 
 def _tool_use_block(tc: ToolCall, ids: IdRemapper) -> dict[str, object]:

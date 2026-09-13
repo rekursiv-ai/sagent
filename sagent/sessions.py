@@ -132,27 +132,6 @@ def migrate_legacy_home() -> None:
         logger.warning("legacy sagent migration incomplete: %s", exc)
 
 
-# Short-lived but real sessions landed under it, so it stays in the fallback chain even
-# though its ambiguity is exactly what the current encoding fixes.
-def _slug_rule_ambiguous_escape(path: str) -> str:
-    """Pre-prefix-free scheme: ``-`` and ``_`` passed through unescaped."""
-    return re.sub(
-        r"[^a-zA-Z0-9/_-]",
-        lambda m: f"-{m.group().encode('utf-8').hex()}-",
-        path,
-    ).replace("/", "_")
-
-
-def _slug_rule_collapse_except_sep(path: str) -> str:
-    """Pre-escape scheme: every non-alphanumeric except ``/`` became ``-``."""
-    return re.sub(r"[^a-zA-Z0-9/]", "-", path).replace("/", "_")
-
-
-def _slug_rule_collapse_all(path: str) -> str:
-    """Pre-convention scheme: every non-alphanumeric, ``/`` included, became ``-``."""
-    return re.sub(r"[^a-zA-Z0-9]", "-", path)
-
-
 # The historical slug schemes, newest first. ``project_dirs`` walks these
 # so a session written under any prior generation stays resumable: a
 # slug rule change must never strand transcripts on disk.
@@ -163,9 +142,13 @@ def _slug_rule_collapse_all(path: str) -> str:
 # nothing fails loudly -- the sessions simply stop appearing in
 # ``--resume``. This has been missed twice.
 _PRIOR_SLUG_RULES: Final[tuple[Callable[[str], str], ...]] = (
-    _slug_rule_ambiguous_escape,
-    _slug_rule_collapse_except_sep,
-    _slug_rule_collapse_all,
+    lambda path: re.sub(
+        r"[^a-zA-Z0-9/_-]",
+        lambda m: f"-{m.group().encode('utf-8').hex()}-",
+        path,
+    ).replace("/", "_"),
+    lambda path: re.sub(r"[^a-zA-Z0-9/]", "-", path).replace("/", "_"),
+    lambda path: re.sub(r"[^a-zA-Z0-9]", "-", path),
 )
 
 
@@ -812,15 +795,6 @@ def _iter_jsonl(lines: Iterable[str]) -> Iterator[MutableJSON]:
             logger.warning("Skipping non-dict JSONL record: %r", line[:120])
 
 
-def _is_user_text_message(rec: MutableJSON) -> bool:
-    """Detect a user-history record (``kind=history, type=user``)."""
-    return (
-        rec.get("kind") == "history"
-        and rec.get("type") == "user"
-        and isinstance(rec.get("text"), str)
-    )
-
-
 # Returns None if the session file is missing or corrupt. Scans the file to pull the
 # first user prompt and message count without loading everything into memory.
 def _peek_session(session_dir: Path) -> SessionInfo | None:
@@ -862,7 +836,11 @@ def _peek_session(session_dir: Path) -> SessionInfo | None:
                 kind = rec.get("kind")
                 if kind == "history":
                     message_count += 1
-                    if not first_user_msg and _is_user_text_message(rec):
+                    if not first_user_msg and (
+                        rec.get("kind") == "history"
+                        and rec.get("type") == "user"
+                        and isinstance(rec.get("text"), str)
+                    ):
                         first_user_msg = str(rec["text"])
                 elif kind == "meta":
                     model_id = str(rec.get("model_id", ""))

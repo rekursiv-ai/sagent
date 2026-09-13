@@ -215,18 +215,13 @@ async def capture(
     return data
 
 
-def _key() -> str:
-    """Return the API key."""
-    return (
+def _make_model() -> Model:
+    """Fresh provider+model per call → each Agent owns its own SDK (isolated shutdown)."""
+    return Anthropic.from_key(
         (config_dir() / "rekursiv-ai" / "sagent" / "anthropic_api_key")
         .read_text()
         .strip()
-    )
-
-
-def _make_model() -> Model:
-    """Fresh provider+model per call → each Agent owns its own SDK (isolated shutdown)."""
-    return Anthropic.from_key(_key()).model(MODEL)
+    ).model(MODEL)
 
 
 def _lineage(eng: Engine) -> dict[str, str]:

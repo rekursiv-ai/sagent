@@ -87,9 +87,6 @@ from sagent.types.tools import Tool
 
 
 agent_lib = lazy_import("sagent.agent")
-# The concrete module (not the package facade) owns the private
-# ``_is_work_idle`` boot/work-idle predicate shared with the forwarder.
-_agent_module = lazy_import("sagent.agent.agent")
 
 if TYPE_CHECKING:
     from sagent.agent import (
@@ -160,7 +157,142 @@ class AgentSpawn:
             if allow_providers is not None
             else tuple(PROVIDER_NAMES)
         )
-        self.directive_schema: JSON = _build_directive_schema(self._allow_providers)
+        self.directive_schema: JSON = json_freeze(
+            {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Task instruction for the child agent.",
+                    },
+                    "system": {
+                        "type": "string",
+                        "description": (
+                            "Override the child's system prompt. Defaults to"
+                            " inheriting the parent agent's system."
+                        ),
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": (
+                            "Provider class name from ``sagent.providers``"
+                            " (e.g. "
+                            + ", ".join(f"``{n}``" for n in self._allow_providers)
+                            + "). Prefer ``*Subscription`` variants when listed;"
+                            " they reuse the host's logged-in CLI subscription"
+                            " and don't need API-key env vars. Defaults to"
+                            " inheriting the parent's provider."
+                        ),
+                    },
+                    "auth": {
+                        "type": "string",
+                        "description": (
+                            "Auth method suffix - dispatches to"
+                            " a zero-argument ``<Provider>.from_<auth>()``"
+                            " (for example, ``env`` for API-key environment"
+                            " variables, ``credentials`` for subscription"
+                            " providers). Prefer"
+                            " ``credentials`` over ``env`` when the chosen"
+                            " provider supports both. Defaults to inheriting"
+                            " the parent's auth."
+                        ),
+                    },
+                    "model_id": {
+                        "type": "string",
+                        "description": (
+                            "Model ID for the chosen provider (e.g."
+                            " ``claude-sonnet-4-6``, ``gemini-3.1-pro-preview``,"
+                            " ``gpt-5.5``). Defaults to inheriting the parent's"
+                            " model id."
+                        ),
+                    },
+                    "model_options": {
+                        "type": "object",
+                        "description": (
+                            "Provider/model-specific serving knobs:"
+                            " ``thinking``, ``effort``, ``cache_ttl``,"
+                            " ``service_tier``. Fast serving is a model-id"
+                            " option tag: request it via ``model='...+fast'``"
+                            " on supported"
+                            " models. Defaults to inheriting"
+                            " the parent's options."
+                        ),
+                        "additionalProperties": True,
+                    },
+                    "account": {
+                        "type": "string",
+                        "description": (
+                            "Credential account name. Defaults to inheriting"
+                            " the parent's account."
+                        ),
+                    },
+                    "tools": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Tool names to grant the child. Defaults to the"
+                            " parent's full toolset. Pass [] for no tools."
+                        ),
+                    },
+                    "max_tool_call_rounds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": (
+                            "Cap on the child's tool-call rounds (model responses"
+                            " that include one or more tool calls). Must be ≥ 1."
+                        ),
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": (
+                            "Cap on the child's own sub-spawning. 0 makes"
+                            " the child a leaf; omit for unbounded."
+                        ),
+                    },
+                    "persistent": {
+                        "type": "boolean",
+                        "description": (
+                            "Run the child as a persistent agent via"
+                            " serve_forever(). Returns immediately with"
+                            " the child's label. Send messages via"
+                            " AgentSend; manage via BackgroundTask."
+                        ),
+                    },
+                    "notify_on_asleep": {
+                        "type": "boolean",
+                        "description": (
+                            "Persistent only. When true (the default),"
+                            " the parent's inbox receives an"
+                            " AgentSendMessage carrying the child's last"
+                            " assistant text"
+                            " every time the child becomes idle (drained"
+                            " inbox, no work in flight) -- shape"
+                            " '[<label> is idle] <last text>'. Pass false"
+                            " to suppress idle pings entirely. Edge-"
+                            " triggered: one notification per idle"
+                            " transition."
+                        ),
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": (
+                            "Label for the child agent (used for AgentSend"
+                            " routing). Auto-generated if omitted."
+                        ),
+                    },
+                    "hot": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true. Cuts cost and latency by reusing your"
+                            " cached prompt. Omit or set false only if this"
+                            " child must know its own live depth/tool state."
+                        ),
+                    },
+                },
+                "required": ["prompt"],
+            },
+        )
 
     def summary(self, args: Mapping[str, object]) -> str:
         """Return a short label summarizing this spawn call.
@@ -1072,11 +1204,11 @@ class _ChildForwarder:
             # Boot suppression: the runtime publishes its first
             # ``AgentIdle`` at the top of the first ``run_forever``
             # iteration -- i.e. before the child has done any work. The
-            # shared ``_is_work_idle`` predicate (empty history == boot)
-            # suppresses that useless "[child is idle]" ping; without it
+            # The empty-history check suppresses that useless
+            # "[child is idle]" ping; without it
             # every fresh child spams the parent before its seeded prompt
             # is even processed.
-            if not _agent_module._is_work_idle(self._child.history):  # noqa: SLF001 -- Shared boot/work-idle predicate.
+            if not bool(self._child.history):
                 return
             # Latch: skip exactly the first work idle that
             # ``drive_until_first_idle`` already consumed as the spawn
@@ -1261,148 +1393,6 @@ def _current_agent() -> Agent | None:
 def _get_agent_class() -> type[Agent]:
     """Resolve ``sagent.agent.Agent`` lazily."""
     return cast(type[Agent], agent_lib.Agent)
-
-
-# The ``provider`` field's enumeration in the description string is rendered from
-# ``allow_providers``; the rest of the schema is fixed.
-def _build_directive_schema(allow_providers: tuple[str, ...]) -> JSON:
-    """Build the ``AgentSpawn`` directive schema for a given provider allow-list."""
-    return json_freeze(
-        {
-            "type": "object",
-            "properties": {
-                "prompt": {
-                    "type": "string",
-                    "description": "Task instruction for the child agent.",
-                },
-                "system": {
-                    "type": "string",
-                    "description": (
-                        "Override the child's system prompt. Defaults to"
-                        " inheriting the parent agent's system."
-                    ),
-                },
-                "provider": {
-                    "type": "string",
-                    "description": (
-                        "Provider class name from ``sagent.providers``"
-                        " (e.g. "
-                        + ", ".join(f"``{n}``" for n in allow_providers)
-                        + "). Prefer ``*Subscription`` variants when listed;"
-                        " they reuse the host's logged-in CLI subscription"
-                        " and don't need API-key env vars. Defaults to"
-                        " inheriting the parent's provider."
-                    ),
-                },
-                "auth": {
-                    "type": "string",
-                    "description": (
-                        "Auth method suffix - dispatches to"
-                        " a zero-argument ``<Provider>.from_<auth>()``"
-                        " (for example, ``env`` for API-key environment"
-                        " variables, ``credentials`` for subscription"
-                        " providers). Prefer"
-                        " ``credentials`` over ``env`` when the chosen"
-                        " provider supports both. Defaults to inheriting"
-                        " the parent's auth."
-                    ),
-                },
-                "model_id": {
-                    "type": "string",
-                    "description": (
-                        "Model ID for the chosen provider (e.g."
-                        " ``claude-sonnet-4-6``, ``gemini-3.1-pro-preview``,"
-                        " ``gpt-5.5``). Defaults to inheriting the parent's"
-                        " model id."
-                    ),
-                },
-                "model_options": {
-                    "type": "object",
-                    "description": (
-                        "Provider/model-specific serving knobs:"
-                        " ``thinking``, ``effort``, ``cache_ttl``,"
-                        " ``service_tier``. Fast serving is a model-id"
-                        " option tag: request it via ``model='...+fast'``"
-                        " on supported"
-                        " models. Defaults to inheriting"
-                        " the parent's options."
-                    ),
-                    "additionalProperties": True,
-                },
-                "account": {
-                    "type": "string",
-                    "description": (
-                        "Credential account name. Defaults to inheriting"
-                        " the parent's account."
-                    ),
-                },
-                "tools": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "Tool names to grant the child. Defaults to the"
-                        " parent's full toolset. Pass [] for no tools."
-                    ),
-                },
-                "max_tool_call_rounds": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": (
-                        "Cap on the child's tool-call rounds (model responses"
-                        " that include one or more tool calls). Must be ≥ 1."
-                    ),
-                },
-                "max_depth": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": (
-                        "Cap on the child's own sub-spawning. 0 makes"
-                        " the child a leaf; omit for unbounded."
-                    ),
-                },
-                "persistent": {
-                    "type": "boolean",
-                    "description": (
-                        "Run the child as a persistent agent via"
-                        " serve_forever(). Returns immediately with"
-                        " the child's label. Send messages via"
-                        " AgentSend; manage via BackgroundTask."
-                    ),
-                },
-                "notify_on_asleep": {
-                    "type": "boolean",
-                    "description": (
-                        "Persistent only. When true (the default),"
-                        " the parent's inbox receives an"
-                        " AgentSendMessage carrying the child's last"
-                        " assistant text"
-                        " every time the child becomes idle (drained"
-                        " inbox, no work in flight) -- shape"
-                        " '[<label> is idle] <last text>'. Pass false"
-                        " to suppress idle pings entirely. Edge-"
-                        " triggered: one notification per idle"
-                        " transition."
-                    ),
-                },
-                "label": {
-                    "type": "string",
-                    "description": (
-                        "Label for the child agent (used for AgentSend"
-                        " routing). Auto-generated if omitted."
-                    ),
-                },
-                "hot": {
-                    "type": "boolean",
-                    "description": (
-                        "Set true. Cuts cost and latency by reusing your"
-                        " cached prompt. Omit or set false only if this"
-                        " child must know its own live depth/tool state."
-                    ),
-                },
-            },
-            "required": ["prompt"],
-        },
-    )
 
 
 def _pick_field(

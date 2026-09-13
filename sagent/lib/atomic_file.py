@@ -37,7 +37,7 @@ def atomic_write_bytes(
     """
     path = _resolve_symlink(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _tmp_for(path)
+    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
     try:
         if file_mode is None:
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o666)
@@ -67,11 +67,6 @@ def _write_all(fd: int, data: bytes) -> None:
 
 # Two coroutines writing to the same path in the same process would otherwise race on a
 # pid-only name.
-def _tmp_for(path: Path) -> Path:
-    """Sibling tmp path: pid + uuid token for per-writer uniqueness."""
-    return path.with_suffix(path.suffix + f".tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
-
-
 # Symlinks pointing at a not-yet-existing target are left unresolved: ``Path.resolve()``
 # would invent an absolute path under the link's parent, which a subsequent
 # ``mkdir(parents=True)`` would then materialise -- creating foreign directories the

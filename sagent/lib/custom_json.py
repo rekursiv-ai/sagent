@@ -933,7 +933,9 @@ def residual(
             "raw": {
                 key: checked[key]
                 for key in represented
-                if key in checked and _respelled(checked[key])
+                if key in checked
+                and isinstance(checked[key], (int, float))
+                and not isinstance(checked[key], bool)
             },
             "residual": spare,
         },
@@ -4076,7 +4078,7 @@ def _validate_json_enum(enum: object, value: object, path: str) -> list[str]:
     return [
         (
             f"Parameter `{path or '<root>'}` must be one of "
-            f"{_json_enum_values(enum_values)}."
+            f"{', '.join(repr(item) for item in enum_values)}."
         ),
     ]
 
@@ -4158,11 +4160,6 @@ def _schema_strings(value: object) -> list[str]:
     return [item for item in items if isinstance(item, str)]
 
 
-def _json_enum_values(enum: Sequence[object]) -> str:
-    """Return a compact display string for enum values."""
-    return ", ".join(repr(item) for item in enum)
-
-
 def _provider_json_value(key: str, value: object) -> JSONValue:
     """Validate one provider field and name it in failures."""
     try:
@@ -4199,11 +4196,6 @@ def _replay_envelope(stored: Mapping[str, object]) -> dict[str, object] | None:
     if "raw" in envelope and not isinstance(envelope["raw"], Mapping):
         return None
     return envelope
-
-
-def _respelled(value: JSONValue) -> bool:
-    """Whether a round trip could write this value a different way."""
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _runtime_codec_for(value: object) -> type[Codec] | None:

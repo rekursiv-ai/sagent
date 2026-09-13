@@ -985,11 +985,6 @@ def _git_unsafe_flag(args: tuple[str, ...]) -> bool:
     )
 
 
-def _go_env_writes(tail: tuple[str, ...]) -> bool:
-    """``go env -w K=V`` MUTATES the persistent go environment."""
-    return any(a in ("-w", "-u") for a in tail)
-
-
 # Called after the subcommand prefix has matched. Returns False to veto the match.
 def _subcommand_extra_safe(
     exe: str,
@@ -999,7 +994,7 @@ def _subcommand_extra_safe(
     """Apply post-match safety refinement for a matched subcommand."""
     if exe == "git" and prefix in (("branch",), ("tag",)):
         return _git_branch_or_tag_safe(list(tail[len(prefix) :]))
-    if exe == "go" and prefix == ("env",) and _go_env_writes(tail):
+    if exe == "go" and prefix == ("env",) and (any(a in ("-w", "-u") for a in tail)):
         return False
     deny = _SUBCOMMAND_NEXT_DENY.get((exe, prefix[0]))
     return not (

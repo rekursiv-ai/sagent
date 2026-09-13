@@ -585,18 +585,13 @@ def _catalog_lines(d: Mapping[str, object], agent: Agent | None) -> list[str]:
     if catalog is None:
         return []
     if catalog == "providers":
-        return _provider_catalog_lines()
+        return ["Known providers: " + ", ".join(_allowed_providers())]
     if catalog == "models":
         provider = str(d.get("catalog_provider") or "").strip()
         if not provider and agent is not None and agent.model_recipe is not None:
             provider = agent.model_recipe.provider
         return _model_catalog_lines(provider)
     return []
-
-
-def _provider_catalog_lines() -> list[str]:
-    """List providers known to the local build, filtered by allow-list."""
-    return ["Known providers: " + ", ".join(_allowed_providers())]
 
 
 def _model_catalog_lines(provider_name: str) -> list[str]:

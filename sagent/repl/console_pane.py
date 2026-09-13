@@ -307,7 +307,7 @@ class ConsolePrinter:
         """
         if not items:
             return
-        gutter_width = _gutter_width(label)
+        gutter_width = max(14, len(label) + 5 + len(_CHILD_INDENT))
         pfx = _gutter_prefix(label, gutter_width)
         indent = " " * gutter_width
 
@@ -317,7 +317,7 @@ class ConsolePrinter:
             # Never wider than what the gutter leaves: a fixed floor made
             # the composed line exceed the terminal on narrow panes, so
             # every child line wrapped raggedly in the user's console.
-            width=_inner_width(self.console.width, gutter_width),
+            width=max(1, self.console.width - gutter_width),
             force_terminal=self.console.is_terminal,
             color_system=cast(
                 "Literal['auto', 'standard', '256', 'truecolor', 'windows'] | None",
@@ -443,20 +443,10 @@ def _wrap_label(text: str, width: int) -> list[str]:
 # than the terminal leaves. The prior fixed floor of 20 columns did exactly that on a
 # narrow pane: with a 14-column gutter, anything under 34 columns overran the terminal
 # and every child line wrapped raggedly.
-def _inner_width(outer_width: int, gutter_width: int) -> int:
-    """Usable width for a child block's inner console."""
-    return max(1, outer_width - gutter_width)
-
-
 # Format is ``" <label> : "`` -- leading 2-space indent matching parent tool labels,
 # then ``len(label) + 5`` for ``" : "``. Held to a floor of 14 columns for visual
 # consistency when labels are short (``Agent_0`` is the typical case at 14 chars
 # exactly).
-def _gutter_width(label: str) -> int:
-    """Width of the gutter column for a given child label."""
-    return max(14, len(label) + 5 + len(_CHILD_INDENT))
-
-
 def _gutter_prefix(label: str, width: int) -> str:
     """Render the first-line gutter for ``label`` padded to ``width``."""
     pfx = f"{_CHILD_INDENT}{label}  :  "

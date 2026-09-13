@@ -350,7 +350,11 @@ async def _await_detached(
         except asyncio.CancelledError:
             if fut.done():
                 return fut.result()
-            event = _drain_queued_detached(agent, call_id)
+            event = _splice_from_inbox_items(
+                agent,
+                call_id,
+                agent.runtime.inbox.drain_nowait(),
+            )
             if event is not None:
                 return event
             if job.task.cancelled():
@@ -385,15 +389,6 @@ async def _await_detached(
 async def _drain_detached(agent: AgentLike, call_id: str) -> ToolResult | None:
     """Drain one inbox batch and return a matching detached result if present."""
     return _splice_from_inbox_items(agent, call_id, await agent.runtime.inbox.drain())
-
-
-def _drain_queued_detached(agent: AgentLike, call_id: str) -> ToolResult | None:
-    """Drain already-queued inbox items without blocking for new input."""
-    return _splice_from_inbox_items(
-        agent,
-        call_id,
-        agent.runtime.inbox.drain_nowait(),
-    )
 
 
 def _splice_from_inbox_items(

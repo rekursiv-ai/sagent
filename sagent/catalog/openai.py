@@ -20,7 +20,6 @@ from sagent.types.capability import (
     ContextTag,
     ModelCapability,
     ModelLimits,
-    ServiceTier,
     ThinkingEffort,
 )
 from sagent.types.cost import (
@@ -76,8 +75,10 @@ def models() -> Mapping[str, ModelCapability]:
             cache_read=0.4,
             two_tier=True,
         ),
-        service_tier=_tiers(),
-        thinking_effort=_efforts(),
+        service_tier=frozenset({"auto", "default", "flex", "priority"}),
+        thinking_effort=frozenset(
+            {"none", "min", "low", "medium", "high", "xhigh", "max"}
+        ),
         thinking_budget={"none", "auto"},
         thinking_output={"none", "text"},
     )
@@ -397,13 +398,3 @@ def _prices(
             cache_read=cache_read * 2.0,
         )
     return PriceCatalog(rows)
-
-
-def _tiers() -> frozenset[ServiceTier]:
-    """Every tier OpenAI sells; a transport narrows it (Codex: priority only)."""
-    return frozenset({"auto", "default", "flex", "priority"})
-
-
-def _efforts() -> frozenset[ThinkingEffort]:
-    """GPT-5.6's effort ladder, including the ``min`` alias for ``none``."""
-    return frozenset({"none", "min", "low", "medium", "high", "xhigh", "max"})
