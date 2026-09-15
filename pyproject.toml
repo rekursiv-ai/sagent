@@ -115,8 +115,8 @@ test = [
 typecheck = [
     "basedpyright>=1.10",
     "ty>=0.0.75",
-    "rekursiv-typeshed",
-    "hatchling",  # packages/rekursiv-typeshed/rekursiv_typeshed/hatch_build.py imports its plugin interface.
+    "rekursiv-ai-typeshed",
+    "hatchling",  # packages/rekursiv-ai-typeshed/rekursiv_ai_typeshed/hatch_build.py imports its plugin interface.
 ]
 "pre-commit" = [
     "pre-commit>=4.6",
@@ -500,12 +500,12 @@ useLibraryCodeForTypes = false
 # `stubPath` (not `extraPaths`) is the one root that resolves ahead of an
 # installed package's inline types.
 stubPath = "typings"
-# `rekursiv-typeshed` (a `typecheck` dependency): the checkers' bundled stdlib
+# `rekursiv-ai-typeshed` (a `typecheck` dependency): the checkers' bundled stdlib
 # with `int`/`float` `__pow__` returning `float` rather than typeshed's `Any`,
 # which would otherwise make every `x ** 0.5` a `reportAny` violation.
 # `uv sync` installs it as shared data at this path; the `basedpyright/` tree
 # also carries configgle's `Intersection` polyfill.
-typeshedPath = ".venv/share/rekursiv-typeshed/basedpyright"
+typeshedPath = ".venv/share/rekursiv-ai-typeshed/basedpyright"
 # `exclude` and `ignore` are the SAME list on purpose. `exclude` stops a path
 # from being a checked source; `ignore` also silences diagnostics when an
 # included file imports it. Pyright has no single key for both, so keep them
@@ -565,7 +565,7 @@ reportPrivateLocalImportUsage = false
 [tool.ty.environment]
 python-version = "3.12"
 # Same patch as `[tool.basedpyright] typeshedPath`, with ty's real `ty_extensions`.
-typeshed = ".venv/share/rekursiv-typeshed/ty"
+typeshed = ".venv/share/rekursiv-ai-typeshed/ty"
 extra-paths = ["typings"]
 
 # Mirrors `[tool.basedpyright] exclude`, minus entries ty never walks anyway
@@ -639,7 +639,7 @@ url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.uv.sources]
-rekursiv-typeshed = { path = "packages/rekursiv-typeshed" }
+rekursiv-ai-typeshed = { path = "packages/rekursiv-ai-typeshed" }
 configgle = { git = "https://github.com/rekursiv-ai/configgle", branch = "main" }
 priml = { git = "https://github.com/rekursiv-ai/priml", branch = "main" }
 wesearch = { git = "https://github.com/rekursiv-ai/wesearch", branch = "main" }

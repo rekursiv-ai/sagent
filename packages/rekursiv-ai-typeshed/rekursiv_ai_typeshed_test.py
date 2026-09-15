@@ -7,13 +7,13 @@ import re
 import sys
 
 import pytest
-import rekursiv_typeshed
+import rekursiv_ai_typeshed
 
 
 _CWD: Final = Path(__file__).resolve().parent
-_INSTALLED = Path(sys.prefix) / "share" / "rekursiv-typeshed"
-_TYPINGS = _CWD / "rekursiv_typeshed" / "typings"
-_PATCH = _CWD / "rekursiv_typeshed" / "typeshed.patch"
+_INSTALLED = Path(sys.prefix) / "share" / "rekursiv-ai-typeshed"
+_TYPINGS = _CWD / "rekursiv_ai_typeshed" / "typings"
+_PATCH = _CWD / "rekursiv_ai_typeshed" / "typeshed.patch"
 
 _POW_ANY = re.compile(r"def __r?pow__\(.*\) -> Any:")
 
@@ -44,7 +44,9 @@ def test_installed_numeric_pow_returns_float(checker: str) -> None:
 
 def test_installed_tree_matches_the_installed_checkers() -> None:
     """A checker bump without a package rebuild leaves the tree stale."""
-    bundle_commit = (rekursiv_typeshed.bundle_dir() / "commit.txt").read_text().strip()
+    bundle_commit = (
+        (rekursiv_ai_typeshed.bundle_dir() / "commit.txt").read_text().strip()
+    )
     bpr = _INSTALLED / "basedpyright"
     assert (bpr / "stubs.commit.txt").read_text().strip() == bundle_commit
     for checker in ("ty", "basedpyright"):
@@ -69,7 +71,7 @@ def test_installed_trees_carry_the_overlays() -> None:
 
 def test_bundle_still_needs_the_patch(tmp_path: Path) -> None:
     """Upstream fixed it: drop this package instead of carrying a no-op."""
-    rekursiv_typeshed.extract_ty_stdlib(tmp_path)
+    rekursiv_ai_typeshed.extract_ty_stdlib(tmp_path)
     text = (tmp_path / "stdlib" / "builtins.pyi").read_text()
     assert _POW_ANY.search(text) is not None
 
@@ -78,11 +80,11 @@ def test_bundle_still_needs_the_patch(tmp_path: Path) -> None:
 @pytest.mark.compute_large_fixture
 def test_build_is_idempotent(tmp_path: Path) -> None:
     target = tmp_path / "typeshed.d"
-    rekursiv_typeshed.build(target)
+    rekursiv_ai_typeshed.build(target)
     first = {
         p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()
     }
-    rekursiv_typeshed.build(target)
+    rekursiv_ai_typeshed.build(target)
     second = {
         p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()
     }

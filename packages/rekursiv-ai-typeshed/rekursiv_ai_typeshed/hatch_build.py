@@ -31,7 +31,7 @@ class TypeshedBuildHook(BuildHookInterface[WheelBuilderConfig]):
         del version
         # Loaded by path: the package under construction is not importable from
         # the isolated build environment.
-        spec = spec_from_file_location("rekursiv_typeshed.build", _CWD / "build.py")
+        spec = spec_from_file_location("rekursiv_ai_typeshed.build", _CWD / "build.py")
         assert spec is not None
         assert spec.loader is not None
         module = module_from_spec(spec)
@@ -39,7 +39,7 @@ class TypeshedBuildHook(BuildHookInterface[WheelBuilderConfig]):
         build = cast("Callable[[Path], None]", module.build)
         # Outside the source tree: a checker walking the checkout must never see
         # a second, unpatched-looking stdlib.
-        target = Path(tempfile.mkdtemp(prefix="rekursiv-typeshed-")) / "typeshed.d"
+        target = Path(tempfile.mkdtemp(prefix="rekursiv-ai-typeshed-")) / "typeshed.d"
         build(target)
         shared = cast("dict[str, str]", build_data.setdefault("shared_data", {}))
-        shared[str(target)] = "share/rekursiv-typeshed"
+        shared[str(target)] = "share/rekursiv-ai-typeshed"
