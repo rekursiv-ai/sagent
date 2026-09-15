@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from io import BytesIO
+from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
 
 from PIL import Image
 
 import numpy as np
 import pytest
+
+
+if TYPE_CHECKING:
+    from turbojpeg import TurboJPEG
 
 from sagent.lib.image import (
     _parse_crop,
@@ -131,7 +136,7 @@ class TestDecodeJpegTurbojpeg:
     def test_success(self) -> None:
         mock_turbo = MagicMock()
         mock_turbo.decode.return_value = np.ones((10, 10, 3), dtype=np.uint8) * 128
-        arr = decode_jpeg_turbojpeg(b"fake", mock_turbo, 10, 10)
+        arr = decode_jpeg_turbojpeg(b"fake", cast("TurboJPEG", mock_turbo), 10, 10)
         assert arr is not None
         assert arr.shape == (10, 10, 3)
         assert arr.dtype == np.uint8
@@ -143,7 +148,7 @@ class TestDecodeJpegTurbojpeg:
         bgr[:, :, 1] = 20  # G.
         bgr[:, :, 2] = 30  # R.
         mock_turbo.decode.return_value = bgr
-        arr = decode_jpeg_turbojpeg(b"fake", mock_turbo, 2, 2)
+        arr = decode_jpeg_turbojpeg(b"fake", cast("TurboJPEG", mock_turbo), 2, 2)
         assert arr is not None
         # After flip, channels should be R, G, B → [30, 20, 10].
         assert arr[0, 0, 0] == 30
@@ -156,7 +161,7 @@ class TestDecodeJpegTurbojpeg:
         mock_turbo.decode.return_value = np.ones((20, 20, 3), dtype=np.uint8)
         arr = decode_jpeg_turbojpeg(
             b"fake",
-            mock_turbo,
+            cast("TurboJPEG", mock_turbo),
             40,
             40,
             crop=(0, 0, 20, 20),
@@ -167,7 +172,9 @@ class TestDecodeJpegTurbojpeg:
     def test_decode_error(self) -> None:
         mock_turbo = MagicMock()
         mock_turbo.decode.side_effect = RuntimeError("decode failed")
-        assert decode_jpeg_turbojpeg(b"x", mock_turbo, 10, 10) is None
+        assert (
+            decode_jpeg_turbojpeg(b"x", cast("TurboJPEG", mock_turbo), 10, 10) is None
+        )
 
 
 class TestDecodeWebpLibwebp:
@@ -221,7 +228,8 @@ class TestDecodeImagePil:
         arr = decode_image_pil(data, 15, 15)
         assert arr is not None
         assert arr.shape == (15, 15, 3)
-        np.testing.assert_array_equal(arr[0, 0], [0, 255, 0])
+        pixel: np.ndarray = arr[0, 0]  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+        np.testing.assert_array_equal(pixel, [0, 255, 0])
 
     def test_rgba_to_rgb(self) -> None:
         img = Image.new("RGBA", (10, 10), (100, 150, 200, 128))
@@ -238,7 +246,8 @@ class TestDecodeImagePil:
         arr = decode_image_pil(buf.getvalue(), 10, 10, channels_format="rgba")
         assert arr is not None
         assert arr.shape == (10, 10, 4)
-        np.testing.assert_array_equal(arr[0, 0], [100, 150, 200, 128])
+        pixel: np.ndarray = arr[0, 0]  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+        np.testing.assert_array_equal(pixel, [100, 150, 200, 128])
 
     def test_grayscale_to_rgb(self) -> None:
         img = Image.new("L", (10, 10), 128)
@@ -422,9 +431,12 @@ class TestDecodeWebpReal:
         assert arr.shape == (30, 30, 3)
         assert arr.dtype == np.uint8
         # WebP lossy compression, allow tolerance.
-        assert abs(int(arr[0, 0, 0]) - 10) < 10
-        assert abs(int(arr[0, 0, 1]) - 20) < 10
-        assert abs(int(arr[0, 0, 2]) - 30) < 10
+        red = int(arr[0, 0, 0])  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+        green = int(arr[0, 0, 1])  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+        blue = int(arr[0, 0, 2])  # pyright: ignore[reportAny] -- numpy scalar indexing is dtype-erased.
+        assert abs(red - 10) < 10
+        assert abs(green - 20) < 10
+        assert abs(blue - 30) < 10
 
     def test_with_crop(self) -> None:
         data = _webp_bytes(size=(60, 60))

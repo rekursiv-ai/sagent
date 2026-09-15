@@ -96,8 +96,6 @@ class Module:
     call_super_init: bool = ...
     _compiled_call_impl: Callable | None = ...
     def __init__(self, *args: Any, **kwargs: Any) -> None: ...
-
-    forward: Callable[..., Any] = ...
     def register_buffer(
         self,
         name: str,
@@ -214,13 +212,16 @@ class Module:
         prefix: str = ...,
         keep_vars: bool = ...,
     ) -> T_destination: ...
+    # ``dict[str, Tensor]``, not torch's ``dict[str, Any]``: every entry is a
+    # parameter or buffer unless a module defines ``get_extra_state``, which
+    # nothing in this repo does.
     @overload
     def state_dict(
         self,
         *,
         prefix: str = ...,
         keep_vars: bool = ...,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Tensor]: ...
     def state_dict(
         self,
         *args,

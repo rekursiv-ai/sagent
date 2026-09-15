@@ -188,7 +188,6 @@ def resolve_context(tape: Sequence[TapeRecord]) -> ResolvedContext:
             )
             order.append(record.ref)
             continue
-        assert isinstance(record, ContextSplice)
         if record.ref not in alive:
             segments[record.ref] = []
             order.append(record.ref)

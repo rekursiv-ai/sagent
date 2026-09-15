@@ -83,7 +83,7 @@ from sagent.bin.cli import (
     resolve_tools,
 )
 from sagent.compaction.summary import SummaryCompactor
-from sagent.lib.custom_json import MutableJSON
+from sagent.lib.custom_json import DictCodec, MutableJSON
 from sagent.lib.userdirs import data_dir
 from sagent.providers import build_provider
 from sagent.tools.slack import Slack, SlackSender
@@ -652,7 +652,7 @@ class SlackAdapter:
             r = await client.get(url, headers=headers, params=params)
             if not r.is_success:
                 return []
-            body = r.json()
+            body = DictCodec.coerce(r.json())
         if not body.get("ok"):
             return []
         members = cast(list[object], body.get("members") or [])

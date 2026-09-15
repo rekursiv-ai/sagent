@@ -1,10 +1,13 @@
 from functools import lru_cache
 
+from .auto_docstring import auto_docstring as auto_docstring
 from .doc import add_end_docstrings as add_end_docstrings
 from .generic import (
     ExplicitEnum as ExplicitEnum,
     PaddingStrategy as PaddingStrategy,
     TensorType as TensorType,
+    TransformersKwargs as TransformersKwargs,
+    can_return_tuple as can_return_tuple,
 )
 from .hub import PushToHubMixin as PushToHubMixin
 from .import_utils import is_tokenizers_available as is_tokenizers_available

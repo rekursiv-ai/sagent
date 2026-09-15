@@ -10,7 +10,6 @@ from sagent.types.cost import PriceCatalogProduct
 
 def test_minimax_from_key() -> None:
     p = MiniMax.from_key("sk-test")
-    assert isinstance(p, MiniMax)
     assert p.api_key == "sk-test"
     assert p.base_url == "https://api.minimax.io/v1"
 

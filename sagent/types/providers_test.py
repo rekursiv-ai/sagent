@@ -57,8 +57,6 @@ def test_resolve_returns_capability_and_settings_as_peers() -> None:
         roles={},
         transport=ModelCapability(),
     )
-    assert isinstance(capability, ModelCapability)
-    assert isinstance(settings, ModelSettings)
     assert settings.context == "+1m"
     assert capability.context.keys() == {"", "+1m"}
 

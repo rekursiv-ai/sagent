@@ -1534,7 +1534,7 @@ def test_token_count_addable() -> None:
     a = TokenCount()
     b = TokenCount()
     c = a + b
-    assert isinstance(c, TokenCount)
+    assert c == TokenCount()
 
 
 def test_agent_shutdown_idempotent() -> None:
@@ -1566,7 +1566,7 @@ async def test_agent_shutdown_closes_active_model_once() -> None:
 def test_system_prompt_arg_type_alias_str_or_callable() -> None:
     # ``SystemPromptArg`` is exposed as a type alias for the constructor.
     arg: SystemPromptArg = "hi"
-    assert isinstance(arg, str)
+    assert arg == "hi"
 
     def factory() -> str:
         return "x"

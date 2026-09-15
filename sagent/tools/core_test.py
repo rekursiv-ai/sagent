@@ -22,7 +22,6 @@ from sagent.agent.state import (
 from sagent.testing import with_fake_agent
 from sagent.tools.core import (
     _MISSING_TOOL_DESCRIPTION,
-    _ToolImpl,
     changed_files_context,
     get_file_write_lock,
     has_been_read,
@@ -80,7 +79,6 @@ def test_truncate_long_appends_notice() -> None:
 
 def test_to_result_wraps_string() -> None:
     r = to_result("hello")
-    assert isinstance(r, ToolResult)
     assert r.content == "hello"
     assert r.call_id == ""
 
@@ -568,7 +566,6 @@ def test_tool_schema_built_from_signature() -> None:
         return name
 
     schema = fn.directive_schema
-    assert isinstance(schema, Mapping)
     props = schema["properties"]
     assert isinstance(props, Mapping)
     assert "name" in props
@@ -609,7 +606,6 @@ def test_tool_decorator_explicit_schema_override() -> None:
         return x
 
     # ``schema=None`` falls back to auto-generation.
-    assert isinstance(fn, _ToolImpl)
 
 
 @pytest.mark.asyncio

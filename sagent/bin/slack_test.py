@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Iterator
 from pathlib import Path
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import argparse
@@ -17,6 +18,11 @@ import json
 import os
 import time
 
+from slack_sdk.socket_mode.aiohttp import SocketModeClient
+from slack_sdk.socket_mode.async_client import AsyncBaseSocketModeClient
+from slack_sdk.socket_mode.request import SocketModeRequest
+from slack_sdk.web.async_client import AsyncWebClient
+
 import pytest
 
 
@@ -24,7 +30,7 @@ import pytest
 pytest.importorskip("slack_sdk")
 
 from sagent.agent import Agent
-from sagent.agent.state import agent_registry
+from sagent.agent.state import AgentLike, agent_registry
 from sagent.bin.slack import (
     SlackAdapter,
     _AgentSlack,
@@ -48,7 +54,7 @@ from sagent.bin.slack import (
 from sagent.lib.custom_json import MutableJSON
 from sagent.testing import FakeAgent
 from sagent.tools.slack import Slack
-from sagent.types.model import ModelRecipe
+from sagent.types.model import Model, ModelRecipe
 from sagent.types.runtime import (
     AssistantMessage,
     ModelResponseError,
@@ -565,8 +571,8 @@ class TestCommands:
         _ = (tmp_path / "sre.md").write_text("You are an SRE.")
         adapter, _ = _make_adapter(persona_dir=tmp_path)
         mock = AsyncMock()
-        adapter.spawn_agent = mock
-        result = await adapter._try_command("create sre as ops", "C1", "1.0")
+        with patch.object(adapter, "spawn_agent", mock):
+            result = await adapter._try_command("create sre as ops", "C1", "1.0")
         assert result is True
         mock.assert_called_once_with("ops", "You are an SRE.")
 
@@ -575,8 +581,8 @@ class TestCommands:
         _ = (tmp_path / "pm.md").write_text("You are a PM.")
         adapter, _ = _make_adapter(persona_dir=tmp_path)
         mock = AsyncMock()
-        adapter.spawn_agent = mock
-        result = await adapter._try_command("create pm", "C1", "1.0")
+        with patch.object(adapter, "spawn_agent", mock):
+            result = await adapter._try_command("create pm", "C1", "1.0")
         assert result is True
         mock.assert_called_once_with("pm", "You are a PM.")
 
@@ -905,7 +911,7 @@ class TestResolveUser:
         mock_web.users_info = AsyncMock(
             return_value={"user": {"profile": {"display_name": "Josh"}}},
         )
-        adapter._web = mock_web
+        adapter._web = cast(AsyncWebClient, mock_web)
         assert await adapter._resolve_user("U1") == "Josh"
         # Cached on subsequent call.
         assert await adapter._resolve_user("U1") == "Josh"
@@ -918,7 +924,7 @@ class TestResolveUser:
         mock_web.users_info = AsyncMock(
             return_value={"user": {"profile": {}, "real_name": "Real Josh"}},
         )
-        adapter._web = mock_web
+        adapter._web = cast(AsyncWebClient, mock_web)
         assert await adapter._resolve_user("U1") == "Real Josh"
 
     @pytest.mark.anyio
@@ -926,7 +932,7 @@ class TestResolveUser:
         adapter, _ = _make_adapter()
         mock_web = MagicMock()
         mock_web.users_info = AsyncMock(side_effect=OSError("boom"))
-        adapter._web = mock_web
+        adapter._web = cast(AsyncWebClient, mock_web)
         assert await adapter._resolve_user("U1") == "U1"
 
 
@@ -1018,7 +1024,10 @@ class TestHandle:
         req = MagicMock()
         req.type = "hello"
         req.envelope_id = "env1"
-        await adapter._handle(client, req)
+        await adapter._handle(
+            cast(AsyncBaseSocketModeClient, client),
+            cast(SocketModeRequest, req),
+        )
         client.send_socket_mode_response.assert_awaited_once()
 
     @pytest.mark.anyio
@@ -1031,7 +1040,10 @@ class TestHandle:
         req.type = "events_api"
         req.envelope_id = "env1"
         req.payload = {"event": _msg_event("Sara go")}
-        await adapter._handle(client, req)
+        await adapter._handle(
+            cast(AsyncBaseSocketModeClient, client),
+            cast(SocketModeRequest, req),
+        )
         assert _inbox_size(agents["Sara"]) > 0
 
     @pytest.mark.anyio
@@ -1043,7 +1055,10 @@ class TestHandle:
         req.type = "events_api"
         req.envelope_id = "env1"
         req.payload = {}
-        await adapter._handle(client, req)  # No crash.
+        await adapter._handle(
+            cast(AsyncBaseSocketModeClient, client),
+            cast(SocketModeRequest, req),
+        )  # No crash.
 
     @pytest.mark.anyio
     async def test_route_exception_is_logged(self) -> None:
@@ -1059,7 +1074,10 @@ class TestHandle:
             "_route",
             new=AsyncMock(side_effect=RuntimeError("nope")),
         ):
-            await adapter._handle(client, req)  # No crash; exception swallowed.
+            await adapter._handle(
+                cast(AsyncBaseSocketModeClient, client),
+                cast(SocketModeRequest, req),
+            )  # No crash; exception swallowed.
 
 
 class TestEnsureLogChannel:
@@ -1402,45 +1420,57 @@ class TestAdapterConstruction:
     @pytest.mark.anyio
     async def test_start_invokes_auth_and_connect(self) -> None:
         adapter, _ = _make_adapter()
-        adapter._web = MagicMock()
-        adapter._web.auth_test = AsyncMock(return_value={"user_id": "UNEW"})
-        adapter._socket = MagicMock()
+        adapter._web = cast(AsyncWebClient, MagicMock())
+        adapter._socket = cast(SocketModeClient, MagicMock())
         adapter._socket.socket_mode_request_listeners = []
-        adapter._socket.connect = AsyncMock()
-        task = asyncio.create_task(adapter.start())
-        for _ in range(50):
-            await asyncio.sleep(0)
-            if adapter.bot_user_id:
-                break
-        _ = task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        with (
+            patch.object(
+                adapter._web,
+                "auth_test",
+                new=AsyncMock(return_value={"user_id": "UNEW"}),
+            ),
+            patch.object(adapter._socket, "connect", new=AsyncMock()),
+        ):
+            task = asyncio.create_task(adapter.start())
+            for _ in range(50):
+                await asyncio.sleep(0)
+                if adapter.bot_user_id:
+                    break
+            _ = task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         assert adapter.bot_user_id == "UNEW"
 
     @pytest.mark.anyio
     async def test_start_with_router_log_channel_resolves(self) -> None:
         adapter, _ = _make_adapter()
         adapter._router_log_channel = "CABC123"
-        adapter._web = MagicMock()
-        adapter._web.auth_test = AsyncMock(return_value={"user_id": "UNEW"})
-        adapter._socket = MagicMock()
+        adapter._web = cast(AsyncWebClient, MagicMock())
+        adapter._socket = cast(SocketModeClient, MagicMock())
         adapter._socket.socket_mode_request_listeners = []
-        adapter._socket.connect = AsyncMock()
-        task = asyncio.create_task(adapter.start())
-        for _ in range(50):
-            await asyncio.sleep(0)
-            if adapter.bot_user_id:
-                break
-        _ = task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        with (
+            patch.object(
+                adapter._web,
+                "auth_test",
+                new=AsyncMock(return_value={"user_id": "UNEW"}),
+            ),
+            patch.object(adapter._socket, "connect", new=AsyncMock()),
+        ):
+            task = asyncio.create_task(adapter.start())
+            for _ in range(50):
+                await asyncio.sleep(0)
+                if adapter.bot_user_id:
+                    break
+            _ = task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         assert adapter.bot_user_id == "UNEW"
 
     @pytest.mark.anyio
     async def test_spawn_agent_writes_manifest(self, tmp_path: Path) -> None:
         adapter, _ = _make_adapter(tmp_path=tmp_path)
-        adapter._model = MagicMock()
-        adapter._model_recipe = MagicMock()
+        adapter._model = cast(Model, MagicMock())
+        adapter._model_recipe = cast(ModelRecipe, MagicMock())
         adapter._compactor = None
         adapter._max_tool_call_rounds = None
         adapter._max_budget_usd = None
@@ -1488,7 +1518,7 @@ class TestAdapterConstruction:
     async def test_stop_agent_shuts_down_real_agent(self, tmp_path: Path) -> None:
         adapter, _ = _make_adapter(tmp_path=tmp_path)
         fake = MagicMock(spec=Agent)
-        agent_registry["Sara"] = fake
+        agent_registry["Sara"] = cast(AgentLike, fake)
         adapter._active_agents["Sara"] = {"persona": "x", "system": "y"}
         adapter.stop_agent("Sara")
         fake.shutdown.assert_called_once()
@@ -1500,7 +1530,7 @@ class TestAdapterConstruction:
         adapter = SlackAdapter(
             app_token="xapp-fake",  # noqa: S106 -- Fixture credential in a test; never a real secret.
             bot_token="xoxb-fake",  # noqa: S106 -- Fixture credential in a test; never a real secret.
-            model=model,
+            model=cast(Model, model),
             model_recipe=ModelRecipe(
                 provider="OpenAI",
                 auth="env",

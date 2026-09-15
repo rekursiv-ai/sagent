@@ -419,7 +419,6 @@ def test_google_build_response_cache_tokens_split_input_cost() -> None:
 
 def test_google_from_key() -> None:
     p = Google.from_key("AIza-key")
-    assert isinstance(p, Google)
     assert p.api_key == "AIza-key"
 
 

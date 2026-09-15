@@ -16,7 +16,6 @@ import pytest
 from sagent.agent import context
 from sagent.agent.context import (
     InvalidContextError,
-    ResolvedContext,
     alive_splices,
     masked_refs_by_alive,
     resolve_context,
@@ -644,7 +643,7 @@ def test_detached_splice_keeps_tool_pairing_valid() -> None:
 def test_resolved_context_is_a_resolved_context_instance() -> None:
     """Sanity: ``resolve_context`` returns a ``ResolvedContext``."""
     result = resolve_context([])
-    assert isinstance(result, ResolvedContext)
+    assert isinstance(result, context.ResolvedContext)
 
 
 if __name__ == "__main__":

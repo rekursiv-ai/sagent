@@ -512,7 +512,6 @@ def test_provider_model_default_picks_default_model() -> None:
     p = _DummyProvider.from_key("k")
     m = p.model()
     assert m.capability.model_id == "stub-1"
-    assert isinstance(m, OpenAICompatModel)
 
 
 def test_provider_utility_model_uses_default_when_not_set() -> None:

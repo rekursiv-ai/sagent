@@ -15,13 +15,11 @@ Three audiences:
 from __future__ import annotations
 
 from io import BytesIO
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 import io
 import logging
 import warnings
-
-from PIL import Image
 
 import imagesize
 import numpy as np
@@ -29,7 +27,12 @@ import webp
 
 
 if TYPE_CHECKING:
+    from PIL import Image
     from turbojpeg import TurboJPEG
+else:
+    from wrapt import lazy_import
+
+    Image = lazy_import("PIL.Image")  # ~60 ms; only the PIL decoder and probes need it.
 
 
 logger = logging.getLogger(__name__)
@@ -146,13 +149,10 @@ def decode_webp_libwebp(
     try:
         crop_coords = _parse_crop(crop, int(height), int(width))
 
-        # New-style webp bindings: lib functions take a cffi pointer to
-        # the config struct. Cast to Any throughout -- the cffi-typed
-        # struct members are opaque to static type checkers. The current
-        # bindings also don't expose crop options on WebPDecoderOptions,
-        # so we decode full and slice below.
-        ffi = cast(Any, webp.ffi)
-        lib = cast(Any, webp.lib)
+        # The cffi bindings expose dynamic struct members, so name only the
+        # fields this decoder reads at the boundary.
+        ffi = cast(_Ffi, webp.ffi)
+        lib = cast(_WebpLib, webp.lib)
         config_ptr = ffi.new("WebPDecoderConfig *")
         if not lib.WebPInitDecoderConfig(config_ptr):
             return None
@@ -166,7 +166,7 @@ def decode_webp_libwebp(
             return None
 
         rgba = config.output.u.RGBA
-        output_buffer = cast(bytes, ffi.buffer(rgba.rgba, rgba.size))
+        output_buffer = ffi.buffer(rgba.rgba, rgba.size)
 
         # Copy before WebPFreeDecBuffer -- output_buffer points into the
         # libwebp-owned memory that we're about to release.
@@ -382,3 +382,41 @@ def _parse_crop(
             crop_x = (width - crop_width) // 2
             crop_y = (height - crop_height) // 2
             return (crop_x, crop_y, crop_width, crop_height)
+
+
+class _Rgba(Protocol):
+    rgba: object
+    size: int
+
+
+class _OutputUnion(Protocol):
+    RGBA: _Rgba
+
+
+class _Output(Protocol):
+    colorspace: int
+    u: _OutputUnion
+
+
+class _Config(Protocol):
+    output: _Output
+
+
+class _ConfigPointer(Protocol):
+    def __getitem__(self, index: int) -> _Config: ...
+
+
+class _Ffi(Protocol):
+    def new(self, declaration: str) -> _ConfigPointer: ...
+    def from_buffer(self, data: bytes) -> object: ...
+    def buffer(self, pointer: object, size: int) -> bytes: ...
+    def addressof(self, value: _Output) -> object: ...
+
+
+class _WebpLib(Protocol):
+    MODE_RGB: int
+    VP8_STATUS_OK: int
+
+    def WebPInitDecoderConfig(self, config: _ConfigPointer) -> int: ...  # noqa: N802 -- cffi exports the C symbol name.
+    def WebPDecode(self, data: object, size: int, config: _ConfigPointer) -> int: ...  # noqa: N802 -- cffi exports the C symbol name.
+    def WebPFreeDecBuffer(self, output: object) -> None: ...  # noqa: N802 -- cffi exports the C symbol name.

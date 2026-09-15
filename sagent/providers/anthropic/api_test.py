@@ -587,7 +587,7 @@ def test_guard_stream_interrupt_silent_when_not_tool_use() -> None:
 
 def test_anthropic_from_key() -> None:
     p = Anthropic.from_key("sk-ant-test")
-    assert isinstance(p, Anthropic)
+    assert p._api_key == "sk-ant-test"
 
 
 def test_anthropic_from_env_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -599,7 +599,7 @@ def test_anthropic_from_env_missing(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_anthropic_from_env_reads(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-key")
     p = Anthropic.from_env()
-    assert isinstance(p, Anthropic)
+    assert p._api_key == "sk-ant-key"
 
 
 def test_anthropic_model_known_id_returns_backend() -> None:
@@ -755,7 +755,7 @@ async def test_anthropic_actual_request_tokens_calls_count_tokens() -> None:
     # we stripped them before the call.
     await_args = fake_sdk.messages.count_tokens.await_args
     assert await_args is not None
-    kwargs = await_args.kwargs
+    kwargs = cast(dict[str, object], await_args.kwargs)
     assert "max_tokens" not in kwargs
     assert "temperature" not in kwargs
     assert kwargs["model"] == "claude-opus-4-7"
@@ -1256,7 +1256,7 @@ async def test_anthropic_provider_close_sdk_closes_shared_sdk() -> None:
     p = Anthropic.from_key("k")
     fake_sdk = MagicMock()
     fake_sdk.close = AsyncMock()
-    p._sdk = fake_sdk
+    p._sdk = cast("anthropic_sdk.AsyncAnthropic", fake_sdk)
 
     await p.close_sdk()
 
@@ -1277,7 +1277,7 @@ async def test_closing_one_model_leaves_a_sibling_model_usable() -> None:
     _advisor = p.model("claude-sonnet-4-5")
     fake_sdk = MagicMock()
     fake_sdk.close = AsyncMock()
-    p._sdk = fake_sdk
+    p._sdk = cast("anthropic_sdk.AsyncAnthropic", fake_sdk)
 
     await model.close()
 

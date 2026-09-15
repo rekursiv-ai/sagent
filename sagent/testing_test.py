@@ -283,7 +283,6 @@ async def test_null_model_satisfies_runtime_model_protocol() -> None:
         ctx.messages,
         lambda _ev: None,
     )
-    assert isinstance(msg, AssistantMessage)
     assert msg.text == ""
 
 

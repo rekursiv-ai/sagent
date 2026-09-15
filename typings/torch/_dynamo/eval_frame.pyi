@@ -11,6 +11,7 @@ import threading
 import types
 
 from torch import _guards
+from torch._dynamo.backends.debugging import ExplainOutput
 from torch._dynamo.package import CompilePackage
 from torch._dynamo.repro.after_dynamo import WrapBackendDebug
 from torch._subclasses import fake_tensor
@@ -186,7 +187,9 @@ def is_inductor_supported() -> bool: ...
 def check_for_incompatible_configs() -> None: ...
 def optimize(*args: Any, **kwargs: Any) -> OptimizeContext | _NullDecorator: ...
 @patch("torch._dynamo.symbolic_convert.explain", True)
-def explain(f: Callable[..., Any], *extra_args: Any, **extra_kwargs: Any) -> Any: ...
+def explain(
+    f: Callable[..., Any], *extra_args: Any, **extra_kwargs: Any
+) -> Callable[..., ExplainOutput]: ...
 
 class FlattenInputOutputSignature(torch.fx.Transformer):
     def __init__(

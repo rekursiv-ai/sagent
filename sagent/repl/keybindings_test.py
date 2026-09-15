@@ -142,11 +142,12 @@ def _fake_buf(
     cursor: int | None = None,
     history: list[str] | None = None,
 ) -> MagicMock:
+    cursor_position = cursor if cursor is not None else len(text)
     buf = MagicMock()
     buf.text = text
-    buf.cursor_position = cursor if cursor is not None else len(text)
+    buf.cursor_position = cursor_position
     buf.working_index = 0
-    buf.document.text_before_cursor = text[: buf.cursor_position]
+    buf.document.text_before_cursor = text[:cursor_position]
     buf.document.text = text
     hist = list(history) if history else []
     buf.history.get_strings.return_value = hist

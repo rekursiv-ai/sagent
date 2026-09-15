@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import time
 
@@ -122,7 +122,8 @@ def _as_agent(a: _FakeAgent) -> Agent:
 def patched_loop_time() -> Iterator[None]:
     """Patch ``asyncio.get_running_loop().time()`` to a deterministic value."""
     with patch("asyncio.get_running_loop") as mock_loop:
-        mock_loop.return_value.time.return_value = 10.0
+        loop = cast(MagicMock, mock_loop.return_value)
+        loop.time.return_value = 10.0
         yield
 
 

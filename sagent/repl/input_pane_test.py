@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
 
 import asyncio
 import sys
-
-from prompt_toolkit.formatted_text import FormattedText
 
 import pytest
 
@@ -45,6 +43,11 @@ from sagent.types.runtime import (
 
 import sagent.repl.input_pane
 import sagent.repl.slash
+
+
+if TYPE_CHECKING:
+    from prompt_toolkit import PromptSession
+    from rich.console import Console
 
 
 # `sys.modules`, not an import: `repl/__init__.py` re-exports a FUNCTION named
@@ -932,7 +935,6 @@ def _as_real_agent(a: _FakeAgent) -> Agent:
 def test_render_input_pane_empty_queue_renders_only_sigil() -> None:
     """Empty queues render only the ``> `` prompt token."""
     fp = render_input_pane(_as_real_agent(_FakeAgent()), InputQueues())
-    assert isinstance(fp, FormattedText)
     assert list(fp) == [("class:input_pane", "> ")]
 
 
@@ -1048,7 +1050,10 @@ def test_next_line_returns_typed_text() -> None:
         return "hello"
 
     session.prompt_async = _prompt_async
-    src = PromptToolkitInputSource(session, queues=InputQueues())
+    src = PromptToolkitInputSource(
+        cast("PromptSession[str]", session),
+        queues=InputQueues(),
+    )
     line = asyncio.run(src.next_line())
     assert line == "hello"
 
@@ -1062,7 +1067,10 @@ def test_next_line_disables_prompt_toolkit_exception_pause() -> None:
         return "hello"
 
     session.prompt_async = _prompt_async
-    src = PromptToolkitInputSource(session, queues=InputQueues())
+    src = PromptToolkitInputSource(
+        cast("PromptSession[str]", session),
+        queues=InputQueues(),
+    )
     line = asyncio.run(src.next_line())
 
     assert line == "hello"
@@ -1077,7 +1085,10 @@ def test_next_line_quit_returns_none() -> None:
         return "/quit"
 
     session.prompt_async = _prompt_async
-    src = PromptToolkitInputSource(session, queues=InputQueues())
+    src = PromptToolkitInputSource(
+        cast("PromptSession[str]", session),
+        queues=InputQueues(),
+    )
     line = asyncio.run(src.next_line())
     assert line is None
 
@@ -1090,7 +1101,10 @@ def test_next_line_eof_returns_none() -> None:
         raise EOFError
 
     session.prompt_async = _prompt_async
-    src = PromptToolkitInputSource(session, queues=InputQueues())
+    src = PromptToolkitInputSource(
+        cast("PromptSession[str]", session),
+        queues=InputQueues(),
+    )
     line = asyncio.run(src.next_line())
     assert line is None
 
@@ -1114,7 +1128,10 @@ def test_next_line_keyboard_interrupt_reprompts_never_quits() -> None:
         return "after interrupt"
 
     session.prompt_async = _prompt_async
-    src = PromptToolkitInputSource(session, queues=InputQueues())
+    src = PromptToolkitInputSource(
+        cast("PromptSession[str]", session),
+        queues=InputQueues(),
+    )
     line = asyncio.run(src.next_line())
     assert line == "after interrupt"
     assert len(calls) == 2
@@ -1135,7 +1152,11 @@ def test_next_line_keyboard_interrupt_preserves_queue() -> None:
     session.prompt_async = _prompt_async
     console = MagicMock()
     queues = InputQueues(deferred=QueuedInputBlock(text="staged line"))
-    src = PromptToolkitInputSource(session, queues=queues, console=console)
+    src = PromptToolkitInputSource(
+        cast("PromptSession[str]", session),
+        queues=queues,
+        console=cast("Console", console),
+    )
     line = asyncio.run(src.next_line())
     assert line == "resumed"
     assert queues.has_any()
@@ -1152,7 +1173,11 @@ def test_quit_surfaces_queued_input_preview() -> None:
     session.prompt_async = _prompt_async
     console = MagicMock()
     queues = InputQueues(deferred=QueuedInputBlock(text="queued line"))
-    src = PromptToolkitInputSource(session, queues=queues, console=console)
+    src = PromptToolkitInputSource(
+        cast("PromptSession[str]", session),
+        queues=queues,
+        console=cast("Console", console),
+    )
     line = asyncio.run(src.next_line())
     assert line is None
     console.print.assert_called_once()
@@ -1177,7 +1202,11 @@ def test_quit_discard_preview_includes_count_when_both_panes() -> None:
         queue=QueuedInputBlock(text="queued one"),
         deferred=QueuedInputBlock(text="deferred one"),
     )
-    src = PromptToolkitInputSource(session, queues=queues, console=console)
+    src = PromptToolkitInputSource(
+        cast("PromptSession[str]", session),
+        queues=queues,
+        console=cast("Console", console),
+    )
     line = asyncio.run(src.next_line())
     assert line is None
     console.print.assert_called_once()
@@ -1204,7 +1233,11 @@ def test_quit_discard_preview_shows_whole_body() -> None:
     console = MagicMock()
     long_text = "x" * 200
     queues = InputQueues(deferred=QueuedInputBlock(text=long_text))
-    src = PromptToolkitInputSource(session, queues=queues, console=console)
+    src = PromptToolkitInputSource(
+        cast("PromptSession[str]", session),
+        queues=queues,
+        console=cast("Console", console),
+    )
     line = asyncio.run(src.next_line())
     assert line is None
     rendered = str(console.print.call_args.args[0])
@@ -1222,7 +1255,11 @@ def test_quit_without_console_swallows_preview() -> None:
 
     session.prompt_async = _prompt_async
     queues = InputQueues(deferred=QueuedInputBlock(text="queued"))
-    src = PromptToolkitInputSource(session, queues=queues, console=None)
+    src = PromptToolkitInputSource(
+        cast("PromptSession[str]", session),
+        queues=queues,
+        console=None,
+    )
     line = asyncio.run(src.next_line())
     assert line is None
     # The buffer stays unchanged when there is no console to surface it.
@@ -1249,7 +1286,11 @@ def test_quit_discard_preview_shows_every_pane() -> None:
         queue=QueuedInputBlock(text="QUEUE-TEXT"),
         deferred=QueuedInputBlock(text="DEFERRED-TEXT"),
     )
-    src = PromptToolkitInputSource(session, queues=queues, console=console)
+    src = PromptToolkitInputSource(
+        cast("PromptSession[str]", session),
+        queues=queues,
+        console=cast("Console", console),
+    )
     assert asyncio.run(src.next_line()) is None
     rendered = str(console.print.call_args.args[0])
     assert "QUEUE-TEXT" in rendered

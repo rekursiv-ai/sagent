@@ -95,6 +95,7 @@ __all__ = [
     "encode_value",
     "json_freeze",
     "json_unfreeze",
+    "loads",
     "replay",
     "residual",
     "resolve_import",
@@ -234,7 +235,7 @@ def resolve_import(path: str) -> object:
             continue
         obj: object = module
         for part in parts[split:]:
-            obj = getattr(obj, part)
+            obj = getattr(obj, part)  # pyright: ignore[reportAny] -- Import path attributes are selected by runtime name.
         return obj
     raise ImportError(f"Cannot resolve path: {path!r}")
 
@@ -373,11 +374,12 @@ class _GraphEncoder:
         cached = self._reduce_cache.get(identity)
         if cached is not None and cached[0] is value:
             return self._fresh_cached_reduce(value, cached[1])
-        reduce = getattr(value, "__reduce_ex__", None)
+        reduce: object = getattr(value, "__reduce_ex__", None)
         if reduce is None:
             reduced = _GRAPH_DECLINED
         else:
             try:
+                assert isinstance(reduce, _Callable)
                 reduced = reduce(2)
             except Exception:  # noqa: BLE001 -- a failed reduce declines this codec.
                 reduced = _GRAPH_DECLINED
@@ -498,14 +500,14 @@ class _GraphEncoder:
             held,
             (str, bytes),
         ):
-            yield from cast(Iterable[object], held)
+            yield from held
         elif isinstance(held, Mapping):
-            yield from cast(Mapping[object, object], held).values()
+            yield from held.values()
         slots = cast(Iterable[object], getattr(type(owner), "__slots__", ()))
         for name in slots:
             if isinstance(name, str) and hasattr(owner, name):
                 yield getattr(owner, name)
-        yield from cast(Mapping[str, object], getattr(owner, "__dict__", {})).values()
+        yield from getattr(owner, "__dict__", {}).values()
 
 
 class _GraphDecoder:
@@ -771,6 +773,29 @@ def json_unfreeze(obj: object, *, allow_nan: bool = True) -> MutableJSONValue:
     if _is_json_sequence(obj):
         return [json_unfreeze(value, allow_nan=allow_nan) for value in obj]
     return _checked_json_scalar(obj, allow_nan=allow_nan)
+
+
+def loads(text: str | bytes, *, allow_nan: bool = True) -> MutableJSONValue:
+    """Parse JSON text into a typed mutable value.
+
+    The typed replacement for ``json.loads``, whose return type is ``Any``:
+    parsing and the walk that proves the result is JSON-shaped happen in one
+    call, so callers never hold an untyped value.
+
+    Args:
+      text: JSON document.
+      allow_nan: Whether to preserve IEEE-754 NaN and signed infinities.
+
+    Returns:
+      value: Plain dicts, lists, and scalars.
+
+    Raises:
+      json.JSONDecodeError: ``text`` is not valid JSON.
+      TypeError: A non-finite float when ``allow_nan`` is false.
+
+    """
+    parsed: object = json.loads(text)  # pyright: ignore[reportAny] -- The stdlib parser returns Any; the walk below is what types it.
+    return json_unfreeze(parsed, allow_nan=allow_nan)
 
 
 def validate_json_schema(schema: object, value: object) -> list[str]:
@@ -1174,7 +1199,8 @@ class EnumCodec(Codec):
     def encode(cls, value: object, annotation: object, *, encode: _Encode) -> JSONValue:
         """Encode an enum member's value recursively."""
         del cls, annotation
-        return encode(cast(Enum, value).value, None)
+        member_value: object = cast(Enum, value).value  # pyright: ignore[reportAny] -- Enum.value is Any in the stdlib stub.
+        return encode(member_value, None)
 
     @classmethod
     @override
@@ -1185,9 +1211,11 @@ class EnumCodec(Codec):
             raise TypeError(f"cannot decode {raw!r} as {annotation}")
         if isinstance(raw, annotation):
             return raw
-        matches = [
-            member for member in annotation if cls._same_value(raw, member.value)
-        ]
+        matches: list[Enum] = []
+        for member in annotation:
+            member_value: object = member.value  # pyright: ignore[reportAny] -- Enum.value is Any in the stdlib stub.
+            if cls._same_value(raw, member_value):
+                matches.append(member)
         if len(matches) == 1:
             return matches[0]
         raise TypeError(f"cannot decode {raw!r} as {annotation.__name__}")
@@ -1235,10 +1263,8 @@ class DataclassCodec(Codec):
         result: dict[str, JSONValue] = {TYPE_TAG: _annotation_id(type(obj))}
         for field in fields(obj):
             if field.init:
-                result[field.name] = _encode(
-                    getattr(obj, field.name),
-                    hints.get(field.name),
-                )
+                field_value: object = getattr(obj, field.name)  # pyright: ignore[reportAny] -- Dataclass fields are selected by runtime name.
+                result[field.name] = _encode(field_value, hints.get(field.name))
         return result
 
     @classmethod
@@ -1405,7 +1431,8 @@ class _ImportCodec:
           result: Tuple of (path, body) from the tag's envelope.
 
         """
-        tag = cast(str, cls.tag)
+        assert cls.tag is not None
+        tag = cls.tag
         payload = node[tag]
         if not isinstance(payload, list) or len(cast(list[object], payload)) != 2:
             raise TypeError(f"invalid {tag} envelope: {payload!r}")
@@ -1483,7 +1510,7 @@ class _ReduceCodec(_ImportCodec):
             return _GRAPH_DECLINED
         if isinstance(reduced, str):
             return {
-                cast(str, _TypeCodec.tag): cls.verified(
+                _TypeCodec.tag: cls.verified(
                     f"{type(value).__module__}.{reduced}",
                     value,
                 ),
@@ -1510,12 +1537,13 @@ class _ReduceCodec(_ImportCodec):
             return _GRAPH_DECLINED
         while len(elements) > 2 and elements[-1] is None:
             elements.pop()
-        return {cast(str, cls.tag): elements}
+        return {cls.tag: elements}
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
         source = cast(Mapping[str, object], node)
-        elements = cast(list[object], source[cast(str, cls.tag)])
+        assert cls.tag is not None
+        elements = cast(list[object], source[cls.tag])
         if len(elements) < 2 or len(elements) > 5:
             raise TypeError("py/reduce requires two to five elements")
         mutable = any(element is not None for element in elements[2:])
@@ -1533,7 +1561,7 @@ class _ReduceCodec(_ImportCodec):
             extend = getattr(value, "extend", None)
             if not callable(extend):
                 raise TypeError(f"reduce target cannot accept list items: {value!r}")
-            extend(cast(Iterable[object], graph.decode(elements[3])))
+            extend(graph.decode(elements[3]))
         if len(elements) > 4 and elements[4] is not None:
             setitem = getattr(value, "__setitem__", None)
             if not callable(setitem):
@@ -1704,7 +1732,7 @@ class _UnionCodec(Codec):
         if not cls.is_annotation(resolved):
             return (resolved,)
         flattened: list[object] = []
-        for member in get_args(resolved):
+        for member in cast(tuple[object, ...], get_args(resolved)):
             inner = _resolve_alias(member)
             if cls.is_annotation(inner):
                 flattened.extend(cls.members(inner))
@@ -1779,7 +1807,10 @@ class _UnionCodec(Codec):
                 for member in cls.members(resolved)
             )
         if origin is Literal:
-            return any(same_json_value(value, choice) for choice in get_args(resolved))
+            return any(
+                same_json_value(value, choice)
+                for choice in cast(tuple[object, ...], get_args(resolved))
+            )
         if resolved is object or isinstance(resolved, TypeVar):
             return not exact
         if isinstance(resolved, type):
@@ -2019,7 +2050,10 @@ class _LiteralCodec(Codec):
     def decode(cls, raw: object, annotation: object, *, decode: _Decode) -> object:
         """Return a matching Literal value or reject it."""
         del cls, decode
-        if any(same_json_value(raw, member) for member in get_args(annotation)):
+        if any(
+            same_json_value(raw, member)
+            for member in cast(tuple[object, ...], get_args(annotation))
+        ):
             return raw
         raise TypeError(f"cannot decode {raw!r} as {annotation}")
 
@@ -2154,7 +2188,7 @@ class BoolCodec(Codec):
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
         """Encode one value through graph traversal."""
         del cls, graph
-        return cast(bool, value)
+        return value
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
@@ -2239,7 +2273,7 @@ class IntCodec(Codec):
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
         """Encode one value through graph traversal."""
         del cls, graph
-        return cast(int, value)
+        return value
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
@@ -2265,7 +2299,8 @@ class FloatCodec(Codec):
         """Encode a float, tagging non-finite values."""
         del annotation, encode
         number = cast(float, value)
-        return number if math.isfinite(number) else {cast(str, cls.tag): repr(number)}
+        assert cls.tag is not None
+        return number if math.isfinite(number) else {cls.tag: repr(number)}
 
     @classmethod
     @override
@@ -2322,13 +2357,23 @@ class FloatCodec(Codec):
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
-        """Decode one value through graph traversal."""
+        """Decode one value through graph traversal.
+
+        Args:
+          node: A bare number or a ``{"py/float": "<repr>"}`` envelope.
+          graph: Decoder supplying typed recursion.
+
+        Returns:
+          value: The decoded float.
+
+        """
         # Aliased before narrowing: a bare ``Mapping`` narrow leaves a
         # partially-unknown key type the payload helper would inherit.
         tagged: object = node
         if not isinstance(node, Mapping):
             return cls.decode(node, float, decode=graph.decode_typed)
-        payload = _tagged_scalar_payload(tagged, cast(str, cls.tag))
+        assert cls.tag is not None
+        payload = _tagged_scalar_payload(tagged, cls.tag)
         return cls.decode(payload, float, decode=graph.decode_typed)
 
 
@@ -2387,7 +2432,7 @@ class StrCodec(Codec):
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
         """Encode one value through graph traversal."""
         del cls, graph
-        return cast(str, value)
+        return value
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
@@ -2413,7 +2458,8 @@ class BytesCodec(Codec):
         """Encode bytes as tagged base64."""
         del annotation, encode
         payload = base64.b64encode(cast(bytes, value)).decode("ascii")
-        return {cast(str, cls.tag): payload}
+        assert cls.tag is not None
+        return {cls.tag: payload}
 
     @classmethod
     @override
@@ -2443,7 +2489,8 @@ class BytesCodec(Codec):
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
         """Decode one value through graph traversal."""
-        payload = _tagged_scalar_payload(node, cast(str, cls.tag))
+        assert cls.tag is not None
+        payload = _tagged_scalar_payload(node, cls.tag)
         return cls.decode(payload, bytes, decode=graph.decode_typed)
 
 
@@ -2464,7 +2511,8 @@ class PathCodec(Codec):
     def encode(cls, value: object, annotation: object, *, encode: _Encode) -> JSONValue:
         """Encode a path as tagged text."""
         del annotation, encode
-        return {cast(str, cls.tag): str(value)}
+        assert cls.tag is not None
+        return {cls.tag: str(value)}
 
     @classmethod
     @override
@@ -2491,7 +2539,8 @@ class PathCodec(Codec):
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
         """Decode one value through graph traversal."""
-        payload = _tagged_scalar_payload(node, cast(str, cls.tag))
+        assert cls.tag is not None
+        payload = _tagged_scalar_payload(node, cls.tag)
         return cls.decode(payload, None, decode=graph.decode_typed)
 
 
@@ -2512,7 +2561,8 @@ class UuidCodec(Codec):
     def encode(cls, value: object, annotation: object, *, encode: _Encode) -> JSONValue:
         """Encode a UUID as tagged text."""
         del annotation, encode
-        return {cast(str, cls.tag): str(value)}
+        assert cls.tag is not None
+        return {cls.tag: str(value)}
 
     @classmethod
     @override
@@ -2542,7 +2592,8 @@ class UuidCodec(Codec):
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
         """Decode one value through graph traversal."""
-        payload = _tagged_scalar_payload(node, cast(str, cls.tag))
+        assert cls.tag is not None
+        payload = _tagged_scalar_payload(node, cls.tag)
         return cls.decode(payload, None, decode=graph.decode_typed)
 
 
@@ -2563,7 +2614,8 @@ class DatetimeCodec(Codec):
     def encode(cls, value: object, annotation: object, *, encode: _Encode) -> JSONValue:
         """Encode a datetime with its named zone."""
         del annotation, encode
-        return {cast(str, cls.tag): cls._stamp(cast(datetime, value))}
+        assert cls.tag is not None
+        return {cls.tag: cls._stamp(cast(datetime, value))}
 
     @classmethod
     @override
@@ -2648,7 +2700,8 @@ class DatetimeCodec(Codec):
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
         """Decode one value through graph traversal."""
-        payload = _tagged_scalar_payload(node, cast(str, cls.tag))
+        assert cls.tag is not None
+        payload = _tagged_scalar_payload(node, cls.tag)
         return cls.decode(payload, None, decode=graph.decode_typed)
 
 
@@ -2838,7 +2891,8 @@ class TupleCodec(_ArrayCodec):
             annotation,
             encode=encode,
         )
-        return {cast(str, cls.tag): payload}
+        assert cls.tag is not None
+        return {cls.tag: payload}
 
     @classmethod
     @override
@@ -2866,7 +2920,8 @@ class TupleCodec(_ArrayCodec):
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
         """Decode one value through graph traversal."""
         source = cast(Mapping[str, object], node)
-        return cls.decode(source[cast(str, cls.tag)], tuple, decode=graph.decode_typed)
+        assert cls.tag is not None
+        return cls.decode(source[cls.tag], tuple, decode=graph.decode_typed)
 
 
 class SetCodec(_ArrayCodec):
@@ -2895,7 +2950,8 @@ class SetCodec(_ArrayCodec):
             ),
             key=repr,
         )
-        return {cast(str, cls.tag): payload}
+        assert cls.tag is not None
+        return {cls.tag: payload}
 
     @classmethod
     @override
@@ -2914,7 +2970,7 @@ class SetCodec(_ArrayCodec):
         """Encode one value through graph traversal."""
         graph.register(value)
         members = sorted(cast(AbstractSet[object], value), key=graph.order_key)
-        return {cast(str, cls.tag): graph.encode_items(members)}
+        return {cls.tag: graph.encode_items(members)}
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
@@ -2931,7 +2987,8 @@ class SetCodec(_ArrayCodec):
         source = cast(Mapping[str, object], node)
         result: set[object] = set()
         graph.register(result)
-        values = cast(Iterable[object], source[cast(str, cls.tag)])
+        assert cls.tag is not None
+        values = cast(Iterable[object], source[cls.tag])
         result.update(graph.decode(value) for value in values)
         return result
 
@@ -3133,7 +3190,7 @@ class MappingCodec(Codec):
         graph.register(result)
         for key, member in cast(dict[str, object], node).items():
             decoded_key = (
-                graph.decode(json.loads(key.removeprefix("json://")))
+                graph.decode(loads(key.removeprefix("json://")))
                 if key.startswith("json://")
                 else key
             )
@@ -3282,7 +3339,7 @@ class AbstractSetCodec(FrozenSetCodec):
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
         graph.register(value)
         members = sorted(cast(AbstractSet[object], value), key=graph.order_key)
-        return {cast(str, SetCodec.tag): graph.encode_items(members)}
+        return {SetCodec.tag: graph.encode_items(members)}
 
 
 class MutableSetCodec(SetCodec):
@@ -3309,12 +3366,13 @@ class _TypeCodec(_ImportCodec):
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
         del graph
-        return {cast(str, cls.tag): cls.path(value)}
+        return {cls.tag: cls.path(value)}
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
         source = cast(Mapping[str, object], node)
-        return graph.resolve(str(source[cast(str, cls.tag)]))
+        assert cls.tag is not None
+        return graph.resolve(str(source[cls.tag]))
 
 
 class _FunctionCodec(_ImportCodec):
@@ -3337,12 +3395,13 @@ class _FunctionCodec(_ImportCodec):
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
         del graph
-        return {cast(str, cls.tag): cls.path(value)}
+        return {cls.tag: cls.path(value)}
 
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
         source = cast(Mapping[str, object], node)
-        return graph.resolve(str(source[cast(str, cls.tag)]))
+        assert cls.tag is not None
+        return graph.resolve(str(source[cls.tag]))
 
 
 class _HookCodec(_ImportCodec):
@@ -3364,7 +3423,7 @@ class _HookCodec(_ImportCodec):
         # as any other value: JSON cannot express a non-finite float, and a
         # payload key colliding with a wire tag needs escaping.
         return {
-            cast(str, cls.tag): [
+            cls.tag: [
                 cls.path(type(value)),
                 graph.encode(graph.hook_payload(value, hook[0])),
             ],
@@ -3402,7 +3461,7 @@ class _InlineCodec(_ImportCodec):
         graph.register(value)
         func, args, kwargs = inline
         return {
-            cast(str, cls.tag): [
+            cls.tag: [
                 cls.path(type(value)),
                 {
                     "func": graph.encode(func),
@@ -3452,10 +3511,11 @@ class _GraphObjectCodec(_ImportCodec):
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
         graph.register(value)
-        payload: dict[str, object] = {cast(str, cls.tag): cls.path(type(value))}
+        assert cls.tag is not None
+        payload: dict[str, object] = {cls.tag: cls.path(type(value))}
         for name in cls.attribute_names(value):
             try:
-                member = getattr(value, name)
+                member: object = getattr(value, name)  # pyright: ignore[reportAny] -- Serialized attributes are selected by runtime name.
             except AttributeError:
                 continue
             payload[name] = graph.encode(member)
@@ -3464,7 +3524,8 @@ class _GraphObjectCodec(_ImportCodec):
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
         source = cast(Mapping[str, object], node)
-        target = graph.resolve(str(source[cast(str, cls.tag)]))
+        assert cls.tag is not None
+        target = graph.resolve(str(source[cls.tag]))
         if not isinstance(target, type):
             raise TypeError("py/object path did not resolve to a type")
         allocate = cast(Callable[[type], object], target.__new__)
@@ -3493,11 +3554,11 @@ class _GraphObjectCodec(_ImportCodec):
         seen: set[str] = set()
         if hasattr(type(value), "__slots__"):
             for target in type(value).__mro__:
-                raw_slots = getattr(target, "__slots__", ())
+                raw_slots: object = getattr(target, "__slots__", ())
                 slots = (
                     (raw_slots,)
                     if isinstance(raw_slots, str)
-                    else (str(slot) for slot in raw_slots)
+                    else (str(slot) for slot in cast(Iterable[object], raw_slots))
                 )
                 for slot in slots:
                     if slot not in seen and slot not in skipped:
@@ -3543,10 +3604,10 @@ class _MappingProxyCodec:
         del cls
         proxy = cast(Mapping[object, object], value)
         return {
-            cast(str, _ReduceCodec.tag): [
-                {cast(str, _TypeCodec.tag): "types.MappingProxyType"},
+            _ReduceCodec.tag: [
+                {_TypeCodec.tag: "types.MappingProxyType"},
                 {
-                    cast(str, TupleCodec.tag): [
+                    TupleCodec.tag: [
                         MappingCodec.encode_graph(dict(proxy), graph),
                     ],
                 },
@@ -3604,15 +3665,18 @@ def _annotation_id(annotation: object, seen: set[int] | None = None) -> str:
         return repr(resolved)
     seen.add(identity)
     try:
-        origin = get_origin(resolved)
+        origin: object = get_origin(resolved)
         if origin is Literal:
             values = ",".join(
-                f"{_annotation_id(cast(object, type(value)), seen)}:{value!r}"
-                for value in get_args(resolved)
+                f"{_annotation_id(type(value), seen)}:{value!r}"
+                for value in cast(tuple[object, ...], get_args(resolved))
             )
             return f"typing.Literal[{values}]"
         if origin is not None:
-            args = ",".join(_annotation_id(arg, seen) for arg in get_args(resolved))
+            args = ",".join(
+                _annotation_id(arg, seen)
+                for arg in cast(tuple[object, ...], get_args(resolved))
+            )
             return f"{_annotation_id(origin, seen)}[{args}]"
         if isinstance(resolved, type):
             # The dotted path alone, even for a dataclass. The tag discriminates
@@ -3698,7 +3762,7 @@ def _resolve_alias(annotation: object) -> object:
     seen: set[int] = set()
     while (identity := id(resolved)) not in seen:
         seen.add(identity)
-        value = getattr(resolved, "__value__", None)
+        value: object = getattr(resolved, "__value__", None)
         if value is None:
             break
         resolved = value
@@ -3864,7 +3928,7 @@ _GRAPH_TAG_CODECS: Final[tuple[type[_GraphDecodingCodec], ...]] = (
 
 
 _GRAPH_RESOLVE_TAGS: Final[frozenset[str]] = frozenset(
-    cast(str, codec.tag)
+    codec.tag
     for codec in (
         _TypeCodec,
         _FunctionCodec,
@@ -3873,6 +3937,7 @@ _GRAPH_RESOLVE_TAGS: Final[frozenset[str]] = frozenset(
         _InlineCodec,
         _GraphObjectCodec,
     )
+    if codec.tag is not None
 )
 
 
@@ -3934,7 +3999,7 @@ _RAW_OBJECT_TAG: Final = "py/raw"
 _BY_TAG: Final[Mapping[str, type[Codec]]] = MappingProxyType(
     {
         **{codec.tag: codec for codec in _RUNTIME_CODECS if codec.tag is not None},
-        cast(str, SetCodec.tag): FrozenSetCodec,
+        **{codec.tag: FrozenSetCodec for codec in (SetCodec,) if codec.tag is not None},
     },
 )
 
@@ -4212,7 +4277,7 @@ def _type_codec_for_resolved_annotation(resolved: object) -> type[Codec] | None:
         return DataclassCodec
     if isinstance(resolved, type) and issubclass(resolved, Enum):
         return EnumCodec
-    origin = cast(object | None, get_origin(resolved))
+    origin = get_origin(resolved)
     for candidate, codec in _BY_ANNOTATION.items():
         if (origin is not None and origin is candidate) or (
             origin is None and resolved is candidate
