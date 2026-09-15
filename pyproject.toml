@@ -538,23 +538,24 @@ ignore = [
 ]
 pythonPlatform = "Linux"
 pythonVersion = "3.12"
-# sagent is an experimental-tier package: it is not held to `reportAny`
-# upstream, so its export is not either.
-reportAny = false
-reportExplicitAny = false
+
+# Authorized.
+reportCallInDefaultInitializer = false     # Immutable constructors (e.g. NamedTuple) in defaults are safe.
 reportImplicitStringConcatenation = false  # Conflicts with ruff ISC003.
-reportInvalidCast = false                  # All cast() calls are intentional.
+reportMissingSuperCall = false             # Fires on plain `object` inheritance (no-op super).
 reportPrivateUsage = false                 # Redundant with ruff SLF001.
 reportUnannotatedClassAttribute = false    # Class attributes don't always need annotations.
-reportUnusedCallResult = false             # Discarding return values is idiomatic Python.
-reportUnusedImport = false                 # Redundant with ruff F401.
-# Extra suppressions.
-reportCallInDefaultInitializer = false     # Immutable constructors (e.g. NamedTuple) in defaults are safe.
-reportIncompatibleMethodOverride = false   # Subclasses may rename parameters.
-reportMissingSuperCall = false             # Fires on plain `object` inheritance (no-op super).
-reportImportCycles = false                 # Lazy imports inside functions create benign cycles.
 reportUnsafeMultipleInheritance = false    # Mixin patterns are intentional.
-# reportConstantRedefinition = false       # Uppercase locals treated as constants (math). [Violates PEP8]
+reportUnusedCallResult = false             # Discarding return values is idiomatic Python.
+
+# Dubious.
+reportImportCycles = false                 # Lazy imports inside functions create benign cycles.
+reportInvalidCast = false                  # All cast() calls are intentional.
+reportUnusedImport = false                 # Redundant with ruff F401.
+
+# Extra suppressions.
+reportAny = false
+reportExplicitAny = false
 reportMissingModuleSource = false
 reportUnnecessaryTypeIgnoreComment = false # Public package drops source-tree-only stubs.
 
