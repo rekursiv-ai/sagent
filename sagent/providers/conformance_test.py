@@ -25,17 +25,20 @@ import inspect
 
 import pytest
 
-from sagent.providers.anthropic.api import _AnthropicModel
-from sagent.providers.anthropic.cli import _AnthropicCLIModel
+from sagent.providers.anthropic.api import Anthropic, _AnthropicModel
+from sagent.providers.anthropic.cli import (
+    AnthropicCLI,
+    _AnthropicCLIModel,
+)
 from sagent.providers.dashscope.api import _DashScopeModel
-from sagent.providers.google.api import _GeminiModel
-from sagent.providers.google.cli import _GoogleCLIModel
+from sagent.providers.google.api import Google, _GeminiModel
+from sagent.providers.google.cli import GoogleCLI, _GoogleCLIModel
 from sagent.providers.minimax.api import _MiniMaxModel
 from sagent.providers.moonshot.api import _MoonshotModel
 from sagent.providers.openai.responses import _OpenAIResponsesModel
 from sagent.providers.openai.sub import _OpenAISubModel
 from sagent.types.model import Model
-from sagent.types.providers import Provider
+from sagent.types.providers import Provider, ProviderCloseable
 
 
 # Every concrete model class that claims to fulfil the ``Model``
@@ -246,6 +249,27 @@ def test_provider_protocol_members_are_callable() -> None:
     """Sanity: the Provider contract exposes the expected factory surface."""
     assert "model" in _PROVIDER_MEMBERS
     assert "utility_model" in _PROVIDER_MEMBERS
+
+
+@pytest.mark.parametrize(
+    ("api_class", "cli_class", "model_class"),
+    [
+        (Anthropic, AnthropicCLI, _AnthropicCLIModel),
+        (Google, GoogleCLI, _GoogleCLIModel),
+    ],
+)
+def test_cli_shares_catalog_without_api_client(
+    api_class: type[Anthropic | Google],
+    cli_class: type[AnthropicCLI | GoogleCLI],
+    model_class: type[_AnthropicCLIModel | _GoogleCLIModel],
+) -> None:
+    cli = cli_class()
+    api = api_class.from_key("test-key")
+    assert cli.CAPABILITIES is api.CAPABILITIES
+    assert cli.ROLES == api.ROLES
+    assert isinstance(cli.model(), model_class)
+    assert isinstance(cli.utility_model(), model_class)
+    assert not isinstance(cli, ProviderCloseable)
 
 
 if __name__ == "__main__":

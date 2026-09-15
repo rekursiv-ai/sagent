@@ -246,13 +246,8 @@ def build_context_management(
     return {"edits": edits} if edits else None
 
 
-class Anthropic:
-    """Anthropic provider - API key auth.
-
-    The base class exposes hooks that alternative auth implementations can override:
-    ``get_sdk``, ``build_system``, ``extra_headers``, ``extra_body``,
-    ``handle_auth_error``, ``subscription``.
-    """
+class AnthropicCatalog:
+    """Model catalog and role defaults shared by Anthropic transports."""
 
     # Latest model we roll to when ``model_id`` is None. Bump on release.
     # Bare id, no ``+1m``: fable-5-1 is in ``_DEFAULT_1M_MODELS``, so its
@@ -282,9 +277,6 @@ class Anthropic:
     )
     """Per-model capability, shared by every Anthropic transport."""
 
-    TRANSPORT: ClassVar[ModelCapability] = sagent.catalog.anthropic.api()
-    """What this transport lets through; subclasses declare their own."""
-
     @property
     def ROLES(self) -> Mapping[ModelRole, str]:  # noqa: N802 -- public provider interface uses this established name.
         """Role name to base id; ``utility`` falls back to the default."""
@@ -294,6 +286,18 @@ class Anthropic:
                 "utility": self.DEFAULT_UTILITY_MODEL or self.DEFAULT_MODEL,
             },
         )
+
+
+class Anthropic(AnthropicCatalog):
+    """Anthropic provider - API key auth.
+
+    The base class exposes hooks that alternative auth implementations can override:
+    ``get_sdk``, ``build_system``, ``extra_headers``, ``extra_body``,
+    ``handle_auth_error``, ``subscription``.
+    """
+
+    TRANSPORT: ClassVar[ModelCapability] = sagent.catalog.anthropic.api()
+    """What this transport lets through; subclasses declare their own."""
 
     def __init__(
         self,

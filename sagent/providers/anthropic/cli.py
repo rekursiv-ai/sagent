@@ -46,7 +46,7 @@ from sagent.lib.custom_json import (
     MutableJSONValue,
     validate_json_schema,
 )
-from sagent.providers.anthropic.api import Anthropic
+from sagent.providers.anthropic.api import Anthropic, AnthropicCatalog
 from sagent.providers.lib.cli_respawn import respawn_for_cadence
 from sagent.providers.lib.errors import (
     error_status_code,
@@ -341,11 +341,11 @@ class AnthropicCLICredentials(TypedDict):
     has_extra_usage_enabled: NotRequired[bool | None]
 
 
-class AnthropicCLI(Anthropic):
+class AnthropicCLI(AnthropicCatalog):
     """Provider that drives the user's installed ``claude`` CLI subprocess.
 
     Inherits ``CAPABILITIES`` (limits, pricing, tokenizer density) from
-    :class:`Anthropic`. The default account uses the CLI's native login
+    :class:`AnthropicCatalog`. The default account uses the CLI's native login
     (including macOS Keychain storage); named accounts use the file variant
     produced by ``providers.lib.oauth.credentials_path``.
     Cost figures are computed from the per-turn ``modelUsage`` summary
@@ -365,12 +365,10 @@ class AnthropicCLI(Anthropic):
     """
 
     def __init__(self, *, account: str | None = None) -> None:
-        super().__init__(api_key="")
         account_name = resolve_account(account)
         self._account = None if account_name == "default" else account_name
 
     @classmethod
-    @override
     def from_key(
         cls,
         api_key: str,
@@ -496,8 +494,7 @@ class AnthropicCLI(Anthropic):
                 "subscription login could be verified.",
             )
 
-    @override
-    def model(  # ty: ignore[invalid-method-override] -- The provider returns its sibling CLI model type by design.
+    def model(
         self,
         model_id: str | None = None,
         *,
@@ -574,8 +571,7 @@ class AnthropicCLI(Anthropic):
             mcp_connect_timeout_sec=mcp_connect_timeout_sec,
         )
 
-    @override
-    def utility_model(self) -> _AnthropicCLIModel:  # ty: ignore[invalid-method-override] -- The provider returns its sibling CLI model type by design.
+    def utility_model(self) -> _AnthropicCLIModel:
         """Return the cheapest CLI-backed model (Haiku by default).
 
         Returns:
