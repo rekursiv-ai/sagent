@@ -1,5 +1,5 @@
 [project]
-name = "rekursiv-typeshed"
+name = "rekursiv-ai-typeshed"
 version = "0.1.0"
 description = "typeshed for basedpyright and ty with int/float ** returning float, not Any."
 readme = "README.md"
@@ -20,18 +20,18 @@ requires = ["hatchling", "basedpyright==1.40.1", "ty==0.0.80"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["rekursiv_typeshed"]
-exclude = ["rekursiv_typeshed/hatch_build.py"]
+packages = ["rekursiv_ai_typeshed"]
+exclude = ["rekursiv_ai_typeshed/hatch_build.py"]
 # ``py.typed`` ships so a consumer's basedpyright reads the installed module's
 # annotations even with ``useLibraryCodeForTypes = false``.
 
 [tool.hatch.build.targets.wheel.hooks.custom]
-path = "rekursiv_typeshed/hatch_build.py"
+path = "rekursiv_ai_typeshed/hatch_build.py"
 
 # The build hook registers the generated tree as ``shared-data``, so it lands
-# under the interpreter prefix at ``share/rekursiv-typeshed`` -- one static,
+# under the interpreter prefix at ``share/rekursiv-ai-typeshed`` -- one static,
 # Python-version-independent path that a project's ``typeshedPath`` /
-# ``[tool.ty.environment] typeshed`` can name (``.venv/share/rekursiv-typeshed``).
+# ``[tool.ty.environment] typeshed`` can name (``.venv/share/rekursiv-ai-typeshed``).
 
 [tool.hatch.build.targets.sdist]
-include = ["rekursiv_typeshed", "README.md"]
+include = ["rekursiv_ai_typeshed", "README.md"]
