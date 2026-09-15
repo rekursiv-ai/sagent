@@ -1,6 +1,7 @@
 from collections.abc import Callable, Generator, Iterable, Sequence
 from typing import Any, Generic, Self, TypeVar
 
+from torch.utils.data._utils.worker import get_worker_info as get_worker_info
 from torch.utils.data.dataset import Dataset
 from torch.utils.data.sampler import Sampler
 
@@ -17,7 +18,6 @@ type _worker_init_fn_t = Callable[[int], None]
 type _collate_fn_t[_T] = Callable[[list[_T]], Any]
 default_collate: _collate_fn_t = ...
 default_convert = ...
-get_worker_info = ...
 logger = ...
 
 class _DatasetKind:

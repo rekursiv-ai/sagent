@@ -85,7 +85,7 @@ def schedule(
     repeat: int = ...,
     skip_first: int = ...,
     skip_first_wait: int = ...,
-) -> Callable: ...
+) -> Callable[[int], ProfilerAction]: ...
 def tensorboard_trace_handler(
     dir_name: str,
     worker_name: str | None = ...,

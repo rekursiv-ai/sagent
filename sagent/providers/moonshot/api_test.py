@@ -9,7 +9,6 @@ from sagent.providers.moonshot.api import Moonshot
 
 def test_moonshot_from_key() -> None:
     p = Moonshot.from_key("sk-moon-test")
-    assert isinstance(p, Moonshot)
     assert p.api_key == "sk-moon-test"
     assert p.base_url == "https://api.moonshot.ai/v1"
 

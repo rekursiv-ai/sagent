@@ -20,15 +20,15 @@ class EventList(list[FunctionEvent | FunctionEventAvg]):
     def self_cpu_time_total(self) -> int: ...
     def table(
         self,
-        sort_by=...,
-        row_limit=...,
-        max_src_column_width=...,
-        max_name_column_width=...,
-        max_shapes_column_width=...,
-        header=...,
-        top_level_events_only=...,
-        time_unit=...,
-    ): ...
+        sort_by: str | None = ...,
+        row_limit: int = ...,
+        max_src_column_width: int = ...,
+        max_name_column_width: int = ...,
+        max_shapes_column_width: int = ...,
+        header: str | None = ...,
+        top_level_events_only: bool = ...,
+        time_unit: str | None = ...,
+    ) -> str: ...
     def export_chrome_trace(self, path) -> None: ...
     def supported_export_stacks_metrics(self) -> list[str]: ...
     def export_stacks(self, path: str, metric: str) -> None: ...

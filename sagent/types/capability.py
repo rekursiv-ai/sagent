@@ -147,7 +147,7 @@ class ModelCapability:
         the constructor cannot do once.
         """
         for f in fields(self):
-            value = getattr(self, f.name)
+            value: object = getattr(self, f.name)  # pyright: ignore[reportAny] -- Dataclass fields are selected by runtime name.
             if isinstance(value, (set, frozenset)):
                 object.__setattr__(self, f.name, frozenset(cast(set[object], value)))
 
@@ -262,13 +262,11 @@ class ModelSettings:
           other: The outgoing model's settings.
 
         """
-        self.take(
-            **{
-                f.name: getattr(other, f.name)
-                for f in fields(self)
-                if f.name not in ("capability", "context")
-            },
-        )
+        choices: dict[str, object] = {}
+        for f in fields(self):
+            if f.name not in ("capability", "context"):
+                choices[f.name] = getattr(other, f.name)
+        self.take(**choices)
 
     def take(self, **choices: object) -> None:
         """Apply each of ``choices`` this capability offers; drop the rest.
@@ -381,7 +379,8 @@ def _reject_unoffered(capability: ModelCapability, name: str, value: object) -> 
 
 def _ladder[T](alias: object) -> tuple[T, ...]:
     """Return the Literal's members, in declaration order -- least committing first."""
-    return cast(tuple[T, ...], get_args(cast(TypeAliasType, alias).__value__))
+    underlying: object = cast(TypeAliasType, alias).__value__  # pyright: ignore[reportAny] -- PEP 695 aliases expose their target through __value__.
+    return cast(tuple[T, ...], get_args(underlying))
 
 
 def _lowest[T](name: str, offered: Collection[T], ladder: Sequence[T]) -> T:

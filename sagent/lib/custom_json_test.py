@@ -65,6 +65,7 @@ from sagent.lib.custom_json import (
     encode_value,
     json_freeze,
     json_unfreeze,
+    loads,
     replay,
     residual,
     resolve_import,
@@ -79,7 +80,6 @@ class TestJsonFreeze:
 
     def test_mapping(self) -> None:
         frozen = json_freeze({"a": [1, {"b": True}]})
-        assert isinstance(frozen, Mapping)
         assert frozen == {"a": (1, {"b": True})}
 
     def test_sequence_abc(self) -> None:
@@ -93,7 +93,6 @@ class TestJsonFreeze:
     @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
     def test_preserves_non_finite_float_extensions(self, value: float) -> None:
         frozen = json_freeze({"value": value})
-        assert isinstance(frozen, Mapping)
         result = frozen["value"]
         assert isinstance(result, float)
         assert math.isnan(result) if math.isnan(value) else result == value
@@ -113,7 +112,7 @@ class TestJsonFreeze:
     ) -> None:
         text = json.dumps(json_unfreeze(json_freeze({"value": value})))
         assert literal in text
-        result = json.loads(text)["value"]
+        result = FloatCodec.coerce(DictCodec.coerce(loads(text))["value"])
         assert math.isnan(result) if math.isnan(value) else result == value
 
     @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
@@ -124,6 +123,34 @@ class TestJsonFreeze:
     def test_rejects_non_string_mapping_keys(self) -> None:
         with pytest.raises(TypeError):
             json_freeze({1: "integer", "1": "string"})
+
+
+class TestLoads:
+    def test_returns_mutable_json_for_valid_text(self) -> None:
+        value = loads('{"a": [1, 2.5, "x", null, true]}')
+        assert value == {"a": [1, 2.5, "x", None, True]}
+
+    def test_accepts_bytes(self) -> None:
+        assert loads(b'{"n": 1}') == {"n": 1}
+
+    def test_preserves_non_finite_extensions(self) -> None:
+        value = loads('{"v": NaN}')
+        assert isinstance(value, dict)
+        v = value["v"]
+        assert isinstance(v, float)
+        assert math.isnan(v)
+
+    def test_allow_nan_false_rejects_non_finite(self) -> None:
+        with pytest.raises(TypeError, match="non-finite"):
+            loads("Infinity", allow_nan=False)
+
+    def test_rejects_non_string_keys_is_impossible_from_text(self) -> None:
+        # JSON text can only carry string keys, so no TypeError path exists.
+        assert loads('{"1": 1}') == {"1": 1}
+
+    def test_invalid_text_raises_json_decode_error(self) -> None:
+        with pytest.raises(json.JSONDecodeError):
+            loads("{not json")
 
 
 class TestJsonUnfreeze:
@@ -312,7 +339,7 @@ class TestOptionalVal:
 
     @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
     def test_non_finite_float_extensions_are_values(self, literal: str) -> None:
-        value = json.loads(literal)
+        value = FloatCodec.coerce(loads(literal))
         result = decode_or_none(float, value)
         assert isinstance(result, float)
         assert math.isnan(result) if math.isnan(value) else result == value
@@ -446,7 +473,7 @@ class TestLosslessFields:
         }
 
         stored = residual(source, fields=fields)
-        encoded = json.loads(json.dumps(stored))
+        encoded = loads(json.dumps(stored))
         restored = replay(
             cast(Mapping[str, object], encoded),
             {"missing": "default", "null": "now set", "value": "new", "invalid": 9},
@@ -1077,14 +1104,15 @@ class TestDataclassCodec:
                 slots=True,
                 kw_only=True,
             )
-            instance = cls(value=1)
+            factory: Callable[..., _Carrier] = cast(Callable[..., _Carrier], cls)
+            instance = factory(value=1)
             assert (
                 DataclassCodec.from_json(cls, DataclassCodec.to_json(instance))
                 == instance
             )
             class_ref = weakref.ref(cls)
 
-            del instance, cls
+            del instance, cls, factory
             gc.collect(0)
 
             assert class_ref() is None
@@ -1323,7 +1351,7 @@ class TestStrictDecode:
 
     @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
     def test_non_finite_float_extensions_are_decoded(self, literal: str) -> None:
-        value = json.loads(literal)
+        value = FloatCodec.coerce(loads(literal))
         result = decode(float | None, value)
         assert isinstance(result, float)
         assert math.isnan(result) if math.isnan(value) else result == value
@@ -1508,7 +1536,7 @@ class TestStrictEncode:
         assert (
             DataclassCodec.from_json(
                 _ObjectHolder,
-                json.loads(json.dumps(DataclassCodec.to_json(doc))),
+                DictCodec.coerce(loads(json.dumps(DataclassCodec.to_json(doc)))),
             )
             == doc
         )
@@ -1672,7 +1700,8 @@ class TestMixedScalarUnion:
             (first, {"number": 1}),
             (second, {"text": "x"}),
         ):
-            original = cls(**fields_by_name)
+            factory: Callable[..., _Carrier] = cast(Callable[..., _Carrier], cls)
+            original = factory(**fields_by_name)
             _assert_round_trips(annotation, original)
 
 
@@ -1683,7 +1712,7 @@ class TestNonFiniteEncoding:
     def test_non_finite_float_under_object_round_trips(self, value: float) -> None:
         doc = _ObjectHolder(value={"number": value})
         text = json.dumps(DataclassCodec.to_json(doc), allow_nan=False)
-        back = DataclassCodec.from_json(_ObjectHolder, json.loads(text))
+        back = DataclassCodec.from_json(_ObjectHolder, DictCodec.coerce(loads(text)))
         result = back.value["number"]
         assert isinstance(result, float)
         assert math.isnan(result) if math.isnan(value) else result == value
@@ -1703,7 +1732,7 @@ class TestNonFiniteEncoding:
         doc = _ObjectHolder(value=value)
         back = DataclassCodec.from_json(
             _ObjectHolder,
-            json.loads(json.dumps(DataclassCodec.to_json(doc))),
+            DictCodec.coerce(loads(json.dumps(DataclassCodec.to_json(doc)))),
         )
         assert back == doc
 
@@ -1713,7 +1742,7 @@ class TestNonFiniteEncoding:
         # ``allow_nan=False`` is what a strict reader enforces: an untagged
         # non-finite raises here rather than emitting invalid JSON.
         text = json.dumps(DataclassCodec.to_json(doc), allow_nan=False)
-        back = DataclassCodec.from_json(_Floats, json.loads(text))
+        back = DataclassCodec.from_json(_Floats, DictCodec.coerce(loads(text)))
         if math.isnan(value):
             assert math.isnan(back.ratio)
         else:
@@ -1724,7 +1753,7 @@ class TestNonFiniteEncoding:
         doc = _FloatUnion(value=value)
         back = DataclassCodec.from_json(
             _FloatUnion,
-            json.loads(json.dumps(DataclassCodec.to_json(doc))),
+            DictCodec.coerce(loads(json.dumps(DataclassCodec.to_json(doc)))),
         )
         if math.isnan(value):
             assert math.isnan(back.value)
@@ -1746,7 +1775,7 @@ class TestZonedDatetimeEncoding:
 
         back = DataclassCodec.from_json(
             _Doc,
-            json.loads(json.dumps(DataclassCodec.to_json(doc))),
+            DictCodec.coerce(loads(json.dumps(DataclassCodec.to_json(doc)))),
         )
 
         assert back.when == doc.when
@@ -1763,7 +1792,7 @@ class TestZonedDatetimeEncoding:
 
         back = DataclassCodec.from_json(
             _Doc,
-            json.loads(json.dumps(DataclassCodec.to_json(doc))),
+            DictCodec.coerce(loads(json.dumps(DataclassCodec.to_json(doc)))),
         ).when
         assert back is not None
         winter = back.astimezone(back.tzinfo) + timedelta(days=150)
@@ -1867,7 +1896,7 @@ def _assert_round_trips(annotation: object, value: object) -> None:
     # Through real JSON text, not just the dict: a value that survives the
     # in-memory round trip but is not serializable (a raw Path, bytes) would
     # otherwise pass while the JSONB write it stands in for fails.
-    wire = DictCodec.coerce(json.loads(json.dumps(DataclassCodec.to_json(original))))
+    wire = DictCodec.coerce(loads(json.dumps(DataclassCodec.to_json(original))))
     back = DataclassCodec.from_json(cast(type[_Carrier], cls), wire)
     assert back == original
     # The container type is half the contract: a ``frozenset`` field decoding
@@ -2070,7 +2099,7 @@ class TestJsonpickleVocabulary:
         assert (
             DataclassCodec.from_json(
                 _Doc,
-                json.loads(json.dumps(DataclassCodec.to_json(doc))),
+                DictCodec.coerce(loads(json.dumps(DataclassCodec.to_json(doc)))),
             )
             == doc
         )
@@ -2084,7 +2113,7 @@ class TestJsonpickleVocabulary:
         assert (
             DataclassCodec.from_json(
                 _Floats,
-                json.loads(json.dumps(DataclassCodec.to_json(doc))),
+                DictCodec.coerce(loads(json.dumps(DataclassCodec.to_json(doc)))),
             )
             == doc
         )
@@ -2098,7 +2127,7 @@ class TestJsonpickleVocabulary:
         assert (
             DataclassCodec.from_json(
                 _Bytes,
-                json.loads(json.dumps(DataclassCodec.to_json(doc))),
+                DictCodec.coerce(loads(json.dumps(DataclassCodec.to_json(doc)))),
             )
             == doc
         )
@@ -2132,7 +2161,7 @@ class TestNamedZonePreservation:
 
         back = DataclassCodec.from_json(
             _Doc,
-            json.loads(json.dumps(DataclassCodec.to_json(doc))),
+            DictCodec.coerce(loads(json.dumps(DataclassCodec.to_json(doc)))),
         )
 
         assert back.when == doc.when
@@ -2179,7 +2208,7 @@ class TestSelfDescribingValues:
 
         assert isinstance(encoded, Mapping)
         assert tag in encoded
-        assert decode(None, json.loads(json.dumps(encoded))) == value
+        assert decode(None, loads(json.dumps(encoded))) == value
 
     def test_a_timestamp_stays_readable_rather_than_pickled(self) -> None:
         # What configgle's ``py/reduce`` costs today: the instant becomes
@@ -2218,7 +2247,7 @@ class TestSelfDiscriminatingUnionMembers:
         assert (
             DataclassCodec.from_json(
                 _Doc,
-                json.loads(json.dumps(DataclassCodec.to_json(doc))),
+                DictCodec.coerce(loads(json.dumps(DataclassCodec.to_json(doc)))),
             )
             == doc
         )
@@ -2254,11 +2283,15 @@ class TestSelfDiscriminatingUnionMembers:
         annotation = first | second
 
         for cls, values in ((first, {"number": 1}), (second, {"text": "x"})):
-            original = cls(**values)
+            factory: Callable[..., _Carrier] = cast(Callable[..., _Carrier], cls)
+            original = factory(**values)
             encoded = encode_value(original, annotation)
 
             assert "py/union" in DictCodec.coerce(encoded)
-            assert decode(annotation, json.loads(json.dumps(encoded))) == original
+            assert (
+                decode(annotation, DictCodec.coerce(loads(json.dumps(encoded))))
+                == original
+            )
 
 
 class TestDecodeCapabilities:
@@ -2865,7 +2898,7 @@ class TestIssue19672Contracts:
             "x": 1.0,
         }
 
-        restored = replay(json.loads(json.dumps(residual(source))), {})
+        restored = replay(DictCodec.coerce(loads(json.dumps(residual(source)))), {})
 
         assert restored == source
         assert type(restored["x"]) is float

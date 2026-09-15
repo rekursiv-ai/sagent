@@ -1,6 +1,7 @@
 from typing import Any
 
 from torch import Size, Tensor
+from torch.nn.parameter import Parameter
 
 import torch
 
@@ -45,6 +46,10 @@ type _shape_t = int | list[int] | Size
 
 class LayerNorm(Module):
     __constants__ = ...
+    # Upstream assigns these in __init__ without class-level annotations, so the
+    # generated stub dropped them and every read fell through Module.__getattr__.
+    weight: Parameter
+    bias: Parameter | None
     normalized_shape: tuple[int, ...]
     eps: float
     elementwise_affine: bool
@@ -64,6 +69,10 @@ class LayerNorm(Module):
 
 class GroupNorm(Module):
     __constants__ = ...
+    # Upstream assigns these in __init__ without class-level annotations, so the
+    # generated stub dropped them and every read fell through Module.__getattr__.
+    weight: Parameter
+    bias: Parameter
     num_groups: int
     num_channels: int
     eps: float
@@ -84,6 +93,9 @@ class GroupNorm(Module):
 
 class RMSNorm(Module):
     __constants__ = ...
+    # Upstream assigns these in __init__ without class-level annotations, so the
+    # generated stub dropped them and every read fell through Module.__getattr__.
+    weight: Parameter
     normalized_shape: tuple[int, ...]
     eps: float | None
     elementwise_affine: bool

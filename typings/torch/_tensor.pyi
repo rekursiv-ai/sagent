@@ -1,6 +1,6 @@
 from collections.abc import Callable, Iterator, Sequence
 from types import NotImplementedType
-from typing import Any, Self, TypeVar, overload
+from typing import Any, Literal, Self, TypeVar, overload
 from typing_extensions import ParamSpec
 
 import enum
@@ -88,13 +88,41 @@ class Tensor(torch._C.TensorBase):
         split_size: Sequence[int],
         dim: int = ...,
     ) -> tuple[Tensor, ...]: ...
+    @overload
     def unique(
         self,
-        sorted=...,
-        return_inverse=...,
-        return_counts=...,
-        dim=...,
-    ) -> Any: ...
+        sorted: bool = ...,
+        return_inverse: Literal[False] = ...,
+        return_counts: Literal[False] = ...,
+        dim: int | None = ...,
+    ) -> Tensor: ...
+    @overload
+    def unique(
+        self,
+        sorted: bool = ...,
+        *,
+        return_inverse: Literal[True],
+        return_counts: Literal[False] = ...,
+        dim: int | None = ...,
+    ) -> tuple[Tensor, Tensor]: ...
+    @overload
+    def unique(
+        self,
+        sorted: bool = ...,
+        return_inverse: Literal[False] = ...,
+        *,
+        return_counts: Literal[True],
+        dim: int | None = ...,
+    ) -> tuple[Tensor, Tensor]: ...
+    @overload
+    def unique(
+        self,
+        sorted: bool = ...,
+        *,
+        return_inverse: Literal[True],
+        return_counts: Literal[True],
+        dim: int | None = ...,
+    ) -> tuple[Tensor, Tensor, Tensor]: ...
     def unique_consecutive(
         self,
         return_inverse=...,

@@ -39,6 +39,7 @@ import sys
 import httpx2
 
 from sagent import providers
+from sagent.lib.custom_json import DictCodec, IntCodec, ListCodec, StrCodec
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.google.api import Google
 from sagent.providers.openai.api import OpenAI
@@ -72,10 +73,14 @@ async def fetch_google(api_key: str) -> dict[str, LiveLimits]:
         r = await client.get(f"{api}?key={api_key}")
         r.raise_for_status()
         out: dict[str, LiveLimits] = {}
-        for m in r.json().get("models", []):
-            short = m.get("name", "").removeprefix("models/")
-            inp = m.get("inputTokenLimit", 0)
-            outp = m.get("outputTokenLimit", 0)
+        body = DictCodec.coerce(r.json())
+        for raw_model in ListCodec.coerce(body.get("models")):
+            model = DictCodec.coerce(raw_model)
+            short = StrCodec.coerce(model.get("name"), default="").removeprefix(
+                "models/",
+            )
+            inp = IntCodec.coerce(model.get("inputTokenLimit"))
+            outp = IntCodec.coerce(model.get("outputTokenLimit"))
             if inp and outp:
                 out[short] = LiveLimits(
                     max_request_tokens=inp,
@@ -145,9 +150,9 @@ async def fetch_anthropic(
             try:
                 r = await client.get(f"{api}/{mid}", headers=headers)
                 r.raise_for_status()
-                data = r.json()
-                max_input = data.get("max_input_tokens", 0)
-                max_output = data.get("max_tokens", 0)
+                data = DictCodec.coerce(r.json())
+                max_input = IntCodec.coerce(data.get("max_input_tokens"))
+                max_output = IntCodec.coerce(data.get("max_tokens"))
                 if max_input and max_output:
                     out[mid] = LiveLimits(
                         max_request_tokens=max_input,

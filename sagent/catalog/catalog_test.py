@@ -23,10 +23,16 @@ from sagent.types.cost import PriceCatalogProduct, TokenCount
 
 _VENDORS = (anthropic, dashscope, google, llamacpp, minimax, moonshot, openai)
 
+
+def _models(module: ModuleType) -> Mapping[str, ModelCapability]:
+    """Return a vendor's typed model catalog."""
+    return cast(Callable[[], Mapping[str, ModelCapability]], module.models)()
+
+
 _ROWS = [
     pytest.param(row, id=f"{module.__name__.rsplit('.', 1)[-1]}:{model_id}")
     for module in _VENDORS
-    for model_id, row in module.models().items()
+    for model_id, row in _models(module).items()
 ]
 
 
@@ -42,7 +48,7 @@ def _transports() -> tuple[list[_Case], list[str]]:
             if not hasattr(module, name):
                 continue
             factory = cast(Callable[[], ModelCapability], getattr(module, name))
-            cases.append((module.models(), factory()))
+            cases.append((_models(module), factory()))
             ids.append(f"{vendor}:{name}")
     return cases, ids
 
@@ -50,14 +56,19 @@ def _transports() -> tuple[list[_Case], list[str]]:
 _TRANSPORTS, _TRANSPORT_IDS = _transports()
 
 
-@pytest.mark.parametrize("module", _VENDORS, ids=lambda m: m.__name__)
+def _module_id(module: ModuleType) -> str:
+    """Return a vendor module's qualified name for pytest."""
+    return module.__name__
+
+
+@pytest.mark.parametrize("module", _VENDORS, ids=_module_id)
 def test_every_vendor_serves_at_least_one_model(module: ModuleType) -> None:
-    assert module.models()
+    assert _models(module)
 
 
-@pytest.mark.parametrize("module", _VENDORS, ids=lambda m: m.__name__)
+@pytest.mark.parametrize("module", _VENDORS, ids=_module_id)
 def test_models_is_a_function_not_a_table(module: ModuleType) -> None:
-    assert isinstance(module.models(), Mapping)
+    assert isinstance(_models(module), Mapping)
     assert not hasattr(module, "MODELS")
 
 
@@ -167,10 +178,13 @@ def test_a_transport_never_advertises_what_no_row_can_reach(
     one -- both green, because nothing compared the two sides.
     """
     for name in ("service_tier", "cache_ttl_sec"):
-        offered = getattr(transport, name)
+        offered = cast(frozenset[str] | bool | None, getattr(transport, name))
         best = max(
-            (getattr(row & transport, name) for row in models.values()),
-            key=lambda v: len(v) if isinstance(v, frozenset) else v,
+            (
+                cast(frozenset[str] | bool | None, getattr(row & transport, name))
+                for row in models.values()
+            ),
+            key=lambda v: len(v) if isinstance(v, frozenset) else int(bool(v)),
         )
         assert best == offered, (
             f"{name}: transport offers {offered!r} but the widest row"
@@ -213,7 +227,7 @@ def test_a_row_bills_the_vendors_published_rate(
     became permanent. Every other test in this file stayed green: they
     assert a row IS priced, never that the number is right.
     """
-    rows = {mid: row for module in _VENDORS for mid, row in module.models().items()}
+    rows = {mid: row for module in _VENDORS for mid, row in _models(module).items()}
     price = rows[model_id].prices[PriceCatalogProduct()]
     assert (price.request, price.response) == published
 
@@ -239,7 +253,7 @@ def test_a_cache_rate_is_a_multiple_of_the_rate_it_rides() -> None:
 
 def test_no_catalog_declares_a_latency_tag() -> None:
     for module in _VENDORS:
-        for model_id in module.models():
+        for model_id in _models(module):
             assert "+fast" not in model_id
 
 

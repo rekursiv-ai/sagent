@@ -246,7 +246,6 @@ def test_shortening_tools_expose_offset(tool: Glob | Grep) -> None:
     argument that would return them.
     """
     schema = tool.directive_schema
-    assert isinstance(schema, Mapping)
     properties = schema["properties"]
     assert isinstance(properties, Mapping)
     assert "offset" in properties, (

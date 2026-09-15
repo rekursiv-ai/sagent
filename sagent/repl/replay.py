@@ -88,7 +88,6 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
                     output_policy=policy,
                 )
             continue
-        assert isinstance(record, ReferrableTapeEvent)
         # ``CompactStarted`` is a live, in-progress marker -- it renders as
         # "[compacting history…]". On resume the compaction it announced has
         # already completed (its ``CompactComplete`` follows in the tape), so

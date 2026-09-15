@@ -1,3 +1,6 @@
+from collections.abc import Callable
+from typing import overload
+
 PATH_TO_TRANSFORMERS = ...
 AUTODOC_FILES = ...
 PLACEHOLDER_TO_AUTO_MODULE = ...
@@ -174,11 +177,12 @@ def auto_method_docstring(
     source_args_dict=...,
 ): ...
 def auto_class_docstring(cls, custom_intro=..., custom_args=..., checkpoint=...): ...
-def auto_docstring(
-    obj=...,
+@overload
+def auto_docstring[T](obj: T) -> T: ...
+@overload
+def auto_docstring[T](
     *,
-    custom_intro=...,
-    custom_args=...,
-    checkpoint=...,
-):  # -> Callable[..., Any]:
-    ...
+    custom_intro: str | None = ...,
+    custom_args: str | None = ...,
+    checkpoint: str | None = ...,
+) -> Callable[[T], T]: ...

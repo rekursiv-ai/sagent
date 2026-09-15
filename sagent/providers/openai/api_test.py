@@ -72,7 +72,6 @@ async def _is_served(client: httpx2.AsyncClient, *, model_id: str, key: str) -> 
 
 def test_openai_from_key_constructs() -> None:
     p = OpenAI.from_key("sk-test")
-    assert isinstance(p, OpenAI)
     assert p.api_key == "sk-test"
     assert p.base_url == "https://api.openai.com/v1"
 

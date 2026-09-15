@@ -2,7 +2,7 @@ from typing import Any
 
 from torch import Tensor
 from torch.nn.modules.module import Module
-from torch.nn.parameter import UninitializedParameter
+from torch.nn.parameter import Parameter, UninitializedParameter
 
 from .lazy import LazyModuleMixin
 from .module import Module
@@ -24,6 +24,14 @@ class _NormBase(Module):
     momentum: float | None
     affine: bool
     track_running_stats: bool
+    # Upstream assigns these in __init__ (Parameter when affine, buffers when
+    # tracking stats) without class-level annotations, so the generated stub
+    # dropped them and every read fell through Module.__getattr__ -> Any.
+    weight: Parameter
+    bias: Parameter
+    running_mean: Tensor | None
+    running_var: Tensor | None
+    num_batches_tracked: Tensor | None
     def __init__(
         self,
         num_features: int,

@@ -13,7 +13,6 @@ import pytest
 
 from sagent.agent.context import (
     InvalidContextError,
-    ResolvedContext,
     resolve_context,
     validate_context,
 )
@@ -75,7 +74,6 @@ def test_context_returns_resolved_context_value() -> None:
     """``runtime.context()`` returns a ``ResolvedContext`` instance."""
     runtime = _runtime()
     resolved = runtime.context()
-    assert isinstance(resolved, ResolvedContext)
     assert resolved.messages == []
     assert resolved.version == 0
 

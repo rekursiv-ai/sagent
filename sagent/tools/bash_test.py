@@ -109,7 +109,6 @@ def test_description_does_not_recommend_ls_for_directory_inspection() -> None:
 
 def test_schema_required_command() -> None:
     schema = Bash().directive_schema
-    assert isinstance(schema, Mapping)
     assert schema["required"] == ("command",)
 
 
@@ -148,7 +147,7 @@ def test_exit_marker_survives_truncation(stdout_size: int) -> None:
     proc = MagicMock()
     proc.returncode = 7
     out = _process_output(
-        proc,
+        cast(asyncio.subprocess.Process, proc),
         "x" * stdout_size,
         "fatal: boom",
         sentinel="__NONE__",
@@ -287,7 +286,7 @@ async def test_kill_process_group_skips_completed() -> None:
     proc = MagicMock()
     proc.returncode = 0
     # ``wait`` should never be called since we short-circuit.
-    await _kill_process_group(proc)
+    await _kill_process_group(cast(asyncio.subprocess.Process, proc))
 
 
 @pytest.mark.asyncio
@@ -301,7 +300,7 @@ async def test_kill_process_group_sigterm_succeeds() -> None:
         return 0
 
     proc.wait = _wait
-    await _kill_process_group(proc)
+    await _kill_process_group(cast(asyncio.subprocess.Process, proc))
 
 
 @pytest.mark.asyncio
@@ -361,7 +360,7 @@ async def test_kill_process_group_sigkill_on_wait_timeout(
         raise TimeoutError
 
     monkeypatch.setattr("asyncio.wait_for", _instant_wait_for)
-    await _kill_process_group(proc)
+    await _kill_process_group(cast(asyncio.subprocess.Process, proc))
     # First wait_for raises TimeoutError → SIGKILL → proc.wait runs once.
     assert wait_calls == [1]
 

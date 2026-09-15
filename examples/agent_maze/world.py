@@ -552,7 +552,6 @@ class World:
         armed = self.armed_plates()
         for lk in self.locks:
             plates = lk["plates"]
-            assert isinstance(plates, list)
             if not lk["open"] and all(p in armed for p in plates):
                 lk["open"] = True
 

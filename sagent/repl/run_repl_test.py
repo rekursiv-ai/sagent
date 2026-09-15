@@ -15,6 +15,7 @@ import dataclasses
 import sys
 
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyPressEvent
 
 import pytest
 
@@ -847,7 +848,7 @@ def test_format_tasks_lists_bg_jobs() -> None:
     task.done.return_value = False
     task.cancelled.return_value = False
     job = BackgroundTaskEntry(
-        task=task,
+        task=cast(asyncio.Task[object], task),
         tool_name="Bash",
         queue_id="bg-1",
         started=0.0,
@@ -874,7 +875,7 @@ def test_format_tasks_namespaces_same_job_id_by_agent_label() -> None:
     task.done.return_value = False
     task.cancelled.return_value = False
     job = BackgroundTaskEntry(
-        task=task,
+        task=cast(asyncio.Task[object], task),
         tool_name="Bash",
         queue_id="job-1",
         started=0.0,
@@ -1608,7 +1609,7 @@ class _GatedCompactor:
 # The harness drives ``_kb_submit`` / ``_kb_defer`` directly rather than through the
 # prompt-toolkit dispatcher; the handlers only touch ``event.current_buffer.text`` /
 # ``.cursor_position`` / ``.reset()`` / ``.append_to_history()``.
-def _make_kb_event(text: str) -> MagicMock:
+def _make_kb_event(text: str) -> KeyPressEvent:
     """Build a prompt-toolkit key event whose buffer holds ``text``."""
     buf = MagicMock()
     buf.text = text
@@ -1618,7 +1619,7 @@ def _make_kb_event(text: str) -> MagicMock:
     buf.history.get_strings.return_value = []
     event = MagicMock()
     event.current_buffer = buf
-    return event
+    return cast(KeyPressEvent, event)
 
 
 async def _wait_for(
@@ -1765,7 +1766,9 @@ async def test_pane_restored_onto_idle_agent_still_drains() -> None:
         # older stop the second Up is a no-op at the hard top and the
         # text correctly stays in the buffer -- no restore happens.
         event = _make_kb_event("")
-        event.current_buffer.history.get_strings.return_value = ["older entry"]
+        cast(MagicMock, event.current_buffer.history).get_strings.return_value = [
+            "older entry",
+        ]
         # Up lifts the pane message into the buffer, emptying the pane.
         _kb_up(cast(Agent, holder), queues, nav, event)
         assert queues.queue is None
@@ -2305,7 +2308,7 @@ def _make_subagent_job(queue_id: str = "child-1") -> BackgroundTaskEntry:
     task.done.return_value = False
     task.cancelled.return_value = False
     return BackgroundTaskEntry(
-        task=task,
+        task=cast(asyncio.Task[object], task),
         tool_name="AgentSpawn",
         queue_id=queue_id,
         started=0.0,

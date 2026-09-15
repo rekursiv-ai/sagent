@@ -172,7 +172,6 @@ def test_from_cli_rejects_credentials_missing_oauth_fields(
 def test_from_key_delegates_to_google() -> None:
     """``GoogleCLI.from_key`` returns a plain ``Google`` provider for API keys."""
     fallback = GoogleCLI.from_key("AIza-not-real")
-    assert isinstance(fallback, Google)
     assert not isinstance(fallback, GoogleCLI)
 
 
@@ -389,7 +388,6 @@ def test_should_respawn_triggers() -> None:
     """Each respawn trigger from §1.4 is detected on the next request."""
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")
-    assert isinstance(model, _GoogleCLIModel)
 
     class _DummyActive:
         pass
@@ -424,7 +422,6 @@ async def test_stream_eof_respawns_and_resets_sent_index(
     """Subprocess EOF is transport failure and resets Google send state."""
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")
-    assert isinstance(model, _GoogleCLIModel)
     respawn_count = 0
 
     class _DeadProc:
@@ -462,7 +459,6 @@ async def test_stream_read_timeout_respawns_and_resets_sent_index(
 ) -> None:
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")
-    assert isinstance(model, _GoogleCLIModel)
     respawn_count = 0
 
     class _StalledProc:
@@ -502,7 +498,6 @@ async def test_stream_repeated_transport_failures_trip_budget(
     """Repeated subprocess transport failures stop respawning indefinitely."""
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")
-    assert isinstance(model, _GoogleCLIModel)
     respawn_count = 0
 
     class _DeadProc:
@@ -555,7 +550,6 @@ async def test_stream_system_change_discards_warmed_old_system_spare(
 ) -> None:
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")
-    assert isinstance(model, _GoogleCLIModel)
     spawned_systems: list[str] = []
     used_systems: list[str] = []
     warmed = asyncio.Event()
@@ -607,7 +601,6 @@ async def test_hot_spare_warmup_does_not_overwrite_active_session_id(
 ) -> None:
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")
-    assert isinstance(model, _GoogleCLIModel)
     ready = asyncio.Event()
     warmed = asyncio.Event()
 
@@ -665,7 +658,6 @@ async def test_exchange_turn_skips_assistant_replay(
     """Respawn replay sends only user-like entries to the CLI subprocess."""
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")
-    assert isinstance(model, _GoogleCLIModel)
     prompts: list[list[MutableJSON]] = []
 
     async def send_prompt(
@@ -705,7 +697,6 @@ async def test_stream_writeback_failure_returns_response(
 ) -> None:
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")
-    assert isinstance(model, _GoogleCLIModel)
     success_count = 0
 
     class _Proc:
@@ -756,7 +747,6 @@ async def test_stream_writeback_failure_returns_response(
 async def test_respawn_resets_active_counters(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")
-    assert isinstance(model, _GoogleCLIModel)
     model._turn_count = 100
     model._last_input_tokens = model.limits.max_request_tokens
 
@@ -805,7 +795,6 @@ async def test_exchange_turn_returns_current_output_only(
 ) -> None:
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")
-    assert isinstance(model, _GoogleCLIModel)
     text_callbacks: list[str] = []
 
     async def send_prompt(
@@ -843,7 +832,6 @@ async def test_terminal_json_rpc_error_respawns_and_resets_state(
 ) -> None:
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")
-    assert isinstance(model, _GoogleCLIModel)
     respawn_count = 0
 
     class _ErrorProc:
@@ -921,7 +909,6 @@ async def test_writeback_credentials_atomic_and_0o600(
     )
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")
-    assert isinstance(model, _GoogleCLIModel)
     src_dir = tmp_path / "sandbox" / ".gemini"
     src_dir.mkdir(parents=True)
     src = src_dir / "oauth_creds.json"
@@ -974,7 +961,6 @@ def test_writeback_credentials_works_across_event_loops(
     )
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")
-    assert isinstance(model, _GoogleCLIModel)
     src_dir = tmp_path / "sandbox" / ".gemini"
     src_dir.mkdir(parents=True)
     src = src_dir / "oauth_creds.json"

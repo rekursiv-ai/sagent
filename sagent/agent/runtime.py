@@ -1423,7 +1423,6 @@ class AgentRuntime:
             elif isinstance(event, ToolResult):
                 self._placeholder_refs[event.call_id] = record.ref
             return
-        assert isinstance(record, ContextSplice)
         for entry in record.payload:
             if isinstance(entry, AssistantMessage):
                 for tc in entry.tool_calls:

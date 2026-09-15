@@ -153,7 +153,8 @@ def test_login_manual_advertises_localhost_redirect_uri(
         return token_resp
 
     http_client = MagicMock()
-    http_client.__enter__.return_value.post.side_effect = _post
+    http_context = cast(MagicMock, http_client.__enter__.return_value)
+    http_context.post.side_effect = _post
 
     out = io.StringIO()
     with (
@@ -339,7 +340,6 @@ def _make_provider(*, expires_at: float = 9999.0) -> OpenAISubscription:
 def test_subscription_from_key_returns_plain_openai() -> None:
     """``from_key`` delegates to the API-key ``OpenAI`` class."""
     p = OpenAISubscription.from_key("sk-test")
-    assert isinstance(p, OpenAI)
     assert not isinstance(p, OpenAISubscription)
 
 
@@ -432,7 +432,7 @@ async def test_subscription_provider_close_releases_sdk() -> None:
     model = provider.model("gpt-5.5")
     sdk = MagicMock()
     sdk.close = AsyncMock()
-    provider._sdk = sdk
+    provider._sdk = cast(openai.AsyncOpenAI, sdk)
     provider._sdk_token = "dummy-token"  # noqa: S105 -- This test fixture token is synthetic and never a credential.
 
     await model.close()
@@ -980,7 +980,7 @@ class TestEnsureValidRace:
         closed: list[bool] = []
         stale_sdk = MagicMock()
         stale_sdk.close = AsyncMock(side_effect=lambda: closed.append(True))
-        provider._sdk = stale_sdk
+        provider._sdk = cast(openai.AsyncOpenAI, stale_sdk)
         provider._sdk_token = _make_jwt({"exp": 0.0})
 
         with patch(

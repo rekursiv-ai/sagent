@@ -122,7 +122,6 @@ class _DummyInner:
 def test_aware_injects_background_and_delay_into_schema() -> None:
     wrapped = BackgroundAwareTool(_DummyInner())
     schema = wrapped.directive_schema
-    assert isinstance(schema, Mapping)
     props = schema["properties"]
     assert isinstance(props, Mapping)
     assert "background" in props

@@ -15,7 +15,6 @@ from sagent.types.model import ModelRequest
 
 def test_dashscope_from_key() -> None:
     p = DashScope.from_key("sk-test")
-    assert isinstance(p, DashScope)
     assert p.api_key == "sk-test"
     assert p.base_url.startswith("https://dashscope-intl.aliyuncs.com")
 

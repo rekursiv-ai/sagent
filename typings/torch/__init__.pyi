@@ -569,7 +569,7 @@ def _check(
 # (used by ``Tensor.to(..., memory_format=...)``) and ``torch.Generator``
 # (used by ``nn.init.*(..., generator=...)``) otherwise resolve to the
 # ``torch`` module itself, producing ``Unknown`` in downstream call sites.
-from torch._C import (  # noqa: E402 -- mirrors upstream module layout
+from torch._C import (  # noqa: E402 -- Mirrors upstream module layout.
     Generator as Generator,
     device as device,
     dtype as dtype,

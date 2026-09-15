@@ -53,7 +53,6 @@ def test_startup_error_with_full_log() -> None:
 
 def test_free_port_returns_int_within_range() -> None:
     p = _free_port()
-    assert isinstance(p, int)
     assert 1 <= p <= 65_535
 
 
