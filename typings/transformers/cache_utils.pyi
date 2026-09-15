@@ -96,6 +96,39 @@ class StaticSlidingWindowLayer(StaticLayer):
     def get_mask_sizes(self, cache_position: torch.Tensor) -> tuple[int, int]: ...
     def get_seq_length(self) -> int: ...
 
+class LinearAttentionCacheLayerMixin(ABC):
+    number_of_states: int
+    conv_states: dict[int, torch.Tensor | None]
+    recurrent_states: dict[int, torch.Tensor | None]
+    is_conv_states_initialized: dict[int, bool]
+    is_recurrent_states_initialized: dict[int, bool]
+    has_previous_state: dict[int, bool]
+    conv_kernel_size: dict[int, int | None]
+    device: torch.device | None
+    dtype: torch.dtype | None
+    record_past: bool
+
+    def __init__(self, number_of_states: int = ..., **kwargs: object) -> None: ...
+    @abstractmethod
+    def lazy_initialization(
+        self,
+        conv_states: torch.Tensor | None = ...,
+        recurrent_states: torch.Tensor | None = ...,
+        state_idx: int = ...,
+    ) -> None: ...
+    @abstractmethod
+    def update_conv_state(
+        self, conv_states: torch.Tensor, state_idx: int = ...
+    ) -> torch.Tensor: ...
+    @abstractmethod
+    def update_recurrent_state(
+        self, recurrent_states: torch.Tensor, state_idx: int = ...
+    ) -> torch.Tensor: ...
+    def offload(self) -> None: ...
+    def prefetch(self) -> None: ...
+    def reset(self) -> None: ...
+    def reorder_cache(self, beam_idx: torch.LongTensor) -> None: ...
+
 class QuantizedLayer(DynamicLayer):
     def __init__(
         self,
@@ -134,10 +167,13 @@ class HQQQuantizedLayer(QuantizedLayer):
     ) -> None: ...
 
 class Cache:
+    layers: list[CacheLayerMixin | LinearAttentionCacheLayerMixin]
+
     def __init__(
         self,
-        layers: list[CacheLayerMixin] | None = ...,
-        layer_class_to_replicate: type[CacheLayerMixin] | None = ...,
+        layers: list[CacheLayerMixin | LinearAttentionCacheLayerMixin] | None = ...,
+        layer_class_to_replicate: type[CacheLayerMixin | LinearAttentionCacheLayerMixin]
+        | None = ...,
         offloading: bool = ...,
         offload_only_non_sliding: bool = ...,
     ) -> None: ...
@@ -199,7 +235,7 @@ class Cache:
 class DynamicCache(Cache):
     def __init__(
         self,
-        ddp_cache_data: Iterable[tuple[torch.Tensor, torch.Tensor]] | None = ...,
+        ddp_cache_data: Iterable[tuple[torch.Tensor | None, ...]] | None = ...,
         config: PretrainedConfig | None = ...,
         offloading: bool = ...,
         offload_only_non_sliding: bool = ...,
