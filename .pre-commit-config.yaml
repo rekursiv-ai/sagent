@@ -312,6 +312,23 @@ repos:
 
   - repo: local
     hooks:
+      # Both type checkers below read `typings/typeshed.d`, a GENERATED copy of
+      # their bundled stdlib carrying `typings/typeshed.patch`. The builder is a
+      # stamp-checked no-op when fresh (~5ms) and rebuilds (~0.6s) after a
+      # basedpyright/ty bump, a patch edit, or a fresh clone -- so a checker
+      # never runs against a stale or missing tree. `always_run`: the inputs are
+      # the installed checkers, not any file pre-commit hands us.
+      #
+      # The monorepo ships the builder under its package tree, every exported
+      # package at `tools/`; the glob serves both so the hook needs no rewrite.
+      - id: typeshed-build
+        name: typeshed-build
+        language: system
+        stages: [pre-commit, pre-push]
+        always_run: true
+        pass_filenames: false
+        entry: bash -c 'exec "$(ls */tools/typeshed_build.py tools/typeshed_build.py 2>/dev/null | head -1)"'
+
       # No official ty hook yet (https://github.com/astral-sh/ty/issues/269).
       # `require_serial: true` for the same reason as `basedpyright` below: ty
       # is rayon-parallel and saturates every core alone (17 threads measured

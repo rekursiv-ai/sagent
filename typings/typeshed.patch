@@ -1,0 +1,34 @@
+--- a/stdlib/builtins.pyi
++++ b/stdlib/builtins.pyi
+@@ -573,11 +573,11 @@
+     # positive __value -> int; negative __value -> float
+     # return type must be Any as `int | float` causes too many false-positive errors
+     @overload
+-    def __pow__(self, value: int, mod: None = None, /) -> Any: ...
++    def __pow__(self, value: int, mod: None = None, /) -> float: ...
+     @overload
+     def __pow__(self, value: int, mod: int, /) -> int: ...
+
+-    def __rpow__(self, value: int, mod: int | None = None, /) -> Any:
++    def __rpow__(self, value: int, mod: int | None = None, /) -> float:
+         """Return pow(value, self, mod)."""
+
+     def __and__(self, value: int, /) -> int:
+@@ -747,7 +747,7 @@
+     # positive __value -> float; negative __value -> complex
+     # return type must be Any as `float | complex` causes too many false-positive errors
+     @overload
+-    def __pow__(self, value: float, mod: None = None, /) -> Any: ...
++    def __pow__(self, value: float, mod: None = None, /) -> float: ...
+
+     def __radd__(self, value: float, /) -> float:
+         """Return value+self."""
+@@ -777,7 +777,7 @@
+     def __rpow__(self, value: _NegativeInteger, mod: None = None, /) -> complex: ...
+     # Returning `complex` for the general case gives too many false-positive errors.
+     @overload
+-    def __rpow__(self, value: float, mod: None = None, /) -> Any: ...
++    def __rpow__(self, value: float, mod: None = None, /) -> float: ...
+
+     def __getnewargs__(self) -> tuple[float]: ...
+     def __trunc__(self) -> int:
