@@ -115,6 +115,8 @@ test = [
 typecheck = [
     "basedpyright>=1.10",
     "ty>=0.0.75",
+    "rekursiv-typeshed",
+    "hatchling",  # packages/rekursiv-typeshed/rekursiv_typeshed/hatch_build.py imports its plugin interface.
 ]
 "pre-commit" = [
     "pre-commit>=4.6",
@@ -283,7 +285,6 @@ target-version = "py312"
 force-exclude = true
 exclude = [
     ".venv/",
-    "typings/typeshed.d/",  # Generated stub tree (see [tool.basedpyright]); not source.
     "*.egg-info/",
     ".pytest_cache/",
     "build/",
@@ -384,7 +385,7 @@ ignore = [
 #    basedpyright --createstub
 #    uv --quiet run --frozen ruff check typings --fix --unsafe-fixes
 #    uv --quiet run --frozen ruff format typings
-"typings/**" = [
+"**/typings/**" = [
     # Autofix will break.
     "ANN401",  # typings.Any.
     "PYI015",  # assignment-default-in-stub -- strips dataclass_transform field-specifier; breaks synthesized __init__.
@@ -496,16 +497,15 @@ section-order = [
 typeCheckingMode = "recommended"
 failOnWarnings = true  # Warnings fail the check (basedpyright default; pinned explicitly).
 useLibraryCodeForTypes = false
-extraPaths = ["typings"]
-# Both checkers read a PATCHED copy of their bundled stdlib stubs so that
-# `int`/`float` `__pow__` return `float` rather than typeshed's `Any` (which
-# would otherwise make every `x ** 0.5` a `reportAny` violation). The copy is
-# generated, not tracked: `tools/typeshed_build.py` (run by the `typeshed-build`
-# pre-commit hook) rebuilds it from the installed checkers plus
-# `typings/typeshed.patch`. `stubPath` additionally exposes the hand-written
-# `typings/*` stubs to basedpyright ahead of the stdlib.
-stubPath = "typings/typeshed.d/basedpyright"
-typeshedPath = "typings/typeshed.d"
+# `stubPath` (not `extraPaths`) is the one root that resolves ahead of an
+# installed package's inline types.
+stubPath = "typings"
+# `rekursiv-typeshed` (a `typecheck` dependency): the checkers' bundled stdlib
+# with `int`/`float` `__pow__` returning `float` rather than typeshed's `Any`,
+# which would otherwise make every `x ** 0.5` a `reportAny` violation.
+# `uv sync` installs it as shared data at this path; the `basedpyright/` tree
+# also carries configgle's `Intersection` polyfill.
+typeshedPath = ".venv/share/rekursiv-typeshed/basedpyright"
 # `exclude` and `ignore` are the SAME list on purpose. `exclude` stops a path
 # from being a checked source; `ignore` also silences diagnostics when an
 # included file imports it. Pyright has no single key for both, so keep them
@@ -565,8 +565,8 @@ reportPrivateLocalImportUsage = false
 
 [tool.ty.environment]
 python-version = "3.12"
-# Same patched typeshed as `[tool.basedpyright] typeshedPath`.
-typeshed = "typings/typeshed.d"
+# Same patch as `[tool.basedpyright] typeshedPath`, with ty's real `ty_extensions`.
+typeshed = ".venv/share/rekursiv-typeshed/ty"
 extra-paths = ["typings"]
 
 # Mirrors `[tool.basedpyright] exclude`, minus entries ty never walks anyway
@@ -640,6 +640,7 @@ url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.uv.sources]
+rekursiv-typeshed = { path = "packages/rekursiv-typeshed" }
 configgle = { git = "https://github.com/rekursiv-ai/configgle", branch = "main" }
 priml = { git = "https://github.com/rekursiv-ai/priml", branch = "main" }
 wesearch = { git = "https://github.com/rekursiv-ai/wesearch", branch = "main" }

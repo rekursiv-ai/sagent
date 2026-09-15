@@ -1079,6 +1079,22 @@ wheels = [
 ]
 
 [[package]]
+name = "hatchling"
+version = "1.32.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+    { name = "pathspec" },
+    { name = "pluggy" },
+    { name = "tomlkit" },
+    { name = "trove-classifiers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/69/08/33331757185504aae48b8d9bd78cec03a76e3aecfb52e549d05a2347c0dd/hatchling-1.32.0.tar.gz", hash = "sha256:0bdbde4a52b06c37e3eca395f85a762bf0ef06fe374fd8ae429dc6be10230f5f", size = 57783, upload-time = "2026-08-11T05:03:44.114Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a9/84/1798b6d85ecde0e31546004efd25c5de1b1f49250644a60cce460e12593a/hatchling-1.32.0-py3-none-any.whl", hash = "sha256:0e17c9c3b9aa7c625acc8d0f5b622f107d5049af9ecf5ada4de1aada5be7cdbc", size = 78435, upload-time = "2026-08-11T05:03:42.644Z" },
+]
+
+[[package]]
 name = "hf-xet"
 version = "1.6.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2382,6 +2398,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pathspec"
+version = "1.1.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/5a/82/42f767fc1c1143d6fd36efb827202a2d997a375e160a71eb2888a925aac1/pathspec-1.1.1.tar.gz", hash = "sha256:17db5ecd524104a120e173814c90367a96a98d07c45b2e10c2f3919fff91bf5a", size = 135180, upload-time = "2026-04-27T01:46:08.907Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f1/d9/7fb5aa316bc299258e68c73ba3bddbc499654a07f151cba08f6153988714/pathspec-1.1.1-py3-none-any.whl", hash = "sha256:a00ce642f577bf7f473932318056212bc4f8bfdf53128c78bbd5af0b9b20b189", size = 57328, upload-time = "2026-04-27T01:46:07.06Z" },
+]
+
+[[package]]
 name = "pexpect"
 version = "4.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3084,6 +3109,21 @@ wheels = [
 ]
 
 [[package]]
+name = "rekursiv-typeshed"
+version = "0.1.0"
+source = { directory = "packages/rekursiv-typeshed" }
+dependencies = [
+    { name = "basedpyright" },
+    { name = "ty" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "basedpyright", specifier = "==1.40.1" },
+    { name = "ty", specifier = "==0.0.80" },
+]
+
+[[package]]
 name = "requests"
 version = "2.34.2"
 source = { registry = "https://pypi.org/simple" }
@@ -3320,6 +3360,7 @@ debug = [
 dev = [
     { name = "basedpyright" },
     { name = "codespell" },
+    { name = "hatchling" },
     { name = "hypothesis" },
     { name = "ipython" },
     { name = "pre-commit" },
@@ -3328,6 +3369,7 @@ dev = [
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
+    { name = "rekursiv-typeshed" },
     { name = "ruff" },
     { name = "ty" },
 ]
@@ -3338,6 +3380,7 @@ lint = [
 pre-commit = [
     { name = "basedpyright" },
     { name = "codespell" },
+    { name = "hatchling" },
     { name = "hypothesis" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -3345,6 +3388,7 @@ pre-commit = [
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
+    { name = "rekursiv-typeshed" },
     { name = "ruff" },
     { name = "ty" },
 ]
@@ -3358,6 +3402,8 @@ test = [
 ]
 typecheck = [
     { name = "basedpyright" },
+    { name = "hatchling" },
+    { name = "rekursiv-typeshed" },
     { name = "ty" },
 ]
 
@@ -3407,6 +3453,7 @@ debug = [{ name = "ipython" }]
 dev = [
     { name = "basedpyright", specifier = ">=1.10" },
     { name = "codespell", specifier = ">=2.2.4" },
+    { name = "hatchling" },
     { name = "hypothesis", specifier = ">=6.155.1" },
     { name = "ipython" },
     { name = "pre-commit", specifier = ">=4.6" },
@@ -3415,6 +3462,7 @@ dev = [
     { name = "pytest-cov" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
+    { name = "rekursiv-typeshed", directory = "packages/rekursiv-typeshed" },
     { name = "ruff" },
     { name = "ty", specifier = ">=0.0.75" },
 ]
@@ -3425,6 +3473,7 @@ lint = [
 pre-commit = [
     { name = "basedpyright", specifier = ">=1.10" },
     { name = "codespell", specifier = ">=2.2.4" },
+    { name = "hatchling" },
     { name = "hypothesis", specifier = ">=6.155.1" },
     { name = "pre-commit", specifier = ">=4.6" },
     { name = "pytest", specifier = ">=7.0" },
@@ -3432,6 +3481,7 @@ pre-commit = [
     { name = "pytest-cov" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
+    { name = "rekursiv-typeshed", directory = "packages/rekursiv-typeshed" },
     { name = "ruff" },
     { name = "ty", specifier = ">=0.0.75" },
 ]
@@ -3445,6 +3495,8 @@ test = [
 ]
 typecheck = [
     { name = "basedpyright", specifier = ">=1.10" },
+    { name = "hatchling" },
+    { name = "rekursiv-typeshed", directory = "packages/rekursiv-typeshed" },
     { name = "ty", specifier = ">=0.0.75" },
 ]
 
@@ -3881,6 +3933,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/df/3d/9e7eee57b37c80cec63322c0231bb6da3cfe535a91d7a4d64896fcb89357/triton-3.6.0-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:a17a5d5985f0ac494ed8a8e54568f092f7057ef60e1b0fa09d3fd1512064e803", size = 188273063, upload-time = "2026-01-20T16:01:07.278Z" },
     { url = "https://files.pythonhosted.org/packages/48/db/56ee649cab5eaff4757541325aca81f52d02d4a7cd3506776cad2451e060/triton-3.6.0-cp314-cp314t-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:0b3a97e8ed304dfa9bd23bb41ca04cdf6b2e617d5e782a8653d616037a5d537d", size = 176274804, upload-time = "2026-01-20T16:16:31.528Z" },
     { url = "https://files.pythonhosted.org/packages/f6/56/6113c23ff46c00aae423333eb58b3e60bdfe9179d542781955a5e1514cb3/triton-3.6.0-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:46bd1c1af4b6704e554cad2eeb3b0a6513a980d470ccfa63189737340c7746a7", size = 188397994, upload-time = "2026-01-20T16:01:14.236Z" },
+]
+
+[[package]]
+name = "trove-classifiers"
+version = "2026.6.1.19"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c2/e3/7ca82ee24c82d344584abd5b8637b3bd056f2900226e8d82fc22f1184b92/trove_classifiers-2026.6.1.19.tar.gz", hash = "sha256:c5132b4b61a829d11cfbd2d72e97f20a45ed6edb95e45c5efdeb5e00836b2745", size = 17059, upload-time = "2026-06-01T19:41:34.649Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7c/a4/81502f486f01db95bc8320646a8a12511f5e556cb63d5e224d91816605c4/trove_classifiers-2026.6.1.19-py3-none-any.whl", hash = "sha256:ab4c4ec93cc4a4e7815fa759906e05e6bb3f2fbd92ea0f897288c6a43efd15b3", size = 14211, upload-time = "2026-06-01T19:41:33.434Z" },
 ]
 
 [[package]]
