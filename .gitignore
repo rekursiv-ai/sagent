@@ -138,3 +138,8 @@ cython_debug/
 # OS
 .DS_Store
 Thumbs.db
+
+# Patched copy of the type checkers' bundled stdlib stubs. `tools/typeshed_build.py`
+# regenerates it from the installed basedpyright/ty plus `typings/typeshed.patch`
+# (the `typeshed-build` pre-commit hook runs it); only the patch is tracked.
+/typings/typeshed.d/

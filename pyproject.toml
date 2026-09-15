@@ -283,6 +283,7 @@ target-version = "py312"
 force-exclude = true
 exclude = [
     ".venv/",
+    "typings/typeshed.d/",  # Generated stub tree (see [tool.basedpyright]); not source.
     "*.egg-info/",
     ".pytest_cache/",
     "build/",
@@ -496,6 +497,15 @@ typeCheckingMode = "recommended"
 failOnWarnings = true  # Warnings fail the check (basedpyright default; pinned explicitly).
 useLibraryCodeForTypes = false
 extraPaths = ["typings"]
+# Both checkers read a PATCHED copy of their bundled stdlib stubs so that
+# `int`/`float` `__pow__` return `float` rather than typeshed's `Any` (which
+# would otherwise make every `x ** 0.5` a `reportAny` violation). The copy is
+# generated, not tracked: `tools/typeshed_build.py` (run by the `typeshed-build`
+# pre-commit hook) rebuilds it from the installed checkers plus
+# `typings/typeshed.patch`. `stubPath` additionally exposes the hand-written
+# `typings/*` stubs to basedpyright ahead of the stdlib.
+stubPath = "typings/typeshed.d/basedpyright"
+typeshedPath = "typings/typeshed.d"
 # `exclude` and `ignore` are the SAME list on purpose. `exclude` stops a path
 # from being a checked source; `ignore` also silences diagnostics when an
 # included file imports it. Pyright has no single key for both, so keep them
@@ -528,8 +538,10 @@ ignore = [
 ]
 pythonPlatform = "Linux"
 pythonVersion = "3.12"
-reportAny = false                          # `Any` propagation is pervasive in third-party deps.
-reportExplicitAny = false                  # Explicit `Any` annotations are intentional.
+# sagent is an experimental-tier package: it is not held to `reportAny`
+# upstream, so its export is not either.
+reportAny = false
+reportExplicitAny = false
 reportImplicitStringConcatenation = false  # Conflicts with ruff ISC003.
 reportInvalidCast = false                  # All cast() calls are intentional.
 reportPrivateUsage = false                 # Redundant with ruff SLF001.
@@ -553,6 +565,8 @@ reportPrivateLocalImportUsage = false
 
 [tool.ty.environment]
 python-version = "3.12"
+# Same patched typeshed as `[tool.basedpyright] typeshedPath`.
+typeshed = "typings/typeshed.d"
 extra-paths = ["typings"]
 
 # Mirrors `[tool.basedpyright] exclude`, minus entries ty never walks anyway
