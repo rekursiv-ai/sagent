@@ -43,7 +43,7 @@ import tempfile
 from sagent.catalog import google
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import JSON, FloatCodec, MutableJSON, validate_json_schema
-from sagent.providers.google.api import Google
+from sagent.providers.google.api import Google, GoogleCatalog
 from sagent.providers.lib.cli_respawn import respawn_for_cadence
 from sagent.providers.lib.errors import (
     error_status_code,
@@ -116,10 +116,10 @@ class GoogleCLICredentials(TypedDict):
     token_type: NotRequired[str]
 
 
-class GoogleCLI(Google):
+class GoogleCLI(GoogleCatalog):
     """Provider that drives the user's installed ``gemini`` CLI subprocess.
 
-    Inherits ``CAPABILITIES`` (limits, pricing) from :class:`Google`.
+    Inherits ``CAPABILITIES`` (limits, pricing) from :class:`GoogleCatalog`.
     Auth is the CLI's own OAuth credentials at
     ``~/.gemini/oauth_creds.json`` (or the named-account variant).
     Cost figures are estimated from public per-token pricing since ACP
@@ -130,16 +130,14 @@ class GoogleCLI(Google):
     """ACP exposes no effort knob and rolls its own history."""
 
     def __init__(self, *, account: str | None = None) -> None:
-        # Skip Google.__init__: the CLI provides auth, no api_key needed.
         self._account = account
 
     @property
-    def api_key(self) -> str:  # pyright: ignore[reportImplicitOverride] -- intentionally shadows the parent compatibility attribute.
+    def api_key(self) -> str:
         """Compatibility shim returning the empty string."""
         return ""
 
     @classmethod
-    @override
     def from_key(cls, api_key: str) -> Google:
         """Create an API-key provider (delegates to :class:`Google`).
 
@@ -184,8 +182,7 @@ class GoogleCLI(Google):
             )
         return cls(account=account)
 
-    @override
-    def model(  # ty: ignore[invalid-method-override] -- shared catalog has a different CLI transport model.
+    def model(
         self,
         model_id: str | None = None,
     ) -> _GoogleCLIModel:
@@ -214,8 +211,7 @@ class GoogleCLI(Google):
             settings=settings,
         )
 
-    @override
-    def utility_model(self) -> _GoogleCLIModel:  # ty: ignore[invalid-method-override] -- shared catalog has a different CLI transport model.
+    def utility_model(self) -> _GoogleCLIModel:
         """Return the cheapest CLI-backed model."""
         return self.model("utility")
 

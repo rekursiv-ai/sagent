@@ -95,8 +95,8 @@ _API_BASE: Final = "https://generativelanguage.googleapis.com/v1beta"
 #     byte-aware compaction gate enforces it across the whole request.
 
 
-class Google:
-    """Google provider - creates Gemini model backends."""
+class GoogleCatalog:
+    """Model catalog and role defaults shared by Gemini transports."""
 
     DEFAULT_MODEL = "gemini-3.1-pro-preview"
     DEFAULT_UTILITY_MODEL = "gemini-2.5-flash-lite"
@@ -107,9 +107,6 @@ class Google:
     CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = google.models()
     """Per-model capability, shared by every Gemini transport."""
 
-    TRANSPORT: ClassVar[ModelCapability] = google.api()
-    """What this transport lets through; subclasses declare their own."""
-
     @property
     def ROLES(self) -> Mapping[ModelRole, str]:  # noqa: N802 -- The provider API exposes this established uppercase capability name.
         """Role name to base id; ``utility`` falls back to the default."""
@@ -119,6 +116,13 @@ class Google:
                 "utility": self.DEFAULT_UTILITY_MODEL or self.DEFAULT_MODEL,
             },
         )
+
+
+class Google(GoogleCatalog):
+    """Google provider - creates Gemini model backends."""
+
+    TRANSPORT: ClassVar[ModelCapability] = google.api()
+    """What this transport lets through; subclasses declare their own."""
 
     def __init__(self, *, api_key: str) -> None:
         self.api_key = api_key
