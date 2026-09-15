@@ -1228,6 +1228,7 @@ async def test_backgrounded_tool_calls_still_serialize_on_their_key() -> None:
     scheduling decision, not permission to race.
     """
     live: list[str] = []
+    finished: list[str] = []
     overlapped = False
 
     @dataclass(kw_only=True, slots=True)
@@ -1247,8 +1248,9 @@ async def test_backgrounded_tool_calls_still_serialize_on_their_key() -> None:
             tag = str(args.get("tag"))
             overlapped = overlapped or bool(live)
             live.append(tag)
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0)
             live.remove(tag)
+            finished.append(tag)
             return ToolResult(call_id="", content=tag)
 
     agent, _ = make_agent(
@@ -1269,8 +1271,7 @@ async def test_backgrounded_tool_calls_still_serialize_on_their_key() -> None:
     agent.inbox.push_back(UserMessage(text="go"))
 
     async def finish() -> None:
-        await wait_until(lambda: bool(live), timeout_sec=3.0)
-        await wait_until(lambda: not live, timeout_sec=3.0)
+        await wait_until(lambda: len(finished) == 2, timeout_sec=3.0)
         agent.inbox.push_back(Quit())
 
     await asyncio.gather(
@@ -1279,6 +1280,7 @@ async def test_backgrounded_tool_calls_still_serialize_on_their_key() -> None:
     )
 
     assert not overlapped, "same-key tools ran concurrently once backgrounded"
+    assert finished == ["one", "two"]
 
 
 @pytest.mark.asyncio
@@ -1327,7 +1329,7 @@ async def test_killing_a_serialized_call_stops_the_rest_of_its_group() -> None:
     async def kill_the_first() -> None:
         await wait_until(lambda: bool(started), timeout_sec=2.0)
         agent.inbox.push_back(Kill(call_id="e1"))
-        await asyncio.sleep(0.2)
+        await wait_until(lambda: not agent.running_tools, timeout_sec=2.0)
         agent.inbox.push_back(Quit())
 
     await asyncio.gather(

@@ -536,6 +536,7 @@ def test_model_properties_defaults() -> None:
     assert m.limits.max_image_bytes == 20 * 1024 * 1024
 
 
+@pytest.mark.compute_large_fixture
 def test_approx_text_tokens_treats_special_token_text_as_ordinary() -> None:
     model = _tiktoken_model()
     text = "literal <|endoftext|> marker"
@@ -592,6 +593,7 @@ async def test_actual_request_tokens_falls_back_to_approx_for_unknown_model() ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.compute_large_fixture
 async def test_actual_request_tokens_treats_special_token_text_as_ordinary() -> None:
     model = _tiktoken_model()
     text = "ValueError for literal <|endoftext|> marker"

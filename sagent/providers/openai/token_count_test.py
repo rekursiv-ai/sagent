@@ -19,6 +19,7 @@ def test_transports_use_model_defaults_directly(model_class: type) -> None:
 
 
 @pytest.mark.parametrize("model_id", ["gpt-4o", "gpt-5.6-sol", "gpt-6-astra"])
+@pytest.mark.compute_large_fixture
 def test_text_estimation_needs_no_model_instance(model_id: str) -> None:
     text = "東京 function_call(arg=42) <|endoftext|>"
     expected = len(tiktoken.get_encoding("o200k_base").encode_ordinary(text))

@@ -143,6 +143,35 @@ def _ratio_divisions(text: str, rel: str) -> list[int]:
     return lines
 
 
+@pytest.mark.parametrize("name", ["text", "content", "body", "unit", "s"])
+@pytest.mark.parametrize("operator", ["//", "/"])
+def test_ratio_divisions_detects_text_length_estimates(
+    name: str,
+    operator: str,
+) -> None:
+    source = f"# Token estimate\nresult = len({name}) {operator} 4\n"
+    assert _ratio_divisions(source, "example.py") == [2]
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "len(items) // 4",
+        "len(text) // ratio",
+        "len(text) * 4",
+        "size(text) // 4",
+        "text // 4",
+        "obj.len(text) // 4",
+        "len(text[0]) // 4",
+        "len() // 4",
+    ],
+)
+def test_ratio_divisions_allows_other_arithmetic(expression: str) -> None:
+    assert _ratio_divisions(expression, "example.py") == []
+
+
+# The fixture is the complete shipped source tree, not one synthetic expression.
+@pytest.mark.compute_large_fixture
 def test_no_module_divides_by_a_chars_per_token_ratio() -> None:
     """``len(text) // 4`` is a tokenizer guess wearing arithmetic.
 
