@@ -413,8 +413,9 @@ class _FakeModel:
             context=MappingProxyType(
                 {
                     "": ModelLimits(
-                        max_request_tokens=200_000, max_response_tokens=8_192
-                    )
+                        max_request_tokens=200_000,
+                        max_response_tokens=8_192,
+                    ),
                 },
             ),
             thinking_effort={"none", *self.valid_efforts},

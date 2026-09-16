@@ -80,7 +80,7 @@ def models() -> Mapping[str, ModelCapability]:
         context=_context(request=1_048_576),
         prices=_prices(request=0.5, response=3.0, cache_read=0.05),
         thinking_effort=frozenset(
-            {"none", "min", "low", "medium", "high", "xhigh", "max"}
+            {"none", "min", "low", "medium", "high", "xhigh", "max"},
         ),
         thinking_budget={"none", "auto", "fixed"},
         thinking_output={"none", "text"},

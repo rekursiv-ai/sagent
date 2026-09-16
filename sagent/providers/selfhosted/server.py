@@ -404,7 +404,8 @@ class SelfHosted:
                 _module_device(model),
             )
             model = cast(
-                "nn.Module", cast(Callable[[object], object], torch.compile)(model)
+                "nn.Module",
+                cast(Callable[[object], object], torch.compile)(model),
             )
             logger.info(
                 "Compiled SelfHosted model model_id=%s elapsed_sec=%.2f",

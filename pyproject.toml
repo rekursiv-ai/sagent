@@ -300,8 +300,8 @@ extend-include = ["*.ipynb"]
 select = ["ALL"]
 
 ignore = [
-    # Will be fixed by formmater.
-    "COM812",  # Missing trailing comma. (select=ALL warning is unfixable.) https://github.com/astral-sh/ruff/issues/9216
+    # Will be fixed by formater.
+    # "COM812",  # Missing trailing comma. (select=ALL warning is unfixable.) https://github.com/astral-sh/ruff/issues/9216
     "E501",    # Line too long.
     "TC001",   # Typing-only first-party import.
     "TC003",   # Typing-only standard library import.

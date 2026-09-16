@@ -216,7 +216,8 @@ def _site_filters(domains: object, *, name: str, prefix: str) -> str:
         # spliced into the query string, or a caller could inject/contradict the scope
         # (e.g. ``"x.com -site:trusted.com"`` would un-scope the search).
         if not isinstance(domain, str) or not re.match(
-            r"^(?:\*\.)?[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::\d+)?$", domain.strip()
+            r"^(?:\*\.)?[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::\d+)?$",
+            domain.strip(),
         ):
             raise ValueError(f"{name!r} contains a non-hostname value: {domain!r}.")
         terms += f" {prefix}{domain.strip()}"

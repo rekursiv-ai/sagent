@@ -757,7 +757,8 @@ def _apply_patch(d: Mapping[str, object]) -> ToolResult:
 
 
 def _build_patch_plan(
-    agent: AgentSelfAgent, d: Mapping[str, object]
+    agent: AgentSelfAgent,
+    d: Mapping[str, object],
 ) -> _PatchPlan | ToolResult:
     """Validate an AgentSelf patch without mutating state."""
     err = _validate_patch(d)

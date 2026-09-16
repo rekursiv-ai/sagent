@@ -291,7 +291,9 @@ class FakeAgent:
     """Divisor backing :meth:`approx_text_tokens`."""
 
     runtime: sagent.agent.runtime.AgentRuntime = field(
-        default_factory=lambda: sagent.agent.runtime.AgentRuntime(model=_NullModel()),
+        default_factory=lambda: sagent.agent.runtime.AgentRuntime(
+            model=_NullModel(),
+        ),
     )
     """Real ``AgentRuntime`` with a null model; its observers list
     captures every published event."""

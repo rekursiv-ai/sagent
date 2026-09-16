@@ -74,7 +74,9 @@ def build(target: Path) -> None:
     shutil.copytree(bundle / "stubs", bpr_tree / "stubs")
     shutil.copy2(bundle / "commit.txt", bpr_tree / "stubs.commit.txt")
     shutil.copytree(
-        _CWD / "typings" / "basedpyright", bpr_tree / "stdlib", dirs_exist_ok=True
+        _CWD / "typings" / "basedpyright",
+        bpr_tree / "stdlib",
+        dirs_exist_ok=True,
     )
     shutil.rmtree(target, ignore_errors=True)
     staging.rename(target)

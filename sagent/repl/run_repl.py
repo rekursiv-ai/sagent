@@ -35,10 +35,12 @@ else:
     from wrapt import lazy_import
 
     PromptSession = lazy_import(
-        "prompt_toolkit", "PromptSession"
+        "prompt_toolkit",
+        "PromptSession",
     )  # ~80 ms; only run_repl uses it.
     AutoSuggestFromHistory = lazy_import(
-        "prompt_toolkit.auto_suggest", "AutoSuggestFromHistory"
+        "prompt_toolkit.auto_suggest",
+        "AutoSuggestFromHistory",
     )
     FileHistory = lazy_import("prompt_toolkit.history", "FileHistory")
     patch_stdout = lazy_import("prompt_toolkit.patch_stdout", "patch_stdout")

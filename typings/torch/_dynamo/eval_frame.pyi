@@ -188,7 +188,9 @@ def check_for_incompatible_configs() -> None: ...
 def optimize(*args: Any, **kwargs: Any) -> OptimizeContext | _NullDecorator: ...
 @patch("torch._dynamo.symbolic_convert.explain", True)
 def explain(
-    f: Callable[..., Any], *extra_args: Any, **extra_kwargs: Any
+    f: Callable[..., Any],
+    *extra_args: Any,
+    **extra_kwargs: Any,
 ) -> Callable[..., ExplainOutput]: ...
 
 class FlattenInputOutputSignature(torch.fx.Transformer):

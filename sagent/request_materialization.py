@@ -211,7 +211,7 @@ def materialize_messages(
                     and bool(
                         materialized.text
                         or materialized.thinking_blocks
-                        or materialized.tool_calls
+                        or materialized.tool_calls,
                     )
                     and (next_newer is None or wire_role(next_newer) != "assistant")
                 ):

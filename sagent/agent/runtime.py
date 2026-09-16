@@ -365,7 +365,8 @@ def widen_barrier_mask(
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Single positional field; the call site reads as a tag.
 class Await:
     """Drain gate: block until an item matching ``types`` arrives."""

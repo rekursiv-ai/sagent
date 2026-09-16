@@ -77,7 +77,7 @@ def models() -> Mapping[str, ModelCapability]:
         ),
         service_tier=frozenset({"auto", "default", "flex", "priority"}),
         thinking_effort=frozenset(
-            {"none", "min", "low", "medium", "high", "xhigh", "max"}
+            {"none", "min", "low", "medium", "high", "xhigh", "max"},
         ),
         thinking_budget={"none", "auto"},
         thinking_output={"none", "text"},

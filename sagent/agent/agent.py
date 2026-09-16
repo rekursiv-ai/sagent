@@ -921,7 +921,9 @@ class Agent:
         spec = self.model_recipe
         if spec is None:
             raise ValueError("agent has no model_recipe; cannot relogin")
-        prov_cls = sagent.providers.providers.provider_class(spec.provider)
+        prov_cls = sagent.providers.providers.provider_class(
+            spec.provider,
+        )
         if prov_cls is None:
             raise ValueError(f"unknown provider {spec.provider!r}")
         login_fn = getattr(prov_cls, "login", None)
@@ -2388,7 +2390,9 @@ def _resolve_target_spec(
     elif prov_name == spec.provider:
         final_auth = spec.auth
     else:
-        final_auth = sagent.providers.providers.default_auth_for_provider(prov_name)
+        final_auth = sagent.providers.providers.default_auth_for_provider(
+            prov_name,
+        )
     final_account = account if account is not None else spec.account
     if model_id is not None:
         final_model_id = model_id
