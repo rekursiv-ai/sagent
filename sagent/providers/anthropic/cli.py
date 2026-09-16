@@ -787,7 +787,9 @@ class _AnthropicCLIModel(ModelDefaults):
         """Local estimate via ``chars_per_token``."""
         return int(
             len(text)
-            / sagent.catalog.anthropic.chars_per_token(self.capability.model_id),
+            / sagent.catalog.anthropic.chars_per_token(
+                self.capability.model_id,
+            ),
         )
 
     @override

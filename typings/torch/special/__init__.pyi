@@ -107,16 +107,24 @@ def bessel_j1(input: Tensor, *args: object, **kwargs: object) -> Tensor: ...
 def bessel_y0(input: Tensor, *args: object, **kwargs: object) -> Tensor: ...
 def bessel_y1(input: Tensor, *args: object, **kwargs: object) -> Tensor: ...
 def chebyshev_polynomial_t(
-    input: Tensor, *args: object, **kwargs: object
+    input: Tensor,
+    *args: object,
+    **kwargs: object,
 ) -> Tensor: ...
 def chebyshev_polynomial_u(
-    input: Tensor, *args: object, **kwargs: object
+    input: Tensor,
+    *args: object,
+    **kwargs: object,
 ) -> Tensor: ...
 def chebyshev_polynomial_v(
-    input: Tensor, *args: object, **kwargs: object
+    input: Tensor,
+    *args: object,
+    **kwargs: object,
 ) -> Tensor: ...
 def chebyshev_polynomial_w(
-    input: Tensor, *args: object, **kwargs: object
+    input: Tensor,
+    *args: object,
+    **kwargs: object,
 ) -> Tensor: ...
 def hermite_polynomial_h(input: Tensor, *args: object, **kwargs: object) -> Tensor: ...
 def hermite_polynomial_he(input: Tensor, *args: object, **kwargs: object) -> Tensor: ...
@@ -127,21 +135,33 @@ def modified_bessel_i1(input: Tensor, *args: object, **kwargs: object) -> Tensor
 def modified_bessel_k0(input: Tensor, *args: object, **kwargs: object) -> Tensor: ...
 def modified_bessel_k1(input: Tensor, *args: object, **kwargs: object) -> Tensor: ...
 def scaled_modified_bessel_k0(
-    input: Tensor, *args: object, **kwargs: object
+    input: Tensor,
+    *args: object,
+    **kwargs: object,
 ) -> Tensor: ...
 def scaled_modified_bessel_k1(
-    input: Tensor, *args: object, **kwargs: object
+    input: Tensor,
+    *args: object,
+    **kwargs: object,
 ) -> Tensor: ...
 def shifted_chebyshev_polynomial_t(
-    input: Tensor, *args: object, **kwargs: object
+    input: Tensor,
+    *args: object,
+    **kwargs: object,
 ) -> Tensor: ...
 def shifted_chebyshev_polynomial_u(
-    input: Tensor, *args: object, **kwargs: object
+    input: Tensor,
+    *args: object,
+    **kwargs: object,
 ) -> Tensor: ...
 def shifted_chebyshev_polynomial_v(
-    input: Tensor, *args: object, **kwargs: object
+    input: Tensor,
+    *args: object,
+    **kwargs: object,
 ) -> Tensor: ...
 def shifted_chebyshev_polynomial_w(
-    input: Tensor, *args: object, **kwargs: object
+    input: Tensor,
+    *args: object,
+    **kwargs: object,
 ) -> Tensor: ...
 def spherical_bessel_j0(input: Tensor, *args: object, **kwargs: object) -> Tensor: ...

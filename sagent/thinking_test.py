@@ -142,7 +142,8 @@ def test_off_is_offerable_even_on_a_model_that_cannot_think() -> None:
     """``none`` is on every ladder, so turning it off never fails."""
     settings = ModelSettings(
         capability=_capability(
-            budgets=frozenset({"none"}), outputs=frozenset({"none"})
+            budgets=frozenset({"none"}),
+            outputs=frozenset({"none"}),
         ),
     )
     assert thinking_offered("off", settings)

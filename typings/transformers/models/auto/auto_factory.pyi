@@ -22,7 +22,9 @@ class _BaseAutoModelClass:
     def __init__(self, *args, **kwargs) -> None: ...
     @classmethod
     def from_config(
-        cls, config: PretrainedConfig, **kwargs: object
+        cls,
+        config: PretrainedConfig,
+        **kwargs: object,
     ) -> PreTrainedModel: ...
     @classmethod
     def from_pretrained(

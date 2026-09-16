@@ -2538,7 +2538,9 @@ async def test_relogin_runs_blocking_login_off_event_loop() -> None:
         assert release.wait(timeout=5.0)
 
     fake_provider_cls = type(
-        "FakeAnthropic", (), {"login": staticmethod(_blocking_login)}
+        "FakeAnthropic",
+        (),
+        {"login": staticmethod(_blocking_login)},
     )
 
     async def _drive() -> None:

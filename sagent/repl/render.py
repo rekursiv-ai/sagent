@@ -522,7 +522,10 @@ def strip_reminders(content: str) -> str:
 
     """
     return re.sub(
-        r"<system-reminder>.*?</system-reminder>\s*", "", content, flags=re.DOTALL
+        r"<system-reminder>.*?</system-reminder>\s*",
+        "",
+        content,
+        flags=re.DOTALL,
     ).strip()
 
 

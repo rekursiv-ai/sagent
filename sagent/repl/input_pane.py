@@ -63,7 +63,8 @@ else:
     from wrapt import lazy_import
 
     Text = lazy_import(
-        "rich.text", "Text"
+        "rich.text",
+        "Text",
     )  # ~60 ms; only _surface_queued_input_on_quit() needs it.
 
 from sagent.agent.background import BackgroundTaskEntry

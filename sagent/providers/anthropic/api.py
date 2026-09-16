@@ -725,7 +725,9 @@ class _AnthropicModel(ModelDefaults):
         """
         return int(
             len(text)
-            / sagent.catalog.anthropic.chars_per_token(self.capability.model_id),
+            / sagent.catalog.anthropic.chars_per_token(
+                self.capability.model_id,
+            ),
         )
 
     @override

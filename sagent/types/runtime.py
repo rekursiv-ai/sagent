@@ -169,7 +169,8 @@ def reset_id_counter(start: int) -> None:
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class BytesMessage:
     """Binary payload (image, PDF)."""
@@ -423,7 +424,8 @@ DETACHED_ARRIVED_SYSTEM_NOTE = (
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class CompactStarted:
     """Compaction task has been spawned."""
@@ -541,35 +543,40 @@ class AgentSendDeferredMessage:
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class Quit:
     """Shut down the agent."""
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class Halt:
     """Cancel model call, wait for user. Tools keep running."""
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class Clear:
     """Detach tools, wipe history, wait for user."""
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class ClearComplete:
     """Published after the runtime finishes processing a ``Clear``."""
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class Kill:
     """Cancel one or all tool tasks."""
@@ -579,7 +586,8 @@ class Kill:
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class Detach:
     """Stub one or all tools, let them finish in background."""
@@ -589,7 +597,8 @@ class Detach:
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class Undetach:
     """Re-gate model on a detached tool's completion."""
@@ -641,14 +650,16 @@ class BudgetReset:
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class ModelCallStarted:
     """Model streaming call has been spawned."""
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class ModelResponsePartial:
     """Streaming text chunk from the model."""
@@ -658,7 +669,8 @@ class ModelResponsePartial:
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class ModelResponseThinking:
     """Streaming thinking chunk from the model."""
@@ -691,7 +703,8 @@ class ModelResponseComplete:
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class ModelResponseCancelled:
     """Model call was cancelled mid-stream."""
@@ -701,7 +714,8 @@ class ModelResponseCancelled:
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class ModelResponseError:
     """Unrecoverable failure (creds expired, retries exhausted)."""
@@ -793,21 +807,24 @@ class NoticeMessage:
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class ModelIdle:
     """Model finished with no tool calls."""
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class AgentIdle:
     """Agent has fully drained: about to block on inbox with no work."""
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class CohortStarted:
     """Tool cohort has been spawned."""
@@ -873,14 +890,16 @@ class LazyEvent:
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class CohortComplete:
     """All tool results for the current cohort have arrived."""
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class Compact:
     """Trigger context compaction."""
@@ -890,7 +909,8 @@ class Compact:
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class Recompact:
     """Alias for ``/compact``; trigger context compaction."""
@@ -900,7 +920,8 @@ class Recompact:
 
 
 @dataclass(
-    frozen=True, slots=True
+    frozen=True,
+    slots=True,
 )  # house-ignore[dataclass] -- Event records are built positionally at every emit site.
 class SaveSession:
     """Signals observers to persist session state."""

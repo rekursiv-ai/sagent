@@ -220,7 +220,7 @@ def _make_model() -> Model:
     return Anthropic.from_key(
         (config_dir() / "rekursiv-ai" / "sagent" / "anthropic_api_key")
         .read_text()
-        .strip()
+        .strip(),
     ).model(MODEL)
 
 
