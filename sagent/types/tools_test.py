@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from sagent.types.model import AgentSettings
+from sagent.types.settings import AgentSettings
 from sagent.types.tools import ToolResultPolicy
 
 

@@ -2796,19 +2796,17 @@ def test_restore_model_success_path() -> None:
             del model_id
             return _FakeModel()
 
-    class _FakeBuilder:
-        def build_provider(
-            self,
-            provider: str,
-            auth: str,
-            *,
-            account: str | None = None,
-        ) -> _FakeProvider:
-            del provider, auth, account
-            return _FakeProvider()
+    def fake_build_provider(
+        provider: str,
+        auth: str,
+        *,
+        account: str | None = None,
+    ) -> _FakeProvider:
+        del provider, auth, account
+        return _FakeProvider()
 
     meta = SessionMeta(provider="Fake", model_id="fake-m", auth="env", account="me")
-    with patch.object(session_io, "providers_lib", _FakeBuilder()):
+    with patch.object(session_io, "build_provider", fake_build_provider):
         result = restore_model(meta)
     assert result is not None
     _, spec = result

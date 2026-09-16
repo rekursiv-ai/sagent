@@ -730,7 +730,7 @@ class AgentRuntime:
         self,
         *,
         model: Model,
-        tools: list[Tool] | None = None,
+        tools: Sequence[Tool] | None = None,
         compactor: Compactor | None = None,
         session_id: str = "",
     ) -> None:

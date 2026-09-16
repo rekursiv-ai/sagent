@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Final, Literal
+from typing import Final, Literal, Protocol
 
 import dataclasses
 import itertools
@@ -19,8 +19,23 @@ import threading
 import time
 
 
-if TYPE_CHECKING:
-    from sagent.types.tape import ContextSplice
+class _CompactOverride(Protocol):
+    """What ``CompactComplete.from_override`` reads off a context splice.
+
+    Read-only properties, not attributes: the concrete splice is a frozen
+    dataclass, and a writable protocol member would reject it.
+    """
+
+    @property
+    def payload(self) -> tuple[ModelContextEvent, ...]: ...
+    @property
+    def token_before(self) -> int: ...
+    @property
+    def token_after(self) -> int: ...
+    @property
+    def fallback_reason(self) -> str: ...
+    @property
+    def preserved_tail_count(self) -> int: ...
 
 
 _id_counter: Iterator[int] = itertools.count()
@@ -437,7 +452,7 @@ class CompactComplete:
     """Number of tail entries preserved verbatim in fallback mode."""
 
     @classmethod
-    def from_override(cls, override: ContextSplice) -> CompactComplete:
+    def from_override(cls, override: _CompactOverride) -> CompactComplete:
         """Build the completion event from a compactor's override.
 
         Args:

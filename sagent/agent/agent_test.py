@@ -63,7 +63,6 @@ from sagent.types.capability import (
     ModelCapability,
     ModelLimits,
     ModelSettings,
-    ServiceTier,
     ThinkingEffort,
 )
 from sagent.types.compactor import (
@@ -73,6 +72,7 @@ from sagent.types.compactor import (
 from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
+    ServiceTier,
     TokenCost,
     TokenCount,
     TokenPrice,
@@ -82,7 +82,6 @@ from sagent.types.exceptions import (
     ContextOverflowError,
 )
 from sagent.types.model import (
-    AgentSettings,
     Model,
     ModelRecipe,
     ModelRequest,
@@ -91,7 +90,6 @@ from sagent.types.model import (
     RequestTooLargeError,
     UsageSnapshot,
     UsageWindow,
-    default_buffer_tokens,
 )
 from sagent.types.runtime import (
     CANCELLED_PLACEHOLDER,
@@ -128,6 +126,10 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
+from sagent.types.settings import (
+    AgentSettings,
+    default_buffer_tokens,
+)
 from sagent.types.tape import (
     ContextSplice,
     MaskRange,
@@ -140,6 +142,8 @@ from sagent.types.tools import (
     Tool,
     ToolResultPolicy,
 )
+
+import sagent.providers.providers
 
 
 # Delegates to the real ``SummaryCompactor`` so a stub that stubs only the PREDICATE
@@ -1637,7 +1641,7 @@ def test_change_model_builds_the_provider_without_construction_options(
     del patched_build_provider
     a = _build_agent_with_spec()
     _ = a.change_model(model_id="claude-sonnet-4-6")
-    build_provider = providers.build_provider
+    build_provider = sagent.providers.providers.build_provider
     assert isinstance(build_provider, Mock)
     build_provider.assert_called_with("Anthropic", "api", account=None)
 
@@ -2272,11 +2276,10 @@ def patched_build_provider() -> Iterator[Mapping[str, object]]:
     fake_provider = MagicMock()
     fake_provider.model.side_effect = fake_model
 
-    # ``change_model`` calls ``providers.build_provider(...)`` via the
-    # package module binding -- patch the function on the providers
-    # package and all consumers see the stub.
+    # ``change_model`` calls ``build_provider`` through its defining module, so
+    # the stub goes there rather than on the package facade.
     with patch(
-        "sagent.providers.build_provider",
+        "sagent.providers.providers.build_provider",
         return_value=fake_provider,
     ):
         yield {"provider": fake_provider}
@@ -2466,8 +2469,7 @@ async def test_relogin_calls_login_classmethod() -> None:
     """``Agent.relogin`` drives the provider class's ``login`` classmethod."""
     a = _build_agent_with_spec()
     login_mock = MagicMock()
-    fake_provider_cls = MagicMock()
-    fake_provider_cls.login = login_mock
+    fake_provider_cls = type("FakeAnthropic", (), {"login": login_mock})
     with patch.object(providers, "Anthropic", fake_provider_cls, create=True):
         await a.relogin()
     login_mock.assert_called_once()
@@ -2535,8 +2537,9 @@ async def test_relogin_runs_blocking_login_off_event_loop() -> None:
         # Hold the worker thread until the event loop proves it advanced.
         assert release.wait(timeout=5.0)
 
-    fake_provider_cls = MagicMock()
-    fake_provider_cls.login = _blocking_login
+    fake_provider_cls = type(
+        "FakeAnthropic", (), {"login": staticmethod(_blocking_login)}
+    )
 
     async def _drive() -> None:
         nonlocal loop_progressed
@@ -2581,8 +2584,7 @@ async def test_relogin_reloads_auth_when_provider_supports_protocol() -> None:
         model_id="claude-opus-4-7",
     )
 
-    fake_cls = MagicMock()
-    fake_cls.login = MagicMock()
+    fake_cls = type("FakeAnthropic", (), {"login": MagicMock()})
     with patch.object(providers, "Anthropic", fake_cls, create=True):
         await a.relogin()
     assert live_provider.handle_auth_error_count == 1
@@ -2606,8 +2608,7 @@ async def test_relogin_clears_suspension_and_halts_inflight_call() -> None:
 
     a.runtime.model_call = asyncio.ensure_future(_never())
     try:
-        fake_cls = MagicMock()
-        fake_cls.login = MagicMock()
+        fake_cls = type("FakeAnthropic", (), {"login": MagicMock()})
         with patch.object(providers, "Anthropic", fake_cls, create=True):
             await a.relogin()
         assert a.runtime.service_suspended_until is None
@@ -2623,8 +2624,7 @@ async def test_relogin_no_halt_when_idle() -> None:
     """With no in-flight call, ``relogin`` clears suspension but queues no Halt."""
     a = _build_agent_with_spec()
     a.runtime.service_suspended_until = time.time() + 100.0
-    fake_cls = MagicMock()
-    fake_cls.login = MagicMock()
+    fake_cls = type("FakeAnthropic", (), {"login": MagicMock()})
     with patch.object(providers, "Anthropic", fake_cls, create=True):
         await a.relogin()
     assert a.runtime.service_suspended_until is None
@@ -2636,7 +2636,7 @@ async def test_relogin_no_halt_when_idle() -> None:
 async def test_relogin_raises_when_provider_has_no_login() -> None:
     """Providers without a ``login`` classmethod surface as ``ValueError``."""
     a = _build_agent_with_spec()
-    fake_cls = MagicMock(spec=[])  # No ``login`` attribute.
+    fake_cls = type("FakeAnthropic", (), {})  # No ``login`` attribute.
     with patch.object(providers, "Anthropic", fake_cls, create=True):  # noqa: SIM117 -- The test keeps independent context managers explicit for readability.
         with pytest.raises(ValueError, match="no login method"):
             await a.relogin()

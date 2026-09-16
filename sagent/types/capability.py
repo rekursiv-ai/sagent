@@ -22,7 +22,7 @@ from dataclasses import dataclass, field, fields, replace
 from types import MappingProxyType
 from typing import Literal, Self, TypeAliasType, cast, get_args, override
 
-from sagent.types.cost import PriceCatalog
+from sagent.types.cost import PriceCatalog, ServiceTier
 
 
 __all__ = [
@@ -31,7 +31,6 @@ __all__ = [
     "ModelLimits",
     "ModelSettings",
     "Permission",
-    "ServiceTier",
     "SummaryKind",
     "ThinkingBudget",
     "ThinkingEffort",
@@ -46,8 +45,6 @@ type ThinkingBudget = Literal["none", "auto", "fixed"]
 type ThinkingOutput = Literal["none", "text", "redacted"]
 
 type ContextTag = Literal["", "+200k", "+1m"]
-
-type ServiceTier = Literal["auto", "default", "flex", "priority"]
 
 type SummaryKind = Literal["none", "auto", "concise", "detailed"]
 

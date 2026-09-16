@@ -86,7 +86,7 @@ from sagent.providers import (
     build_provider,
     default_auth_for_provider,
 )
-from sagent.repl import run_repl
+from sagent.repl.run_repl import run_repl
 from sagent.thinking import (
     THINKING_COMMANDS,
     apply_thinking_command,

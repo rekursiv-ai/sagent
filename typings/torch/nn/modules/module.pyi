@@ -229,8 +229,26 @@ class Module:
         prefix=...,
         keep_vars=...,
     ) -> OrderedDict[Any, Any]: ...
-    def register_load_state_dict_pre_hook(self, hook) -> RemovableHandle: ...
-    def register_load_state_dict_post_hook(self, hook) -> RemovableHandle: ...
+    def register_load_state_dict_pre_hook(
+        self,
+        hook: Callable[
+            [
+                Module,
+                dict[str, Any],
+                str,
+                dict[str, Any],
+                bool,
+                list[str],
+                list[str],
+                list[str],
+            ],
+            None,
+        ],
+    ) -> RemovableHandle: ...
+    def register_load_state_dict_post_hook(
+        self,
+        hook: Callable[[Module, _IncompatibleKeys], None],
+    ) -> RemovableHandle: ...
     def load_state_dict(
         self,
         state_dict: Mapping[str, Any],

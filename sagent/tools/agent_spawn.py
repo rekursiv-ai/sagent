@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import Literal, cast
 
 import asyncio
 import dataclasses
@@ -28,9 +28,7 @@ import logging
 import time
 import uuid
 
-from wrapt import lazy_import
-
-from sagent.agent import Agent
+from sagent.agent.agent import Agent, SystemPromptArg
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.session_io import (
     PersistentAgentState,
@@ -46,8 +44,8 @@ from sagent.agent.state import (
     max_depth_var,
 )
 from sagent.lib.custom_json import JSON, BoolCodec, json_freeze
-from sagent.providers import (
-    PROVIDER_NAMES,
+from sagent.providers import PROVIDER_NAMES
+from sagent.providers.providers import (
     build_provider,
     default_auth_for_provider,
 )
@@ -62,8 +60,9 @@ from sagent.tools.core import (
     opt_str,
     provider_not_allowed_result,
 )
-from sagent.types.capability import ServiceTier, ThinkingEffort
+from sagent.types.capability import ThinkingEffort
 from sagent.types.compactor import Compactor
+from sagent.types.cost import ServiceTier
 from sagent.types.model import Model, ModelRecipe
 from sagent.types.runtime import (
     AgentIdle,
@@ -85,13 +84,6 @@ from sagent.types.runtime import (
 )
 from sagent.types.tools import Tool
 
-
-agent_lib = lazy_import("sagent.agent")
-
-if TYPE_CHECKING:
-    from sagent.agent import (
-        SystemPromptArg,
-    )
 
 # Prevent GC of persistent agent tasks. Keyed by label; cleaned
 # up in the wrapper's ``finally`` block.
@@ -537,7 +529,7 @@ class AgentSpawn:
             ]
         if "service_tier" in model_options:
             settings.service_tier = cast(ServiceTier, model_options["service_tier"])
-        agent_class = _get_agent_class()
+        agent_class = Agent
         # ``max_attempts`` is passed only when inherited: ``None`` is not its
         # default, so forwarding it unconditionally would override the
         # constructor's own value with a nonsense one.
@@ -1380,19 +1372,8 @@ def _current_agent() -> Agent | None:
     agent = current_agent_var.get()
     if agent is None:
         return None
-    cls = _get_agent_class()
+    cls = Agent
     return agent if isinstance(agent, cls) else None
-
-
-# ``tools.AgentSpawn`` is re-exported from ``tools/__init__.py``. That re-export runs
-# while ``sagent.agent`` is mid-initialization (``sagent.agent`` -> ``tools.core`` ->
-# ``tools/__init__.py`` -> ``tools.agent_spawn``). A top-level attribute import of
-# ``Agent`` here would hit the partially-initialized module and fail. Deferring the
-# lookup until ``__call__`` time sidesteps the cycle; the class is guaranteed to be
-# resolved by then.
-def _get_agent_class() -> type[Agent]:
-    """Resolve ``sagent.agent.Agent`` lazily."""
-    return cast(type[Agent], agent_lib.Agent)
 
 
 def _pick_field(

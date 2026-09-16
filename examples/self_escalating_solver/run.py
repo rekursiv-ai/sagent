@@ -45,7 +45,7 @@ from sagent.providers import (
     Google,
     default_auth_for_provider,
 )
-from sagent.types.model import ModelRecipe
+from sagent.types.model import Model, ModelRecipe
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -76,7 +76,7 @@ CONFIGS: Final = {
 }
 
 
-def build(provider_name: str, model_id: str):
+def build(provider_name: str, model_id: str) -> tuple[Model, ModelRecipe]:
     """Return (Model, ModelRecipe) for one arm.
 
     Args:
@@ -452,7 +452,7 @@ def _read_key(provider_name: str) -> str | None:
     return kf.read_text().strip() if kf.exists() else None
 
 
-def _provider(provider_name: str):
+def _provider(provider_name: str) -> Google | Anthropic:
     key = _read_key(provider_name)
     if provider_name == "Google":
         return Google.from_key(key) if key else Google.from_env()

@@ -14,8 +14,8 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from sagent.lib.custom_json import JSON
-from sagent.types.model import AgentSettings
 from sagent.types.runtime import ToolResult
+from sagent.types.settings import AgentSettings
 
 
 __all__ = [

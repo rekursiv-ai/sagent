@@ -15,22 +15,21 @@ from __future__ import annotations
 from bisect import bisect_right
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, NamedTuple, Self, override
-
-
-if TYPE_CHECKING:
-    # Prevent cycle since ``capability`` imports ``PriceCatalog``.
-    from sagent.types.capability import ServiceTier
+from typing import Literal, NamedTuple, Self, override
 
 
 __all__ = [
     "PriceCatalog",
     "PriceCatalogProduct",
+    "ServiceTier",
     "TokenCost",
     "TokenCount",
     "TokenPrice",
     "TokenStats",
 ]
+
+
+type ServiceTier = Literal["auto", "default", "flex", "priority"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

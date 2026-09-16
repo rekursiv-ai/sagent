@@ -15,13 +15,8 @@ from sagent.agent.agent import Agent
 from sagent.agent.state import current_agent_var, tool_state_var
 from sagent.testing import MockModelCaps
 from sagent.tools.agent_self import AgentSelf
-from sagent.types.capability import (
-    ModelCapability,
-    ModelLimits,
-    ServiceTier,
-    ThinkingEffort,
-)
-from sagent.types.cost import TokenCost, TokenCount
+from sagent.types.capability import ModelCapability, ModelLimits, ThinkingEffort
+from sagent.types.cost import ServiceTier, TokenCost, TokenCount
 from sagent.types.model import (
     ModelRecipe,
     ModelRequest,
@@ -64,11 +59,9 @@ class StubProviderModel(MockModelCaps):
         return ModelResponse(message=msg)
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _CatalogStub:
+def _catalog_stub(capabilities: Mapping[str, ModelCapability]) -> type:
     """Stand-in provider class exposing only a ``CAPABILITIES`` catalog."""
-
-    CAPABILITIES: Mapping[str, ModelCapability]
+    return type("StubCat", (), {"CAPABILITIES": capabilities})
 
 
 def _make_agent(*, spec: ModelRecipe | None = None) -> Agent:
@@ -279,8 +272,8 @@ async def test_exceeds_cap_suggests_window_variant_when_one_exists() -> None:
     ``max_request_tokens`` up -- rejected at the cap. The rejection now
     names the ``+1m`` sibling so the wrong path self-corrects.
     """
-    catalog = _CatalogStub(
-        CAPABILITIES={
+    catalog = _catalog_stub(
+        {
             "big-base": ModelCapability(
                 model_id="big-base",
                 context=MappingProxyType(

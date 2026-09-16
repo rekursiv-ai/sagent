@@ -73,11 +73,19 @@ from sagent.agent.state import (
     agent_registry,
 )
 from sagent.repl.input_queues import InputQueues
+from sagent.repl.render import HELP_TEXT
 from sagent.repl.slash import (
     QUIT_WORDS,
     Controllable,
     SlashAction,
     parse_slash,
+)
+from sagent.repl.slash_handlers import (
+    do_login,
+    do_switch_effort,
+    do_switch_model,
+    do_switch_thinking,
+    format_tasks,
 )
 from sagent.tools.background_task import cancel_persistent_subagent
 from sagent.tools.tool_spec import (
@@ -102,24 +110,6 @@ from sagent.types.runtime import (
 
 import sagent.repl.slash
 
-
-# Cycle break: ``run_repl`` imports ``spawn_repl_pump`` from this module.
-# Lazy module proxy so the dispatch helpers (do_switch_model / do_login /
-# format_tasks) are reachable without re-introducing a top-level cycle. The
-# TYPE_CHECKING arm names the real modules so their attributes resolve; the
-# proxy is a runtime-only device.
-if TYPE_CHECKING:
-    # `import ... as`, not `from ... import`: the package re-exports a
-    # FUNCTION named `run_repl`, so the `from`-form binds that instead of the
-    # module. isort rewrites the two-name form back into a `from`, so each
-    # alias stands alone.
-    import sagent.repl.render as render  # noqa: PLR0402 -- These module aliases break a runtime import cycle.
-    import sagent.repl.run_repl as run_repl  # noqa: PLR0402 -- These module aliases break a runtime import cycle.
-else:
-    from wrapt import lazy_import
-
-    run_repl = lazy_import("sagent.repl.run_repl")
-    render = lazy_import("sagent.repl.render")
 
 if TYPE_CHECKING:
     from prompt_toolkit import PromptSession
@@ -430,13 +420,13 @@ def _dispatch_target_control(
     """Dispatch a slash command against one targeted subagent."""
     action = parse_slash(body)
     if isinstance(action, sagent.repl.slash.ModelSwitch):
-        run_repl.do_switch_model(target, action.args, printer)
+        do_switch_model(target, action.args, printer)
         return
     if isinstance(action, sagent.repl.slash.Thinking):
-        run_repl.do_switch_thinking(target, action.command, printer)
+        do_switch_thinking(target, action.command, printer)
         return
     if isinstance(action, sagent.repl.slash.Effort):
-        run_repl.do_switch_effort(target, action.value, printer)
+        do_switch_effort(target, action.value, printer)
         return
     if isinstance(action, sagent.repl.slash.Halt):
         target.halt()
@@ -655,23 +645,23 @@ async def _dispatch(
                 note = f" ({args})" if args else ""
                 printer.write_slash_block(f"[/recompact] queued{note}")
         case sagent.repl.slash.ModelSwitch(args=args):
-            run_repl.do_switch_model(agent, args, printer)
+            do_switch_model(agent, args, printer)
         case sagent.repl.slash.Thinking(command=command):
-            run_repl.do_switch_thinking(agent, command, printer)
+            do_switch_thinking(agent, command, printer)
         case sagent.repl.slash.Effort(value=value):
-            run_repl.do_switch_effort(agent, value, printer)
+            do_switch_effort(agent, value, printer)
         case sagent.repl.slash.Tool(spec=spec):
             _dispatch_tool(agent, spec, printer)
         case sagent.repl.slash.Login():
-            await run_repl.do_login(agent, printer)
+            await do_login(agent, printer)
             if queues is not None:
                 queues.commit_deferred_on_idle(agent)
         case sagent.repl.slash.Help():
             if printer is not None:
-                printer.write_line(render.HELP_TEXT)
+                printer.write_line(HELP_TEXT)
         case sagent.repl.slash.Tasks():
             if printer is not None:
-                printer.write_line(run_repl.format_tasks(agent))
+                printer.write_line(format_tasks(agent))
         case sagent.repl.slash.Text(content=content):
             agent.runtime.inbox.push_back(UserMessage(text=content))
         case sagent.repl.slash.Defer(content=content):

@@ -22,23 +22,15 @@ else:
 
     openai_sdk = lazy_import("openai")
 
-__all__ = ["OpenAI"]
+__all__ = ["OpenAI", "OpenAICatalog"]
 
 
-class OpenAI:
-    """API-key authentication and loop-local OpenAI SDK ownership."""
+class OpenAICatalog:
+    """Model catalog and role defaults shared by OpenAI transports."""
 
     DEFAULT_MODEL: ClassVar[str] = "gpt-6-astra+1m"
     DEFAULT_UTILITY_MODEL: ClassVar[str] = "gpt-5.6-luna"
-    ENV_VAR: ClassVar[str] = "OPENAI_API_KEY"
-    BASE_URL: ClassVar[str] = "https://api.openai.com/v1"
     CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = openai.models()
-    TRANSPORT: ClassVar[ModelCapability] = openai.api()
-
-    def __init__(self, *, api_key: str, base_url: str | None = None) -> None:
-        self.api_key = api_key
-        self.base_url = base_url or self.BASE_URL
-        self._sdks: PerLoop[openai_sdk.AsyncOpenAI] = PerLoop(self._make_sdk)
 
     @property
     def ROLES(self) -> Mapping[ModelRole, str]:  # noqa: N802 -- provider protocol spelling.
@@ -46,6 +38,19 @@ class OpenAI:
         return MappingProxyType(
             {"default": self.DEFAULT_MODEL, "utility": self.DEFAULT_UTILITY_MODEL},
         )
+
+
+class OpenAI(OpenAICatalog):
+    """API-key authentication and loop-local OpenAI SDK ownership."""
+
+    ENV_VAR: ClassVar[str] = "OPENAI_API_KEY"
+    BASE_URL: ClassVar[str] = "https://api.openai.com/v1"
+    TRANSPORT: ClassVar[ModelCapability] = openai.api()
+
+    def __init__(self, *, api_key: str, base_url: str | None = None) -> None:
+        self.api_key = api_key
+        self.base_url = base_url or self.BASE_URL
+        self._sdks: PerLoop[openai_sdk.AsyncOpenAI] = PerLoop(self._make_sdk)
 
     @classmethod
     def from_key(cls, api_key: str, *, base_url: str | None = None) -> Self:

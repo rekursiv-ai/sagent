@@ -12,8 +12,9 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from sagent.types.model import AgentSettings, Model
+from sagent.types.model import Model
 from sagent.types.runtime import ModelContextEvent
+from sagent.types.settings import AgentSettings
 from sagent.types.tape import ContextSplice, TapeRecord, TapeRef
 
 

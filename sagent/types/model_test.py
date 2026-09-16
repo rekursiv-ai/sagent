@@ -15,15 +15,17 @@ from sagent.types.cost import (
 )
 from sagent.types.model import (
     CONTEXT_TAGS,
-    AgentSettings,
     ModelRecipe,
     ModelResponse,
     StreamInterruptedError,
     base_model_id,
-    default_buffer_tokens,
     split_model_id,
 )
 from sagent.types.runtime import AssistantMessage
+from sagent.types.settings import (
+    AgentSettings,
+    default_buffer_tokens,
+)
 
 
 # ---- AgentSettings ---------------------------------------------------------
