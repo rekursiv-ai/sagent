@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from sagent.types.compactor import ReattachPolicy
-from sagent.types.model import AgentSettings
+from sagent.types.settings import AgentSettings
 
 
 def _settings(*, request: int = 200_000) -> AgentSettings:

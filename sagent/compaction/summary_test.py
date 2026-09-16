@@ -26,7 +26,6 @@ from sagent.compaction.summary import (
 )
 from sagent.testing import MockModelCaps
 from sagent.types.model import (
-    AgentSettings,
     Model,
     ModelRequest,
     ModelResponse,
@@ -42,6 +41,7 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
+from sagent.types.settings import AgentSettings
 from sagent.types.tape import (
     ContextSplice,
     ReferrableTapeEvent,

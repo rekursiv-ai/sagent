@@ -15,11 +15,10 @@ from sagent.repl.replay import replay_messages
 from sagent.types.capability import (
     ModelCapability,
     ModelSettings,
-    ServiceTier,
     ThinkingBudget,
     ThinkingEffort,
 )
-from sagent.types.cost import TokenCost
+from sagent.types.cost import ServiceTier, TokenCost
 from sagent.types.runtime import (
     AssistantMessage,
     CompactComplete,

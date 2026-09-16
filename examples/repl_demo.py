@@ -33,7 +33,7 @@ import sys
 
 from sagent.agent.agent import Agent
 from sagent.providers import build_provider
-from sagent.repl import run_repl
+from sagent.repl.run_repl import run_repl
 from sagent.testing import MockModelCaps
 from sagent.types.cost import TokenCount
 from sagent.types.model import ModelRequest, ModelResponse

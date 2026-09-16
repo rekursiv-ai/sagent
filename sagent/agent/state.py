@@ -32,13 +32,17 @@ import difflib
 import itertools
 import logging
 
-from sagent.agent import runtime
+from sagent.agent.runtime import AgentRuntime
 
 
 if TYPE_CHECKING:
     from sagent.agent.background import BackgroundTaskEntry
     from sagent.agent.cost_tracker import CostTracker
     from sagent.tools.lib.bash import BashParseCache
+    from sagent.types.capability import ThinkingEffort
+    from sagent.types.cost import ServiceTier, TokenCount
+    from sagent.types.model import Model, ModelRecipe
+    from sagent.types.tools import Tool
 
 logger = logging.getLogger(__name__)
 
@@ -475,7 +479,7 @@ def approx_tokens(text: str) -> int:
 class AgentLike(Protocol):
     """Minimal agent surface for tools that route messages between agents."""
 
-    runtime: runtime.AgentRuntime
+    runtime: AgentRuntime
     """The agent's ``AgentRuntime``; exposes ``inbox``, ``cohort``,
     ``model_call``, ``compact_task``, and ``detached`` for routing
     and liveness inspection."""
@@ -595,6 +599,126 @@ class AgentLike(Protocol):
 
         """
         ...
+
+
+class _ActivityLike(Protocol):
+    elapsed_seconds: float
+
+
+class _CompactionStateLike(Protocol):
+    compact_count: int
+
+
+class PersistableAgent(Protocol):
+    """Read-only agent surface required by session persistence."""
+
+    @property
+    def account(self) -> str | None: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def activity(self) -> _ActivityLike: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def auth(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def base_system_spec(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def cache_ttl_sec(self) -> float: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def compaction_state(self) -> _CompactionStateLike: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def cost_tracker(self) -> CostTracker: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def effort(self) -> ThinkingEffort: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def frozen_system(self) -> bool: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def label(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def max_budget_usd(self) -> float | None: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def max_request_tokens(self) -> int: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def max_response_tokens(self) -> int: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def max_tool_call_rounds(self) -> int | None: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def model(self) -> Model: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def model_id(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def model_recipe(self) -> ModelRecipe | None: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def name(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def notify_on_asleep(self) -> bool: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def num_tool_call_rounds(self) -> int: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def persistent_retry(self) -> bool: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def provider(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def run_id(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def runtime(self) -> AgentRuntime: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def service_tier(self) -> ServiceTier: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def session_dir(self) -> Path | None: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def session_id(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def show_thinking(self) -> bool: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def state(self) -> ToolState: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def status(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def system(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def thinking_budget(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def thinking_output(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def tool_state(self) -> ToolState: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def tools(self) -> list[Tool]: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def total_tokens(self) -> TokenCount: ...  # noqa: D102 -- Protocol member declaration.
 
 
 # Process-wide registry of live agents, keyed by label.

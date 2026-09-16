@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Generator, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast, get_args
+from typing import Literal, cast, get_args
 
 import base64
 import contextlib
@@ -39,15 +39,19 @@ import os
 import threading
 import time
 
-from wrapt import lazy_import
-
 from sagent.agent.context import (
     alive_splices,
     masked_refs_by_alive,
     resolve_context,
 )
-from sagent.agent.state import ReadCacheEntry, ToolState
+from sagent.agent.state import (
+    AgentLike,
+    PersistableAgent,
+    ReadCacheEntry,
+    ToolState,
+)
 from sagent.lib.custom_json import FloatCodec, IntCodec
+from sagent.providers.providers import build_provider
 from sagent.sessions import restrict_path
 from sagent.types.cost import TokenCost, TokenCount
 from sagent.types.model import Model, ModelRecipe
@@ -90,11 +94,6 @@ from sagent.types.tape import (
     pair_and_dedup_tool_calls,
 )
 
-
-if TYPE_CHECKING:
-    from sagent.agent.agent import Agent
-
-providers_lib = lazy_import("sagent.providers")
 
 logger = logging.getLogger(__name__)
 
@@ -418,8 +417,8 @@ def append_context_repair(
 
 
 def append_persistent_agent_lifecycle(
-    parent_agent: Agent,
-    child: Agent,
+    parent_agent: PersistableAgent | AgentLike,
+    child: PersistableAgent | AgentLike,
     label: str,
     run_id: str,
     *,
@@ -441,6 +440,8 @@ def append_persistent_agent_lifecycle(
           rather than read off them.
 
     """
+    parent_agent = cast(PersistableAgent, parent_agent)
+    child = cast(PersistableAgent, child)
     if parent_agent.session_dir is None:
         return
     spec = child.model_recipe
@@ -592,7 +593,10 @@ def session_file_lock(path: Path) -> Generator[None]:
             os.close(fd)
 
 
-def install_session_persistence(agent: Agent, session_dir: Path) -> Callable[[], None]:
+def install_session_persistence(
+    agent: PersistableAgent | AgentLike,
+    session_dir: Path,
+) -> Callable[[], None]:
     """Attach a ``SaveSession`` observer that appends tape deltas to disk.
 
     Tracks ``len(runtime.tape)`` (not resolved-context length) so
@@ -620,6 +624,7 @@ def install_session_persistence(agent: Agent, session_dir: Path) -> Callable[[],
           to the same file, duplicating them.
 
     """
+    agent = cast(PersistableAgent, agent)
     persisted_refs = _persisted_refs(session_dir / "session.jsonl")
     meta_written = False
     last_status = agent.status
@@ -678,7 +683,7 @@ def install_session_persistence(agent: Agent, session_dir: Path) -> Callable[[],
     return _rebaseline
 
 
-def unpersisted_session_error(agent: Agent) -> str | None:
+def unpersisted_session_error(agent: PersistableAgent | AgentLike) -> str | None:
     """Return an error message if a non-empty session was never persisted.
 
     Args:
@@ -702,6 +707,7 @@ def unpersisted_session_error(agent: Agent) -> str | None:
     the REPL's stderr-and-exit error convention.
 
     """
+    agent = cast(PersistableAgent, agent)
     session_dir = agent.session_dir
     if session_dir is None or not agent.runtime.tape:
         return None
@@ -937,7 +943,7 @@ def restore_model(
     if not meta.provider or not meta.model_id:
         return None
     try:
-        provider = providers_lib.build_provider(
+        provider = build_provider(
             meta.provider,
             meta.auth,
             account=meta.account or None,

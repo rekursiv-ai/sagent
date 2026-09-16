@@ -16,7 +16,7 @@ from sagent.agent.cost_tracker import CostTracker
 from sagent.lib.custom_json import FloatCodec
 from sagent.repl.status_pane import render_status_pane
 from sagent.types.cost import TokenCost, TokenCount
-from sagent.types.model import AgentSettings
+from sagent.types.settings import AgentSettings
 
 
 @dataclass(slots=True, kw_only=True)

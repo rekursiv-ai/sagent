@@ -300,16 +300,13 @@ extend-include = ["*.ipynb"]
 select = ["ALL"]
 
 ignore = [
-    # Module-level ignores.
-    "ANN0",    # Flake8 missing-annotation rules. (We use pyright for type checking.)
-    "ANN2",    # Flake8 missing-return-annotation rules. (We use pyright for type checking.)
-    "CPY001",  # Missing copyright notice. (License is in LICENSE, not per-file.)
     # Will be fixed by formmater.
     "COM812",  # Missing trailing comma. (select=ALL warning is unfixable.) https://github.com/astral-sh/ruff/issues/9216
     "E501",    # Line too long.
     "TC001",   # Typing-only first-party import.
     "TC003",   # Typing-only standard library import.
     # Documentation.
+    "CPY001",  # Missing copyright notice. (License is in LICENSE, not per-file.)
     "D105",    # Undocumented magic method.
     "D106",    # Undocumented public nested class.
     "D107",    # Undocumented public init.
@@ -329,7 +326,7 @@ ignore = [
     "TD004",   # Missing colon in TODO
     "TD005",   # Missing issue description after `TODO`
     # Complexity.
-    "C90",     # McCabe complexity. (One function slightly over threshold.)
+    "C90",     # McCabe complexity.
     "FLY002",  # Consider f-string instead of join. (Join is often clearer.)
     "PLR0911", # Too many return statements. (Early returns aid clarity.)
     "PLR0912", # Too many branches.
@@ -341,6 +338,7 @@ ignore = [
     # Style.
     "A001",    # Builtin variable shadowing.
     "A002",    # Builtin argument shadowing.
+    "ANN204",  # Missing return type annotation for special method (eg __init__).
     "DTZ006",  # Call datetime fromtimestamp.
     "EM101",   # Raw string in exception.
     "EM102",   # F-string in exception.
@@ -368,6 +366,8 @@ ignore = [
 ]
 
 "{*_test.py,**/tests/test*.py}" = [
+    "ANN201",  # Missing return type annotation for public function.
+    "ANN202",  # Missing return type annotation for private function.
     "D100",    # Undocumented public module. (A test module's name is its docstring.)
     "D101",    # Undocumented public class. (A test class's name is its docstring.)
     "D102",    # Undocumented public method. (A test's name is its docstring.)
@@ -387,7 +387,7 @@ ignore = [
 #    uv --quiet run --frozen ruff format typings
 "**/typings/**" = [
     # Autofix will break.
-    "ANN401",  # typings.Any.
+    "ANN",     # Flake8 annotations.
     "PYI015",  # assignment-default-in-stub -- strips dataclass_transform field-specifier; breaks synthesized __init__.
     "PYI018",  # unused-private-type-var -- deletes TypeVars used only in Generic[]/Protocol[] subscripts.
     "UP046",   # non-pep695-generic-class -- PEP 695 rewrite rebinds/drops TypeVar params.
@@ -542,25 +542,19 @@ pythonVersion = "3.12"
 reportCallInDefaultInitializer = false     # Immutable constructors (e.g. NamedTuple) in defaults are safe.
 reportImplicitStringConcatenation = false  # Conflicts with ruff ISC003.
 reportMissingSuperCall = false             # Fires on plain `object` inheritance (no-op super).
-reportPrivateUsage = false                 # Redundant with ruff SLF001.
+reportPrivateUsage = false                 # Redundant with ruff SLF001/PLC2701.
 reportUnannotatedClassAttribute = false    # Class attributes don't always need annotations.
 reportUnsafeMultipleInheritance = false    # Mixin patterns are intentional.
 reportUnusedCallResult = false             # Discarding return values is idiomatic Python.
-reportImportCycles = false                 # Lazy imports inside functions create benign cycles.
 reportInvalidCast = false                  # All cast() calls are intentional.
 # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 
-# Extra suppressions.
+# Extra.
 reportAny = false
 reportExplicitAny = false
 reportMissingModuleSource = false
 reportUnnecessaryTypeIgnoreComment = false # Public package drops source-tree-only stubs.
 # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
-
-[[tool.basedpyright.executionEnvironments]]
-root = "tests"
-reportPrivateUsage = false
-reportPrivateLocalImportUsage = false
 
 [tool.ty.environment]
 python-version = "3.12"

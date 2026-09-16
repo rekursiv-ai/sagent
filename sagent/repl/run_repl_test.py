@@ -38,6 +38,10 @@ from sagent.repl.render import (
 from sagent.repl.run_repl import (
     _background_tasks_for_repl_cancel,
     _input_queue_committer_observer,
+    install_input_queue_committer,
+    run_repl,
+)
+from sagent.repl.slash_handlers import (
     _parse_model_args,
     _subagent_phase,
     do_login,
@@ -45,8 +49,6 @@ from sagent.repl.run_repl import (
     do_switch_model,
     do_switch_thinking,
     format_tasks,
-    install_input_queue_committer,
-    run_repl,
 )
 from sagent.types.capability import (
     ModelCapability,
@@ -592,7 +594,7 @@ def test_do_switch_model_success_delegates_to_change_model() -> None:
     agent = _FakeAgent()
     printer = RecordingPrinter()
     with patch(
-        "sagent.repl.run_repl.infer_provider",
+        "sagent.repl.slash_handlers.infer_provider",
         return_value=None,
     ):
         do_switch_model(_as_agent(agent), "claude-sonnet-4-6", printer)
@@ -619,7 +621,7 @@ def test_do_switch_model_infer_provider_overrides_provider_and_auth() -> None:
         model_id="gemini-3-pro",
     )
     with patch(
-        "sagent.repl.run_repl.infer_provider",
+        "sagent.repl.slash_handlers.infer_provider",
         return_value=("Google", "sub"),
     ):
         do_switch_model(_as_agent(agent), "gemini-3-pro", printer)
@@ -643,7 +645,7 @@ def test_do_switch_model_change_model_error_writes_to_printer() -> None:
     agent.change_model_side_effect = ValueError("no credentials")
     printer = RecordingPrinter()
     with patch(
-        "sagent.repl.run_repl.infer_provider",
+        "sagent.repl.slash_handlers.infer_provider",
         return_value=None,
     ):
         do_switch_model(_as_agent(agent), "claude-sonnet-4-6", printer)
@@ -807,7 +809,7 @@ def test_format_tasks_no_registry_header_only() -> None:
     agent = _FakeAgent()
     empty: dict[str, AgentLike] = {}
     with patch(
-        "sagent.repl.run_repl.agent_registry",
+        "sagent.repl.slash_handlers.agent_registry",
         empty,
     ):
         out = format_tasks(_as_agent(agent))
@@ -823,7 +825,7 @@ def test_format_tasks_lists_registered_agent_fg_idle() -> None:
     other.runtime.compact_task = None
     other.background = {}
     with patch(
-        "sagent.repl.run_repl.agent_registry",
+        "sagent.repl.slash_handlers.agent_registry",
         {"Agent_0": other},
     ):
         out = format_tasks(_as_agent(agent))
@@ -835,7 +837,7 @@ def test_format_tasks_lists_registered_agent_fg_idle() -> None:
 def test_format_tasks_marks_self() -> None:
     agent = _FakeAgent()
     with patch(
-        "sagent.repl.run_repl.agent_registry",
+        "sagent.repl.slash_handlers.agent_registry",
         {"Agent_0": agent},
     ):
         out = format_tasks(_as_agent(agent))
@@ -860,7 +862,7 @@ def test_format_tasks_lists_bg_jobs() -> None:
     other.work = task
     other.background = {"bg-1": job}
     with patch(
-        "sagent.repl.run_repl.agent_registry",
+        "sagent.repl.slash_handlers.agent_registry",
         {"Agent_0": other},
     ):
         out = format_tasks(_as_agent(agent))
@@ -889,7 +891,7 @@ def test_format_tasks_namespaces_same_job_id_by_agent_label() -> None:
     second.work = None
     second.background = {"job-1": job}
     with patch(
-        "sagent.repl.run_repl.agent_registry",
+        "sagent.repl.slash_handlers.agent_registry",
         {"Agent": first, "fix-tools": second},
     ):
         out = format_tasks(_as_agent(agent))
@@ -2376,7 +2378,7 @@ def test_format_tasks_non_persistent_job_crashed_shows_errored() -> None:
     other.work = None
     other.background = {"job-x": crashed_job}
     with patch(
-        "sagent.repl.run_repl.agent_registry",
+        "sagent.repl.slash_handlers.agent_registry",
         {"agent-0": other},
     ):
         out = format_tasks(_as_agent(agent))
@@ -2417,7 +2419,7 @@ def test_subagent_phase_running_when_child_not_in_registry() -> None:
     job = _make_subagent_job("missing-child")
     empty_registry: dict[str, object] = {}
     with patch(
-        "sagent.repl.run_repl.agent_registry",
+        "sagent.repl.slash_handlers.agent_registry",
         empty_registry,
     ):
         assert _subagent_phase(job) == "running"
@@ -2428,7 +2430,7 @@ def test_subagent_phase_running_when_model_call_active() -> None:
     child = MagicMock()
     child.runtime = _make_runtime(model_call=MagicMock())
     with patch(
-        "sagent.repl.run_repl.agent_registry",
+        "sagent.repl.slash_handlers.agent_registry",
         {"child-1": child},
     ):
         assert _subagent_phase(job) == "running"
@@ -2439,7 +2441,7 @@ def test_subagent_phase_compacting_when_compact_task_active() -> None:
     child = MagicMock()
     child.runtime = _make_runtime(compact_task=MagicMock())
     with patch(
-        "sagent.repl.run_repl.agent_registry",
+        "sagent.repl.slash_handlers.agent_registry",
         {"child-1": child},
     ):
         assert _subagent_phase(job) == "compacting"
@@ -2450,7 +2452,7 @@ def test_subagent_phase_tool_wait_when_cohort_nonempty() -> None:
     child = MagicMock()
     child.runtime = _make_runtime(cohort={"call-1"})
     with patch(
-        "sagent.repl.run_repl.agent_registry",
+        "sagent.repl.slash_handlers.agent_registry",
         {"child-1": child},
     ):
         assert _subagent_phase(job) == "tool-wait"
@@ -2461,7 +2463,7 @@ def test_subagent_phase_gate_armed() -> None:
     child = MagicMock()
     child.runtime = _make_runtime(gate_armed=True)
     with patch(
-        "sagent.repl.run_repl.agent_registry",
+        "sagent.repl.slash_handlers.agent_registry",
         {"child-1": child},
     ):
         assert _subagent_phase(job) == "gate-armed"
@@ -2473,7 +2475,7 @@ def test_subagent_phase_idle_when_all_fields_quiet() -> None:
     child = MagicMock()
     child.runtime = _make_runtime()
     with patch(
-        "sagent.repl.run_repl.agent_registry",
+        "sagent.repl.slash_handlers.agent_registry",
         {"child-1": child},
     ):
         assert _subagent_phase(job) == "idle"
@@ -2491,7 +2493,7 @@ def test_format_tasks_persistent_subagent_shows_idle_phase() -> None:
     child.background = {}
     child.runtime = _make_runtime()
     with patch(
-        "sagent.repl.run_repl.agent_registry",
+        "sagent.repl.slash_handlers.agent_registry",
         {"parent": parent, "child-1": child},
     ):
         out = format_tasks(_as_agent(agent))

@@ -64,8 +64,8 @@ from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.lib.usage import openai_usage
 from sagent.providers.openai import token_count
-from sagent.types.capability import ModelCapability, ModelSettings, ServiceTier
-from sagent.types.cost import TokenCount
+from sagent.types.capability import ModelCapability, ModelSettings
+from sagent.types.cost import ServiceTier, TokenCount
 from sagent.types.model import (
     ModelRequest,
     ModelResponse,

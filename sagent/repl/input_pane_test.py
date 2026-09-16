@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 # `sys.modules`, not an import: `repl/__init__.py` re-exports a FUNCTION named
 # `run_repl`, which rebinds that attribute on the package, so both the
 # `from`-form and `import ... as` yield the function rather than the module.
-run_repl_mod = sys.modules["sagent.repl.run_repl"]
+input_pane_mod = sys.modules["sagent.repl.input_pane"]
 
 
 class _StubInbox:
@@ -624,7 +624,7 @@ async def test_dispatch_send_model_switch_routes_to_child() -> None:
     agent_registry["fix-tools"] = child
     try:
         with patch.object(
-            run_repl_mod,
+            input_pane_mod,
             "do_switch_model",
         ) as mock:
             _ = await _dispatch(
@@ -681,7 +681,7 @@ async def test_dispatch_tasks_calls_run_repl_format_tasks() -> None:
     a = _agent()
     p = RecordingPrinter()
     with patch.object(
-        run_repl_mod,
+        input_pane_mod,
         "format_tasks",
         return_value="tasks listing",
     ) as mock:
@@ -707,7 +707,7 @@ async def test_dispatch_model_switch_calls_run_repl() -> None:
     a = _agent()
     p = RecordingPrinter()
     with patch.object(
-        run_repl_mod,
+        input_pane_mod,
         "do_switch_model",
     ) as mock:
         _ = await _dispatch(
@@ -724,7 +724,7 @@ async def test_dispatch_login_calls_run_repl() -> None:
     a = _agent()
     p = RecordingPrinter()
     with patch.object(
-        run_repl_mod,
+        input_pane_mod,
         "do_login",
     ) as mock:
         _ = await _dispatch(a, sagent.repl.slash.Login(), p)
@@ -737,7 +737,7 @@ async def test_dispatch_login_flushes_local_deferred_queue() -> None:
     stub = cast(_StubAgent, a)
     queues = InputQueues(deferred=QueuedInputBlock(text="retry after login"))
     with patch.object(
-        run_repl_mod,
+        input_pane_mod,
         "do_login",
     ):
         _ = await _dispatch(

@@ -13,29 +13,31 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextvars import ContextVar
+from pathlib import Path
 from types import MappingProxyType
-from typing import cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import dataclasses
 
-from sagent.agent.agent import Agent
-from sagent.agent.state import current_agent_var
+from sagent.agent.state import (
+    AgentLike,
+    current_agent_var,
+)
 from sagent.lib.custom_json import JSON, json_freeze
-from sagent.providers import (
+from sagent.providers.providers import (
+    PROVIDER_NAMES,
     build_provider,
     default_auth_for_provider,
     infer_provider,
+    provider_class,
 )
 from sagent.thinking import apply_thinking_command
 from sagent.tools.core import (
     load_tool_description,
     provider_not_allowed_result,
 )
-from sagent.types.capability import (
-    ModelCapability,
-    ServiceTier,
-    ThinkingEffort,
-)
+from sagent.types.capability import ModelCapability, ThinkingEffort
+from sagent.types.cost import ServiceTier
 from sagent.types.model import (
     CONTEXT_TAGS,
     Model,
@@ -49,7 +51,27 @@ from sagent.types.runtime import (
     ToolResult,
 )
 
-import sagent.providers
+
+if TYPE_CHECKING:
+    from sagent.agent.cost_tracker import CostTracker
+    from sagent.agent.state import ToolState
+
+
+class AgentSelfAgent(AgentLike, Protocol):
+    """Agent surface mutated by ``AgentSelf``."""
+
+    model: Model
+    model_recipe: ModelRecipe | None
+    status: str
+    max_request_tokens: int
+    max_response_tokens: int
+    cost_tracker: CostTracker
+    num_tool_call_rounds: int
+    session_dir: Path | None
+    session_id: str
+    tool_state: ToolState
+
+    def swap_model(self, model: Model, *, spec: ModelRecipe | None = None) -> None: ...  # noqa: D102 -- Protocol member declaration.
 
 
 CACHE_TTL_SEC: Mapping[str, float] = MappingProxyType({"5m": 300.0, "1h": 3600.0})
@@ -181,7 +203,7 @@ class AgentSelf:
         allow_providers: tuple[str, ...] | None = None,
     ) -> None:
         self._allow_providers: tuple[str, ...] = (
-            tuple(allow_providers) if allow_providers is not None else _provider_names()
+            tuple(allow_providers) if allow_providers is not None else PROVIDER_NAMES
         )
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -408,7 +430,7 @@ def _supported_model_options(model: Model) -> dict[str, str]:
 
 
 def _plan_limits(
-    agent: Agent,
+    agent: AgentSelfAgent,
     model: Model,
     d: Mapping[str, object],
 ) -> dict[str, int] | ToolResult:
@@ -451,24 +473,6 @@ def _plan_limits(
                 is_error=True,
             )
         limits["max_response_tokens"] = max_response_tokens
-    try:
-        budget = agent.budget
-        if "max_request_tokens" in limits:
-            budget = dataclasses.replace(
-                budget,
-                max_request_tokens=limits["max_request_tokens"],
-            )
-        if "max_response_tokens" in limits:
-            budget = dataclasses.replace(
-                budget,
-                max_response_tokens=limits["max_response_tokens"],
-            )
-    except (ValueError, TypeError) as exc:
-        return ToolResult(
-            call_id="",
-            content=f"Invalid AgentSelf limit override: {exc}",
-            is_error=True,
-        )
     return limits
 
 
@@ -518,12 +522,12 @@ def _plan_one_limit(raw: object, attr: str) -> int | ToolResult | None:
 # the ``max_request_tokens`` limit. When an agent over-raises the limit to reach a
 # bigger window, point it at the sibling variant (same base id, a window tag, enough
 # room) so the rejection self-corrects.
-def _window_variant_hint(agent: Agent, model: Model, requested: int) -> str:
+def _window_variant_hint(agent: AgentSelfAgent, model: Model, requested: int) -> str:
     """Suggest a larger-window model id when one would satisfy ``requested``."""
     spec = agent.model_recipe
     if spec is None:
         return ""
-    provider_cls = getattr(sagent.providers, spec.provider, None)
+    provider_cls = provider_class(spec.provider)
     known = getattr(provider_cls, "CAPABILITIES", None)
     if not isinstance(known, Mapping):
         return ""
@@ -546,7 +550,7 @@ def _window_variant_hint(agent: Agent, model: Model, requested: int) -> str:
 
 # Context verbs are first-class ``RuntimeEvent``s on the inbox; the runtime loop
 # dispatches them in arrival order.
-def _commit_context(agent: Agent, context: str, prompt: str) -> None:
+def _commit_context(agent: AgentSelfAgent, context: str, prompt: str) -> None:
     """Push a validated context mutation directly to the runtime inbox."""
     if context == "clear":
         agent.runtime.inbox.push_back(Clear())
@@ -561,7 +565,7 @@ def _do_diagnostics(
     d: Mapping[str, object] | None = None,
 ) -> ToolResult:
     """Return current agent diagnostics."""
-    agent = cast(Agent | None, current_agent_var.get(None))
+    agent = cast(AgentSelfAgent | None, current_agent_var.get(None))
     spec = agent.model_recipe if agent is not None else None
     lines: list[str] = []
     if changes:
@@ -579,7 +583,7 @@ def _do_diagnostics(
     return ToolResult(call_id="", content="\n".join(lines))
 
 
-def _catalog_lines(d: Mapping[str, object], agent: Agent | None) -> list[str]:
+def _catalog_lines(d: Mapping[str, object], agent: AgentSelfAgent | None) -> list[str]:
     """Return read-only provider/model catalog diagnostics."""
     catalog = d.get("catalog")
     if catalog is None:
@@ -598,8 +602,8 @@ def _model_catalog_lines(provider_name: str) -> list[str]:
     """List statically known models for one provider, gated by allow-list."""
     if not provider_name:
         return ["Known models: set catalog_provider or configure an active provider."]
-    provider_cls = getattr(sagent.providers, provider_name, None)
-    if not isinstance(provider_cls, type):
+    provider_cls = provider_class(provider_name)
+    if provider_cls is None:
         return [f"Known models: unknown provider {provider_name!r}."]
     if provider_name not in _allowed_providers():
         return [
@@ -626,7 +630,7 @@ def _model_catalog_lines(provider_name: str) -> list[str]:
 # Reads directly from the single cost store (``agent.cost_tracker``) plus the live
 # budget/round counters on the agent. No separate per-request publisher exists;
 # diagnostics is a pull, not a push.
-def _format_stats(agent: Agent) -> list[str]:
+def _format_stats(agent: AgentSelfAgent) -> list[str]:
     """Format live cost/budget counters into display lines."""
     tracker = agent.cost_tracker
     max_req = agent.max_request_tokens
@@ -658,7 +662,7 @@ def _spec_lines(spec: ModelRecipe | None) -> list[str]:
     ]
 
 
-def _agent_option_lines(agent: Agent) -> list[str]:
+def _agent_option_lines(agent: AgentSelfAgent) -> list[str]:
     """Format current and supported model options."""
     # Each axis is total, so "unsupported" is the SINGLETON unset value, not
     # an empty set: ``not bool(frozenset)`` was never true and every model
@@ -691,7 +695,7 @@ def _agent_option_lines(agent: Agent) -> list[str]:
     ]
 
 
-def _session_lines(agent: Agent) -> list[str]:
+def _session_lines(agent: AgentSelfAgent) -> list[str]:
     """Format session identity, path, and cwd."""
     if agent.session_dir is not None:
         lines = [f"Session:            {agent.session_dir.name}"]
@@ -731,7 +735,7 @@ def _apply_patch(d: Mapping[str, object]) -> ToolResult:
     active = current_agent_var.get(None)
     if active is None:
         return ToolResult(call_id="", content="No active agent.", is_error=True)
-    agent = cast(Agent, active)
+    agent = cast(AgentSelfAgent, active)
     plan_or_err = _build_patch_plan(agent, d)
     if isinstance(plan_or_err, ToolResult):
         return plan_or_err
@@ -752,7 +756,9 @@ def _apply_patch(d: Mapping[str, object]) -> ToolResult:
     )
 
 
-def _build_patch_plan(agent: Agent, d: Mapping[str, object]) -> _PatchPlan | ToolResult:
+def _build_patch_plan(
+    agent: AgentSelfAgent, d: Mapping[str, object]
+) -> _PatchPlan | ToolResult:
     """Validate an AgentSelf patch without mutating state."""
     err = _validate_patch(d)
     if err is not None:
@@ -793,7 +799,7 @@ def _build_patch_plan(agent: Agent, d: Mapping[str, object]) -> _PatchPlan | Too
     )
 
 
-def _commit_patch_plan(agent: Agent, plan: _PatchPlan) -> list[str]:
+def _commit_patch_plan(agent: AgentSelfAgent, plan: _PatchPlan) -> list[str]:
     """Apply a fully validated AgentSelf patch plan."""
     parts: list[str] = []
     if plan.status is not None:
@@ -896,7 +902,7 @@ def _plan_status(d: Mapping[str, object]) -> str | ToolResult | None:
 
 
 def _plan_model(
-    agent: Agent,
+    agent: AgentSelfAgent,
     d: Mapping[str, object],
 ) -> _ModelPlan | ToolResult | None:
     """Build an optional model/provider/account update without applying it."""
@@ -969,16 +975,6 @@ def _plan_model(
     )
 
 
-def _provider_names() -> tuple[str, ...]:
-    """Return exported provider classes, excluding the model helper."""
-    return tuple(
-        name
-        for name in sagent.providers.__all__
-        if name != "SelfHostedModel"
-        and isinstance(getattr(sagent.providers, name, None), type)
-    )
-
-
 def _allowed_providers() -> tuple[str, ...]:
     """Return the active allow-list, falling back to known providers."""
-    return _allow_providers_var.get() or _provider_names()
+    return _allow_providers_var.get() or PROVIDER_NAMES

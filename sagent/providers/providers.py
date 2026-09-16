@@ -103,6 +103,25 @@ def infer_provider(
     return None
 
 
+def provider_class(provider_name: str) -> type | None:
+    """Look a provider class up by name on the ``providers`` package facade.
+
+    The facade is the registry: every provider is re-exported there, and
+    reading it through ``sys.modules`` keeps this module -- and the agent
+    layer that calls it -- below the facade in the import graph.
+
+    Args:
+      provider_name: Provider class name (e.g. ``"Anthropic"``).
+
+    Returns:
+      cls: The provider class, or ``None`` when the name is unknown.
+
+    """
+    providers = sys.modules["sagent.providers"]
+    cls = getattr(providers, provider_name, None)
+    return cls if isinstance(cls, type) else None
+
+
 def build_provider(
     provider_name: str,
     auth: str = "env",
@@ -125,8 +144,7 @@ def build_provider(
           matching auth method.
 
     """
-    providers = sys.modules["sagent.providers"]
-    cls = getattr(providers, provider_name, None)
+    cls = provider_class(provider_name)
     if cls is None:
         raise AttributeError(f"unknown provider {provider_name!r}")
     factory = getattr(cls, f"from_{auth}", None)
@@ -157,8 +175,7 @@ def default_auth_for_provider(provider_name: str) -> str:
       AttributeError: If the provider class is unknown or has no defaultable auth.
 
     """
-    providers = sys.modules["sagent.providers"]
-    cls = getattr(providers, provider_name, None)
+    cls = provider_class(provider_name)
     if cls is None:
         raise AttributeError(f"unknown provider {provider_name!r}")
     if provider_name.endswith(("CLI", "Subscription")) and hasattr(

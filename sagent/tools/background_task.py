@@ -17,16 +17,19 @@ to load before ``agent/`` is fully initialized.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import asyncio
 import time
 
-from wrapt import lazy_import
-
+from sagent.agent.agent import Agent
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.session_io import append_persistent_agent_lifecycle
-from sagent.agent.state import agent_registry, current_agent_var
+from sagent.agent.state import (
+    AgentLike,
+    agent_registry,
+    current_agent_var,
+)
 from sagent.lib.custom_json import JSON, json_freeze
 from sagent.tools.core import load_tool_description
 from sagent.types.runtime import (
@@ -37,13 +40,6 @@ from sagent.types.runtime import (
     ToolResultKind,
 )
 
-
-if TYPE_CHECKING:
-    from sagent.agent import Agent
-    from sagent.agent.state import AgentLike
-
-
-agent_lib = lazy_import("sagent.agent")
 
 __all__ = [
     "BackgroundTask",
@@ -312,7 +308,7 @@ def cancel_persistent_subagent(agent: AgentLike, label: str) -> bool:
 
 def _get_agent_class() -> type[Agent]:
     """Resolve the concrete ``Agent`` class lazily."""
-    return cast(type["Agent"], agent_lib.Agent)
+    return Agent
 
 
 # A ``CANCELLED`` result is a valid final answer here (a killed job's outcome is

@@ -16,8 +16,10 @@ Callers must reach into a specific submodule:
   calculus and the price catalog.
 - ``sagent.types.capability`` -- ``ModelLimits``, ``ModelCapability``,
   and ``ModelSettings``: what a model offers, and what one instance chose.
-- ``sagent.types.model`` -- the ``Model`` Protocol,
-  ``AgentSettings``, and request/response types.
+- ``sagent.types.model`` -- the ``Model`` Protocol
+  and request/response types.
+- ``sagent.types.settings`` -- ``AgentSettings`` and
+  its buffer sizing helper.
 - ``sagent.types.providers`` -- provider Protocols.
 - ``sagent.types.tools`` -- ``Tool`` Protocol and the
   off-load thresholds for what a tool returns.
@@ -35,6 +37,7 @@ from sagent.types import (
     providers,
     runtime,
     session,
+    settings,
     tape,
     tools,
 )
@@ -47,6 +50,7 @@ __all__ = [
     "providers",
     "runtime",
     "session",
+    "settings",
     "tape",
     "tools",
 ]

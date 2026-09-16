@@ -27,7 +27,6 @@ from sagent.compaction.history import estimate_entry_tokens
 from sagent.tools.core import read_asset, recipe_dict
 from sagent.types.compactor import ReattachPolicy
 from sagent.types.model import (
-    AgentSettings,
     Model,
     ModelRequest,
     ModelResponse,
@@ -41,6 +40,7 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
+from sagent.types.settings import AgentSettings
 from sagent.types.tape import (
     ContextSplice,
     MaskRange,

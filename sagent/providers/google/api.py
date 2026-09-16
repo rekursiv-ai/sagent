@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from types import MappingProxyType
-from typing import TYPE_CHECKING, ClassVar, Final, cast, override
+from typing import TYPE_CHECKING, ClassVar, Final, Protocol, cast, override
 
 import asyncio
 import base64
@@ -195,12 +195,21 @@ class Google(GoogleCatalog):
         return self.model("utility")
 
 
+class GeminiProvider(Protocol):
+    """What ``_GeminiModel`` reads off the provider that built it."""
+
+    @property
+    def api_key(self) -> str:
+        """Key sent as ``x-goog-api-key``; empty when the transport uses OAuth."""
+        ...
+
+
 class _GeminiModel(ModelDefaults):
     """Gemini model backend."""
 
     def __init__(
         self,
-        provider: Google,
+        provider: GeminiProvider,
         capability: ModelCapability,
         settings: ModelSettings,
     ) -> None:

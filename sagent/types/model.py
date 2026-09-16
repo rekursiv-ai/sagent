@@ -1,20 +1,14 @@
 """Model contract and its data classes.
 
-The ``Model`` Protocol, the request and response shapes, ``AgentSettings``,
-and the ``ModelRecipe`` used to build a Model from CLI-style strings.
+The ``Model`` Protocol, the request and response shapes, and the
+``ModelRecipe`` used to build a Model from CLI-style strings.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import (
-    TYPE_CHECKING,
-    Final,
-    Protocol,
-    get_args,
-    runtime_checkable,
-)
+from typing import Final, Protocol, get_args, runtime_checkable
 
 from sagent.types.capability import (
     ContextTag,
@@ -29,19 +23,11 @@ from sagent.types.runtime import (
     ModelContextEvent,
     RuntimeEvent,
 )
-
-
-if TYPE_CHECKING:
-    # ``ModelRequest.tools`` references ``Tool`` from ``tools.py``;
-    # ``tools.py`` references ``ToolResult`` from ``history.py``. No
-    # runtime cycle because ``from __future__ import annotations`` makes
-    # ``Tool`` a forward string at definition time.
-    from sagent.types.tools import Tool
+from sagent.types.tools import Tool
 
 
 __all__ = [
     "CONTEXT_TAGS",
-    "AgentSettings",
     "Model",
     "ModelRecipe",
     "ModelRequest",
@@ -53,7 +39,6 @@ __all__ = [
     "UsageSnapshot",
     "UsageWindow",
     "base_model_id",
-    "default_buffer_tokens",
     "split_model_id",
 ]
 
@@ -101,101 +86,6 @@ def base_model_id(model_id: str) -> str:
 
     """
     return split_model_id(model_id)[0]
-
-
-def default_buffer_tokens(max_request_tokens: int) -> int:
-    """Return proportional compaction headroom for a given input window.
-
-    Seeds ``AgentSettings.buffer_tokens``; ``Compactor.largest_context``,
-    not this function, defines the compaction threshold.
-
-    Args:
-      max_request_tokens: The model's input-token window.
-
-    Returns:
-      buffer: Tokens of headroom reserved below the effective cap.
-
-    """
-    return min(max(max_request_tokens // 15, 8_000), max(max_request_tokens // 2, 0))
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class AgentSettings:
-    """What one Agent chose, within what its model's capability offers.
-
-    There is no ``AgentCapability``: a capability needs an external
-    declarer, and an Agent has none -- its ceiling is ``model.capability``.
-    Use :meth:`from_limits` for proportional defaults.
-    """
-
-    max_request_tokens: int
-    """Maximum input tokens the agent will send."""
-
-    max_response_tokens: int
-    """Maximum output tokens reserved for the response."""
-
-    buffer_tokens: int = 0
-    """Headroom a ``Compactor`` deducts in ``largest_context``, in tokens."""
-
-    max_attempts: int = 5
-    """Retry attempts inside one send before the error surfaces."""
-
-    max_tool_call_rounds: int | None = None
-    """Cap on tool-call rounds per turn; ``None`` for no cap."""
-
-    max_budget_usd: float | None = None
-    """Hard spend cap for this agent's own tree; ``None`` for no cap."""
-
-    def __post_init__(self) -> None:
-        """Validate window parameters."""
-        if self.max_request_tokens <= 0:
-            raise ValueError(
-                f"max_request_tokens must be > 0, got {self.max_request_tokens}",
-            )
-        if self.max_response_tokens <= 0:
-            raise ValueError(
-                f"max_response_tokens must be > 0, got {self.max_response_tokens}",
-            )
-        if self.buffer_tokens < 0 or self.buffer_tokens >= self.max_request_tokens:
-            raise ValueError(
-                f"buffer_tokens ({self.buffer_tokens}) must be in"
-                f" [0, max_request_tokens={self.max_request_tokens})",
-            )
-        if self.max_attempts < 1:
-            # A zero would send nothing at all: the loop checks the attempt
-            # count before the first send, so "no retries" is 1, not 0.
-            raise ValueError(f"max_attempts must be >= 1, got {self.max_attempts}")
-        if self.max_tool_call_rounds is not None and self.max_tool_call_rounds < 0:
-            raise ValueError(
-                "max_tool_call_rounds must be >= 0 or None, got"
-                f" {self.max_tool_call_rounds}",
-            )
-        if self.max_budget_usd is not None and self.max_budget_usd < 0:
-            raise ValueError(
-                f"max_budget_usd must be >= 0 or None, got {self.max_budget_usd}",
-            )
-
-    @classmethod
-    def from_limits(cls, limits: ModelLimits) -> AgentSettings:
-        """Derive proportional defaults from the selected context's limits.
-
-        Takes ``ModelLimits`` rather than a ``Model`` so a caller sizing a
-        window it has not built yet -- ``swap_model`` rescaling to a
-        candidate -- reaches the same definition as one that has.
-
-        Args:
-          limits: Ceilings of the context tag the model selected, i.e.
-              ``model.settings.limits``.
-
-        Returns:
-          settings: New ``AgentSettings`` with proportional defaults.
-
-        """
-        return cls(
-            max_request_tokens=limits.max_request_tokens,
-            max_response_tokens=limits.max_response_tokens,
-            buffer_tokens=default_buffer_tokens(limits.max_request_tokens),
-        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

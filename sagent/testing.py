@@ -39,12 +39,12 @@ from sagent.types.capability import (
     ModelCapability,
     ModelLimits,
     ModelSettings,
-    ServiceTier,
     ThinkingEffort,
 )
 from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
+    ServiceTier,
     TokenCost,
     TokenCount,
     TokenPrice,

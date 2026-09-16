@@ -105,7 +105,7 @@ from sagent.providers.lib.oauth import (
     pkce_pair,
 )
 from sagent.providers.lib.perloop import PerLoop
-from sagent.providers.openai.api import OpenAI
+from sagent.providers.openai.api import OpenAI, OpenAICatalog
 from sagent.providers.openai.responses import _OpenAIResponsesModel
 from sagent.types.capability import (
     ContextTag,
@@ -195,10 +195,10 @@ def _subscription_context(cap: ModelCapability) -> Mapping[ContextTag, ModelLimi
     )
 
 
-class OpenAISubscription(OpenAI):
+class OpenAISubscription(OpenAICatalog):
     """OpenAI provider -- OAuth + ChatGPT subscription billing.
 
-    Derives CAPABILITIES from OpenAI (API pricing inherited, token
+    Derives CAPABILITIES from :class:`OpenAICatalog` (API pricing inherited, token
     limits clamped to the subscription wire contract, ``+1m`` ids
     dropped -- see the ``CAPABILITIES`` comprehension below).
     Cost tracking uses standard API per-token pricing even though
@@ -213,8 +213,9 @@ class OpenAISubscription(OpenAI):
     # would clamp to exactly its base id. Rather than accept a suffix that buys
     # nothing (and silently mislead a caller expecting 1M), the catalog omits
     # ``+1m`` ids entirely: the base id is the only honest handle here. The
-    # inherited ``OpenAI.DEFAULT_MODEL`` carries ``+1m``, so it is overridden
-    # below to the base id to stay resolvable against this narrowed catalog.
+    # inherited ``OpenAICatalog.DEFAULT_MODEL`` carries ``+1m``, so it is
+    # overridden below to the base id to stay resolvable against this narrowed
+    # catalog.
     DEFAULT_MODEL: ClassVar[str] = "gpt-6-astra"
 
     CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = MappingProxyType(
@@ -294,9 +295,7 @@ class OpenAISubscription(OpenAI):
             self._authed.clear()
 
     @classmethod
-    @override
-    # API-key authentication returns the base provider, not the OAuth subclass.
-    def from_key(  # ty: ignore[invalid-method-override] -- The OAuth provider's factory intentionally returns its concrete subclass instead of the base provider.
+    def from_key(
         cls,
         api_key: str,
         *,
@@ -480,7 +479,6 @@ class OpenAISubscription(OpenAI):
         out.flush()
         return creds
 
-    @override
     def model(
         self,
         model_id: str | None = None,
@@ -515,7 +513,6 @@ class OpenAISubscription(OpenAI):
             settings=settings,
         )
 
-    @override
     def utility_model(self) -> _OpenAISubModel:
         """Return the default utility (fast/cheap) model backend.
 
@@ -532,7 +529,6 @@ class OpenAISubscription(OpenAI):
         """True if the access token is within 5 min of expiry."""
         return time.time() > self._expires_at - self._refresh_buffer_sec
 
-    @override
     async def get_sdk(self) -> openai.AsyncOpenAI:
         """Return OAuth-authed SDK client, refreshing as needed.
 
@@ -567,7 +563,6 @@ class OpenAISubscription(OpenAI):
                 await cached[0].close()
             return sdk
 
-    @override
     async def close_sdk(self) -> None:
         """Close and clear the shared OAuth SDK client.
 

@@ -29,7 +29,7 @@ budget USD).
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Generator, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal, cast
@@ -45,7 +45,6 @@ import logging
 import time
 import uuid
 
-from sagent import agents_md, providers
 from sagent.agent.background import (
     BackgroundAwareTool,
     BackgroundTaskEntry,
@@ -59,6 +58,12 @@ from sagent.agent.compaction import (
 from sagent.agent.cost_tracker import CostTracker
 from sagent.agent.result_storage import post_process_result
 from sagent.agent.retry import send_with_retry, service_error_snapshot
+from sagent.agent.runtime import (
+    AgentRuntime,
+    GatedDeque,
+    current_call_id_var,
+    widen_barrier_mask,
+)
 from sagent.agent.session_io import (
     SessionMeta,
     install_session_persistence,
@@ -100,17 +105,19 @@ from sagent.types.exceptions import (
     log_task_exception,
 )
 from sagent.types.model import (
-    AgentSettings,
     Model,
     ModelRecipe,
     ModelRequest,
     ModelResponse,
     RequestTooLargeError,
     base_model_id,
-    default_buffer_tokens,
 )
 from sagent.types.providers import (
     AuthReloadable,
+)
+from sagent.types.settings import (
+    AgentSettings,
+    default_buffer_tokens,
 )
 from sagent.types.tape import (
     ContextSplice,
@@ -125,7 +132,8 @@ from sagent.types.tools import (
     ToolResultPolicy,
 )
 
-import sagent.agent.runtime
+import sagent.agents_md
+import sagent.providers.providers
 
 
 logger = logging.getLogger(__name__)
@@ -202,7 +210,7 @@ _TOOL_REGISTRY_MAX: Final = 10_000
 
 
 class Agent:
-    """Conversation agent: composes :class:`sagent.agent.runtime.AgentRuntime` with wrappers.
+    """Conversation agent: composes :class:`AgentRuntime` with wrappers.
 
     Args:
       model: Rich provider model the agent calls.
@@ -360,14 +368,14 @@ class Agent:
         self._tools_version: int = 0
         self._live_tools_cache: tuple[int, list[Tool]] | None = None
         self._persist_budget_cache: tuple[int, int] | None = None
-        agent_tools: list[sagent.agent.runtime.Tool] = []
+        agent_tools: list[_AgentTool] = []
         for t in self._tools_list:
             self._tools_map[t.name] = t
             agent_tools.append(_AgentTool(t, self))
         self._agent_compactor = (
             _AgentCompactor(compactor, self) if compactor is not None else None
         )
-        self.runtime = sagent.agent.runtime.AgentRuntime(
+        self.runtime = AgentRuntime(
             model=self._agent_model,
             tools=agent_tools,
             compactor=self._agent_compactor,
@@ -544,7 +552,7 @@ class Agent:
     @property
     def inbox(
         self,
-    ) -> sagent.agent.runtime.GatedDeque[runtime.RuntimeEvent]:
+    ) -> GatedDeque[runtime.RuntimeEvent]:
         """The runtime's inbox."""
         return self.runtime.inbox
 
@@ -865,7 +873,7 @@ class Agent:
             model_id=model_id,
             account=account,
         )
-        provider_obj = providers.build_provider(
+        provider_obj = sagent.providers.providers.build_provider(
             target.provider,
             target.auth,
             account=target.account,
@@ -913,7 +921,7 @@ class Agent:
         spec = self.model_recipe
         if spec is None:
             raise ValueError("agent has no model_recipe; cannot relogin")
-        prov_cls = getattr(providers, spec.provider, None)
+        prov_cls = sagent.providers.providers.provider_class(spec.provider)
         if prov_cls is None:
             raise ValueError(f"unknown provider {spec.provider!r}")
         login_fn = getattr(prov_cls, "login", None)
@@ -1448,7 +1456,11 @@ class Agent:
     # (``serve_forever``) the caller owns the registry and this CM only binds the
     # ContextVars.
     @contextlib.contextmanager
-    def _install_contextvars(self, *, label: str | None = None):
+    def _install_contextvars(
+        self,
+        *,
+        label: str | None = None,
+    ) -> Generator[None, None, None]:
         """Install per-agent ContextVars for the lifetime of the block."""
         agent_token = current_agent_var.set(self)
         parent_root = cost_root_var.get(None)
@@ -2156,7 +2168,7 @@ class Agent:
             # rejection escaped the method entirely: no ``CompactFailed``, no
             # ``last_compact_error``, and overflow recovery's ``assert`` on
             # that field fired instead of the real error.
-            override = sagent.agent.runtime.widen_barrier_mask(
+            override = widen_barrier_mask(
                 override,
                 self.runtime.tape,
             )
@@ -2376,7 +2388,7 @@ def _resolve_target_spec(
     elif prov_name == spec.provider:
         final_auth = spec.auth
     else:
-        final_auth = providers.default_auth_for_provider(prov_name)
+        final_auth = sagent.providers.providers.default_auth_for_provider(prov_name)
     final_account = account if account is not None else spec.account
     if model_id is not None:
         final_model_id = model_id
@@ -2397,7 +2409,7 @@ def _resolve_target_spec(
 # membership check, mirroring the providers' own lookup rule.
 def _provider_knows_model(prov_name: str, model_id: str) -> bool:
     """Return True when the provider class's catalog includes ``model_id``."""
-    cls = getattr(providers, prov_name, None)
+    cls = sagent.providers.providers.provider_class(prov_name)
     if cls is None:
         return False
     known = getattr(cls, "CAPABILITIES", None)
@@ -2408,7 +2420,7 @@ def _provider_knows_model(prov_name: str, model_id: str) -> bool:
 
 def _default_model_for(prov_name: str) -> str:
     """Return ``Provider.DEFAULT_MODEL`` for the named provider class."""
-    cls = getattr(providers, prov_name, None)
+    cls = sagent.providers.providers.provider_class(prov_name)
     if cls is None:
         raise ValueError(f"unknown provider: {prov_name!r}")
     default = getattr(cls, "DEFAULT_MODEL", None)
@@ -2755,7 +2767,7 @@ class _AgentTool:
         # Production callers always have a non-empty id, so emitted
         # ``ToolLabel`` / ``ToolResult`` records correlate to the
         # originating assistant tool_use.
-        call_id = sagent.agent.runtime.current_call_id_var.get("")
+        call_id = current_call_id_var.get("")
         bg_requested, delay_sec, clean_args = split_bg_args(args)
         validation_error = validate_tool_input(
             self._inner.name,
@@ -2848,10 +2860,10 @@ class _AgentTool:
         path = Path(raw_path)
         if not path.is_absolute():
             path = cwd / path
-        reminder, matched = agents_md.conditional_rules_for_paths(
+        reminder, matched = sagent.agents_md.conditional_rules_for_paths(
             cwd,
             [path],
-            config=agents_md.AgentsMdConfig(
+            config=sagent.agents_md.AgentsMdConfig(
                 additional_dirs=[Path(d) for d in state.additional_dirs],
             ),
             exclude=state.invoked_rules,
@@ -3017,7 +3029,7 @@ class _AgentCompactor:
         self,
         tape: Sequence[TapeRecord],
         context: Sequence[runtime.ModelContextEvent],
-        model: sagent.agent.runtime.Model,
+        model: object,
         mint_ref: Callable[[], TapeRef],
         custom_instructions: str | None = None,
     ) -> ContextSplice:
