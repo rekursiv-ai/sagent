@@ -35,3 +35,13 @@ path = "rekursiv_ai_typeshed/hatch_build.py"
 
 [tool.hatch.build.targets.sdist]
 include = ["rekursiv_ai_typeshed", "README.md"]
+
+[tool.uv]
+cache-keys = [
+    {file = "pyproject.toml"},
+    {file = "README.md"},
+    {file = "rekursiv_ai_typeshed/*.py"},
+    {file = "rekursiv_ai_typeshed/py.typed"},
+    {file = "rekursiv_ai_typeshed/typeshed.patch"},
+    {file = "rekursiv_ai_typeshed/typings/**/*.pyi"},
+]
