@@ -301,7 +301,12 @@ select = ["ALL"]
 
 ignore = [
     # Will be fixed by formater.
-    # "COM812",  # Missing trailing comma. (select=ALL warning is unfixable.) https://github.com/astral-sh/ruff/issues/9216
+    # COM812 is deliberately ignored here and re-enabled only by the
+    # pre-commit `ruff-check` hook (`--extend-select COM812`). Selecting it in
+    # config makes every `ruff format` print a conflict warning; the rule is
+    # only useful inside the hook's format->fix->format loop, where it forces
+    # compact multi-line args to explode one-per-line (astral-sh/ruff#9216).
+    "COM812",  # Missing trailing comma.
     "E501",    # Line too long.
     "TC001",   # Typing-only first-party import.
     "TC003",   # Typing-only standard library import.
