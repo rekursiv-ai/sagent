@@ -20,6 +20,10 @@ class ParallelStyle(ABC):
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module: ...
 
 class ColwiseParallel(ParallelStyle):
+    input_layouts: tuple[Placement]
+    output_layouts: tuple[Placement]
+    desired_input_layouts: tuple[Placement]
+    use_local_output: bool
     def __init__(
         self,
         *,
@@ -30,6 +34,9 @@ class ColwiseParallel(ParallelStyle):
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module: ...
 
 class RowwiseParallel(ParallelStyle):
+    input_layouts: tuple[Placement]
+    output_layouts: tuple[Placement]
+    use_local_output: bool
     def __init__(
         self,
         *,
