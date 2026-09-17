@@ -289,8 +289,10 @@ repos:
       # trailing comma, so COM812 only fires AFTER a format pass; the second
       # format honors the comma it added. The single check->format order
       # upstream documents converges only on the next commit attempt.
-      # `--quiet` drops the formatter's stderr nag about COM812
-      # (astral-sh/ruff#9216); diagnostics and exit codes are unaffected.
+      # COM812 is ignored in pyproject.toml (it makes `ruff format` warn) and
+      # selected only here: format -> fix (adds trailing comma to compact
+      # multi-line args) -> format (explodes them one-per-line). Dropping
+      # `--extend-select COM812` silently loses that explosion (ruff#9216).
       - id: ruff-format
         name: ruff-format-pre
         stages: [pre-commit]
@@ -302,7 +304,7 @@ repos:
         stages: [pre-commit]
         require_serial: true
         types_or: [python, pyi, jupyter]
-        args: [--fix]
+        args: [--fix, --extend-select, COM812]
       - id: ruff-format
         name: ruff-format
         stages: [pre-commit]

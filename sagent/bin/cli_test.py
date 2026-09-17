@@ -321,10 +321,7 @@ def test_implicit_startup_falls_back_from_missing_api_key_to_claude_login(
             return _Provider()
         raise AssertionError(f"unexpected provider {provider_name}")
 
-    monkeypatch.setattr(
-        "sagent.bin.cli.build_provider",
-        fake_build_provider,
-    )
+    monkeypatch.setattr("sagent.bin.cli.build_provider", fake_build_provider)
 
     _, model, auth = _build_provider_model(
         ns,
