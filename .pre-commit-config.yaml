@@ -298,7 +298,6 @@ repos:
         stages: [pre-commit]
         require_serial: true
         types_or: [python, pyi, jupyter]
-        args: [--quiet]
       - id: ruff-check
         name: ruff-check
         stages: [pre-commit]
@@ -310,7 +309,6 @@ repos:
         stages: [pre-commit]
         require_serial: true
         types_or: [python, pyi, jupyter]
-        args: [--quiet]
 
   - repo: local
     hooks:
