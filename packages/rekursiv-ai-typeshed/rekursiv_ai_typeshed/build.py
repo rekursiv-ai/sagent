@@ -90,8 +90,10 @@ def bundle_dir() -> Path:
 
     """
     spec = find_spec("basedpyright")
-    assert spec is not None
-    assert spec.origin is not None
+    if spec is None:
+        raise ValueError("Expected spec is not None.")
+    if spec.origin is None:
+        raise ValueError("Expected spec.origin is not None.")
     return Path(spec.origin).resolve().parent / "dist" / "typeshed-fallback"
 
 
@@ -148,7 +150,8 @@ def _read_member(archive: zipfile.ZipFile, name: str) -> bytes:
     # 93 is ZIP_ZSTANDARD, a name ``zipfile`` only gained in 3.14.
     if info.compress_type != 93 or sys.version_info >= (3, 14):
         return archive.read(name)
-    assert archive.fp is not None
+    if archive.fp is None:
+        raise ValueError("Expected archive.fp is not None.")
     archive.fp.seek(info.header_offset)
     header = archive.fp.read(30)
     name_len = int.from_bytes(header[26:28], "little")

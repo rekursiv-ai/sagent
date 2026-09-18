@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import asyncio
 import re
@@ -35,7 +35,6 @@ import tempfile
 from sagent.agent.agent import Agent
 from sagent.lib.custom_json import JSON, json_freeze
 from sagent.tools import AgentSelf
-from sagent.types.model import Model, ModelRecipe
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
@@ -43,7 +42,11 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-from sagent.types.tools import Tool
+
+
+if TYPE_CHECKING:
+    from sagent.types.model import Model, ModelRecipe
+    from sagent.types.tools import Tool
 
 
 # --------------------------------------------------------------------------

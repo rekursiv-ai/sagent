@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from typing import TYPE_CHECKING
 
 import os
 
@@ -17,6 +17,10 @@ from sagent.lib.testing import userdirs_fixture
 from sagent.lib.testing.resource_markers import pytest_collection_modifyitems
 from sagent.lib.testing.userdirs_fixture import isolate_user_dirs
 from sagent.tools.agent_spawn import _persistent_tasks
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 # In the OSS export the flattened top-level ``sagent/types`` masks stdlib

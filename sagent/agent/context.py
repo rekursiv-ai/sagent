@@ -37,8 +37,8 @@ when the cut record itself is masked.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import bisect
 import logging
@@ -58,6 +58,10 @@ from sagent.types.tape import (
     TapeRecord,
     TapeRef,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 __all__ = [

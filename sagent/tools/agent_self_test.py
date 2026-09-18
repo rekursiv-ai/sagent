@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -29,6 +29,10 @@ from sagent.types.runtime import (
     Recompact,
     RuntimeEvent,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator, Mapping
 
 
 @dataclass(slots=True, kw_only=True)

@@ -21,7 +21,6 @@ familiar import surface.
 
 from __future__ import annotations
 
-from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, Protocol
@@ -32,13 +31,16 @@ import difflib
 import itertools
 import logging
 
-from sagent.agent.runtime import AgentRuntime
-
 
 if TYPE_CHECKING:
+    from collections.abc import Generator, Mapping
+
     from sagent.agent.background import BackgroundTaskEntry
     from sagent.agent.cost_tracker import CostTracker
-    from sagent.tools.lib.bash import BashParseCache
+    from sagent.agent.runtime import AgentRuntime
+    from sagent.tools.lib.bash import (
+        BashParseCache,  # noqa: TC004 -- Eager import cycles through ``tools/__init__``; the field is never resolved via ``get_type_hints``.
+    )
     from sagent.types.capability import ThinkingEffort
     from sagent.types.cost import ServiceTier, TokenCount
     from sagent.types.model import Model, ModelRecipe

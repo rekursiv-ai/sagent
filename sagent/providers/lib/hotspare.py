@@ -16,14 +16,18 @@ the background after each swap.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Coroutine
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import asyncio
 import logging
 
-from sagent.providers.lib.subproc import Subproc
 from sagent.types.exceptions import log_task_exception
+
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Coroutine
+
+    from sagent.providers.lib.subproc import Subproc
 
 
 __all__ = ["HotSpare"]

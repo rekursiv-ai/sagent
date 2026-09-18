@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from types import MappingProxyType
-from typing import ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import json
 
@@ -46,6 +45,10 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 def _priced_model(prices: PriceCatalog) -> OpenAICompatModel:

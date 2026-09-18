@@ -7,9 +7,13 @@ append, async pop-from-front, tail access, and bulk drain.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterator
+from typing import TYPE_CHECKING
 
 import asyncio
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 __all__ = ["Deque"]

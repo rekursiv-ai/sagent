@@ -13,9 +13,7 @@ uncontended. Do not replace these with bare yields.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-from contextlib import AbstractAsyncContextManager
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import asyncio
 import threading
@@ -27,6 +25,12 @@ from sagent.providers.lib.oauth import credential_file_lock
 from sagent.providers.openai.api import OpenAI
 from sagent.providers.openai.sub import OpenAISubscription
 from sagent.tools.core import locked_file_write
+
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+    from contextlib import AbstractAsyncContextManager
+    from pathlib import Path
 
 
 def _drive(work: Callable[[], Awaitable[None]], runs: int = 3) -> list[str]:

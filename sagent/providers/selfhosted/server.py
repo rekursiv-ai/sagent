@@ -87,19 +87,22 @@ from sagent.types.runtime import (
     ToolCall,
     UserMessage,
 )
-from sagent.types.tools import Tool
 
 
 if TYPE_CHECKING:
     # Type-only, and every runtime ``cast`` below quotes them: a runtime
     # ``from torch import ...`` here would defeat the lazy import and make the
     # torch-free sagent package unimportable.
-    from torch import Tensor, nn
+    from torch import (
+        Tensor,  # noqa: TC004 -- ``_RenderedPrompt`` is never JSON-serialized, so its field type is not resolved at runtime; eager torch would make the torch-free package unimportable.
+        nn,
+    )
 
     import torch
     import transformers as transformers_lib
 
     from sagent.lib import image
+    from sagent.types.tools import Tool
 else:
     from wrapt import lazy_import
 

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 
 import asyncio
 import threading
@@ -11,6 +11,10 @@ import threading
 import pytest
 
 from sagent.providers.lib.perloop import PerLoop
+
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 
 def test_one_loop_gets_one_value() -> None:

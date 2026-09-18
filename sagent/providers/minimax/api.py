@@ -18,15 +18,19 @@ uses the standard ``tool_calls`` block.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from sagent.catalog import minimax
 from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
 )
-from sagent.types.capability import ModelCapability
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from sagent.types.capability import ModelCapability
 
 
 class _MiniMaxModel(OpenAICompatModel):

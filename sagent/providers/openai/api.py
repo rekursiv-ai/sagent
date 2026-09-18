@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar, Self
 
@@ -11,12 +10,15 @@ import os
 from sagent.catalog import openai
 from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.openai.responses import _OpenAIResponsesModel
-from sagent.types.capability import ModelCapability
 from sagent.types.providers import ModelRole, resolve
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     import openai as openai_sdk
+
+    from sagent.types.capability import ModelCapability
 else:
     from wrapt import lazy_import
 

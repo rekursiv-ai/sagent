@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import dataclasses
 
 from sagent.agent.state import approx_tokens
-from sagent.types.model import ModelRequest
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
@@ -18,6 +16,12 @@ from sagent.types.runtime import (
     labeled_agent_send_text,
     wire_role,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
+
+    from sagent.types.model import ModelRequest
 
 
 ELIDED_TOOL_RESULT_TAG: Final = "<elided>"

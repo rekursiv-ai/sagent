@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import asyncio
 import base64
@@ -26,6 +26,10 @@ from sagent.providers.lib.oauth import (
     pkce_pair,
     resolve_account,
 )
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_resolve_account_none_returns_default() -> None:

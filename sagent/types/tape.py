@@ -54,8 +54,8 @@ records.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import MISSING, Field, dataclass, fields, replace
+from typing import TYPE_CHECKING
 
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -68,6 +68,10 @@ from sagent.types.runtime import (
     UserMessage,
     labeled_agent_send_text,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 __all__ = [

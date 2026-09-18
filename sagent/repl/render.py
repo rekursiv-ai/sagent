@@ -15,8 +15,7 @@ implementations live in :mod:`repl.console_pane` (rich-backed) and on
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator, Sequence
-from typing import Final, Protocol
+from typing import TYPE_CHECKING, Final, Protocol
 
 import contextlib
 import contextvars
@@ -65,6 +64,10 @@ from sagent.types.runtime import (
     ToolResultPartial,
     UserMessage,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator, Sequence
 
 
 logger = logging.getLogger(__name__)

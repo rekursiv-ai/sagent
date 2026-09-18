@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import ClassVar, cast, override
+from typing import TYPE_CHECKING, ClassVar, cast, override
 
 import asyncio
 import time
@@ -45,6 +44,10 @@ from sagent.types.runtime import (
     ModelResponsePartial,
     RuntimeEvent,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
 
 
 def test_backoff_delay_keeps_jitter_visible_at_the_cap() -> None:

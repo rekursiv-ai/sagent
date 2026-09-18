@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextvars import ContextVar
-from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -53,6 +52,8 @@ from sagent.types.runtime import (
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from sagent.agent.cost_tracker import CostTracker
     from sagent.agent.state import ToolState
 

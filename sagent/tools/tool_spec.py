@@ -11,8 +11,8 @@ on the tool, which is the only thing that knows them.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
 from typing import (
+    TYPE_CHECKING,
     Annotated,
     Final,
     Literal,
@@ -23,6 +23,10 @@ from typing import (
 )
 
 import inspect
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Mapping
 
 
 __all__ = ["CLI_SETTABLE", "ToolSpecError", "coerce_kwargs", "parse_tool_overrides"]

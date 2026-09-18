@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import os
 
@@ -14,6 +14,10 @@ from sagent.tools.lib.path_sort import (
     safe_size,
     sort_paths,
 )
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_sort_values_contains_expected_keys() -> None:

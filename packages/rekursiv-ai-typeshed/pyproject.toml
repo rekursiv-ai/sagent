@@ -16,7 +16,10 @@ dependencies = [
 ]
 
 [build-system]
-requires = ["hatchling", "basedpyright==1.40.1", "ty==0.0.80"]
+# ``>=1.32.1``: ``BuildHookInterface`` gained a second type parameter there,
+# and ``hatch_build.py`` subscripts it with two; an older hatchling raises
+# ``TypeError: Too few arguments`` at class-definition time.
+requires = ["hatchling>=1.32.1", "basedpyright==1.40.1", "ty==0.0.80"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]

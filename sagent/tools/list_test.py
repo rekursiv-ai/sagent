@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from sagent.testing import with_fake_agent
 from sagent.tools.lib.bash import parse_bash
 from sagent.tools.list import List
-from sagent.types.runtime import ToolResult
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from pathlib import Path
+
+    from sagent.types.runtime import ToolResult
 
 
 list_tool = List()

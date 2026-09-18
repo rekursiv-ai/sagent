@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Annotated, cast
+from typing import TYPE_CHECKING, Annotated, cast
 
 import asyncio
 import os
-import threading
 import time
 
 import pytest
@@ -43,6 +42,10 @@ from sagent.tools.core import (
     truncate_to_budget,
 )
 from sagent.types.runtime import ToolResult
+
+
+if TYPE_CHECKING:
+    import threading
 
 
 def _schema_property(schema: object, name: str) -> Mapping[str, object]:

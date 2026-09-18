@@ -49,7 +49,6 @@ should prefer the API-key path (``OpenAI.from_key``).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
@@ -77,12 +76,27 @@ import time
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
     from openai.types.responses.response_create_params import (
         ResponseCreateParamsStreaming,
     )
 
     import httpx2
     import openai
+
+    from sagent.types.capability import (
+        ContextTag,
+        ModelCapability,
+        ModelLimits,
+    )
+    from sagent.types.model import (
+        ModelRequest,
+        ModelResponse,
+    )
+    from sagent.types.runtime import (
+        RuntimeEvent,
+    )
 else:
     from wrapt import lazy_import
 
@@ -107,22 +121,10 @@ from sagent.providers.lib.oauth import (
 from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.openai.api import OpenAI, OpenAICatalog
 from sagent.providers.openai.responses import _OpenAIResponsesModel
-from sagent.types.capability import (
-    ContextTag,
-    ModelCapability,
-    ModelLimits,
-)
 from sagent.types.exceptions import (
     AuthRefreshError,
 )
-from sagent.types.model import (
-    ModelRequest,
-    ModelResponse,
-)
 from sagent.types.providers import resolve
-from sagent.types.runtime import (
-    RuntimeEvent,
-)
 
 import sagent.catalog.openai
 

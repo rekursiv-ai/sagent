@@ -16,7 +16,7 @@ Operates on ``ToolResult`` dataclasses.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import dataclasses
 import hashlib
@@ -27,7 +27,10 @@ import tempfile
 import uuid
 
 from sagent.agent.state import approx_tokens
-from sagent.types.runtime import ToolResult
+
+
+if TYPE_CHECKING:
+    from sagent.types.runtime import ToolResult
 
 
 logger = logging.getLogger(__name__)

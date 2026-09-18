@@ -75,7 +75,6 @@ from slack_sdk.web.async_client import AsyncWebClient
 import httpx2
 
 from sagent.agent import Agent
-from sagent.agent.runtime import AgentRuntime
 from sagent.agent.state import agent_registry
 from sagent.bin.cli import (
     DEFAULT_TOOLS,
@@ -107,6 +106,7 @@ if TYPE_CHECKING:
     from slack_sdk.socket_mode.async_client import AsyncBaseSocketModeClient
     from slack_sdk.socket_mode.request import SocketModeRequest
 
+    from sagent.agent.runtime import AgentRuntime
     from sagent.types.model import Model
 
 logger = logging.getLogger(__name__)

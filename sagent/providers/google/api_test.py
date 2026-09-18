@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import replace
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import logging
 
@@ -46,6 +45,10 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 def test_strip_additional_properties_removes_top_level_key() -> None:

@@ -31,7 +31,6 @@ warning.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal, cast
@@ -46,6 +45,8 @@ from markdown_it import MarkdownIt
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from markdown_it.token import Token
 
 from sagent.lib.dotsagent import parse_frontmatter, walk_up

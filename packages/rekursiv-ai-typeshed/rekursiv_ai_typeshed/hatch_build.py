@@ -7,21 +7,25 @@ therefore matches the checkers a consumer receives as dependencies.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
-from typing import Final, cast, override
+from typing import TYPE_CHECKING, Final, cast, override
 
 import tempfile
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 from hatchling.builders.wheel import WheelBuilderConfig
+from hatchling.plugin.manager import PluginManager
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 _CWD: Final = Path(__file__).resolve().parent
 
 
-class TypeshedBuildHook(BuildHookInterface[WheelBuilderConfig]):
+class TypeshedBuildHook(BuildHookInterface[WheelBuilderConfig, PluginManager]):
     """Generate the tree into a temp dir and register it as ``shared-data``."""
 
     PLUGIN_NAME = "custom"
@@ -32,8 +36,10 @@ class TypeshedBuildHook(BuildHookInterface[WheelBuilderConfig]):
         # Loaded by path: the package under construction is not importable from
         # the isolated build environment.
         spec = spec_from_file_location("rekursiv_ai_typeshed.build", _CWD / "build.py")
-        assert spec is not None
-        assert spec.loader is not None
+        if spec is None:
+            raise ValueError("Expected spec is not None.")
+        if spec.loader is None:
+            raise ValueError("Expected spec.loader is not None.")
         module = module_from_spec(spec)
         spec.loader.exec_module(module)
         build = cast("Callable[[Path], None]", module.build)

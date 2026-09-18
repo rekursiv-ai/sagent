@@ -58,13 +58,14 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-from sagent.types.tools import Tool
 
 
 if TYPE_CHECKING:
     from anthropic.types import MessageParam
 
     import anthropic as anthropic_sdk
+
+    from sagent.types.tools import Tool
 else:
     from wrapt import lazy_import
 

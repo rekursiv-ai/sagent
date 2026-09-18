@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
 from sagent.agent.agent import Agent
-from sagent.lib.custom_json import MutableJSON
 from sagent.providers.dashscope.api import DashScope, _DashScopeModel
 from sagent.types.capability import ModelSettings, ThinkingEffort
 from sagent.types.model import ModelRequest
+
+
+if TYPE_CHECKING:
+    from sagent.lib.custom_json import MutableJSON
 
 
 def test_dashscope_from_key() -> None:

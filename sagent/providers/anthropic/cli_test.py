@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import asyncio
@@ -15,7 +14,6 @@ import re
 
 import pytest
 
-from sagent.lib.custom_json import MutableJSON
 from sagent.providers.anthropic import cli
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.anthropic.cli import (
@@ -53,7 +51,13 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-from sagent.types.tape import TapeEvent
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from sagent.lib.custom_json import MutableJSON
+    from sagent.types.tape import TapeEvent
 
 
 def _noop_sync_tools_bridge(

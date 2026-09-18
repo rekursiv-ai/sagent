@@ -32,11 +32,10 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Callable, Generator, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, Literal, cast
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 import asyncio
 import contextlib
-import contextvars
 import dataclasses
 import inspect
 import itertools
@@ -94,9 +93,6 @@ from sagent.request_materialization import materialize_request
 # The one module imported whole rather than by name: this file touches 36
 # of its symbols, and the flat list buried every other import here.
 from sagent.types import runtime
-from sagent.types.compactor import (
-    Compactor,
-)
 from sagent.types.cost import TokenCost, TokenCount
 from sagent.types.exceptions import (
     BudgetExhaustedError,
@@ -134,6 +130,14 @@ from sagent.types.tools import (
 
 import sagent.agents_md
 import sagent.providers.providers
+
+
+if TYPE_CHECKING:
+    import contextvars
+
+    from sagent.types.compactor import (
+        Compactor,
+    )
 
 
 logger = logging.getLogger(__name__)
@@ -2518,7 +2522,8 @@ class _AgentModel:
         # to the runtime tape; we refetch the resolved view below.
         if not await self._agent.compact_if_needed(history, self._inner):
             last_err = self._agent.last_compact_error
-            assert last_err is not None  # compact_now sets this on every False return.
+            if last_err is None:  # compact_now sets this on every False return.
+                raise ValueError("Expected last_err is not None.")
             raise _compact_failure_error(last_err, self._inner) from last_err
         # Compaction may have appended a barrier override; refetch the
         # resolved view so subsequent attempts in this call see it.
@@ -2662,9 +2667,8 @@ class _AgentModel:
                 # lines followed by a cryptic RuntimeError).
                 if not await self._agent.compact_now():
                     last_err = self._agent.last_compact_error
-                    assert (
-                        last_err is not None
-                    )  # compact_now sets this on every False return.
+                    if last_err is None:  # compact_now sets this on every False return.
+                        raise ValueError("Expected last_err is not None.") from None
                     raise _compact_failure_error(last_err, self._inner) from last_err
                 # Refetch resolved view: ``compact_now`` appended a
                 # barrier override.

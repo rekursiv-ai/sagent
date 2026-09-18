@@ -13,11 +13,10 @@ Includes:
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, cast, override
+from typing import TYPE_CHECKING, Final, cast, override
 
 import asyncio
 import base64
@@ -30,6 +29,10 @@ import re
 import secrets
 import threading
 import urllib.parse
+
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
 
 
 logger = logging.getLogger(__name__)
@@ -258,7 +261,8 @@ class AuthCodeListener:
           uri: ``http://<host>:<port><callback_path>`` string.
 
         """
-        assert self._server is not None
+        if self._server is None:
+            raise ValueError("Expected self._server is not None.")
         port = self._server.server_address[1]
         return f"http://{host}:{port}{self.callback_path}"
 

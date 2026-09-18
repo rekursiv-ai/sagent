@@ -17,7 +17,6 @@ these tools show a model the same text; only argument validation and the
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, cast
 
 import json
@@ -36,6 +35,8 @@ from sagent.types.runtime import ToolResult
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
     from wesearch.paper.custom_types import IdType
 
 

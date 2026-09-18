@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import cast, override
+from typing import TYPE_CHECKING, cast, override
 
 import logging
 
@@ -49,6 +48,10 @@ from sagent.types.tape import (
     TapeRef,
     coalesce_roles,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _ref_factory(start: int = 0) -> Callable[[], TapeRef]:

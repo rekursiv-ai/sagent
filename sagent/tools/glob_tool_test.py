@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -15,7 +15,12 @@ from sagent.tools.glob_tool import (
     _long_line,
 )
 from sagent.tools.lib.bash import parse_bash
-from sagent.types.runtime import ToolResult
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from sagent.types.runtime import ToolResult
 
 
 glob_tool_instance = Glob()

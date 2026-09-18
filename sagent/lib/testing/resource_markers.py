@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import os
 
 import pytest
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
 
 
 class MarkedItem(Protocol):
@@ -55,8 +58,10 @@ def resource_marker_family(
 
     """
     family, separator, _specific = marker.partition("_")
-    assert separator
-    assert family in resource_families
+    if not separator:
+        raise ValueError("Expected separator.")
+    if family not in resource_families:
+        raise ValueError("Expected family in resource_families.")
     return family
 
 

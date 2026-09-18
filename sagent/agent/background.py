@@ -21,7 +21,7 @@ primitive.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import asyncio
 import dataclasses
@@ -35,8 +35,11 @@ from sagent.lib.custom_json import (
     json_freeze,
     json_unfreeze,
 )
-from sagent.types.runtime import ToolResult
-from sagent.types.tools import Tool
+
+
+if TYPE_CHECKING:
+    from sagent.types.runtime import ToolResult
+    from sagent.types.tools import Tool
 
 
 @dataclasses.dataclass(kw_only=True, slots=True)

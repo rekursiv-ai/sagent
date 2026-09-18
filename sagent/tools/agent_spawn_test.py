@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import override
+from typing import TYPE_CHECKING, override
 from unittest.mock import MagicMock, patch
 
 import asyncio
@@ -62,7 +60,13 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-from sagent.types.tools import Tool
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator, Mapping
+    from pathlib import Path
+
+    from sagent.types.tools import Tool
 
 
 _AGENT_SPAWN_LOGGER = agent_spawn.__name__

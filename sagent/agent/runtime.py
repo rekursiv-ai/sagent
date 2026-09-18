@@ -224,10 +224,9 @@ drive the next events back through the inbox.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 import asyncio
 import contextlib
@@ -312,6 +311,10 @@ from sagent.types.tape import (
     splice_safe_repair,
     unpaired_call_ids,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
 
 
 # ``current_call_id_var`` is set by ``_run_tool_and_post`` before
@@ -488,11 +491,12 @@ class GatedDeque[T]:
             (i for i, item in enumerate(items) if isinstance(item, Await)),
             -1,
         )
-        assert await_idx <= 0, (
-            f"GatedDeque.push_front precondition violated: Await must be the "
-            f"first argument when present; got Await at index {await_idx} with "
-            f"{await_idx} non-Await item(s) ahead of it"
-        )
+        if await_idx > 0:
+            raise ValueError(
+                f"GatedDeque.push_front precondition violated: Await must be the "
+                f"first argument when present; got Await at index {await_idx} with "
+                f"{await_idx} non-Await item(s) ahead of it",
+            )
         old: list[T] = []
         while not self._queue.empty():
             try:
@@ -1538,13 +1542,16 @@ class AgentRuntime:
         pending, self._pending_commits = self._pending_commits, []
         for commit in pending:
             if commit.kind == "pairing":
-                assert commit.result is not None
+                if commit.result is None:
+                    raise ValueError("Expected commit.result is not None.")
                 self._commit_pairing(commit.result)
             elif commit.kind == "forward":
-                assert commit.result is not None
+                if commit.result is None:
+                    raise ValueError("Expected commit.result is not None.")
                 self._append_detached_arrival(commit.result)
             else:
-                assert commit.user is not None
+                if commit.user is None:
+                    raise ValueError("Expected commit.user is not None.")
                 self.publish(self._append_or_coalesce_user(commit.user))
 
     # Only ``forward`` (a completed detached tool's real result) wakes the model: a
@@ -3327,7 +3334,8 @@ def _coalesce_user_side(
 ) -> UserMessage | AgentSendMessage:
     """Merge a user-side run into one entry via the canonical coalescer."""
     merged = coalesce_roles(items)
-    assert len(merged) == 1
+    if len(merged) != 1:
+        raise ValueError("Expected len(merged) == 1.")
     entry = merged[0]
     assert isinstance(entry, (UserMessage, AgentSendMessage))
     return entry

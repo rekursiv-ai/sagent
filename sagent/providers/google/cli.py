@@ -17,7 +17,6 @@ recipe, and per-knob rationale.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -62,7 +61,6 @@ from sagent.providers.lib.subproc import (
     Subproc,
     SubprocessTransportError,
 )
-from sagent.types.capability import ModelCapability, ModelSettings
 from sagent.types.cost import TokenCount
 from sagent.types.model import (
     ModelRequest,
@@ -78,11 +76,14 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-from sagent.types.tape import TapeEvent
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from sagent.lib import image
+    from sagent.types.capability import ModelCapability, ModelSettings
+    from sagent.types.tape import TapeEvent
 else:
     from wrapt import lazy_import
 
@@ -845,7 +846,8 @@ class _GoogleCLIModel(ModelDefaults):
 
     async def _acp_handshake(self, proc: Subproc, workdir: Path) -> str:
         """Run ``initialize`` → ``authenticate`` → ``session/new`` (§3.2)."""
-        assert self._tools_bridge is not None
+        if self._tools_bridge is None:
+            raise ValueError("Expected self._tools_bridge is not None.")
         await _rpc_call(
             proc,
             self._allocate_rpc_id(),

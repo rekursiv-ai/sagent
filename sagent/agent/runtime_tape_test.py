@@ -7,7 +7,7 @@ append-time mask-overlap validator (once-overwrite rule).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -34,6 +34,10 @@ from sagent.types.tape import (
     ReferrableTapeEvent,
     TapeRef,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class _NoopModel:

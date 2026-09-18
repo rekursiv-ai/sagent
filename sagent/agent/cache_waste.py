@@ -16,11 +16,14 @@ waste after the fact rather than preventing it. Prevention lives in
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from sagent.types.cost import TokenCost, TokenCount
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
 
 
 __all__ = [

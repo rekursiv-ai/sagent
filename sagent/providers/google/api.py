@@ -29,6 +29,11 @@ if TYPE_CHECKING:
     import httpx2
 
     from sagent.lib import image
+    from sagent.types.capability import (
+        ModelCapability,
+        ModelLimits,
+        ModelSettings,
+    )
 else:
     from wrapt import lazy_import
 
@@ -51,11 +56,6 @@ from sagent.providers.lib.errors import (
 from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.lib.stop_reason import normalize_stop_reason
-from sagent.types.capability import (
-    ModelCapability,
-    ModelLimits,
-    ModelSettings,
-)
 from sagent.types.cost import TokenCount
 from sagent.types.model import (
     ModelRequest,

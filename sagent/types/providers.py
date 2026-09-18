@@ -8,8 +8,7 @@ selected.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Literal, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, cast, runtime_checkable
 
 from sagent.types.capability import (
     ContextTag,
@@ -20,6 +19,10 @@ from sagent.types.model import (
     Model,
     split_model_id,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 __all__ = [

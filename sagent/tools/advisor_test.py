@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -19,6 +19,10 @@ from sagent.types.runtime import (
     ModelResponsePartial,
     RuntimeEvent,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 @dataclass(slots=True, kw_only=True)

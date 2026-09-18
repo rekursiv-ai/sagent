@@ -24,7 +24,7 @@ What they cover (the production-correctness gaps the unit suite leaves):
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import asyncio
 import json
@@ -44,7 +44,10 @@ from sagent.providers.lib.subproc import SubprocessTransportError
 from sagent.tools import tool
 from sagent.types.model import ModelRequest, ModelResponse
 from sagent.types.runtime import UserMessage
-from sagent.types.tools import Tool
+
+
+if TYPE_CHECKING:
+    from sagent.types.tools import Tool
 
 
 pytestmark = pytest.mark.cli_claude

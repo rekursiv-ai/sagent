@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import io
 import threading
@@ -22,6 +22,10 @@ from sagent.tools.lib.pdf import (
     is_pdf,
     parse_page_range,
 )
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _make_pdf(tmp_path: Path, n_pages: int = 1) -> Path:

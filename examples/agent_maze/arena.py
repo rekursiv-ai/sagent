@@ -14,8 +14,7 @@ told   : the system prompt states the topology.   discover : it doesn't (illegal
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Callable
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import asyncio
 import contextlib
@@ -26,11 +25,16 @@ from examples.agent_maze.tools import (
     SpawnTool,
     WorldTool,
 )
-from examples.agent_maze.world import SpawnMeta
 from sagent.agent.agent import Agent
 from sagent.agent.state import agent_label_var
-from sagent.types.model import Model
 from sagent.types.runtime import UserMessage
+
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, Callable
+
+    from examples.agent_maze.world import SpawnMeta
+    from sagent.types.model import Model
 
 
 SEED = "a0"  # house-ignore[globals] -- Level/seed tuning dial, retuned per run.

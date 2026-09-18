@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from types import ModuleType
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -19,6 +18,10 @@ from sagent.catalog import (
 )
 from sagent.types.capability import ModelCapability, ModelSettings
 from sagent.types.cost import PriceCatalogProduct, TokenCount
+
+
+if TYPE_CHECKING:
+    from types import ModuleType
 
 
 _VENDORS = (anthropic, dashscope, google, llamacpp, minimax, moonshot, openai)

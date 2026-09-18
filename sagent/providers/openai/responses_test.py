@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
 from types import MappingProxyType
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import asyncio
 import base64
@@ -57,6 +56,10 @@ from sagent.types.runtime import (
 )
 
 import sagent.catalog.openai
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @dataclass(slots=True, kw_only=True)

@@ -21,9 +21,13 @@ directory layout.
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from sagent.sessions import project_dir
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 # Index file truncation limits.

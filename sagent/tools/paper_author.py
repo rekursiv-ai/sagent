@@ -7,7 +7,7 @@ process cache, and text rendering.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 import asyncio
 
@@ -32,6 +32,10 @@ from sagent.tools.paper_common import (
     validate_year_range,
 )
 from sagent.types.runtime import ToolResult
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 _cache = cachetools.LRUCache[tuple[object, ...], str](maxsize=1024)

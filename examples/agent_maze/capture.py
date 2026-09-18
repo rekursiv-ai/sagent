@@ -9,19 +9,22 @@ clean run per cell; metrics are computed per arm from the event log.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import json
 
 from examples.agent_maze.arena import Arena
-from examples.agent_maze.engine import Engine
 from examples.agent_maze.world import (
     SpawnMeta,
     make_spawn_level,
 )
 from sagent.lib.userdirs import config_dir
 from sagent.providers import Anthropic
-from sagent.types.model import Model
+
+
+if TYPE_CHECKING:
+    from examples.agent_maze.engine import Engine
+    from sagent.types.model import Model
 
 
 _CWD: Final = Path(__file__).resolve().parent

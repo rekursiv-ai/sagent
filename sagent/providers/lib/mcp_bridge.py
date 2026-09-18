@@ -50,6 +50,8 @@ if TYPE_CHECKING:
 
     import mcp.types as mcp_types
     import uvicorn
+
+    from sagent.types.tools import Tool
 else:
     from wrapt import lazy_import
 
@@ -72,7 +74,6 @@ from sagent.lib.custom_json import json_unfreeze
 from sagent.lib.tool_validation import validate_tool_input
 from sagent.types.exceptions import log_task_exception
 from sagent.types.runtime import RuntimeEvent, ToolLabel, ToolResult
-from sagent.types.tools import Tool
 
 
 __all__ = ["ToolsBridge"]
@@ -131,7 +132,8 @@ class _BridgeServer:
         """
         async with self._loop_lock():
             await self._ensure_started()
-            assert self._app is not None
+            if self._app is None:
+                raise ValueError("Expected self._app is not None.")
             mount = _starlette_routing.Mount(f"/{token}/mcp", app=handle_mcp)
             self._routes[token] = mount
             self._app.router.routes.append(mount)
@@ -194,7 +196,8 @@ class _BridgeServer:
         """Block until uvicorn reports the listening socket is bound."""
         deadline = asyncio.get_running_loop().time() + _STARTUP_TIMEOUT_SEC
         while True:
-            assert self._uvicorn_server is not None
+            if self._uvicorn_server is None:
+                raise ValueError("Expected self._uvicorn_server is not None.")
             if self._uvicorn_server.started:
                 return
             if asyncio.get_running_loop().time() > deadline:
@@ -203,7 +206,8 @@ class _BridgeServer:
 
     def _extract_port(self) -> int:
         """Read the bound port from uvicorn's listening socket."""
-        assert self._uvicorn_server is not None
+        if self._uvicorn_server is None:
+            raise ValueError("Expected self._uvicorn_server is not None.")
         for srv in self._uvicorn_server.servers:
             for sock in srv.sockets:
                 return int(sock.getsockname()[1])

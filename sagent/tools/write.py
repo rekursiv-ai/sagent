@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import re
 
@@ -21,6 +20,10 @@ from sagent.tools.core import (
 from sagent.tools.display import Toggle, Wrap
 from sagent.tools.tool_spec import CLI_SETTABLE
 from sagent.types.runtime import ToolResult
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 # Matches the ``Wrote N bytes to PATH`` confirmation produced by ``_run``.

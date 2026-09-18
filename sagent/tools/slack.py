@@ -18,8 +18,7 @@ Supported operations:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Final, Protocol
+from typing import TYPE_CHECKING, Final, Protocol
 
 import asyncio
 import json
@@ -31,6 +30,10 @@ from wesearch.types.errors import FetchError
 from sagent.lib.custom_json import JSON, DictCodec, IntCodec, ListCodec, json_freeze
 from sagent.tools.core import load_tool_description
 from sagent.types.runtime import ToolResult
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 logger = logging.getLogger(__name__)

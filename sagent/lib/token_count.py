@@ -10,7 +10,6 @@ single-file edit here, not a hunt across every provider.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, Protocol
 
 import json
@@ -23,11 +22,13 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-from sagent.types.tape import TapeEvent
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from sagent.types.model import ModelRequest
+    from sagent.types.tape import TapeEvent
 
 
 logger = logging.getLogger(__name__)

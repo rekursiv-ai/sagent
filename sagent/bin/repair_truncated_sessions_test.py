@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator, Sequence
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import contextlib
@@ -16,7 +15,6 @@ from sagent.agent.session_io import (
     append_session,
     load_session,
 )
-from sagent.agent.state import ToolState
 from sagent.bin import repair_truncated_sessions
 from sagent.bin.repair_truncated_sessions import (
     main,
@@ -35,6 +33,13 @@ from sagent.types.tape import (
     TapeRecord,
     TapeRef,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Generator, Sequence
+    from pathlib import Path
+
+    from sagent.agent.state import ToolState
 
 
 # Reproduces the on-disk shape the coalesce bug left behind: a barrier carrying the

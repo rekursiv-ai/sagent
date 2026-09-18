@@ -10,9 +10,9 @@ so ``ModelLimits`` carries only the two token windows.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import replace
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 from sagent.types.capability import ContextTag, ModelCapability, ModelLimits
 from sagent.types.cost import (
@@ -20,6 +20,10 @@ from sagent.types.cost import (
     PriceCatalogProduct,
     TokenPrice,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 __all__ = ["models"]

@@ -15,8 +15,7 @@ and fully observable in the REPL.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from sagent.lib import debug_log
 from sagent.lib.custom_json import JSON, json_freeze
@@ -30,6 +29,10 @@ from sagent.types.runtime import (
 )
 
 import sagent.agent.runtime
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
 
 
 SYSTEM_NUDGE: Final = (

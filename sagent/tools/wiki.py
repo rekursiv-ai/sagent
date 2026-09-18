@@ -15,9 +15,8 @@ Not included: ingest/update/query - those are LLM-driven via skills.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import logging
 import re
@@ -27,6 +26,10 @@ from sagent.lib.custom_json import JSON, json_freeze
 from sagent.tools.core import load_tool_description, run_sync
 from sagent.tools.prompt_text import escape_prompt_text
 from sagent.types.runtime import ToolResult
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
 
 
 logger = logging.getLogger(__name__)

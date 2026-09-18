@@ -9,13 +9,16 @@ layer consumes the rest (``tool_id``, ``description``,
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from sagent.lib.custom_json import JSON
-from sagent.types.runtime import ToolResult
-from sagent.types.settings import AgentSettings
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from sagent.lib.custom_json import JSON
+    from sagent.types.runtime import ToolResult
+    from sagent.types.settings import AgentSettings
 
 
 __all__ = [

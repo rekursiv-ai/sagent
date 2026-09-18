@@ -12,8 +12,6 @@ the same id return the cached path.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import asyncio
@@ -36,6 +34,9 @@ from sagent.types.runtime import ToolResult
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from pathlib import Path
+
     from wesearch.paper.custom_types import IdType
 
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import os
 import stat
@@ -10,6 +10,10 @@ import stat
 import pytest
 
 from sagent.lib.atomic_file import atomic_write_bytes
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_atomic_write_bytes_fsyncs_before_rename(

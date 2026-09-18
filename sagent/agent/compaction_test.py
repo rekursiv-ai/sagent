@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import asyncio
 
@@ -25,7 +25,12 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-from sagent.types.tools import Tool
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
+    from sagent.types.tools import Tool
 
 
 @dataclass(slots=True, kw_only=True)

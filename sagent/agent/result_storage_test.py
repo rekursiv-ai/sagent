@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -17,6 +16,8 @@ from sagent.types.runtime import BytesMessage, ToolResult
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     import pytest
 
 

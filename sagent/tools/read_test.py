@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from io import BytesIO
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import json
 import os
@@ -19,6 +19,10 @@ from sagent.tools.lib.pdf import MAX_PDF_BYTES, extract_pdf_pages
 from sagent.tools.read import (
     Read,
 )
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 read = Read()

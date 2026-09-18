@@ -14,24 +14,29 @@ can be unit-tested without spinning up an ``Agent``.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING
 
 import dataclasses
 import logging
 import time
 
-from sagent.agent.background import BackgroundTaskEntry
-from sagent.agent.state import ToolState
 from sagent.compaction.files import reattach_files
 from sagent.compaction.history import append_to_first_user
 from sagent.types.compactor import (
     CompactRestorable,
     ReattachPolicy,
 )
-from sagent.types.runtime import (
-    ModelContextEvent,
-)
-from sagent.types.tools import Tool
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
+    from sagent.agent.background import BackgroundTaskEntry
+    from sagent.agent.state import ToolState
+    from sagent.types.runtime import (
+        ModelContextEvent,
+    )
+    from sagent.types.tools import Tool
 
 
 logger = logging.getLogger(__name__)

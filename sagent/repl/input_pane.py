@@ -59,6 +59,8 @@ from prompt_toolkit.formatted_text import FormattedText
 
 if TYPE_CHECKING:
     from rich.text import Text
+
+    from sagent.repl.input_queues import InputQueues
 else:
     from wrapt import lazy_import
 
@@ -73,7 +75,6 @@ from sagent.agent.state import (
     agent_label_var,
     agent_registry,
 )
-from sagent.repl.input_queues import InputQueues
 from sagent.repl.render import HELP_TEXT
 from sagent.repl.slash import (
     QUIT_WORDS,

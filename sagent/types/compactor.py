@@ -8,21 +8,21 @@ re-inject state into history after compaction.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
-
-from sagent.types.model import Model
-from sagent.types.runtime import ModelContextEvent
-from sagent.types.settings import AgentSettings
-from sagent.types.tape import ContextSplice, TapeRecord, TapeRef
 
 
 if TYPE_CHECKING:
     # ``ToolState`` lives in ``agent/state.py``; forward-referencing it on
     # ``CompactRestorable.post_compact_restore`` keeps the agent layer
     # out of the types tree.
+    from collections.abc import Callable, Sequence
+
     from sagent.agent.state import ToolState
+    from sagent.types.model import Model
+    from sagent.types.runtime import ModelContextEvent
+    from sagent.types.settings import AgentSettings
+    from sagent.types.tape import ContextSplice, TapeRecord, TapeRef
 
 
 __all__ = [

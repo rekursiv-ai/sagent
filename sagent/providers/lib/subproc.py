@@ -14,8 +14,7 @@ speaks the wire protocol on the returned handle.
 from __future__ import annotations
 
 from collections import deque
-from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import asyncio
 import contextlib
@@ -26,6 +25,10 @@ import signal
 
 from sagent.lib.custom_json import MutableJSON
 from sagent.types.exceptions import log_task_exception
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 __all__ = ["Subproc", "SubprocessTransportError"]
@@ -116,8 +119,10 @@ class Subproc:
 
         """
         proc = self._proc
-        assert proc is not None
-        assert proc.stdin is not None
+        if proc is None:
+            raise ValueError("Expected proc is not None.")
+        if proc.stdin is None:
+            raise ValueError("Expected proc.stdin is not None.")
         try:
             proc.stdin.write(line.encode() + b"\n")
             await proc.stdin.drain()
@@ -134,8 +139,10 @@ class Subproc:
 
         """
         proc = self._proc
-        assert proc is not None
-        assert proc.stdout is not None
+        if proc is None:
+            raise ValueError("Expected proc is not None.")
+        if proc.stdout is None:
+            raise ValueError("Expected proc.stdout is not None.")
         try:
             raw = await asyncio.wait_for(
                 proc.stdout.readline(),
@@ -279,8 +286,10 @@ class Subproc:
     async def _drain_stderr(self) -> None:
         """Read stderr forever, buffering the tail for diagnostics."""
         proc = self._proc
-        assert proc is not None
-        assert proc.stderr is not None
+        if proc is None:
+            raise ValueError("Expected proc is not None.")
+        if proc.stderr is None:
+            raise ValueError("Expected proc.stderr is not None.")
         while True:
             raw = await proc.stderr.readline()
             if not raw:

@@ -1241,7 +1241,8 @@ class DataclassCodec(Codec):
     def settable_fields(cls, target: type) -> frozenset[str]:
         """Return names accepted by a dataclass's generated initializer."""
         del cls
-        assert is_dataclass(target)
+        if not is_dataclass(target):
+            raise ValueError("Expected is_dataclass(target).")
         return frozenset(field.name for field in fields(target) if field.init)
 
     @classmethod
@@ -1431,7 +1432,8 @@ class _ImportCodec:
           result: Tuple of (path, body) from the tag's envelope.
 
         """
-        assert cls.tag is not None
+        if cls.tag is None:
+            raise ValueError("Expected cls.tag is not None.")
         tag = cls.tag
         payload = node[tag]
         if not isinstance(payload, list) or len(cast(list[object], payload)) != 2:
@@ -1542,7 +1544,8 @@ class _ReduceCodec(_ImportCodec):
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
         source = cast(Mapping[str, object], node)
-        assert cls.tag is not None
+        if cls.tag is None:
+            raise ValueError("Expected cls.tag is not None.")
         elements = cast(list[object], source[cls.tag])
         if len(elements) < 2 or len(elements) > 5:
             raise TypeError("py/reduce requires two to five elements")
@@ -2299,7 +2302,8 @@ class FloatCodec(Codec):
         """Encode a float, tagging non-finite values."""
         del annotation, encode
         number = cast(float, value)
-        assert cls.tag is not None
+        if cls.tag is None:
+            raise ValueError("Expected cls.tag is not None.")
         return number if math.isfinite(number) else {cls.tag: repr(number)}
 
     @classmethod
@@ -2372,7 +2376,8 @@ class FloatCodec(Codec):
         tagged: object = node
         if not isinstance(node, Mapping):
             return cls.decode(node, float, decode=graph.decode_typed)
-        assert cls.tag is not None
+        if cls.tag is None:
+            raise ValueError("Expected cls.tag is not None.")
         payload = _tagged_scalar_payload(tagged, cls.tag)
         return cls.decode(payload, float, decode=graph.decode_typed)
 
@@ -2458,7 +2463,8 @@ class BytesCodec(Codec):
         """Encode bytes as tagged base64."""
         del annotation, encode
         payload = base64.b64encode(cast(bytes, value)).decode("ascii")
-        assert cls.tag is not None
+        if cls.tag is None:
+            raise ValueError("Expected cls.tag is not None.")
         return {cls.tag: payload}
 
     @classmethod
@@ -2489,7 +2495,8 @@ class BytesCodec(Codec):
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
         """Decode one value through graph traversal."""
-        assert cls.tag is not None
+        if cls.tag is None:
+            raise ValueError("Expected cls.tag is not None.")
         payload = _tagged_scalar_payload(node, cls.tag)
         return cls.decode(payload, bytes, decode=graph.decode_typed)
 
@@ -2511,7 +2518,8 @@ class PathCodec(Codec):
     def encode(cls, value: object, annotation: object, *, encode: _Encode) -> JSONValue:
         """Encode a path as tagged text."""
         del annotation, encode
-        assert cls.tag is not None
+        if cls.tag is None:
+            raise ValueError("Expected cls.tag is not None.")
         return {cls.tag: str(value)}
 
     @classmethod
@@ -2539,7 +2547,8 @@ class PathCodec(Codec):
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
         """Decode one value through graph traversal."""
-        assert cls.tag is not None
+        if cls.tag is None:
+            raise ValueError("Expected cls.tag is not None.")
         payload = _tagged_scalar_payload(node, cls.tag)
         return cls.decode(payload, None, decode=graph.decode_typed)
 
@@ -2561,7 +2570,8 @@ class UuidCodec(Codec):
     def encode(cls, value: object, annotation: object, *, encode: _Encode) -> JSONValue:
         """Encode a UUID as tagged text."""
         del annotation, encode
-        assert cls.tag is not None
+        if cls.tag is None:
+            raise ValueError("Expected cls.tag is not None.")
         return {cls.tag: str(value)}
 
     @classmethod
@@ -2592,7 +2602,8 @@ class UuidCodec(Codec):
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
         """Decode one value through graph traversal."""
-        assert cls.tag is not None
+        if cls.tag is None:
+            raise ValueError("Expected cls.tag is not None.")
         payload = _tagged_scalar_payload(node, cls.tag)
         return cls.decode(payload, None, decode=graph.decode_typed)
 
@@ -2614,7 +2625,8 @@ class DatetimeCodec(Codec):
     def encode(cls, value: object, annotation: object, *, encode: _Encode) -> JSONValue:
         """Encode a datetime with its named zone."""
         del annotation, encode
-        assert cls.tag is not None
+        if cls.tag is None:
+            raise ValueError("Expected cls.tag is not None.")
         return {cls.tag: cls._stamp(cast(datetime, value))}
 
     @classmethod
@@ -2700,7 +2712,8 @@ class DatetimeCodec(Codec):
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
         """Decode one value through graph traversal."""
-        assert cls.tag is not None
+        if cls.tag is None:
+            raise ValueError("Expected cls.tag is not None.")
         payload = _tagged_scalar_payload(node, cls.tag)
         return cls.decode(payload, None, decode=graph.decode_typed)
 
@@ -2891,7 +2904,8 @@ class TupleCodec(_ArrayCodec):
             annotation,
             encode=encode,
         )
-        assert cls.tag is not None
+        if cls.tag is None:
+            raise ValueError("Expected cls.tag is not None.")
         return {cls.tag: payload}
 
     @classmethod
@@ -2920,7 +2934,8 @@ class TupleCodec(_ArrayCodec):
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
         """Decode one value through graph traversal."""
         source = cast(Mapping[str, object], node)
-        assert cls.tag is not None
+        if cls.tag is None:
+            raise ValueError("Expected cls.tag is not None.")
         return cls.decode(source[cls.tag], tuple, decode=graph.decode_typed)
 
 
@@ -2950,7 +2965,8 @@ class SetCodec(_ArrayCodec):
             ),
             key=repr,
         )
-        assert cls.tag is not None
+        if cls.tag is None:
+            raise ValueError("Expected cls.tag is not None.")
         return {cls.tag: payload}
 
     @classmethod
@@ -2987,7 +3003,8 @@ class SetCodec(_ArrayCodec):
         source = cast(Mapping[str, object], node)
         result: set[object] = set()
         graph.register(result)
-        assert cls.tag is not None
+        if cls.tag is None:
+            raise ValueError("Expected cls.tag is not None.")
         values = cast(Iterable[object], source[cls.tag])
         result.update(graph.decode(value) for value in values)
         return result
@@ -3371,7 +3388,8 @@ class _TypeCodec(_ImportCodec):
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
         source = cast(Mapping[str, object], node)
-        assert cls.tag is not None
+        if cls.tag is None:
+            raise ValueError("Expected cls.tag is not None.")
         return graph.resolve(str(source[cls.tag]))
 
 
@@ -3400,7 +3418,8 @@ class _FunctionCodec(_ImportCodec):
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
         source = cast(Mapping[str, object], node)
-        assert cls.tag is not None
+        if cls.tag is None:
+            raise ValueError("Expected cls.tag is not None.")
         return graph.resolve(str(source[cls.tag]))
 
 
@@ -3417,7 +3436,8 @@ class _HookCodec(_ImportCodec):
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
         hook = graph.hook_for(value)
-        assert hook is not None
+        if hook is None:
+            raise ValueError("Expected hook is not None.")
         graph.register(value)
         # The payload is arbitrary caller data, so it takes the same graph pass
         # as any other value: JSON cannot express a non-finite float, and a
@@ -3457,7 +3477,8 @@ class _InlineCodec(_ImportCodec):
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
         inline = graph.inline_for(value)
-        assert inline is not None
+        if inline is None:
+            raise ValueError("Expected inline is not None.")
         graph.register(value)
         func, args, kwargs = inline
         return {
@@ -3511,7 +3532,8 @@ class _GraphObjectCodec(_ImportCodec):
     @classmethod
     def encode_graph(cls, value: object, graph: _GraphEncoder) -> object:
         graph.register(value)
-        assert cls.tag is not None
+        if cls.tag is None:
+            raise ValueError("Expected cls.tag is not None.")
         payload: dict[str, object] = {cls.tag: cls.path(type(value))}
         for name in cls.attribute_names(value):
             try:
@@ -3524,7 +3546,8 @@ class _GraphObjectCodec(_ImportCodec):
     @classmethod
     def decode_graph(cls, node: object, graph: _GraphDecoder) -> object:
         source = cast(Mapping[str, object], node)
-        assert cls.tag is not None
+        if cls.tag is None:
+            raise ValueError("Expected cls.tag is not None.")
         target = graph.resolve(str(source[cls.tag]))
         if not isinstance(target, type):
             raise TypeError("py/object path did not resolve to a type")

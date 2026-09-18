@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import MappingProxyType
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import base64
@@ -45,6 +44,10 @@ from sagent.types.runtime import (
 )
 
 import sagent.catalog.openai
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_subscription_context_clamps_request_tokens() -> None:

@@ -13,8 +13,8 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import logging
 import os
@@ -31,6 +31,10 @@ from sagent.tools.core import (
     recipe_list,
 )
 from sagent.types.model import base_model_id
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 logger = logging.getLogger(__name__)

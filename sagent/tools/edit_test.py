@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import os
 import stat
@@ -13,6 +13,10 @@ import pytest
 from sagent.testing import with_fake_agent
 from sagent.tools.edit import Edit, make_diff
 from sagent.tools.lib.bash import parse_bash
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 edit = Edit()
