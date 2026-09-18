@@ -45,7 +45,23 @@ class TypeshedBuildHook(BuildHookInterface[WheelBuilderConfig, PluginManager]):
         build = cast("Callable[[Path], None]", module.build)
         # Outside the source tree: a checker walking the checkout must never see
         # a second, unpatched-looking stdlib.
-        target = Path(tempfile.mkdtemp(prefix="rekursiv-ai-typeshed-")) / "typeshed.d"
+        self._scratch = tempfile.TemporaryDirectory(prefix="rekursiv-ai-typeshed-")
+        target = Path(self._scratch.name) / "typeshed.d"
         build(target)
         shared = cast("dict[str, str]", build_data.setdefault("shared_data", {}))
         shared[str(target)] = "share/rekursiv-ai-typeshed"
+
+    @override
+    def finalize(
+        self,
+        version: str,
+        build_data: dict[str, object],
+        artifact_path: str,
+    ) -> None:
+        del version, build_data, artifact_path
+        if self._scratch is None:
+            raise ValueError("Expected self._scratch is not None.")
+        # The tree is 7k inodes and uv rebuilds this wheel many times a day.
+        self._scratch.cleanup()
+
+    _scratch: tempfile.TemporaryDirectory[str] | None = None

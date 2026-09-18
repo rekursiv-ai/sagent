@@ -5,6 +5,10 @@ from typing import Final
 
 import re
 import sys
+import tempfile
+import zipfile
+
+from hatchling.builders.wheel import WheelBuilder
 
 import pytest
 import rekursiv_ai_typeshed
@@ -89,6 +93,26 @@ def test_build_is_idempotent(tmp_path: Path) -> None:
         p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()
     }
     assert first == second
+
+
+# One in-process wheel build (0.8 s): generates the tree, then zips it.
+@pytest.mark.compute_large_fixture
+def test_wheel_build_removes_its_temp_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A kept tree costs 7k inodes per build, and uv rebuilds many times a day."""
+    temp_root = tmp_path / "tmp"
+    temp_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temp_root))
+    (wheel,) = WheelBuilder(str(_CWD)).build(
+        directory=str(tmp_path / "dist"),
+        versions=["standard"],
+    )
+    # The tree must outlive ``initialize``: hatchling zips it afterwards.
+    shipped = "/data/share/rekursiv-ai-typeshed/ty/stdlib/builtins.pyi"
+    assert any(name.endswith(shipped) for name in zipfile.ZipFile(wheel).namelist())
+    assert list(temp_root.iterdir()) == []
 
 
 if __name__ == "__main__":
