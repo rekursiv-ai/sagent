@@ -12,13 +12,15 @@ rejected anything.
 
 from __future__ import annotations
 
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
-from sagent.types.capability import (
-    ModelSettings,
-    ThinkingBudget,
-    ThinkingOutput,
-)
+
+if TYPE_CHECKING:
+    from sagent.types.capability import (
+        ModelSettings,
+        ThinkingBudget,
+        ThinkingOutput,
+    )
 
 
 __all__ = [

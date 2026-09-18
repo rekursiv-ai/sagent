@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from sagent.agent.context import validate_context
 from sagent.agent.state import approx_tokens
@@ -20,6 +20,10 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 def test_materialize_messages_bounds_tool_results_and_preserves_pairs() -> None:

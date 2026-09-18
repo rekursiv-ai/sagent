@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import asyncio
 import inspect
@@ -14,7 +13,6 @@ import time
 
 import pytest
 
-from sagent.lib.custom_json import MutableJSON
 from sagent.providers.google import cli
 from sagent.providers.google.api import Google
 from sagent.providers.google.cli import (
@@ -41,6 +39,12 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from sagent.lib.custom_json import MutableJSON
 
 
 _CRED_PAYLOAD: dict[str, object] = {

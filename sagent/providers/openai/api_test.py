@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+from typing import TYPE_CHECKING
 
 import asyncio
 import os
@@ -15,10 +16,13 @@ import tiktoken
 
 from sagent.catalog import openai
 from sagent.providers.openai.api import OpenAI
-from sagent.types.capability import (
-    ThinkingEffort,
-)
 from sagent.types.cost import PriceCatalogProduct
+
+
+if TYPE_CHECKING:
+    from sagent.types.capability import (
+        ThinkingEffort,
+    )
 
 
 @pytest.mark.network_openai

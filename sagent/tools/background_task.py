@@ -16,14 +16,12 @@ to load before ``agent/`` is fully initialized.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import asyncio
 import time
 
 from sagent.agent.agent import Agent
-from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.session_io import append_persistent_agent_lifecycle
 from sagent.agent.state import (
     AgentLike,
@@ -39,6 +37,12 @@ from sagent.types.runtime import (
     ToolResult,
     ToolResultKind,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from sagent.agent.background import BackgroundTaskEntry
 
 
 __all__ = [

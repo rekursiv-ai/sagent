@@ -6,12 +6,15 @@ Used by both ``agents_md`` (AGENTS.md discovery) and ``tools.skill``
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import re
 
 import yaml
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def walk_up(cwd: Path) -> list[Path]:

@@ -8,7 +8,7 @@ the originally-masked content).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
@@ -38,6 +38,10 @@ from sagent.types.tape import (
     TapeRecord,
     TapeRef,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 def _ref(ordinal: int, session: str = "s") -> TapeRef:

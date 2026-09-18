@@ -6,9 +6,8 @@ The ``Model`` Protocol, the request and response shapes, and the
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Final, Protocol, get_args, runtime_checkable
+from typing import TYPE_CHECKING, Final, Protocol, get_args, runtime_checkable
 
 from sagent.types.capability import (
     ContextTag,
@@ -21,9 +20,16 @@ from sagent.types.exceptions import UserFacingError
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
-    RuntimeEvent,
 )
 from sagent.types.tools import Tool
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from sagent.types.runtime import (
+        RuntimeEvent,
+    )
 
 
 __all__ = [

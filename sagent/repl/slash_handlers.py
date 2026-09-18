@@ -13,10 +13,8 @@ import dataclasses
 import shlex
 import time
 
-from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.state import agent_registry
 from sagent.providers.providers import infer_provider
-from sagent.repl.slash import Controllable
 from sagent.thinking import (
     THINKING_COMMANDS,
     apply_thinking_command,
@@ -28,7 +26,9 @@ from sagent.types.capability import ThinkingEffort
 
 if TYPE_CHECKING:
     from sagent.agent.agent import Agent
+    from sagent.agent.background import BackgroundTaskEntry
     from sagent.repl.render import Printer
+    from sagent.repl.slash import Controllable
 
 
 def do_switch_model(

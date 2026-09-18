@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import cast, override
+from typing import TYPE_CHECKING, cast, override
 
 import inspect
 
@@ -25,6 +24,10 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def test_estimate_entry_tokens_shared_across_compaction_modules() -> None:

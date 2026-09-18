@@ -9,6 +9,7 @@ adapter binds it (``paper_search.search``).
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import asyncio
@@ -17,9 +18,12 @@ from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import PaperError
 from wesearch.paper.search import SearchResult
 
-from sagent.lib.custom_json import MutableJSON
 from sagent.tools import paper_search
 from sagent.tools.paper_search import PaperSearch, _empty_hint
+
+
+if TYPE_CHECKING:
+    from sagent.lib.custom_json import MutableJSON
 
 
 def _result(

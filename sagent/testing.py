@@ -18,12 +18,12 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator, Iterator, Mapping
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
-import asyncio
 import itertools
 import time
 
@@ -66,6 +66,12 @@ from sagent.types.runtime import (
 )
 
 import sagent.agent.runtime
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator, Mapping
+
+    import asyncio
 
 
 __all__ = ["FakeAgent", "MockModelCaps", "with_fake_agent"]

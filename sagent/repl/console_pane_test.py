@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import io
 import re
@@ -17,7 +17,6 @@ from sagent.repl.console_pane import (
     ConsolePrinter,
     _wrap_label,
 )
-from sagent.repl.render import ChildItem
 from sagent.tools.display import OutputSpec, ToolDisplay
 from sagent.types.exceptions import AuthRefreshError
 from sagent.types.runtime import (
@@ -28,6 +27,12 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from sagent.repl.render import ChildItem
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")

@@ -17,10 +17,8 @@ itself *is* the registry for those objects.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
 from contextlib import suppress
-from pathlib import Path
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 import asyncio
 import dataclasses
@@ -61,7 +59,6 @@ from sagent.tools.core import (
     provider_not_allowed_result,
 )
 from sagent.types.capability import ThinkingEffort
-from sagent.types.compactor import Compactor
 from sagent.types.cost import ServiceTier
 from sagent.types.model import Model, ModelRecipe
 from sagent.types.runtime import (
@@ -82,7 +79,14 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-from sagent.types.tools import Tool
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+    from pathlib import Path
+
+    from sagent.types.compactor import Compactor
+    from sagent.types.tools import Tool
 
 
 # Prevent GC of persistent agent tasks. Keyed by label; cleaned
@@ -603,7 +607,8 @@ class AgentSpawn:
     ) -> ToolResult:
         """Drive a oneshot child to its first result, then stop it."""
         parent_agent = _current_agent()
-        assert parent_agent is not None
+        if parent_agent is None:
+            raise ValueError("Expected parent_agent is not None.")
         child._is_subagent = True  # noqa: SLF001 -- Cross-layer subagent flag.
         child._lifecycle = "oneshot"  # noqa: SLF001 -- Cross-layer lifecycle flag.
         child.name = label

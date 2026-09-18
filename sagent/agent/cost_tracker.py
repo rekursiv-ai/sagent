@@ -26,12 +26,17 @@ Three methods, each named for what it does:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import dataclasses
 import time
 
 from sagent.agent.cache_waste import CacheMiss
 from sagent.types.cost import TokenCost, TokenCount
-from sagent.types.model import ModelResponse
+
+
+if TYPE_CHECKING:
+    from sagent.types.model import ModelResponse
 
 
 @dataclasses.dataclass(kw_only=True, slots=True)

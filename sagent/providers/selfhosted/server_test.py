@@ -5,9 +5,8 @@ Avoids loading torch/transformers by exercising only the pure helpers.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from types import MappingProxyType
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import json
 
@@ -35,7 +34,12 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-from sagent.types.tools import Tool
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from sagent.types.tools import Tool
 
 
 def test_context_window_top_level_max_position() -> None:

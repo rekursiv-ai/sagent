@@ -9,7 +9,7 @@ the library entry points where the adapter binds them
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import asyncio
@@ -26,6 +26,10 @@ from sagent.tools.paper_details import (
     _render_listing,
     _validate_details_args,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 @pytest.fixture(autouse=True)

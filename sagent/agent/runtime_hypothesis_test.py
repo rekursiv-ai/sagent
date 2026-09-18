@@ -20,7 +20,7 @@ session:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from hypothesis import given, settings
 from hypothesis.strategies import (
@@ -60,6 +60,10 @@ from sagent.types.tape import (
     TapeRef,
     splice_safe_repair,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 pytestmark = pytest.mark.compute_large_fixture

@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from sagent.testing import with_fake_agent
 from sagent.tools import wiki
 from sagent.tools.wiki import Wiki
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _make_wiki(root: Path, pages: dict[str, str] | None = None) -> Path:

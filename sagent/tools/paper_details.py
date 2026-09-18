@@ -7,7 +7,6 @@ schema, arg validation, the process cache, and text rendering.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 import asyncio
@@ -42,6 +41,8 @@ from sagent.types.runtime import ToolResult
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from wesearch.paper.custom_types import IdType
 
 

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
 
 import time
@@ -17,6 +16,10 @@ from sagent.lib.custom_json import FloatCodec
 from sagent.repl.status_pane import render_status_pane
 from sagent.types.cost import TokenCost, TokenCount
 from sagent.types.settings import AgentSettings
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 @dataclass(slots=True, kw_only=True)

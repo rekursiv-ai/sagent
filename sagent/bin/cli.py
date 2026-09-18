@@ -48,7 +48,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Coroutine, Mapping
 from pathlib import Path
-from typing import Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import argparse
 import asyncio
@@ -128,9 +128,12 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-from sagent.types.tools import (
-    Tool,
-)
+
+
+if TYPE_CHECKING:
+    from sagent.types.tools import (
+        Tool,
+    )
 
 
 _DEFAULT_PROVIDER = "Anthropic"

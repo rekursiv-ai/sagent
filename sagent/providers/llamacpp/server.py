@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
-from typing import ClassVar, Final, Self, override
+from typing import TYPE_CHECKING, ClassVar, Final, Self, override
 
 import atexit
 import os
@@ -24,7 +23,12 @@ from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
 )
-from sagent.types.capability import ModelCapability
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+    from sagent.types.capability import ModelCapability
 
 
 class LlamaCpp(OpenAICompat):

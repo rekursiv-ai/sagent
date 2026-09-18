@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import itertools
@@ -19,6 +19,10 @@ from sagent.types.runtime import (
     UserMessage,
     reset_id_counter,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 def test_recompact_event_docstring_describes_compact_alias() -> None:

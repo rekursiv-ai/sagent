@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from sagent.types.session import Session
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def test_at_names_the_session_for_its_directory(tmp_path: Path) -> None:

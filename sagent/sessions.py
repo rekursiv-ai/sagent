@@ -25,10 +25,9 @@ Public API:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, Final
+from typing import IO, TYPE_CHECKING, Final
 
 import contextlib
 import json
@@ -41,6 +40,10 @@ import uuid
 
 from sagent.lib.custom_json import DictCodec, MutableJSON, json_unfreeze
 from sagent.lib.userdirs import data_dir
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Iterator
 
 
 logger = logging.getLogger(__name__)

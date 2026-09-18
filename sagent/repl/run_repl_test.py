@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
 from types import MappingProxyType
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
 
 import asyncio
@@ -21,7 +20,6 @@ import pytest
 
 from sagent.agent.agent import Agent, _resolve_target_spec
 from sagent.agent.background import BackgroundTaskEntry
-from sagent.agent.state import AgentLike
 from sagent.lib import last_models
 from sagent.providers import Google
 from sagent.repl.input_queues import InputQueues, QueuedInputBlock
@@ -85,6 +83,13 @@ from sagent.types.runtime import (
 from sagent.types.tape import ContextSplice, TapeRef
 
 import sagent.agent.runtime
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from pathlib import Path
+
+    from sagent.agent.state import AgentLike
 
 
 async def wait_until(

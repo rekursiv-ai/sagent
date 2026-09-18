@@ -23,8 +23,8 @@ Examples:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import argparse
 import logging
@@ -45,6 +45,10 @@ from sagent.types.tape import (
     TapeRecord,
     TapeRef,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 logger = logging.getLogger(__name__)
@@ -248,7 +252,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         if not args.dry_run and repair_session(session_dir):
             after = load_session(session_dir)
-            assert after is not None
+            if after is None:
+                raise ValueError("Expected after is not None.")
             print(f"  repaired -> {len(resolve_context(after[1]).messages)} messages")
     if damaged == 0:
         print(f"no truncated sessions among {len(candidates)} scanned")

@@ -6,9 +6,8 @@ All tests stub the Slack SDK -- no network calls.
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Iterator
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import argparse
@@ -51,7 +50,6 @@ from sagent.bin.slack import (
     log_tap,
     parse_slack_args,
 )
-from sagent.lib.custom_json import MutableJSON
 from sagent.testing import FakeAgent
 from sagent.tools.slack import Slack
 from sagent.types.model import Model, ModelRecipe
@@ -65,6 +63,12 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from sagent.lib.custom_json import MutableJSON
 
 
 @pytest.fixture(autouse=True)

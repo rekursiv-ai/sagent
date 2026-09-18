@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator, Mapping
 from contextlib import ExitStack, contextmanager
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import asyncio
@@ -19,6 +18,11 @@ from sagent.tools.grep import (
 )
 from sagent.tools.lib.bash import parse_bash
 from sagent.types.runtime import ToolResult
+
+
+if TYPE_CHECKING:
+    from collections.abc import Generator, Mapping
+    from pathlib import Path
 
 
 grep = Grep()

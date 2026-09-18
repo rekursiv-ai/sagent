@@ -8,21 +8,25 @@ microcompacted tool-call args.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import asyncio
 import html
 import logging
 
 from sagent.compaction.history import append_to_first_user
-from sagent.types.compactor import ReattachPolicy
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
     ToolResult,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from sagent.types.compactor import ReattachPolicy
 
 
 logger = logging.getLogger(__name__)

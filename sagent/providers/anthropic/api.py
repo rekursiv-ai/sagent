@@ -44,6 +44,8 @@ if TYPE_CHECKING:
     import httpx2
 
     from sagent.lib import image
+    from sagent.types.capability import ModelCapability, ModelSettings
+    from sagent.types.tools import Tool, ToolResultClearable
 else:
     from wrapt import lazy_import
 
@@ -69,7 +71,6 @@ from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.lib.usage import anthropic_usage
-from sagent.types.capability import ModelCapability, ModelSettings
 from sagent.types.cost import PriceCatalogProduct, TokenCount
 from sagent.types.model import (
     ModelRequest,
@@ -94,7 +95,6 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-from sagent.types.tools import Tool, ToolResultClearable
 
 import sagent.catalog.anthropic
 

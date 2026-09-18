@@ -20,19 +20,23 @@ switch behavior (mapped to ``enable_thinking`` in the body).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import ClassVar, override
+from typing import TYPE_CHECKING, ClassVar, override
 
 from sagent.catalog import dashscope
-from sagent.lib.custom_json import MutableJSON
 from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
 )
-from sagent.types.capability import ModelCapability
-from sagent.types.model import (
-    ModelRequest,
-)
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from sagent.lib.custom_json import MutableJSON
+    from sagent.types.capability import ModelCapability
+    from sagent.types.model import (
+        ModelRequest,
+    )
 
 
 # Non-reasoning variants that share a thinking prefix but reject the

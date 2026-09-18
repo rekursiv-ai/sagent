@@ -25,11 +25,15 @@ silently deletes the exclusion.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import asyncio
 import threading
 import weakref
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 __all__ = ["PerLoop"]

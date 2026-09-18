@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from queue import Queue
+from typing import TYPE_CHECKING
 
 import shutil
 
@@ -16,6 +16,10 @@ from sagent.providers.llamacpp.server import (
     _looks_like_path,
     _startup_error,
 )
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.mark.parametrize(

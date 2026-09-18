@@ -16,9 +16,9 @@ and the executor (calls the compactor once per partition).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import cast, override
+from typing import TYPE_CHECKING, cast, override
 
 import pytest
 
@@ -43,6 +43,10 @@ from sagent.types.tape import (
     TapeRef,
     full_tape_mask,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _stub_model() -> Model:

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import asyncio
 import contextlib
@@ -22,7 +21,6 @@ from sagent.agent.context import (
     InvalidContextError,
     validate_context,
 )
-from sagent.agent.runtime import Tool
 from sagent.repl.input_queues import InputQueues
 from sagent.repl.run_repl import _input_queue_committer_observer
 from sagent.types.exceptions import AuthRefreshError
@@ -84,6 +82,12 @@ from sagent.types.tape import (
     TapeRef,
     mask_contains_ref,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping, Sequence
+
+    from sagent.agent.runtime import Tool
 
 
 # When ``tape`` is supplied, the mask covers every existing record so every alive splice
@@ -4338,7 +4342,7 @@ def test_gated_deque_push_front_rejects_items_before_await() -> None:
     """
     dq: runtime.GatedDeque[object] = runtime.GatedDeque()
     user = UserMessage(text="oops")
-    with pytest.raises(AssertionError, match="Await must be the first"):
+    with pytest.raises(ValueError, match="Await must be the first"):
         dq.push_front(user, runtime.Await((UserMessage,)))
 
 

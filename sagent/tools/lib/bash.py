@@ -469,7 +469,6 @@ def resolve_cwd_path(cwd: str | None, path: str | None) -> str:
         return "" if path in (None, "", ".") else str(path)
     if path in (None, "", "."):
         return cwd
-    assert path is not None
     if Path(path).is_absolute():
         return path
     return f"{cwd.rstrip('/')}/{path}"
@@ -1417,7 +1416,8 @@ def _sink_blocks(source: Invocation, sink: Invocation) -> bool:
 def _stdin_operand(inv: Invocation) -> bool:
     """Whether a stdin-fed ``inv`` still names an operand one hop up."""
     source = inv.piped_from
-    assert source is not None
+    if source is None:
+        raise ValueError("Expected source is not None.")
     return (
         inv.exe in _SEARCH_EXES
         # A search still needs its own pattern; only the PATH comes from

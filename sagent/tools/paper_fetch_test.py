@@ -12,7 +12,7 @@ mapping. The library surface is mocked where the adapter binds each name:
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import asyncio
@@ -20,6 +20,10 @@ import asyncio
 from wesearch.paper.errors import NotFoundError
 
 from sagent.tools.paper_fetch import PaperFetch, _is_cached_pdf
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 # A valid PDF: magic prefix + padding past the 128-byte floor _is_cached_pdf

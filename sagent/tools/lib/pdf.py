@@ -7,7 +7,6 @@ no system binaries required.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import io
@@ -27,6 +26,8 @@ _PDFIUM_LOCK = threading.Lock()
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from PIL import Image
 
 

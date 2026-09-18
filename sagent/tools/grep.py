@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Final
@@ -38,8 +37,10 @@ from sagent.types.runtime import ToolResult
 
 
 if TYPE_CHECKING:
-    from bashlex.ast import (  # noqa: N812 -- AST alias.
-        node as BashlexNode,
+    from collections.abc import Mapping, Sequence
+
+    from bashlex.ast import (
+        node as BashlexNode,  # noqa: N812 -- PascalCase for the type name; bashlex spells it lowercase.
     )
 
 
@@ -901,7 +902,8 @@ def _build_rg_cmd(
 ) -> list[str]:
     """Build the ripgrep argv."""
     rg_path = _rg_path()
-    assert rg_path is not None
+    if rg_path is None:
+        raise ValueError("Expected rg_path is not None.")
     cmd = [
         rg_path,
         "--no-heading",

@@ -13,13 +13,17 @@ holds across providers.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 import math
 import re
 import time
 
 from sagent.types.model import UsageSnapshot, UsageWindow
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 # Non-blocking unified statuses; ``rejected`` / ``rate_limited`` throttle.

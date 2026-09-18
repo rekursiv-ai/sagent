@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import zipfile
 
 import pytest
 
 from sagent.bin import check_wheel
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 _ENTRY_POINTS = """[console_scripts]

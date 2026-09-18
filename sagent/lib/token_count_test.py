@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, override
 
@@ -10,7 +9,11 @@ from sagent.lib.token_count import approx_request_tokens
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     import pytest
+
+    from sagent.types.tools import Tool
 from sagent.lib.custom_json import JSON
 from sagent.testing import MockModelCaps
 from sagent.types.model import ModelRequest
@@ -22,7 +25,6 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-from sagent.types.tools import Tool
 
 
 @dataclass(slots=True, kw_only=True)

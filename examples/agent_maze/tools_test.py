@@ -6,8 +6,7 @@ inbox), so these run fast and pin the topology rules the demo's contrast depends
 
 from __future__ import annotations
 
-from collections.abc import Coroutine
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import asyncio
 
@@ -15,7 +14,12 @@ from examples.agent_maze.engine import Engine
 from examples.agent_maze.tools import CommsTool, SpawnTool
 from examples.agent_maze.world import make_spawn_level
 from sagent.agent.state import agent_label_var, agent_registry
-from sagent.types.runtime import ToolResult
+
+
+if TYPE_CHECKING:
+    from collections.abc import Coroutine
+
+    from sagent.types.runtime import ToolResult
 
 
 class _Inbox:

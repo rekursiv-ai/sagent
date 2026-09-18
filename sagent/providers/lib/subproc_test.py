@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import cast, override
+from typing import TYPE_CHECKING, cast, override
 
 import asyncio
 import contextlib
@@ -16,6 +15,10 @@ from sagent.providers.lib.subproc import (
     Subproc,
     SubprocessTransportError,
 )
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 pytestmark = pytest.mark.cli_python_subprocess

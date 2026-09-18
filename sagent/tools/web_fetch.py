@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, cast, get_args
 
@@ -27,6 +26,8 @@ from sagent.types.runtime import ToolResult
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from bashlex.ast import (
         node as Node,  # noqa: N812 -- PascalCase for the type name; bashlex spells it lowercase.
     )

@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from pathlib import Path
-from typing import cast, override
+from typing import TYPE_CHECKING, cast, override
 
 import asyncio
 import contextlib
@@ -40,6 +39,10 @@ from sagent.types.runtime import (
     ToolResultKind,
 )
 from sagent.types.tape import ContextSplice
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class _PersistentChild(FakeAgent):

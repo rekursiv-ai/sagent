@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Final, Literal, cast, get_args
+from typing import TYPE_CHECKING, Final, Literal, cast, get_args
 
 import inspect
 import sys
 
-from sagent.types.providers import Provider
+
+if TYPE_CHECKING:
+    from sagent.types.providers import Provider
 
 
 type ProviderName = Literal[

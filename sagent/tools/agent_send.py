@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 import asyncio
 import logging
@@ -14,6 +14,10 @@ from sagent.types.runtime import (
     AgentSendMessage,
     ToolResult,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 logger = logging.getLogger(__name__)

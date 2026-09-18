@@ -25,7 +25,7 @@ Or with the offline echo for iteration without an API key::
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import argparse
 import asyncio
@@ -43,6 +43,10 @@ from sagent.types.runtime import (
     RuntimeEvent,
     UserMessage,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def main() -> int:

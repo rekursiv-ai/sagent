@@ -31,15 +31,13 @@ each iteration.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import logging
 
 from sagent.compaction.history import estimate_entry_tokens
 from sagent.lib.token_count import entry_tokens
-from sagent.types.model import Model
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
@@ -47,9 +45,17 @@ from sagent.types.runtime import (
 )
 from sagent.types.tape import (
     ContextSplice,
-    TapeRecord,
-    TapeRef,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
+    from sagent.types.model import Model
+    from sagent.types.tape import (
+        TapeRecord,
+        TapeRef,
+    )
 
 
 logger = logging.getLogger(__name__)

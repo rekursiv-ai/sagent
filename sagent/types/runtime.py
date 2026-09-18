@@ -8,15 +8,19 @@ tape/model/tool modules here.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Final, Literal, Protocol
+from typing import TYPE_CHECKING, Final, Literal, Protocol
 
 import dataclasses
 import itertools
 import threading
 import time
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 class _CompactOverride(Protocol):

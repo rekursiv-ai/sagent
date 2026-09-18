@@ -8,17 +8,22 @@ Agent-coupled enrichment pipeline lives in
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import dataclasses
 
 from sagent.lib.token_count import entry_tokens
-from sagent.types.model import Model
 from sagent.types.runtime import (
     AgentSendMessage,
     ModelContextEvent,
     UserMessage,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from sagent.types.model import Model
 
 
 __all__ = [

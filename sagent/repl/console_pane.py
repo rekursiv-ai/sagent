@@ -8,7 +8,6 @@ duplicate -- the formatting logic is already correct and battle-tested.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Final, Literal, assert_never, cast
 
 import io
@@ -16,6 +15,8 @@ import re
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
     from rich.cells import chop_cells
     from rich.console import Console
     from rich.text import Text

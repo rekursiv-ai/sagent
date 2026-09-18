@@ -15,10 +15,14 @@ not imply durability.
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import os
 import uuid
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def atomic_write_bytes(

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterable, Callable, Mapping
 from typing import TYPE_CHECKING, Final, Protocol, cast, override
 
 import asyncio
@@ -27,7 +26,6 @@ from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.lib.usage import openai_usage
 from sagent.providers.openai import token_count
-from sagent.types.capability import ModelCapability, ModelSettings
 from sagent.types.cost import ServiceTier, TokenCount
 from sagent.types.exceptions import UserFacingError
 from sagent.types.model import (
@@ -49,10 +47,11 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-from sagent.types.tools import Tool
 
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterable, Callable, Mapping
+
     from openai.types import responses
     from openai.types.responses.response_create_params import (
         ResponseCreateParamsStreaming,
@@ -63,6 +62,8 @@ if TYPE_CHECKING:
     import openai
 
     from sagent.lib.image import resize
+    from sagent.types.capability import ModelCapability, ModelSettings
+    from sagent.types.tools import Tool
 else:
     from wrapt import lazy_import
 

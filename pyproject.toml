@@ -116,7 +116,7 @@ typecheck = [
     "basedpyright>=1.10",
     "ty>=0.0.75",
     "rekursiv-ai-typeshed",
-    "hatchling",  # packages/rekursiv-ai-typeshed/rekursiv_ai_typeshed/hatch_build.py imports its plugin interface.
+    "hatchling>=1.32.1",  # packages/rekursiv-ai-typeshed/rekursiv_ai_typeshed/hatch_build.py subscripts its two-parameter BuildHookInterface.
 ]
 "pre-commit" = [
     "pre-commit>=4.6",
@@ -300,7 +300,6 @@ extend-include = ["*.ipynb"]
 select = ["ALL"]
 
 ignore = [
-    # Will be fixed by formater.
     # COM812 is deliberately ignored here and re-enabled only by the
     # pre-commit `ruff-check` hook (`--extend-select COM812`). Selecting it in
     # config makes every `ruff format` print a conflict warning; the rule is
@@ -308,8 +307,7 @@ ignore = [
     # compact multi-line args to explode one-per-line (astral-sh/ruff#9216).
     "COM812",  # Missing trailing comma.
     "E501",    # Line too long.
-    "TC001",   # Typing-only first-party import.
-    "TC003",   # Typing-only standard library import.
+    "TC006",   # Runtime cast value; needed for ty/basedpyright.
     # Documentation.
     "CPY001",  # Missing copyright notice. (License is in LICENSE, not per-file.)
     "D105",    # Undocumented magic method.
@@ -344,19 +342,15 @@ ignore = [
     "A001",    # Builtin variable shadowing.
     "A002",    # Builtin argument shadowing.
     "ANN204",  # Missing return type annotation for special method (eg __init__).
-    "DTZ006",  # Call datetime fromtimestamp.
     "EM101",   # Raw string in exception.
     "EM102",   # F-string in exception.
     "EXE001",  # Shebang is present but file is not executable.
     "FBT001",  # Boolean type hint positional argument.
     "FBT002",  # Boolean default value positional argument.
     "FBT003",  # Boolean positional value in call.
-    "G004",    # Logging f-string.
     "N806",    # Non-lowercase variable in function.
     "PLW0642", # Self or cls assignment. (Reassignment of name in finalize.)
-    "RET504",  # Unnecessary assign.
     "S101",    # Use of `assert` detected.
-    "TC006",   # Runtime cast value.
     "TRY003",  # Raise vanilla args.
     "TRY300",  # Try consider else.
     # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
@@ -398,6 +392,7 @@ ignore = [
     "UP046",   # non-pep695-generic-class -- PEP 695 rewrite rebinds/drops TypeVar params.
     "UP047",   # non-pep695-generic-function -- PEP 695 rewrite breaks ParamSpec binding.
     # Must violate; intrinsic to any faithful stub.
+    "A003",    # builtin-attribute-shadowing -- mirrors upstream attribute names (``type: type``); renaming breaks callers.
     "A004",    # builtin-import-shadowing -- mirrors upstream import names; renaming rebinds.
     "E743",    # ambiguous-function-name -- mirrors upstream naming; renaming breaks callers.
     "F403",    # undefined-local-with-import-star -- stub re-exports the whole namespace.
@@ -464,6 +459,46 @@ ignore = [
 ]
 
 # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
+
+# TC001-TC003 move annotation-only imports under `if TYPE_CHECKING:`. That is
+# wrong wherever something reads annotations at runtime. Two knobs stop it:
+#
+# exempt-modules: never move an import FROM these modules.
+#   - typing, typing_extensions: the annotation vocabulary; moving them buys nothing.
+#   - dataclasses: `_: KW_ONLY` looks annotation-only but dataclasses reads it
+#     at class creation. Under TYPE_CHECKING every `kw_only=False` Config
+#     failed to import.
+#
+# runtime-evaluated-*: never move an import USED IN annotations of these.
+#   - pydantic.BaseModel: validates fields from annotations.
+#   - configgle Fig/Makes/Maker: resolves Config fields and owner __init__ hints.
+#   - dataclasses.dataclass: custom_json.to_json, cli_override, and
+#     tool_spec.coerce_kwargs call get_type_hints on any dataclass. This pins
+#     every dataclass field type eager; a heavy one (torch.Tensor) that the
+#     house `annotation-import` rule then flags takes an inline house-ignore.
+#   - MCPServer.tool, APIRouter.*: build schemas from handler signatures.
+#
+# With these set, TC004 flags an import that IS needed at runtime but sits
+# under TYPE_CHECKING, and `--fix` hoists it. One exception: `_typeshed` has no
+# runtime module, so its import stays under TYPE_CHECKING with an inline noqa.
+[tool.ruff.lint.flake8-type-checking]
+exempt-modules = ["typing", "typing_extensions", "dataclasses"]
+runtime-evaluated-base-classes = [
+    "pydantic.BaseModel",
+    "trackinizer.wire.bodies.ActorMixin",
+    "configgle.Fig",
+    "configgle.Makes",
+    "configgle.Maker",
+]
+runtime-evaluated-decorators = [
+    "dataclasses.dataclass",
+    "mcp.server.MCPServer.tool",
+    "fastapi.APIRouter.get",
+    "fastapi.APIRouter.post",
+    "fastapi.APIRouter.put",
+    "fastapi.APIRouter.patch",
+    "fastapi.APIRouter.delete",
+]
 
 # STYLE.md / AGENTS.md rules ruff can host outright. Each ban carries the
 # house replacement so the finding is the fix.

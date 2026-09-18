@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, cast, override
 
 import asyncio
@@ -25,6 +24,8 @@ from sagent.types.tools import Tool
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
     from mcp.types import ImageContent, TextContent

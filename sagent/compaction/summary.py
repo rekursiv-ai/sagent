@@ -14,9 +14,8 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
 from html import escape
-from typing import Final, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 import dataclasses
 import logging
@@ -40,7 +39,6 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-from sagent.types.settings import AgentSettings
 from sagent.types.tape import (
     ContextSplice,
     MaskRange,
@@ -49,6 +47,12 @@ from sagent.types.tape import (
     coalesce_roles,
     full_tape_mask,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
+    from sagent.types.settings import AgentSettings
 
 
 __all__ = [

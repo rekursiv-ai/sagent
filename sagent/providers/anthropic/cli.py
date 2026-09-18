@@ -66,7 +66,6 @@ from sagent.providers.lib.subproc import (
     Subproc,
     SubprocessTransportError,
 )
-from sagent.types.capability import ModelCapability, ModelSettings
 from sagent.types.cost import TokenCost, TokenCount
 from sagent.types.model import (
     ModelRequest,
@@ -86,13 +85,14 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-from sagent.types.tape import TapeEvent
 
 import sagent.catalog.anthropic
 
 
 if TYPE_CHECKING:
     from sagent.lib import image
+    from sagent.types.capability import ModelCapability, ModelSettings
+    from sagent.types.tape import TapeEvent
     from sagent.types.tools import Tool
 else:
     from wrapt import lazy_import
@@ -883,7 +883,8 @@ class _AnthropicCLIModel(ModelDefaults):
         try:
             if self._session_id is not None:
                 return await self._stream_session_persistent(request, publish)
-            assert self._hot_spare is not None  # Stateless path.
+            if self._hot_spare is None:  # Stateless path.
+                raise ValueError("Expected self._hot_spare is not None.")
             # Stash the request's tools so the spawn factory
             # (``_spawn_initialized``) can populate the bridge BEFORE it
             # launches ``claude`` -- the CLI issues ``ListToolsRequest``
@@ -1023,7 +1024,8 @@ class _AnthropicCLIModel(ModelDefaults):
                 # on 2026-06-03 around 14:30, when each retry re-wrote
                 # the earliest pending entry AND failed to reach the
                 # later entries that contained TL's STOP directives).
-                assert rel_idx is not None  # Only the trailing entry may be synthetic.
+                if rel_idx is None:  # Only the trailing entry may be synthetic.
+                    raise ValueError("Expected rel_idx is not None.")
                 self._last_sent_index = base + rel_idx + 1
                 _ = await self._drain_until_result(
                     proc,
@@ -1092,7 +1094,8 @@ class _AnthropicCLIModel(ModelDefaults):
 
     def _should_respawn(self, request: ModelRequest) -> bool:
         """Inspect the trigger list (§1.4) for this request."""
-        assert self._hot_spare is not None  # Caller is the stateless path.
+        if self._hot_spare is None:  # Caller is the stateless path.
+            raise ValueError("Expected self._hot_spare is not None.")
         if self._hot_spare.active is None:
             return False
         history = request.messages
@@ -1310,7 +1313,6 @@ class _AnthropicCLIModel(ModelDefaults):
                 )
             elif kind == "system" and event.get("subtype") == "init":
                 message_id = cast(str, event.get("session_id") or "")
-        assert usage_event is not None
         if update_input_tokens and last_round_usage is not None:
             # Cache-inclusive context footprint of the last internal round;
             # feeds the context-fraction respawn heuristic. Only overwrite when

@@ -16,8 +16,8 @@ agent shouldn't fail a model request because the host can't beep.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import importlib
 import logging
@@ -29,6 +29,10 @@ from sagent.agent.state import get_tool_state
 from sagent.lib.custom_json import JSON, json_freeze
 from sagent.tools.core import load_tool_description, run_sync
 from sagent.types.runtime import ToolResult
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 logger = logging.getLogger(__name__)
