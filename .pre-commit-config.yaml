@@ -42,6 +42,9 @@
 #     git --no-pager diff -z --name-only --cached --relative \
 #       | xargs -0 --no-run-if-empty uv --quiet run --frozen --group pre-commit pre-commit run --files
 #
+#   # Run all the files from CWD.
+#     uv --quiet run --frozen --group pre-commit pre-commit run --files $(git ls-files .)
+#
 #   One hook at a time, by id (`ruff-check`, `ty-check`, `pytest-global`, ...):
 #     uv --quiet run --frozen --group pre-commit pre-commit run ruff-check --all-files
 #     uv --quiet run --frozen --group pre-commit pre-commit run pytest-global --hook-stage pre-push
