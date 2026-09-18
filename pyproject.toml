@@ -272,8 +272,13 @@ exclude_lines = [
     "if TYPE_CHECKING:",
     "if __name__ == .__main__.:",
     "raise NotImplementedError",
+    # Convention: a ``_triton``-suffixed def is a body ``triton.jit`` compiles
+    # from its source text to PTX. The Python bytecode never runs, so the
+    # tracer cannot see lines a GPU test executed; the kernel is tested by
+    # its ``gpu_triton`` caller, not by line coverage.
+    "^def \\w+_triton\\(",
 ]
-# fail_under = 85
+# fail_under = 90
 show_missing = true
 skip_covered = true
 
