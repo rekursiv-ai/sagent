@@ -37,6 +37,7 @@ from sagent.agent.session_io import (
     _ref_from_json,
     _tool_result_kind_from_json,
     append_context_repair,
+    append_persistent_agent_lifecycle,
     append_session,
     load_persistent_agents,
     load_session,
@@ -2075,6 +2076,45 @@ def test_notice_message_without_error_round_trips(tmp_path: Path) -> None:
     assert loaded is not None
     meta, _, _ = loaded
     assert meta.runtime_events == (notice,)
+
+
+@pytest.mark.parametrize(
+    ("explicit_request", "explicit_response"),
+    [(None, None), (50_000, 512)],
+)
+def test_persistent_lifecycle_preserves_token_limit_provenance(
+    tmp_path: Path,
+    explicit_request: int | None,
+    explicit_response: int | None,
+) -> None:
+    parent = Agent(
+        model=_NoopModel(),
+        tools=[],
+        session_dir=tmp_path / "parent",
+    )
+    child = Agent(
+        model=_NoopModel(),
+        tools=[],
+        session_dir=tmp_path / "child",
+    )
+    if explicit_request is not None:
+        child.max_request_tokens = explicit_request
+    if explicit_response is not None:
+        child.max_response_tokens = explicit_response
+
+    append_persistent_agent_lifecycle(
+        parent,
+        child,
+        "child",
+        "run-1",
+        state="running",
+        notify_on_asleep=True,
+    )
+
+    records = load_persistent_agents(tmp_path / "parent")
+    assert len(records) == 1
+    assert records[0].max_request_tokens == explicit_request
+    assert records[0].max_response_tokens == explicit_response
 
 
 def test_append_session_writes_persistent_agent_lifecycle(tmp_path: Path) -> None:

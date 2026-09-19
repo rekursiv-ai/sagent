@@ -418,6 +418,11 @@ class Agent:
     # -- Properties / config surface ----------------------------------
 
     @property
+    def settings(self) -> AgentSettings:
+        """Return unresolved agent choices; ``None`` derives from the model."""
+        return self._budget
+
+    @property
     def budget(self) -> AgentSettings:
         """Resolve explicit choices against the active model limits."""
         limits = self.model.limits
@@ -781,55 +786,6 @@ class Agent:
         if spec is not None:
             last_models.record(spec.provider, spec.model_id)
         _schedule_close(old)
-        self._compact_if_history_exceeds_budget()
-
-    # Called after :meth:`swap_model`: if the resolved view's token estimate crosses the
-    # compactor's own threshold, the next provider call would
-    # overflow before the user even types. Push a ``Compact()`` so the agent layer's
-    # bridge (which now wraps the producer in scrunch) can fit history before resuming.
-    # No-op when no compactor is configured or history is small.
-    #
-    # Routed through the compactor's ``should_compact`` rather than comparing against an
-    # inline expression: a swap must fire on exactly the condition a turn fires on.
-    # While the two were separate expressions they disagreed by 137k tokens on a 1M
-    # window, so a session could pass every turn and then compact on a swap that changed
-    # no limit at all.
-    def _compact_if_history_exceeds_budget(self) -> None:
-        """Push ``Compact()`` when current history exceeds the active budget."""
-        if self._agent_compactor is None:
-            return
-        request = ModelRequest(
-            messages=self.runtime.context().messages,
-            system=self.system_prompt() or None,
-            tools=self.live_tools() or None,
-        )
-        try:
-            estimated = self.model.approx_request_tokens(
-                materialize_request(
-                    request,
-                    tool_result_budget_tokens=self.tool_results.message_budget_tokens,
-                ),
-            )
-        except Exception as exc:  # noqa: BLE001 -- The estimator invokes provider classification during recovery.
-            log_exception_or_warning(
-                logger,
-                "swap_model: token estimate failed; skipping compact",
-                exc,
-            )
-            return
-        target = self._agent_compactor.largest_context(self.budget)
-        if self._agent_compactor.should_compact(
-            current_tokens=estimated,
-            largest_context=target,
-            system_tokens=self.model.approx_text_tokens(self.system_prompt()),
-        ):
-            logger.info(
-                "swap_model: history (%d tok) exceeds new budget (%d tok); "
-                "pushing Compact()",
-                estimated,
-                target,
-            )
-            self.runtime.inbox.push_back(runtime.Compact())
 
     def change_model(
         self,

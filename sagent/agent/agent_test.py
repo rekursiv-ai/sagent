@@ -580,7 +580,11 @@ async def test_agent_model_stream_materializes_request() -> None:
 
 
 def test_agent_budget_override_respected() -> None:
-    b = AgentSettings.from_limits(StubModel().limits)
+    b = AgentSettings(
+        max_request_tokens=50_000,
+        max_response_tokens=512,
+        buffer_tokens=1_000,
+    )
     a = _build_agent(budget=b)
     assert a.budget == b
 
@@ -1998,17 +2002,8 @@ class _NoopCompactor:
         )
 
 
-def test_swap_model_pushes_compact_when_history_exceeds_new_budget() -> None:
-    """Swapping to a smaller-window model with oversized history triggers compact.
-
-    The /model verb's whole purpose is rescuing a session whose
-    current model wedged (rate limit, oversized history). Just
-    rescaling the budget without compacting leaves the next provider
-    call to overflow against the new (smaller) model -- the user is
-    no better off. After a swap whose rescaled budget cannot hold the
-    current resolved view, push a ``Compact()`` so the agent layer's
-    bridge can fit history before the next stream call.
-    """
+def test_swap_model_never_enqueues_compaction() -> None:
+    """A model selection changes configuration without mutating history."""
 
     @dataclass(slots=True, kw_only=True)
     class _LyingTokenModel(StubModel):
@@ -2019,27 +2014,26 @@ def test_swap_model_pushes_compact_when_history_exceeds_new_budget() -> None:
             del request
             return 500_000
 
-    # A REAL gate, not a stub: the swap gate asks the compactor whether the
-    # rescaled budget holds the history, so a stub answering a constant would
-    # decide this test rather than the budget arithmetic under test.
-    a = Agent(
-        model=_LyingTokenModel(model_id="big", max_request_tokens=1_000_000),
+    agent = Agent(
+        model=_LyingTokenModel(
+            model_id="claude-haiku-4-5",
+            max_request_tokens=200_000,
+        ),
         tools=[],
         compactor=SummaryCompactor(),
     )
-    a.runtime.inbox.drain_nowait()  # `clear` any startup events.
-    a.runtime.append_history(UserMessage(text="payload"))
+    agent.runtime.inbox.drain_nowait()
+    agent.runtime.append_history(UserMessage(text="payload"))
 
-    # Swap to a smaller model that also reports 500k tokens for the
-    # current request -- 500k > (100k - 1024 - small buffer) so the
-    # post-swap budget cannot hold this history.
-    a.swap_model(_LyingTokenModel(model_id="small", max_request_tokens=100_000))
-
-    items = a.runtime.inbox.drain_nowait()
-    compacts = [ev for ev in items if isinstance(ev, Compact)]
-    assert compacts, (
-        f"swap_model to smaller model did not push Compact(); inbox was {items!r}"
+    agent.swap_model(
+        _LyingTokenModel(
+            model_id="claude-opus-4-8",
+            max_request_tokens=200_000,
+        ),
     )
+
+    items = agent.runtime.inbox.drain_nowait()
+    assert not any(isinstance(event, Compact) for event in items), items
 
 
 def test_swap_model_does_not_push_compact_when_history_fits() -> None:
@@ -2107,78 +2101,6 @@ def test_largest_context_respects_provider_input_plus_max_tokens_ceiling() -> No
         )
         # And it must not fire so early the model is unusable.
         assert gate.should_compact(largest // 2, largest, 0) is False
-
-
-def test_swap_gate_and_turn_gate_agree_on_one_threshold() -> None:
-    """A same-size swap must not compact history every turn accepts.
-
-    Both gates route through ``should_compact`` against the compactor's
-    ``largest_context``. While each computed its own threshold the swap
-    gate fired 137k tokens earlier than the turn gate on a 1M window, so a
-    session in that band ran normally until any ``/model`` -- even one to
-    a model with byte-identical limits -- compacted it.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _FixedTokenModel(StubModel):
-        reported: int = 0
-
-        @override
-        def approx_request_tokens(self, request: ModelRequest) -> int:
-            del request
-            return self.reported
-
-        @override
-        def approx_text_tokens(self, text: str) -> int:
-            del text
-            return 0
-
-    gate = SummaryCompactor()
-    budget = AgentSettings(
-        max_request_tokens=1_000_000,
-        max_response_tokens=128_000,
-        buffer_tokens=66_666,
-    )
-    # Land squarely in the old disagreement band: above the old swap-gate
-    # threshold (805_334), below the old turn-gate threshold (~941_060).
-    used = 893_646
-    assert gate.largest_context(budget) < used < 941_060
-
-    a = Agent(
-        model=_FixedTokenModel(
-            model_id="big",
-            max_request_tokens=1_000_000,
-            max_response_tokens=128_000,
-            reported=used,
-        ),
-        tools=[],
-        compactor=gate,
-        budget=budget,
-    )
-    a.runtime.inbox.drain_nowait()
-    a.runtime.append_history(UserMessage(text="payload"))
-
-    turn_gate_fires = gate.should_compact(
-        current_tokens=used,
-        largest_context=gate.largest_context(a.budget),
-        system_tokens=0,
-    )
-    a.swap_model(
-        _FixedTokenModel(
-            model_id="same",
-            max_request_tokens=1_000_000,
-            max_response_tokens=128_000,
-            reported=used,
-        ),
-    )
-    swap_gate_fires = any(
-        isinstance(ev, Compact) for ev in a.runtime.inbox.drain_nowait()
-    )
-
-    assert swap_gate_fires == turn_gate_fires, (
-        f"swap gate fired {swap_gate_fires} but turn gate fired"
-        f" {turn_gate_fires} at {used:,} tokens against the same budget"
-    )
 
 
 def test_swap_model_no_compact_when_no_compactor_configured() -> None:

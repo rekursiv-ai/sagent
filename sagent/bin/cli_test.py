@@ -248,6 +248,60 @@ def test_build_persistent_child_restores_frozen_system(
     assert child.frozen_system is True
 
 
+def test_resumed_persistent_child_default_limits_follow_model_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_build_provider(monkeypatch)
+    child = _build_persistent_child(
+        _child_record(),
+        allow_providers=(),
+        parent_label="parent",
+    )
+
+    child.swap_model(
+        cast(
+            Model,
+            _ChildStubModel(
+                model_id="larger",
+                max_request_tokens=1_000_000,
+                max_response_tokens=8_192,
+            ),
+        ),
+    )
+
+    assert child.settings.max_request_tokens is None
+    assert child.settings.max_response_tokens is None
+    assert child.max_request_tokens == 1_000_000
+    assert child.max_response_tokens == 8_192
+
+
+def test_resumed_persistent_child_explicit_limits_survive_model_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_build_provider(monkeypatch)
+    child = _build_persistent_child(
+        _child_record(max_request_tokens=50_000, max_response_tokens=512),
+        allow_providers=(),
+        parent_label="parent",
+    )
+
+    child.swap_model(
+        cast(
+            Model,
+            _ChildStubModel(
+                model_id="larger",
+                max_request_tokens=1_000_000,
+                max_response_tokens=8_192,
+            ),
+        ),
+    )
+
+    assert child.settings.max_request_tokens == 50_000
+    assert child.settings.max_response_tokens == 512
+    assert child.max_request_tokens == 50_000
+    assert child.max_response_tokens == 512
+
+
 def test_default_allow_providers_leads_with_default_provider() -> None:
     """Default allow-list's first entry is the zero-flag default provider."""
     out = _default_allow_providers()
