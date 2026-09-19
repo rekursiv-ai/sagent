@@ -8,7 +8,6 @@ from sagent.catalog import anthropic
 from sagent.types.capability import (
     ContextTag,
     ModelCapability,
-    ModelLimits,
 )
 from sagent.types.cost import (
     TokenCount,
@@ -22,43 +21,10 @@ from sagent.types.model import (
     split_model_id,
 )
 from sagent.types.runtime import AssistantMessage
-from sagent.types.settings import (
-    AgentSettings,
-    default_buffer_tokens,
-)
+from sagent.types.settings import AgentSettings
 
 
 # ---- AgentSettings ---------------------------------------------------------
-
-
-def _limits(*, request: int = 4_096, response: int = 1_024) -> ModelLimits:
-    return ModelLimits(max_request_tokens=request, max_response_tokens=response)
-
-
-def test_from_limits_handles_a_small_window() -> None:
-    """B12: a floored buffer used to exceed a sub-8k window and raise."""
-    _ = AgentSettings.from_limits(_limits(request=4_096))
-
-
-def test_from_limits_caps_the_buffer_at_half_the_window() -> None:
-    """The buffer never exceeds half the window even for tiny models."""
-    settings = AgentSettings.from_limits(_limits(request=4_096))
-    assert settings.buffer_tokens is not None
-    assert settings.buffer_tokens <= 4_096 // 2
-
-
-def test_from_limits_carries_both_windows() -> None:
-    settings = AgentSettings.from_limits(_limits(request=200_000, response=64_000))
-    assert settings.max_request_tokens == 200_000
-    assert settings.max_response_tokens == 64_000
-
-
-def test_from_limits_takes_limits_not_a_model() -> None:
-    """``swap_model`` sizes a candidate window before that model exists."""
-    limits = _limits(request=1_000_000, response=128_000)
-    assert AgentSettings.from_limits(limits).buffer_tokens == default_buffer_tokens(
-        1_000_000,
-    )
 
 
 def test_accepts_zero_buffer_tokens() -> None:

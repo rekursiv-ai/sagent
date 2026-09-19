@@ -3,11 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
-
-
-if TYPE_CHECKING:
-    from sagent.types.capability import ModelLimits
 
 
 __all__ = ["AgentSettings", "default_buffer_tokens"]
@@ -67,12 +62,3 @@ class AgentSettings:
             raise ValueError(
                 f"max_budget_usd must be >= 0 or None, got {self.max_budget_usd}",
             )
-
-    @classmethod
-    def from_limits(cls, limits: ModelLimits) -> AgentSettings:
-        """Derive proportional defaults from the selected context's limits."""
-        return cls(
-            max_request_tokens=limits.max_request_tokens,
-            max_response_tokens=limits.max_response_tokens,
-            buffer_tokens=default_buffer_tokens(limits.max_request_tokens),
-        )

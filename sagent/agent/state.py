@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from sagent.types.capability import ThinkingEffort
     from sagent.types.cost import ServiceTier, TokenCount
     from sagent.types.model import Model, ModelRecipe
+    from sagent.types.settings import AgentSettings
     from sagent.types.tools import Tool
 
 logger = logging.getLogger(__name__)
@@ -688,6 +689,9 @@ class PersistableAgent(Protocol):
 
     @property
     def service_tier(self) -> ServiceTier: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def settings(self) -> AgentSettings: ...  # noqa: D102 -- Protocol member declaration.
 
     @property
     def session_dir(self) -> Path | None: ...  # noqa: D102 -- Protocol member declaration.
