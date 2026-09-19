@@ -27,9 +27,16 @@ include = ["rekursiv_ai_typeshed", "README.md"]
 [tool.uv]
 cache-keys = [
     {file = "pyproject.toml"},
+    {file = "../../uv.lock"},
     {file = "README.md"},
     {file = "rekursiv_ai_typeshed/*.py"},
     {file = "rekursiv_ai_typeshed/py.typed"},
     {file = "rekursiv_ai_typeshed/typeshed.patch"},
     {file = "rekursiv_ai_typeshed/typings/**/*.pyi"},
+]
+
+[tool.uv.extra-build-dependencies]
+rekursiv-ai-typeshed = [
+    {requirement = "basedpyright", match-runtime = true},
+    {requirement = "ty", match-runtime = true},
 ]
