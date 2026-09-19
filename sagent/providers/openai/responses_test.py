@@ -14,6 +14,7 @@ import json
 import os
 
 import httpx2
+import openai
 import pytest
 
 from sagent.agent.retry import is_rate_limited, is_retryable
@@ -43,6 +44,7 @@ from sagent.types.cost import (
 from sagent.types.exceptions import UserFacingError
 from sagent.types.model import (
     ModelRequest,
+    ModelResponse,
     StreamInterruptedError,
 )
 from sagent.types.runtime import (
@@ -1129,7 +1131,8 @@ async def test_api_astra_reasoning_tool_roundtrip_and_legacy_replay() -> None:
         text="Find the smallest positive integer n with n mod 17=12, n mod 19=7, n mod 23=5. Compute it before calling verify(n). After verification, do not call tools again; report the result.",
     )
     try:
-        first = await model.stream(
+        first = await _stream_with_retry(
+            model,
             ModelRequest(
                 messages=[user],
                 tools=[_VerifyTool()],
@@ -1154,7 +1157,8 @@ async def test_api_astra_reasoning_tool_roundtrip_and_legacy_replay() -> None:
         assert restored == first.message
         result = ToolResult(call_id=call.id, content="Verified successfully.")
         for history in _replay_variants(restored):
-            response = await model.stream(
+            response = await _stream_with_retry(
+                model,
                 ModelRequest(
                     messages=[user, history, result],
                     tools=[_VerifyTool()],
@@ -1166,6 +1170,23 @@ async def test_api_astra_reasoning_tool_roundtrip_and_legacy_replay() -> None:
             assert response.tokens.response > 0
     finally:
         await provider.close_sdk()
+
+
+async def _stream_with_retry(
+    model: _OpenAIResponsesModel,
+    request: ModelRequest,
+    *,
+    max_attempts: int = 3,
+) -> ModelResponse:
+    """Retry ``model.stream`` on transient API timeouts."""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await model.stream(request)
+        except openai.APITimeoutError:
+            if attempt == max_attempts:
+                raise
+            await asyncio.sleep(2.0**attempt)
+    raise AssertionError("unreachable")
 
 
 def _replay_variants(message: AssistantMessage) -> Iterator[AssistantMessage]:
