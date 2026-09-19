@@ -48,8 +48,6 @@ def post_process_result(
     *,
     session_dir: Path | None,
     persist_tokens: int,
-    message_budget_tokens: int = 0,
-    used_message_tokens: int = 0,
 ) -> ToolResult:
     """Persist oversized content and inject the empty-output marker.
 
@@ -68,10 +66,6 @@ def post_process_result(
       persist_tokens: Per-result token threshold. ``0`` disables
           persistence; results above it are off-loaded to disk and
           replaced with a preview.
-      message_budget_tokens: Aggregate live tool-result budget, in
-          tokens. ``0`` disables it.
-      used_message_tokens: Persist-budget tokens already in context;
-          excludes error results, since ``_should_persist`` skips them.
 
     Returns:
       processed: Possibly-modified ``ToolResult``. ``call_id`` /
@@ -92,8 +86,6 @@ def post_process_result(
     if _should_persist(
         content,
         persist_tokens=persist_tokens,
-        message_budget_tokens=message_budget_tokens,
-        used_message_tokens=used_message_tokens,
     ):
         preview = _persist_oversized(result.call_id, content, session_dir=session_dir)
         if preview is not None:
@@ -276,28 +268,13 @@ def _should_persist(
     content: str,
     *,
     persist_tokens: int,
-    message_budget_tokens: int,
-    used_message_tokens: int,
 ) -> bool:
     """Return True when result content should be off-loaded."""
     tokens = approx_tokens(content)
     # Never off-load a result the stub would not shrink. The stub is a
     # tag, a path, a size line, and up to ``preview_chars`` of the content,
-    # so below about that size persisting COSTS tokens instead of saving
-    # them -- a 159-byte result came back as a ~600-byte preview. Only the
-    # aggregate branch makes that reachable for a small result: it charges
-    # the newest result for the size of everything before it, so once the
-    # aggregate is spent EVERY later result off-loads however tiny.
+    # so below about that size persisting costs tokens instead of saving
+    # them -- a 159-byte result came back as a ~600-byte preview.
     if tokens <= stub_cost_tokens(content):
         return False
-    if persist_tokens > 0 and tokens > persist_tokens:
-        return True
-    # Aggregate pressure off-loads as well. It is the only thing standing
-    # between many mid-size results and the wire, where
-    # ``materialize_request`` replaces an over-budget result with a
-    # placeholder carrying no path back; off-loading here keeps the
-    # content reachable on disk instead.
-    return (
-        message_budget_tokens > 0
-        and used_message_tokens + tokens > message_budget_tokens
-    )
+    return persist_tokens > 0 and tokens > persist_tokens

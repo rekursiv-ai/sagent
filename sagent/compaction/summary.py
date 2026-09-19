@@ -207,6 +207,12 @@ class SummaryCompactor:
               a budget whose reservations exceed its window.
 
         """
+        if (
+            settings.max_request_tokens is None
+            or settings.max_response_tokens is None
+            or settings.buffer_tokens is None
+        ):
+            raise ValueError("largest_context requires resolved AgentSettings")
         return max(
             0,
             settings.max_request_tokens

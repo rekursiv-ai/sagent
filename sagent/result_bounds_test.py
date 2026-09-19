@@ -314,8 +314,6 @@ def test_an_oversized_error_result_keeps_a_path_back(tmp_path: Path) -> None:
         "Bash",
         session_dir=tmp_path,
         persist_tokens=_PERSIST_TOKENS,
-        message_budget_tokens=_MESSAGE_BUDGET_TOKENS,
-        used_message_tokens=0,
     )
     assert "tool-results" in processed.content, (
         "an oversized error result was not off-loaded, so materialization"
@@ -333,8 +331,6 @@ def test_persisted_result_carries_a_path_back() -> None:
             "Bash",
             session_dir=Path(tmp),
             persist_tokens=_PERSIST_TOKENS,
-            message_budget_tokens=_MESSAGE_BUDGET_TOKENS,
-            used_message_tokens=0,
         )
     assert "tool-results" in out.content, "persisted result lost its path back"
     assert len(out.content) < len(body)

@@ -681,9 +681,9 @@ async def test_model_swap_with_explicit_budget_lands_in_one_step() -> None:
     """Combined ``model_id`` + ``max_request_tokens`` must succeed.
 
     The patch lands both the swap and the explicit window in a single
-    call: ``swap_model`` rescales the budget to the new model first, then
-    the explicit cap is clamped on top, so no intermediate state exceeds
-    the new model's window.
+    call: the default budget resolves against the new model first, then
+    the explicit cap is applied, so no intermediate state exceeds the
+    new model's window.
     """
     agent = _make_agent(
         spec=ModelRecipe(provider="StubP", auth="env", model_id="big", account=""),

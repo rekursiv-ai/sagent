@@ -168,7 +168,7 @@ def _reject_budget_over_model(budget: AgentSettings, model: Model) -> None:
         ("max_request_tokens", budget.max_request_tokens, limits.max_request_tokens),
         ("max_response_tokens", budget.max_response_tokens, limits.max_response_tokens),
     ):
-        if ceiling > 0 and requested > ceiling:
+        if ceiling > 0 and requested is not None and requested > ceiling:
             raise ValueError(f"budget {name}={requested:,} exceeds model's {ceiling:,}")
 
 
@@ -226,7 +226,7 @@ class Agent:
           on overflow recovery.
       session_dir: Directory for session persistence and pre-compact
           transcripts; ``None`` disables both.
-      budget: Context budget; defaults to ``AgentSettings.from_limits``.
+      budget: Explicit context and execution choices; omitted values derive live from the model.
       max_attempts: Retry attempts inside ``send_with_retry``.
       name: Human-readable agent label.
       description: Agent description for parent agents and the UI.
@@ -292,7 +292,11 @@ class Agent:
         self._tools_list: list[Tool] = list(tools or [])
         self.compactor = compactor
         if budget is None:
-            budget = AgentSettings.from_limits(model.limits)
+            budget = AgentSettings(
+                max_attempts=max_attempts,
+                max_tool_call_rounds=max_tool_call_rounds,
+                max_budget_usd=max_budget_usd,
+            )
         # An explicit budget goes through the same ceiling check the
         # setters apply. Without it, construction was the one way past
         # them: ``AgentSettings`` validates only non-negativity, so a
@@ -300,11 +304,8 @@ class Agent:
         # on the first request, where the provider rejects it.
         _reject_budget_over_model(budget, model)
         self._budget = budget
-        self._tool_results = ToolResultPolicy.from_settings(budget)
-        self.max_attempts = max_attempts
-        self.max_tool_call_rounds = max_tool_call_rounds
+        self._tool_results_override: ToolResultPolicy | None = None
         self.persistent_retry = persistent_retry
-        self._max_budget_usd = max_budget_usd
         self.last_compact_error: Exception | None = None
         # Cache-inclusive input-token count from the most recent response
         # (input + cache_creation + cache_read), used as the anchor of the
@@ -312,6 +313,7 @@ class Agent:
         # client estimate. ``0`` until the first response, when the gate falls
         # back to a client-side estimate of the next request.
         self._last_input_tokens: int = 0
+        self._last_measured_history: tuple[runtime.ModelContextEvent, ...] = ()
 
         self.cost_tracker = CostTracker()
         self.activity = ActivityTracker()
@@ -371,7 +373,6 @@ class Agent:
         self._tools_map: dict[str, Tool] = {}
         self._tools_version: int = 0
         self._live_tools_cache: tuple[int, list[Tool]] | None = None
-        self._persist_budget_cache: tuple[int, int] | None = None
         agent_tools: list[_AgentTool] = []
         for t in self._tools_list:
             self._tools_map[t.name] = t
@@ -418,13 +419,43 @@ class Agent:
 
     @property
     def budget(self) -> AgentSettings:
-        """Context budget; auto-derived from the model when unset."""
-        return self._budget
+        """Resolve explicit choices against the active model limits."""
+        limits = self.model.limits
+        request = self._budget.max_request_tokens
+        if request is None:
+            request = limits.max_request_tokens
+            if request <= 0:
+                raise ValueError(
+                    "model max_request_tokens is unknown; set an explicit AgentSettings cap",
+                )
+        elif limits.max_request_tokens > 0:
+            request = min(request, limits.max_request_tokens)
+        response = self._budget.max_response_tokens
+        if response is None:
+            response = limits.max_response_tokens
+            if response <= 0:
+                raise ValueError(
+                    "model max_response_tokens is unknown; set an explicit AgentSettings cap",
+                )
+        elif limits.max_response_tokens > 0:
+            response = min(response, limits.max_response_tokens)
+        buffer = self._budget.buffer_tokens
+        if buffer is None:
+            buffer = default_buffer_tokens(request)
+        return dataclasses.replace(
+            self._budget,
+            max_request_tokens=request,
+            max_response_tokens=response,
+            buffer_tokens=buffer,
+        )
 
     @property
     def tool_results(self) -> ToolResultPolicy:
-        """When a tool result is off-loaded to disk instead of kept inline."""
-        return self._tool_results
+        """Derive tool-result limits from the effective request window."""
+        override = self._tool_results_override
+        if override is not None:
+            return override
+        return ToolResultPolicy.from_settings(self.budget)
 
     @property
     def max_request_bytes(self) -> int:
@@ -441,7 +472,7 @@ class Agent:
         bounds from the persist threshold keeps a single result clear of
         both.
         """
-        return self._tool_results.persist_tokens
+        return self.tool_results.persist_tokens
 
     def approx_text_tokens(self, text: str) -> int:
         """Delegate to the active model's tokenizer.
@@ -462,46 +493,52 @@ class Agent:
     @property
     def max_request_tokens(self) -> int:
         """Active per-request input token budget."""
-        return self._budget.max_request_tokens
+        value = self.budget.max_request_tokens
+        if value is None:
+            raise ValueError("resolved request budget is unset")
+        return value
 
     @max_request_tokens.setter
     def max_request_tokens(self, value: int) -> None:
-        """Set the per-request input token budget; bounded by the model.
+        """Set the per-request input token budget; bounded by a known model cap.
 
         Args:
-          value: New input token budget; must not exceed the model's cap.
+          value: New input token budget; must not exceed a known model cap.
 
         Raises:
-          ValueError: If ``value`` exceeds the model's ``max_request_tokens``.
+          ValueError: If ``value`` exceeds a known ``max_request_tokens``.
 
         """
-        if value > self.model.limits.max_request_tokens:
+        ceiling = self.model.limits.max_request_tokens
+        if ceiling > 0 and value > ceiling:
             raise ValueError(
-                f"max_request_tokens={value:,} exceeds model's"
-                f" {self.model.limits.max_request_tokens:,}",
+                f"max_request_tokens={value:,} exceeds model's {ceiling:,}",
             )
         self._budget = dataclasses.replace(self._budget, max_request_tokens=value)
 
     @property
     def max_response_tokens(self) -> int:
         """Active per-request response token budget."""
-        return self._budget.max_response_tokens
+        value = self.budget.max_response_tokens
+        if value is None:
+            raise ValueError("resolved request budget is unset")
+        return value
 
     @max_response_tokens.setter
     def max_response_tokens(self, value: int) -> None:
-        """Set the per-request response token budget; bounded by the model.
+        """Set the response token budget; bounded by a known model cap.
 
         Args:
-          value: New response token budget; must not exceed the model's cap.
+          value: New response token budget; must not exceed a known model cap.
 
         Raises:
-          ValueError: If ``value`` exceeds the model's ``max_response_tokens``.
+          ValueError: If ``value`` exceeds a known ``max_response_tokens``.
 
         """
-        if value > self.model.limits.max_response_tokens:
+        ceiling = self.model.limits.max_response_tokens
+        if ceiling > 0 and value > ceiling:
             raise ValueError(
-                f"max_response_tokens={value:,} exceeds model's"
-                f" {self.model.limits.max_response_tokens:,}",
+                f"max_response_tokens={value:,} exceeds model's {ceiling:,}",
             )
         self._budget = dataclasses.replace(self._budget, max_response_tokens=value)
 
@@ -618,9 +655,31 @@ class Agent:
         return self._frozen_system
 
     @property
+    def max_attempts(self) -> int:
+        """Maximum retry attempts from the owned settings."""
+        return self._budget.max_attempts
+
+    @max_attempts.setter
+    def max_attempts(self, value: int) -> None:
+        self._budget = dataclasses.replace(self._budget, max_attempts=value)
+
+    @property
+    def max_tool_call_rounds(self) -> int | None:
+        """Maximum tool-call rounds from the owned settings."""
+        return self._budget.max_tool_call_rounds
+
+    @max_tool_call_rounds.setter
+    def max_tool_call_rounds(self, value: int | None) -> None:
+        self._budget = dataclasses.replace(self._budget, max_tool_call_rounds=value)
+
+    @property
     def max_budget_usd(self) -> float | None:
         """Maximum budget in USD, or ``None`` when uncapped."""
-        return self._max_budget_usd
+        return self._budget.max_budget_usd
+
+    @max_budget_usd.setter
+    def max_budget_usd(self, value: float | None) -> None:
+        self._budget = dataclasses.replace(self._budget, max_budget_usd=value)
 
     @property
     def total_tokens(self) -> TokenCount:
@@ -649,32 +708,6 @@ class Agent:
             )
         merged.update(self._bg)
         return merged
-
-    def persist_budget_used_tokens(self) -> int:
-        """Return live tool-result tokens that still occupy the persist budget.
-
-        Excludes error results -- ``_should_persist`` skips them, so they
-        should not inflate the budget that forces persist of unrelated
-        results.
-
-        Cached against ``runtime.context().version`` (monotonic tape
-        length); each new tape record invalidates the cache so the next
-        call rewalks the resolved history.
-
-        Returns:
-          tokens: Estimated live result tokens occupying the persist budget.
-
-        """
-        resolved = self.runtime.context()
-        cached = self._persist_budget_cache
-        if cached is not None and cached[0] == resolved.version:
-            return cached[1]
-        total = 0
-        for entry in resolved.messages:
-            if isinstance(entry, runtime.ToolResult) and not entry.is_error:
-                total += self.model.approx_text_tokens(entry.content)
-        self._persist_budget_cache = (resolved.version, total)
-        return total
 
     def publish(self, event: runtime.RuntimeEvent) -> None:
         """Forward an event to the runtime's observer list.
@@ -737,35 +770,11 @@ class Agent:
         if model is self.model:
             return
         old = self.model
-        request_window = _rescaled_window(
-            self._budget.max_request_tokens,
-            old_max=old.limits.max_request_tokens,
-            new_max=model.limits.max_request_tokens,
-        )
-        self._budget = dataclasses.replace(
-            self._budget,
-            max_request_tokens=request_window,
-            max_response_tokens=_rescaled_window(
-                self._budget.max_response_tokens,
-                old_max=old.limits.max_response_tokens,
-                new_max=model.limits.max_response_tokens,
-            ),
-            # The buffer is proportional to the window it protects, so it
-            # follows the window down. Left at the outgoing model's value a
-            # 1M -> 100k swap kept a 66,666-token buffer against a 100k
-            # window, which ``input_target`` deducts in full: 32% of the new
-            # model was reachable, and every gate reading that target
-            # compacted a session the model could hold three times over.
-            buffer_tokens=min(
-                self._budget.buffer_tokens,
-                default_buffer_tokens(request_window),
-            ),
-        )
-        # The settings object belongs to the model, so a swap that skipped
-        # this silently reset every knob the user had chosen.
         carried = old.settings
         self.model = model
         self.model_recipe = spec
+        self._last_input_tokens = 0
+        self._last_measured_history = ()
         self._agent_model.set_inner(model)
         self.runtime.model = self._agent_model
         model.settings.adopt(carried)
@@ -774,8 +783,8 @@ class Agent:
         _schedule_close(old)
         self._compact_if_history_exceeds_budget()
 
-    # Called after :meth:`swap_model` rescales the budget: if the resolved view's token
-    # estimate still crosses the compactor's own threshold, the next provider call would
+    # Called after :meth:`swap_model`: if the resolved view's token estimate crosses the
+    # compactor's own threshold, the next provider call would
     # overflow before the user even types. Push a ``Compact()`` so the agent layer's
     # bridge (which now wraps the producer in scrunch) can fit history before resuming.
     # No-op when no compactor is configured or history is small.
@@ -972,30 +981,12 @@ class Agent:
         """
         return self._build_system()
 
-    # Publishes ``BudgetReset`` when the prior budget couldn't fit the new model -- the
-    # reset is destructive of any ``AgentSettings`` customisation, so renderers surface
-    # a notification.
     def _apply_model_change(
         self,
         model: Model,
         spec: ModelRecipe,
     ) -> None:
-        """Apply a high-level model change, resetting stale derived budgets."""
-        if (
-            self._budget.max_request_tokens > model.limits.max_request_tokens
-            or self._budget.max_response_tokens > model.limits.max_response_tokens
-        ):
-            prior = self._budget
-            self._budget = AgentSettings.from_limits(model.limits)
-            self.runtime.publish(
-                runtime.BudgetReset(
-                    model_id=model.tagged_model_id,
-                    prior_max_request_tokens=prior.max_request_tokens,
-                    prior_max_response_tokens=prior.max_response_tokens,
-                    new_max_request_tokens=self._budget.max_request_tokens,
-                    new_max_response_tokens=self._budget.max_response_tokens,
-                ),
-            )
+        """Apply a high-level model change."""
         self.swap_model(model, spec=spec)
 
     def resume(
@@ -1175,6 +1166,8 @@ class Agent:
         synchronously after ``await``.
         """
         self.tool_state.reset_tool_recall()
+        self._last_input_tokens = 0
+        self._last_measured_history = ()
         self._cancel_all_background()
         await self._await_event(
             runtime.Clear(),
@@ -1613,13 +1606,14 @@ class Agent:
             + response.tokens.cache_write
             + response.tokens.cache_read
         )
+        self._last_measured_history = tuple(self.runtime.context().messages)
         if (
-            self._max_budget_usd is not None
-            and self._own_spend.total >= self._max_budget_usd
+            self.max_budget_usd is not None
+            and self._own_spend.total >= self.max_budget_usd
         ):
             raise BudgetExhaustedError(
                 total_cost_usd=self._own_spend.total,
-                max_budget_usd=self._max_budget_usd,
+                max_budget_usd=self.max_budget_usd,
             )
         self._surface_usage_warning()
 
@@ -1790,6 +1784,8 @@ class Agent:
     def _track_compaction(self, event: runtime.RuntimeEvent) -> None:
         """Update compaction state after a barrier lands."""
         if isinstance(event, runtime.CompactComplete) and event.records:
+            self._last_input_tokens = 0
+            self._last_measured_history = ()
             self.tool_state.reset_tool_recall()
             self.compaction_state.compact_count += 1
             self.compaction_state.compact_failures = 0
@@ -2075,10 +2071,19 @@ class Agent:
         model: Model,
     ) -> int:
         """Estimate tokens of entries appended after the last model response."""
-        last_assistant = _last_assistant_index(history)
-        if last_assistant is None:
-            return 0
-        since = history[last_assistant + 1 :]
+        anchor = self._last_measured_history
+        if (
+            not anchor
+            or len(history) < len(anchor)
+            or tuple(history[: len(anchor)]) != anchor
+        ):
+            return model.approx_request_tokens(
+                materialize_request(
+                    ModelRequest(messages=list(history)),
+                    tool_result_budget_tokens=self.tool_results.message_budget_tokens,
+                ),
+            )
+        since = history[len(anchor) :]
         if not since:
             return 0
         return model.approx_request_tokens(
@@ -2150,6 +2155,8 @@ class Agent:
             self.compaction_state.compact_failures = 0
             return True
         tape_len = len(self.runtime.tape)
+        tape_snapshot = tuple(self.runtime.tape)
+        context_snapshot = self.runtime.context().messages
         # Mirror the inbox-arm handler at ``runtime.py: case Compact():``:
         # ``append_history`` for each lifecycle marker so resume / session
         # replay see the same CompactStarted / CompactComplete /
@@ -2161,22 +2168,18 @@ class Agent:
         self.publish(started)
         try:
             override = await self._agent_compactor.compact(
-                self.runtime.tape,
-                self.runtime.context().messages,
+                tape_snapshot,
+                context_snapshot,
                 self._agent_model,
                 self.runtime.mint_ref,
                 custom_instructions=None,
             )
-            # Adoption is inside the guarded region because it VALIDATES.
-            # ``widen_barrier_mask`` grows the producer's mask to every tape
-            # ref, so it can newly absorb an alive splice the summary never
-            # carried, and ``adopt_record`` rejects that. Outside the try, the
-            # rejection escaped the method entirely: no ``CompactFailed``, no
-            # ``last_compact_error``, and overflow recovery's ``assert`` on
-            # that field fired instead of the real error.
+            # Adoption validates splice carry-forward and must report failures
+            # through the normal CompactFailed path. Widen only over the
+            # captured tape; later arrivals were absent from the summary.
             override = widen_barrier_mask(
                 override,
-                self.runtime.tape,
+                tape_snapshot,
             )
             # A summary replaces the region it masks, so it is expected to be
             # shorter; the payload-carry check governs merging producers.
@@ -2201,6 +2204,8 @@ class Agent:
         self.runtime.append_history(complete)
         self.publish(complete)
         self.last_compact_error = None
+        self._last_input_tokens = 0
+        self._last_measured_history = ()
         self.compaction_state.compact_failures = 0
         return True
 
@@ -2364,17 +2369,6 @@ def _compact_failure_error(last_err: Exception, model: Model) -> Exception:
     if model.is_context_overflow(last_err):
         return _context_overflow_error()
     return last_err
-
-
-# The budget follows the model rather than persisting across swaps: a budget left at the
-# old model's ceiling (the "use the whole window" default) snaps to the new ceiling,
-# while an explicitly pinned smaller value is preserved and only clamped down when it
-# overflows the new model.
-def _rescaled_window(current: int, *, old_max: int, new_max: int) -> int:
-    """Rescale one budget window to a model swap."""
-    if current >= old_max:
-        return new_max
-    return min(current, new_max)
 
 
 # ``None`` kwargs inherit from ``spec``. The model-id branch implements the cross-
@@ -2550,10 +2544,9 @@ class _AgentModel:
         #
         # Measure the MATERIALIZED request (same artifact ``send_with_retry``
         # ships), so tool results elided by ``tool_result_budget_tokens`` are
-        # sized at their wire placeholder -- not their pre-elision length. This
-        # mirrors ``persist_budget_used_tokens``, which already
-        # materializes-then-measures, and keeps a single rule: byte accounting
-        # always runs over the materialized view. ``_wire_request_bytes`` counts
+        # sized at their wire placeholder -- not their pre-elision length.
+        # Byte accounting always runs over that materialized view.
+        # ``_wire_request_bytes`` counts
         # attachments and every text surface but omits tool-schema / JSON
         # framing, so it stays a conservative lower bound that never
         # false-rejects a request the provider would accept; a genuine miss
@@ -2848,8 +2841,6 @@ class _AgentTool:
             self._inner.name,
             session_dir=self._agent.session_dir,
             persist_tokens=self._agent.tool_results.persist_tokens,
-            message_budget_tokens=self._agent.tool_results.message_budget_tokens,
-            used_message_tokens=self._agent.persist_budget_used_tokens(),
         )
 
     def _inject_conditional_rules(
@@ -2901,8 +2892,6 @@ class _AgentTool:
                 self._inner.name,
                 session_dir=self._agent.session_dir,
                 persist_tokens=self._agent.tool_results.persist_tokens,
-                message_budget_tokens=self._agent.tool_results.message_budget_tokens,
-                used_message_tokens=self._agent.persist_budget_used_tokens(),
             )
         except asyncio.CancelledError:
             # Two cancellation paths, distinguished by registry membership

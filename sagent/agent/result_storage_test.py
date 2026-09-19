@@ -28,8 +28,8 @@ def test_empty_result_gets_completed_marker() -> None:
     assert out.content == "(Bash completed with no output)"
 
 
-def test_nonempty_error_result_skips_persist_and_marker() -> None:
-    """C9: error results with content pass through untouched (no persist)."""
+def test_small_error_result_stays_inline() -> None:
+    """A result stays inline when its persistence stub would be larger."""
     result = ToolResult(call_id="c1", content="boom", is_error=True)
     out = post_process_result(result, "Bash", session_dir=None, persist_tokens=10)
     assert out is result
@@ -81,9 +81,7 @@ def test_oversized_result_persists_to_disk(tmp_path: Path) -> None:
     assert on_disk.read_text() == big
 
 
-def test_aggregate_budget_persists_before_per_result_threshold(
-    tmp_path: Path,
-) -> None:
+def test_result_below_per_result_threshold_stays_inline(tmp_path: Path) -> None:
     body = "X" * 5_000  # ~1_250 tokens at the no-agent fallback ratio.
     result = ToolResult(call_id="call_budget", content=body)
     out = post_process_result(
@@ -91,11 +89,9 @@ def test_aggregate_budget_persists_before_per_result_threshold(
         "Bash",
         session_dir=tmp_path,
         persist_tokens=10_000,
-        message_budget_tokens=1_500,
-        used_message_tokens=1_000,
     )
-    assert PERSISTED_TAG in out.content
-    assert (tmp_path / "tool-results" / "call_budget.txt").read_text() == body
+    assert out.content == body
+    assert not (tmp_path / "tool-results" / "call_budget.txt").exists()
 
 
 def test_no_tool_is_exempt_from_persist(tmp_path: Path) -> None:

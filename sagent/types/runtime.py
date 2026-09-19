@@ -82,7 +82,6 @@ __all__ = [
     "AgentSendMessage",
     "AgentSendQueuedMessage",
     "AssistantMessage",
-    "BudgetReset",
     "BytesMessage",
     "ChildDoneEvent",
     "ChildEvent",
@@ -633,26 +632,6 @@ class ModelSwitchRejected:
     """Human-readable switch label, when available."""
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class BudgetReset:
-    """Agent ``AgentSettings`` was reset to fit the new model."""
-
-    model_id: str
-    """Provider-specific model id the budget was sized for."""
-
-    prior_max_request_tokens: int
-    """Pre-reset input cap."""
-
-    prior_max_response_tokens: int
-    """Pre-reset output cap."""
-
-    new_max_request_tokens: int
-    """Post-reset input cap."""
-
-    new_max_response_tokens: int
-    """Post-reset output cap."""
-
-
 @dataclass(
     frozen=True,
     slots=True,
@@ -1023,7 +1002,6 @@ type RuntimeEvent = (
     | AgentSendDeferredMessage
     | ModelSwitch
     | ModelSwitchRejected
-    | BudgetReset
     | ModelCallStarted
     | ModelResponsePartial
     | ModelResponseThinking
