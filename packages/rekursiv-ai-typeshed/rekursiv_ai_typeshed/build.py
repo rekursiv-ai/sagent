@@ -1,8 +1,8 @@
 """Build the patched typeshed trees from the installed ``ty`` and ``basedpyright``.
 
-The only change to the standard-library stubs is ``typeshed.patch`` beside this
-module (``int``/``float`` ``__pow__`` return ``float``, not ``Any``). Neither
-checker can take that as a partial override -- basedpyright drops the ``BuiltIn``
+``typeshed.patch`` beside this module fixes numeric power return types and
+annotates email content-manager methods. Neither
+checker can take the builtins patch as a partial override -- basedpyright drops the ``BuiltIn``
 flag unless the file sits at ``stdlib/builtins.pyi`` inside a full typeshed tree,
 and ty binds ``builtins`` to its bundled stdlib -- so the patch is applied to a
 COPY of the bundle and both checkers are pointed at the copy.

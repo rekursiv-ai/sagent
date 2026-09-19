@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Final
 
+import ast
 import re
 import sys
 import tempfile
@@ -22,8 +23,9 @@ _PATCH = _CWD / "rekursiv_ai_typeshed" / "typeshed.patch"
 _POW_ANY = re.compile(r"def __r?pow__\(.*\) -> Any:")
 
 
-def test_patch_is_only_the_pow_lines() -> None:
-    hunks = [line for line in _PATCH.read_text().splitlines() if line[:1] in "+-"]
+def test_builtins_patch_is_only_the_pow_lines() -> None:
+    builtins_patch = _PATCH.read_text().split("--- a/stdlib/email/", 1)[0]
+    hunks = [line for line in builtins_patch.splitlines() if line[:1] in "+-"]
     changed = [h for h in hunks if not h.startswith(("---", "+++"))]
     removed = [h[1:] for h in changed if h.startswith("-")]
     added = [h[1:] for h in changed if h.startswith("+")]
@@ -44,6 +46,49 @@ def test_installed_numeric_pow_returns_float(checker: str) -> None:
         if klass in {"int", "float"} and _POW_ANY.search(line):
             offenders.append(f"{klass}: {line.strip()}")
     assert not offenders, offenders
+
+
+@pytest.mark.parametrize("checker", ["ty", "basedpyright"])
+@pytest.mark.parametrize(
+    ("module", "class_name", "methods"),
+    [
+        (
+            "message",
+            "MIMEPart",
+            {
+                "get_content",
+                "set_content",
+                "add_related",
+                "add_alternative",
+                "add_attachment",
+            },
+        ),
+        ("contentmanager", "ContentManager", {"get_content", "set_content"}),
+    ],
+)
+def test_email_content_methods_are_annotated(
+    checker: str,
+    module: str,
+    class_name: str,
+    methods: set[str],
+) -> None:
+    path = _INSTALLED / checker / "stdlib" / "email" / f"{module}.pyi"
+    tree = ast.parse(path.read_text())
+    klass = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == class_name
+    )
+    found: set[str] = set()
+    for node in klass.body:
+        if not isinstance(node, ast.FunctionDef) or node.name not in methods:
+            continue
+        found.add(node.name)
+        assert node.returns is not None, node.name
+        for argument in ast.walk(node.args):
+            if isinstance(argument, ast.arg) and argument.arg != "self":
+                assert argument.annotation is not None, (node.name, argument.arg)
+    assert found == methods
 
 
 def test_installed_tree_matches_the_installed_checkers() -> None:
