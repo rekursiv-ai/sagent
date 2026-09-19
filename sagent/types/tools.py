@@ -29,10 +29,10 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ToolResultPolicy:
-    """When a tool result is off-loaded to disk instead of kept in history.
+    """Bound stored and provider-visible tool results.
 
-    Both thresholds are read against a running per-request total, so a
-    result's fate depends on what ran before it in the same turn.
+    ``persist_tokens`` bounds each stored result independently.
+    ``message_budget_tokens`` bounds their aggregate request materialization.
     """
 
     persist_tokens: int = 0
@@ -60,8 +60,15 @@ class ToolResultPolicy:
         Returns:
           policy: Off-load thresholds proportional to ``max_request_tokens``.
 
+        Raises:
+          ValueError: If ``settings`` has not resolved its input window.
+
         """
         window = settings.max_request_tokens
+        if window is None:
+            raise ValueError(
+                "ToolResultPolicy.from_settings requires resolved AgentSettings",
+            )
         return cls(
             persist_tokens=window // 4,
             message_budget_tokens=window // 2,

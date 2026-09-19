@@ -417,6 +417,129 @@ def test_agent_budget_defaults_from_model() -> None:
     assert a.budget.max_request_tokens == 100_000
 
 
+def test_unknown_model_limits_require_explicit_agent_caps() -> None:
+    agent = Agent(model=StubModel(max_request_tokens=0, max_response_tokens=0))
+
+    with pytest.raises(ValueError, match="max_request_tokens is unknown"):
+        _ = agent.budget
+
+    agent = Agent(
+        model=StubModel(max_request_tokens=0, max_response_tokens=0),
+        budget=AgentSettings(max_request_tokens=80_000),
+    )
+    with pytest.raises(ValueError, match="max_response_tokens is unknown"):
+        _ = agent.budget
+
+
+def test_explicit_agent_caps_resolve_unknown_model_limits() -> None:
+    agent = Agent(
+        model=StubModel(max_request_tokens=0, max_response_tokens=0),
+        budget=AgentSettings(
+            max_request_tokens=80_000,
+            max_response_tokens=4_000,
+        ),
+    )
+
+    assert agent.budget.max_request_tokens == 80_000
+    assert agent.budget.max_response_tokens == 4_000
+    assert agent.tool_results == ToolResultPolicy(
+        persist_tokens=20_000,
+        message_budget_tokens=40_000,
+    )
+
+
+def test_explicit_ceiling_equal_initial_remains_on_model_switch() -> None:
+    small = StubModel(max_request_tokens=100_000)
+    large = StubModel(max_request_tokens=1_000_000)
+    agent = Agent(
+        model=small,
+        budget=AgentSettings(max_request_tokens=100_000),
+    )
+    agent.swap_model(large)
+    assert agent.budget.max_request_tokens == 100_000
+
+
+@pytest.mark.asyncio
+async def test_measurement_invalidates_across_swap_clear_and_compaction() -> None:
+    agent = Agent(model=StubModel(), compactor=SummaryCompactor())
+    agent._last_input_tokens = 123
+    agent.swap_model(StubModel(model_id="next"))
+    assert agent._last_input_tokens == 0
+    agent._last_input_tokens = 456
+    driver = asyncio.create_task(agent.runtime.run_forever())
+    clear_task = asyncio.create_task(agent.clear())
+    await asyncio.sleep(0)
+    agent.inbox.push_back(UserMessage(text="resume"))
+    await clear_task
+    assert agent._last_input_tokens == 0
+    agent.inbox.push_back(Quit())
+    await driver
+    agent._last_input_tokens = 789
+    await agent.compact_now()
+    assert agent._last_input_tokens == 0
+
+
+def test_live_context_mutation_updates_budget_policy_without_swap() -> None:
+    capability = ModelCapability(
+        model_id="dynamic",
+        context=MappingProxyType(
+            {
+                "": ModelLimits(max_request_tokens=100_000, max_response_tokens=8_000),
+                "+1m": ModelLimits(
+                    max_request_tokens=1_000_000,
+                    max_response_tokens=8_000,
+                ),
+            },
+        ),
+    )
+    model = StubModel(chosen=ModelSettings(capability=capability))
+    agent = Agent(model=model)
+    model.settings.context = "+1m"
+    assert agent.budget.max_request_tokens == 1_000_000
+    assert agent.budget.max_response_tokens == 8_000
+    assert agent.budget.buffer_tokens == default_buffer_tokens(1_000_000)
+    assert agent.tool_results.persist_tokens == 250_000
+    model.settings.context = ""
+    assert agent.budget.max_request_tokens == 100_000
+    assert agent.budget.buffer_tokens == default_buffer_tokens(100_000)
+    assert agent.tool_results.persist_tokens == 25_000
+
+
+def test_explicit_buffer_equal_default_remains_explicit_on_switch() -> None:
+    small = StubModel(max_request_tokens=100_000)
+    large = StubModel(max_request_tokens=1_000_000)
+    chosen = default_buffer_tokens(100_000)
+    agent = Agent(model=small, budget=AgentSettings(buffer_tokens=chosen))
+    agent.swap_model(large)
+    assert agent.budget.buffer_tokens == chosen
+
+
+def test_tool_policy_reads_switched_model_limits_live() -> None:
+    small = StubModel(max_request_tokens=100_000)
+    large = StubModel(max_request_tokens=1_000_000)
+    agent = Agent(model=small)
+    assert agent.tool_results.persist_tokens == 25_000
+    agent.swap_model(large)
+    assert agent.tool_results.persist_tokens == 250_000
+    agent.swap_model(small)
+    agent.swap_model(large)
+    assert agent.tool_results.message_budget_tokens == 500_000
+
+
+def test_token_delta_uses_measured_history_identity_not_last_assistant() -> None:
+    agent = Agent(model=StubModel())
+    measured = UserMessage(text="measured")
+    agent.runtime.append_history(measured)
+    agent._last_input_tokens = 100
+    agent._last_measured_history = (measured,)
+    synthetic = AssistantMessage(text="synthetic arrival")
+    history = [measured, synthetic, UserMessage(text="fresh")]
+    delta = agent._tokens_appended_since_last_response(history, agent.model)
+    assert delta == agent.model.approx_request_tokens(
+        ModelRequest(messages=[synthetic, history[-1]]),
+    )
+
+
 @pytest.mark.asyncio
 async def test_agent_tool_injects_conditional_agents_md_rule(tmp_path: Path) -> None:
     rules = tmp_path / ".sagent" / "rules"
@@ -442,7 +565,7 @@ async def test_agent_model_stream_materializes_request() -> None:
     call = ToolCall(id="call_1", name="Bash", args={})
     model = StubModel()
     agent = Agent(model=model)
-    agent._tool_results = ToolResultPolicy(message_budget_tokens=10)
+    agent._tool_results_override = ToolResultPolicy(message_budget_tokens=10)
 
     agent.runtime.append_history(UserMessage(text="start"))
     agent.runtime.append_history(AssistantMessage(tool_calls=(call,)))
@@ -459,7 +582,7 @@ async def test_agent_model_stream_materializes_request() -> None:
 def test_agent_budget_override_respected() -> None:
     b = AgentSettings.from_limits(StubModel().limits)
     a = _build_agent(budget=b)
-    assert a.budget is b
+    assert a.budget == b
 
 
 def test_agent_like_protocol_exposes_kill_all_tools() -> None:
@@ -475,34 +598,6 @@ def test_agent_like_protocol_exposes_kill_all_tools() -> None:
     # The Protocol method is present on the structural type; callers
     # depend on this attribute being typed.
     assert callable(via_protocol.kill_all_tools)
-
-
-def test_persist_budget_used_tokens_excludes_error_results() -> None:
-    """Error results don't inflate the persist budget.
-
-    ``_should_persist`` skips them, so counting them here would force
-    unrelated results to disk early. No tool is exempt any more -- Read's
-    exemption is what let an 11.1M-character result reach the wire in
-    session ``190b6baec7ed`` -- so every non-error result counts.
-    """
-    a = _build_agent()
-    read_call = ToolCall(id="read-1", name="Read", args={})
-    bash_call = ToolCall(id="bash-1", name="Bash", args={})
-    err_call = ToolCall(id="bash-err", name="Bash", args={})
-    a.runtime.append_history(UserMessage(text="go"))
-    a.runtime.append_history(
-        AssistantMessage(
-            tool_calls=(read_call, bash_call, err_call),
-        ),
-    )
-    a.runtime.append_history(ToolResult(call_id="read-1", content="r" * 200))
-    a.runtime.append_history(ToolResult(call_id="bash-1", content="b" * 50))
-    a.runtime.append_history(
-        ToolResult(call_id="bash-err", content="e" * 30, is_error=True),
-    )
-    # Both non-error results count (200 + 50 chars at 4 chars/token);
-    # only the error result is excluded.
-    assert a.persist_budget_used_tokens() == (200 + 50) // 4
 
 
 def test_agent_register_and_cancel_background() -> None:
@@ -1323,7 +1418,7 @@ async def test_agent_tool_persists_with_runtime_call_id(tmp_path: Path) -> None:
     )
     tool = StubTool(response="X" * 5_000)
     a = _build_agent(model=model, tools=[tool], session_dir=tmp_path)
-    a._tool_results = ToolResultPolicy(persist_tokens=1_000)
+    a._tool_results_override = ToolResultPolicy(persist_tokens=1_000)
 
     async for _ in a.run(UserMessage(text="hi")):
         pass
@@ -1975,14 +2070,14 @@ def test_swap_model_rescales_buffer_to_the_new_window() -> None:
         tools=[],
         compactor=gate,
     )
-    assert a.budget.buffer_tokens == default_buffer_tokens(1_000_000)
+    assert (a.budget.buffer_tokens or 0) == default_buffer_tokens(1_000_000)
 
     a.swap_model(StubModel(model_id="small", max_request_tokens=100_000))
 
-    assert a.budget.buffer_tokens <= default_buffer_tokens(100_000)
+    assert (a.budget.buffer_tokens or 0) <= default_buffer_tokens(100_000)
     assert gate.largest_context(a.budget) > 100_000 * 0.85, (
         f"largest_context {gate.largest_context(a.budget):,} leaves too little"
-        f" of the 100k window; buffer is {a.budget.buffer_tokens:,}"
+        f" of the 100k window; buffer is {(a.budget.buffer_tokens or 0):,}"
     )
 
 
@@ -3413,6 +3508,73 @@ async def test_compact_now_replaces_history_in_place() -> None:
 
 
 @pytest.mark.asyncio
+async def test_compact_now_preserves_arrivals_after_its_snapshot() -> None:
+    compact_started = asyncio.Event()
+    release_compact = asyncio.Event()
+
+    @dataclass(slots=True, kw_only=True)
+    class _BlockingCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
+        def should_compact(
+            self,
+            current_tokens: int,
+            largest_context: int,
+            system_tokens: int = 0,
+        ) -> bool:
+            del current_tokens, largest_context, system_tokens
+            return False
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[ModelContextEvent],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            compact_started.set()
+            await release_compact.wait()
+            return _summary_override(
+                [UserMessage(text="[summary]")],
+                mint_ref,
+                tape=tape,
+            )
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[ModelContextEvent],
+            tools: object,
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextSplice, ...]:
+            del tape, context, tools, mint_ref
+            return ()
+
+    agent = Agent(model=StubModel(), compactor=_BlockingCompactor())
+    agent.runtime.append_history(UserMessage(text="old"))
+    compact = asyncio.create_task(agent.compact_now())
+    await asyncio.wait_for(compact_started.wait(), timeout=1.0)
+    agent.runtime.append_history(UserMessage(text="new"))
+    release_compact.set()
+
+    assert await compact
+    texts = [
+        entry.text
+        for entry in agent.runtime.context().messages
+        if isinstance(entry, UserMessage)
+    ]
+    assert texts.count("[summary]") == 1
+    assert texts.count("new") == 1
+
+
+@pytest.mark.asyncio
 async def test_compact_now_survives_a_tape_carrying_an_alive_coalesce() -> None:
     """Compaction must not die on a tape that holds an alive coalesce splice.
 
@@ -4674,7 +4836,7 @@ async def test_agent_compactor_scrunches_when_inner_output_still_oversized() -> 
     target = (
         a.model.limits.max_request_tokens
         - a.max_response_tokens
-        - a.budget.buffer_tokens
+        - (a.budget.buffer_tokens or 0)
     )
     assert visible_chars // 4 <= target, (
         f"post-scrunch view ({visible_chars // 4} tok) still exceeds target {target}"
@@ -4967,7 +5129,9 @@ async def test_agent_compactor_scrunch_uses_agent_budget_not_model_cap() -> None
         await a.compact_now()
 
     assert seen_targets, "scrunch was never invoked"
-    expected = a.max_request_tokens - a.max_response_tokens - a.budget.buffer_tokens
+    expected = (
+        a.max_request_tokens - a.max_response_tokens - (a.budget.buffer_tokens or 0)
+    )
     assert seen_targets[0] == expected, (
         f"scrunch target {seen_targets[0]} != agent budget {expected}"
         f" (model cap is {a.model.limits.max_request_tokens})"
@@ -5073,7 +5237,7 @@ async def test_agent_compactor_scrunch_target_subtracts_system_tool_overhead() -
 
     assert seen_targets, "scrunch was never invoked"
     budget_target = (
-        a.max_request_tokens - a.max_response_tokens - a.budget.buffer_tokens
+        a.max_request_tokens - a.max_response_tokens - (a.budget.buffer_tokens or 0)
     )
     system_overhead = a.model.approx_text_tokens(system)  # 200.
     # The messages-only scrunch target must reserve the system overhead.
@@ -6613,9 +6777,8 @@ async def test_pre_send_guard_measures_materialized_not_raw_history() -> None:
     tool-result budget (truncated to a resumable head, or elided outright when
     even that will not fit) before the request ships. Sizing raw history counts
     the un-shed bytes and false-rejects a request the provider would happily
-    accept. The guard must measure the same artifact that ``send_with_retry``
-    sends (mirrors ``persist_budget_used_tokens``, which already
-    materializes-then-measures).
+    accept. The guard must measure the same materialized artifact that
+    ``send_with_retry`` sends.
     """
 
     @dataclass(slots=True, kw_only=True)
@@ -6639,7 +6802,7 @@ async def test_pre_send_guard_measures_materialized_not_raw_history() -> None:
     # message_budget_tokens=1000 -> the 5 MB historical tool result elides to the
     # short placeholder; the materialized body is tiny and well under 1 MB.
     a = Agent(model=model, tools=[], compactor=None)
-    a._tool_results = ToolResultPolicy(message_budget_tokens=1_000)
+    a._tool_results_override = ToolResultPolicy(message_budget_tokens=1_000)
     # A CLOSED tool pair in HISTORY (not this turn's input): user asks, model
     # calls a tool, a 5 MB tool result returns, then a fresh user turn.
     a.runtime.append_history(UserMessage(text="hi"))
@@ -7719,7 +7882,7 @@ async def test_agent_compactor_receives_canonical_context() -> None:
 
     call = ToolCall(id="call_1", name="Bash", args={})
     a = Agent(model=StubModel(), compactor=_RecordingCompactor())
-    a._tool_results = ToolResultPolicy(message_budget_tokens=10)
+    a._tool_results_override = ToolResultPolicy(message_budget_tokens=10)
     a.runtime.append_history(UserMessage(text="start"))
     a.runtime.append_history(AssistantMessage(tool_calls=(call,)))
     a.runtime.append_history(ToolResult(call_id="call_1", content="x" * 1_000))

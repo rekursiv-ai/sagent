@@ -43,6 +43,7 @@ def test_from_limits_handles_a_small_window() -> None:
 def test_from_limits_caps_the_buffer_at_half_the_window() -> None:
     """The buffer never exceeds half the window even for tiny models."""
     settings = AgentSettings.from_limits(_limits(request=4_096))
+    assert settings.buffer_tokens is not None
     assert settings.buffer_tokens <= 4_096 // 2
 
 

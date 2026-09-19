@@ -28,7 +28,6 @@ from sagent.types.runtime import (
     AgentSendMessage,
     AgentSendQueuedMessage,
     AssistantMessage,
-    BudgetReset,
     ChildDoneEvent,
     ChildEvent,
     CompactComplete,
@@ -136,25 +135,6 @@ def test_model_switch_rejected_emits_error_without_halt() -> None:
     obs(ModelSwitchRejected(exception=ValueError("too small")))
     assert p.tool_errors == ["ValueError: too small"]
     assert p.halts == []
-
-
-def test_budget_reset_emits_notification_line() -> None:
-    """``BudgetReset`` surfaces as a ``[/model] budget reset ...`` line."""
-    p = RecordingPrinter()
-    obs = make_render_observer(p)
-    obs(
-        BudgetReset(
-            model_id="claude-sonnet-4-6",
-            prior_max_request_tokens=1_000_000,
-            prior_max_response_tokens=32_000,
-            new_max_request_tokens=200_000,
-            new_max_response_tokens=16_000,
-        ),
-    )
-    assert len(p.lines) == 1
-    assert "claude-sonnet-4-6" in p.lines[0]
-    assert "1,000,000" in p.lines[0]
-    assert "200,000" in p.lines[0]
 
 
 def test_compact_started_emits_dim_line() -> None:

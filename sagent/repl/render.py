@@ -40,7 +40,6 @@ from sagent.types.runtime import (
     AgentSendMessage,
     AgentSendQueuedMessage,
     AssistantMessage,
-    BudgetReset,
     ChildDoneEvent,
     ChildEvent,
     CompactComplete,
@@ -668,17 +667,6 @@ class RenderObserver:
             case ModelSwitchRejected(exception=exc):
                 self._flush_stream()
                 self._printer.write_tool_error(error_text(exc))
-            case BudgetReset(
-                model_id=model_id,
-                prior_max_request_tokens=prior_in,
-                new_max_request_tokens=new_in,
-            ):
-                self._flush_stream()
-                self._printer.write_line(
-                    f"[/model] budget reset to {model_id} defaults "
-                    f"(max_request_tokens {prior_in:,} -> {new_in:,}); "
-                    f"re-apply customised budget if needed.",
-                )
             case ChildEvent(label=label, inner=inner):
                 self._consume_child(label, inner)
             case ChildDoneEvent(label=label):

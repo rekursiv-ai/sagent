@@ -1856,6 +1856,68 @@ async def test_compact_rewrites_history() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_compact_snapshot_preserves_coalesced_arrivals_once() -> None:
+    """Input arriving during compaction survives snapshot replacement once."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingCompactor:
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[ModelContextEvent],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, model, custom_instructions
+            entered.set()
+            await release.wait()
+            return _summary_override(
+                [UserMessage(text="summary")],
+                mint_ref,
+                tape=tape,
+            )
+
+    agent, _ = make_agent([AssistantMessage(text="old")])
+    agent.append_history(UserMessage(text="original"))
+    tail_ref = agent.append_history(AssistantMessage(text="old answer"))
+    agent.append_splice(
+        insert_after=tail_ref,
+        payload=(AssistantMessage(text="spliced tail"),),
+        strategy="test_tail_splice",
+    )
+    agent.compactor = BlockingCompactor()
+    driver = asyncio.create_task(agent.run_forever())
+    agent.inbox.push_back(Compact())
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    agent.inbox.push_back(UserMessage(text="new one"))
+    agent.inbox.push_back(UserMessage(text="new two"))
+    for _ in range(100):
+        if "new one" in "\n".join(
+            entry.text
+            for entry in agent.context().messages
+            if isinstance(entry, UserMessage)
+        ):
+            break
+        await asyncio.sleep(0)
+    else:
+        raise AssertionError("arrivals were not committed before compactor release")
+    release.set()
+    await asyncio.sleep(0.05)
+    agent.inbox.push_back(Quit())
+    await asyncio.wait_for(driver, timeout=2)
+    texts = [
+        entry.text
+        for entry in agent.context().messages
+        if isinstance(entry, UserMessage)
+    ]
+    assert sum(text.count("new one") for text in texts) == 1
+    assert sum(text.count("new two") for text in texts) == 1
+    assert any("summary" in text for text in texts)
+
+
 def test_rescue_declares_that_it_replaces_what_it_sanitizes() -> None:
     """Rescue drops what cannot be made wire-valid, so it must say so.
 

@@ -64,8 +64,15 @@ class ReattachPolicy:
         Returns:
           policy: Re-attach caps proportional to ``max_request_tokens``.
 
+        Raises:
+          ValueError: If ``settings`` has not resolved its input window.
+
         """
         window = settings.max_request_tokens
+        if window is None:
+            raise ValueError(
+                "ReattachPolicy.from_settings requires resolved AgentSettings",
+            )
         return cls(
             count=5,
             max_tokens=max(window // 40, 2_000),

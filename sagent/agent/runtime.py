@@ -3119,10 +3119,12 @@ class AgentRuntime:
                 self.inbox.push_back(CompactComplete())
             return
         tape_len = len(self.tape)
+        tape_snapshot = tuple(self.tape)
+        context_snapshot = self.context().messages
         try:
             override = await self.compactor.compact(
-                self.tape,
-                self.context().messages,
+                tape_snapshot,
+                context_snapshot,
                 self.model,
                 self.mint_ref,
                 custom_instructions=args or None,
@@ -3138,7 +3140,7 @@ class AgentRuntime:
             return
         if generation != self._compact_generation:
             return
-        override = widen_barrier_mask(override, self.tape)
+        override = widen_barrier_mask(override, tape_snapshot)
         # Compaction replaces the region it masks with a summary; a summary is
         # supposed to be shorter than what it summarizes, so the payload-carry
         # check does not apply to it.
