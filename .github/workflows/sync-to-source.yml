@@ -118,7 +118,7 @@ jobs:
         if: steps.settings.outputs.enabled == 'true'
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         if: steps.settings.outputs.enabled == 'true'
 
       - name: Capture trusted import helper
@@ -127,6 +127,21 @@ jobs:
           install -m 600 \
             "target/$COPYBARISTA_TOOL_PROJECT_PATH/scripts/sync_import_change.py" \
             "$TRUSTED_IMPORT_SCRIPT"
+
+      # The public repo (this repo) at FULL history, before the baseline is
+      # resolved: the resolver walks it for the newest public commit the source
+      # already reflects, which includes source->public EXPORTS that leave no
+      # import-ledger entry in target. Without this a long export-only streak
+      # yields a months-stale baseline and the three-way merge manufactures
+      # conflicts (the 39-file incident). Shallow would see one commit and hide
+      # every export.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.settings.outputs.enabled == 'true'
+        with:
+          ref: main
+          path: public-history
+          persist-credentials: false
+          fetch-depth: 0
 
       - id: refs
         name: Resolve public refs
@@ -143,17 +158,20 @@ jobs:
             fi
           else
             # A push carries no explicit base, so read the baseline from the
-            # target's own import ledger: the public commit it last absorbed.
-            # github.event.before is only the pushed commit's PARENT, and the
-            # two diverge the moment an import fails or goes unlanded -- the
-            # parent marches on while the target stays pinned, so a
-            # parent-based baseline feeds the three-way merge a wrong common
-            # ancestor and manufactures conflicts. It survives only as the
-            # bootstrap for a target that has never landed an import.
+            # public commit the source already reflects -- by EITHER path it
+            # gets there. The target import ledger records landed imports; the
+            # public-history checkout additionally surfaces source->public
+            # exports, which leave NO ledger entry. github.event.before is only
+            # the pushed commit's PARENT, and it diverges from the true baseline
+            # the moment an import fails/goes unlanded OR an export lands with no
+            # import between -- so a parent-based baseline feeds the merge a
+            # wrong common ancestor and manufactures conflicts. It survives only
+            # as the bootstrap for a target that has synced nothing yet.
             base_ref="$(uv --quiet run --no-project python \
               "$TRUSTED_IMPORT_SCRIPT" \
               --print-synced-base \
               --target-dir target \
+              --public-dir public-history \
               --base-branch main \
               --sync-label "$COPYBARISTA_SYNC_LABEL" \
               --fallback-sha "${{ github.event.before }}")"
