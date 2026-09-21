@@ -1080,7 +1080,7 @@ wheels = [
 
 [[package]]
 name = "hatchling"
-version = "1.32.3"
+version = "1.32.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "packaging" },
@@ -1089,9 +1089,9 @@ dependencies = [
     { name = "tomlkit" },
     { name = "trove-classifiers" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/62/7f/b20bd29978bec1f2ddd3bbc1cdc5829bb2dd5c1476facd8a84bfe9934c5e/hatchling-1.32.3.tar.gz", hash = "sha256:acdd4436d84d829c6e7ae6df723241d8f0bca9c5bad5a6148bd41f2ea6b8a792", size = 58154, upload-time = "2026-09-17T20:05:11.675Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f6/97/b5312f01a8c6daf729a9d272dd442e0c546dbcc630495788786c4b567ed0/hatchling-1.32.4.tar.gz", hash = "sha256:c4468f73144c054d2aab4ef0f0378c43b9878bf07f8ffd6b79690e970d375f07", size = 58065, upload-time = "2026-09-20T22:48:45.398Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f6/89/268c7e4b2bcf2071047366c4c3b4b0e89f640e13ea7bfdaf1df6c40e5140/hatchling-1.32.3-py3-none-any.whl", hash = "sha256:d05b350af5d9aa5bf7b34b434a45a742b99e67d0b48ea67d240cfeab98e13945", size = 78895, upload-time = "2026-09-17T20:05:10.38Z" },
+    { url = "https://files.pythonhosted.org/packages/5f/80/91f51f439c05d4ec4623c22928ce16a938d6d793bf709477830823497859/hatchling-1.32.4-py3-none-any.whl", hash = "sha256:08ecf7548fb48205e7f213d70c71e67b8271b7242093dc3f1da578b42c734a2c", size = 78748, upload-time = "2026-09-20T22:48:44.19Z" },
 ]
 
 [[package]]
@@ -3469,7 +3469,7 @@ debug = [{ name = "ipython" }]
 dev = [
     { name = "basedpyright", specifier = ">=1.40.1" },
     { name = "codespell", specifier = ">=2.2.4" },
-    { name = "hatchling", specifier = ">=1.32.1" },
+    { name = "hatchling", specifier = ">=1.32.4" },
     { name = "hypothesis", specifier = ">=6.155.1" },
     { name = "ipython" },
     { name = "pre-commit", specifier = ">=4.6" },
@@ -3489,7 +3489,7 @@ lint = [
 pre-commit = [
     { name = "basedpyright", specifier = ">=1.40.1" },
     { name = "codespell", specifier = ">=2.2.4" },
-    { name = "hatchling", specifier = ">=1.32.1" },
+    { name = "hatchling", specifier = ">=1.32.4" },
     { name = "hypothesis", specifier = ">=6.155.1" },
     { name = "pre-commit", specifier = ">=4.6" },
     { name = "pytest", specifier = ">=7.0" },
@@ -3511,7 +3511,7 @@ test = [
 ]
 typecheck = [
     { name = "basedpyright", specifier = ">=1.40.1" },
-    { name = "hatchling", specifier = ">=1.32.1" },
+    { name = "hatchling", specifier = ">=1.32.4" },
     { name = "rekursiv-ai-typeshed", directory = "packages/rekursiv-ai-typeshed" },
     { name = "ty", specifier = ">=0.0.82" },
 ]

@@ -116,7 +116,7 @@ typecheck = [
     "basedpyright>=1.40.1",
     "ty>=0.0.82",
     "rekursiv-ai-typeshed",
-    "hatchling>=1.32.1",  # packages/rekursiv-ai-typeshed/rekursiv_ai_typeshed/hatch_build.py subscripts its two-parameter BuildHookInterface.
+    "hatchling>=1.32.4",  # packages/rekursiv-ai-typeshed/rekursiv_ai_typeshed/hatch_build.py subscripts its one-parameter BuildHookInterface.
 ]
 "pre-commit" = [
     "pre-commit>=4.6",
