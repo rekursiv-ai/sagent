@@ -11,7 +11,7 @@ authors = [
 dependencies = ["basedpyright>=1.40.1", "ty>=0.0.82"]
 
 [build-system]
-requires = ["hatchling>=1.32.1", "basedpyright>=1.40.1", "ty>=0.0.82"]
+requires = ["hatchling>=1.32.4", "basedpyright>=1.40.1", "ty>=0.0.82"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]

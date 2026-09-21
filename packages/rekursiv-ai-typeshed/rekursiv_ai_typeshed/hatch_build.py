@@ -15,7 +15,6 @@ import tempfile
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 from hatchling.builders.wheel import WheelBuilderConfig
-from hatchling.plugin.manager import PluginManager
 
 
 if TYPE_CHECKING:
@@ -25,7 +24,7 @@ if TYPE_CHECKING:
 _CWD: Final = Path(__file__).resolve().parent
 
 
-class TypeshedBuildHook(BuildHookInterface[WheelBuilderConfig, PluginManager]):
+class TypeshedBuildHook(BuildHookInterface[WheelBuilderConfig]):
     """Generate the tree into a temp dir and register it as ``shared-data``."""
 
     PLUGIN_NAME = "custom"
