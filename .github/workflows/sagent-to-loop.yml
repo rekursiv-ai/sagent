@@ -1,7 +1,7 @@
-# DO NOT EDIT -- generated from public-to-source.yml.tmpl and this
+# DO NOT EDIT -- generated from external-to-internal.yml.tmpl and this
 # package's sync config. Hand edits are overwritten; change
 # the template, the generator, or the sync config instead.
-name: "Public to Source Sagent"
+name: "Sagent to Loop"
 
 on:
   pull_request:
@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   import-change:
-    name: "Public to Source Sagent into source"
+    name: "Sagent to Loop into source"
     runs-on: ubuntu-latest
     # Bounded so a hung step fails in minutes, not at the 6h default.
     timeout-minutes: 45
@@ -61,7 +61,7 @@ jobs:
       - name: Set sync paths
         run: |
           echo "IMPORT_REPORT=$RUNNER_TEMP/copybarista-import-report.json" >> "$GITHUB_ENV"
-          echo "TRUSTED_IMPORT_SCRIPT=$RUNNER_TEMP/monorepo_import_change.py" >> "$GITHUB_ENV"
+          echo "TRUSTED_IMPORT_SCRIPT=$RUNNER_TEMP/sync_import_change.py" >> "$GITHUB_ENV"
 
       - id: settings
         name: Check settings
@@ -89,7 +89,7 @@ jobs:
             if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
               exit 1
             fi
-            echo "::notice::Public-to-source import is not configured; skipping."
+            echo "::notice::Import back to loop is not configured; skipping."
             echo "enabled=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -125,7 +125,7 @@ jobs:
         if: steps.settings.outputs.enabled == 'true'
         run: |
           install -m 600 \
-            "target/$COPYBARISTA_TOOL_PROJECT_PATH/scripts/monorepo_import_change.py" \
+            "target/$COPYBARISTA_TOOL_PROJECT_PATH/scripts/sync_import_change.py" \
             "$TRUSTED_IMPORT_SCRIPT"
 
       # The public repo (this repo) at FULL history, before the baseline is
