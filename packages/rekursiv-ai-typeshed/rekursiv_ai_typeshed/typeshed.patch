@@ -34,7 +34,10 @@
      def __trunc__(self) -> int:
 --- a/stdlib/email/message.pyi
 +++ b/stdlib/email/message.pyi
-@@ -557,11 +557,11 @@
+@@ -554,14 +554,14 @@
+         Return an empty iterator for a non-multipart.
+         """
+
 -    def get_content(self, *args, content_manager: ContentManager | None = None, **kw): ...
 -    def set_content(self, *args, content_manager: ContentManager | None = None, **kw) -> None: ...
 +    def get_content(self, *args: object, content_manager: ContentManager | None = None, **kw: object) -> object: ...
