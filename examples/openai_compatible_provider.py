@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from types import MappingProxyType
-from typing import ClassVar, cast
+from typing import cast
 
 import asyncio
 import os
 import sys
 
 from sagent.agent.agent import Agent
+from sagent.catalog import openai
 from sagent.providers.openai.compat import OpenAICompat
 from sagent.types.capability import ModelCapability, ModelLimits
 from sagent.types.cost import (
@@ -18,32 +19,33 @@ from sagent.types.cost import (
     PriceCatalogProduct,
     TokenPrice,
 )
+from sagent.types.providers import ModelCatalog
 from sagent.types.runtime import AssistantMessage, UserMessage
 
 
 class LocalOpenAI(OpenAICompat):
     """Provider for a chat-completions-compatible local server."""
 
-    DEFAULT_MODEL = os.environ.get("LOCAL_OPENAI_MODEL", "local-model")
-    DEFAULT_UTILITY_MODEL = DEFAULT_MODEL
     ENV_VAR = "LOCAL_OPENAI_API_KEY"
     BASE_URL = os.environ.get("LOCAL_OPENAI_BASE_URL", "http://localhost:8000/v1")
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = MappingProxyType(
-        {
-            DEFAULT_MODEL: ModelCapability(
-                model_id=DEFAULT_MODEL,
-                context=MappingProxyType(
-                    {
-                        "": ModelLimits(
-                            max_request_tokens=128_000,
-                            max_response_tokens=8_192,
-                        ),
-                    },
+
+    model_id = os.environ.get("LOCAL_OPENAI_MODEL", "local-model")
+    row = ModelCapability(
+        model_id=model_id,
+        context=MappingProxyType(
+            {
+                "": ModelLimits(
+                    max_request_tokens=128_000,
+                    max_response_tokens=8_192,
                 ),
-                # A local server bills nothing, but a missing row would raise.
-                prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
-            ),
-        },
+            },
+        ),
+        # A local server bills nothing, but a missing row would raise.
+        prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+    )
+    catalog = ModelCatalog(
+        rows=MappingProxyType({model_id: row, "default": row, "utility": row}),
+        transport=openai.compatible(),
     )
 
 

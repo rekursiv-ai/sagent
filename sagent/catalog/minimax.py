@@ -73,7 +73,14 @@ def models() -> Mapping[str, ModelCapability]:
             prices=_prices(request=1.5, response=1.5),
         ),
     )
-    return MappingProxyType({row.model_id: row for row in rows})
+    catalog = {row.model_id: row for row in rows}
+    return MappingProxyType(
+        {
+            "default": catalog["MiniMax-M2.7"],
+            "utility": catalog["MiniMax-Text-01"],
+            **catalog,
+        },
+    )
 
 
 def _limits(*, window: int, response: int) -> Mapping[ContextTag, ModelLimits]:

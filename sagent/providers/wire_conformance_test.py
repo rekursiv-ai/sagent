@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import replace
-from typing import TYPE_CHECKING, ClassVar, Protocol, get_args
+from typing import TYPE_CHECKING, Protocol, get_args
 
 import pytest
 
@@ -45,8 +45,8 @@ from sagent.types.capability import (
 )
 from sagent.types.model import ModelRequest
 from sagent.types.providers import (
+    ModelResolver,
     UnsupportedTagError,
-    resolve,
 )
 from sagent.types.runtime import UserMessage
 
@@ -54,22 +54,10 @@ from sagent.types.runtime import UserMessage
 if TYPE_CHECKING:
     from sagent.lib.custom_json import MutableJSON
     from sagent.types.model import Model
-    from sagent.types.providers import ModelRole
 
 
-class _CatalogProvider(Protocol):
-    """The catalog surface every provider in the roster exposes.
-
-    ``CAPABILITIES`` and ``TRANSPORT`` are ``ClassVar`` on the providers,
-    so they must be ``ClassVar`` here for the structural match to hold.
-    """
-
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]]
-    TRANSPORT: ClassVar[ModelCapability]
-
-    @property
-    def ROLES(self) -> Mapping[ModelRole, str]:  # noqa: N802 -- matches the provider class attribute.
-        ...
+class _ResolvedProvider(ModelResolver, Protocol):
+    """The model-construction surface every provider in the roster exposes."""
 
     def model(self, model_id: str | None = None) -> Model: ...
 
@@ -122,7 +110,7 @@ def _chat_thinking(model: Model, settings: ModelSettings) -> object:
 # wire body. Adding a provider without adding it here leaves its catalog
 # unverified, so the roster is asserted complete below.
 _WireBuilder = tuple[
-    Callable[[], "_CatalogProvider"],
+    Callable[[], "_ResolvedProvider"],
     Callable[["Model", ModelSettings], object],
 ]
 _WIRE_BUILDERS: Mapping[str, _WireBuilder] = {
@@ -140,7 +128,7 @@ def _rows() -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     for name, (make, _) in _WIRE_BUILDERS.items():
         provider = make()
-        out.extend((name, model_id) for model_id in provider.CAPABILITIES)
+        out.extend((name, model_id) for model_id in provider.catalog.model_ids())
     return out
 
 
@@ -243,14 +231,9 @@ def test_every_advertised_context_resolves(provider_name: str, model_id: str) ->
     """
     make, _ = _WIRE_BUILDERS[provider_name]
     provider = make()
-    caps = provider.CAPABILITIES
-    for context in caps[model_id].context:
-        _, settings = resolve(
-            model_id + context,
-            models=caps,
-            roles=provider.ROLES,
-            transport=provider.TRANSPORT,
-        )
+    capability, _ = provider.catalog.resolve(model_id)
+    for context in capability.context:
+        _, settings = provider.catalog.resolve(model_id + context)
         assert settings.context == context
         assert settings.limits.max_request_tokens > 0
 
@@ -260,17 +243,14 @@ def test_an_unoffered_context_is_rejected(provider_name: str, model_id: str) -> 
     """Serving the base window under a ``+1m`` id understates the budget 4x."""
     make, _ = _WIRE_BUILDERS[provider_name]
     provider = make()
-    caps = provider.CAPABILITIES
+    capability, _ = provider.catalog.resolve(model_id)
     for tag in get_args(ContextTag.__value__):
-        if not tag or tag in caps[model_id].context:
+        if not tag or tag in capability.context:
+            continue
+        if tag == "+1m" and capability.context[""].max_request_tokens >= 1_000_000:
             continue
         with pytest.raises(UnsupportedTagError):
-            resolve(
-                model_id + tag,
-                models=caps,
-                roles=provider.ROLES,
-                transport=provider.TRANSPORT,
-            )
+            provider.catalog.resolve(model_id + tag)
 
 
 @pytest.mark.parametrize(("provider_name", "model_id"), _ROWS, ids=str)
@@ -281,12 +261,7 @@ def test_every_priced_tier_survives_the_transport(
     """A tier the row prices but the transport withholds bills unreachably."""
     make, _ = _WIRE_BUILDERS[provider_name]
     provider = make()
-    capability, settings = resolve(
-        model_id,
-        models=provider.CAPABILITIES,
-        roles=provider.ROLES,
-        transport=provider.TRANSPORT,
-    )
+    capability, settings = provider.catalog.resolve(model_id)
     for product in capability.prices:
         # Construction validates, so an unreachable tier raises here.
         _ = replace(settings, service_tier=product.service_tier)

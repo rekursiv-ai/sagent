@@ -22,18 +22,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar, override
 
-from sagent.catalog import dashscope
+from sagent.catalog import dashscope, openai
 from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
 )
+from sagent.types.providers import ModelCatalog
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from sagent.lib.custom_json import MutableJSON
-    from sagent.types.capability import ModelCapability
     from sagent.types.model import (
         ModelRequest,
     )
@@ -67,7 +65,7 @@ class _DashScopeModel(OpenAICompatModel):
         # Prefixes WITHOUT a trailing hyphen match both the hyphenated ids
         # (``qwen3-32b``) and the dotted generation ids (``qwen3.6-plus``, the
         # default). A bare ``qwen3-`` silently excluded the entire qwen3.6
-        # family -- including ``DEFAULT_MODEL`` -- from the effort knob.
+        # family -- including the default row -- from the effort knob.
         return any(
             model_id.startswith(p)
             for p in ("qwen3", "qwen-plus", "qwen-max", "qwq", "qvq")
@@ -108,22 +106,17 @@ class _DashScopeModel(OpenAICompatModel):
 class DashScope(OpenAICompat):
     """DashScope (Alibaba) provider."""
 
-    DEFAULT_MODEL: ClassVar[str] = "qwen3.6-plus"
-    # Same generation and reasoning ladder as the default at 1/11th the cost;
-    # without it ``utility_model()`` falls back to the default and every
-    # summarizer call bills the expensive row.
-    DEFAULT_UTILITY_MODEL: ClassVar[str] = "qwen3.6-flash"
     ENV_VAR: ClassVar[str] = "DASHSCOPE_API_KEY"
     # International endpoint. For mainland China use
     # dashscope.aliyuncs.com via the ``base_url=`` override.
     BASE_URL: ClassVar[str] = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+
     # Model limits and pricing.
     # Source: https://help.aliyun.com/zh/model-studio/developer-reference/
     # Cross-ref: https://github.com/taylorwilsdon/llm-context-limits
     #
     # To add a new model: check the Alibaba Cloud Model Studio docs
     # for context window and max output tokens.
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = dashscope.models()
-    """Per-model capability; transport limits live on ``TRANSPORT``."""
+    catalog = ModelCatalog(rows=dashscope.models(), transport=openai.compatible())
 
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _DashScopeModel

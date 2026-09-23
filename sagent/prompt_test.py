@@ -18,10 +18,15 @@ from sagent.prompt import (
     build_system_dict,
     environment,
 )
+from sagent.types.capability import ModelCapability
 
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+
+def _model(model_id: str) -> ModelCapability:
+    return ModelCapability(model_id=model_id)
 
 
 @pytest.fixture(autouse=True)
@@ -36,7 +41,7 @@ def stub_recipe_and_helpers() -> Iterator[None]:
         "base": "BASE\n",
         "env": (
             "cwd={cwd} git={is_git} plat={platform} shell={shell_line}"
-            " os={os_version} m={marketing} id={model_id} co={cutoff}{worktree_line}"
+            " os={os_version} id={model_id}{knowledge_cutoff_line}{worktree_line}"
         ),
     }
 
@@ -98,7 +103,7 @@ def stub_recipe_and_helpers() -> Iterator[None]:
 
 
 def test_build_system_returns_concatenated_string() -> None:
-    out = build_system("claude-sonnet-4-6", custom="custom note")
+    out = build_system(_model("sonnet-4.6"), custom="custom note")
     assert "static body" in out
     assert "AGENTS_SECTION" in out
     assert "MEMORY_SECTION" in out
@@ -108,12 +113,12 @@ def test_build_system_returns_concatenated_string() -> None:
 
 
 def test_build_system_omits_memory_when_disabled() -> None:
-    out = build_system("claude-sonnet-4-6", include_memory=False)
+    out = build_system(_model("sonnet-4.6"), include_memory=False)
     assert "MEMORY_SECTION" not in out
 
 
 def test_build_system_dict_has_expected_keys() -> None:
-    d = build_system_dict("claude-sonnet-4-6", custom="hi")
+    d = build_system_dict(_model("sonnet-4.6"), custom="hi")
     assert "static" in d
     assert "environment" in d
     assert "agents_md" in d
@@ -122,55 +127,24 @@ def test_build_system_dict_has_expected_keys() -> None:
 
 
 def test_build_system_dict_no_user_instructions_when_custom_empty() -> None:
-    d = build_system_dict("claude-sonnet-4-6", custom="")
+    d = build_system_dict(_model("sonnet-4.6"), custom="")
     assert "user_instructions" not in d
 
 
-def test_environment_section_includes_model_metadata() -> None:
-    out = environment("claude-sonnet-4-6")
-    assert "claude-sonnet-4-6" in out
-    assert "Claude Sonnet 4.6" in out
-    assert "August 2025" in out
+def test_environment_section_includes_the_model_id_verbatim() -> None:
+    assert "opus-4.8+1m" in environment(_model("opus-4.8"), context="+1m")
 
 
-def test_environment_section_unknown_model_falls_back() -> None:
-    out = environment("custom-model-xyz")
-    assert "custom-model-xyz" in out
-    assert "unknown" in out  # Cutoff fallback.
+def test_environment_reads_knowledge_cutoff_from_the_model_spec() -> None:
+    model = ModelCapability(
+        model_id="opus-5.5",
+        knowledge_cutoff="June 2026",
+    )
+    assert "June 2026" in environment(model)
 
 
-def test_environment_section_strips_context_tag() -> None:
-    # The default model id carries a ``+1m`` context tag. The cutoff lookup
-    # must canonicalize it like every other consumer (``_strip_context_tag``),
-    # else the default session renders "Knowledge cutoff: unknown".
-    out = environment("claude-opus-4-8+1m")
-    assert "Claude Opus 4.8" in out
-    assert "January 2026" in out
-
-
-def test_environment_section_haiku_utility_model_has_cutoff() -> None:
-    # The utility model's runtime id is ``claude-haiku-4-5``; the metadata
-    # table must key on that, not a dated suffix, or the lookup misses and
-    # the cutoff renders "unknown".
-    out = environment("claude-haiku-4-5")
-    assert "Claude Haiku 4.5" in out
-    assert "February 2025" in out
-
-
-def test_environment_section_fable_has_marketing_name() -> None:
-    out = environment("claude-fable-5+1m")
-    assert "Claude Fable 5" in out
-
-
-def test_environment_section_fable_5_1_has_marketing_name() -> None:
-    out = environment("claude-fable-5-1+1m")
-    assert "Claude Fable 5.1" in out
-    assert "June 2026" in out
-
-
-def test_environment_section_sonnet_5_has_marketing_name() -> None:
-    out = environment("claude-sonnet-5+1m")
-    assert "Claude Sonnet 5" in out
+def test_environment_omits_an_unspecified_knowledge_cutoff() -> None:
+    assert "Knowledge cutoff" not in environment(_model("local"))
 
 
 def test_shell_name_recognizes_bash() -> None:
@@ -268,15 +242,15 @@ def test_load_static_reflects_recipe_change(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_build_system_dict_environment_is_lazy() -> None:
-    d = build_system_dict("claude-opus-4-7")
+    d = build_system_dict(_model("opus-4.7"))
     env_section = d["environment"]
     # Environment is a callable so it re-evaluates per call.
-    assert "claude-opus-4-7" in env_section()
+    assert "opus-4.7" in env_section()
 
 
 def test_build_system_dict_all_values_callable() -> None:
     """All sections expose the same shape (callable) so callers don't branch."""
-    d = build_system_dict("claude-opus-4-7", custom="ci")
+    d = build_system_dict(_model("opus-4.7"), custom="ci")
     assert all(callable(v) for v in d.values())
 
 
@@ -305,7 +279,7 @@ def test_include_memory_vs_recipe_sections(
         return sections or []
 
     monkeypatch.setattr("sagent.prompt.recipe_list", fake_recipe_list)
-    d = build_system_dict("claude-opus-4-7", include_memory=include_memory)
+    d = build_system_dict(_model("opus-4.7"), include_memory=include_memory)
     assert ("memory" in d) is expect_memory
 
 

@@ -14,9 +14,12 @@ Three audiences:
 
 from __future__ import annotations
 
+from ctypes.util import find_library
 from io import BytesIO
-from typing import TYPE_CHECKING, Literal, Protocol, cast
+from typing import TYPE_CHECKING, ClassVar, Literal, Protocol, cast
 
+import ctypes
+import functools
 import io
 import logging
 import warnings
@@ -41,6 +44,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "decode_image_pil",
     "decode_jpeg_turbojpeg",
+    "decode_jpeg_turbojpeg_region",
     "decode_webp_libwebp",
     "get_dimensions",
     "get_mime",
@@ -89,6 +93,9 @@ def decode_jpeg_turbojpeg(
     height: int,
     width: int,
     crop: tuple[int, int] | tuple[int, int, int, int] | None = None,
+    *,
+    min_height: int = 0,
+    min_width: int = 0,
 ) -> np.ndarray | None:
     """Decode JPEG using PyTurboJPEG with optional crop-during-decode.
 
@@ -98,33 +105,83 @@ def decode_jpeg_turbojpeg(
       height: Original image height.
       width: Original image width.
       crop: Optional crop spec (see ``_parse_crop``).
+      min_height: With a crop, let the decoder downscale by 1/2, 1/4, or 1/8
+        while the cropped region stays at least this tall; 0 decodes at
+        full scale.
+      min_width: The width counterpart of ``min_height``.
 
     Returns:
-      image: uint8 (H, W, 3) RGB ndarray, or None on decode error.
+      image: uint8 (H, W, 3) RGB ndarray, or None on decode error. A scaled
+        decode returns the region at the reduced size, for a later resize.
 
     """
     try:
         crop_coords = _parse_crop(crop, int(height), int(width))
+        if crop_coords is not None:
+            return _decode_jpeg_region(
+                image_bytes,
+                *crop_coords,
+                min_height=min_height,
+                min_width=min_width,
+            )
 
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", message="Corrupt JPEG data")
-            if crop_coords is not None:
-                crop_x, crop_y, crop_w, crop_h = crop_coords
-                cropped = turbo_jpeg.crop(
-                    image_bytes,
-                    crop_x,
-                    crop_y,
-                    crop_w,
-                    crop_h,
-                )
-                bgr = turbo_jpeg.decode(cropped)
-            else:
-                bgr = turbo_jpeg.decode(image_bytes)
+            bgr = turbo_jpeg.decode(image_bytes)
 
         # BGR → RGB; flip is a view, ascontiguousarray materializes.
         return np.ascontiguousarray(np.flip(bgr, axis=2))
 
     except Exception:  # noqa: BLE001 -- Image backends expose multiple exception types at this boundary.
+        return None
+
+
+def decode_jpeg_turbojpeg_region(
+    image_bytes: bytes,
+    *,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    min_height: int = 0,
+    min_width: int = 0,
+    fast_dct: bool = False,
+) -> np.ndarray | None:
+    """Decode only the ``(x, y, w, h)`` region of a JPEG to uint8 RGB.
+
+    The decoder's own crop (``tj3SetCroppingRegion``): rows and blocks outside
+    the region skip the IDCT and colour conversion. Needs no ``TurboJPEG``
+    instance and no source dimensions, so a batch stage can call it per image.
+
+    Args:
+      image_bytes: Raw JPEG bytes.
+      x: Left edge of the region, in source pixels.
+      y: Top edge of the region, in source pixels.
+      w: Region width, in source pixels.
+      h: Region height, in source pixels.
+      min_height: Let the IDCT downscale by 1/2, 1/4, or 1/8 while the region
+        stays at least this tall; 0 decodes at full scale.
+      min_width: The width counterpart of ``min_height``.
+      fast_dct: Use libjpeg-turbo's fast integer IDCT (``TJFLAG_FASTDCT``),
+        as ffcv decodes, instead of the accurate one.
+
+    Returns:
+      image: uint8 (h', w', 3) RGB ndarray -- the region, at the reduced size
+        under a scaled decode -- or None when libturbojpeg rejects the stream.
+
+    """
+    try:
+        return _decode_jpeg_region(
+            image_bytes,
+            x,
+            y,
+            w,
+            h,
+            min_height=min_height,
+            min_width=min_width,
+            fast_dct=fast_dct,
+        )
+    except RuntimeError:
         return None
 
 
@@ -356,6 +413,182 @@ def _is_svg(data: bytes) -> bool:
     """Magic-byte sniff for SVG (PIL can't open XML)."""
     head = data.lstrip()[:256].lower()
     return head.startswith(b"<svg") or (head.startswith(b"<?xml") and b"<svg" in head)
+
+
+# PyTurboJPEG's ``crop()`` is a LOSSLESS TRANSFORM: it re-encodes a cropped JPEG, which
+# the caller then decodes -- measured 1.81 ms/img against 0.73 for the decoder's own
+# ``tj3SetCroppingRegion``, which skips IDCT and colour conversion outside the region.
+# PyTurboJPEG does not wrap that call, so it is bound here against the same library.
+# With a nonzero ``min_height``/``min_width`` the IDCT itself downscales by the largest
+# of 1/2, 1/4, 1/8 that keeps the region at least that large -- SIMD-accelerated in
+# libjpeg-turbo, and the full-resolution pixels a later resize would discard are never
+# produced. The region's edges then snap outward to the reduced grid, a sub-pixel shift.
+def _decode_jpeg_region(
+    image_bytes: bytes,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    *,
+    min_height: int = 0,
+    min_width: int = 0,
+    fast_dct: bool = False,
+) -> np.ndarray:
+    """Decode only the ``(x, y, w, h)`` region of a JPEG to uint8 RGB."""
+    lib = _libturbojpeg()
+    src = np.frombuffer(image_bytes, dtype=np.uint8)
+    # iMCU width per TJSAMP_* (turbojpeg.h tjMCUWidth).
+    mcu_widths = (8, 16, 16, 8, 8, 32, 8)
+    handle = lib.tj3Init(1)  # TJINIT_DECOMPRESS.
+    if handle is None:
+        raise RuntimeError("tj3Init failed.")
+    try:
+        _check_tj(
+            lib,
+            handle,
+            lib.tj3DecompressHeader(handle, src.ctypes.data, src.size),
+        )
+        subsamp = lib.tj3Get(handle, 4)  # TJPARAM_SUBSAMP.
+        if subsamp < 0 or subsamp >= len(mcu_widths):
+            raise RuntimeError(f"Unsupported JPEG subsampling {subsamp}.")
+        if fast_dct:
+            _check_tj(lib, handle, lib.tj3Set(handle, 10, 1))  # TJPARAM_FASTDCT.
+        denom = _dct_denominator(w, h, min_width=min_width, min_height=min_height)
+        if denom > 1:
+            _check_tj(
+                lib,
+                handle,
+                lib.tj3SetScalingFactor(handle, _TjScalingFactor(1, denom)),
+            )
+        width = -(-lib.tj3Get(handle, 5) // denom)  # TJPARAM_JPEGWIDTH.
+        height = -(-lib.tj3Get(handle, 6) // denom)  # TJPARAM_JPEGHEIGHT.
+        x, y = x // denom, y // denom
+        right = min(width, -(-(x * denom + w) // denom))
+        bottom = min(height, -(-(y * denom + h) // denom))
+        w, h = right - x, bottom - y
+        # The left edge must sit on an iMCU boundary; decode the aligned
+        # superset and slice. Chroma upsampling reads one iMCU past each edge of
+        # the region, so decode that margin too, or subsampled edges differ from
+        # a full decode. Width 0 means "to the right edge".
+        mcu = -(-mcu_widths[subsamp] // denom)
+        x0 = max(0, x - x % mcu - mcu)
+        x1 = min(width, x + w + mcu)
+        region = _TjRegion(x0, y, 0 if x1 == width else x1 - x0, h)
+        _check_tj(lib, handle, lib.tj3SetCroppingRegion(handle, region))
+        out = np.empty((h, x1 - x0, 3), dtype=np.uint8)
+        _check_tj(
+            lib,
+            handle,
+            lib.tj3Decompress8(
+                handle,
+                src.ctypes.data,
+                src.size,
+                out.ctypes.data,
+                0,
+                0,  # TJPF_RGB.
+            ),
+        )
+    finally:
+        lib.tj3Destroy(handle)
+    return np.ascontiguousarray(out[:, x - x0 : x + w - x0])
+
+
+def _dct_denominator(w: int, h: int, *, min_width: int, min_height: int) -> int:
+    """Largest of 1, 2, 4, 8 dividing ``(w, h)`` while both stay at least the floor."""
+    if min_width <= 0 or min_height <= 0:
+        return 1
+    denom = 1
+    while (
+        denom < 8 and w // (2 * denom) >= min_width and h // (2 * denom) >= min_height
+    ):
+        denom *= 2
+    return denom
+
+
+def _check_tj(lib: _TurboJpegLib, handle: int, status: int) -> None:
+    """Raise on a fatal libturbojpeg error; a warning (corrupt data) is decoded."""
+    if status != 0 and lib.tj3GetErrorCode(handle) != 0:  # TJERR_WARNING.
+        raise RuntimeError(lib.tj3GetErrorStr(handle).decode())
+
+
+@functools.cache
+def _libturbojpeg() -> _TurboJpegLib:
+    """Load libturbojpeg as PyTurboJPEG's first lookup does, and declare ABIs."""
+    path = find_library("turbojpeg")
+    if path is None:
+        raise OSError("libturbojpeg not found.")
+    lib = ctypes.CDLL(path)
+    lib.tj3Init.argtypes = [ctypes.c_int]
+    lib.tj3Init.restype = ctypes.c_void_p
+    lib.tj3Destroy.argtypes = [ctypes.c_void_p]
+    lib.tj3Destroy.restype = None
+    lib.tj3DecompressHeader.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+    ]
+    lib.tj3Get.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.tj3Set.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+    lib.tj3SetCroppingRegion.argtypes = [ctypes.c_void_p, _TjRegion]
+    lib.tj3SetScalingFactor.argtypes = [ctypes.c_void_p, _TjScalingFactor]
+    lib.tj3Decompress8.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+    ]
+    lib.tj3GetErrorCode.argtypes = [ctypes.c_void_p]
+    lib.tj3GetErrorStr.argtypes = [ctypes.c_void_p]
+    lib.tj3GetErrorStr.restype = ctypes.c_char_p
+    return cast(_TurboJpegLib, lib)
+
+
+class _TjRegion(ctypes.Structure):
+    """``tjregion``, passed to ``tj3SetCroppingRegion`` by value."""
+
+    _fields_: ClassVar = [
+        ("x", ctypes.c_int),
+        ("y", ctypes.c_int),
+        ("w", ctypes.c_int),
+        ("h", ctypes.c_int),
+    ]
+
+
+class _TjScalingFactor(ctypes.Structure):
+    """``tjscalingfactor``, passed to ``tj3SetScalingFactor`` by value."""
+
+    _fields_: ClassVar = [("num", ctypes.c_int), ("denom", ctypes.c_int)]
+
+
+class _TurboJpegLib(Protocol):
+    """The TurboJPEG 3 entry points ``_decode_jpeg_region`` calls, as declared."""
+
+    def tj3Init(self, init_type: int, /) -> int | None: ...  # noqa: N802 -- The C symbol name.
+    def tj3Destroy(self, handle: int, /) -> None: ...  # noqa: N802 -- The C symbol name.
+    def tj3DecompressHeader(self, handle: int, src: int, size: int, /) -> int: ...  # noqa: N802 -- The C symbol name.
+    def tj3Get(self, handle: int, param: int, /) -> int: ...  # noqa: N802 -- The C symbol name.
+    def tj3Set(self, handle: int, param: int, value: int, /) -> int: ...  # noqa: N802 -- The C symbol name.
+    def tj3SetCroppingRegion(self, handle: int, region: _TjRegion, /) -> int: ...  # noqa: N802 -- The C symbol name.
+    def tj3SetScalingFactor(  # noqa: N802 -- The C symbol name.
+        self,
+        handle: int,
+        factor: _TjScalingFactor,
+        /,
+    ) -> int: ...
+    def tj3Decompress8(  # noqa: N802, PLR0917 -- The C symbol and its positional ABI.
+        self,
+        handle: int,
+        src: int,
+        size: int,
+        dst: int,
+        pitch: int,
+        pixel_format: int,
+        /,
+    ) -> int: ...
+    def tj3GetErrorCode(self, handle: int, /) -> int: ...  # noqa: N802 -- The C symbol name.
+    def tj3GetErrorStr(self, handle: int, /) -> bytes: ...  # noqa: N802 -- The C symbol name.
 
 
 def _parse_crop(

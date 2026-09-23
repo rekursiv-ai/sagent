@@ -26,8 +26,6 @@ from sagent.providers.anthropic.api import (
     _tool_result_block,
     _tool_use_block,
     build_context_management,
-    context_betas,
-    supports_native_context_management,
 )
 from sagent.providers.lib.errors import StreamingResponseNotReadError
 from sagent.providers.lib.id_remap import IdRemapper
@@ -110,27 +108,34 @@ def _make_request(
     return ModelRequest(messages=messages)
 
 
-def test_context_betas_one_million_emits_beta() -> None:
-    assert "context-1m-2025-08-07" in context_betas("claude-opus-4-7+1m")
+def test_normalized_anthropic_id_uses_vendor_id_on_the_wire() -> None:
+    model = Anthropic.from_key("k").model("opus-5.5")
+    kwargs = model._build_kwargs(
+        ModelRequest(messages=[UserMessage(text="hello")]),
+        [],
+    )
+    assert kwargs["model"] == "claude-opus-5-5"
 
 
-def test_context_betas_skip_one_million_beta_for_default_1m_model() -> None:
-    assert "context-1m-2025-08-07" not in context_betas("claude-fable-5-1+1m")
-    assert "context-1m-2025-08-07" not in context_betas("claude-fable-5+1m")
-    assert "context-1m-2025-08-07" not in context_betas("claude-sonnet-5+1m")
-
-
-def test_context_betas_native_context_management_for_supported_models() -> None:
-    assert "context-management-2025-06-27" in context_betas("claude-haiku-4-5")
-    assert "context-management-2025-06-27" in context_betas("claude-opus-4-7+1m")
-    assert "context-management-2025-06-27" in context_betas("claude-fable-5-1+1m")
-    assert "context-management-2025-06-27" in context_betas("claude-fable-5+1m")
-    assert "context-management-2025-06-27" in context_betas("claude-sonnet-5+1m")
-
-
-def test_context_betas_skip_native_context_management_for_unknown_models() -> None:
-    # Older / unsupported models don't get the context-management beta.
-    assert context_betas("claude-3-opus-20240229") == []
+@pytest.mark.parametrize(
+    ("model_id", "has_long_context_beta"),
+    [
+        ("opus-4.7", True),
+        ("opus-4.7+200k", False),
+        ("fable-5.1", False),
+        ("opus-5.5", False),
+    ],
+)
+def test_context_betas_come_from_the_selected_catalog_limits(
+    model_id: str,
+    has_long_context_beta: bool,
+) -> None:
+    model = Anthropic.from_key("k").model(model_id)
+    kwargs = model._build_kwargs(ModelRequest(messages=[]), [])
+    headers = cast(dict[str, str], kwargs["extra_headers"])
+    betas = headers["anthropic-beta"].split(",")
+    assert ("context-1m-2025-08-07" in betas) is has_long_context_beta
+    assert "context-management-2025-06-27" in betas
 
 
 @pytest.mark.parametrize(
@@ -605,8 +610,9 @@ def test_anthropic_from_env_reads(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_anthropic_model_known_id_returns_backend() -> None:
     p = Anthropic.from_key("k")
-    m = p.model("claude-haiku-4-5")
-    assert m.capability.model_id == "claude-haiku-4-5"
+    m = p.model("haiku-4.5")
+    assert m.capability.model_id == "haiku-4.5"
+    assert m.capability.wire_model_id == "claude-haiku-4-5"
     # Haiku supports thinking via ``enabled`` only (measured: 249 readable
     # thinking chars; ``adaptive`` 400s 'not supported on this model').
     assert m.capability.thinking_budget != frozenset({"none"})
@@ -620,35 +626,39 @@ def test_anthropic_model_unknown_id_raises() -> None:
 
 
 def test_anthropic_model_strips_context_tag_for_profile_lookup() -> None:
-    """``claude-sonnet-4-5+1m`` should resolve to the +1m profile entry."""
+    """``+200k`` selects the smaller context profile."""
     p = Anthropic.from_key("k")
-    m = p.model("claude-sonnet-4-5+1m")
-    assert m.limits.max_request_tokens == 1_000_000
+    m = p.model("claude-sonnet-4-5+200k")
+    assert m.limits.max_request_tokens == 200_000
 
 
 def test_anthropic_default_model_resolves() -> None:
     p = Anthropic.from_key("k")
     m = p.model()
-    assert m.capability.model_id == Anthropic.DEFAULT_MODEL
+    assert m.capability.model_id == p.catalog.resolve("default")[0].model_id
 
 
 def test_anthropic_default_model_is_fable_5_1_untagged() -> None:
-    """Fable 5.1 is natively 1M, so the default carries no ``+1m`` tag.
-
-    ``context_betas`` withholds the unnecessary context beta for native 1M
-    models, regardless of an explicit context tag.
-    """
-    assert Anthropic.DEFAULT_MODEL == "claude-fable-5-1"
-    assert Anthropic.DEFAULT_UTILITY_MODEL == "claude-haiku-4-5"
+    """Fable 5.1 is natively 1M, so the default needs no context beta."""
     p = Anthropic.from_key("k")
+    assert p.catalog.resolve("default")[0].model_id == "fable-5.1"
+    assert p.catalog.resolve("utility")[0].model_id == "haiku-4.5"
     assert p.model().limits.max_request_tokens == 1_000_000
-    assert "context-1m-2025-08-07" not in context_betas(Anthropic.DEFAULT_MODEL)
+    assert "context-1m-2025-08-07" not in p.model().limits.request_betas
+
+
+def test_anthropic_opus_5_5_defaults_to_full_window() -> None:
+    p = Anthropic.from_key("k")
+    full = p.model("opus-5.5")
+    small = p.model("opus-5.5+200k")
+    assert full.limits.max_request_tokens == 1_000_000
+    assert small.limits.max_request_tokens == 200_000
 
 
 def test_anthropic_utility_model_uses_haiku() -> None:
     p = Anthropic.from_key("k")
-    m = p.utility_model()
-    assert m.capability.model_id == "claude-haiku-4-5"
+    m = p.model("utility")
+    assert m.capability.model_id == "haiku-4.5"
 
 
 def test_anthropic_subscription_property_false_on_api_key() -> None:
@@ -661,10 +671,10 @@ def test_anthropic_model_is_context_overflow_via_prompt_too_long() -> None:
     assert m.is_context_overflow(PromptTooLongError("too long")) is True
 
 
-def test_anthropic_model_token_estimate_uses_profile_chars_per_token() -> None:
+def test_anthropic_model_token_estimate_uses_profile_approx_chars_per_token() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-7")
-    # chars_per_token = 2.38 for the claude-5 / 4-8 / 4-7 tokenizer family.
+    # approx_chars_per_token = 2.38 for the Claude 5 / 4.8 / 4.7 tokenizer.
     assert m.approx_text_tokens("a" * 28) == 11
 
 
@@ -692,11 +702,11 @@ def test_anthropic_fable_5_1_model_profile() -> None:
     assert m.capability.thinking_budget == frozenset({"none", "auto"})
 
 
-def test_anthropic_fable_5_1_one_million_alias() -> None:
+def test_anthropic_fable_5_1_smaller_context() -> None:
     p = Anthropic.from_key("k")
-    m = p.model("claude-fable-5-1+1m")
-    assert m.tagged_model_id == "claude-fable-5-1+1m"
-    assert m.limits.max_request_tokens == 1_000_000
+    m = p.model("fable-5.1+200k")
+    assert m.tagged_model_id == "fable-5.1+200k"
+    assert m.limits.max_request_tokens == 200_000
 
 
 def test_anthropic_fable_model_profile() -> None:
@@ -710,11 +720,11 @@ def test_anthropic_fable_model_profile() -> None:
     assert m.capability.prices[PriceCatalogProduct()].cache_read == 1.0
 
 
-def test_anthropic_fable_one_million_alias() -> None:
+def test_anthropic_fable_smaller_context() -> None:
     p = Anthropic.from_key("k")
-    m = p.model("claude-fable-5+1m")
-    assert m.tagged_model_id == "claude-fable-5+1m"
-    assert m.limits.max_request_tokens == 1_000_000
+    m = p.model("fable-5+200k")
+    assert m.tagged_model_id == "fable-5+200k"
+    assert m.limits.max_request_tokens == 200_000
 
 
 def test_anthropic_sonnet_5_model_profile() -> None:
@@ -731,11 +741,11 @@ def test_anthropic_sonnet_5_model_profile() -> None:
     )
 
 
-def test_anthropic_sonnet_5_one_million_alias() -> None:
+def test_anthropic_sonnet_5_smaller_context() -> None:
     p = Anthropic.from_key("k")
-    m = p.model("claude-sonnet-5+1m")
-    assert m.tagged_model_id == "claude-sonnet-5+1m"
-    assert m.limits.max_request_tokens == 1_000_000
+    m = p.model("sonnet-5+200k")
+    assert m.tagged_model_id == "sonnet-5+200k"
+    assert m.limits.max_request_tokens == 200_000
 
 
 @pytest.mark.asyncio
@@ -836,7 +846,7 @@ def test_anthropic_thinking_axes_opus_4_8_adaptive_only_no_text() -> None:
     on ``thinking.type=enabled``.
     """
     p = Anthropic.from_key("k")
-    for model_id in ("claude-opus-4-8", "claude-opus-4-8+1m"):
+    for model_id in ("claude-opus-4-8", "claude-opus-4-8+200k"):
         m = p.model(model_id)
         assert m.capability.thinking_budget == frozenset({"none", "auto"}), model_id
         assert m.capability.thinking_output == frozenset({"none", "redacted"}), model_id
@@ -855,7 +865,7 @@ def test_anthropic_priority_tier_is_opus_only() -> None:
     """Fast mode is Opus 5 and Opus 4.8 only; 4-7 withdrew it, 4-6 never had it."""
     p = Anthropic.from_key("k")
     assert "priority" in p.model("claude-opus-4-8").capability.service_tier
-    assert "priority" in p.model("claude-opus-4-8+1m").capability.service_tier
+    assert "priority" in p.model("claude-opus-4-8+200k").capability.service_tier
     assert "priority" not in p.model("claude-fable-5-1").capability.service_tier
     assert "priority" not in p.model("claude-fable-5").capability.service_tier
     assert "priority" not in p.model("claude-sonnet-5").capability.service_tier
@@ -1322,32 +1332,31 @@ def test_anthropic_model_is_retryable_provider_error_no_body_attr() -> None:
 
 def test_anthropic_provider_extra_headers_for_1m_includes_beta() -> None:
     p = Anthropic.from_key("k")
-    headers = p.extra_headers("claude-opus-4-7+1m")
+    model = p.model("opus-4.7")
+    headers = p.extra_headers(model.capability, model.settings)
     assert headers.get("anthropic-beta", "").startswith("context-1m")
 
 
 def test_anthropic_provider_extra_headers_includes_context_management() -> None:
     """Modern models opt into the context-management beta unconditionally."""
     p = Anthropic.from_key("k")
-    headers = p.extra_headers("claude-haiku-4-5")
+    model = p.model("claude-haiku-4-5")
+    headers = p.extra_headers(model.capability, model.settings)
     assert "context-management-2025-06-27" in headers.get("anthropic-beta", "")
 
 
 def test_anthropic_provider_extra_headers_redact_thinking_opt_in() -> None:
     p = Anthropic.from_key("k", redact_thinking=True)
-    headers = p.extra_headers("claude-opus-4-7")
+    model = p.model("claude-opus-4-7")
+    headers = p.extra_headers(model.capability, model.settings)
     assert "redact-thinking-2026-02-12" in headers.get("anthropic-beta", "")
 
 
 def test_anthropic_provider_extra_headers_redact_thinking_default_off() -> None:
     p = Anthropic.from_key("k")
-    headers = p.extra_headers("claude-opus-4-7")
+    model = p.model("claude-opus-4-7")
+    headers = p.extra_headers(model.capability, model.settings)
     assert "redact-thinking-2026-02-12" not in headers.get("anthropic-beta", "")
-
-
-def test_anthropic_provider_extra_headers_unknown_model_empty() -> None:
-    p = Anthropic.from_key("k")
-    assert p.extra_headers("claude-3-opus-20240229") == {}
 
 
 def test_anthropic_provider_extra_body_default_none() -> None:
@@ -1370,7 +1379,7 @@ def test_build_kwargs_no_context_management_by_default() -> None:
     must be explicitly opted in (see session bd952b0c audit for rationale).
     """
     p = Anthropic.from_key("k")
-    model = p.model("claude-opus-4-7+1m")
+    model = p.model("claude-opus-4-7")
     req = ModelRequest(messages=[UserMessage(text="hi")], system="s")
     msgs: list[MessageParam] = [
         cast(
@@ -1386,7 +1395,7 @@ def test_build_kwargs_no_context_management_by_default() -> None:
 def test_build_kwargs_includes_context_management_when_opted_in() -> None:
     """``server_side_context_management=True`` injects the ``clear_tool_uses`` config."""
     p = Anthropic.from_key("k", server_side_context_management=True)
-    model = p.model("claude-opus-4-7+1m")
+    model = p.model("claude-opus-4-7")
     req = ModelRequest(
         messages=[UserMessage(text="hi")],
         system="s",
@@ -1433,7 +1442,7 @@ def test_build_kwargs_context_management_trigger_scales_with_context_window() ->
         ),
     ]
 
-    m200 = p.model("claude-opus-4-7")
+    m200 = p.model("claude-opus-4-7+200k")
     kw200 = m200._build_kwargs(req, msgs)
     body200 = cast(dict[str, object], kw200["extra_body"])
     cm200 = cast(dict[str, object], body200["context_management"])
@@ -1441,7 +1450,7 @@ def test_build_kwargs_context_management_trigger_scales_with_context_window() ->
     trig200 = cast(dict[str, object], edit200["trigger"])
     assert trig200["value"] == 100_000
 
-    m1m = p.model("claude-opus-4-7+1m")
+    m1m = p.model("claude-opus-4-7")
     kw1m = m1m._build_kwargs(req, msgs)
     body1m = cast(dict[str, object], kw1m["extra_body"])
     cm1m = cast(dict[str, object], body1m["context_management"])
@@ -1492,7 +1501,7 @@ def test_build_kwargs_preserves_provider_context_management() -> None:
     # Opt the base into server-side clearing so the gate is open -- the
     # test then proves the subclass policy wins over the base default.
     p = _CustomCmAnthropic.from_key("k", server_side_context_management=True)
-    model = p.model("claude-opus-4-7+1m")
+    model = p.model("claude-opus-4-7")
     req = ModelRequest(messages=[UserMessage(text="hi")], system="s")
     msgs: list[MessageParam] = [
         cast(
@@ -1512,11 +1521,6 @@ def test_build_kwargs_preserves_provider_context_management() -> None:
     assert tool_edit["exclude_tools"] == ["Edit", "Write"]
     trig = cast(dict[str, object], tool_edit["trigger"])
     assert trig["value"] == 180_000
-
-
-def test_build_kwargs_no_context_management_for_unknown_model() -> None:
-    """Unknown / older models don't get the context-management config."""
-    assert not supports_native_context_management("claude-3-opus-20240229")
 
 
 def test_anthropic_provider_build_system_passthrough() -> None:

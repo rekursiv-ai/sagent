@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import MappingProxyType
 
 import pytest
@@ -13,6 +14,7 @@ from sagent.types.capability import (
 )
 from sagent.types.cost import PriceCatalog, PriceCatalogProduct, TokenPrice
 from sagent.types.providers import (
+    ModelCatalog,
     UnknownModelError,
     UnsupportedTagError,
     resolve,
@@ -21,7 +23,7 @@ from sagent.types.providers import (
 
 def _opus() -> ModelCapability:
     return ModelCapability(
-        model_id="claude-opus-4-8",
+        model_id="opus-4.8",
         context=MappingProxyType(
             {
                 "": ModelLimits(max_request_tokens=200_000, max_image_bytes=5_000_000),
@@ -52,9 +54,8 @@ def _cli() -> ModelCapability:
 
 def test_resolve_returns_capability_and_settings_as_peers() -> None:
     capability, settings = resolve(
-        "claude-opus-4-8+1m",
-        models={"claude-opus-4-8": _opus()},
-        roles={},
+        "opus-4.8+1m",
+        models={"opus-4.8": _opus()},
         transport=ModelCapability(),
     )
     assert settings.context == "+1m"
@@ -63,9 +64,8 @@ def test_resolve_returns_capability_and_settings_as_peers() -> None:
 
 def test_resolve_keeps_the_whole_context_table() -> None:
     _, settings = resolve(
-        "claude-opus-4-8",
-        models={"claude-opus-4-8": _opus()},
-        roles={},
+        "opus-4.8",
+        models={"opus-4.8": _opus()},
         transport=ModelCapability(),
     )
     assert settings.limits.max_request_tokens == 200_000
@@ -75,9 +75,8 @@ def test_resolve_keeps_the_whole_context_table() -> None:
 
 def test_resolve_meets_the_transport() -> None:
     capability, _ = resolve(
-        "claude-opus-4-8",
-        models={"claude-opus-4-8": _opus()},
-        roles={},
+        "opus-4.8",
+        models={"opus-4.8": _opus()},
         transport=_cli(),
     )
     assert capability.thinking_effort == frozenset({"none"})
@@ -86,9 +85,8 @@ def test_resolve_meets_the_transport() -> None:
 
 def test_resolve_never_grants_what_the_row_lacks() -> None:
     capability, _ = resolve(
-        "claude-opus-4-8",
-        models={"claude-opus-4-8": _opus()},
-        roles={},
+        "opus-4.8",
+        models={"opus-4.8": _opus()},
         transport=ModelCapability(
             thinking_effort={"none", "min", "low", "medium", "high", "max"},
         ),
@@ -99,54 +97,97 @@ def test_resolve_never_grants_what_the_row_lacks() -> None:
 def test_resolve_rejects_a_context_the_model_lacks() -> None:
     with pytest.raises(UnsupportedTagError, match="no \\+200k context"):
         _ = resolve(
-            "claude-opus-4-8+200k",
-            models={"claude-opus-4-8": _opus()},
-            roles={},
+            "opus-4.8+200k",
+            models={"opus-4.8": _opus()},
             transport=ModelCapability(),
         )
+
+
+def test_resolve_accepts_explicit_1m_when_the_default_is_already_1m() -> None:
+    row = replace(
+        _opus(),
+        context=MappingProxyType(
+            {
+                "": ModelLimits(
+                    max_request_tokens=1_000_000,
+                    max_response_tokens=128_000,
+                ),
+            },
+        ),
+    )
+    capability, settings = resolve(
+        "opus-4.8+1m",
+        models={row.model_id: row},
+        transport=ModelCapability(),
+    )
+    assert settings.context == "+1m"
+    assert settings.limits == capability.context[""]
 
 
 def test_a_transport_cannot_remove_a_context_window() -> None:
     """Windows are the model's; a transport restricts knobs, not physics."""
     narrow = ModelCapability(context=MappingProxyType({"": ModelLimits()}))
     _, settings = resolve(
-        "claude-opus-4-8+1m",
-        models={"claude-opus-4-8": _opus()},
-        roles={},
+        "opus-4.8+1m",
+        models={"opus-4.8": _opus()},
         transport=narrow,
     )
     assert settings.limits.max_request_tokens == 1_000_000
 
 
 def test_resolve_names_the_known_models_on_a_miss() -> None:
-    with pytest.raises(UnknownModelError, match="claude-opus-4-8"):
+    with pytest.raises(UnknownModelError, match=r"opus-4\.8"):
         _ = resolve(
             "nope",
-            models={"claude-opus-4-8": _opus()},
-            roles={},
+            models={"opus-4.8": _opus()},
             transport=ModelCapability(),
         )
 
 
-def test_resolve_follows_a_role() -> None:
-    _, settings = resolve(
+def test_resolve_follows_a_catalog_alias() -> None:
+    row = _opus()
+    capability, _ = resolve(
         "utility",
-        models={"claude-opus-4-8": _opus()},
-        roles={"utility": "claude-opus-4-8+1m"},
+        models={"utility": row, row.model_id: row},
         transport=ModelCapability(),
     )
-    assert settings.context == "+1m"
+    assert capability.model_id == "opus-4.8"
+
+
+def test_resolve_accepts_a_vendor_id_as_a_compatibility_alias() -> None:
+    row = replace(
+        _opus(),
+        model_id="opus-4.8",
+        wire_model_id="claude-opus-4-8",
+    )
+    capability, _ = resolve(
+        "claude-opus-4-8",
+        models={row.model_id: row},
+        transport=ModelCapability(),
+    )
+    assert capability.model_id == "opus-4.8"
+    assert capability.wire_model_id == "claude-opus-4-8"
 
 
 def test_resolve_settings_carry_the_capability_they_were_narrowed_from() -> None:
     """Construction validates, so the settings could not exist otherwise."""
     capability, settings = resolve(
-        "claude-opus-4-8+1m",
-        models={"claude-opus-4-8": _opus()},
-        roles={},
+        "opus-4.8+1m",
+        models={"opus-4.8": _opus()},
         transport=_cli(),
     )
     assert settings.capability == capability
+
+
+def test_model_catalog_owns_ids_and_resolution() -> None:
+    row = _opus()
+    catalog = ModelCatalog(
+        rows=MappingProxyType({row.model_id: row}),
+        transport=_cli(),
+    )
+    assert catalog.model_ids() == ("opus-4.8",)
+    capability, _ = catalog.resolve("opus-4.8")
+    assert capability.model_id == "opus-4.8"
 
 
 if __name__ == "__main__":

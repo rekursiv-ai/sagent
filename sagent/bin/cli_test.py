@@ -783,7 +783,7 @@ def test_resume_model_defaults_explicit_model_overrides_session_meta() -> None:
 
 
 def test_resume_model_defaults_explicit_provider_keeps_context_tagged_model() -> None:
-    """A ``+1m`` id is not a catalog key; the check must strip it.
+    """A ``+200k`` id is not a catalog key; the check must strip it.
 
     Regression: exact catalog membership nulled the persisted model on an
     explicit same-provider resume, silently dropping the window tag (and
@@ -793,10 +793,10 @@ def test_resume_model_defaults_explicit_provider_keeps_context_tagged_model() ->
     meta = SessionMeta(
         provider="Anthropic",
         auth="env",
-        model_id="claude-opus-4-8+1m",
+        model_id="claude-opus-4-8+200k",
     )
     _apply_resume_model_defaults(ns, meta)
-    assert ns.model == "claude-opus-4-8+1m"
+    assert ns.model == "claude-opus-4-8+200k"
 
 
 def test_parse_agent_args_known_unknown_split() -> None:

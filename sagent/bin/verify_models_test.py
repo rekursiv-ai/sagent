@@ -211,7 +211,7 @@ class TestCompare:
         }
         assert verify_models.compare("Provider", known, live) == 3
         out = capsys.readouterr().out
-        assert "in API but not in CAPABILITIES" in out
+        assert "in API but not in the catalog" in out
         assert "max_request_tokens" in out
         assert "max_response_tokens" in out
 

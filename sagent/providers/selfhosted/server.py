@@ -241,7 +241,6 @@ def _default_device() -> str | None:
 class SelfHosted:
     """Self-hosted model provider backed by HuggingFace transformers."""
 
-    DEFAULT_MODEL: ClassVar[str] = "Qwen/Qwen3.6-27B"
     DEFAULT_MAX_REQUEST_TOKENS: ClassVar[int] = 32_768
     DEFAULT_MAX_RESPONSE_TOKENS: ClassVar[int] = 4_096
 
@@ -303,7 +302,7 @@ class SelfHosted:
           provider: Configured self-hosted provider.
 
         """
-        return cls.from_key(cls.DEFAULT_MODEL)
+        return cls.from_key("Qwen/Qwen3.6-27B")
 
     @property
     def native_model(self) -> nn.Module:
@@ -461,21 +460,12 @@ class SelfHosted:
 
         """
         del max_request_tokens
-        if model_id is not None and model_id != self._model_id:
+        if model_id not in {None, "default", "utility", self._model_id}:
             raise ValueError(
                 f"SelfHosted provider is bound to {self._model_id!r}, "
                 f"got {model_id!r}. Rebuild via SelfHosted.from_hf().",
             )
         return SelfHostedModel(provider=self)
-
-    def utility_model(self) -> SelfHostedModel:
-        """Return the default model instance.
-
-        Returns:
-          model: Bound model using the loaded model ID.
-
-        """
-        return self.model()
 
 
 class _ProviderLike(Protocol):

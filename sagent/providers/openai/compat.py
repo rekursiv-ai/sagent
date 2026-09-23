@@ -1,13 +1,12 @@
 """OpenAI chat-completions compatible base.
 
 Third-party providers (Kimi, Qwen, MiniMax, any local vLLM/SGLang
-box) subclass ``OpenAICompat`` and override a handful of class attrs::
+    box) subclass ``OpenAICompat`` and set its catalog and endpoint::
 
     class Kimi(OpenAICompat):
-        DEFAULT_MODEL = "kimi-k2.6"
         ENV_VAR = "MOONSHOT_API_KEY"
         BASE_URL = "https://api.moonshot.ai/v1"
-        CAPABILITIES = {...}
+        catalog = ModelCatalog(rows=models(), transport=openai.compatible())
 
 The model backend (``OpenAICompatModel``) exposes hooks for
 provider-specific tweaks (``_reasoning_field``, ``_is_effort_model``,
@@ -17,14 +16,13 @@ for most provider divergence.
 Usage::
 
     provider = Kimi.from_env()
-    model = provider.model()        # DEFAULT_MODEL
+    model = provider.model()        # catalog key "default"
     response = await model.buffer(request)
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar, Self, cast, override
 
 import asyncio
@@ -38,12 +36,14 @@ if TYPE_CHECKING:
     import httpx2
 
     from sagent.lib import image
+    from sagent.types.capability import ModelCapability, ModelSettings
 else:
     from wrapt import lazy_import
 
     httpx2 = lazy_import("httpx2")  # 100ms cold.
     image = lazy_import("sagent.lib.image")
 
+from sagent.catalog import openai
 from sagent.lib import debug_log
 from sagent.lib.custom_json import (
     DictCodec,
@@ -64,7 +64,6 @@ from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.lib.usage import openai_usage
 from sagent.providers.openai import token_count
-from sagent.types.capability import ModelCapability, ModelSettings
 from sagent.types.cost import ServiceTier, TokenCount
 from sagent.types.model import (
     ModelRequest,
@@ -74,7 +73,7 @@ from sagent.types.model import (
     UsageSnapshot,
     base_model_id,
 )
-from sagent.types.providers import ModelRole, resolve
+from sagent.types.providers import ModelCatalog
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
@@ -96,40 +95,11 @@ _STREAM_IDLE_TIMEOUT = (
 class OpenAICompat:
     """Base provider for OpenAI chat-completions compatible endpoints."""
 
-    DEFAULT_MODEL: ClassVar[str] = ""
-    DEFAULT_UTILITY_MODEL: ClassVar[str] = ""
     ENV_VAR: ClassVar[str] = ""
     BASE_URL: ClassVar[str] = ""
-
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = MappingProxyType[
-        str,
-        ModelCapability,
-    ]({})
-    """Per-model capability; empty on the plain compat base."""
-
-    # The thinking axes are stated wide, not omitted: ``&`` can only remove and
-    # an omitted axis defaults to its narrow value, so leaving them out emptied
-    # DashScope's reasoning ladder -- a model nothing can be requested from.
-    TRANSPORT: ClassVar[ModelCapability] = ModelCapability(
-        thinking_effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
-        thinking_budget={"none", "auto", "fixed"},
-        thinking_output={"none", "text", "redacted"},
-        service_tier={"auto"},
-        manage_context_server_side={False},
-    )
-    """Chat-completions vendors expose no cache or tier knob."""
+    catalog = ModelCatalog(rows={}, transport=openai.compatible())
 
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]]
-
-    @property
-    def ROLES(self) -> Mapping[ModelRole, str]:  # noqa: N802 -- The provider adapter preserves the upstream OpenAI field name required by its protocol.
-        """Role name to base id; ``utility`` falls back to the default."""
-        return MappingProxyType(
-            {
-                "default": self.DEFAULT_MODEL,
-                "utility": self.DEFAULT_UTILITY_MODEL or self.DEFAULT_MODEL,
-            },
-        )
 
     def __init__(self, *, api_key: str, base_url: str | None = None) -> None:
         self.api_key = api_key
@@ -183,17 +153,12 @@ class OpenAICompat:
           model: Chat-completions model backend.
 
         Raises:
-          ValueError: If ``model_id`` is not in ``CAPABILITIES``, or it
+          ValueError: If ``model_id`` is not in the catalog, or it
               carries a ``+fast`` tag the backend has no latency mode for.
 
         """
         mid = model_id if model_id is not None else "default"
-        capability, settings = resolve(
-            mid,
-            models=self.CAPABILITIES,
-            roles=self.ROLES,
-            transport=self.TRANSPORT,
-        )
+        capability, settings = self.catalog.resolve(mid)
         model_class = cast(
             type[OpenAICompatModel],
             getattr(self, "MODEL_CLASS", OpenAICompatModel),
@@ -203,15 +168,6 @@ class OpenAICompat:
             capability=capability,
             settings=settings,
         )
-
-    def utility_model(self) -> OpenAICompatModel:
-        """Return the default utility (fast/cheap) model backend.
-
-        Returns:
-          model: Backend for the cheapest/fastest known model.
-
-        """
-        return self.model("utility")
 
 
 class OpenAICompatModel(ModelDefaults):

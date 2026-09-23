@@ -187,27 +187,20 @@ def test_model_unknown_raises() -> None:
 
 
 def test_model_uses_default_when_unset() -> None:
-    """``provider.model()`` picks ``DEFAULT_MODEL``."""
     provider = GoogleCLI()
     model = provider.model()
-    assert model.capability.model_id == GoogleCLI.DEFAULT_MODEL
+    assert model.capability.model_id == provider.catalog.resolve("default")[0].model_id
 
 
-def test_default_model_inherits_from_google() -> None:
-    """``GoogleCLI`` defers to ``Google.DEFAULT_MODEL``."""
-    assert GoogleCLI.DEFAULT_MODEL == Google.DEFAULT_MODEL
-
-
-def test_default_utility_model_inherits_from_google() -> None:
-    """``GoogleCLI`` defers to ``Google.DEFAULT_UTILITY_MODEL``."""
-    assert GoogleCLI.DEFAULT_UTILITY_MODEL == Google.DEFAULT_UTILITY_MODEL
+def test_catalog_inherits_from_google() -> None:
+    assert GoogleCLI.catalog.model_ids() == Google.catalog.model_ids()
 
 
 def test_utility_model_picks_flash_lite() -> None:
     """``utility_model`` returns the cheapest Gemini in ``KNOWN_MODELS``."""
     provider = GoogleCLI()
-    model = provider.utility_model()
-    assert model.capability.model_id == GoogleCLI.DEFAULT_UTILITY_MODEL
+    model = provider.model("utility")
+    assert model.capability.model_id == provider.catalog.resolve("utility")[0].model_id
 
 
 def test_model_capabilities() -> None:

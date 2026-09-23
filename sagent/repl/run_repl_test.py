@@ -21,7 +21,6 @@ import pytest
 from sagent.agent.agent import Agent, _resolve_target_spec
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.lib import last_models
-from sagent.providers import Google
 from sagent.repl.input_queues import InputQueues, QueuedInputBlock
 from sagent.repl.keybindings import (
     NavState,
@@ -301,7 +300,7 @@ def test_parse_model_args_short_flag_provider_falls_back_to_default_model() -> N
     """
     with patch.object(last_models, "load", return_value={}):
         out = _parse("-p", "Google")
-    assert out == ("Google", "env", None, Google.DEFAULT_MODEL)
+    assert out == ("Google", "env", None, "default")
 
 
 def test_parse_model_args_flag_auth() -> None:
@@ -318,7 +317,7 @@ def test_parse_model_args_kv_provider_falls_back_to_default_model() -> None:
     """``/model provider=Google`` with no model picks Google.DEFAULT_MODEL."""
     with patch.object(last_models, "load", return_value={}):
         out = _parse("provider=Google")
-    assert out == ("Google", "env", None, Google.DEFAULT_MODEL)
+    assert out == ("Google", "env", None, "default")
 
 
 def test_parse_model_args_kv_auth() -> None:
@@ -370,7 +369,7 @@ def test_provider_switch_uses_last_used_when_known(
 ) -> None:
     """``/model provider=Google`` prefers the last-used Google model over the default.
 
-    The current spec's ``claude-opus-4-7`` is not in ``Google.CAPABILITIES``
+    The current spec's ``claude-opus-4-7`` is not in Google's catalog
     so cross-provider preservation falls through. With a recorded last-used
     Google model in the sagent ``last-models.json``, the resolver picks
     that up. ``Google.DEFAULT_MODEL`` is the cold-start fallback.

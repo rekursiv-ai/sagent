@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import MappingProxyType
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import ClassVar, cast
 
 import json
 
@@ -11,6 +11,7 @@ import httpx2
 import pytest
 import tiktoken
 
+from sagent.catalog import openai
 from sagent.lib.custom_json import MutableJSON
 from sagent.providers.openai.compat import (
     OpenAICompat,
@@ -35,6 +36,7 @@ from sagent.types.model import (
     RequestTooLargeError,
     StreamInterruptedError,
 )
+from sagent.types.providers import ModelCatalog
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
@@ -45,10 +47,6 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
 
 
 def _priced_model(prices: PriceCatalog) -> OpenAICompatModel:
@@ -470,19 +468,25 @@ def _stub_limits(request: int) -> ModelLimits:
 
 
 class _DummyProvider(OpenAICompat):
-    DEFAULT_MODEL: ClassVar[str] = "stub-1"
     ENV_VAR: ClassVar[str] = "DUMMY_PROV_KEY"
     BASE_URL: ClassVar[str] = "https://stub.test/v1"
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = MappingProxyType(
-        {
-            "stub-1": ModelCapability(
-                model_id="stub-1",
-                context=MappingProxyType(
-                    {"": _stub_limits(1000), "+1m": _stub_limits(1_000_000)},
-                ),
-                prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
-            ),
-        },
+    _row = ModelCapability(
+        model_id="stub-1",
+        context=MappingProxyType(
+            {"": _stub_limits(1000), "+1m": _stub_limits(1_000_000)},
+        ),
+        prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+    )
+
+    catalog = ModelCatalog(
+        rows=MappingProxyType(
+            {
+                "default": _row,
+                "utility": _row,
+                "stub-1": _row,
+            },
+        ),
+        transport=openai.compatible(),
     )
 
 
@@ -517,9 +521,9 @@ def test_provider_model_default_picks_default_model() -> None:
     assert m.capability.model_id == "stub-1"
 
 
-def test_provider_utility_model_uses_default_when_not_set() -> None:
+def test_provider_utility_alias_uses_the_utility_row() -> None:
     p = _DummyProvider.from_key("k")
-    m = p.utility_model()
+    m = p.model("utility")
     assert m.capability.model_id == "stub-1"
 
 

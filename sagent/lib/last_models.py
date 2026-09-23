@@ -6,7 +6,7 @@ Stored at ``data_dir() / "rekursiv-ai"/sagent/last-models.json`` as a flat
 ``ModelRecipe`` is supplied). Looked up by the ``/model`` slash
 command when the user changes provider without naming a model -- so
 ``/model provider=OpenAISubscription`` resumes the last OpenAI model
-the user picked, falling back to ``OpenAISubscription.DEFAULT_MODEL``
+the user picked, falling back to the provider catalog's ``default`` row
 when this provider hasn't been used before.
 
 Concurrent writers (multiple agent processes / threads) are serialised

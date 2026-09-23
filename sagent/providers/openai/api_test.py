@@ -36,7 +36,9 @@ async def test_every_catalog_row_is_a_model_the_vendor_serves() -> None:
     # Bounded concurrency: firing one connection per row made the slowest
     # response the whole test's fate, and `ReadTimeout` under that fan-out was
     # the observed failure rather than any catalog defect.
-    model_ids = tuple(openai.models())
+    model_ids = tuple(
+        row.wire_model_id or model_id for model_id, row in openai.models().items()
+    )
     gate = asyncio.Semaphore(8)
 
     async def _probe(client: httpx2.AsyncClient, model_id: str) -> bool:
@@ -94,14 +96,19 @@ def test_openai_from_env_reads_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_openai_default_model_known() -> None:
     p = OpenAI.from_key("k")
-    m = p.model()  # Picks DEFAULT_MODEL.
-    assert m.tagged_model_id == OpenAI.DEFAULT_MODEL
+    m = p.model()
+    assert m.tagged_model_id == p.catalog.resolve("default")[0].model_id
 
 
 def test_openai_default_models_are_astra_and_luna() -> None:
     """Astra for reasoning, Luna for utility (50x/42x cheaper per token)."""
-    assert OpenAI.DEFAULT_MODEL == "gpt-6-astra+1m"
-    assert OpenAI.DEFAULT_UTILITY_MODEL == "gpt-5.6-luna"
+    assert OpenAI.catalog.resolve("default")[0].model_id == "astra-6"
+    assert OpenAI.catalog.resolve("utility")[0].model_id == "luna-6"
+
+
+def test_normalized_openai_id_uses_vendor_id_on_the_wire() -> None:
+    model = OpenAI.from_key("k").model("astra-6")
+    assert model._wire_model_id == "gpt-6-astra"
 
 
 def test_openai_known_model_returns_backend() -> None:
@@ -122,7 +129,7 @@ def test_openai_unknown_model_raises() -> None:
     [
         ("gpt-5.6-sol", 1_050_000),
         ("gpt-5.6", 1_050_000),
-        ("gpt-5.6-terra", 1_050_000),
+        ("terra-5.6", 1_050_000),
         ("gpt-5.6-luna", 1_050_000),
         ("gpt-5.5", 1_000_000),
         ("gpt-5.5-pro", 1_050_000),
@@ -130,19 +137,21 @@ def test_openai_unknown_model_raises() -> None:
         ("gpt-5.4-pro", 1_050_000),
     ],
 )
-def test_openai_two_tier_default_caps_at_272k(base_id: str, full_tokens: int) -> None:
+def test_openai_two_tier_defaults_to_full_window(
+    base_id: str,
+    full_tokens: int,
+) -> None:
     p = OpenAI.from_key("k")
-    base = p.model(base_id)
-    full = p.model(f"{base_id}+1m")
-    assert base.limits.max_request_tokens == 272_000
+    full = p.model(base_id)
+    small = p.model(f"{base_id}+272k")
     assert full.limits.max_request_tokens == full_tokens
-    assert full.tagged_model_id == f"{base_id}+1m"
-    # ``+1m`` only widens the window; pricing and other limits track the base.
+    assert small.limits.max_request_tokens == 272_000
+    assert small.tagged_model_id.endswith("+272k")
     assert (
         full.capability.prices[PriceCatalogProduct()]
-        == base.capability.prices[PriceCatalogProduct()]
+        == small.capability.prices[PriceCatalogProduct()]
     )
-    assert full.limits.max_request_bytes == base.limits.max_request_bytes
+    assert full.limits.max_request_bytes == small.limits.max_request_bytes
 
 
 def test_openai_gpt_6_astra_profile() -> None:
@@ -150,10 +159,10 @@ def test_openai_gpt_6_astra_profile() -> None:
 
     ``reasoning.effort`` 400s on ``none``/``minimal`` and takes low..max;
     ``service_tier`` takes auto/default/flex/priority (``batch`` 400s);
-    the window is 272K untagged with a 1.05M ``+1m`` variant.
+    the untagged window is 1.05M and ``+272k`` selects the smaller cap.
     """
-    m = OpenAI.from_key("k").model("gpt-6-astra")
-    assert m.limits.max_request_tokens == 272_000
+    m = OpenAI.from_key("k").model("astra-6")
+    assert m.limits.max_request_tokens == 1_050_000
     assert m.limits.max_response_tokens == 128_000
     assert m.capability.prices[PriceCatalogProduct()].request == 10.0
     assert m.capability.prices[PriceCatalogProduct()].response == 50.0
@@ -161,9 +170,6 @@ def test_openai_gpt_6_astra_profile() -> None:
     assert m.capability.prices[PriceCatalogProduct()].cache_read == 1.0
     assert m.capability.service_tier == frozenset(
         {"auto", "default", "flex", "priority"},
-    )
-    assert OpenAI.from_key("k").model("gpt-6-astra+1m").limits.max_request_tokens == (
-        1_050_000
     )
 
 
@@ -173,7 +179,7 @@ def test_openai_gpt_6_astra_cannot_be_asked_not_to_think() -> None:
     The API rejects both ``none`` and ``minimal`` outright, so offering
     them would let a caller select a value the wire refuses.
     """
-    m = OpenAI.from_key("k").model("gpt-6-astra")
+    m = OpenAI.from_key("k").model("astra-6")
     assert m.capability.thinking_effort == frozenset(
         {"low", "medium", "high", "xhigh", "max"},
     )
@@ -205,10 +211,10 @@ def test_openai_gpt_6_effort_floor_never_emits_a_rejected_value(
 
 
 def test_openai_default_model_opts_into_full_window() -> None:
-    # API-key default is the ``+1m`` variant: full window out of the box.
+    # The untagged default is the full window.
     p = OpenAI.from_key("k")
     m = p.model()
-    assert m.tagged_model_id == "gpt-6-astra+1m"
+    assert m.tagged_model_id == "astra-6"
     assert m.limits.max_request_tokens == 1_050_000
 
 
@@ -228,7 +234,7 @@ def test_openai_gpt_56_profiles(
     cache_write_price: float,
 ) -> None:
     m = OpenAI.from_key("k").model(model_id)
-    assert m.limits.max_request_tokens == 272_000
+    assert m.limits.max_request_tokens == 1_050_000
     assert m.limits.max_response_tokens == 128_000
     assert m.capability.prices[PriceCatalogProduct()].request == request_price
     assert m.capability.prices[PriceCatalogProduct()].response == response_price
@@ -309,15 +315,11 @@ async def test_openai_gpt_6_uses_o200k_tokenizer() -> None:
 
 
 @pytest.mark.parametrize("base_id", ["gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano"])
-def test_openai_no_cliff_model_plus1m_is_alias(base_id: str) -> None:
-    # gpt-4.1 has a single flat price (no 272K tier), so ``+1m`` is an alias:
-    # both ids resolve to the same full window.
+def test_openai_no_cliff_model_defaults_to_full_window(base_id: str) -> None:
     p = OpenAI.from_key("k")
-    assert (
-        p.model(f"{base_id}+1m").limits.max_request_tokens
-        == p.model(base_id).limits.max_request_tokens
-        == 1_047_576
-    )
+    model = p.model(base_id)
+    assert model.limits.max_request_tokens == 1_047_576
+    assert set(model.capability.context) == {""}
 
 
 @pytest.mark.parametrize(
@@ -333,8 +335,8 @@ def test_openai_400k_model_has_no_plus1m(model_id: str) -> None:
 
 def test_openai_utility_model_default() -> None:
     p = OpenAI.from_key("k")
-    m = p.utility_model()
-    assert m.capability.model_id == "gpt-5.6-luna"
+    m = p.model("utility")
+    assert m.capability.model_id == "luna-6"
 
 
 @pytest.mark.parametrize(

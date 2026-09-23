@@ -170,7 +170,7 @@ class _OpenAIResponsesModel(ModelDefaults):
 
     @property
     def _wire_model_id(self) -> str:
-        return base_model_id(self.capability.model_id)
+        return self.capability.wire_model_id or base_model_id(self.capability.model_id)
 
     def _effective_service_tier(self) -> ServiceTier | None:
         tier = self.settings.service_tier
@@ -205,7 +205,7 @@ class _OpenAIResponsesModel(ModelDefaults):
             return None
         return reasoning_effort(
             self.settings.thinking_effort,
-            model_id=self.capability.model_id,
+            model_id=self._wire_model_id,
         )
 
     def _build_kwargs(self, request: ModelRequest) -> ResponseCreateParamsStreaming:

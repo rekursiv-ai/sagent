@@ -8,7 +8,7 @@ Usage::
 
     from sagent.prompt import build_system_dict
 
-    system = build_system_dict(model_id="claude-sonnet-4-6")
+    system = build_system_dict(model_spec)
 """
 
 from __future__ import annotations
@@ -30,56 +30,35 @@ from sagent.tools.core import (
     recipe_dict,
     recipe_list,
 )
-from sagent.types.model import base_model_id
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from sagent.types.capability import ContextTag, ModelCapability
+
 
 logger = logging.getLogger(__name__)
 
 
-def environment(model_id: str) -> str:
+def environment(
+    model_spec: ModelCapability,
+    *,
+    context: ContextTag = "",
+) -> str:
     """Build the environment section with current runtime info.
 
     Args:
-      model_id: Provider-specific model identifier.
+      model_spec: Resolved catalog record.
+      context: Explicit context tag selected for this model.
 
     Returns:
       section: Formatted environment info string.
 
     """
+    model_id = f"{model_spec.model_id}{context}"
     cwd = get_tool_state().bash_cwd
     is_git = _is_git_repo(cwd)
-    model_info: dict[str, tuple[str, str]] = {
-        # 2026-08-28.
-        "claude-fable-5-1": ("Claude Fable 5.1", "June 2026"),
-        # 2026-07-24.
-        "claude-opus-5": ("Claude Opus 5", "May 2026"),
-        # 2026-06-29.
-        "claude-sonnet-5": ("Claude Sonnet 5", "January 2026"),
-        # 2026-06-07.
-        "claude-fable-5": ("Claude Fable 5", "January 2026"),
-        # 2026-05-28.
-        "claude-opus-4-8": ("Claude Opus 4.8", "January 2026"),
-        # 2026-04-14.
-        "claude-opus-4-7": ("Claude Opus 4.7", "January 2026"),
-        # 2026-02-17.
-        "claude-sonnet-4-6": ("Claude Sonnet 4.6", "August 2025"),
-        # 2026-02-04.
-        "claude-opus-4-6": ("Claude Opus 4.6", "May 2025"),
-        # 2025-11-24.
-        "claude-opus-4-5": ("Claude Opus 4.5", "May 2025"),
-        # 2025-10-15.
-        "claude-haiku-4-5": ("Claude Haiku 4.5", "February 2025"),
-        # 2025-09-29.
-        "claude-sonnet-4-5": ("Claude Sonnet 4.5", "January 2025"),
-    }
-    # Context-window variants share their base model's metadata; key the
-    # lookup on the canonical base id so ``claude-opus-4-8+1m`` resolves to
-    # its base entry instead of falling back to "unknown".
-    marketing, cutoff = model_info.get(base_model_id(model_id), (model_id, "unknown"))
     shell_name = _shell_name(os.environ.get("SHELL", "unknown"))
     on_windows = platform.system() == "Windows"
     # On Windows, tell the model to use Unix shell syntax (assumes Git Bash / WSL).
@@ -103,16 +82,20 @@ def environment(model_id: str) -> str:
         platform=sys.platform,
         shell_line=shell_line,
         os_version=f"{platform.system()} {platform.release()}",
-        marketing=marketing,
         model_id=model_id,
-        cutoff=cutoff,
+        knowledge_cutoff_line=(
+            f"\nKnowledge cutoff: {model_spec.knowledge_cutoff}."
+            if model_spec.knowledge_cutoff
+            else ""
+        ),
     )
 
 
 def build_system(
-    model_id: str,
+    model_spec: ModelCapability,
     custom: str = "",
     *,
+    context: ContextTag = "",
     include_memory: bool = True,
 ) -> str:
     """Assemble the full system prompt (one-shot evaluation).
@@ -121,22 +104,29 @@ def build_system(
     ``build_system_dict()`` for per-request dynamic evaluation.
 
     Args:
-      model_id: Provider-specific model identifier.
+      model_spec: Resolved catalog record.
       custom: Optional user instructions appended to the prompt.
+      context: Explicit context tag selected for this model.
       include_memory: Whether to include persistent project memory.
 
     Returns:
       prompt: Assembled system prompt string.
 
     """
-    d = build_system_dict(model_id, custom=custom, include_memory=include_memory)
+    d = build_system_dict(
+        model_spec,
+        custom=custom,
+        context=context,
+        include_memory=include_memory,
+    )
     return "\n\n".join(v() for v in d.values())
 
 
 def build_system_dict(
-    model_id: str,
+    model_spec: ModelCapability,
     custom: str = "",
     *,
+    context: ContextTag = "",
     include_memory: bool = True,
 ) -> dict[str, Callable[[], str]]:
     """Assemble core scaffolding for the system prompt.
@@ -154,8 +144,9 @@ def build_system_dict(
     prompt of just the ``custom`` text (useful for benchmarks).
 
     Args:
-      model_id: Provider-specific model identifier.
+      model_spec: Resolved catalog record.
       custom: Optional user instructions appended to the prompt.
+      context: Explicit context tag selected for this model.
       include_memory: Whether to include persistent project memory.
 
     Returns:
@@ -167,7 +158,7 @@ def build_system_dict(
     if "static" in enabled:
         sections["static"] = _load_static
     if "environment" in enabled:
-        sections["environment"] = lambda: environment(model_id)
+        sections["environment"] = lambda: environment(model_spec, context=context)
     if "agents_md" in enabled:
         # AGENTS.md walk runs per-request so edits to project instructions
         # take effect without restarting the CLI.

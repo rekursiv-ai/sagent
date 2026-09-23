@@ -31,7 +31,7 @@ def test_dashscope_from_env_missing(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_dashscope_default_model() -> None:
     p = DashScope.from_key("k")
     m = p.model()
-    assert m.capability.model_id == DashScope.DEFAULT_MODEL
+    assert m.capability.model_id == p.catalog.resolve("default")[0].model_id
     # Reasoning is surfaced via ``reasoning_content`` on Qwen3.
     assert m.capability.thinking_budget != frozenset({"none"})
 
@@ -46,7 +46,7 @@ def test_dashscope_unknown_model_raises() -> None:
     ("model_id", "is_effort"),
     [
         ("qwen3-32b", True),
-        # The qwen3.6 family (incl. the DEFAULT_MODEL) is Qwen3-generation and
+        # The qwen3.6 family (including the default) is Qwen3-generation and
         # MUST expose the effort knob; the prefix has to match the dotted form.
         ("qwen3.6-plus", True),
         ("qwen3.6-max-preview", True),
@@ -76,7 +76,7 @@ def test_dashscope_is_effort_model(model_id: str, is_effort: bool) -> None:
     assert m._is_effort_model(model_id) is is_effort
 
 
-@pytest.mark.parametrize("model_id", sorted(DashScope.CAPABILITIES))
+@pytest.mark.parametrize("model_id", sorted(DashScope.catalog.model_ids()))
 def test_the_effort_predicate_agrees_with_every_row(model_id: str) -> None:
     """The id-shape predicate and the catalog row must say the same thing.
 
@@ -88,7 +88,7 @@ def test_the_effort_predicate_agrees_with_every_row(model_id: str) -> None:
     """
     model = DashScope.from_key("k").model(model_id)
     offers_effort = model.capability.thinking_effort != frozenset({"none"})
-    assert model._is_effort_model(model_id) is offers_effort
+    assert model._is_effort_model(model.capability.model_id) is offers_effort
 
 
 # Not defaulted to ``"none"``: a ``-thinking`` row withholds that value, so forcing it

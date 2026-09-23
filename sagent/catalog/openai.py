@@ -34,10 +34,27 @@ if TYPE_CHECKING:
 
 __all__ = [
     "api",
+    "compatible",
     "models",
     "reasoning_effort",
     "subscription",
 ]
+
+
+def compatible() -> ModelCapability:
+    """Return the common Chat Completions transport capability.
+
+    Returns:
+      capability: Restrictions shared by OpenAI-compatible transports.
+
+    """
+    return ModelCapability(
+        thinking_effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
+        thinking_budget={"none", "auto", "fixed"},
+        thinking_output={"none", "text", "redacted"},
+        service_tier={"auto"},
+        manage_context_server_side={False},
+    )
 
 
 # A row carries only what the MODEL can do; caching, retry, and auth mode are
@@ -48,7 +65,7 @@ __all__ = [
 # was repriced after this catalog first landed -- Sol $5/$30 -> $4/$20, Luna
 # $1/$6 -> $0.20/$1.20 -- so the old rows over-billed by up to 5x. Sol's rate
 # is promotional "at least through November 21, 2026" and needs rechecking then.
-# ``chars_per_token`` measured from SERVER-reported ``usage.input_tokens``
+# ``approx_chars_per_token`` measured from SERVER-reported ``usage.input_tokens``
 # on 347k chars of real session text (2026-08-22), differencing out the
 # per-request envelope. 3.71 across the whole range -- the catalog's prior
 # flat 4.0 was the dataclass default, never measured, and over-credited
@@ -65,6 +82,7 @@ def models() -> Mapping[str, ModelCapability]:
     # and reasoning axes replaced. 5.6 bills images by 32x32 patch and takes
     # a far larger request body than the generations before it.
     gpt56 = ModelCapability(
+        knowledge_cutoff="February 16, 2026",
         context=_windowed(
             request=272_000,
             response=128_000,
@@ -108,7 +126,15 @@ def models() -> Mapping[str, ModelCapability]:
         # differs would otherwise inherit a limit nothing verified for it.
         replace(
             gpt56,
-            model_id="gpt-6-astra",
+            model_id="astra-6",
+            wire_model_id="gpt-6-astra",
+            knowledge_cutoff="April 30, 2026",
+            context=_windowed(
+                request=272_000,
+                response=128_000,
+                long=1_050_000,
+                gpt56_images=True,
+            ),
             prices=_prices(
                 request=10.0,
                 response=50.0,
@@ -117,6 +143,32 @@ def models() -> Mapping[str, ModelCapability]:
                 two_tier=True,
             ),
             thinking_effort={"low", "medium", "high", "xhigh", "max"},
+        ),
+        replace(
+            gpt56,
+            model_id="sol-6",
+            wire_model_id="gpt-6-sol",
+            knowledge_cutoff="April 20, 2026",
+            prices=_prices(
+                request=2.0,
+                response=10.0,
+                cache_write=2.5,
+                cache_read=0.2,
+                two_tier=True,
+            ),
+        ),
+        replace(
+            gpt56,
+            model_id="luna-6",
+            wire_model_id="gpt-6-luna",
+            knowledge_cutoff="May 18, 2026",
+            prices=_prices(
+                request=0.1,
+                response=0.5,
+                cache_write=0.125,
+                cache_read=0.01,
+                two_tier=True,
+            ),
         ),
         replace(
             gpt56,
@@ -142,7 +194,8 @@ def models() -> Mapping[str, ModelCapability]:
         ),
         replace(
             gpt56,
-            model_id="gpt-5.6-terra",
+            model_id="terra-5.6",
+            wire_model_id="gpt-5.6-terra",
             prices=_prices(
                 request=2.0,
                 response=12.0,
@@ -256,7 +309,14 @@ def models() -> Mapping[str, ModelCapability]:
             prices=_prices(request=30.0, response=60.0),
         ),
     )
-    return MappingProxyType({row.model_id: row for row in rows})
+    catalog = {row.model_id: row for row in rows}
+    return MappingProxyType(
+        {
+            "default": catalog["astra-6"],
+            "utility": catalog["luna-6"],
+            **catalog,
+        },
+    )
 
 
 def reasoning_effort(
@@ -348,7 +408,7 @@ def _context(
     response: int,
     gpt56_images: bool = False,
 ) -> Mapping[ContextTag, ModelLimits]:
-    """One context tag, for a model with no ``+1m`` variant."""
+    """One untagged context for a model with no smaller-window selection."""
     return MappingProxyType(
         {"": _one(request=request, response=response, gpt56_images=gpt56_images)},
     )
@@ -361,13 +421,17 @@ def _windowed(
     long: int,
     gpt56_images: bool = False,
 ) -> Mapping[ContextTag, ModelLimits]:
-    """Both context tags; ``+1m`` opts into the full window and its surcharge."""
-    return MappingProxyType(
-        {
-            "": _one(request=request, response=response, gpt56_images=gpt56_images),
-            "+1m": _one(request=long, response=response, gpt56_images=gpt56_images),
-        },
-    )
+    """Default to the full window; ``+272k`` selects the smaller cap."""
+    context: dict[ContextTag, ModelLimits] = {
+        "": _one(request=long, response=response, gpt56_images=gpt56_images),
+    }
+    if request < long:
+        context["+272k"] = _one(
+            request=request,
+            response=response,
+            gpt56_images=gpt56_images,
+        )
+    return MappingProxyType(context)
 
 
 def _prices(
@@ -380,8 +444,8 @@ def _prices(
 ) -> PriceCatalog:
     """USD per million tokens, plus the >272K surcharge row when two-tier."""
     # Prompts above 272K input tokens bill at 2x input / 1.5x output for the
-    # whole request on gpt-5.4 and later. The untagged id caps the window
-    # there; a ``+1m`` id opts into the full window and thus the surcharge.
+    # whole request on gpt-5.4 and later. The untagged id exposes the full
+    # window; ``+272k`` keeps requests below the surcharge threshold.
     two_tier_floor = 272_000
     rows = {
         PriceCatalogProduct(): TokenPrice(

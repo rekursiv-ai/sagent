@@ -54,7 +54,14 @@ def models() -> Mapping[str, ModelCapability]:
             context=_limits(window=32_768, response=4_096),
         ),
     )
-    return MappingProxyType({row.model_id: row for row in rows})
+    catalog = {row.model_id: row for row in rows}
+    return MappingProxyType(
+        {
+            "default": catalog["qwen3.6-27b-12gb"],
+            "utility": catalog["qwen3.6-27b-12gb"],
+            **catalog,
+        },
+    )
 
 
 def _limits(*, window: int, response: int) -> Mapping[ContextTag, ModelLimits]:

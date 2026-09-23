@@ -18,19 +18,14 @@ uses the standard ``tool_calls`` block.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar
+from typing import ClassVar
 
-from sagent.catalog import minimax
+from sagent.catalog import minimax, openai
 from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
 )
-
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-    from sagent.types.capability import ModelCapability
+from sagent.types.providers import ModelCatalog
 
 
 class _MiniMaxModel(OpenAICompatModel):
@@ -48,20 +43,15 @@ class _MiniMaxModel(OpenAICompatModel):
 class MiniMax(OpenAICompat):
     """MiniMax provider (api.minimax.io)."""
 
-    DEFAULT_MODEL: ClassVar[str] = "MiniMax-M2.7"
-    # Cheapest row that keeps a comparable window: ``abab6.5s-chat`` undercuts
-    # it further but is a prior generation. Without this, ``utility_model()``
-    # falls back to the default and every summarizer call bills the full rate.
-    DEFAULT_UTILITY_MODEL: ClassVar[str] = "MiniMax-Text-01"
     ENV_VAR: ClassVar[str] = "MINIMAX_API_KEY"
     BASE_URL: ClassVar[str] = "https://api.minimax.io/v1"
+
     # Model limits and pricing.
     # Source: https://platform.minimaxi.com/document/guides/chat-model/pro
     # Cross-ref: https://github.com/taylorwilsdon/llm-context-limits
     #
     # To add a new model: check the MiniMax platform docs for the
     # model's context window and max output tokens.
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = minimax.models()
-    """Per-model capability; transport limits live on ``TRANSPORT``."""
+    catalog = ModelCatalog(rows=minimax.models(), transport=openai.compatible())
 
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _MiniMaxModel

@@ -29,7 +29,7 @@ def test_minimax_from_env_reads(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_minimax_default_model_known() -> None:
     p = MiniMax.from_key("k")
     m = p.model()
-    assert m.capability.model_id == MiniMax.DEFAULT_MODEL
+    assert m.capability.model_id == p.catalog.resolve("default")[0].model_id
 
 
 def test_minimax_unknown_model_raises() -> None:
@@ -47,7 +47,7 @@ def test_minimax_model_supports_thinking_via_reasoning_field() -> None:
 
 def test_minimax_known_models_have_pricing() -> None:
     p = MiniMax.from_key("k")
-    for mid in MiniMax.CAPABILITIES:
+    for mid in MiniMax.catalog.model_ids():
         m = p.model(mid)
         assert m.capability.prices[PriceCatalogProduct()].request > 0
         assert m.capability.prices[PriceCatalogProduct()].response > 0

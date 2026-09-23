@@ -206,10 +206,10 @@ def test_stream_interrupted_message_embeds_response_counts() -> None:
 @pytest.mark.parametrize(
     ("model_id", "base"),
     [
-        ("claude-opus-4-7+1m", "claude-opus-4-7"),
-        ("claude-opus-4-7+200k", "claude-opus-4-7"),
-        ("claude-opus-4-7", "claude-opus-4-7"),
-        ("Claude-Opus-4-7+1M", "Claude-Opus-4-7"),
+        ("opus-4.7+1m", "opus-4.7"),
+        ("opus-4.7+200k", "opus-4.7"),
+        ("opus-4.7", "opus-4.7"),
+        ("Opus-4.7+1M", "Opus-4.7"),
     ],
 )
 def test_base_model_id_strips_the_context_tag(model_id: str, base: str) -> None:
@@ -219,10 +219,11 @@ def test_base_model_id_strips_the_context_tag(model_id: str, base: str) -> None:
 @pytest.mark.parametrize(
     ("model_id", "base", "tags"),
     [
-        ("claude-opus-4-8", "claude-opus-4-8", frozenset[ContextTag]()),
-        ("claude-opus-4-8+1m", "claude-opus-4-8", frozenset({"+1m"})),
-        ("claude-opus-4-8+200k", "claude-opus-4-8", frozenset({"+200k"})),
-        ("Claude-Opus-4-8+1M", "Claude-Opus-4-8", frozenset({"+1m"})),
+        ("opus-4.8", "opus-4.8", frozenset[ContextTag]()),
+        ("opus-4.8+1m", "opus-4.8", frozenset({"+1m"})),
+        ("opus-4.8+200k", "opus-4.8", frozenset({"+200k"})),
+        ("astra-6+272k", "astra-6", frozenset({"+272k"})),
+        ("Opus-4.8+1M", "Opus-4.8", frozenset({"+1m"})),
         ("model+unknown", "model+unknown", frozenset[ContextTag]()),
     ],
 )
@@ -232,13 +233,13 @@ def test_split_model_id(model_id: str, base: str, tags: frozenset[ContextTag]) -
 
 def test_context_tags_derive_from_the_literal() -> None:
     """A tag the type admits but the tuple omits would be unparseable."""
-    assert set(CONTEXT_TAGS) == {"+1m", "+200k"}
+    assert set(CONTEXT_TAGS) == {"+1m", "+272k", "+200k"}
 
 
 def test_no_latency_tag_survives() -> None:
     """``+fast`` was a second spelling of ``service_tier="priority"``."""
-    assert split_model_id("claude-opus-5+fast") == (
-        "claude-opus-5+fast",
+    assert split_model_id("opus-5+fast") == (
+        "opus-5+fast",
         frozenset(),
     )
 
@@ -249,13 +250,13 @@ def test_no_latency_tag_survives() -> None:
 @pytest.mark.parametrize(
     ("model_id", "priority"),
     [
-        ("claude-opus-5", True),
-        ("claude-opus-4-8", True),
+        ("opus-5", True),
+        ("opus-4.8", True),
         # Fast mode was removed from 4-7 on 2026-07-24 and never shipped on
         # 4-6: a fast request there is served at standard speed and billed at
         # standard rates, so a fast price row overstates the cost.
-        ("claude-opus-4-7", False),
-        ("claude-opus-4-6", False),
+        ("opus-4.7", False),
+        ("opus-4.6", False),
     ],
 )
 def test_only_documented_models_offer_the_priority_tier(
@@ -273,16 +274,18 @@ def test_only_documented_models_offer_the_priority_tier(
 @pytest.mark.parametrize(
     ("model_id", "divisor"),
     [
-        ("claude-opus-5", 2.38),
-        ("claude-opus-4-8", 2.38),
-        ("claude-opus-4-6", 3.12),
-        ("claude-haiku-4-5", 3.12),
+        ("opus-5", 2.38),
+        ("opus-4.8", 2.38),
+        ("opus-4.6", 3.12),
+        ("haiku-4.5", 3.12),
     ],
 )
-def test_chars_per_token_is_provider_internal(model_id: str, divisor: float) -> None:
-    """A divisor is not a capability: nothing SELECTS one."""
-    assert anthropic.chars_per_token(model_id) == divisor
-    assert "chars_per_token" not in ModelCapability.__dataclass_fields__
+def test_approx_chars_per_token_is_model_metadata(
+    model_id: str,
+    divisor: float,
+) -> None:
+    assert anthropic.models()[model_id].approx_chars_per_token == divisor
+    assert "approx_chars_per_token" in ModelCapability.__dataclass_fields__
 
 
 if __name__ == "__main__":
