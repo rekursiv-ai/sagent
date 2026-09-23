@@ -55,6 +55,7 @@ else:
     image = lazy_import("sagent.lib.image")
 
 
+from sagent.catalog.anthropic import api, models
 from sagent.lib import debug_log
 from sagent.lib.custom_json import MutableJSON, MutableJSONValue, json_unfreeze
 from sagent.providers.lib.errors import (
@@ -89,8 +90,6 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-
-import sagent.catalog.anthropic
 
 
 logger = logging.getLogger(__name__)
@@ -200,10 +199,7 @@ class Anthropic:
     ``handle_auth_error``, ``subscription``.
     """
 
-    catalog = ModelCatalog(
-        rows=sagent.catalog.anthropic.models(),
-        transport=sagent.catalog.anthropic.api(),
-    )
+    catalog = ModelCatalog(rows=models(), transport=api())
 
     def __init__(
         self,

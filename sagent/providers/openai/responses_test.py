@@ -19,6 +19,7 @@ import pytest
 
 from sagent.agent.retry import is_rate_limited, is_retryable
 from sagent.agent.session_io import _entry_from_json, _entry_to_json
+from sagent.catalog.openai import reasoning_effort
 from sagent.lib.custom_json import DictCodec, JSONValue, MutableJSON
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.openai.api import OpenAI
@@ -56,8 +57,6 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-
-import sagent.catalog.openai
 
 
 if TYPE_CHECKING:
@@ -281,7 +280,7 @@ def test_earlier_gpt5_catalog_keeps_native_efforts(model_id: str) -> None:
     assert model.capability.thinking_effort == frozenset(
         {"none", "low", "medium", "high", "xhigh"},
     )
-    assert sagent.catalog.openai.reasoning_effort("xhigh", model_id=model_id) == "xhigh"
+    assert reasoning_effort("xhigh", model_id=model_id) == "xhigh"
 
 
 def _free_model() -> _OpenAIResponsesModel:

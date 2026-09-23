@@ -37,6 +37,7 @@ import shutil
 import subprocess
 import tempfile
 
+from sagent.catalog.anthropic import cli, models
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import (
     JSON,
@@ -82,8 +83,6 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-
-import sagent.catalog.anthropic
 
 
 if TYPE_CHECKING:
@@ -348,10 +347,7 @@ class AnthropicCLI:
     the CLI emits on the terminal ``result`` event.
     """
 
-    catalog = ModelCatalog(
-        rows=sagent.catalog.anthropic.models(),
-        transport=sagent.catalog.anthropic.cli(),
-    )
+    catalog = ModelCatalog(rows=models(), transport=cli())
 
     supported_options: ClassVar[frozenset[str]] = frozenset[str]()
     """``from_credentials`` (the CLI wrapper) takes no construction options.

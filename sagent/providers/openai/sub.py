@@ -96,6 +96,7 @@ else:
     openai = lazy_import("openai")  # 493ms cold.
 
 
+from sagent.catalog.openai import subscription, subscription_models
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import (
     DictCodec,
@@ -117,8 +118,6 @@ from sagent.types.exceptions import (
     AuthRefreshError,
 )
 from sagent.types.providers import ModelCatalog
-
-import sagent.catalog.openai
 
 
 logger = logging.getLogger(__name__)
@@ -168,10 +167,7 @@ class OpenAISubscription:
     regardless of auth mode.
     """
 
-    catalog = ModelCatalog(
-        rows=sagent.catalog.openai.subscription_models(),
-        transport=sagent.catalog.openai.subscription(),
-    )
+    catalog = ModelCatalog(rows=subscription_models(), transport=subscription())
 
     class Credentials(TypedDict):
         """OAuth credentials for an OpenAI ChatGPT subscription."""

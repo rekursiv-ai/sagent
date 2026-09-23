@@ -43,6 +43,7 @@ else:
     httpx2 = lazy_import("httpx2")  # 100ms cold.
     image = lazy_import("sagent.lib.image")
 
+from sagent.catalog.openai import compatible
 from sagent.lib import debug_log
 from sagent.lib.custom_json import (
     DictCodec,
@@ -83,8 +84,6 @@ from sagent.types.runtime import (
     UserMessage,
 )
 
-import sagent.catalog.openai
-
 
 logger = logging.getLogger(__name__)
 
@@ -98,10 +97,7 @@ class OpenAICompat:
 
     ENV_VAR: ClassVar[str] = ""
     BASE_URL: ClassVar[str] = ""
-    catalog = ModelCatalog(
-        rows={},
-        transport=sagent.catalog.openai.compatible(),
-    )
+    catalog = ModelCatalog(rows={}, transport=compatible())
 
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]]
 

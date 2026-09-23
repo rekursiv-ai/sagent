@@ -14,6 +14,7 @@ import httpx2
 import openai
 import pytest
 
+from sagent.catalog.openai import models, reasoning_effort, subscription_models
 from sagent.providers import OpenAI
 from sagent.providers.lib.errors import (
     PER_ITEM_STRING_CAP_BODY,
@@ -39,28 +40,26 @@ from sagent.types.runtime import (
     UserMessage,
 )
 
-import sagent.catalog.openai
-
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
 def test_subscription_context_clamps_request_tokens() -> None:
-    clamped = sagent.catalog.openai.subscription_models()["astra-6"].context[""]
+    clamped = subscription_models()["astra-6"].context[""]
     assert clamped.max_request_tokens == 272_000
     assert clamped.max_response_tokens == 32_000
 
 
 def test_subscription_context_keeps_small_windows() -> None:
-    clamped = sagent.catalog.openai.subscription_models()["gpt-4"].context[""]
+    clamped = subscription_models()["gpt-4"].context[""]
     assert clamped.max_request_tokens == 8_192
     assert clamped.max_response_tokens == 8_192
 
 
 def test_subscription_context_drops_the_long_window_tag() -> None:
     """``+1m`` clamps to exactly the base id, so offering it would mislead."""
-    rows = sagent.catalog.openai.subscription_models()
+    rows = subscription_models()
     assert all(capability.context.keys() == {""} for capability in rows.values())
 
 
@@ -69,8 +68,8 @@ def test_subscription_context_inherits_size_caps_from_parent() -> None:
     # caps are a property of the underlying model and must flow through
     # unchanged, not be overwritten by a stale local constant. A divergent
     # parent capability proves inheritance rather than a hardcoded match.
-    api = sagent.catalog.openai.models()["astra-6"].context[""]
-    clamped = sagent.catalog.openai.subscription_models()["astra-6"].context[""]
+    api = models()["astra-6"].context[""]
+    clamped = subscription_models()["astra-6"].context[""]
     assert clamped.max_image_edge_px == api.max_image_edge_px
     assert clamped.max_image_bytes == api.max_image_bytes
     assert clamped.max_request_bytes == api.max_request_bytes
@@ -550,7 +549,7 @@ def test_subscription_catalog_efforts_are_all_buildable() -> None:
         assert _wire_effort_for(
             model_id=model_id,
             effort=effort,
-        ) == sagent.catalog.openai.reasoning_effort(effort, model_id=model_id)
+        ) == reasoning_effort(effort, model_id=model_id)
 
 
 def test_subscription_stream_requests_reasoning_summary_when_thinking() -> None:
