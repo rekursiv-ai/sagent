@@ -74,7 +74,9 @@ def do_switch_model(
     if parsed.model_id and parsed.provider is None:
         inferred = infer_provider(parsed.model_id, spec.provider)
         if inferred is not None:
-            prov_override, auth_override = inferred
+            prov_override, inferred_auth = inferred
+            if parsed.auth is None:
+                auth_override = inferred_auth
     old_id = agent.model.tagged_model_id
     try:
         target = agent.change_model(
@@ -357,8 +359,7 @@ def _parse_model_args(tokens: list[str]) -> _ParsedModelArgs | str:
         return (
             "[/model] usage: /model [provider=P] [auth=A] [account=ACCT]"
             " [model=MODEL_ID]   (or --provider/--auth/--account flags,"
-            " or a bare model_id, with option tags like"
-            " claude-opus-4-8+1m+fast)"
+            " or a bare model_id, with context tags like opus-4.8+200k)"
         )
     return _ParsedModelArgs(
         provider=provider,

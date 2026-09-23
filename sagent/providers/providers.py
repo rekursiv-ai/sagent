@@ -32,28 +32,13 @@ PROVIDER_NAMES: Final[tuple[ProviderName, ...]] = cast(
     get_args(ProviderName.__value__),
 )
 
-_MODEL_PROVIDER_MAP: Final[list[tuple[str, str]]] = [
-    ("claude", "Anthropic"),
-    ("gemini", "Google"),
-    ("gpt", "OpenAI"),
-    ("chatgpt", "OpenAI"),
-    ("o1", "OpenAI"),
-    ("o3", "OpenAI"),
-    ("o4", "OpenAI"),
-    ("codex", "OpenAI"),
-    ("kimi", "Moonshot"),
-    ("moonshot", "Moonshot"),
-    ("qwen", "DashScope"),
-    ("minimax", "MiniMax"),
-]
-
 # Maps API-key provider names to their account-auth (subscription /
 # credentials-file) variant. When ``infer_provider`` sees a model_id
-# whose prefix maps to an API-key provider (e.g. ``claude-...`` →
+# whose catalog row maps to an API-key provider (e.g. ``opus-4.8`` →
 # ``Anthropic``) AND the user's *current* provider is the account
 # variant (e.g. ``AnthropicCLI``), the inference resolves to the
 # account variant + ``credentials`` auth instead of the API-key path.
-# Without this, ``AgentSelf(model_id="claude-sonnet-4-6")`` from an
+# Without this, ``AgentSelf(model_id="sonnet-4.6")`` from an
 # AnthropicCLI-backed agent would silently try to build a fresh
 # Anthropic API provider, requiring ``ANTHROPIC_API_KEY`` to be set.
 _ACCOUNT_OVERRIDES: Final[dict[str, str]] = {
@@ -66,10 +51,10 @@ def infer_provider(
     model_id: str,
     current_provider: str,
 ) -> tuple[str, str] | None:
-    """Infer ``(provider, auth)`` from a model-id prefix.
+    """Infer ``(provider, auth)`` from catalog membership or a vendor prefix.
 
     Args:
-      model_id: Model identifier (e.g. ``"claude-sonnet-4-6"``).
+      model_id: Model identifier (e.g. ``"sonnet-4.6"``).
       current_provider: Name of the currently active provider.
 
     Returns:
@@ -81,27 +66,20 @@ def infer_provider(
     if model_id.startswith(("/", "./", "../", "~/")):
         return ("SelfHosted", model_id)
 
+    if _provider_accepts(current_provider, model_id):
+        return None
     prefer_account = current_provider in _ACCOUNT_PROVIDERS
-    for prefix, base_prov in _MODEL_PROVIDER_MAP:
-        if model_id.startswith(prefix):
-            if current_provider.startswith(base_prov):
-                # Same vendor family: the current provider is either the base
-                # itself or one of its variants (``OpenAISubscription``,
-                # ``AnthropicCLI``, ...). Preserve it rather than re-infer to
-                # the bare API-key sibling, which would demand a key the
-                # operator never set. This guard is independent of the account
-                # override table, so it holds for variants that table does not
-                # enumerate (e.g. ``OpenAISubscription`` in the public build).
-                return None
-            target = (
-                _ACCOUNT_OVERRIDES.get(base_prov, base_prov)
-                if prefer_account
-                else base_prov
-            )
-            if target == current_provider:
-                return None
-            auth = "credentials" if target in _ACCOUNT_PROVIDERS else "env"
-            return (target, auth)
+    base_prov = _catalog_provider(model_id)
+    if base_prov is not None:
+        target = (
+            _ACCOUNT_OVERRIDES.get(base_prov, base_prov)
+            if prefer_account
+            else base_prov
+        )
+        if target == current_provider:
+            return None
+        auth = "credentials" if target in _ACCOUNT_PROVIDERS else "env"
+        return (target, auth)
     return None
 
 
@@ -190,3 +168,33 @@ def default_auth_for_provider(provider_name: str) -> str:
     if hasattr(cls, "from_key"):
         return "key"
     raise AttributeError(f"provider {provider_name!r} has no default auth method")
+
+
+def _catalog_provider(model_id: str) -> str | None:
+    """Return the unique API provider whose catalog accepts ``model_id``."""
+    matches: list[str] = []
+    for provider in PROVIDER_NAMES:
+        if provider.endswith(("CLI", "Subscription")):
+            continue
+        cls = provider_class(provider)
+        catalog = getattr(cls, "catalog", None)
+        if catalog is None:
+            continue
+        try:
+            catalog.resolve(model_id)
+        except ValueError:
+            continue
+        matches.append(provider)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _provider_accepts(provider: str, model_id: str) -> bool:
+    cls = provider_class(provider)
+    catalog = getattr(cls, "catalog", None)
+    if catalog is None:
+        return False
+    try:
+        catalog.resolve(model_id)
+    except ValueError:
+        return False
+    return True

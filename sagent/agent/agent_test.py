@@ -2514,7 +2514,7 @@ async def test_relogin_forwards_named_account() -> None:
     a.model_recipe = ModelRecipe(
         provider="OpenAISubscription",
         auth="credentials",
-        model_id="gpt-5.6-sol",
+        model_id="sol-5.6",
         account="work",
     )
     calls: list[str | None] = []

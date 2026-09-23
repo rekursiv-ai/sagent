@@ -6,8 +6,8 @@ Sagent separates providers from models. A provider owns authentication and creat
 
 | Provider class | Environment variable | Default model | Utility model | Notes |
 | --- | --- | --- | --- | --- |
-| `Anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-4-7+1m` | `claude-haiku-4-5` | Anthropic API-key provider. |
-| `OpenAI` | `OPENAI_API_KEY` | `gpt-5.6-sol+1m` | `gpt-5.4-mini` | OpenAI API provider. `+1m` opts into the full 1.05M window; bare GPT-5.6 IDs cap at the 272K cheap tier. |
+| `Anthropic` | `ANTHROPIC_API_KEY` | `fable-5.1` | `haiku-4.5` | Anthropic API-key provider. |
+| `OpenAI` | `OPENAI_API_KEY` | `astra-6` | `luna-6` | OpenAI API provider. |
 | `Google` | `GOOGLE_API_KEY` | `gemini-3.1-pro-preview` | `gemini-3-flash-preview` | Google Gemini provider. |
 | `Moonshot` | `MOONSHOT_API_KEY` | `kimi-k2.6` | provider-defined | OpenAI-compatible Kimi provider. |
 | `DashScope` | `DASHSCOPE_API_KEY` | `qwen3.6-plus` | provider-defined | Alibaba DashScope provider. |
@@ -38,16 +38,13 @@ ProviderClass.from_env().utility_model()
 
 `model(None)` uses the provider's default model. Unknown model IDs raise with the provider's known model list.
 
-OpenAI supports the GPT-5.6 family as `gpt-5.6-sol`, `gpt-5.6-terra`, and
-`gpt-5.6-luna`; `gpt-5.6` is an alias for Sol. Append `+1m` to any of these
-IDs for Sagent's full-window API-key budget. `OpenAISubscription` caps every
-request at its 272K backend contract, so `+1m` would widen nothing there; the
-subscription catalog therefore omits `+1m` IDs entirely and a `+1m` ID raises
-as unknown -- use the base ID (e.g. `gpt-5.6-sol`) under subscription auth.
-Both OpenAI providers use the Responses API, including for older catalog models.
-GPT-5.6 supports reasoning efforts from `none` through `max`; Astra supports
-`low` through `max`. Reasoning and function tools work together under API-key
-and subscription authentication. Supported efforts vary by model.
+Catalog keys use short names such as `astra-6`, `sol-6`, `luna-6`, and
+`terra-5.6`; vendor wire IDs remain accepted as compatibility aliases. A bare
+model ID selects its largest context window. Append `+272k` for a smaller
+OpenAI window or `+200k` for a smaller Anthropic window when the model offers
+one. An explicit `+1m` is also accepted when the bare model already provides
+that window. Both OpenAI providers use the Responses API. Supported reasoning
+efforts vary by model.
 
 API-key requests send output-token limits and temperature for non-reasoning
 models. The subscription backend omits those unsupported fields. Both paths
@@ -72,7 +69,9 @@ Prefer environment variables so keys do not land in shell history.
 
 ## Provider inference
 
-Agent tools can infer a provider switch from model ID prefixes:
+Agent tools first infer a provider from catalog membership, so short IDs such
+as `opus-4.8` and `luna-6` can switch providers without a separate provider
+argument. Vendor prefixes remain as compatibility fallbacks:
 
 | Prefix | Provider |
 | --- | --- |
@@ -91,8 +90,8 @@ This is used by model-switching tools so callers can usually pass just `model_id
 Anthropic model IDs may include window tags such as:
 
 ```bash
-sagent --provider Anthropic --model claude-sonnet-4-6+200k
-sagent --provider Anthropic --model claude-opus-4-7+1m
+sagent --provider Anthropic --model sonnet-4.6+200k
+sagent --provider Anthropic --model opus-4.7+1m
 ```
 
 The provider strips the tag for API calls and uses it to select the request-token budget.

@@ -766,10 +766,10 @@ def test_inherit_no_parent() -> None:
     assert t._inherit_max_attempts(None) is None
 
 
-def test_resolve_model_rebuilds_fresh_transport_when_spec_matches() -> None:
+def test_build_child_model_rebuilds_fresh_transport_when_spec_matches() -> None:
     """A child inheriting the parent's spec gets its OWN transport, not an alias.
 
-    Regression guard for the shared-subprocess bug: ``_resolve_model`` used
+    Regression guard for the shared-subprocess bug: child model construction used
     to return ``parent.model`` verbatim when the resolved provider/auth/
     model_id/account matched the parent. On a subprocess-backed provider
     (AnthropicCLI/GoogleCLI) that aliased every same-model child onto the
@@ -791,7 +791,7 @@ def test_resolve_model_rebuilds_fresh_transport_when_spec_matches() -> None:
         "sagent.tools.agent_spawn.build_provider",
         return_value=fake_provider,
     ) as build:
-        resolved = t._resolve_model(
+        resolved = t._build_child_model(
             provider="StubP",
             auth="env",
             model_id="stub",
@@ -805,7 +805,7 @@ def test_resolve_model_rebuilds_fresh_transport_when_spec_matches() -> None:
     build.assert_called_once_with("StubP", "env", account=None)
 
 
-def test_resolve_model_each_child_gets_distinct_transport() -> None:
+def test_build_child_model_each_child_gets_distinct_transport() -> None:
     """N inherit-spec children resolve to N distinct model objects.
 
     The load-bearing property for scaling: each spawn's transport must be
@@ -827,7 +827,7 @@ def test_resolve_model_each_child_gets_distinct_transport() -> None:
         return_value=fake_provider,
     ):
         for _ in range(5):
-            resolved = t._resolve_model(
+            resolved = t._build_child_model(
                 provider=None,
                 auth=None,
                 model_id=None,
@@ -840,7 +840,7 @@ def test_resolve_model_each_child_gets_distinct_transport() -> None:
     assert all(m is not parent.model for m in models)
 
 
-def test_resolve_model_no_spec_falls_back_to_parent_model() -> None:
+def test_build_child_model_no_spec_falls_back_to_parent_model() -> None:
     """A spec-less parent (test harness / raw-Model inject) can't rebuild.
 
     Without a ``model_recipe`` there is nothing to hand ``build_provider``,
@@ -850,7 +850,7 @@ def test_resolve_model_no_spec_falls_back_to_parent_model() -> None:
     parent = _make_parent()  # Constructed with no model_recipe.
     assert parent.model_recipe is None
     t = AgentSpawn()
-    resolved = t._resolve_model(
+    resolved = t._build_child_model(
         provider=None,
         auth=None,
         model_id=None,
@@ -930,7 +930,7 @@ async def test_run_redirects_latency_option_to_service_tier() -> None:
     assert "service_tier" in result.content
 
 
-def test_resolve_model_provider_change_without_auth_uses_target_default() -> None:
+def test_build_child_model_provider_change_without_auth_uses_target_default() -> None:
     parent = _make_parent()
     parent.model_recipe = ModelRecipe(
         provider="OpenAISubscription",
@@ -944,7 +944,7 @@ def test_resolve_model_provider_change_without_auth_uses_target_default() -> Non
         "sagent.tools.agent_spawn.build_provider",
         return_value=fake_provider,
     ) as build:
-        resolved = AgentSpawn()._resolve_model(
+        resolved = AgentSpawn()._build_child_model(
             provider="Google",
             auth=None,
             model_id="gemini-3-pro",
@@ -962,7 +962,7 @@ def test_resolve_model_provider_change_without_auth_uses_target_default() -> Non
     build.assert_called_once_with("Google", "env", account="work")
 
 
-def test_resolve_model_rejects_empty_account() -> None:
+def test_build_child_model_rejects_empty_account() -> None:
     parent = _make_parent()
     parent.model_recipe = ModelRecipe(
         provider="OpenAISubscription",
@@ -970,7 +970,7 @@ def test_resolve_model_rejects_empty_account() -> None:
         model_id="gpt-5.5",
         account="work",
     )
-    result = AgentSpawn()._resolve_model(
+    result = AgentSpawn()._build_child_model(
         provider=None,
         auth=None,
         model_id="gpt-5",
@@ -1908,13 +1908,13 @@ def test_allow_providers_default_includes_all() -> None:
         assert f"``{name}``" in rendered, f"missing {name}"
 
 
-def test_resolve_model_rejects_provider_outside_allow_list() -> None:
+def test_build_child_model_rejects_provider_outside_allow_list() -> None:
     """An explicit ``provider`` not in the allow list is rejected with
     a ``ToolResult`` error rather than reaching ``build_provider``.
     """
     parent = _make_parent()
     t = AgentSpawn(allow_providers=("OpenAISubscription",))
-    result = t._resolve_model(
+    result = t._build_child_model(
         provider="Anthropic",
         auth="env",
         model_id="gpt-5.5",
@@ -1927,7 +1927,7 @@ def test_resolve_model_rejects_provider_outside_allow_list() -> None:
     assert "Anthropic" in result.content
 
 
-def test_resolve_model_parent_provider_always_allowed() -> None:
+def test_build_child_model_parent_provider_always_allowed() -> None:
     """The parent's own provider is always accepted, even when not
     in the allow list -- inheritance must keep working. The child gets a
     FRESH transport built from the inherited spec, never the parent's alias.
@@ -1946,7 +1946,7 @@ def test_resolve_model_parent_provider_always_allowed() -> None:
         "sagent.tools.agent_spawn.build_provider",
         return_value=fake_provider,
     ) as build:
-        resolved = t._resolve_model(
+        resolved = t._build_child_model(
             provider="StubP",
             auth="env",
             model_id="stub",

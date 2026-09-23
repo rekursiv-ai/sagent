@@ -127,10 +127,10 @@ def test_openai_unknown_model_raises() -> None:
 @pytest.mark.parametrize(
     ("base_id", "full_tokens"),
     [
-        ("gpt-5.6-sol", 1_050_000),
+        ("sol-5.6", 1_050_000),
         ("gpt-5.6", 1_050_000),
         ("terra-5.6", 1_050_000),
-        ("gpt-5.6-luna", 1_050_000),
+        ("luna-5.6", 1_050_000),
         ("gpt-5.5", 1_000_000),
         ("gpt-5.5-pro", 1_050_000),
         ("gpt-5.4", 1_050_000),
@@ -221,10 +221,10 @@ def test_openai_default_model_opts_into_full_window() -> None:
 @pytest.mark.parametrize(
     ("model_id", "request_price", "response_price", "cache_write_price"),
     [
-        ("gpt-5.6-sol", 4.0, 20.0, 5.0),
+        ("sol-5.6", 4.0, 20.0, 5.0),
         ("gpt-5.6", 4.0, 20.0, 5.0),
         ("gpt-5.6-terra", 2.0, 12.0, 2.5),
-        ("gpt-5.6-luna", 0.2, 1.2, 0.25),
+        ("luna-5.6", 0.2, 1.2, 0.25),
     ],
 )
 def test_openai_gpt_56_profiles(
@@ -267,7 +267,7 @@ def test_openai_gpt_56_image_tokens_use_32px_patches(
     height: int,
     tokens: int,
 ) -> None:
-    model = OpenAI.from_key("k").model("gpt-5.6-sol")
+    model = OpenAI.from_key("k").model("sol-5.6")
     assert model.approx_image_tokens(_png(width, height)) == tokens
 
 
@@ -293,7 +293,7 @@ def test_openai_gpt_6_image_tokens_scale_the_patch_grid(
 @pytest.mark.anyio
 @pytest.mark.compute_large_fixture
 async def test_openai_gpt_56_uses_o200k_tokenizer() -> None:
-    model = OpenAI.from_key("k").model("gpt-5.6-sol")
+    model = OpenAI.from_key("k").model("sol-5.6")
     text = "GPT-5.6 token counting: 東京 and function_call(arg=42)"
     expected = len(tiktoken.get_encoding("o200k_base").encode(text))
     assert await model.actual_text_tokens(text) == expected

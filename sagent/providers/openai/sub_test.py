@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -27,11 +26,8 @@ from sagent.providers.openai.sub import (
     _jwt_claim,
     _jwt_exp,
     _jwt_payload,
-    _subscription_context,
 )
 from sagent.types.capability import (
-    ModelCapability,
-    ModelLimits,
     ModelSettings,
     ThinkingEffort,
 )
@@ -51,44 +47,21 @@ if TYPE_CHECKING:
 
 
 def test_subscription_context_clamps_request_tokens() -> None:
-    cap = ModelCapability(
-        context=MappingProxyType(
-            {
-                "": ModelLimits(
-                    max_request_tokens=1_000_000,
-                    max_response_tokens=1_000_000,
-                ),
-            },
-        ),
-    )
-    clamped = _subscription_context(cap)[""]
-    # Wire contract is 272_000 / 32_000 -- see sub._SUBSCRIPTION_MAX_*.
+    clamped = sagent.catalog.openai.subscription_models()["astra-6"].context[""]
     assert clamped.max_request_tokens == 272_000
     assert clamped.max_response_tokens == 32_000
 
 
 def test_subscription_context_keeps_small_windows() -> None:
-    cap = ModelCapability(
-        context=MappingProxyType(
-            {"": ModelLimits(max_request_tokens=100_000, max_response_tokens=10_000)},
-        ),
-    )
-    clamped = _subscription_context(cap)[""]
-    assert clamped.max_request_tokens == 100_000
-    assert clamped.max_response_tokens == 10_000
+    clamped = sagent.catalog.openai.subscription_models()["gpt-4"].context[""]
+    assert clamped.max_request_tokens == 8_192
+    assert clamped.max_response_tokens == 8_192
 
 
 def test_subscription_context_drops_the_long_window_tag() -> None:
     """``+1m`` clamps to exactly the base id, so offering it would mislead."""
-    cap = ModelCapability(
-        context=MappingProxyType(
-            {
-                "": ModelLimits(max_request_tokens=272_000),
-                "+1m": ModelLimits(max_request_tokens=1_050_000),
-            },
-        ),
-    )
-    assert _subscription_context(cap).keys() == {""}
+    rows = sagent.catalog.openai.subscription_models()
+    assert all(capability.context.keys() == {""} for capability in rows.values())
 
 
 def test_subscription_context_inherits_size_caps_from_parent() -> None:
@@ -96,22 +69,11 @@ def test_subscription_context_inherits_size_caps_from_parent() -> None:
     # caps are a property of the underlying model and must flow through
     # unchanged, not be overwritten by a stale local constant. A divergent
     # parent capability proves inheritance rather than a hardcoded match.
-    cap = ModelCapability(
-        context=MappingProxyType(
-            {
-                "": ModelLimits(
-                    max_response_tokens=1_000_000,
-                    max_image_edge_px=4096,
-                    max_image_bytes=7_000_000,
-                    max_request_bytes=33_000_000,
-                ),
-            },
-        ),
-    )
-    clamped = _subscription_context(cap)[""]
-    assert clamped.max_image_edge_px == 4096
-    assert clamped.max_image_bytes == 7_000_000
-    assert clamped.max_request_bytes == 33_000_000
+    api = sagent.catalog.openai.models()["astra-6"].context[""]
+    clamped = sagent.catalog.openai.subscription_models()["astra-6"].context[""]
+    assert clamped.max_image_edge_px == api.max_image_edge_px
+    assert clamped.max_image_bytes == api.max_image_bytes
+    assert clamped.max_request_bytes == api.max_request_bytes
 
 
 # 1×1 transparent PNG -- smallest valid PNG ``image_lib.resize`` will accept.
@@ -371,7 +333,7 @@ def test_subscription_default_model_is_openai_default_without_1m() -> None:
     assert OpenAISubscription.catalog.resolve("default")[0].model_id == "astra-6"
     assert OpenAI.catalog.resolve("default")[0].model_id == "astra-6"
     # The narrowed default must resolve against the narrowed catalog.
-    assert "default" in OpenAISubscription.catalog.model_ids()
+    assert "default" in OpenAISubscription.catalog.rows
 
 
 def test_subscription_default_utility_model_inherits_from_openai() -> None:
@@ -397,10 +359,8 @@ def test_subscription_rejects_1m_ids() -> None:
     """``+1m`` buys nothing under the wire contract, so it is not a known id."""
     p = _make_provider()
     with pytest.raises(ValueError, match="Unknown model"):
-        _ = p.model("gpt-5.6-sol+1m")
-    assert not any(
-        name.endswith("+1m") for name in OpenAISubscription.catalog.model_ids()
-    )
+        _ = p.model("sol-5.6+1m")
+    assert not any(name.endswith("+1m") for name in OpenAISubscription.catalog.rows)
 
 
 def test_subscription_model_supports_thinking_via_reasoning_effort() -> None:
@@ -544,7 +504,7 @@ def test_subscription_expired_property_false_when_far_future() -> None:
 
 def _create_kwargs_for(
     *,
-    model_id: str = "gpt-5.6-sol",
+    model_id: str = "sol-5.6",
     effort: ThinkingEffort = "none",
 ) -> dict[str, object]:
     model = _make_provider().model(model_id)
@@ -579,12 +539,12 @@ def test_subscription_stream_preserves_gpt_56_effort(
     effort: ThinkingEffort,
     wire_effort: str,
 ) -> None:
-    assert _wire_effort_for(model_id="gpt-5.6-sol", effort=effort) == wire_effort
+    assert _wire_effort_for(model_id="sol-5.6", effort=effort) == wire_effort
 
 
 def test_subscription_catalog_efforts_are_all_buildable() -> None:
     """Every effort the catalog offers must reach the wire."""
-    model_id = "gpt-5.6-sol"
+    model_id = "sol-5.6"
     capability = _make_provider().model(model_id).capability
     for effort in capability.thinking_effort - {"none"}:
         assert _wire_effort_for(

@@ -168,6 +168,7 @@ def decode_jpeg_turbojpeg_region(
     Returns:
       image: uint8 (h', w', 3) RGB ndarray -- the region, at the reduced size
         under a scaled decode -- or None when libturbojpeg rejects the stream.
+        A strided view into the decode buffer, not contiguous.
 
     """
     try:
@@ -494,7 +495,8 @@ def _decode_jpeg_region(
         )
     finally:
         lib.tj3Destroy(handle)
-    return np.ascontiguousarray(out[:, x - x0 : x + w - x0])
+    # A view: the margins stay in the buffer; consumers read the strides.
+    return out[:, x - x0 : x + w - x0]
 
 
 def _dct_denominator(w: int, h: int, *, min_width: int, min_height: int) -> int:

@@ -882,7 +882,7 @@ def test_service_suspended_surfaces_the_provider_message() -> None:
         provider="OpenAISubscription",
         auth="credentials",
         account=None,
-        model_id="gpt-5.6-sol+fast",
+        model_id="sol-5.6+fast",
         retry_at=time.time() + 7.0,
         delay_sec=7.0,
         server_supplied=False,

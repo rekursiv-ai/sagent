@@ -12,6 +12,7 @@ Sources:
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import cache
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal
 
@@ -38,6 +39,7 @@ __all__ = [
     "models",
     "reasoning_effort",
     "subscription",
+    "subscription_models",
 ]
 
 
@@ -71,6 +73,7 @@ def compatible() -> ModelCapability:
 # flat 4.0 was the dataclass default, never measured, and over-credited
 # every budget by ~7%. tiktoken says 3.81 locally; the gap is request
 # framing the local tokenizer never sees.
+@cache
 def models() -> Mapping[str, ModelCapability]:
     """Return every OpenAI model, as the API-key transport sees it.
 
@@ -82,6 +85,7 @@ def models() -> Mapping[str, ModelCapability]:
     # and reasoning axes replaced. 5.6 bills images by 32x32 patch and takes
     # a far larger request body than the generations before it.
     gpt56 = ModelCapability(
+        approx_chars_per_token=3.71,
         knowledge_cutoff="February 16, 2026",
         context=_windowed(
             request=272_000,
@@ -107,6 +111,7 @@ def models() -> Mapping[str, ModelCapability]:
     # 20MB.
     legacy = replace(
         gpt56,
+        knowledge_cutoff=None,
         thinking_effort={"none", "low", "medium", "high", "xhigh"},
         context=_windowed(request=272_000, response=128_000, long=1_050_000),
         prices=_prices(request=2.5, response=15.0, cache_read=0.25, two_tier=True),
@@ -172,7 +177,8 @@ def models() -> Mapping[str, ModelCapability]:
         ),
         replace(
             gpt56,
-            model_id="gpt-5.6-sol",
+            model_id="sol-5.6",
+            wire_model_id="gpt-5.6-sol",
         ),
         # Absent from ``GET /v1/models`` yet serves ``POST /v1/responses``
         # normally. Listing is an entitlement view, not the model set, so a
@@ -183,7 +189,8 @@ def models() -> Mapping[str, ModelCapability]:
         ),
         replace(
             gpt56,
-            model_id="gpt-5.6-luna",
+            model_id="luna-5.6",
+            wire_model_id="gpt-5.6-luna",
             prices=_prices(
                 request=0.2,
                 response=1.2,
@@ -334,9 +341,20 @@ def reasoning_effort(
       wire: Responses reasoning effort.
 
     """
+    row = models().get(model_id)
+    if row is None:
+        row = next(
+            (
+                candidate
+                for candidate in models().values()
+                if candidate.wire_model_id == model_id
+            ),
+            None,
+        )
+    canonical_id = row.model_id if row is not None else model_id
     if effort == "min":
-        return "none" if model_id.startswith("gpt-5.6") else "low"
-    if effort == "none" and model_id == "gpt-6-astra":
+        return "none" if canonical_id.endswith("-5.6") else "low"
+    if effort == "none" and canonical_id == "astra-6":
         return "low"
     return effort
 
@@ -383,6 +401,32 @@ def subscription() -> ModelCapability:
         service_tier={"auto", "priority"},
         account_auth=True,
     )
+
+
+@cache
+def subscription_models() -> Mapping[str, ModelCapability]:
+    """Return catalog rows clamped to the ChatGPT backend contract.
+
+    Returns:
+      models: Subscription-visible rows with only their usable context.
+
+    """
+    rows: dict[str, ModelCapability] = {}
+    for name, capability in models().items():
+        limits = capability.context[""]
+        rows[name] = replace(
+            capability,
+            context=MappingProxyType(
+                {
+                    "": replace(
+                        limits,
+                        max_request_tokens=min(limits.max_request_tokens, 272_000),
+                        max_response_tokens=min(limits.max_response_tokens, 32_000),
+                    ),
+                },
+            ),
+        )
+    return MappingProxyType(rows)
 
 
 def _one(*, request: int, response: int, gpt56_images: bool = False) -> ModelLimits:

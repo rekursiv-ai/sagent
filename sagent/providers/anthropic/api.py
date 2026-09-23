@@ -9,7 +9,7 @@ Usage::
 
     provider = Anthropic.from_key("sk-ant-...")
     # or: Anthropic.from_env()  (reads ANTHROPIC_API_KEY)
-    sonnet = provider.model("claude-sonnet-4-6")
+    sonnet = provider.model("sonnet-4.6")
     response = await sonnet.buffer(request)
 """
 
@@ -289,16 +289,11 @@ class Anthropic:
     def model(
         self,
         model_id: str | None = None,
-        **provider_options: object,
     ) -> _AnthropicModel:
         """Create a model backend.
 
         Args:
           model_id: Catalog id with optional tags, or a role name.
-          provider_options: Transport-specific options, ignored here. Declared
-            because ``Provider.model`` declares them: a subclass whose
-            transport DOES take options (the CLI's MCP servers and timeouts)
-            is otherwise a narrower override of this method.
 
         Returns:
           model: Anthropic model backend.
@@ -309,7 +304,6 @@ class Anthropic:
               model does not offer.
 
         """
-        del provider_options
         mid = model_id if model_id is not None else "default"
         capability, settings = self.catalog.resolve(mid)
         return _AnthropicModel(

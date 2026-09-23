@@ -819,7 +819,7 @@ class TestStreamIdleTimeout:
         assert "too many requests" in msg
         assert "code=rate_limit" in msg
         assert "param=input" in msg
-        model = OpenAI.from_key("test-key").model("gpt-5.6-sol")
+        model = OpenAI.from_key("test-key").model("sol-5.6")
         assert is_retryable(raised.value, model) is True
         assert is_rate_limited(raised.value) is True
 
@@ -885,7 +885,7 @@ class TestStreamIdleTimeout:
         assert "response_id=resp_failed" in msg
         assert "code=server_error" in msg
         assert "backend failed" in msg
-        model = OpenAI.from_key("test-key").model("gpt-5.6-sol")
+        model = OpenAI.from_key("test-key").model("sol-5.6")
         assert is_retryable(raised.value, model) is True
 
     @pytest.mark.anyio

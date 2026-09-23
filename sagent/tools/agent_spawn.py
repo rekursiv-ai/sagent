@@ -110,7 +110,7 @@ class AgentSpawn:
     :func:`providers.build_provider`.
 
     ``allow_providers`` narrows the set of providers exposed to the
-    LLM in :attr:`directive_schema` and gated in :meth:`_resolve_model`.
+    LLM in :attr:`directive_schema` and gated in :meth:`_build_child_model`.
     The default ``None`` means "every provider in ``sagent.providers``".
     Restrict it at construction (typically from ``--allow-providers``)
     on hosts that only have credentials for a subset.
@@ -197,8 +197,8 @@ class AgentSpawn:
                         "type": "string",
                         "description": (
                             "Model ID for the chosen provider (e.g."
-                            " ``claude-sonnet-4-6``, ``gemini-3.1-pro-preview``,"
-                            " ``gpt-5.5``). Defaults to inheriting the parent's"
+                            " ``sonnet-4.6``, ``gemini-3.1-pro-preview``,"
+                            " ``sol-6``). Defaults to inheriting the parent's"
                             " model id."
                         ),
                     },
@@ -207,9 +207,8 @@ class AgentSpawn:
                         "description": (
                             "Provider/model-specific serving knobs:"
                             " ``thinking``, ``effort``, ``cache_ttl``,"
-                            " ``service_tier``. Fast serving is a model-id"
-                            " option tag: request it via ``model='...+fast'``"
-                            " on supported"
+                            " ``service_tier``. Request fast serving with"
+                            " ``service_tier='priority'`` on supported"
                             " models. Defaults to inheriting"
                             " the parent's options."
                         ),
@@ -352,7 +351,7 @@ class AgentSpawn:
         auth = opt_str(args, "auth")
         model_id = opt_str(args, "model_id")
         # Detect ``account=""`` BEFORE ``opt_str`` collapses it to None.
-        # The downstream ``_resolve_model`` branch on ``account == ""``
+        # The downstream ``_build_child_model`` branch on ``account == ""``
         # was unreachable because the local ``account`` had already
         # been normalized to None. Reject at parse time so the schema
         # ``minLength: 1`` intent is enforced once, at the edge.
@@ -443,7 +442,7 @@ class AgentSpawn:
                 is_error=True,
             )
 
-        resolved = self._resolve_model(
+        resolved = self._build_child_model(
             provider=provider,
             auth=auth,
             model_id=model_id,
@@ -864,7 +863,7 @@ class AgentSpawn:
     # ``parent.model`` is inherited as-is with a ``None`` spec. If the LLM / factory
     # asked for a switch but the resulting trio is missing fields, that's an error - we
     # can't build a provider without all three.
-    def _resolve_model(
+    def _build_child_model(
         self,
         *,
         provider: str | None,
@@ -937,7 +936,7 @@ class AgentSpawn:
         # (below) is the whole point of spawns running "like a tool" in
         # parallel; the saved constructor call is not worth the lost
         # concurrency + isolation. See
-        # ``test_resolve_model_rebuilds_fresh_transport_when_spec_matches``.
+        # ``test_build_child_model_rebuilds_fresh_transport_when_spec_matches``.
         if p is None or a is None or m is None:
             return ToolResult(
                 call_id="",

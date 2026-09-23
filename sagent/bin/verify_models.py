@@ -245,8 +245,7 @@ def audit_catalogs() -> int:
         if not isinstance(cls, ModelResolver):
             continue
         rows = {
-            model_id: cls.catalog.resolve(model_id)[0]
-            for model_id in cls.catalog.model_ids()
+            model_id: cls.catalog.resolve(model_id)[0] for model_id in cls.catalog.rows
         }
         for mid, cap in rows.items():
             if mid in {"default", "utility"}:
@@ -363,7 +362,7 @@ def _canonical_models(catalog: ModelCatalog) -> dict[str, ModelCapability]:
     """Return one resolved row per canonical model ID."""
     return {
         capability.model_id: capability
-        for model_id in catalog.model_ids()
+        for model_id in catalog.rows
         if (capability := catalog.resolve(model_id)[0]).model_id == model_id
     }
 

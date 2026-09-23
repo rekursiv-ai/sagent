@@ -128,7 +128,7 @@ def _rows() -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     for name, (make, _) in _WIRE_BUILDERS.items():
         provider = make()
-        out.extend((name, model_id) for model_id in provider.catalog.model_ids())
+        out.extend((name, model_id) for model_id in provider.catalog.rows)
     return out
 
 

@@ -82,6 +82,12 @@ def test_every_catalog_names_its_default_and_utility_rows(module: ModuleType) ->
     assert models["utility"].model_id in models
 
 
+def test_openai_metadata_does_not_leak_from_new_models_to_legacy_rows() -> None:
+    models = openai.models()
+    assert models["astra-6"].approx_chars_per_token == 3.71
+    assert models["gpt-4"].knowledge_cutoff is None
+
+
 @pytest.mark.parametrize("row", _ROWS)
 def test_a_row_has_a_catalog_id(row: ModelCapability) -> None:
     assert row.model_id
@@ -235,10 +241,10 @@ _PUBLISHED_PRICES = {
     "astra-6": (10.0, 50.0),
     "sol-6": (2.0, 10.0),
     "luna-6": (0.1, 0.5),
-    "gpt-5.6-sol": (4.0, 20.0),
+    "sol-5.6": (4.0, 20.0),
     "gpt-5.6": (4.0, 20.0),
     "terra-5.6": (2.0, 12.0),
-    "gpt-5.6-luna": (0.2, 1.2),
+    "luna-5.6": (0.2, 1.2),
     "gpt-5.5": (5.0, 30.0),
     "opus-5": (5.0, 25.0),
     "opus-5.5": (4.0, 20.0),

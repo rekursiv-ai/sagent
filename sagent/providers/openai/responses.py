@@ -135,7 +135,11 @@ class _OpenAIResponsesModel(ModelDefaults):
           tokens: Tokenizer count, or chars/4 when the tokenizer is unknown.
 
         """
-        return token_count.approx_text_tokens(text, model_id=self._wire_model_id)
+        return token_count.approx_text_tokens(
+            text,
+            model_id=self._wire_model_id,
+            approx_chars_per_token=self.capability.approx_chars_per_token,
+        )
 
     @override
     def approx_image_tokens(self, data: bytes) -> int:

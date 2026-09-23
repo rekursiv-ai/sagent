@@ -49,9 +49,7 @@ should prefer the API-key path (``OpenAI.from_key``).
 
 from __future__ import annotations
 
-from dataclasses import replace
 from pathlib import Path
-from types import MappingProxyType
 from typing import (
     IO,
     TYPE_CHECKING,
@@ -75,7 +73,7 @@ import time
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
     from openai.types.responses.response_create_params import (
         ResponseCreateParamsStreaming,
@@ -84,11 +82,6 @@ if TYPE_CHECKING:
     import httpx2
     import openai
 
-    from sagent.types.capability import (
-        ContextTag,
-        ModelCapability,
-        ModelLimits,
-    )
     from sagent.types.model import (
         ModelRequest,
         ModelResponse,
@@ -150,16 +143,6 @@ DEFAULT_REFRESH_BUFFER_SEC = (
 # fingerprinted as Codex CLI has this port baked into its allowed
 # redirects on OpenAI's side.
 _CALLBACK_PORT: Final = 1455
-# Codex's subscription backend currently exposes a smaller practical
-# context window than the public API model metadata. Local budgeting must
-# plan against the wire contract so auto-compaction runs before the backend
-# rejects an oversized request.
-_SUBSCRIPTION_MAX_REQUEST_TOKENS = (
-    272_000  # house-ignore[globals] -- Backend context budget, user-retunable.
-)
-_SUBSCRIPTION_MAX_RESPONSE_TOKENS = (
-    32_000  # house-ignore[globals] -- Backend response budget, user-retunable.
-)
 
 
 def _default_credentials_path() -> Path:
@@ -174,28 +157,6 @@ class _CredentialFileError(ValueError):
     """Stored credentials do not match the subscription OAuth schema."""
 
 
-# Only the default tag survives: ``+1m`` clamps to exactly the base id, so offering it
-# would mislead a caller expecting 1M.
-def _subscription_context(cap: ModelCapability) -> Mapping[ContextTag, ModelLimits]:
-    """Clamp the untagged window to the subscription wire contract."""
-    base = cap.context[""]
-    return MappingProxyType(
-        {
-            "": replace(
-                base,
-                max_request_tokens=min(
-                    base.max_request_tokens,
-                    _SUBSCRIPTION_MAX_REQUEST_TOKENS,
-                ),
-                max_response_tokens=min(
-                    base.max_response_tokens,
-                    _SUBSCRIPTION_MAX_RESPONSE_TOKENS,
-                ),
-            ),
-        },
-    )
-
-
 class OpenAISubscription:
     """OpenAI provider -- OAuth + ChatGPT subscription billing.
 
@@ -208,12 +169,7 @@ class OpenAISubscription:
     """
 
     catalog = ModelCatalog(
-        rows=MappingProxyType(
-            {
-                name: replace(cap, context=_subscription_context(cap))
-                for name, cap in sagent.catalog.openai.models().items()
-            },
-        ),
+        rows=sagent.catalog.openai.subscription_models(),
         transport=sagent.catalog.openai.subscription(),
     )
 

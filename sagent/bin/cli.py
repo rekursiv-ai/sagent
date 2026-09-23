@@ -19,10 +19,10 @@ Usage::
     ./cli.py --provider AnthropicCLI
 
     # OpenAI
-    ./cli.py --provider OpenAI --model gpt-5.6-sol
+    ./cli.py --provider OpenAI --model sol-6
 
     # ChatGPT subscription (reuses `codex login`)
-    ./cli.py --provider OpenAISubscription --model gpt-5.6-sol
+    ./cli.py --provider OpenAISubscription --model sol-6
 
     # Google
     ./cli.py --provider Google --auth env --model gemini-3.1-pro-preview
@@ -33,14 +33,14 @@ Usage::
     ./cli.py --provider MiniMax --model MiniMax-M2.7
 
     # Models default to their largest window; append +200k for the smaller one.
-    ./cli.py --model claude-sonnet-4-6+200k
+    ./cli.py --model sonnet-4.6+200k
     ./cli.py --session ~/.sessions/my
     ./cli.py --resume       # pick from past sessions for this cwd
     ./cli.py --continue     # resume the most recent for this cwd
 
     # Advisor strategy: Sonnet as executor, Opus as advisor.
     # See https://claude.com/blog/the-advisor-strategy
-    ./cli.py --model claude-sonnet-4-6 --advisor claude-opus-4-7
+    ./cli.py --model sonnet-4.6 --advisor opus-4.7
 '''
 # fmt: on
 
@@ -1201,9 +1201,7 @@ def _apply_resume_model_defaults(args: argparse.Namespace, meta: SessionMeta) ->
             args.model = None
 
 
-# Mirrors the providers' profile-lookup rule: latency tags (``+fast``) ride on catalog
-# ids and are stripped before the membership check, while context tags stay -- ``+1m``
-# variants are catalog keys where supported and must keep failing the check elsewhere.
+# Ask the catalog resolver directly; it owns context-tag validation and wire aliases.
 def _provider_knows_model(provider_name: str, model_id: str) -> bool:
     """Return True when the named provider's catalog includes ``model_id``."""
     cls = getattr(providers, provider_name, None)
