@@ -20,14 +20,13 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from sagent.catalog.moonshot import models
+from sagent.catalog.openai import compatible
 from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
 )
 from sagent.types.providers import ModelCatalog
-
-import sagent.catalog.moonshot
-import sagent.catalog.openai
 
 
 class _MoonshotModel(OpenAICompatModel):
@@ -54,9 +53,6 @@ class Moonshot(OpenAICompat):
     #
     # To add a new model: check the Moonshot platform docs for the
     # model's context window and max output tokens.
-    catalog = ModelCatalog(
-        rows=sagent.catalog.moonshot.models(),
-        transport=sagent.catalog.openai.compatible(),
-    )
+    catalog = ModelCatalog(rows=models(), transport=compatible())
 
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _MoonshotModel

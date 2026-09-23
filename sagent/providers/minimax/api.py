@@ -20,14 +20,13 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from sagent.catalog.minimax import models
+from sagent.catalog.openai import compatible
 from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
 )
 from sagent.types.providers import ModelCatalog
-
-import sagent.catalog.minimax
-import sagent.catalog.openai
 
 
 class _MiniMaxModel(OpenAICompatModel):
@@ -54,9 +53,6 @@ class MiniMax(OpenAICompat):
     #
     # To add a new model: check the MiniMax platform docs for the
     # model's context window and max output tokens.
-    catalog = ModelCatalog(
-        rows=sagent.catalog.minimax.models(),
-        transport=sagent.catalog.openai.compatible(),
-    )
+    catalog = ModelCatalog(rows=models(), transport=compatible())
 
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _MiniMaxModel

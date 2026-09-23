@@ -11,6 +11,7 @@ import httpx2
 import pytest
 import tiktoken
 
+from sagent.catalog.openai import compatible
 from sagent.lib.custom_json import MutableJSON
 from sagent.providers.openai.compat import (
     OpenAICompat,
@@ -46,8 +47,6 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-
-import sagent.catalog.openai
 
 
 def _priced_model(prices: PriceCatalog) -> OpenAICompatModel:
@@ -487,7 +486,7 @@ class _DummyProvider(OpenAICompat):
                 "stub-1": _row,
             },
         ),
-        transport=sagent.catalog.openai.compatible(),
+        transport=compatible(),
     )
 
 

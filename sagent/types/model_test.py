@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from sagent.catalog import anthropic
+from sagent.catalog.anthropic import models
 from sagent.types.capability import (
     ContextTag,
     ModelCapability,
@@ -267,7 +267,7 @@ def test_only_documented_models_offer_the_priority_tier(
 
     https://code.claude.com/docs/en/fast-mode
     """
-    row = anthropic.models()[model_id]
+    row = models()[model_id]
     assert ("priority" in row.service_tier) is priority
 
 
@@ -284,7 +284,7 @@ def test_approx_chars_per_token_is_model_metadata(
     model_id: str,
     divisor: float,
 ) -> None:
-    assert anthropic.models()[model_id].approx_chars_per_token == divisor
+    assert models()[model_id].approx_chars_per_token == divisor
     assert "approx_chars_per_token" in ModelCapability.__dataclass_fields__
 
 

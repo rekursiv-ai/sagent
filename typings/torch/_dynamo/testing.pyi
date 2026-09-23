@@ -60,6 +60,8 @@ def debug_insert_nops(
 ) -> ConvertFrameReturn: ...
 
 class CompileCounter:
+    frame_count: int
+    op_count: int
     def __init__(self) -> None: ...
     def __call__(
         self,
@@ -69,6 +71,10 @@ class CompileCounter:
     def clear(self) -> None: ...
 
 class CompileCounterWithBackend:
+    frame_count: int
+    op_count: int
+    backend: str
+    graphs: list[torch.fx.GraphModule]
     def __init__(self, backend: str) -> None: ...
     def __call__(
         self,

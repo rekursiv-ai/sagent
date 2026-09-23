@@ -22,14 +22,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar, override
 
+from sagent.catalog.dashscope import models, thinking_budget
+from sagent.catalog.openai import compatible
 from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
 )
 from sagent.types.providers import ModelCatalog
-
-import sagent.catalog.dashscope
-import sagent.catalog.openai
 
 
 if TYPE_CHECKING:
@@ -89,7 +88,7 @@ class _DashScopeModel(OpenAICompatModel):
         # ``-instruct`` / ``-coder`` / ``-turbo`` ids); never send one.
         if self.capability.thinking_effort == frozenset({"none"}):
             return body
-        budget = sagent.catalog.dashscope.thinking_budget(effort)
+        budget = thinking_budget(effort)
         # Qwen spells "no reasoning" as a toggle, not a zero budget.
         body["enable_thinking"] = budget != "0"
         if budget != "0":
@@ -119,9 +118,6 @@ class DashScope(OpenAICompat):
     #
     # To add a new model: check the Alibaba Cloud Model Studio docs
     # for context window and max output tokens.
-    catalog = ModelCatalog(
-        rows=sagent.catalog.dashscope.models(),
-        transport=sagent.catalog.openai.compatible(),
-    )
+    catalog = ModelCatalog(rows=models(), transport=compatible())
 
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _DashScopeModel
