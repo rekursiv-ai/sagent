@@ -39,7 +39,6 @@ else:
     httpx2 = lazy_import("httpx2")  # 100ms cold.
     image = lazy_import("sagent.lib.image")
 
-from sagent.catalog import google
 from sagent.lib.custom_json import (
     IntCodec,
     MutableJSON,
@@ -73,6 +72,8 @@ from sagent.types.runtime import (
     UserMessage,
 )
 
+import sagent.catalog.google
+
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,10 @@ _API_BASE: Final = "https://generativelanguage.googleapis.com/v1beta"
 class Google:
     """Google provider - creates Gemini model backends."""
 
-    catalog = ModelCatalog(rows=google.models(), transport=google.api())
+    catalog = ModelCatalog(
+        rows=sagent.catalog.google.models(),
+        transport=sagent.catalog.google.api(),
+    )
 
     def __init__(self, *, api_key: str) -> None:
         self.api_key = api_key
@@ -507,7 +511,7 @@ def _thinking_config(
     include = settings.thinking_output == "text"
     if settings.thinking_budget == "auto":
         return {"includeThoughts": include, "thinkingBudget": -1}
-    budget = google.thinking_budget(settings.thinking_effort)
+    budget = sagent.catalog.google.thinking_budget(settings.thinking_effort)
     return {"includeThoughts": include, "thinkingBudget": int(budget)}
 
 

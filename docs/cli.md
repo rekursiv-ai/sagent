@@ -49,7 +49,8 @@ sagent --provider SelfHosted --model /opt/models/qwen3.6-27b+bfloat16+cuda
 | `--max-response-tokens N` | Limit response tokens for each model call. |
 | `--log-level LEVEL` | Enable stderr diagnostics. Same values as Python logging levels. |
 
-If no `from_<auth>` factory exists, Sagent treats `--auth` as a literal API key and passes it to `from_key(...)`. Prefer environment variables for shell history safety.
+If no `from_<auth>` factory exists, Sagent reports an error. Use `--auth env`
+for API keys so secrets do not land in shell history.
 
 For self-hosted HuggingFace models, `SelfHosted` defaults to
 `Qwen/Qwen3.6-27B` and treats `--model` as a repo ID or local snapshot path with

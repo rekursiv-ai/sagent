@@ -218,6 +218,26 @@ def test_build_provider_no_match_no_from_key_raises(
         build_provider("BareProv", "unsupported")
 
 
+def test_key_only_provider_has_no_zero_argument_default_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StubProvKeyOnly:
+        @classmethod
+        def from_key(cls, api_key: str) -> StubProvKeyOnly:
+            del api_key
+            return cls()
+
+    providers_mod = sys.modules["sagent.providers"]
+    monkeypatch.setattr(
+        providers_mod,
+        "StubProvKeyOnly",
+        StubProvKeyOnly,
+        raising=False,
+    )
+    with pytest.raises(AttributeError, match="no default auth method"):
+        providers.default_auth_for_provider("StubProvKeyOnly")
+
+
 def test_self_hosted_imported_via_dispatch() -> None:
     # We exercise that ``SelfHosted`` is exposed; we don't load HF weights.
     assert SelfHosted.__name__ == "SelfHosted"

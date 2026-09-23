@@ -46,6 +46,7 @@ from sagent.providers import PROVIDER_NAMES
 from sagent.providers.providers import (
     build_provider,
     default_auth_for_provider,
+    infer_provider,
 )
 from sagent.thinking import apply_thinking_command
 from sagent.tools.agent_self import (
@@ -885,21 +886,34 @@ class AgentSpawn:
             self._provider,
             parent_spec.provider if parent_spec else None,
         )
+        m = _pick_field(
+            model_id,
+            self._model_id,
+            parent_spec.model_id if parent_spec else None,
+        )
+        inferred_auth: str | None = None
+        if (
+            provider is None
+            and self._provider is None
+            and (model_id is not None or self._model_id is not None)
+            and p is not None
+            and m is not None
+        ):
+            inferred = infer_provider(m, p)
+            if inferred is not None:
+                p, inferred_auth = inferred
         if auth is not None:
             a = auth
         elif self._auth is not None:
             a = self._auth
+        elif inferred_auth is not None:
+            a = inferred_auth
         elif parent_spec is not None and p == parent_spec.provider:
             a = parent_spec.auth
         elif p is not None:
             a = default_auth_for_provider(p)
         else:
             a = None
-        m = _pick_field(
-            model_id,
-            self._model_id,
-            parent_spec.model_id if parent_spec else None,
-        )
         if account == "" or self._account == "":
             return ToolResult(
                 call_id="",

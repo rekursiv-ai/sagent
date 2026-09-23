@@ -24,7 +24,7 @@ from sagent.providers import Google
 
 provider = Google.from_env()
 model = provider.model("gemini-3.1-pro-preview")
-utility = provider.utility_model()
+utility = provider.model("utility")
 ```
 
 All public API-key providers support:
@@ -33,7 +33,7 @@ All public API-key providers support:
 ProviderClass.from_env()
 ProviderClass.from_key("...")
 ProviderClass.from_env().model("model-id")
-ProviderClass.from_env().utility_model()
+ProviderClass.from_env().model("utility")
 ```
 
 `model(None)` uses the provider's default model. Unknown model IDs raise with the provider's known model list.
@@ -59,13 +59,8 @@ sagent --provider Google --auth env --model gemini-3.1-pro-preview
 
 `--provider` is the provider class name from `sagent.providers`. `--auth env` calls `Google.from_env()`.
 
-If the named factory does not exist, Sagent treats `--auth` as a literal API key and calls `from_key(...)`:
-
-```bash
-sagent --provider Google --auth "$GOOGLE_API_KEY" --model gemini-3.1-pro-preview
-```
-
-Prefer environment variables so keys do not land in shell history.
+If the named factory does not exist, Sagent reports an error. Use `--auth env`
+for API keys so secrets do not land in shell history.
 
 ## Provider inference
 
@@ -100,24 +95,8 @@ The provider strips the tag for API calls and uses it to select the request-toke
 
 Subclass `OpenAICompat` for endpoints that implement OpenAI chat completions.
 
-```python
-from sagent.providers import OpenAICompat
-from sagent.providers.lib.cost import ModelProfile, Pricing
-
-
-class LocalProvider(OpenAICompat):
-    ENV_VAR = "LOCAL_OPENAI_API_KEY"
-    BASE_URL = "http://localhost:8000/v1"
-    DEFAULT_MODEL = "local-model"
-    DEFAULT_UTILITY_MODEL = "local-model"
-    KNOWN_MODELS = {
-        "local-model": ModelProfile(
-            max_request_tokens=128_000,
-            max_response_tokens=8_192,
-            pricing=Pricing(),
-        ),
-    }
-```
+Set the subclass's `ENV_VAR`, `BASE_URL`, and `catalog`. The catalog must map
+the `default` and `utility` roles to capability rows alongside its model IDs.
 
 Use it like any other provider:
 

@@ -17,13 +17,15 @@ import time
 import urllib.error
 import urllib.request
 
-from sagent.catalog import llamacpp, openai
 from sagent.lib.userdirs import data_dir
 from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
 )
 from sagent.types.providers import ModelCatalog
+
+import sagent.catalog.llamacpp
+import sagent.catalog.openai
 
 
 if TYPE_CHECKING:
@@ -36,7 +38,10 @@ class LlamaCpp(OpenAICompat):
     ENV_VAR: ClassVar[str] = "LLAMA_CPP_API_KEY"
     BASE_URL: ClassVar[str] = "http://127.0.0.1:8081/v1"
 
-    catalog = ModelCatalog(rows=llamacpp.models(), transport=openai.compatible())
+    catalog = ModelCatalog(
+        rows=sagent.catalog.llamacpp.models(),
+        transport=sagent.catalog.openai.compatible(),
+    )
 
     def __init__(
         self,

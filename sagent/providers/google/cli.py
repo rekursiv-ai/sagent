@@ -38,7 +38,6 @@ import os
 import shutil
 import tempfile
 
-from sagent.catalog import google
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import JSON, FloatCodec, MutableJSON, validate_json_schema
 from sagent.providers.google.api import Google
@@ -75,6 +74,8 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
+
+import sagent.catalog.google
 
 
 if TYPE_CHECKING:
@@ -125,7 +126,10 @@ class GoogleCLI:
     does not surface per-turn usage on ``session/prompt`` responses.
     """
 
-    catalog = ModelCatalog(rows=google.models(), transport=google.cli())
+    catalog = ModelCatalog(
+        rows=sagent.catalog.google.models(),
+        transport=sagent.catalog.google.cli(),
+    )
 
     def __init__(self, *, account: str | None = None) -> None:
         self._account = account

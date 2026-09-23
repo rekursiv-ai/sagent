@@ -439,7 +439,6 @@ class SelfHosted:
     def model(
         self,
         model_id: str | None = None,
-        /,
         max_request_tokens: int | None = None,
     ) -> SelfHostedModel:
         """Return the bound model.
