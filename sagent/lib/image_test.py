@@ -194,6 +194,20 @@ class TestDecodeJpegTurbojpeg:
         assert arr is not None
         np.testing.assert_array_equal(arr, full[y : y + h, x : x + w])
 
+    @pytest.mark.parametrize(
+        "box",
+        [(0, 0, 0, 10), (0, 0, 10, 0), (70, 0, 10, 10), (0, 45, 10, 10)],
+        ids=["zero-width", "zero-height", "past-right", "past-bottom"],
+    )
+    def test_a_region_with_no_pixels_is_none(
+        self,
+        box: tuple[int, int, int, int],
+    ) -> None:
+        """An empty region is a failed decode, never a 0-sized array to resize."""
+        x, y, w, h = box
+        data = _noise_jpeg(width=64, height=40)
+        assert decode_jpeg_turbojpeg_region(data, x=x, y=y, w=w, h=h) is None
+
     def test_crop_of_corrupt_bytes_is_none(self) -> None:
         assert (
             decode_jpeg_turbojpeg(b"x", TurboJPEG(), 40, 64, crop=(0, 0, 8, 8)) is None
