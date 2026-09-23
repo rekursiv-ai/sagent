@@ -300,8 +300,8 @@ class Anthropic:
 
         Raises:
           UnknownModelError: ``model_id`` is not in the catalog.
-          UnsupportedTagError: The id asks for a context or fast tier the
-              model does not offer.
+          UnsupportedTagError: The id asks for a context the model does not
+              offer.
 
         """
         mid = model_id if model_id is not None else "default"

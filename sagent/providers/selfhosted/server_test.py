@@ -12,6 +12,7 @@ import json
 
 from sagent.lib.custom_json import JSON, MutableJSON
 from sagent.providers.selfhosted.server import (
+    SelfHosted,
     SelfHostedModel,
     _attention_mask,
     _build_chat_messages,
@@ -400,6 +401,15 @@ def test_self_hosted_model_properties() -> None:
     assert m.is_context_overflow(RuntimeError("x")) is False
     assert m.is_retryable_provider_error(RuntimeError("x")) is False
     assert m.capability.prices[PriceCatalogProduct()].request == 0.0
+
+
+def test_self_hosted_model_accepts_model_id_by_keyword() -> None:
+    provider = SelfHosted.__new__(SelfHosted)
+    provider._model_id = "stub/qwen"
+    provider._max_request_tokens = 1_234
+    provider._max_response_tokens = 567
+    model = provider.model(model_id="default")
+    assert model.model_id == "stub/qwen"
 
 
 if __name__ == "__main__":

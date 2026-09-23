@@ -139,7 +139,7 @@ A `Provider` constructs `Model` objects:
 ```python
 provider = Google.from_env()
 model = provider.model("gemini-3.1-pro-preview")
-utility = provider.utility_model()
+utility = provider.model("utility")
 ```
 
 A `Model` exposes:

@@ -14,9 +14,10 @@ import httpx2
 import pytest
 import tiktoken
 
-from sagent.catalog import openai
 from sagent.providers.openai.api import OpenAI
 from sagent.types.cost import PriceCatalogProduct
+
+import sagent.catalog.openai
 
 
 if TYPE_CHECKING:
@@ -37,7 +38,8 @@ async def test_every_catalog_row_is_a_model_the_vendor_serves() -> None:
     # response the whole test's fate, and `ReadTimeout` under that fan-out was
     # the observed failure rather than any catalog defect.
     model_ids = tuple(
-        row.wire_model_id or model_id for model_id, row in openai.models().items()
+        row.wire_model_id or model_id
+        for model_id, row in sagent.catalog.openai.models().items()
     )
     gate = asyncio.Semaphore(8)
 
@@ -193,8 +195,20 @@ def test_openai_gpt_6_keeps_the_native_effort_ladder() -> None:
     Falling back to the pre-5.6 ladder would silently downgrade ``max``
     to ``high`` and lose the top rung the model actually serves.
     """
-    assert openai.reasoning_effort("max", model_id="gpt-6-astra") == "max"
-    assert openai.reasoning_effort("xhigh", model_id="gpt-6-astra") == "xhigh"
+    assert (
+        sagent.catalog.openai.reasoning_effort(
+            "max",
+            model_id="gpt-6-astra",
+        )
+        == "max"
+    )
+    assert (
+        sagent.catalog.openai.reasoning_effort(
+            "xhigh",
+            model_id="gpt-6-astra",
+        )
+        == "xhigh"
+    )
 
 
 @pytest.mark.parametrize("effort", ["none", "min"])
@@ -207,7 +221,13 @@ def test_openai_gpt_6_effort_floor_never_emits_a_rejected_value(
     reachable without that check, so returning ``none`` here would leave
     the guarantee resting on call order rather than on the mapping.
     """
-    assert openai.reasoning_effort(effort, model_id="gpt-6-astra") == "low"
+    assert (
+        sagent.catalog.openai.reasoning_effort(
+            effort,
+            model_id="gpt-6-astra",
+        )
+        == "low"
+    )
 
 
 def test_openai_default_model_opts_into_full_window() -> None:

@@ -43,7 +43,6 @@ else:
     httpx2 = lazy_import("httpx2")  # 100ms cold.
     image = lazy_import("sagent.lib.image")
 
-from sagent.catalog import openai
 from sagent.lib import debug_log
 from sagent.lib.custom_json import (
     DictCodec,
@@ -84,6 +83,8 @@ from sagent.types.runtime import (
     UserMessage,
 )
 
+import sagent.catalog.openai
+
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,10 @@ class OpenAICompat:
 
     ENV_VAR: ClassVar[str] = ""
     BASE_URL: ClassVar[str] = ""
-    catalog = ModelCatalog(rows={}, transport=openai.compatible())
+    catalog = ModelCatalog(
+        rows={},
+        transport=sagent.catalog.openai.compatible(),
+    )
 
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]]
 
@@ -153,8 +157,8 @@ class OpenAICompat:
           model: Chat-completions model backend.
 
         Raises:
-          ValueError: If ``model_id`` is not in the catalog, or it
-              carries a ``+fast`` tag the backend has no latency mode for.
+          ValueError: If ``model_id`` is not in the catalog or requests an
+              unsupported context.
 
         """
         mid = model_id if model_id is not None else "default"
@@ -272,6 +276,7 @@ class OpenAICompatModel(ModelDefaults):
 
     @property
     def _wire_model_id(self) -> str:
+        """Return the untagged vendor model id sent on the wire."""
         return base_model_id(
             self.capability.wire_model_id or self.capability.model_id,
         )

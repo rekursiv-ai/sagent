@@ -962,6 +962,63 @@ def test_build_child_model_provider_change_without_auth_uses_target_default() ->
     build.assert_called_once_with("Google", "env", account="work")
 
 
+def test_build_child_model_infers_provider_from_bare_model_id() -> None:
+    parent = _make_parent()
+    parent.model_recipe = ModelRecipe(
+        provider="Anthropic",
+        auth="env",
+        model_id="opus-4.8",
+        account=None,
+    )
+    fake_provider = MagicMock()
+    fake_provider.model.return_value = StubProviderModel(model_id="luna-6")
+    with patch(
+        "sagent.tools.agent_spawn.build_provider",
+        return_value=fake_provider,
+    ) as build:
+        resolved = AgentSpawn()._build_child_model(
+            provider=None,
+            auth=None,
+            model_id="luna-6",
+            account=None,
+            parent_agent=parent,
+        )
+    assert isinstance(resolved, tuple)
+    _, spec = resolved
+    assert spec == ModelRecipe(
+        provider="OpenAI",
+        auth="env",
+        model_id="luna-6",
+        account=None,
+    )
+    build.assert_called_once_with("OpenAI", "env", account=None)
+
+
+def test_build_child_model_inference_preserves_explicit_auth() -> None:
+    parent = _make_parent()
+    parent.model_recipe = ModelRecipe(
+        provider="Anthropic",
+        auth="env",
+        model_id="opus-4.8",
+        account=None,
+    )
+    fake_provider = MagicMock()
+    fake_provider.model.return_value = StubProviderModel(model_id="luna-6")
+    with patch(
+        "sagent.tools.agent_spawn.build_provider",
+        return_value=fake_provider,
+    ) as build:
+        resolved = AgentSpawn()._build_child_model(
+            provider=None,
+            auth="credentials",
+            model_id="luna-6",
+            account=None,
+            parent_agent=parent,
+        )
+    assert isinstance(resolved, tuple)
+    build.assert_called_once_with("OpenAI", "credentials", account=None)
+
+
 def test_build_child_model_rejects_empty_account() -> None:
     parent = _make_parent()
     parent.model_recipe = ModelRecipe(

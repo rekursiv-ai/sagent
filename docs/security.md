@@ -76,7 +76,8 @@ SLACK_BOT_TOKEN=...
 LINEAR_API_KEY=...
 ```
 
-Avoid passing literal API keys through `--auth` unless you control shell history and process-list exposure.
+Do not pass literal API keys through `--auth`; it names a `from_<auth>` factory.
+Use `--auth env` so secrets stay out of shell history and process listings.
 
 ## Shell and filesystem safety
 

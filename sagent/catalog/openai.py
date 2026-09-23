@@ -5,8 +5,9 @@ Sources:
   - Pricing: https://developers.openai.com/api/docs/pricing
   - Images: https://developers.openai.com/api/docs/guides/images-vision
 
-:func:`models` is the API-key view. Other transports narrow it with ``&``
-(see :func:`subscription`), which can only remove.
+:func:`models` is the API-key view. :func:`subscription_models` projects the
+subscription request and response limits; transport capabilities then narrow
+either view with ``&``, which can only remove.
 """
 
 from __future__ import annotations

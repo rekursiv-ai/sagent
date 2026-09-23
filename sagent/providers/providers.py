@@ -112,7 +112,7 @@ def build_provider(
 
     Args:
       provider_name: Provider class name (e.g. ``"Anthropic"``).
-      auth: Auth method suffix (``"env"``, ``"credentials"``, ``"key"``).
+      auth: Auth method suffix such as ``"env"`` or ``"credentials"``.
       account: Credential slot forwarded to providers that accept it.
           Ignored by providers without an ``account`` parameter.
 
@@ -165,8 +165,6 @@ def default_auth_for_provider(provider_name: str) -> str:
         return "credentials"
     if hasattr(cls, "from_env"):
         return "env"
-    if hasattr(cls, "from_key"):
-        return "key"
     raise AttributeError(f"provider {provider_name!r} has no default auth method")
 
 
@@ -189,6 +187,7 @@ def _catalog_provider(model_id: str) -> str | None:
 
 
 def _provider_accepts(provider: str, model_id: str) -> bool:
+    """Return whether the provider catalog resolves the model id."""
     cls = provider_class(provider)
     catalog = getattr(cls, "catalog", None)
     if catalog is None:
