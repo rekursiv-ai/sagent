@@ -466,6 +466,10 @@ def _decode_jpeg_region(
         right = min(width, -(-(x * denom + w) // denom))
         bottom = min(height, -(-(y * denom + h) // denom))
         w, h = right - x, bottom - y
+        # An empty region would size the buffer at zero while libturbojpeg,
+        # reading width 0 as "to the right edge", writes a full row into it.
+        if w <= 0 or h <= 0:
+            raise RuntimeError(f"Region ({x}, {y}, {w}, {h}) holds no pixels.")
         # The left edge must sit on an iMCU boundary; decode the aligned
         # superset and slice. Chroma upsampling reads one iMCU past each edge of
         # the region, so decode that margin too, or subsampled edges differ from
