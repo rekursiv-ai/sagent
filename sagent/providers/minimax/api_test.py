@@ -47,7 +47,7 @@ def test_minimax_model_supports_thinking_via_reasoning_field() -> None:
 
 def test_minimax_known_models_have_pricing() -> None:
     p = MiniMax.from_key("k")
-    for mid in MiniMax.catalog.model_ids():
+    for mid in MiniMax.catalog.rows:
         m = p.model(mid)
         assert m.capability.prices[PriceCatalogProduct()].request > 0
         assert m.capability.prices[PriceCatalogProduct()].response > 0

@@ -14,7 +14,7 @@ Usage::
 
     uv --quiet run --frozen python -m
         examples.repl_demo
-        --provider Anthropic --auth env --model claude-haiku-4-5
+        --provider Anthropic --auth env --model haiku-4.5
 
 Or with the offline echo for iteration without an API key::
 

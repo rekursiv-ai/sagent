@@ -41,15 +41,10 @@ def test_provider_names_includes_self_hosted_and_compat() -> None:
         ("claude-sonnet-4-6", "Anthropic"),
         ("gemini-3-flash-preview", "Google"),
         ("gpt-5.5", "OpenAI"),
-        ("chatgpt-4o", "OpenAI"),
-        ("o1-mini", "OpenAI"),
         ("o3-mini", "OpenAI"),
-        ("o4-x", "OpenAI"),
-        ("codex-mini", "OpenAI"),
         ("kimi-k2.6", "Moonshot"),
-        ("moonshot-v1-8k", "Moonshot"),
         ("qwen3.6-plus", "DashScope"),
-        ("minimax-m2", "MiniMax"),
+        ("MiniMax-M2.7", "MiniMax"),
     ],
 )
 def test_infer_provider_from_prefix(model_id: str, provider: str) -> None:
@@ -61,6 +56,14 @@ def test_infer_provider_from_prefix(model_id: str, provider: str) -> None:
 
 def test_infer_provider_returns_none_when_already_matches() -> None:
     assert infer_provider("claude-sonnet-4-6", current_provider="Anthropic") is None
+
+
+@pytest.mark.parametrize(
+    ("model_id", "provider"),
+    [("opus-4.8", "Anthropic"), ("luna-6", "OpenAI")],
+)
+def test_infer_provider_uses_short_catalog_ids(model_id: str, provider: str) -> None:
+    assert infer_provider(model_id, current_provider="Google") == (provider, "env")
 
 
 def test_infer_provider_preserves_same_family_variant() -> None:
@@ -244,7 +247,7 @@ def test_build_provider_forwards_account_only_where_declared(
         name
         for name in PROVIDER_NAMES
         if isinstance((cls := getattr(providers, name, None)), ModelResolver)
-        and cls.catalog.model_ids()
+        and cls.catalog.rows
     ),
 )
 def test_a_catalog_backed_provider_names_a_cheaper_utility_model(

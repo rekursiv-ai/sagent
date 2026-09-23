@@ -329,6 +329,27 @@ async def test_exceeds_cap_suggests_window_variant_when_one_exists() -> None:
 
 
 @pytest.mark.asyncio
+async def test_exceeds_smaller_profile_suggests_the_maximal_bare_id() -> None:
+    agent = Agent(
+        model=StubProviderModel(
+            model_id="astra-6+272k",
+            max_request_tokens=272_000,
+        ),
+        tools=[],
+        model_recipe=ModelRecipe(
+            provider="OpenAI",
+            auth="env",
+            model_id="astra-6+272k",
+            account="",
+        ),
+    )
+    with _active(agent):
+        result = await AgentSelf().run({"max_request_tokens": 500_000})
+    assert result.is_error
+    assert "model_id=astra-6 " in result.content
+
+
+@pytest.mark.asyncio
 async def test_exceeds_cap_no_variant_hint_when_none_fits() -> None:
     """No window-variant sibling -> plain rejection, no spurious suggestion."""
     agent = _make_agent()  # StubProviderModel has no provider catalog.

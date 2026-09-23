@@ -265,7 +265,7 @@ def test_cli_shares_catalog_without_api_client(
 ) -> None:
     cli = cli_class()
     api = api_class.from_key("test-key")
-    assert cli.catalog.model_ids() == api.catalog.model_ids()
+    assert tuple(cli.catalog.rows) == tuple(api.catalog.rows)
     assert isinstance(cli.model(), model_class)
     assert isinstance(cli.model("utility"), model_class)
     assert not isinstance(cli, ProviderCloseable)

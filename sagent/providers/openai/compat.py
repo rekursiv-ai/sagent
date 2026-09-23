@@ -233,7 +233,11 @@ class OpenAICompatModel(ModelDefaults):
           tokens: Tokenizer count, or chars/4 when the tokenizer is unknown.
 
         """
-        return token_count.approx_text_tokens(text, model_id=self._wire_model_id)
+        return token_count.approx_text_tokens(
+            text,
+            model_id=self._wire_model_id,
+            approx_chars_per_token=self.capability.approx_chars_per_token,
+        )
 
     @override
     def approx_image_tokens(self, data: bytes) -> int:
@@ -268,7 +272,9 @@ class OpenAICompatModel(ModelDefaults):
 
     @property
     def _wire_model_id(self) -> str:
-        return base_model_id(self.capability.model_id)
+        return base_model_id(
+            self.capability.wire_model_id or self.capability.model_id,
+        )
 
     def _effective_service_tier(self) -> ServiceTier | None:
         tier = self.settings.service_tier

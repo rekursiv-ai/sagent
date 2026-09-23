@@ -268,7 +268,7 @@ class SessionMeta:
     """Stable identifier for the session."""
 
     model_id: str = ""
-    """Concrete model identifier (e.g. ``claude-opus-4-7``)."""
+    """Concrete model identifier (e.g. ``opus-4.7``)."""
 
     provider: str = ""
     """Provider key (e.g. ``anthropic``, ``google``)."""

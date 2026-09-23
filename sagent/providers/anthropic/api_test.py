@@ -8,6 +8,8 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, cast, override
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import operator
+
 import httpx2
 import pytest
 
@@ -623,6 +625,12 @@ def test_anthropic_model_unknown_id_raises() -> None:
     p = Anthropic.from_key("k")
     with pytest.raises(ValueError, match="Unknown model"):
         _ = p.model("unknown-claude")
+
+
+def test_anthropic_model_rejects_unknown_provider_options() -> None:
+    p = Anthropic.from_key("k")
+    with pytest.raises(TypeError, match="typoo"):
+        _ = operator.methodcaller("model", "opus-4.8", typoo=True)(p)
 
 
 def test_anthropic_model_strips_context_tag_for_profile_lookup() -> None:

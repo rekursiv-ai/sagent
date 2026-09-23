@@ -472,8 +472,8 @@ class _GoogleCLIModel(ModelDefaults):
 
     Args:
       provider: Owning :class:`GoogleCLI`.
-      model_id: Gemini model id passed via ``--model``.
-      max_request_tokens: Per-request input cap.
+      capability: Resolved model and transport capabilities.
+      settings: Selections validated against ``capability``.
 
     """
 
@@ -518,8 +518,8 @@ class _GoogleCLIModel(ModelDefaults):
 
     @override
     def approx_text_tokens(self, text: str) -> int:
-        """Local estimate via ``len(text) // 4`` (Gemini's heuristic)."""
-        return len(text) // 4
+        """Estimate locally from the catalog's measured character ratio."""
+        return int(len(text) / self.capability.approx_chars_per_token)
 
     @override
     def approx_image_tokens(self, data: bytes) -> int:
@@ -795,8 +795,9 @@ class _GoogleCLIModel(ModelDefaults):
         system_hash = _hash_system(self._pending_system)
         _populate_google_tmpdir(tmpdir, self._provider.account, self._pending_system)
         workdir = tmpdir / "workdir"
+        model_id = self.capability.wire_model_id or self.capability.model_id
         proc = Subproc(
-            ["gemini", "--experimental-acp", "--model", self.capability.model_id],
+            ["gemini", "--experimental-acp", "--model", model_id],
             env=_google_subprocess_env(tmpdir),
             tmpdir=tmpdir,
             cwd=workdir,

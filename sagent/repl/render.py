@@ -844,7 +844,7 @@ sagent commands
   /compact [hints]            compact history
   /recompact [hints]          alias for /compact
 
-  /model    [args]            switch model; ids take option tags (+1m, +fast)
+  /model    [args]            switch model; ids may select context (+200k, +272k)
   /provider <name>            switch provider
   /thinking <state|partial>   adaptive/on/off/redact/show/hide
   /effort [level]             show or set effort; bare lists options

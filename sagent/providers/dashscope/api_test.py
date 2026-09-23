@@ -76,7 +76,7 @@ def test_dashscope_is_effort_model(model_id: str, is_effort: bool) -> None:
     assert m._is_effort_model(model_id) is is_effort
 
 
-@pytest.mark.parametrize("model_id", sorted(DashScope.catalog.model_ids()))
+@pytest.mark.parametrize("model_id", sorted(DashScope.catalog.rows))
 def test_the_effort_predicate_agrees_with_every_row(model_id: str) -> None:
     """The id-shape predicate and the catalog row must say the same thing.
 

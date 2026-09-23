@@ -211,9 +211,9 @@ to set the default value of the `--provider` flag.
 
 | Provider | Environment variable | Example model |
 | --- | --- | --- |
-| `Anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-6` |
-| `AnthropicCLI` | none (`claude auth login --claudeai`) | `claude-sonnet-4-6` |
-| `OpenAI` | `OPENAI_API_KEY` | `gpt-5.6-sol` |
+| `Anthropic` | `ANTHROPIC_API_KEY` | `fable-5.1` |
+| `AnthropicCLI` | none (`claude auth login --claudeai`) | `fable-5.1` |
+| `OpenAI` | `OPENAI_API_KEY` | `astra-6` |
 | `Google` | `GOOGLE_API_KEY` | `gemini-3.1-pro-preview` |
 | `Moonshot` | `MOONSHOT_API_KEY` | `kimi-k2.6` |
 | `DashScope` | `DASHSCOPE_API_KEY` | `qwen3.6-plus` |

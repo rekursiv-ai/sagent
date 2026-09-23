@@ -821,7 +821,7 @@ class Agent:
           provider: New provider class name, e.g. ``"AnthropicCLI"``.
           auth: New auth-method suffix.
           model_id: New provider-specific model id. Option tags ride
-              along (e.g. ``claude-opus-4-8+1m+fast``); the provider's
+              along (e.g. ``opus-4.8+200k``); the provider's
               ``model()`` validates them.
           account: New credential account override.
 

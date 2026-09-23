@@ -64,14 +64,14 @@ CONFIGS: Final = {
         "mutate": ("Google", "gemini-3.1-pro-preview"),
     },
     "anthropic": {
-        "cheap": ("Anthropic", "claude-haiku-4-5"),
-        "high": ("Anthropic", "claude-opus-4-8"),
-        "mutate": ("Anthropic", "claude-opus-4-8"),
+        "cheap": ("Anthropic", "haiku-4.5"),
+        "high": ("Anthropic", "opus-4.8"),
+        "mutate": ("Anthropic", "opus-4.8"),
     },
     "cross": {
         "cheap": ("Google", "gemini-2.5-flash-lite"),
-        "high": ("Anthropic", "claude-opus-4-8"),
-        "mutate": ("Anthropic", "claude-sonnet-4-6"),
+        "high": ("Anthropic", "opus-4.8"),
+        "mutate": ("Anthropic", "sonnet-4.6"),
     },
 }
 

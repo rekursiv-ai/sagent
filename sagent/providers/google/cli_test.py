@@ -193,7 +193,7 @@ def test_model_uses_default_when_unset() -> None:
 
 
 def test_catalog_inherits_from_google() -> None:
-    assert GoogleCLI.catalog.model_ids() == Google.catalog.model_ids()
+    assert tuple(GoogleCLI.catalog.rows) == tuple(Google.catalog.rows)
 
 
 def test_utility_model_picks_flash_lite() -> None:

@@ -30,11 +30,6 @@ _CWD: Final = Path(__file__).resolve().parent
 # nobody is using, and it silently re-opens the hole if one is added later.
 _RATIO_ALLOWED: Final = frozenset(
     {
-        # Providers with no local tokenizer: the ratio IS their estimator.
-        "providers/google/api.py",
-        "providers/google/cli.py",
-        # tiktoken-less compat vendors (Kimi, Qwen, MiniMax) fall back to it.
-        "providers/openai/token_count.py",
         # The single no-agent fallback, and the test seam mirroring it.
         "agent/state.py",
         "testing.py",

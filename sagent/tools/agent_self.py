@@ -170,9 +170,9 @@ class AgentSelf:
                     "description": (
                         "Optional provider/model-specific settings:"
                         " 'thinking', 'effort', 'cache_ttl', 'service_tier'."
-                        " Fast serving is a model-id option tag, not an"
-                        " option: request it via model='...+fast' on"
-                        " supported models. Supported keys per model are"
+                        " Request fast serving with"
+                        " service_tier='priority' on supported models."
+                        " Supported keys per model are"
                         " reported by diagnostics."
                     ),
                     "additionalProperties": True,
@@ -524,10 +524,9 @@ def _plan_one_limit(raw: object, attr: str) -> int | ToolResult | None:
     return val
 
 
-# Context-window size is encoded in the model id via a ``+1m`` / ``+200k`` suffix, not
-# the ``max_request_tokens`` limit. When an agent over-raises the limit to reach a
-# bigger window, point it at the sibling variant (same base id, a window tag, enough
-# room) so the rejection self-corrects.
+# Context-window size is selected by the model id, not by raising
+# ``max_request_tokens``. Bare IDs use the largest profile; a tag may select a
+# smaller one. Point an over-limit request at the first sibling profile that fits.
 def _window_variant_hint(agent: AgentSelfAgent, model: Model, requested: int) -> str:
     """Suggest a larger-window model id when one would satisfy ``requested``."""
     spec = agent.model_recipe
@@ -541,9 +540,12 @@ def _window_variant_hint(agent: AgentSelfAgent, model: Model, requested: int) ->
         cap, _ = provider_cls.catalog.resolve(base)
     except (UnknownModelError, UnsupportedTagError):
         return ""
-    for tag in CONTEXT_TAGS:
-        candidate = base + tag
-        window = getattr(cap.context.get(tag), "max_request_tokens", 0)
+    candidates = (
+        (base, cap.context.get("")),
+        *((base + tag, cap.context.get(tag)) for tag in CONTEXT_TAGS),
+    )
+    for candidate, limits in candidates:
+        window = getattr(limits, "max_request_tokens", 0)
         if candidate != model.tagged_model_id and window >= requested:
             return (
                 f". The window is part of the model id: switch to"
@@ -621,7 +623,7 @@ def _model_catalog_lines(provider_name: str) -> list[str]:
     if isinstance(provider_cls, ModelResolver):
         default, _ = provider_cls.catalog.resolve("default")
         lines.append(f"Default model: {default.model_id}")
-        model_ids = list(provider_cls.catalog.model_ids())
+        model_ids = list(provider_cls.catalog.rows)
         models = ", ".join(sorted(model_ids))
         lines.append(f"Known models: {models or 'none'}")
     else:
@@ -944,7 +946,9 @@ def _plan_model(
     if model_id and prov_name == spec.provider:
         inferred = infer_provider(model_id, prov_name)
         if inferred is not None:
-            prov_name, auth = inferred
+            prov_name, inferred_auth = inferred
+            if "auth" not in d:
+                auth = inferred_auth
     allow = _allowed_providers()
     if prov_name != spec.provider and prov_name not in allow:
         return provider_not_allowed_result(prov_name, allow, spec.provider)

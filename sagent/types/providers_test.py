@@ -17,7 +17,6 @@ from sagent.types.providers import (
     ModelCatalog,
     UnknownModelError,
     UnsupportedTagError,
-    resolve,
 )
 
 
@@ -50,6 +49,16 @@ def _cli() -> ModelCapability:
         thinking_output={"none", "text"},
         manage_context_server_side={True},
     )
+
+
+def resolve(
+    model_id: str,
+    *,
+    models: dict[str, ModelCapability],
+    transport: ModelCapability,
+) -> tuple[ModelCapability, ModelSettings]:
+    """Resolve through the sole public catalog API."""
+    return ModelCatalog(rows=models, transport=transport).resolve(model_id)
 
 
 def test_resolve_returns_capability_and_settings_as_peers() -> None:
@@ -98,6 +107,19 @@ def test_resolve_rejects_a_context_the_model_lacks() -> None:
     with pytest.raises(UnsupportedTagError, match="no \\+200k context"):
         _ = resolve(
             "opus-4.8+200k",
+            models={"opus-4.8": _opus()},
+            transport=ModelCapability(),
+        )
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    ["opus-4.8+1m+200k", "opus-4.8+200k+1m"],
+)
+def test_resolve_rejects_conflicting_context_tags(model_id: str) -> None:
+    with pytest.raises(UnsupportedTagError, match="conflicting contexts"):
+        _ = resolve(
+            model_id,
             models={"opus-4.8": _opus()},
             transport=ModelCapability(),
         )
@@ -185,9 +207,17 @@ def test_model_catalog_owns_ids_and_resolution() -> None:
         rows=MappingProxyType({row.model_id: row}),
         transport=_cli(),
     )
-    assert catalog.model_ids() == ("opus-4.8",)
+    assert tuple(catalog.rows) == ("opus-4.8",)
     capability, _ = catalog.resolve("opus-4.8")
     assert capability.model_id == "opus-4.8"
+
+
+def test_model_catalog_snapshots_and_freezes_rows() -> None:
+    source = {"opus-4.8": _opus()}
+    catalog = ModelCatalog(rows=source, transport=_cli())
+    source.clear()
+    assert "opus-4.8" in catalog.rows
+    assert type(catalog.rows) is MappingProxyType
 
 
 if __name__ == "__main__":

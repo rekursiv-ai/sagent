@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import asyncio
 import inspect
 import json
+import operator
 import os
 import re
 
@@ -505,6 +506,12 @@ def test_model_unknown_raises() -> None:
         _ = provider.model("not-a-claude")
 
 
+def test_model_rejects_unknown_provider_options() -> None:
+    provider = AnthropicCLI()
+    with pytest.raises(TypeError, match="typoo"):
+        _ = operator.methodcaller("model", "opus-4.8", typoo=True)(provider)
+
+
 def test_model_resolves_context_tag_to_profile() -> None:
     """The explicit smaller-window tag resolves against the same profile."""
     provider = AnthropicCLI()
@@ -521,7 +528,7 @@ def test_model_rejects_an_unknown_tag() -> None:
 
 
 def test_catalog_inherits_from_anthropic() -> None:
-    assert AnthropicCLI.catalog.model_ids() == Anthropic.catalog.model_ids()
+    assert tuple(AnthropicCLI.catalog.rows) == tuple(Anthropic.catalog.rows)
 
 
 def test_utility_model_picks_haiku() -> None:

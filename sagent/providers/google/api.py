@@ -230,8 +230,8 @@ class _GeminiModel(ModelDefaults):
 
     @override
     def approx_text_tokens(self, text: str) -> int:
-        """Local estimate via ``len(text) // 4`` (Gemini's heuristic)."""
-        return len(text) // 4
+        """Estimate locally from the catalog's measured character ratio."""
+        return int(len(text) / self.capability.approx_chars_per_token)
 
     @override
     def approx_image_tokens(self, data: bytes) -> int:
@@ -246,7 +246,8 @@ class _GeminiModel(ModelDefaults):
     @override
     async def actual_request_tokens(self, request: ModelRequest) -> int:
         """Call ``:countTokens`` for the exact server-side count."""
-        url = f"{_API_BASE}/models/{self.capability.model_id}:countTokens"
+        model_id = self.capability.wire_model_id or self.capability.model_id
+        url = f"{_API_BASE}/models/{model_id}:countTokens"
         body = _build_request(request, self.capability, self.settings, self.limits)
         client = await self._get_client()
         r = await client.post(
@@ -307,7 +308,8 @@ class _GeminiModel(ModelDefaults):
           ValueError: Server returns ``400`` for non-overflow reasons.
 
         """
-        url = f"{_API_BASE}/models/{self.capability.model_id}:streamGenerateContent?alt=sse"
+        model_id = self.capability.wire_model_id or self.capability.model_id
+        url = f"{_API_BASE}/models/{model_id}:streamGenerateContent?alt=sse"
         body = _build_request(request, self.capability, self.settings, self.limits)
         client = await self._get_client()
         async with client.stream(

@@ -32,7 +32,6 @@ __all__ = [
     "ProviderCloseable",
     "UnknownModelError",
     "UnsupportedTagError",
-    "resolve",
 ]
 
 
@@ -51,13 +50,67 @@ class ModelCatalog:
     rows: Mapping[str, ModelCapability]
     transport: ModelCapability
 
-    def model_ids(self) -> tuple[str, ...]:
-        """Return every accepted model ID."""
-        return tuple(self.rows)
+    def __post_init__(self) -> None:
+        """Snapshot rows so a global provider catalog cannot be mutated."""
+        object.__setattr__(self, "rows", MappingProxyType(dict(self.rows)))
 
     def resolve(self, model_id: str) -> tuple[ModelCapability, ModelSettings]:
-        """Resolve ``model_id`` against this catalog's transport."""
-        return resolve(model_id, models=self.rows, transport=self.transport)
+        """Resolve ``model_id`` against this catalog's transport.
+
+        Args:
+          model_id: Catalog key or vendor wire id, optionally context-tagged.
+
+        Returns:
+          capability: The catalog capability narrowed by the transport.
+          settings: Settings selecting the requested context.
+
+        Raises:
+          UnknownModelError: The base id is absent.
+          UnsupportedTagError: Context tags conflict or are unavailable.
+
+        """
+        base, id_tags = split_model_id(model_id)
+        tags: list[ContextTag] = sorted(id_tags)
+        if len(tags) > 1:
+            joined = ", ".join(tags)
+            raise UnsupportedTagError(
+                f"Model {model_id!r} selects conflicting contexts: {joined}",
+            )
+        context: ContextTag = tags[0] if tags else ""
+        row = self.rows.get(base)
+        if row is None:
+            row = next(
+                (
+                    candidate
+                    for candidate in self.rows.values()
+                    if candidate.wire_model_id == base
+                ),
+                None,
+            )
+        if row is None:
+            known = ", ".join(sorted(self.rows))
+            raise UnknownModelError(
+                f"Unknown model {model_id!r}. Known models: {known}",
+            )
+        capability = row & self.transport
+        if (
+            context == "+1m"
+            and context not in capability.context
+            and capability.context[""].max_request_tokens >= 1_000_000
+        ):
+            capability = replace(
+                capability,
+                context=MappingProxyType(
+                    {**capability.context, "+1m": capability.context[""]},
+                ),
+            )
+        if context not in capability.context:
+            offered = ", ".join(sorted(t for t in capability.context if t)) or "(none)"
+            raise UnsupportedTagError(
+                f"Unknown model {model_id!r}: {base} has no {context} context;"
+                f" offers: {offered}",
+            )
+        return capability, ModelSettings.narrowest(capability, context=context)
 
 
 @runtime_checkable
@@ -67,67 +120,6 @@ class ModelResolver(Protocol):
     catalog: ModelCatalog
 
 
-def resolve(
-    model_id: str,
-    *,
-    models: Mapping[str, ModelCapability],
-    transport: ModelCapability,
-) -> tuple[ModelCapability, ModelSettings]:
-    """Turn a tagged model id into a capability and the settings it selects.
-
-    Args:
-      model_id: Catalog key or id with an optional smaller-window tag.
-      models: The provider's capability catalog, keyed by base id.
-      transport: What this transport lets through.
-
-    Returns:
-      capability: The catalog row met with ``transport``.
-      settings: The choices the id encoded.
-
-    Raises:
-      UnknownModelError: The base id is not in ``models``.
-      UnsupportedTagError: The id asks for a context the model does not
-          offer. Silently serving the base window would understate the
-          caller's budget by up to 4x.
-
-    """
-    base, id_tags = split_model_id(model_id)
-    tags: list[ContextTag] = sorted(id_tags)
-    context: ContextTag = tags[0] if tags else ""
-    row = models.get(base)
-    if row is None:
-        row = next(
-            (
-                candidate
-                for candidate in models.values()
-                if candidate.wire_model_id == base
-            ),
-            None,
-        )
-    if row is None:
-        known = ", ".join(sorted(models))
-        raise UnknownModelError(f"Unknown model {model_id!r}. Known models: {known}")
-    capability = row & transport
-    if (
-        context == "+1m"
-        and context not in capability.context
-        and capability.context[""].max_request_tokens >= 1_000_000
-    ):
-        capability = replace(
-            capability,
-            context=MappingProxyType(
-                {**capability.context, "+1m": capability.context[""]},
-            ),
-        )
-    if context not in capability.context:
-        offered = ", ".join(sorted(t for t in capability.context if t)) or "(none)"
-        raise UnsupportedTagError(
-            f"Unknown model {model_id!r}: {base} has no {context} context;"
-            f" offers: {offered}",
-        )
-    return capability, ModelSettings.narrowest(capability, context=context)
-
-
 @runtime_checkable
 class Provider(Protocol):
     """Factory for model backends. ``None`` selects catalog key ``default``."""
@@ -135,21 +127,11 @@ class Provider(Protocol):
     def model(
         self,
         model_id: str | None = None,
-        max_request_tokens: int | None = None,
-        **provider_options: object,
     ) -> Model:
         """Build a model backend.
 
         Args:
           model_id: Provider-specific id; ``None`` selects ``default``.
-          max_request_tokens: Override for the model's input cap.
-          provider_options: Provider-specific construction knobs. Each
-              concrete provider declares these as real, typed keyword
-              args on its own ``model(...)`` (e.g. ``AnthropicCLI``
-              accepts ``extra_mcp_servers`` / ``subprocess_read_timeout_sec``);
-              the protocol acknowledges the nonstandard tail here so the
-              uniform call site holds. A provider rejects keys it does
-              not recognize rather than silently ignoring them.
 
         Returns:
           model: A ``Model`` ready to handle requests.

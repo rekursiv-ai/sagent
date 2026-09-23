@@ -20,12 +20,18 @@ else:
     get_dimensions = lazy_import("sagent.lib.image", "get_dimensions")
 
 
-def approx_text_tokens(text: str, *, model_id: str) -> int:
-    """Count text locally, falling back to chars/4 for unknown tokenizers.
+def approx_text_tokens(
+    text: str,
+    *,
+    model_id: str,
+    approx_chars_per_token: float = 4.0,
+) -> int:
+    """Count text locally, falling back to the catalog ratio.
 
     Args:
       text: Text to count, including literal special-token spellings.
       model_id: Model id selecting the tokenizer.
+      approx_chars_per_token: Fallback divisor when no tokenizer is known.
 
     Returns:
       tokens: Local text token estimate.
@@ -33,7 +39,9 @@ def approx_text_tokens(text: str, *, model_id: str) -> int:
     """
     encoding = _tiktoken_encoding(model_id)
     return (
-        len(encoding.encode_ordinary(text)) if encoding is not None else len(text) // 4
+        len(encoding.encode_ordinary(text))
+        if encoding is not None
+        else int(len(text) / approx_chars_per_token)
     )
 
 
