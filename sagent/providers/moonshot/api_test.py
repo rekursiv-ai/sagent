@@ -28,7 +28,7 @@ def test_moonshot_from_env_reads(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_moonshot_default_model() -> None:
     p = Moonshot.from_key("k")
     m = p.model()
-    assert m.capability.model_id == Moonshot.DEFAULT_MODEL
+    assert m.capability.model_id == p.catalog.resolve("default")[0].model_id
     # Kimi surfaces reasoning via ``reasoning_content``.
     assert m.capability.thinking_output == frozenset({"none", "text"})
 
@@ -41,7 +41,7 @@ def test_moonshot_unknown_model_raises() -> None:
 
 def test_moonshot_known_models_have_pricing_and_limits() -> None:
     p = Moonshot.from_key("k")
-    for mid in Moonshot.CAPABILITIES:
+    for mid in Moonshot.catalog.model_ids():
         m = p.model(mid)
         assert m.limits.max_request_tokens > 0
         assert m.limits.max_response_tokens > 0

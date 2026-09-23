@@ -35,13 +35,18 @@ from sagent.tools.core import (
     load_tool_description,
     provider_not_allowed_result,
 )
-from sagent.types.capability import ModelCapability, ThinkingEffort
+from sagent.types.capability import ThinkingEffort
 from sagent.types.cost import ServiceTier
 from sagent.types.model import (
     CONTEXT_TAGS,
     Model,
     ModelRecipe,
     base_model_id,
+)
+from sagent.types.providers import (
+    ModelResolver,
+    UnknownModelError,
+    UnsupportedTagError,
 )
 from sagent.types.runtime import (
     Clear,
@@ -138,7 +143,7 @@ class AgentSelf:
                 "auth": {
                     "type": "string",
                     "description": (
-                        "Optional auth method suffix override (e.g. 'env',"
+                        "Optional auth method suffix override (e.g. 'env' or"
                         " 'credentials')."
                     ),
                 },
@@ -529,13 +534,12 @@ def _window_variant_hint(agent: AgentSelfAgent, model: Model, requested: int) ->
     if spec is None:
         return ""
     provider_cls = provider_class(spec.provider)
-    known = getattr(provider_cls, "CAPABILITIES", None)
-    if not isinstance(known, Mapping):
+    if not isinstance(provider_cls, ModelResolver):
         return ""
-    catalog = cast(Mapping[str, ModelCapability], known)
     base = base_model_id(model.tagged_model_id)
-    cap = catalog.get(base)
-    if cap is None:
+    try:
+        cap, _ = provider_cls.catalog.resolve(base)
+    except (UnknownModelError, UnsupportedTagError):
         return ""
     for tag in CONTEXT_TAGS:
         candidate = base + tag
@@ -613,14 +617,11 @@ def _model_catalog_lines(provider_name: str) -> list[str]:
                 f" {list(_allowed_providers())}."
             ),
         ]
-    default = getattr(provider_cls, "DEFAULT_MODEL", None)
-    known = getattr(provider_cls, "CAPABILITIES", None)
     lines = [f"Provider catalog: {provider_name}"]
-    if isinstance(default, str):
-        lines.append(f"Default model: {default}")
-    if isinstance(known, Mapping):
-        known_models = cast(Mapping[object, object], known)
-        model_ids = [str(k) for k in known_models]
+    if isinstance(provider_cls, ModelResolver):
+        default, _ = provider_cls.catalog.resolve("default")
+        lines.append(f"Default model: {default.model_id}")
+        model_ids = list(provider_cls.catalog.model_ids())
         models = ", ".join(sorted(model_ids))
         lines.append(f"Known models: {models or 'none'}")
     else:

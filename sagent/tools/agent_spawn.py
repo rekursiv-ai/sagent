@@ -186,7 +186,7 @@ class AgentSpawn:
                             "Auth method suffix - dispatches to"
                             " a zero-argument ``<Provider>.from_<auth>()``"
                             " (for example, ``env`` for API-key environment"
-                            " variables, ``credentials`` for subscription"
+                            " variables, or ``credentials`` for subscription"
                             " providers). Prefer"
                             " ``credentials`` over ``env`` when the chosen"
                             " provider supports both. Defaults to inheriting"

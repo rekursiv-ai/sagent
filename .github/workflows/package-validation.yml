@@ -49,6 +49,7 @@ jobs:
         run: |
           # Lint/type/test checks come from this package's own .pre-commit-config.yaml.
           # Restating each tool here means a newly added hook silently goes unrun.
+          bash install-libjpeg-turbo.sh
           uv sync --frozen --all-groups --extra slack
           uv run pre-commit run --all-files --hook-stage pre-commit
           uv run pre-commit run --all-files --hook-stage pre-push

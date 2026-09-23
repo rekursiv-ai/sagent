@@ -506,11 +506,11 @@ def test_model_unknown_raises() -> None:
 
 
 def test_model_resolves_context_tag_to_profile() -> None:
-    """``claude-sonnet-4-5+1m`` finds the same profile as ``claude-sonnet-4-5``."""
+    """The explicit smaller-window tag resolves against the same profile."""
     provider = AnthropicCLI()
-    model = provider.model("claude-sonnet-4-5+1m")
-    assert model.tagged_model_id == "claude-sonnet-4-5+1m"
-    assert model.limits.max_request_tokens == 1_000_000
+    model = provider.model("sonnet-4.5+200k")
+    assert model.tagged_model_id == "sonnet-4.5+200k"
+    assert model.limits.max_request_tokens == 200_000
 
 
 def test_model_rejects_an_unknown_tag() -> None:
@@ -520,26 +520,15 @@ def test_model_rejects_an_unknown_tag() -> None:
         _ = provider.model("claude-opus-4-8+fast")
 
 
-def test_default_model_inherits_from_anthropic() -> None:
-    """``AnthropicCLI`` defers to ``Anthropic.DEFAULT_MODEL``.
-
-    Vendor-base classes (``Anthropic``, ``Google``, ``OpenAI``) own the
-    catalog; auth subclasses (``CLI`` / ``Subscription``) should not
-    fork the default unless the transport genuinely demands it.
-    """
-    assert AnthropicCLI.DEFAULT_MODEL == Anthropic.DEFAULT_MODEL
-
-
-def test_default_utility_model_inherits_from_anthropic() -> None:
-    """``AnthropicCLI`` defers to ``Anthropic.DEFAULT_UTILITY_MODEL``."""
-    assert AnthropicCLI.DEFAULT_UTILITY_MODEL == Anthropic.DEFAULT_UTILITY_MODEL
+def test_catalog_inherits_from_anthropic() -> None:
+    assert AnthropicCLI.catalog.model_ids() == Anthropic.catalog.model_ids()
 
 
 def test_utility_model_picks_haiku() -> None:
     """``utility_model`` returns the cheapest Claude in ``KNOWN_MODELS``."""
     provider = AnthropicCLI()
-    model = provider.utility_model()
-    assert model.capability.model_id == "claude-haiku-4-5"
+    model = provider.model("utility")
+    assert model.capability.model_id == "haiku-4.5"
 
 
 def test_model_capabilities() -> None:

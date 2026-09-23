@@ -32,8 +32,8 @@ Usage::
     ./cli.py --provider DashScope --model qwen3.6-plus
     ./cli.py --provider MiniMax --model MiniMax-M2.7
 
-    # Model + window tag (append +1m or +200k; 200K is the default)
-    ./cli.py --model claude-sonnet-4-6+1m
+    # Models default to their largest window; append +200k for the smaller one.
+    ./cli.py --model claude-sonnet-4-6+200k
     ./cli.py --session ~/.sessions/my
     ./cli.py --resume       # pick from past sessions for this cwd
     ./cli.py --continue     # resume the most recent for this cwd
@@ -46,7 +46,6 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Callable, Coroutine, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
 
@@ -103,17 +102,17 @@ from sagent.tools.tool_spec import (
     coerce_kwargs,
     parse_tool_overrides,
 )
-from sagent.types.capability import (
-    ThinkingEffort,
-)
+from sagent.types.capability import ThinkingEffort
 from sagent.types.model import (
     Model,
     ModelRecipe,
-    base_model_id,
 )
 from sagent.types.providers import (
+    ModelResolver,
     Provider,
     ProviderCloseable,
+    UnknownModelError,
+    UnsupportedTagError,
 )
 from sagent.types.runtime import (
     AssistantMessage,
@@ -131,6 +130,8 @@ from sagent.types.runtime import (
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine, Mapping
+
     from sagent.types.tools import (
         Tool,
     )
@@ -532,8 +533,9 @@ def main() -> int:
 
     def _system() -> str:
         return build_system(
-            model.tagged_model_id,
+            model.capability,
             custom=custom_system,
+            context=model.settings.context,
             include_memory=not args.ephemeral,
         )
 
@@ -1025,10 +1027,7 @@ def _build_provider_model_once(
         auth = model_id or "env"
         model_id = None
     provider = build_provider(provider_name, auth, account=args.account)
-    if model_id == "utility":
-        model = provider.utility_model()
-    else:
-        model = provider.model(None if model_id == "default" else model_id)
+    model = provider.model(None if model_id == "default" else model_id)
     return provider, model, auth
 
 
@@ -1208,12 +1207,13 @@ def _apply_resume_model_defaults(args: argparse.Namespace, meta: SessionMeta) ->
 def _provider_knows_model(provider_name: str, model_id: str) -> bool:
     """Return True when the named provider's catalog includes ``model_id``."""
     cls = getattr(providers, provider_name, None)
-    if cls is None:
+    if not isinstance(cls, ModelResolver):
         return False
-    known = getattr(cls, "CAPABILITIES", None)
-    if not isinstance(known, Mapping):
+    try:
+        cls.catalog.resolve(model_id)
+    except (UnknownModelError, UnsupportedTagError):
         return False
-    return base_model_id(model_id) in known
+    return True
 
 
 async def _resume_persistent_agents(

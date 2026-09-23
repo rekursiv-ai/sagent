@@ -75,8 +75,15 @@ def test_models_is_a_function_not_a_table(module: ModuleType) -> None:
     assert not hasattr(module, "MODELS")
 
 
+@pytest.mark.parametrize("module", _VENDORS, ids=_module_id)
+def test_every_catalog_names_its_default_and_utility_rows(module: ModuleType) -> None:
+    models = _models(module)
+    assert models["default"].model_id in models
+    assert models["utility"].model_id in models
+
+
 @pytest.mark.parametrize("row", _ROWS)
-def test_a_row_keys_itself_by_its_wire_id(row: ModelCapability) -> None:
+def test_a_row_has_a_catalog_id(row: ModelCapability) -> None:
     assert row.model_id
 
 
@@ -90,6 +97,13 @@ def test_every_context_declares_both_windows(row: ModelCapability) -> None:
     for tag, limits in row.context.items():
         assert limits.max_request_tokens > 0, tag
         assert limits.max_response_tokens > 0, tag
+
+
+@pytest.mark.parametrize("row", _ROWS)
+def test_untagged_context_is_the_largest_window(row: ModelCapability) -> None:
+    assert row.context[""].max_request_tokens == max(
+        limits.max_request_tokens for limits in row.context.values()
+    )
 
 
 @pytest.mark.parametrize("row", _ROWS)
@@ -112,7 +126,7 @@ def test_no_axis_is_empty(row: ModelCapability) -> None:
 def test_only_reasoning_only_models_reject_none(row: ModelCapability) -> None:
     """Keep vendor-enforced reasoning mandatory, and optional elsewhere."""
     reasoning_only = row.model_id.endswith("-thinking-2507") or row.model_id in {
-        "gpt-6-astra",
+        "astra-6",
         "gpt-5.5-pro",
         "gpt-5.4-pro",
         "o1",
@@ -151,6 +165,21 @@ def test_a_transport_preserves_windows_and_prices(
         assert met.context == row.context
         assert met.prices == row.prices
         assert met.model_id == row.model_id
+        assert met.knowledge_cutoff == row.knowledge_cutoff
+        assert met.approx_chars_per_token == row.approx_chars_per_token
+
+
+def test_published_knowledge_cutoffs_are_catalog_data() -> None:
+    assert anthropic.models()["opus-5.5"].knowledge_cutoff == "June 2026"
+    assert anthropic.models()["fable-5.1"].knowledge_cutoff == "June 2026"
+    assert openai.models()["astra-6"].knowledge_cutoff == "April 30, 2026"
+    assert openai.models()["sol-6"].knowledge_cutoff == "April 20, 2026"
+    assert openai.models()["luna-6"].knowledge_cutoff == "May 18, 2026"
+
+
+def test_anthropic_tokenizer_ratio_is_catalog_data() -> None:
+    assert anthropic.models()["opus-5.5"].approx_chars_per_token == 2.38
+    assert anthropic.models()["opus-4.6"].approx_chars_per_token == 3.12
 
 
 @pytest.mark.parametrize(("models", "transport"), _TRANSPORTS, ids=_TRANSPORT_IDS)
@@ -196,23 +225,26 @@ def test_a_transport_never_advertises_what_no_row_can_reach(
 
 
 # Base input/output USD per Mtok, transcribed from each vendor's pricing page
-# on 2026-09-04. Only rows whose price this repo actually bills against are
+# on 2026-09-22. Only rows whose price this repo actually bills against are
 # listed; the point is to catch a REPRICE, which no structural invariant sees.
 # Sources:
 #   https://developers.openai.com/api/docs/pricing
 #   https://docs.anthropic.com/en/docs/about-claude/pricing
 #   https://ai.google.dev/gemini-api/docs/pricing
 _PUBLISHED_PRICES = {
-    "gpt-6-astra": (10.0, 50.0),
+    "astra-6": (10.0, 50.0),
+    "sol-6": (2.0, 10.0),
+    "luna-6": (0.1, 0.5),
     "gpt-5.6-sol": (4.0, 20.0),
     "gpt-5.6": (4.0, 20.0),
-    "gpt-5.6-terra": (2.0, 12.0),
+    "terra-5.6": (2.0, 12.0),
     "gpt-5.6-luna": (0.2, 1.2),
     "gpt-5.5": (5.0, 30.0),
-    "claude-opus-5": (5.0, 25.0),
-    "claude-fable-5-1": (10.0, 50.0),
-    "claude-sonnet-5": (2.0, 10.0),
-    "claude-haiku-4-5": (1.0, 5.0),
+    "opus-5": (5.0, 25.0),
+    "opus-5.5": (4.0, 20.0),
+    "fable-5.1": (10.0, 50.0),
+    "sonnet-5": (2.0, 10.0),
+    "haiku-4.5": (1.0, 5.0),
     "gemini-3.1-pro-preview": (2.0, 12.0),
     "gemini-2.5-pro": (1.25, 10.0),
 }
@@ -243,15 +275,54 @@ def test_a_cache_rate_is_a_multiple_of_the_rate_it_rides() -> None:
     the 0.1x every other model uses.
     """
     rows = anthropic.models()
-    opus = rows["claude-opus-5"].prices
+    opus = rows["opus-5"].prices
     standard = opus[PriceCatalogProduct()]
     fast = opus[PriceCatalogProduct(service_tier="priority")]
     assert (fast.request, fast.response) == (10.0, 50.0)
     assert fast.cache_write == fast.request * 1.25
     assert fast.cache_read == fast.request * 0.1
     assert fast.cache_write == standard.cache_write * 2.0
-    fable = rows["claude-fable-5-1"].prices[PriceCatalogProduct()]
+    fable = rows["fable-5.1"].prices[PriceCatalogProduct()]
     assert fable.cache_read == 0.25
+
+
+def test_anthropic_context_betas_are_catalog_data() -> None:
+    rows = anthropic.models()
+    assert rows["opus-4.8"].context[""].request_betas == frozenset(
+        {"context-1m-2025-08-07"},
+    )
+    assert not rows["opus-4.8"].context["+200k"].request_betas
+    assert not rows["opus-5.5"].context[""].request_betas
+
+
+@pytest.mark.parametrize(
+    ("catalog_id", "wire_id"),
+    [
+        ("astra-6", "gpt-6-astra"),
+        ("sol-6", "gpt-6-sol"),
+        ("luna-6", "gpt-6-luna"),
+        ("terra-5.6", "gpt-5.6-terra"),
+        ("fable-5.1", "claude-fable-5-1"),
+        ("opus-5.5", "claude-opus-5-5"),
+        ("sonnet-5", "claude-sonnet-5"),
+        ("haiku-4.5", "claude-haiku-4-5"),
+        ("opus-4.8", "claude-opus-4-8"),
+        ("opus-4.7", "claude-opus-4-7"),
+        ("opus-4.6", "claude-opus-4-6"),
+        ("opus-4.5", "claude-opus-4-5"),
+        ("sonnet-4.6", "claude-sonnet-4-6"),
+        ("sonnet-4.5", "claude-sonnet-4-5"),
+    ],
+)
+def test_simple_catalog_ids_are_distinct_from_vendor_wire_ids(
+    catalog_id: str,
+    wire_id: str,
+) -> None:
+    rows = {**openai.models(), **anthropic.models()}
+    row = rows[catalog_id]
+    assert row.model_id == catalog_id
+    assert row.wire_model_id == wire_id
+    assert wire_id not in rows
 
 
 def test_no_catalog_declares_a_latency_tag() -> None:

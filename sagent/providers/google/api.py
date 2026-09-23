@@ -13,8 +13,7 @@ Usage::
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from types import MappingProxyType
-from typing import TYPE_CHECKING, ClassVar, Final, Protocol, cast, override
+from typing import TYPE_CHECKING, Final, Protocol, cast, override
 
 import asyncio
 import base64
@@ -63,10 +62,7 @@ from sagent.types.model import (
     PromptTooLongError,
     StreamInterruptedError,
 )
-from sagent.types.providers import (
-    ModelRole,
-    resolve,
-)
+from sagent.types.providers import ModelCatalog
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
@@ -95,34 +91,10 @@ _API_BASE: Final = "https://generativelanguage.googleapis.com/v1beta"
 #     byte-aware compaction gate enforces it across the whole request.
 
 
-class GoogleCatalog:
-    """Model catalog and role defaults shared by Gemini transports."""
-
-    DEFAULT_MODEL = "gemini-3.1-pro-preview"
-    DEFAULT_UTILITY_MODEL = "gemini-2.5-flash-lite"
-
-    # Model limits and pricing.
-    # ModelLimits: https://ai.google.dev/gemini-api/docs/models
-    # Pricing: https://ai.google.dev/gemini-api/docs/pricing.
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = google.models()
-    """Per-model capability, shared by every Gemini transport."""
-
-    @property
-    def ROLES(self) -> Mapping[ModelRole, str]:  # noqa: N802 -- The provider API exposes this established uppercase capability name.
-        """Role name to base id; ``utility`` falls back to the default."""
-        return MappingProxyType(
-            {
-                "default": self.DEFAULT_MODEL,
-                "utility": self.DEFAULT_UTILITY_MODEL or self.DEFAULT_MODEL,
-            },
-        )
-
-
-class Google(GoogleCatalog):
+class Google:
     """Google provider - creates Gemini model backends."""
 
-    TRANSPORT: ClassVar[ModelCapability] = google.api()
-    """What this transport lets through; subclasses declare their own."""
+    catalog = ModelCatalog(rows=google.models(), transport=google.api())
 
     def __init__(self, *, api_key: str) -> None:
         self.api_key = api_key
@@ -163,36 +135,22 @@ class Google(GoogleCatalog):
         """Create a model backend.
 
         Args:
-          model_id: Model ID; ``None`` uses ``DEFAULT_MODEL``.
+          model_id: Model ID; ``None`` uses catalog key ``default``.
 
         Returns:
           model: Gemini model backend.
 
         Raises:
-          ValueError: If ``model_id`` is not in ``CAPABILITIES``.
+          ValueError: If ``model_id`` is not in the catalog.
 
         """
         mid = model_id if model_id is not None else "default"
-        capability, settings = resolve(
-            mid,
-            models=self.CAPABILITIES,
-            roles=self.ROLES,
-            transport=self.TRANSPORT,
-        )
+        capability, settings = self.catalog.resolve(mid)
         return _GeminiModel(
             provider=self,
             capability=capability,
             settings=settings,
         )
-
-    def utility_model(self) -> _GeminiModel:
-        """Return the default utility (fast/cheap) model backend.
-
-        Returns:
-          model: Backend for ``DEFAULT_UTILITY_MODEL``.
-
-        """
-        return self.model("utility")
 
 
 class GeminiProvider(Protocol):

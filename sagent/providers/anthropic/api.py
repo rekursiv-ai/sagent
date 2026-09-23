@@ -16,8 +16,7 @@ Usage::
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, ClassVar, Final, Protocol, cast, override
+from typing import TYPE_CHECKING, Any, Final, Protocol, cast, override
 
 import asyncio
 import base64
@@ -78,13 +77,8 @@ from sagent.types.model import (
     PromptTooLongError,
     StreamInterruptedError,
     UsageSnapshot,
-    base_model_id,
-    split_model_id,
 )
-from sagent.types.providers import (
-    ModelRole,
-    resolve,
-)
+from sagent.types.providers import ModelCatalog
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
@@ -142,54 +136,6 @@ _DEFAULT_API_TARGET_INPUT_TOKENS = (
     40_000  # house-ignore[globals] -- Target input-token dial.
 )
 
-_DEFAULT_1M_MODELS = frozenset(
-    {"claude-fable-5-1", "claude-fable-5", "claude-sonnet-5", "claude-opus-5"},
-)
-
-
-# Models that support server-side ``clear_tool_uses_20250919``. Per
-# Anthropic docs: Sonnet 4/4.5, Haiku 4.5, Opus 4/4.1/4.5. We treat
-# the +1m variants identically (same base model).
-_CONTEXT_MANAGEMENT_MODELS = frozenset(
-    {
-        "claude-fable-5-1",
-        "claude-fable-5",
-        "claude-opus-5",
-        "claude-opus-4-8",
-        "claude-opus-4-7",
-        "claude-opus-4-6",
-        "claude-opus-4-5",
-        "claude-sonnet-5",
-        "claude-sonnet-4-6",
-        "claude-sonnet-4-5",
-        "claude-haiku-4-5",
-    },
-)
-
-
-def supports_native_context_management(model_id: str) -> bool:
-    """Check whether the model accepts the ``clear_tool_uses_20250919`` beta."""
-    return base_model_id(model_id) in _CONTEXT_MANAGEMENT_MODELS
-
-
-def context_betas(model_id: str) -> list[str]:
-    """Return beta headers required by the requested context window.
-
-    Args:
-      model_id: Model identifier, possibly with a context-window suffix.
-
-    Returns:
-      betas: Beta header strings to include in the request.
-
-    """
-    base, tags = split_model_id(model_id)
-    betas: list[str] = []
-    if "+1m" in tags and base not in _DEFAULT_1M_MODELS:
-        betas.append("context-1m-2025-08-07")
-    if supports_native_context_management(model_id):
-        betas.append("context-management-2025-06-27")
-    return betas
-
 
 def build_context_management(
     *,
@@ -246,49 +192,7 @@ def build_context_management(
     return {"edits": edits} if edits else None
 
 
-class AnthropicCatalog:
-    """Model catalog and role defaults shared by Anthropic transports."""
-
-    # Latest model we roll to when ``model_id`` is None. Bump on release.
-    # Bare id, no ``+1m``: fable-5-1 is in ``_DEFAULT_1M_MODELS``, so its
-    # window is already 1M without the context beta.
-    DEFAULT_MODEL = "claude-fable-5-1"
-    DEFAULT_UTILITY_MODEL = "claude-haiku-4-5"
-
-    # ``chars_per_token`` measured via ``messages.count_tokens`` on a 2.6M-char
-    # mixed code+JSON+thinking session (de89f75430bf). Three tokenizer
-    # generations cluster: opus-4-7 (2.83), opus/sonnet-4.6-4.5 (3.66),
-    # sonnet-4.5 / haiku-4.5 (4.83). Pure-English content tokenizes higher;
-    # these defaults err toward overcount for mixed agent traffic, which is
-    # the safe direction for the compaction trigger.
-    # opus-4-8 inherits 4-7's value (2.83) pending its own measurement.
-    # Thinking/effort capability per generation, all measured against the
-    # live API (Jun 2026):
-    #   - opus-4-8 / opus-4-7: ``adaptive`` only (``enabled`` 400s), and the
-    #     thinking block returns signed-but-empty -- no readable text.
-    #     Efforts low..xhigh,max.
-    #   - opus-4-6 / sonnet-4-6: both modes, readable thinking text.
-    #     Efforts low,medium,high,max (NO xhigh).
-    #   - opus-4-5 / sonnet-4-5 / haiku-4-5: ``enabled`` only (``adaptive``
-    #     400s 'not supported'), readable text. Efforts: opus-4-5
-    #     low,medium,high; sonnet-4-5 / haiku-4-5 none.
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = (
-        sagent.catalog.anthropic.models()
-    )
-    """Per-model capability, shared by every Anthropic transport."""
-
-    @property
-    def ROLES(self) -> Mapping[ModelRole, str]:  # noqa: N802 -- public provider interface uses this established name.
-        """Role name to base id; ``utility`` falls back to the default."""
-        return MappingProxyType(
-            {
-                "default": self.DEFAULT_MODEL,
-                "utility": self.DEFAULT_UTILITY_MODEL or self.DEFAULT_MODEL,
-            },
-        )
-
-
-class Anthropic(AnthropicCatalog):
+class Anthropic:
     """Anthropic provider - API key auth.
 
     The base class exposes hooks that alternative auth implementations can override:
@@ -296,8 +200,10 @@ class Anthropic(AnthropicCatalog):
     ``handle_auth_error``, ``subscription``.
     """
 
-    TRANSPORT: ClassVar[ModelCapability] = sagent.catalog.anthropic.api()
-    """What this transport lets through; subclasses declare their own."""
+    catalog = ModelCatalog(
+        rows=sagent.catalog.anthropic.models(),
+        transport=sagent.catalog.anthropic.api(),
+    )
 
     def __init__(
         self,
@@ -398,33 +304,19 @@ class Anthropic(AnthropicCatalog):
           model: Anthropic model backend.
 
         Raises:
-          UnknownModelError: ``model_id`` is not in ``CAPABILITIES``.
+          UnknownModelError: ``model_id`` is not in the catalog.
           UnsupportedTagError: The id asks for a context or fast tier the
               model does not offer.
 
         """
         del provider_options
         mid = model_id if model_id is not None else "default"
-        capability, settings = resolve(
-            mid,
-            models=self.CAPABILITIES,
-            roles=self.ROLES,
-            transport=self.TRANSPORT,
-        )
+        capability, settings = self.catalog.resolve(mid)
         return _AnthropicModel(
             provider=self,
             capability=capability,
             settings=settings,
         )
-
-    def utility_model(self) -> _AnthropicModel:
-        """Return the default utility (fast/cheap) model backend.
-
-        Returns:
-          model: Backend for ``DEFAULT_UTILITY_MODEL``.
-
-        """
-        return self.model("utility")
 
     # -- Hooks (subclasses override) -----------------------------------
 
@@ -499,17 +391,24 @@ class Anthropic(AnthropicCatalog):
             return system
         return anthropic.NOT_GIVEN
 
-    def extra_headers(self, model_id: str) -> dict[str, str]:
+    def extra_headers(
+        self,
+        capability: ModelCapability,
+        settings: ModelSettings,
+    ) -> dict[str, str]:
         """Return per-request extra headers.
 
         Args:
-          model_id: Active model id used to derive beta opt-ins.
+          capability: Active model capability.
+          settings: Active model selections.
 
         Returns:
           headers: Header dict (``anthropic-beta`` set when betas apply).
 
         """
-        betas = context_betas(model_id)
+        betas = list(settings.limits.request_betas)
+        if True in capability.manage_context_server_side:
+            betas.append("context-management-2025-06-27")
         if self._redact_thinking:
             betas.append(REDACT_THINKING_BETA)
         return {"anthropic-beta": ",".join(betas)} if betas else {}
@@ -714,7 +613,7 @@ class _AnthropicModel(ModelDefaults):
 
     @override
     def approx_text_tokens(self, text: str) -> int:
-        """Local estimate via ``chars_per_token``.
+        """Local estimate via ``approx_chars_per_token``.
 
         Args:
           text: Text to score.
@@ -723,12 +622,7 @@ class _AnthropicModel(ModelDefaults):
           tokens: Approximate input token count.
 
         """
-        return int(
-            len(text)
-            / sagent.catalog.anthropic.chars_per_token(
-                self.capability.model_id,
-            ),
-        )
+        return int(len(text) / self.capability.approx_chars_per_token)
 
     @override
     def approx_image_tokens(self, data: bytes) -> int:
@@ -845,7 +739,7 @@ class _AnthropicModel(ModelDefaults):
         has_thinking = budget != "none"
         max_tok = request.max_response_tokens or self.limits.max_response_tokens
         kwargs: dict[str, object] = {
-            "model": base_model_id(self.capability.model_id),
+            "model": self.capability.wire_model_id or self.capability.model_id,
             "messages": messages,
             "max_tokens": max_tok,
             "temperature": request.temperature,
@@ -891,14 +785,14 @@ class _AnthropicModel(ModelDefaults):
             cache_cold=self._cache_cold,
             trigger_tokens=(
                 self.limits.max_request_tokens // 2
-                if supports_native_context_management(self.capability.model_id)
+                if True in self.capability.manage_context_server_side
                 else 0
             ),
             tools=request.tools or (),
         )
         if body is not None:
             kwargs["extra_body"] = body
-        headers = self._provider.extra_headers(self.capability.model_id)
+        headers = self._provider.extra_headers(self.capability, self.settings)
         if self.settings.service_tier == "priority":
             # ``speed`` is a first-class parameter only on the SDK's beta
             # endpoints (``beta.messages.*``); the stream path here is a

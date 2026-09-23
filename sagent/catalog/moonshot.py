@@ -86,7 +86,14 @@ def models() -> Mapping[str, ModelCapability]:
             prices=_prices(request=0.6, response=6.0),
         ),
     )
-    return MappingProxyType({row.model_id: row for row in rows})
+    catalog = {row.model_id: row for row in rows}
+    return MappingProxyType(
+        {
+            "default": catalog["kimi-k2.6"],
+            "utility": catalog["kimi-k2-0905-preview"],
+            **catalog,
+        },
+    )
 
 
 def _limits(*, window: int, response: int) -> Mapping[ContextTag, ModelLimits]:

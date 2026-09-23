@@ -46,7 +46,7 @@ from sagent.lib.custom_json import (
     MutableJSONValue,
     validate_json_schema,
 )
-from sagent.providers.anthropic.api import Anthropic, AnthropicCatalog
+from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.lib.cli_respawn import respawn_for_cadence
 from sagent.providers.lib.errors import (
     error_status_code,
@@ -70,11 +70,8 @@ from sagent.types.cost import TokenCost, TokenCount
 from sagent.types.model import (
     ModelRequest,
     ModelResponse,
-    base_model_id,
 )
-from sagent.types.providers import (
-    resolve,
-)
+from sagent.types.providers import ModelCatalog
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
@@ -341,19 +338,20 @@ class AnthropicCLICredentials(TypedDict):
     has_extra_usage_enabled: NotRequired[bool | None]
 
 
-class AnthropicCLI(AnthropicCatalog):
+class AnthropicCLI:
     """Provider that drives the user's installed ``claude`` CLI subprocess.
 
-    Inherits ``CAPABILITIES`` (limits, pricing, tokenizer density) from
-    :class:`AnthropicCatalog`. The default account uses the CLI's native login
+    Shares the Anthropic model catalog. The default account uses the CLI's native login
     (including macOS Keychain storage); named accounts use the file variant
     produced by ``providers.lib.oauth.credentials_path``.
     Cost figures are computed from the per-turn ``modelUsage`` summary
     the CLI emits on the terminal ``result`` event.
     """
 
-    TRANSPORT: ClassVar[ModelCapability] = sagent.catalog.anthropic.cli()
-    """The subprocess exposes no effort, latency, cache, or redaction knob."""
+    catalog = ModelCatalog(
+        rows=sagent.catalog.anthropic.models(),
+        transport=sagent.catalog.anthropic.cli(),
+    )
 
     supported_options: ClassVar[frozenset[str]] = frozenset[str]()
     """``from_credentials`` (the CLI wrapper) takes no construction options.
@@ -507,7 +505,7 @@ class AnthropicCLI(AnthropicCatalog):
         """Build a CLI-backed model.
 
         Args:
-          model_id: Claude model id; ``None`` uses ``DEFAULT_MODEL``.
+          model_id: Claude model id; ``None`` uses catalog key ``default``.
           extra_mcp_servers: Additional MCP servers (stdio or HTTP)
             merged into the CLI's ``--mcp-config`` at subprocess spawn
             time. Each entry follows Claude Code's mcp.json shape:
@@ -549,18 +547,13 @@ class AnthropicCLI(AnthropicCatalog):
           model: Backend wrapping a managed ``claude`` subprocess.
 
         Raises:
-          ValueError: If the resolved id is not in ``CAPABILITIES``, or
+          ValueError: If the resolved id is not in the catalog, or
               it carries a ``+fast`` tag (the CLI has no fast path).
 
         """
         del provider_options
         mid = model_id if model_id is not None else "default"
-        capability, settings = resolve(
-            mid,
-            models=self.CAPABILITIES,
-            roles=self.ROLES,
-            transport=self.TRANSPORT,
-        )
+        capability, settings = self.catalog.resolve(mid)
         return _AnthropicCLIModel(
             provider=self,
             capability=capability,
@@ -570,15 +563,6 @@ class AnthropicCLI(AnthropicCatalog):
             subprocess_read_timeout_sec=subprocess_read_timeout_sec,
             mcp_connect_timeout_sec=mcp_connect_timeout_sec,
         )
-
-    def utility_model(self) -> _AnthropicCLIModel:
-        """Return the cheapest CLI-backed model (Haiku by default).
-
-        Returns:
-          model: Utility model backend.
-
-        """
-        return self.model("utility")
 
     @property
     def account(self) -> str | None:
@@ -784,13 +768,8 @@ class _AnthropicCLIModel(ModelDefaults):
 
     @override
     def approx_text_tokens(self, text: str) -> int:
-        """Local estimate via ``chars_per_token``."""
-        return int(
-            len(text)
-            / sagent.catalog.anthropic.chars_per_token(
-                self.capability.model_id,
-            ),
-        )
+        """Local estimate via ``approx_chars_per_token``."""
+        return int(len(text) / self.capability.approx_chars_per_token)
 
     @override
     def approx_image_tokens(self, data: bytes) -> int:
@@ -1373,7 +1352,7 @@ class _AnthropicCLIModel(ModelDefaults):
             _populate_anthropic_tmpdir(tmpdir, self._provider.account)
             spawn_owned_tmpdir = tmpdir
         argv = _build_anthropic_argv(
-            model_id=base_model_id(self.capability.model_id),
+            model_id=self.capability.wire_model_id or self.capability.model_id,
             system_prompt=self._pending_system,
             bridge_url=self._tools_bridge.url,
             bridge_server_name=self._tools_bridge.server_name,

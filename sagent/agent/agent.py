@@ -106,10 +106,12 @@ from sagent.types.model import (
     ModelRequest,
     ModelResponse,
     RequestTooLargeError,
-    base_model_id,
 )
 from sagent.types.providers import (
     AuthReloadable,
+    ModelResolver,
+    UnknownModelError,
+    UnsupportedTagError,
 )
 from sagent.types.settings import (
     AgentSettings,
@@ -809,7 +811,7 @@ class Agent:
            knows it (same vendor, different auth subclass).
         2. Else use the last model recorded for the new provider in
            the sagent ``last-models.json``.
-        3. Else fall back to the new provider's ``DEFAULT_MODEL``.
+        3. Else fall back to the new provider's ``default`` catalog row.
 
         Queues a :class:`types.runtime.ModelSwitch` through the runtime inbox so any
         in-flight model call finishes against the OLD model (cost
@@ -2353,7 +2355,7 @@ def _resolve_target_spec(
     elif prov_name == spec.provider or _provider_knows_model(prov_name, spec.model_id):
         final_model_id = spec.model_id
     else:
-        final_model_id = last_models.get(prov_name) or _default_model_for(prov_name)
+        final_model_id = last_models.get(prov_name) or "default"
     return ModelRecipe(
         provider=prov_name,
         auth=final_auth,
@@ -2362,29 +2364,16 @@ def _resolve_target_spec(
     )
 
 
-# Reads ``cls.CAPABILITIES`` without instantiating so the probe is side-effect-free (no
-# credential lookup). Option tags ride on catalog ids and are stripped before the
-# membership check, mirroring the providers' own lookup rule.
 def _provider_knows_model(prov_name: str, model_id: str) -> bool:
     """Return True when the provider class's catalog includes ``model_id``."""
     cls = sagent.providers.providers.provider_class(prov_name)
-    if cls is None:
+    if not isinstance(cls, ModelResolver):
         return False
-    known = getattr(cls, "CAPABILITIES", None)
-    if not isinstance(known, Mapping):
+    try:
+        cls.catalog.resolve(model_id)
+    except (UnknownModelError, UnsupportedTagError):
         return False
-    return base_model_id(model_id) in known
-
-
-def _default_model_for(prov_name: str) -> str:
-    """Return ``Provider.DEFAULT_MODEL`` for the named provider class."""
-    cls = sagent.providers.providers.provider_class(prov_name)
-    if cls is None:
-        raise ValueError(f"unknown provider: {prov_name!r}")
-    default = getattr(cls, "DEFAULT_MODEL", None)
-    if not isinstance(default, str) or not default:
-        raise ValueError(f"provider {prov_name!r} has no DEFAULT_MODEL")
-    return default
+    return True
 
 
 # ``Model.close()`` is a required contract method: CLI-style providers

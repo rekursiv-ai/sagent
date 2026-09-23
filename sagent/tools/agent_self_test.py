@@ -15,13 +15,18 @@ from sagent.agent.agent import Agent
 from sagent.agent.state import current_agent_var, tool_state_var
 from sagent.testing import MockModelCaps
 from sagent.tools.agent_self import AgentSelf
-from sagent.types.capability import ModelCapability, ModelLimits, ThinkingEffort
+from sagent.types.capability import (
+    ModelCapability,
+    ModelLimits,
+    ThinkingEffort,
+)
 from sagent.types.cost import ServiceTier, TokenCost, TokenCount
 from sagent.types.model import (
     ModelRecipe,
     ModelRequest,
     ModelResponse,
 )
+from sagent.types.providers import ModelCatalog
 from sagent.types.runtime import (
     AssistantMessage,
     Clear,
@@ -64,8 +69,15 @@ class StubProviderModel(MockModelCaps):
 
 
 def _catalog_stub(capabilities: Mapping[str, ModelCapability]) -> type:
-    """Stand-in provider class exposing only a ``CAPABILITIES`` catalog."""
-    return type("StubCat", (), {"CAPABILITIES": capabilities})
+    """Stand-in provider class exposing side-effect-free model resolution."""
+
+    class StubCatalog:
+        catalog = ModelCatalog(
+            rows=capabilities,
+            transport=ModelCapability(),
+        )
+
+    return StubCatalog
 
 
 def _make_agent(*, spec: ModelRecipe | None = None) -> Agent:

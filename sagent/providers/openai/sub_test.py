@@ -360,25 +360,30 @@ def test_subscription_model_unknown_id_raises() -> None:
 
 def test_subscription_model_uses_default_when_unset() -> None:
     m = _make_provider().model()
-    assert m.capability.model_id == OpenAISubscription.DEFAULT_MODEL
+    assert (
+        m.capability.model_id
+        == OpenAISubscription.catalog.resolve("default")[0].model_id
+    )
 
 
 def test_subscription_default_model_is_openai_default_without_1m() -> None:
     """Sub default = the API default's base id (``+1m`` is not in the catalog)."""
-    assert OpenAISubscription.DEFAULT_MODEL == "gpt-6-astra"
-    assert OpenAI.DEFAULT_MODEL == "gpt-6-astra+1m"
+    assert OpenAISubscription.catalog.resolve("default")[0].model_id == "astra-6"
+    assert OpenAI.catalog.resolve("default")[0].model_id == "astra-6"
     # The narrowed default must resolve against the narrowed catalog.
-    assert OpenAISubscription.DEFAULT_MODEL in OpenAISubscription.CAPABILITIES
+    assert "default" in OpenAISubscription.catalog.model_ids()
 
 
 def test_subscription_default_utility_model_inherits_from_openai() -> None:
-    """``OpenAISubscription`` defers to ``OpenAI.DEFAULT_UTILITY_MODEL``."""
-    assert OpenAISubscription.DEFAULT_UTILITY_MODEL == OpenAI.DEFAULT_UTILITY_MODEL
+    assert (
+        OpenAISubscription.catalog.resolve("utility")[0].model_id
+        == OpenAI.catalog.resolve("utility")[0].model_id
+    )
 
 
 def test_subscription_utility_model_uses_utility_default() -> None:
-    m = _make_provider().utility_model()
-    assert m.capability.model_id == "gpt-5.6-luna"
+    m = _make_provider().model("utility")
+    assert m.capability.model_id == "luna-6"
 
 
 def test_subscription_model_clamps_against_wire_contract() -> None:
@@ -393,7 +398,9 @@ def test_subscription_rejects_1m_ids() -> None:
     p = _make_provider()
     with pytest.raises(ValueError, match="Unknown model"):
         _ = p.model("gpt-5.6-sol+1m")
-    assert not any(name.endswith("+1m") for name in OpenAISubscription.CAPABILITIES)
+    assert not any(
+        name.endswith("+1m") for name in OpenAISubscription.catalog.model_ids()
+    )
 
 
 def test_subscription_model_supports_thinking_via_reasoning_effort() -> None:

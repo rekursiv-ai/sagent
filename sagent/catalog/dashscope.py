@@ -148,7 +148,14 @@ def models() -> Mapping[str, ModelCapability]:
             prices=_prices(request=0.05, response=0.2),
         ),
     )
-    return MappingProxyType({row.model_id: row for row in rows})
+    catalog = {row.model_id: row for row in rows}
+    return MappingProxyType(
+        {
+            "default": catalog["qwen3.6-plus"],
+            "utility": catalog["qwen3.6-flash"],
+            **catalog,
+        },
+    )
 
 
 def _limits(*, window: int, response: int) -> Mapping[ContextTag, ModelLimits]:

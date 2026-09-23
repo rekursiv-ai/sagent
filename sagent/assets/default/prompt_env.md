@@ -4,5 +4,4 @@ Git repository: {is_git}
 Platform: {platform}
 Shell: {shell_line}
 OS: {os_version}
-Model: {marketing} (model ID: {model_id}).
-Knowledge cutoff: {cutoff}.
+Model: {model_id}.{knowledge_cutoff_line}

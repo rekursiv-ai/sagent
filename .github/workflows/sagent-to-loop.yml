@@ -237,6 +237,7 @@ jobs:
             --sync-label "$COPYBARISTA_SYNC_LABEL" \
             --report "$IMPORT_REPORT" \
             --refresh-public-lockfile \
+            --validation-command 'bash install-libjpeg-turbo.sh' \
             --validation-command 'uv sync --frozen --all-groups --extra slack' \
             --validation-command 'uv run pre-commit run --all-files --hook-stage pre-commit' \
             --validation-command 'uv run pre-commit run --all-files --hook-stage pre-push' \

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar, Self
 
 import os
@@ -10,44 +9,26 @@ import os
 from sagent.catalog import openai
 from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.openai.responses import _OpenAIResponsesModel
-from sagent.types.providers import ModelRole, resolve
+from sagent.types.providers import ModelCatalog
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     import openai as openai_sdk
 
-    from sagent.types.capability import ModelCapability
 else:
     from wrapt import lazy_import
 
     openai_sdk = lazy_import("openai")
 
-__all__ = ["OpenAI", "OpenAICatalog"]
+__all__ = ["OpenAI"]
 
 
-class OpenAICatalog:
-    """Model catalog and role defaults shared by OpenAI transports."""
-
-    DEFAULT_MODEL: ClassVar[str] = "gpt-6-astra+1m"
-    DEFAULT_UTILITY_MODEL: ClassVar[str] = "gpt-5.6-luna"
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = openai.models()
-
-    @property
-    def ROLES(self) -> Mapping[ModelRole, str]:  # noqa: N802 -- provider protocol spelling.
-        """Role names resolved by model construction."""
-        return MappingProxyType(
-            {"default": self.DEFAULT_MODEL, "utility": self.DEFAULT_UTILITY_MODEL},
-        )
-
-
-class OpenAI(OpenAICatalog):
+class OpenAI:
     """API-key authentication and loop-local OpenAI SDK ownership."""
 
     ENV_VAR: ClassVar[str] = "OPENAI_API_KEY"
     BASE_URL: ClassVar[str] = "https://api.openai.com/v1"
-    TRANSPORT: ClassVar[ModelCapability] = openai.api()
+    catalog = ModelCatalog(rows=openai.models(), transport=openai.api())
 
     def __init__(self, *, api_key: str, base_url: str | None = None) -> None:
         self.api_key = api_key
@@ -94,26 +75,14 @@ class OpenAI(OpenAICatalog):
           model: Configured Responses model.
 
         """
-        capability, settings = resolve(
+        capability, settings = self.catalog.resolve(
             model_id if model_id is not None else "default",
-            models=self.CAPABILITIES,
-            roles=self.ROLES,
-            transport=self.TRANSPORT,
         )
         return _OpenAIResponsesModel(
             provider=self,
             capability=capability,
             settings=settings,
         )
-
-    def utility_model(self) -> _OpenAIResponsesModel:
-        """Return the utility-role model.
-
-        Returns:
-          model: Utility Responses backend.
-
-        """
-        return self.model("utility")
 
     async def get_sdk(self) -> openai_sdk.AsyncOpenAI:
         """Get this event loop's SDK client.

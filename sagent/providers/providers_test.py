@@ -21,7 +21,7 @@ from sagent.providers import (
     infer_provider,
 )
 from sagent.types.cost import PriceCatalogProduct, TokenCount
-from sagent.types.model import base_model_id
+from sagent.types.providers import ModelResolver
 
 
 def test_provider_names_contains_core_providers() -> None:
@@ -217,7 +217,7 @@ def test_build_provider_no_match_no_from_key_raises(
 
 def test_self_hosted_imported_via_dispatch() -> None:
     # We exercise that ``SelfHosted`` is exposed; we don't load HF weights.
-    assert SelfHosted.DEFAULT_MODEL
+    assert SelfHosted.__name__ == "SelfHosted"
 
 
 def test_build_provider_defers_to_the_factory_default(
@@ -243,32 +243,30 @@ def test_build_provider_forwards_account_only_where_declared(
     sorted(
         name
         for name in PROVIDER_NAMES
-        if getattr(getattr(providers, name, None), "CAPABILITIES", {})
+        if isinstance((cls := getattr(providers, name, None)), ModelResolver)
+        and cls.catalog.model_ids()
     ),
 )
 def test_a_catalog_backed_provider_names_a_cheaper_utility_model(
     provider_name: str,
 ) -> None:
-    """``utility`` must name a row, and a cheaper one than ``default``.
-
-    ``ROLES`` resolves ``utility`` to ``DEFAULT_UTILITY_MODEL or
-    DEFAULT_MODEL``, so a provider that declares none still answers -- with
-    the expensive default. DashScope, MiniMax, and Moonshot all did, which is
-    invisible from the role lookup alone: every summarizer call silently
-    billed the top rate.
-    """
+    """``utility`` must name a row, and a cheaper one than ``default``."""
     cls = getattr(providers, provider_name)
-    utility = getattr(cls, "DEFAULT_UTILITY_MODEL", "")
-    assert utility, f"{provider_name} declares no DEFAULT_UTILITY_MODEL"
-    caps = cls.CAPABILITIES
-    default_row = caps[base_model_id(cls.DEFAULT_MODEL)]
-    utility_row = caps[base_model_id(utility)]
-    if utility_row is default_row:
+    assert not hasattr(cls, "resolve_model")
+    assert not hasattr(cls, "model_ids")
+    default_row, _ = cls.catalog.resolve("default")
+    utility_row, _ = cls.catalog.resolve("utility")
+    assert not hasattr(cls, "CAPABILITIES")
+    assert not hasattr(cls, "TRANSPORT")
+    if utility_row.model_id == default_row.model_id:
         pytest.skip("single-model catalog: utility and default coincide")
     tokens = TokenCount(request=1_000_000, response=100_000)
     assert (utility_row.prices[PriceCatalogProduct()] * tokens).total < (
         default_row.prices[PriceCatalogProduct()] * tokens
-    ).total, f"{provider_name} utility {utility!r} is not cheaper than its default"
+    ).total, (
+        f"{provider_name} utility {utility_row.model_id!r} is not cheaper than"
+        f" its default {default_row.model_id!r}"
+    )
 
 
 if __name__ == "__main__":

@@ -57,7 +57,6 @@ from sagent.agent.state import (
 from sagent.compaction.summary import SummaryCompactor
 from sagent.lib import last_models, token_count
 from sagent.lib.custom_json import JSON, json_freeze
-from sagent.providers import Google
 from sagent.tools.read import Read
 from sagent.types.capability import (
     ModelCapability,
@@ -2323,7 +2322,7 @@ def _drain_model_switches(a: Agent) -> list[ModelSwitch]:
 
 def test_provider_knows_model_strips_the_context_tag() -> None:
     """Cross-provider ``change_model`` must not discard a tagged id."""
-    assert _provider_knows_model("Anthropic", "claude-opus-4-8+1m")
+    assert _provider_knows_model("Anthropic", "claude-opus-4-8+200k")
     assert not _provider_knows_model("Anthropic", "unknown-model+1m")
 
 
@@ -2404,7 +2403,7 @@ def test_change_model_cross_provider_falls_back_to_default(
 ) -> None:
     """When current model isn't in new provider's catalog, use DEFAULT_MODEL.
 
-    ``claude-opus-4-7`` is not in ``Google.CAPABILITIES``; with no
+    ``claude-opus-4-7`` is not in Google's catalog; with no
     ``last_models`` entry recorded, resolution falls through to
     ``Google.DEFAULT_MODEL``.
     """
@@ -2417,7 +2416,7 @@ def test_change_model_cross_provider_falls_back_to_default(
     a = _build_agent_with_spec(model_id="claude-opus-4-7")
     target = a.change_model(provider="Google", auth="env")
     assert target.provider == "Google"
-    assert target.model_id == Google.DEFAULT_MODEL
+    assert target.model_id == "default"
 
 
 def test_change_model_cross_provider_falls_back_to_last_models(

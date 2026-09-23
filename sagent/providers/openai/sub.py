@@ -55,7 +55,6 @@ from types import MappingProxyType
 from typing import (
     IO,
     TYPE_CHECKING,
-    ClassVar,
     Final,
     NotRequired,
     TypedDict,
@@ -119,12 +118,12 @@ from sagent.providers.lib.oauth import (
     pkce_pair,
 )
 from sagent.providers.lib.perloop import PerLoop
-from sagent.providers.openai.api import OpenAI, OpenAICatalog
+from sagent.providers.openai.api import OpenAI
 from sagent.providers.openai.responses import _OpenAIResponsesModel
 from sagent.types.exceptions import (
     AuthRefreshError,
 )
-from sagent.types.providers import resolve
+from sagent.types.providers import ModelCatalog
 
 import sagent.catalog.openai
 
@@ -197,39 +196,26 @@ def _subscription_context(cap: ModelCapability) -> Mapping[ContextTag, ModelLimi
     )
 
 
-class OpenAISubscription(OpenAICatalog):
+class OpenAISubscription:
     """OpenAI provider -- OAuth + ChatGPT subscription billing.
 
-    Derives CAPABILITIES from :class:`OpenAICatalog` (API pricing inherited, token
-    limits clamped to the subscription wire contract, ``+1m`` ids
-    dropped -- see the ``CAPABILITIES`` comprehension below).
+    Uses the OpenAI catalog with token limits clamped to the subscription
+    wire contract.
     Cost tracking uses standard API per-token pricing even though
     subscription users pay a flat fee. This is intentional: it gives
     a consistent "what would this session cost at API rates" metric
     regardless of auth mode.
     """
 
-    # Sub users pay a flat fee, so the most-capable model is the right default.
-    # ``+1m`` only widens the input window, which the subscription backend caps
-    # at ``_SUBSCRIPTION_MAX_REQUEST_TOKENS`` regardless -- so every ``+1m`` id
-    # would clamp to exactly its base id. Rather than accept a suffix that buys
-    # nothing (and silently mislead a caller expecting 1M), the catalog omits
-    # ``+1m`` ids entirely: the base id is the only honest handle here. The
-    # inherited ``OpenAICatalog.DEFAULT_MODEL`` carries ``+1m``, so it is
-    # overridden below to the base id to stay resolvable against this narrowed
-    # catalog.
-    DEFAULT_MODEL: ClassVar[str] = "gpt-6-astra"
-
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = MappingProxyType(
-        {
-            name: replace(cap, context=_subscription_context(cap))
-            for name, cap in sagent.catalog.openai.models().items()
-        },
+    catalog = ModelCatalog(
+        rows=MappingProxyType(
+            {
+                name: replace(cap, context=_subscription_context(cap))
+                for name, cap in sagent.catalog.openai.models().items()
+            },
+        ),
+        transport=sagent.catalog.openai.subscription(),
     )
-    """The Responses wire: every advertised effort, clamped token windows."""
-
-    TRANSPORT: ClassVar[ModelCapability] = sagent.catalog.openai.subscription()
-    """Codex subscription: account auth, ``/fast`` maps to the priority tier."""
 
     class Credentials(TypedDict):
         """OAuth credentials for an OpenAI ChatGPT subscription."""
@@ -494,7 +480,7 @@ class OpenAISubscription(OpenAICatalog):
           model: Responses API model backend.
 
         Raises:
-          UnknownModelError: ``model_id`` is not in ``CAPABILITIES``.
+          UnknownModelError: ``model_id`` is not in the catalog.
           UnsupportedTagError: The id asks for a tag this model or
               transport does not offer.
 
@@ -503,26 +489,12 @@ class OpenAISubscription(OpenAICatalog):
         # ``+1m`` is absent from the narrowed subscription catalog, so a
         # ``+1m`` id raises rather than silently clamping: the suffix buys
         # nothing under the subscription wire contract.
-        capability, settings = resolve(
-            mid,
-            models=self.CAPABILITIES,
-            roles=self.ROLES,
-            transport=self.TRANSPORT,
-        )
+        capability, settings = self.catalog.resolve(mid)
         return _OpenAISubModel(
             provider=self,
             capability=capability,
             settings=settings,
         )
-
-    def utility_model(self) -> _OpenAISubModel:
-        """Return the default utility (fast/cheap) model backend.
-
-        Returns:
-          model: Utility model backend.
-
-        """
-        return self.model("utility")
 
     # -- Token management ----------------------------------------------
 

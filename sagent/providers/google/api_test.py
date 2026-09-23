@@ -446,7 +446,7 @@ def test_google_model_unknown_raises() -> None:
 def test_google_model_default_uses_default_model() -> None:
     p = Google.from_key("k")
     m = p.model()
-    assert m.capability.model_id == Google.DEFAULT_MODEL
+    assert m.capability.model_id == p.catalog.resolve("default")[0].model_id
 
 
 def test_google_utility_model_uses_flash_lite() -> None:
@@ -456,8 +456,8 @@ def test_google_utility_model_uses_flash_lite() -> None:
     ``KNOWN_MODELS`` -- both transports (API key and CLI) inherit it.
     """
     p = Google.from_key("k")
-    m = p.utility_model()
-    assert m.capability.model_id == Google.DEFAULT_UTILITY_MODEL
+    m = p.model("utility")
+    assert m.capability.model_id == p.catalog.resolve("utility")[0].model_id
 
 
 def test_google_model_properties() -> None:

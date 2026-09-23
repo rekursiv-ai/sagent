@@ -3,9 +3,9 @@
 # fmt: off
 '''' 2>/dev/null #
 exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
-Verify CAPABILITIES limits.
+Verify provider model limits.
 
-Checks that every provider's CAPABILITIES entries have correct
+Checks that every provider's catalog entries have correct
 max_request_tokens and max_response_tokens by querying live APIs or
 scraping official documentation pages.
 
@@ -26,9 +26,8 @@ Cross-reference: https://github.com/taylorwilsdon/llm-context-limits
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import cast
+from typing import TYPE_CHECKING
 
 import argparse
 import asyncio
@@ -43,7 +42,13 @@ from sagent.lib.custom_json import DictCodec, IntCodec, ListCodec, StrCodec
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.google.api import Google
 from sagent.providers.openai.api import OpenAI
-from sagent.types.capability import ModelCapability
+from sagent.types.providers import ModelCatalog, ModelResolver
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from sagent.types.capability import ModelCapability
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -173,11 +178,11 @@ def compare(
     known: Mapping[str, ModelCapability],
     live: dict[str, LiveLimits],
 ) -> int:
-    """Compare CAPABILITIES entries against live API limits.
+    """Compare catalog entries against live API limits.
 
     Args:
       provider_name: Display name for log output.
-      known: CAPABILITIES mapping from the provider class.
+      known: Resolved model catalog.
       live: LiveLimits fetched from the live API.
 
     Returns:
@@ -190,7 +195,7 @@ def compare(
         k = known.get(mid)
         lv = live.get(mid)
         if k is None:
-            _out(f"  {provider_name}.{mid}: in API but not in CAPABILITIES")
+            _out(f"  {provider_name}.{mid}: in API but not in the catalog")
             if lv:
                 _out(
                     f"    API: req={lv.max_request_tokens:,}"
@@ -237,12 +242,20 @@ def audit_catalogs() -> int:
     errors = 0
     for name in sorted(providers.PROVIDER_NAMES):
         cls = getattr(providers, name, None)
-        catalog = getattr(cls, "CAPABILITIES", None)
-        if not isinstance(catalog, Mapping):
+        if not isinstance(cls, ModelResolver):
             continue
-        rows = cast(Mapping[str, ModelCapability], catalog)
+        rows = {
+            model_id: cls.catalog.resolve(model_id)[0]
+            for model_id in cls.catalog.model_ids()
+        }
         for mid, cap in rows.items():
-            if cap.model_id != mid:
+            if mid in {"default", "utility"}:
+                if cap.model_id not in rows:
+                    _out(
+                        f"  {name}.{mid}: target {cap.model_id!r} is not a catalog key",
+                    )
+                    errors += 1
+            elif cap.model_id != mid:
                 _out(f"  {name}.{mid}: model_id is {cap.model_id!r}, not the key")
                 errors += 1
             if not cap.prices:
@@ -290,7 +303,7 @@ def _num(s: str) -> int:
 
 
 async def _run() -> int:
-    """Verify all providers' CAPABILITIES against live APIs."""
+    """Verify all providers' model catalogs against live APIs."""
     parser = argparse.ArgumentParser(
         description=(__doc__ or "").split("\n", 2)[2],
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -321,12 +334,13 @@ async def _run() -> int:
             _out("  [skip] GOOGLE_API_KEY not set")
         else:
             live = await fetch_google(key)
-            total_errors += compare("Google", Google.CAPABILITIES, live)
+            total_errors += compare("Google", _canonical_models(Google.catalog), live)
 
     if target in ("all", "openai"):
         _out("OpenAI (doc scrape):")
-        live = await fetch_openai(list(OpenAI.CAPABILITIES))
-        total_errors += compare("OpenAI", OpenAI.CAPABILITIES, live)
+        known = _canonical_models(OpenAI.catalog)
+        live = await fetch_openai(list(known))
+        total_errors += compare("OpenAI", known, live)
 
     if target in ("all", "anthropic"):
         _out("Anthropic (API query):")
@@ -334,14 +348,24 @@ async def _run() -> int:
         if not key:
             _out("  [skip] ANTHROPIC_API_KEY not set")
         else:
-            live = await fetch_anthropic(key, list(Anthropic.CAPABILITIES))
-            total_errors += compare("Anthropic", Anthropic.CAPABILITIES, live)
+            known = _canonical_models(Anthropic.catalog)
+            live = await fetch_anthropic(key, list(known))
+            total_errors += compare("Anthropic", known, live)
 
     if total_errors:
         _out(f"\n{total_errors} mismatch(es) found.")
     else:
         _out("\nAll limits verified.")
     return 1 if total_errors else 0
+
+
+def _canonical_models(catalog: ModelCatalog) -> dict[str, ModelCapability]:
+    """Return one resolved row per canonical model ID."""
+    return {
+        capability.model_id: capability
+        for model_id in catalog.model_ids()
+        if (capability := catalog.resolve(model_id)[0]).model_id == model_id
+    }
 
 
 if __name__ == "__main__":

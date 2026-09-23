@@ -3,22 +3,29 @@
 from __future__ import annotations
 
 from io import BytesIO
-from typing import TYPE_CHECKING, cast
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 from PIL import Image
+from turbojpeg import (
+    TJFLAG_FASTDCT,
+    TJPF_RGB,
+    TJSAMP_411,
+    TJSAMP_420,
+    TJSAMP_422,
+    TJSAMP_440,
+    TJSAMP_444,
+    TurboJPEG,
+)
 
 import numpy as np
 import pytest
-
-
-if TYPE_CHECKING:
-    from turbojpeg import TurboJPEG
 
 from sagent.lib.image import (
     _parse_crop,
     decode_image_pil,
     decode_jpeg_turbojpeg,
+    decode_jpeg_turbojpeg_region,
     decode_webp_libwebp,
     get_dimensions,
     get_mime,
@@ -35,6 +42,16 @@ def _jpeg_bytes(
     buf = BytesIO()
     img.save(buf, format="JPEG")
     return buf.getvalue()
+
+
+def _noise_jpeg(*, width: int, height: int) -> bytes:
+    """Encode deterministic noise as a 4:4:4 JPEG, so every pixel differs."""
+    rgb = np.random.default_rng(0).integers(0, 256, (height, width, 3), dtype=np.uint8)
+    return TurboJPEG().encode(
+        rgb,
+        pixel_format=TJPF_RGB,
+        jpeg_subsample=TJSAMP_444,
+    )
 
 
 def _png_bytes(
@@ -136,7 +153,7 @@ class TestDecodeJpegTurbojpeg:
     def test_success(self) -> None:
         mock_turbo = MagicMock()
         mock_turbo.decode.return_value = np.ones((10, 10, 3), dtype=np.uint8) * 128
-        arr = decode_jpeg_turbojpeg(b"fake", cast("TurboJPEG", mock_turbo), 10, 10)
+        arr = decode_jpeg_turbojpeg(b"fake", cast(TurboJPEG, mock_turbo), 10, 10)
         assert arr is not None
         assert arr.shape == (10, 10, 3)
         assert arr.dtype == np.uint8
@@ -148,33 +165,142 @@ class TestDecodeJpegTurbojpeg:
         bgr[:, :, 1] = 20  # G.
         bgr[:, :, 2] = 30  # R.
         mock_turbo.decode.return_value = bgr
-        arr = decode_jpeg_turbojpeg(b"fake", cast("TurboJPEG", mock_turbo), 2, 2)
+        arr = decode_jpeg_turbojpeg(b"fake", cast(TurboJPEG, mock_turbo), 2, 2)
         assert arr is not None
         # After flip, channels should be R, G, B → [30, 20, 10].
         assert arr[0, 0, 0] == 30
         assert arr[0, 0, 1] == 20
         assert arr[0, 0, 2] == 10
 
-    def test_with_crop(self) -> None:
-        mock_turbo = MagicMock()
-        mock_turbo.crop.return_value = b"cropped"
-        mock_turbo.decode.return_value = np.ones((20, 20, 3), dtype=np.uint8)
+    @pytest.mark.parametrize(
+        "box",
+        [(0, 0, 20, 20), (5, 13, 17, 29), (10, 34, 30, 30), (39, 63, 1, 1)],
+        ids=["origin", "unaligned-left", "flush-right", "single-pixel"],
+    )
+    def test_crop_matches_a_full_decode_sliced(
+        self,
+        box: tuple[int, int, int, int],
+    ) -> None:
+        """The decoder's own crop returns the same pixels as decode-then-slice.
+
+        4:4:4 so no chroma upsampling crosses the crop edge; the region is
+        then bit-exact rather than within a level.
+        """
+        data = _noise_jpeg(width=64, height=40)
+        turbo = TurboJPEG()
+        full = turbo.decode(data, pixel_format=TJPF_RGB)
+        y, x, h, w = box
+        arr = decode_jpeg_turbojpeg(data, turbo, 40, 64, crop=box)
+        assert arr is not None
+        np.testing.assert_array_equal(arr, full[y : y + h, x : x + w])
+
+    def test_crop_of_corrupt_bytes_is_none(self) -> None:
+        assert (
+            decode_jpeg_turbojpeg(b"x", TurboJPEG(), 40, 64, crop=(0, 0, 8, 8)) is None
+        )
+
+    @pytest.mark.parametrize(
+        ("floor", "shape"),
+        [(0, (40, 64)), (20, (20, 32)), (10, (10, 16)), (5, (5, 8))],
+        ids=["full", "half", "quarter", "eighth"],
+    )
+    def test_scaled_crop_decodes_at_the_largest_factor_the_floor_allows(
+        self,
+        floor: int,
+        shape: tuple[int, int],
+    ) -> None:
+        """A region twice the floor decodes at half scale, four times at a quarter."""
         arr = decode_jpeg_turbojpeg(
-            b"fake",
-            cast("TurboJPEG", mock_turbo),
+            _noise_jpeg(width=64, height=40),
+            TurboJPEG(),
             40,
-            40,
-            crop=(0, 0, 20, 20),
+            64,
+            crop=(0, 0, 40, 64),
+            min_height=floor,
+            min_width=floor,
         )
         assert arr is not None
-        mock_turbo.crop.assert_called_once()
+        assert arr.shape == (*shape, 3)
+
+    def test_scaled_crop_is_the_region_of_a_scaled_full_decode(self) -> None:
+        data = _noise_jpeg(width=64, height=48)
+        turbo = TurboJPEG()
+        full = turbo.decode(data, pixel_format=TJPF_RGB, scaling_factor=(1, 2))
+        arr = decode_jpeg_turbojpeg(
+            data,
+            turbo,
+            48,
+            64,
+            crop=(8, 16, 32, 48),
+            min_height=16,
+            min_width=16,
+        )
+        assert arr is not None
+        np.testing.assert_array_equal(arr, full[4:20, 8:32])
+
+    @pytest.mark.parametrize("box", [(0, 0, 20, 17), (3, 5, 30, 26), (0, 16, 40, 31)])
+    def test_a_subsampled_region_is_a_full_decode_sliced(
+        self,
+        box: tuple[int, int, int, int],
+    ) -> None:
+        """At 4:2:0 a right edge inside a chroma block still upsamples from its
+        neighbour, as the full decode does, rather than replicating the edge.
+        """
+        rgb = np.random.default_rng(0).integers(0, 256, (40, 64, 3), dtype=np.uint8)
+        data = TurboJPEG().encode(rgb, pixel_format=TJPF_RGB, jpeg_subsample=TJSAMP_420)
+        full = TurboJPEG().decode(data, pixel_format=TJPF_RGB)
+        y, x, h, w = box
+        arr = decode_jpeg_turbojpeg_region(data, x=x, y=y, w=w, h=h)
+        assert arr is not None
+        np.testing.assert_array_equal(arr, full[y : y + h, x : x + w])
+
+    @pytest.mark.parametrize(
+        "subsample",
+        [TJSAMP_444, TJSAMP_422, TJSAMP_420, TJSAMP_440, TJSAMP_411],
+        ids=["444", "422", "420", "440", "411"],
+    )
+    def test_every_region_is_a_full_decode_sliced(self, subsample: int) -> None:
+        """Every left edge, a spread of widths, both edges of the image."""
+        rgb = np.random.default_rng(1).integers(0, 256, (48, 72, 3), dtype=np.uint8)
+        data = TurboJPEG().encode(rgb, pixel_format=TJPF_RGB, jpeg_subsample=subsample)
+        full = TurboJPEG().decode(data, pixel_format=TJPF_RGB, flags=TJFLAG_FASTDCT)
+        for x in range(40):
+            for w in (1, 2, 3, 17, 24, 72 - x):
+                for y, h in ((0, 9), (5, 20), (31, 17)):
+                    arr = decode_jpeg_turbojpeg_region(
+                        data,
+                        x=x,
+                        y=y,
+                        w=w,
+                        h=h,
+                        fast_dct=True,
+                    )
+                    assert arr is not None
+                    np.testing.assert_array_equal(
+                        arr,
+                        full[y : y + h, x : x + w],
+                        err_msg=f"{x=} {w=} {y=}",
+                    )
+
+    @pytest.mark.parametrize("box", [(0, 0, 40, 64), (5, 13, 17, 29)])
+    def test_fast_dct_region_is_a_fast_dct_full_decode_sliced(
+        self,
+        box: tuple[int, int, int, int],
+    ) -> None:
+        """``fast_dct`` is libjpeg-turbo's ``TJFLAG_FASTDCT``, as ffcv decodes."""
+        data = _noise_jpeg(width=64, height=40)
+        fast = TurboJPEG().decode(data, pixel_format=TJPF_RGB, flags=TJFLAG_FASTDCT)
+        accurate = TurboJPEG().decode(data, pixel_format=TJPF_RGB)
+        assert not np.array_equal(fast, accurate)
+        y, x, h, w = box
+        arr = decode_jpeg_turbojpeg_region(data, x=x, y=y, w=w, h=h, fast_dct=True)
+        assert arr is not None
+        np.testing.assert_array_equal(arr, fast[y : y + h, x : x + w])
 
     def test_decode_error(self) -> None:
         mock_turbo = MagicMock()
         mock_turbo.decode.side_effect = RuntimeError("decode failed")
-        assert (
-            decode_jpeg_turbojpeg(b"x", cast("TurboJPEG", mock_turbo), 10, 10) is None
-        )
+        assert decode_jpeg_turbojpeg(b"x", cast(TurboJPEG, mock_turbo), 10, 10) is None
 
 
 class TestDecodeWebpLibwebp:

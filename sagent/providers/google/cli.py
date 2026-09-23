@@ -20,7 +20,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
-    ClassVar,
     Final,
     NotRequired,
     TypedDict,
@@ -42,7 +41,7 @@ import tempfile
 from sagent.catalog import google
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import JSON, FloatCodec, MutableJSON, validate_json_schema
-from sagent.providers.google.api import Google, GoogleCatalog
+from sagent.providers.google.api import Google
 from sagent.providers.lib.cli_respawn import respawn_for_cadence
 from sagent.providers.lib.errors import (
     error_status_code,
@@ -66,7 +65,7 @@ from sagent.types.model import (
     ModelRequest,
     ModelResponse,
 )
-from sagent.types.providers import resolve
+from sagent.types.providers import ModelCatalog
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
@@ -117,18 +116,16 @@ class GoogleCLICredentials(TypedDict):
     token_type: NotRequired[str]
 
 
-class GoogleCLI(GoogleCatalog):
+class GoogleCLI:
     """Provider that drives the user's installed ``gemini`` CLI subprocess.
 
-    Inherits ``CAPABILITIES`` (limits, pricing) from :class:`GoogleCatalog`.
-    Auth is the CLI's own OAuth credentials at
+    Shares the Gemini model catalog. Auth is the CLI's own OAuth credentials at
     ``~/.gemini/oauth_creds.json`` (or the named-account variant).
     Cost figures are estimated from public per-token pricing since ACP
     does not surface per-turn usage on ``session/prompt`` responses.
     """
 
-    TRANSPORT: ClassVar[ModelCapability] = google.cli()
-    """ACP exposes no effort knob and rolls its own history."""
+    catalog = ModelCatalog(rows=google.models(), transport=google.cli())
 
     def __init__(self, *, account: str | None = None) -> None:
         self._account = account
@@ -190,31 +187,22 @@ class GoogleCLI(GoogleCatalog):
         """Build a CLI-backed model.
 
         Args:
-          model_id: Gemini model id; ``None`` uses ``DEFAULT_MODEL``.
+          model_id: Gemini model id; ``None`` uses catalog key ``default``.
 
         Returns:
           model: Backend wrapping a managed ``gemini --experimental-acp`` subprocess.
 
         Raises:
-          ValueError: If the resolved id is not in ``CAPABILITIES``.
+          ValueError: If the resolved id is not in the catalog.
 
         """
         mid = model_id if model_id is not None else "default"
-        capability, settings = resolve(
-            mid,
-            models=self.CAPABILITIES,
-            roles=self.ROLES,
-            transport=self.TRANSPORT,
-        )
+        capability, settings = self.catalog.resolve(mid)
         return _GoogleCLIModel(
             provider=self,
             capability=capability,
             settings=settings,
         )
-
-    def utility_model(self) -> _GoogleCLIModel:
-        """Return the cheapest CLI-backed model."""
-        return self.model("utility")
 
     @property
     def account(self) -> str | None:

@@ -44,7 +44,7 @@ type ThinkingBudget = Literal["none", "auto", "fixed"]
 
 type ThinkingOutput = Literal["none", "text", "redacted"]
 
-type ContextTag = Literal["", "+200k", "+1m"]
+type ContextTag = Literal["", "+200k", "+272k", "+1m"]
 
 type SummaryKind = Literal["none", "auto", "concise", "detailed"]
 
@@ -70,6 +70,9 @@ class ModelLimits:
     max_image_bytes: int = 0
     """Per-image byte cap after resize; ``0`` = no cap."""
 
+    request_betas: frozenset[str] = frozenset()
+    """Vendor beta features required by this context configuration."""
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelCapability:
@@ -84,7 +87,16 @@ class ModelCapability:
     """
 
     model_id: str = ""
-    """The id the vendor accepts on the wire, without option tags."""
+    """Our normalized model id, without option tags."""
+
+    wire_model_id: str = ""
+    """Vendor id when it differs from :attr:`model_id`; blank means identical."""
+
+    knowledge_cutoff: str | None = None
+    """Vendor-published knowledge cutoff, formatted for the system prompt."""
+
+    approx_chars_per_token: float = 4.0
+    """Measured text-token estimate for this model's tokenizer."""
 
     context: Mapping[ContextTag, ModelLimits] = field(
         default_factory=lambda: MappingProxyType({"": ModelLimits()}),
@@ -158,12 +170,13 @@ class ModelCapability:
           narrowed: What survives on both sides.
 
         """
-        # ``model_id``, ``context``, and ``prices`` pass through: a transport
+        # Model facts pass through: a transport
         # restricts which knobs it may send, never which windows a model has
         # or what it costs.
         return replace(
             self,
             model_id=self.model_id,
+            wire_model_id=self.wire_model_id,
             context=self.context,
             prices=self.prices,
             thinking_effort=self.thinking_effort & other.thinking_effort,

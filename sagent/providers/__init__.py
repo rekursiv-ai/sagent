@@ -1,15 +1,15 @@
 """Model providers (Anthropic, Google, OpenAI, Moonshot, DashScope, MiniMax, ...).
 
-Each provider class has a ``DEFAULT_MODEL`` class attr and one or
-more zero-arg ``from_*`` classmethods (e.g. ``from_env``,
+Each catalog-backed provider names ``default`` and ``utility`` rows and has
+one or more zero-arg ``from_*`` classmethods (e.g. ``from_env``,
 ``from_key``). Host scripts (``cli.py``, ``slack.py``) pick a
 provider + method by name and dispatch via ``getattr`` - no shared
 registry here.
 
 ``Moonshot``, ``DashScope``, ``MiniMax`` - and any future OpenAI chat-
 completions compatible endpoint including self-hosted
-vLLM/SGLang - subclass ``OpenAICompat``. Override a handful of class
-attrs (DEFAULT_MODEL, ENV_VAR, BASE_URL, PRICING) and you're done.
+vLLM/SGLang - subclass ``OpenAICompat``. Supply its catalog, environment
+variable, and base URL.
 Pass ``base_url=`` to ``from_env`` / ``from_key`` to point any of
 them at a localhost inference server.
 """

@@ -8,7 +8,10 @@ selected.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal, Protocol, cast, runtime_checkable
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from types import MappingProxyType
+from typing import Protocol, runtime_checkable
 
 from sagent.types.capability import (
     ContextTag,
@@ -21,23 +24,16 @@ from sagent.types.model import (
 )
 
 
-if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-
 __all__ = [
     "AuthReloadable",
-    "ModelRole",
+    "ModelCatalog",
+    "ModelResolver",
     "Provider",
     "ProviderCloseable",
     "UnknownModelError",
     "UnsupportedTagError",
     "resolve",
 ]
-
-
-type ModelRole = Literal["default", "utility"]
-"""A model selected by what it is FOR, not by id."""
 
 
 class UnknownModelError(ValueError):
@@ -48,20 +44,40 @@ class UnsupportedTagError(ValueError):
     """The id carries a context tag the model does not offer."""
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelCatalog:
+    """Resolved model rows and the transport restrictions applied to them."""
+
+    rows: Mapping[str, ModelCapability]
+    transport: ModelCapability
+
+    def model_ids(self) -> tuple[str, ...]:
+        """Return every accepted model ID."""
+        return tuple(self.rows)
+
+    def resolve(self, model_id: str) -> tuple[ModelCapability, ModelSettings]:
+        """Resolve ``model_id`` against this catalog's transport."""
+        return resolve(model_id, models=self.rows, transport=self.transport)
+
+
+@runtime_checkable
+class ModelResolver(Protocol):
+    """Provider class or instance exposing its resolved catalog directly."""
+
+    catalog: ModelCatalog
+
+
 def resolve(
-    model_id: str | ModelRole,
+    model_id: str,
     *,
     models: Mapping[str, ModelCapability],
-    roles: Mapping[ModelRole, str],
     transport: ModelCapability,
 ) -> tuple[ModelCapability, ModelSettings]:
     """Turn a tagged model id into a capability and the settings it selects.
 
     Args:
-      model_id: Catalog id with an optional ``+1m`` / ``+200k`` tag, or a
-          role name resolved through ``roles``.
+      model_id: Catalog key or id with an optional smaller-window tag.
       models: The provider's capability catalog, keyed by base id.
-      roles: Role name to base id (``default``, ``utility``).
       transport: What this transport lets through.
 
     Returns:
@@ -75,15 +91,34 @@ def resolve(
           caller's budget by up to 4x.
 
     """
-    tagged: str = roles.get(cast(ModelRole, model_id), model_id)
-    base, id_tags = split_model_id(tagged)
+    base, id_tags = split_model_id(model_id)
     tags: list[ContextTag] = sorted(id_tags)
     context: ContextTag = tags[0] if tags else ""
     row = models.get(base)
     if row is None:
+        row = next(
+            (
+                candidate
+                for candidate in models.values()
+                if candidate.wire_model_id == base
+            ),
+            None,
+        )
+    if row is None:
         known = ", ".join(sorted(models))
         raise UnknownModelError(f"Unknown model {model_id!r}. Known models: {known}")
     capability = row & transport
+    if (
+        context == "+1m"
+        and context not in capability.context
+        and capability.context[""].max_request_tokens >= 1_000_000
+    ):
+        capability = replace(
+            capability,
+            context=MappingProxyType(
+                {**capability.context, "+1m": capability.context[""]},
+            ),
+        )
     if context not in capability.context:
         offered = ", ".join(sorted(t for t in capability.context if t)) or "(none)"
         raise UnsupportedTagError(
@@ -95,7 +130,7 @@ def resolve(
 
 @runtime_checkable
 class Provider(Protocol):
-    """Factory for model backends. ``None`` -> provider's ``DEFAULT_MODEL``."""
+    """Factory for model backends. ``None`` selects catalog key ``default``."""
 
     def model(
         self,
@@ -106,8 +141,7 @@ class Provider(Protocol):
         """Build a model backend.
 
         Args:
-          model_id: Provider-specific id; ``None`` selects the
-              provider's ``DEFAULT_MODEL``.
+          model_id: Provider-specific id; ``None`` selects ``default``.
           max_request_tokens: Override for the model's input cap.
           provider_options: Provider-specific construction knobs. Each
               concrete provider declares these as real, typed keyword
@@ -119,15 +153,6 @@ class Provider(Protocol):
 
         Returns:
           model: A ``Model`` ready to handle requests.
-
-        """
-        ...
-
-    def utility_model(self) -> Model:
-        """Build the cheapest/fastest model for utility tasks.
-
-        Returns:
-          model: A low-cost ``Model`` for internal use (summarizers, etc.).
 
         """
         ...

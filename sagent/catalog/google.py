@@ -139,7 +139,14 @@ def models() -> Mapping[str, ModelCapability]:
             prices=_prices(request=1.25, response=5.0, cache_read=0.3125),
         ),
     )
-    return MappingProxyType({row.model_id: row for row in rows})
+    catalog = {row.model_id: row for row in rows}
+    return MappingProxyType(
+        {
+            "default": catalog["gemini-3.1-pro-preview"],
+            "utility": catalog["gemini-2.5-flash-lite"],
+            **catalog,
+        },
+    )
 
 
 def api() -> ModelCapability:

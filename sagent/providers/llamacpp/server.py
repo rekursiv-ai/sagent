@@ -17,29 +17,26 @@ import time
 import urllib.error
 import urllib.request
 
-from sagent.catalog import llamacpp
+from sagent.catalog import llamacpp, openai
 from sagent.lib.userdirs import data_dir
 from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
 )
+from sagent.types.providers import ModelCatalog
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
-
-    from sagent.types.capability import ModelCapability
+    from collections.abc import Sequence
 
 
 class LlamaCpp(OpenAICompat):
     """OpenAI-compatible provider backed by a managed llama-server process."""
 
-    DEFAULT_MODEL: ClassVar[str] = "qwen3.6-27b-12gb"
-    DEFAULT_UTILITY_MODEL: ClassVar[str] = "qwen3.6-27b-12gb"
     ENV_VAR: ClassVar[str] = "LLAMA_CPP_API_KEY"
     BASE_URL: ClassVar[str] = "http://127.0.0.1:8081/v1"
-    CAPABILITIES: ClassVar[Mapping[str, ModelCapability]] = llamacpp.models()
-    """Per-model capability; transport limits live on ``TRANSPORT``."""
+
+    catalog = ModelCatalog(rows=llamacpp.models(), transport=openai.compatible())
 
     def __init__(
         self,

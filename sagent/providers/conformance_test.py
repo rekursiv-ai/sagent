@@ -248,7 +248,7 @@ def test_no_getattr_of_model_contract_members(rel: str) -> None:
 def test_provider_protocol_members_are_callable() -> None:
     """Sanity: the Provider contract exposes the expected factory surface."""
     assert "model" in _PROVIDER_MEMBERS
-    assert "utility_model" in _PROVIDER_MEMBERS
+    assert "utility_model" not in _PROVIDER_MEMBERS
 
 
 @pytest.mark.parametrize(
@@ -265,10 +265,9 @@ def test_cli_shares_catalog_without_api_client(
 ) -> None:
     cli = cli_class()
     api = api_class.from_key("test-key")
-    assert cli.CAPABILITIES is api.CAPABILITIES
-    assert cli.ROLES == api.ROLES
+    assert cli.catalog.model_ids() == api.catalog.model_ids()
     assert isinstance(cli.model(), model_class)
-    assert isinstance(cli.utility_model(), model_class)
+    assert isinstance(cli.model("utility"), model_class)
     assert not isinstance(cli, ProviderCloseable)
 
 
