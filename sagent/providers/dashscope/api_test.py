@@ -33,7 +33,7 @@ def test_dashscope_default_model() -> None:
     m = p.model()
     assert m.capability.model_id == p.catalog.resolve("default")[0].model_id
     # Reasoning is surfaced via ``reasoning_content`` on Qwen3.
-    assert m.capability.thinking_budget != frozenset({"none"})
+    assert m.capability.thinking.budget != frozenset({"none"})
 
 
 def test_dashscope_unknown_model_raises() -> None:
@@ -87,7 +87,7 @@ def test_the_effort_predicate_agrees_with_every_row(model_id: str) -> None:
     catalog it actually runs on.
     """
     model = DashScope.from_key("k").model(model_id)
-    offers_effort = model.capability.thinking_effort != frozenset({"none"})
+    offers_effort = model.capability.thinking.effort != frozenset({"none"})
     assert model._is_effort_model(model.capability.model_id) is offers_effort
 
 
@@ -138,7 +138,7 @@ def test_dashscope_thinking_suffix_model_never_disables_thinking() -> None:
     withholds ``none`` and the wire never sends the toggle down.
     """
     m = _model("qwen3-235b-a22b-thinking-2507", "low")
-    assert "none" not in m.capability.thinking_effort
+    assert "none" not in m.capability.thinking.effort
     out = m._transform_body({}, ModelRequest(messages=[]))
     assert out["enable_thinking"] is True
     assert out["thinking_budget"] == 4_096
@@ -155,7 +155,7 @@ def test_dashscope_a_thinking_only_row_cannot_select_none() -> None:
 def test_dashscope_non_reasoning_model_gets_no_thinking_knobs(model_id: str) -> None:
     """A row offering only ``none`` claims the model REJECTS the knob."""
     m = _model(model_id)
-    assert m.capability.thinking_effort == frozenset({"none"})
+    assert m.capability.thinking.effort == frozenset({"none"})
     out = m._transform_body({}, ModelRequest(messages=[]))
     assert "enable_thinking" not in out
     assert "thinking_budget" not in out
@@ -168,7 +168,7 @@ def test_dashscope_default_model_supports_effort_end_to_end() -> None:
     unreachable for default use.
     """
     m = DashScope.from_key("k").model()
-    assert m.capability.thinking_effort != frozenset({"none"})
+    assert m.capability.thinking.effort != frozenset({"none"})
     agent = Agent(model=m)
     agent.model.settings.thinking_effort = "medium"
     assert m.settings.thinking_effort == "medium"

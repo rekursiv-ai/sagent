@@ -234,7 +234,7 @@ class _OpenAIResponsesModel(ModelDefaults):
                 body["reasoning"]["context"] = "all_turns"
         if request.max_response_tokens is not None:
             body["max_output_tokens"] = request.max_response_tokens
-        if self.capability.thinking_effort == frozenset({"none"}):
+        if self.capability.thinking.effort == frozenset({"none"}):
             body["temperature"] = request.temperature
         tier = self._effective_service_tier()
         if tier is not None:

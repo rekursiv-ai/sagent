@@ -464,8 +464,8 @@ def test_google_model_properties() -> None:
     p = Google.from_key("k")
     m = p.model("gemini-2.5-pro")
     assert m.limits.max_request_tokens == 1_000_000
-    assert m.capability.thinking_budget != frozenset({"none"})
-    assert m.capability.thinking_effort != frozenset({"none"})
+    assert m.capability.thinking.budget != frozenset({"none"})
+    assert m.capability.thinking.effort != frozenset({"none"})
     assert m.capability.cache_ttl_sec == frozenset({0.0})
     # Gemini publishes no per-image pixel or byte cap (images are tiled
     # server-side); the only documented limit is the 20 MB total request size.
@@ -484,8 +484,8 @@ def test_legacy_gemini_models_do_not_support_thinking() -> None:
     p = Google.from_key("k")
     off = frozenset({"none"})
     for mid in ("gemini-1.5-flash", "gemini-1.5-pro"):
-        assert p.model(mid).capability.thinking_budget == off
-        assert p.model(mid).capability.thinking_effort == off
+        assert p.model(mid).capability.thinking.budget == off
+        assert p.model(mid).capability.thinking.effort == off
 
 
 def test_build_request_adaptive_thinking_uses_dynamic_budget() -> None:

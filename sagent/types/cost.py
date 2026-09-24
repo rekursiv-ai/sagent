@@ -224,6 +224,29 @@ class PriceCatalog(Mapping[PriceCatalogProduct, TokenPrice]):
             return self[PriceCatalogProduct("auto", key.min_request_tokens)]
         raise KeyError(key)
 
+    def cost(
+        self,
+        tokens: TokenCount,
+        *,
+        service_tier: ServiceTier = "auto",
+    ) -> TokenCost:
+        """Price ONE request's ``tokens`` at the tier its whole prompt selects.
+
+        Vendors size the long-context tier from the full prompt -- cached
+        pools included -- of a single request. Summing requests first, or
+        sizing by the uncached pool alone, picks the wrong tier.
+
+        Args:
+          tokens: One request's usage.
+          service_tier: Tier the request was served at.
+
+        Returns:
+          cost: USD, by bucket.
+
+        """
+        prompt = tokens.request + tokens.cache_write + tokens.cache_read
+        return self[PriceCatalogProduct(service_tier, prompt)] * tokens
+
     @override
     def __contains__(self, key: object) -> bool:
         # Defined as "the lookup succeeds" rather than re-deriving the floor

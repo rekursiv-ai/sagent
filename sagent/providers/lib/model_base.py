@@ -19,7 +19,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 from sagent.lib import token_count
-from sagent.types.cost import PriceCatalogProduct
 
 
 if TYPE_CHECKING:
@@ -81,14 +80,10 @@ class ModelDefaults(_Transport, Protocol):
           spend: USD cost, per bucket.
 
         """
-        # Vendors size the tier from the whole prompt, though the three
-        # input pools stay disjoint for billing.
-        prompt = tokens.request + tokens.cache_write + tokens.cache_read
-        product = PriceCatalogProduct(
+        return self.capability.prices.cost(
+            tokens,
             service_tier=self.settings.service_tier,
-            min_request_tokens=prompt,
         )
-        return self.capability.prices[product] * tokens
 
     def approx_request_tokens(self, request: ModelRequest) -> int:
         """Walk-and-sum every wire-bearing surface of ``request``."""

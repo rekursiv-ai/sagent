@@ -386,8 +386,8 @@ def test_self_hosted_model_properties() -> None:
     assert m.limits.max_request_tokens == 1234
     assert m.capability.model_id == "stub/qwen"
     assert m.limits.max_response_tokens == 567
-    assert m.capability.thinking_budget == frozenset({"none"})
-    assert m.capability.thinking_effort == frozenset({"none"})
+    assert m.capability.thinking.budget == frozenset({"none"})
+    assert m.capability.thinking.effort == frozenset({"none"})
     assert m.capability.cache_ttl_sec == frozenset({0.0})
     assert m.capability.manage_context_server_side == frozenset({False})
     assert m.capability.retries_internally is False

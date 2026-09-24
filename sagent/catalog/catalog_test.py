@@ -121,9 +121,9 @@ def test_every_row_is_priced(row: ModelCapability) -> None:
 
 @pytest.mark.parametrize("row", _ROWS)
 def test_no_axis_is_empty(row: ModelCapability) -> None:
-    assert row.thinking_effort
-    assert row.thinking_budget
-    assert row.thinking_output
+    assert row.thinking.effort
+    assert row.thinking.budget
+    assert row.thinking.output
     assert row.service_tier
     assert row.manage_context_server_side
 
@@ -138,7 +138,7 @@ def test_only_reasoning_only_models_reject_none(row: ModelCapability) -> None:
         "o1",
         "o3-mini",
     }
-    assert ("none" not in row.thinking_effort) == reasoning_only
+    assert ("none" not in row.thinking.effort) == reasoning_only
 
 
 @pytest.mark.parametrize("row", _ROWS)
@@ -154,9 +154,9 @@ def test_a_transport_only_removes(
 ) -> None:
     for row in models.values():
         met = row & transport
-        assert met.thinking_effort <= row.thinking_effort
-        assert met.thinking_budget <= row.thinking_budget
-        assert met.thinking_output <= row.thinking_output
+        assert met.thinking.effort <= row.thinking.effort
+        assert met.thinking.budget <= row.thinking.budget
+        assert met.thinking.output <= row.thinking.output
         assert met.service_tier <= row.service_tier
         assert met.manage_context_server_side <= row.manage_context_server_side
 
@@ -173,6 +173,50 @@ def test_a_transport_preserves_windows_and_prices(
         assert met.model_id == row.model_id
         assert met.knowledge_cutoff == row.knowledge_cutoff
         assert met.approx_chars_per_token == row.approx_chars_per_token
+
+
+@pytest.mark.parametrize(
+    ("model_id", "cutoff"),
+    [
+        ("fable-5.1", "June 2026"),
+        ("fable-5", "January 2026"),
+        ("opus-5.5", "June 2026"),
+        ("opus-5", "May 2026"),
+        ("opus-4.8", "January 2026"),
+        ("opus-4.7", "January 2026"),
+        ("opus-4.6", "May 2025"),
+        ("opus-4.5", "May 2025"),
+        ("sonnet-5", "January 2026"),
+        ("sonnet-4.6", "August 2025"),
+        ("sonnet-4.5", "January 2025"),
+        ("haiku-4.5", "February 2025"),
+    ],
+)
+def test_every_anthropic_row_states_its_published_cutoff(
+    model_id: str,
+    cutoff: str,
+) -> None:
+    """Reliable knowledge cutoff, per each model's overview page (2026-09-24)."""
+    assert anthropic.models()[model_id].knowledge_cutoff == cutoff
+
+
+def test_a_tier_is_offered_exactly_when_it_is_priced() -> None:
+    """``service_tier`` is derived from ``prices``, so the two cannot drift."""
+    rows = anthropic.models()
+    for row in rows.values():
+        priced = {"auto", "default", *(p.service_tier for p in row.prices)}
+        assert row.service_tier == priced, row.model_id
+    fast = {m for m, row in rows.items() if "priority" in row.service_tier}
+    assert fast == {"default", "opus-5.5", "opus-5", "opus-4.8"}
+
+
+def test_pre_4_6_models_have_no_1m_window() -> None:
+    """Sonnet 4.5 and Opus 4.5 are 200k / 64k models; a 1M row would 400."""
+    for model_id in ("opus-4.5", "sonnet-4.5", "haiku-4.5"):
+        row = anthropic.models()[model_id]
+        assert set(row.context) == {""}, model_id
+        assert row.context[""].max_request_tokens == 200_000, model_id
+        assert row.context[""].max_response_tokens == 64_000, model_id
 
 
 def test_published_knowledge_cutoffs_are_catalog_data() -> None:
@@ -195,9 +239,9 @@ def test_a_narrowed_row_leaves_every_axis_selectable(
 ) -> None:
     for row in models.values():
         met = row & transport
-        assert met.thinking_effort, row.model_id
-        assert met.thinking_budget, row.model_id
-        assert met.thinking_output, row.model_id
+        assert met.thinking.effort, row.model_id
+        assert met.thinking.budget, row.model_id
+        assert met.thinking.output, row.model_id
         assert met.service_tier, row.model_id
         assert met.manage_context_server_side, row.model_id
 
@@ -290,6 +334,27 @@ def test_a_cache_rate_is_a_multiple_of_the_rate_it_rides() -> None:
     assert fast.cache_write == standard.cache_write * 2.0
     fable = rows["fable-5.1"].prices[PriceCatalogProduct()]
     assert fable.cache_read == 0.25
+
+
+@pytest.mark.parametrize(
+    ("model_id", "cache_read"),
+    [
+        ("fable-5.1", 0.25),
+        ("fable-5", 1.0),
+        ("opus-5.5", 0.2),
+        ("opus-5", 0.5),
+        ("sonnet-5", 0.2),
+        ("sonnet-4.6", 0.3),
+        ("haiku-4.5", 0.1),
+    ],
+)
+def test_anthropic_cache_hits_bill_the_published_rate(
+    model_id: str,
+    cache_read: float,
+) -> None:
+    """Fable 5.1 is 0.025x, Opus 5.5 0.05x, every other model 0.1x input."""
+    price = anthropic.models()[model_id].prices[PriceCatalogProduct()]
+    assert price.cache_read == pytest.approx(cache_read)
 
 
 def test_anthropic_context_betas_are_catalog_data() -> None:

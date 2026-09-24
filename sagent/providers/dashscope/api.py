@@ -86,7 +86,7 @@ class _DashScopeModel(OpenAICompatModel):
         effort = self.settings.thinking_effort
         # A row offering only ``none`` claims the model REJECTS the knob (the
         # ``-instruct`` / ``-coder`` / ``-turbo`` ids); never send one.
-        if self.capability.thinking_effort == frozenset({"none"}):
+        if self.capability.thinking.effort == frozenset({"none"}):
             return body
         budget = thinking_budget(effort)
         # Qwen spells "no reasoning" as a toggle, not a zero budget.

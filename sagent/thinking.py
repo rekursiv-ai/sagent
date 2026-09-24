@@ -95,7 +95,7 @@ def thinking_offered(command: str, settings: ModelSettings) -> bool:
     """
     budget, output, _ = _axes(command, settings, show=True)
     capability = settings.capability
-    return budget in capability.thinking_budget and output in capability.thinking_output
+    return budget in capability.thinking.budget and output in capability.thinking.output
 
 
 def describe_thinking(settings: ModelSettings, *, show: bool) -> str:

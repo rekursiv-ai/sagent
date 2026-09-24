@@ -364,7 +364,7 @@ def test_subscription_rejects_1m_ids() -> None:
 
 def test_subscription_model_supports_thinking_via_reasoning_effort() -> None:
     m = _make_provider().model("gpt-5.5")
-    assert m.capability.thinking_budget == frozenset({"none", "auto"})
+    assert m.capability.thinking.budget == frozenset({"none", "auto"})
     assert m.capability.account_auth is True
 
 
@@ -379,8 +379,8 @@ def test_subscription_effort_matches_api_key_path() -> None:
     api_p = OpenAI.from_key("k")
     for model_id in ("o1", "o3-mini", "gpt-5.5"):
         assert (
-            sub_p.model(model_id).capability.thinking_effort
-            == api_p.model(model_id).capability.thinking_effort
+            sub_p.model(model_id).capability.thinking.effort
+            == api_p.model(model_id).capability.thinking.effort
         )
     for provider in (sub_p, api_p):
         with pytest.raises(ValueError, match="Unknown model"):
@@ -545,7 +545,7 @@ def test_subscription_catalog_efforts_are_all_buildable() -> None:
     """Every effort the catalog offers must reach the wire."""
     model_id = "sol-5.6"
     capability = _make_provider().model(model_id).capability
-    for effort in capability.thinking_effort - {"none"}:
+    for effort in capability.thinking.effort - {"none"}:
         assert _wire_effort_for(
             model_id=model_id,
             effort=effort,

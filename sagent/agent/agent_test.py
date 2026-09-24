@@ -62,6 +62,7 @@ from sagent.types.capability import (
     ModelCapability,
     ModelLimits,
     ModelSettings,
+    ThinkingCapability,
     ThinkingEffort,
 )
 from sagent.types.compactor import (
@@ -232,16 +233,14 @@ class StubModel:
                     for t in self.valid_service_tiers
                 },
             ),
-            thinking_effort=thinking,
-            thinking_budget=(
-                frozenset({"none", "auto", "fixed"})
+            thinking=ThinkingCapability(
+                effort=thinking,
+                budget=frozenset({"none", "auto", "fixed"})
                 if self.supports_thinking
-                else frozenset({"none"})
-            ),
-            thinking_output=(
-                frozenset({"none", "text"})
+                else frozenset({"none"}),
+                output=frozenset({"none", "text"})
                 if self.supports_thinking
-                else frozenset({"none"})
+                else frozenset({"none"}),
             ),
             service_tier={"auto", *self.valid_service_tiers},
             cache_ttl_sec={3600.0} if self.supports_cache_control else {0.0},
@@ -7588,9 +7587,10 @@ def test_swap_model_resets_a_budget_the_new_model_rejects() -> None:
             # Two-arg ``super``: ``slots=True`` rebuilds the class, so the
             # zero-arg form's ``__class__`` cell points at the discarded
             # original and raises on Python < 3.14 (python/cpython#90562).
+            base = super(_EnabledOnlyModel, self).capability
             return dataclasses.replace(
-                super(_EnabledOnlyModel, self).capability,
-                thinking_budget={"none", "fixed"},
+                base,
+                thinking=dataclasses.replace(base.thinking, budget={"none", "fixed"}),
             )
 
     a = _build_agent(model=StubModel(supports_thinking=True))

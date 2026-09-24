@@ -515,8 +515,8 @@ def test_model_rejects_unknown_provider_options() -> None:
 def test_model_resolves_context_tag_to_profile() -> None:
     """The explicit smaller-window tag resolves against the same profile."""
     provider = AnthropicCLI()
-    model = provider.model("sonnet-4.5+200k")
-    assert model.tagged_model_id == "sonnet-4.5+200k"
+    model = provider.model("sonnet-4.6+200k")
+    assert model.tagged_model_id == "sonnet-4.6+200k"
     assert model.limits.max_request_tokens == 200_000
 
 
@@ -531,19 +531,18 @@ def test_catalog_inherits_from_anthropic() -> None:
     assert tuple(AnthropicCLI.catalog.rows) == tuple(Anthropic.catalog.rows)
 
 
-def test_utility_model_picks_haiku() -> None:
-    """``utility_model`` returns the cheapest Claude in ``KNOWN_MODELS``."""
+def test_utility_model_picks_latest_sonnet() -> None:
     provider = AnthropicCLI()
     model = provider.model("utility")
-    assert model.capability.model_id == "haiku-4.5"
+    assert model.capability.model_id == "sonnet-5"
 
 
 def test_model_capabilities() -> None:
     """The CLI transport narrows the row it inherits from the API."""
     provider = AnthropicCLI()
     model = provider.model("claude-sonnet-4-5")
-    assert model.capability.thinking_budget != frozenset({"none"})
-    assert model.capability.thinking_effort == frozenset({"none"})
+    assert model.capability.thinking.budget != frozenset({"none"})
+    assert model.capability.thinking.effort == frozenset({"none"})
     assert model.capability.cache_ttl_sec == frozenset({0.0})
     assert model.capability.manage_context_server_side == frozenset({True})
     assert model.capability.retries_internally is False

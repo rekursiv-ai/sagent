@@ -617,7 +617,7 @@ def test_anthropic_model_known_id_returns_backend() -> None:
     assert m.capability.wire_model_id == "claude-haiku-4-5"
     # Haiku supports thinking via ``enabled`` only (measured: 249 readable
     # thinking chars; ``adaptive`` 400s 'not supported on this model').
-    assert m.capability.thinking_budget != frozenset({"none"})
+    assert m.capability.thinking.budget != frozenset({"none"})
     assert m.limits.max_request_tokens == 200_000
 
 
@@ -636,7 +636,7 @@ def test_anthropic_model_rejects_unknown_provider_options() -> None:
 def test_anthropic_model_strips_context_tag_for_profile_lookup() -> None:
     """``+200k`` selects the smaller context profile."""
     p = Anthropic.from_key("k")
-    m = p.model("claude-sonnet-4-5+200k")
+    m = p.model("claude-sonnet-4-6+200k")
     assert m.limits.max_request_tokens == 200_000
 
 
@@ -646,11 +646,12 @@ def test_anthropic_default_model_resolves() -> None:
     assert m.capability.model_id == p.catalog.resolve("default")[0].model_id
 
 
-def test_anthropic_default_model_is_fable_5_1_untagged() -> None:
-    """Fable 5.1 is natively 1M, so the default needs no context beta."""
+def test_anthropic_roles_resolve_to_the_latest_of_each_family() -> None:
+    """Opus 5.5 is natively 1M, so the default needs no context beta."""
     p = Anthropic.from_key("k")
-    assert p.catalog.resolve("default")[0].model_id == "fable-5.1"
-    assert p.catalog.resolve("utility")[0].model_id == "haiku-4.5"
+    assert p.catalog.resolve("best")[0].model_id == "fable-5.1"
+    assert p.catalog.resolve("default")[0].model_id == "opus-5.5"
+    assert p.catalog.resolve("utility")[0].model_id == "sonnet-5"
     assert p.model().limits.max_request_tokens == 1_000_000
     assert "context-1m-2025-08-07" not in p.model().limits.request_betas
 
@@ -663,10 +664,10 @@ def test_anthropic_opus_5_5_defaults_to_full_window() -> None:
     assert small.limits.max_request_tokens == 200_000
 
 
-def test_anthropic_utility_model_uses_haiku() -> None:
+def test_anthropic_utility_model_uses_latest_sonnet() -> None:
     p = Anthropic.from_key("k")
     m = p.model("utility")
-    assert m.capability.model_id == "haiku-4.5"
+    assert m.capability.model_id == "sonnet-5"
 
 
 def test_anthropic_subscription_property_false_on_api_key() -> None:
@@ -702,12 +703,12 @@ def test_anthropic_fable_5_1_model_profile() -> None:
     assert m.limits.max_response_tokens == 128_000
     assert m.capability.prices[PriceCatalogProduct()].request == 10.0
     assert m.capability.prices[PriceCatalogProduct()].response == 50.0
-    assert m.capability.thinking_effort == frozenset(
+    assert m.capability.thinking.effort == frozenset(
         {"none", "low", "medium", "high", "xhigh", "max"},
     )
     assert "priority" not in m.capability.service_tier
     # ``enabled`` 400s, so the row offers the adaptive budget only.
-    assert m.capability.thinking_budget == frozenset({"none", "auto"})
+    assert m.capability.thinking.budget == frozenset({"none", "auto"})
 
 
 def test_anthropic_fable_5_1_smaller_context() -> None:
@@ -744,7 +745,7 @@ def test_anthropic_sonnet_5_model_profile() -> None:
     # cancelled the scheduled rise to $3/$15 and made it the standard rate.
     assert m.capability.prices[PriceCatalogProduct()].request == 2.0
     assert m.capability.prices[PriceCatalogProduct()].response == 10.0
-    assert m.capability.thinking_effort == frozenset(
+    assert m.capability.thinking.effort == frozenset(
         {"none", "low", "medium", "high", "xhigh", "max"},
     )
 
@@ -790,7 +791,7 @@ def test_anthropic_token_count_default_typing() -> None:
 def test_anthropic_model_capability() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-7")
-    assert m.capability.thinking_effort != frozenset({"none"})
+    assert m.capability.thinking.effort != frozenset({"none"})
     assert m.capability.cache_ttl_sec == frozenset({300.0, 3600.0})
     assert m.capability.retries_internally is True
     assert m.capability.manage_context_server_side == frozenset({False, True})
@@ -843,8 +844,8 @@ def test_anthropic_build_kwargs_enabled_thinking_respects_max_tokens_cap() -> No
 def test_anthropic_thinking_axes_opus_4_6() -> None:
     """opus-4-6 streams readable thinking and accepts a fixed budget."""
     m = Anthropic.from_key("k").model("claude-opus-4-6")
-    assert m.capability.thinking_budget == frozenset({"none", "auto", "fixed"})
-    assert m.capability.thinking_output == frozenset({"none", "text", "redacted"})
+    assert m.capability.thinking.budget == frozenset({"none", "auto", "fixed"})
+    assert m.capability.thinking.output == frozenset({"none", "text", "redacted"})
 
 
 def test_anthropic_thinking_axes_opus_4_8_adaptive_only_no_text() -> None:
@@ -856,8 +857,8 @@ def test_anthropic_thinking_axes_opus_4_8_adaptive_only_no_text() -> None:
     p = Anthropic.from_key("k")
     for model_id in ("claude-opus-4-8", "claude-opus-4-8+200k"):
         m = p.model(model_id)
-        assert m.capability.thinking_budget == frozenset({"none", "auto"}), model_id
-        assert m.capability.thinking_output == frozenset({"none", "redacted"}), model_id
+        assert m.capability.thinking.budget == frozenset({"none", "auto"}), model_id
+        assert m.capability.thinking.output == frozenset({"none", "redacted"}), model_id
 
 
 def test_anthropic_thinking_axes_4_5_generation_enabled_only() -> None:
@@ -865,8 +866,8 @@ def test_anthropic_thinking_axes_4_5_generation_enabled_only() -> None:
     p = Anthropic.from_key("k")
     for model_id in ("claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"):
         m = p.model(model_id)
-        assert m.capability.thinking_budget == frozenset({"none", "fixed"}), model_id
-        assert "text" in m.capability.thinking_output, model_id
+        assert m.capability.thinking.budget == frozenset({"none", "fixed"}), model_id
+        assert "text" in m.capability.thinking.output, model_id
 
 
 def test_anthropic_priority_tier_is_opus_only() -> None:

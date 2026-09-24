@@ -321,7 +321,7 @@ class OpenAICompatModel(ModelDefaults):
     def _is_effort_model(self, model_id: str) -> bool:
         """Whether ``model_id`` accepts a reasoning-effort knob."""
         del model_id
-        return self.capability.thinking_effort != frozenset({"none"})
+        return self.capability.thinking.effort != frozenset({"none"})
 
     def _transform_body(
         self,

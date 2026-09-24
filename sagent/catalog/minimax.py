@@ -14,7 +14,12 @@ from dataclasses import replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from sagent.types.capability import ContextTag, ModelCapability, ModelLimits
+from sagent.types.capability import (
+    ContextTag,
+    ModelCapability,
+    ModelLimits,
+    ThinkingCapability,
+)
 from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
@@ -40,7 +45,7 @@ def models() -> Mapping[str, ModelCapability]:
     minimax = ModelCapability(
         context=_limits(window=204_800, response=32_768),
         prices=_prices(request=0.3, response=1.2),
-        thinking_output={"none", "text"},
+        thinking=ThinkingCapability(output={"none", "text"}),
     )
     long_context = replace(minimax, context=_limits(window=1_000_000, response=16_384))
     abab = replace(minimax, context=_limits(window=245_000, response=16_384))

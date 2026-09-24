@@ -2,9 +2,10 @@
 
 :class:`ModelCapability` and :class:`ModelSettings` share field NAMES:
 ``capability.x`` is the allowed set, ``settings.x`` is the chosen value, so
-validation is ``settings.x in capability.x`` for every field. An axis added
-to one side without the other is a field nothing can select or nothing
-validates.
+validation is ``settings.x in capability.x`` for every field. The thinking
+axes are the one grouping: ``settings.thinking_x`` validates against
+``capability.thinking.x``. An axis added to one side without the other is a
+field nothing can select or nothing validates.
 
 Each axis is TOTAL: its unset value is spelled ``none``, so no field is
 ``| None``.
@@ -33,6 +34,7 @@ __all__ = [
     "Permission",
     "SummaryKind",
     "ThinkingBudget",
+    "ThinkingCapability",
     "ThinkingEffort",
     "ThinkingOutput",
 ]
@@ -75,6 +77,34 @@ class ModelLimits:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ThinkingCapability:
+    """Reasoning knobs one model or transport accepts, one set per axis."""
+
+    effort: AbstractSet[ThinkingEffort] = frozenset({"none"})
+    """Effort levels accepted."""
+
+    budget: AbstractSet[ThinkingBudget] = frozenset({"none"})
+    """Budget modes accepted."""
+
+    output: AbstractSet[ThinkingOutput] = frozenset({"none"})
+    """Reasoning-visibility modes accepted."""
+
+    def __post_init__(self) -> None:
+        """Freeze every axis so callers may write a plain set literal."""
+        object.__setattr__(self, "effort", frozenset(self.effort))
+        object.__setattr__(self, "budget", frozenset(self.budget))
+        object.__setattr__(self, "output", frozenset(self.output))
+
+    def __and__(self, other: ThinkingCapability) -> ThinkingCapability:
+        """Narrow each axis to what BOTH offer."""
+        return ThinkingCapability(
+            effort=self.effort & other.effort,
+            budget=self.budget & other.budget,
+            output=self.output & other.output,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ModelCapability:
     """What one model offers: every value a caller may select.
 
@@ -106,14 +136,8 @@ class ModelCapability:
     prices: PriceCatalog = field(default_factory=PriceCatalog)
     """USD rates, keyed by service tier and request-size threshold."""
 
-    thinking_effort: AbstractSet[ThinkingEffort] = frozenset({"none"})
-    """Effort levels this transport accepts."""
-
-    thinking_budget: AbstractSet[ThinkingBudget] = frozenset({"none"})
-    """Budget modes this transport accepts."""
-
-    thinking_output: AbstractSet[ThinkingOutput] = frozenset({"none"})
-    """Reasoning-visibility modes this transport accepts."""
+    thinking: ThinkingCapability = field(default_factory=ThinkingCapability)
+    """Reasoning effort, budget, and visibility this transport accepts."""
 
     service_tier: AbstractSet[ServiceTier] = frozenset({"auto", "default"})
     """Speed/price tiers this transport accepts.
@@ -179,9 +203,7 @@ class ModelCapability:
             wire_model_id=self.wire_model_id,
             context=self.context,
             prices=self.prices,
-            thinking_effort=self.thinking_effort & other.thinking_effort,
-            thinking_budget=self.thinking_budget & other.thinking_budget,
-            thinking_output=self.thinking_output & other.thinking_output,
+            thinking=self.thinking & other.thinking,
             service_tier=self.service_tier & other.service_tier,
             manage_context_server_side=(
                 self.manage_context_server_side & other.manage_context_server_side
@@ -333,17 +355,17 @@ class ModelSettings:
             context=context,
             thinking_effort=_lowest(
                 "thinking_effort",
-                capability.thinking_effort,
+                capability.thinking.effort,
                 _ladder(ThinkingEffort),
             ),
             thinking_budget=_lowest(
                 "thinking_budget",
-                capability.thinking_budget,
+                capability.thinking.budget,
                 _ladder(ThinkingBudget),
             ),
             thinking_output=_lowest(
                 "thinking_output",
-                capability.thinking_output,
+                capability.thinking.output,
                 _ladder(ThinkingOutput),
             ),
             service_tier=_lowest(
@@ -369,9 +391,22 @@ class ModelSettings:
         return self.capability.context[self.context]
 
 
+def _allowed(capability: ModelCapability, name: str) -> Collection[object]:
+    """Return the set ``capability`` offers for the settings axis ``name``."""
+    match name:
+        case "thinking_effort":
+            return capability.thinking.effort
+        case "thinking_budget":
+            return capability.thinking.budget
+        case "thinking_output":
+            return capability.thinking.output
+        case _:
+            return cast(Collection[object], getattr(capability, name))
+
+
 def _offers(capability: ModelCapability, name: str, value: object) -> bool:
     """Whether ``capability`` allows ``value`` on the axis ``name``."""
-    return value in cast(Collection[object], getattr(capability, name))
+    return value in _allowed(capability, name)
 
 
 def _reject_unoffered(capability: ModelCapability, name: str, value: object) -> None:
@@ -381,9 +416,7 @@ def _reject_unoffered(capability: ModelCapability, name: str, value: object) -> 
     model = capability.model_id or "this model"
     # ``repr`` before ``sorted``: these sets mix strings, floats, and bools,
     # which do not order against each other.
-    offered = ", ".join(
-        sorted(repr(v) for v in cast(Collection[object], getattr(capability, name))),
-    )
+    offered = ", ".join(sorted(repr(v) for v in _allowed(capability, name)))
     raise ValueError(f"{name}={value!r} is not offered by {model}; allowed: {offered}")
 
 
