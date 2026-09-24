@@ -69,7 +69,7 @@ def render_status_pane(agent: Agent) -> str:
         f"{format_elapsed(elapsed)}"
         f" {format_count(tokens.request)}↑"
         f" {format_count(output_tokens)}↓"
-        f" {format_count(tokens.cache_write)}↟"
+        f" {format_count(tokens.cache_write + tokens.cache_write_1h)}↟"
         f" {format_count(tokens.cache_read)}↡"
         f" ${cost:.2f}"
     )

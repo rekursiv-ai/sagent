@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Literal, cast, override
@@ -71,7 +72,7 @@ from sagent.types.compactor import (
 )
 from sagent.types.cost import (
     PriceCatalog,
-    PriceCatalogProduct,
+    PriceKey,
     ServiceTier,
     TokenCost,
     TokenCount,
@@ -227,9 +228,23 @@ class StubModel:
                 },
             ),
             prices=PriceCatalog(
-                {PriceCatalogProduct(): TokenPrice()}
+                {
+                    PriceKey("auto"): TokenPrice(
+                        request=0.0,
+                        response=0.0,
+                        cache_write=0.0,
+                        cache_write_1h=0.0,
+                        cache_read=0.0,
+                    ),
+                }
                 | {
-                    PriceCatalogProduct(service_tier=t): TokenPrice()
+                    PriceKey(t): TokenPrice(
+                        request=0.0,
+                        response=0.0,
+                        cache_write=0.0,
+                        cache_write_1h=0.0,
+                        cache_read=0.0,
+                    )
                     for t in self.valid_service_tiers
                 },
             ),
@@ -242,8 +257,8 @@ class StubModel:
                 if self.supports_thinking
                 else frozenset({"none"}),
             ),
-            service_tier={"auto", *self.valid_service_tiers},
-            cache_ttl_sec={3600.0} if self.supports_cache_control else {0.0},
+            service_tier=frozenset({"auto", *self.valid_service_tiers}),
+            cache_ttl_sec=frozenset({3600.0 if self.supports_cache_control else 0.0}),
             manage_context_server_side=(
                 frozenset({False, True})
                 if self.supports_context_management
@@ -278,15 +293,10 @@ class StubModel:
 
     def spend(self, tokens: TokenCount) -> TokenCost:
         """Price ``tokens`` at the tier these settings select."""
-        prompt = tokens.request + tokens.cache_write + tokens.cache_read
-        return (
-            self.capability.prices[
-                PriceCatalogProduct(
-                    service_tier=self.settings.service_tier,
-                    min_request_tokens=prompt,
-                )
-            ]
-            * tokens
+        return self.capability.prices.cost(
+            tokens,
+            service_tier=self.settings.service_tier,
+            at=datetime.now(UTC).date(),
         )
 
     def approx_text_tokens(self, text: str) -> int:
@@ -5305,7 +5315,17 @@ class _OverflowModel:
                     ),
                 },
             ),
-            prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+            prices=PriceCatalog(
+                {
+                    PriceKey("auto"): TokenPrice(
+                        request=0.0,
+                        response=0.0,
+                        cache_write=0.0,
+                        cache_write_1h=0.0,
+                        cache_read=0.0,
+                    ),
+                },
+            ),
         )
 
     @property
@@ -5321,7 +5341,7 @@ class _OverflowModel:
         return self.model_id
 
     def spend(self, tokens: TokenCount) -> TokenCost:
-        return self.capability.prices[PriceCatalogProduct()] * tokens
+        return self.capability.prices[PriceKey("auto")] * tokens
 
     def approx_text_tokens(self, text: str) -> int:
         return max(1, len(text) // 4)
@@ -5413,7 +5433,17 @@ class _RawOverflowModel:
                     ),
                 },
             ),
-            prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+            prices=PriceCatalog(
+                {
+                    PriceKey("auto"): TokenPrice(
+                        request=0.0,
+                        response=0.0,
+                        cache_write=0.0,
+                        cache_write_1h=0.0,
+                        cache_read=0.0,
+                    ),
+                },
+            ),
         )
 
     @property
@@ -5429,7 +5459,7 @@ class _RawOverflowModel:
         return self.model_id
 
     def spend(self, tokens: TokenCount) -> TokenCost:
-        return self.capability.prices[PriceCatalogProduct()] * tokens
+        return self.capability.prices[PriceKey("auto")] * tokens
 
     def approx_text_tokens(self, text: str) -> int:
         return max(1, len(text) // 4)
@@ -5641,7 +5671,17 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
                         ),
                     },
                 ),
-                prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+                prices=PriceCatalog(
+                    {
+                        PriceKey("auto"): TokenPrice(
+                            request=0.0,
+                            response=0.0,
+                            cache_write=0.0,
+                            cache_write_1h=0.0,
+                            cache_read=0.0,
+                        ),
+                    },
+                ),
             )
 
         @property
@@ -5657,7 +5697,7 @@ async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
             return self.model_id
 
         def spend(self, tokens: TokenCount) -> TokenCost:
-            return self.capability.prices[PriceCatalogProduct()] * tokens
+            return self.capability.prices[PriceKey("auto")] * tokens
 
         def approx_text_tokens(self, text: str) -> int:
             return max(1, len(text) // 4)
@@ -7590,7 +7630,10 @@ def test_swap_model_resets_a_budget_the_new_model_rejects() -> None:
             base = super(_EnabledOnlyModel, self).capability
             return dataclasses.replace(
                 base,
-                thinking=dataclasses.replace(base.thinking, budget={"none", "fixed"}),
+                thinking=dataclasses.replace(
+                    base.thinking,
+                    budget=frozenset({"none", "fixed"}),
+                ),
             )
 
     a = _build_agent(model=StubModel(supports_thinking=True))

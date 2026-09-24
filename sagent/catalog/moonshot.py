@@ -22,7 +22,7 @@ from sagent.types.capability import (
 )
 from sagent.types.cost import (
     PriceCatalog,
-    PriceCatalogProduct,
+    PriceKey,
     TokenPrice,
 )
 
@@ -45,7 +45,7 @@ def models() -> Mapping[str, ModelCapability]:
     kimi = ModelCapability(
         context=_limits(window=256_000, response=96_000),
         prices=_prices(request=0.95, response=4.0, cache_read=0.16),
-        thinking=ThinkingCapability(output={"none", "text"}),
+        thinking=ThinkingCapability(output=frozenset({"none", "text"})),
     )
     rows = (
         replace(kimi, model_id="kimi-k2.6"),
@@ -76,19 +76,19 @@ def models() -> Mapping[str, ModelCapability]:
             kimi,
             model_id="moonshot-v1-8k",
             context=_limits(window=8_000, response=16_384),
-            prices=_prices(request=0.2, response=2.0),
+            prices=_prices(request=0.2, response=2.0, cache_read=0.0),
         ),
         replace(
             kimi,
             model_id="moonshot-v1-32k",
             context=_limits(window=32_000, response=16_384),
-            prices=_prices(request=0.4, response=4.0),
+            prices=_prices(request=0.4, response=4.0, cache_read=0.0),
         ),
         replace(
             kimi,
             model_id="moonshot-v1-128k",
             context=_limits(window=128_000, response=16_384),
-            prices=_prices(request=0.6, response=6.0),
+            prices=_prices(request=0.6, response=6.0, cache_read=0.0),
         ),
     )
     catalog = {row.model_id: row for row in rows}
@@ -113,18 +113,15 @@ def _limits(*, window: int, response: int) -> Mapping[ContextTag, ModelLimits]:
     )
 
 
-def _prices(
-    *,
-    request: float,
-    response: float,
-    cache_read: float = 0.0,
-) -> PriceCatalog:
-    """USD per million tokens; these vendors quote one flat tier."""
+def _prices(*, request: float, response: float, cache_read: float) -> PriceCatalog:
+    """Return the one published card; these vendors quote one flat tier."""
     return PriceCatalog(
         {
-            PriceCatalogProduct(): TokenPrice(
+            PriceKey("auto"): TokenPrice(
                 request=request,
                 response=response,
+                cache_write=0.0,
+                cache_write_1h=0.0,
                 cache_read=cache_read,
             ),
         },

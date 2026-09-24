@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, Protocol, cast, override
 
 import asyncio
@@ -10,7 +11,7 @@ import inspect
 import json
 import logging
 
-from sagent.catalog.openai import reasoning_effort
+from sagent.catalog.openai import reasoning_effort, served_tier
 from sagent.lib import debug_log
 from sagent.lib.custom_json import DictCodec, IntCodec, json_unfreeze
 from sagent.providers.lib.errors import (
@@ -544,6 +545,7 @@ async def _consume_stream(
     output_tokens = 0
     cache_read = 0
     cache_write = 0
+    served: ServiceTier = "auto"
     message_id = ""
     finish_reason: str | None = None
     completed = False
@@ -648,10 +650,11 @@ async def _consume_stream(
                         incomplete = getattr(resp, "incomplete_details", None)
                         if getattr(incomplete, "reason", None) == "content_filter":
                             finish_reason = "content_filter"
+                    served = served_tier(getattr(resp, "service_tier", None))
                     debug_log.trace(
                         "api_response",
                         kind="openai_responses",
-                        service_tier=getattr(resp, "service_tier", None),
+                        service_tier=served,
                     )
                     # Set last: if a usage/attr read above raises on an SDK shape
                     # change, ``completed`` stays False so the ``finally`` still
@@ -672,6 +675,7 @@ async def _consume_stream(
         output_tokens=output_tokens,
         cache_write=cache_write,
         cache_read=cache_read,
+        served=served,
         finish_reason=finish_reason,
         message_id=message_id,
         model=model,
@@ -733,6 +737,7 @@ def _build_stream_response(
     output_tokens: int,
     cache_write: int,
     cache_read: int,
+    served: ServiceTier,
     finish_reason: str | None,
     message_id: str,
     model: _OpenAIResponsesModel,
@@ -765,7 +770,11 @@ def _build_stream_response(
         ),
         message_id=message_id,
         request_id=message_id,
-        spend=model.spend(tokens),
+        spend=model.capability.prices.cost(
+            tokens,
+            service_tier=served,
+            at=datetime.now(UTC).date(),
+        ),
     )
 
 

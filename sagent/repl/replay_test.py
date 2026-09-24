@@ -72,12 +72,12 @@ def _StubCostTracker_factory() -> _StubCostTracker:  # noqa: N802 -- The stub mi
 _WIDE = ModelCapability(
     model_id="m",
     thinking=ThinkingCapability(
-        effort={"none", "high"},
-        budget={"none", "auto", "fixed"},
-        output={"none", "text", "redacted"},
+        effort=frozenset({"none", "high"}),
+        budget=frozenset({"none", "auto", "fixed"}),
+        output=frozenset({"none", "text", "redacted"}),
     ),
-    service_tier={"auto", "default", "priority"},
-    cache_ttl_sec={0.0, 3600.0},
+    service_tier=frozenset({"auto", "default", "priority"}),
+    cache_ttl_sec=frozenset({0.0, 3600.0}),
 )
 """A capability offering every knob the footer can print."""
 

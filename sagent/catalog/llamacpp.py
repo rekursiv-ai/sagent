@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 from sagent.types.capability import ContextTag, ModelCapability, ModelLimits
 from sagent.types.cost import (
     PriceCatalog,
-    PriceCatalogProduct,
+    PriceKey,
     TokenPrice,
 )
 
@@ -39,7 +39,17 @@ def models() -> Mapping[str, ModelCapability]:
     # A local server bills nothing, but a missing price row would raise.
     local = ModelCapability(
         context=_limits(window=16_384, response=1_024),
-        prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+        prices=PriceCatalog(
+            {
+                PriceKey("auto"): TokenPrice(
+                    request=0.0,
+                    response=0.0,
+                    cache_write=0.0,
+                    cache_write_1h=0.0,
+                    cache_read=0.0,
+                ),
+            },
+        ),
     )
     rows = (
         replace(local, model_id="qwen3.6-27b-12gb"),

@@ -23,7 +23,7 @@ from sagent.types.capability import (
 )
 from sagent.types.cost import (
     PriceCatalog,
-    PriceCatalogProduct,
+    PriceKey,
     TokenPrice,
 )
 
@@ -79,8 +79,8 @@ def models() -> Mapping[str, ModelCapability]:
         prices=_prices(request=1.6, response=6.4),
         thinking=ThinkingCapability(
             effort=_efforts(),
-            budget={"none", "auto", "fixed"},
-            output={"none", "text"},
+            budget=frozenset({"none", "auto", "fixed"}),
+            output=frozenset({"none", "text"}),
         ),
     )
     # ``-instruct`` / ``-coder`` / ``-turbo`` reject the toggle, so every
@@ -172,9 +172,17 @@ def _limits(*, window: int, response: int) -> Mapping[ContextTag, ModelLimits]:
 
 
 def _prices(*, request: float, response: float) -> PriceCatalog:
-    """USD per million tokens; DashScope quotes one flat tier."""
+    """Return the one published card; DashScope quotes one flat tier, and reports no cache pools."""
     return PriceCatalog(
-        {PriceCatalogProduct(): TokenPrice(request=request, response=response)},
+        {
+            PriceKey("auto"): TokenPrice(
+                request=request,
+                response=response,
+                cache_write=0.0,
+                cache_write_1h=0.0,
+                cache_read=0.0,
+            ),
+        },
     )
 
 

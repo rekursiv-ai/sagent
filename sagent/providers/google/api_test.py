@@ -26,7 +26,7 @@ from sagent.types.capability import (
 )
 from sagent.types.cost import (
     PriceCatalog,
-    PriceCatalogProduct,
+    PriceKey,
     TokenPrice,
 )
 from sagent.types.model import (
@@ -390,10 +390,12 @@ def test_google_build_response_cache_tokens_split_input_cost() -> None:
         model.capability,
         prices=PriceCatalog(
             {
-                PriceCatalogProduct(): TokenPrice(
+                PriceKey("auto"): TokenPrice(
                     request=1.0,
                     response=2.0,
                     cache_read=0.5,
+                    cache_write=0.0,
+                    cache_write_1h=0.0,
                 ),
             },
         ),

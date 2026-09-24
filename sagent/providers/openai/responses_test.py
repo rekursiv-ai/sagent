@@ -39,7 +39,7 @@ from sagent.types.capability import (
 )
 from sagent.types.cost import (
     PriceCatalog,
-    PriceCatalogProduct,
+    PriceKey,
     TokenPrice,
 )
 from sagent.types.exceptions import UserFacingError
@@ -288,22 +288,46 @@ def _free_model() -> _OpenAIResponsesModel:
     return _OpenAIResponsesModel(
         provider=OpenAI.from_key("test-key"),
         capability=ModelCapability(
-            prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+            prices=PriceCatalog(
+                {
+                    PriceKey("auto"): TokenPrice(
+                        request=0.0,
+                        response=0.0,
+                        cache_write=0.0,
+                        cache_write_1h=0.0,
+                        cache_read=0.0,
+                    ),
+                },
+            ),
         ),
         settings=ModelSettings(),
     )
 
 
 def _priced_model() -> _OpenAIResponsesModel:
-    """$1/Mtok request with the usual 1.25x cache-write multiplier."""
+    """$1/Mtok standard with the usual 1.25x cache write; flex at half."""
+    standard = TokenPrice(
+        request=1.0,
+        cache_write=1.25,
+        response=0.0,
+        cache_write_1h=0.0,
+        cache_read=0.0,
+    )
+    prices = PriceCatalog(
+        {
+            PriceKey("auto"): standard,
+            PriceKey("flex"): dataclasses.replace(
+                standard,
+                request=0.5,
+                cache_write=0.625,
+            ),
+        },
+    )
+    capability = ModelCapability(prices=prices, service_tier=prices.service_tiers)
     return _OpenAIResponsesModel(
         provider=OpenAI.from_key("test-key"),
-        capability=ModelCapability(
-            prices=PriceCatalog(
-                {PriceCatalogProduct(): TokenPrice(request=1.0, cache_write=1.25)},
-            ),
-        ),
-        settings=ModelSettings(),
+        capability=capability,
+        settings=ModelSettings(capability=capability),
     )
 
 
@@ -394,10 +418,16 @@ class _CompletedEvent:
 class _CompletedResponse:
     """Small stand-in for OpenAI's completed response payload."""
 
-    def __init__(self, usage: object | None = None) -> None:
+    def __init__(
+        self,
+        usage: object | None = None,
+        *,
+        service_tier: str | None = None,
+    ) -> None:
         self.id = "resp_123"
         self.status = "completed"
         self.usage = usage
+        self.service_tier = service_tier
 
 
 class _InputTokenDetails:
@@ -972,6 +1002,34 @@ class TestStreamIdleTimeout:
             + response.spend.cache_write
             + response.spend.cache_read
         ) == pytest.approx((3 + 1306 * 1.25) / 1_000_000)
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(("served", "rate"), [("flex", 0.5), ("default", 1.0)])
+    async def test_completed_usage_bills_the_tier_the_server_served(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        served: str,
+        rate: float,
+    ) -> None:
+        """A flex request the server served at standard bills standard."""
+        monkeypatch.setattr(
+            "sagent.providers.openai.responses.responses.ResponseCompletedEvent",
+            _CompletedEvent,
+        )
+        event = _CompletedEvent(
+            _CompletedResponse(
+                _Usage(input_tokens=1_000_000, output_tokens=0),
+                service_tier=served,
+            ),
+        )
+        model = _priced_model()
+        model.settings.service_tier = "flex"
+        response = await _consume_stream(
+            _DelayedStream([event], delay_sec=0.0),
+            model=model,
+            publish=None,
+        )
+        assert response.spend.request == pytest.approx(rate)
 
     @pytest.mark.anyio
     async def test_stream_preserves_and_replays_encrypted_reasoning(

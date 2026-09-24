@@ -17,6 +17,7 @@ from dataclasses import replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
+from sagent.lib.custom_json import DictCodec, IntCodec
 from sagent.types.capability import (
     ContextTag,
     ModelCapability,
@@ -25,7 +26,8 @@ from sagent.types.capability import (
 )
 from sagent.types.cost import (
     PriceCatalog,
-    PriceCatalogProduct,
+    PriceKey,
+    TokenCount,
     TokenPrice,
 )
 
@@ -42,6 +44,7 @@ __all__ = [
     "cli",
     "models",
     "subscription",
+    "usage_tokens",
 ]
 
 
@@ -59,8 +62,9 @@ CACHE_TTL_SEC: Final = frozenset({300.0, 3600.0})
 # also omit an explicit thinking request, and the axis is total, so omitting it
 # would make the provider default unselectable.
 #
-# Knowledge cutoffs are the vendor's "reliable knowledge cutoff", verified
-# against each model's overview page on 2026-09-24.
+# Knowledge cutoffs are the vendor's "reliable knowledge cutoff", and prices
+# its published table (input, output, 5m/1h cache write, cache hit), both
+# verified on 2026-09-24.
 def models() -> Mapping[str, ModelCapability]:
     """Return every Anthropic model, as the API-key transport sees it.
 
@@ -75,41 +79,59 @@ def models() -> Mapping[str, ModelCapability]:
         knowledge_cutoff="June 2026",
         approx_chars_per_token=2.38,
         context=_limits(),
-        # Opus 5.5 bills cache hits at 0.05x base input, not the usual 0.1x.
         prices=_prices(
-            input_usd=4.0,
-            output_usd=20.0,
-            cache_read_usd=0.2,
-            priority_input_usd=8.0,
-            priority_output_usd=40.0,
+            _card(
+                request=4.0,
+                response=20.0,
+                cache_write=5.0,
+                cache_write_1h=8.0,
+                cache_read=0.2,
+            ),
+            fast_request=8.0,
+            fast_response=40.0,
         ),
         thinking=ThinkingCapability(
-            effort={"none", "low", "medium", "high", "xhigh", "max"},
-            budget={"none", "auto"},
-            output={"none", "redacted"},
+            effort=frozenset({"none", "low", "medium", "high", "xhigh", "max"}),
+            budget=frozenset({"none", "auto"}),
+            output=frozenset({"none", "redacted"}),
         ),
     )
     # The 4.6-and-earlier reasoning contract: readable thinking and a fixed
     # budget alongside adaptive.
     extended = replace(
         default.thinking,
-        budget={"none", "auto", "fixed"},
-        output={"none", "text", "redacted"},
+        budget=frozenset({"none", "auto", "fixed"}),
+        output=frozenset({"none", "text", "redacted"}),
     )
     rows = (
-        # Fable 5.1 and Mythos 5.1 bill cache hits at 0.025x base input.
         replace(
             default,
             model_id="fable-5.1",
             wire_model_id="claude-fable-5-1",
-            prices=_prices(input_usd=10.0, output_usd=50.0, cache_read_usd=0.25),
+            prices=_prices(
+                _card(
+                    request=10.0,
+                    response=50.0,
+                    cache_write=12.5,
+                    cache_write_1h=20.0,
+                    cache_read=0.25,
+                ),
+            ),
         ),
         replace(
             default,
             model_id="fable-5",
             wire_model_id="claude-fable-5",
             knowledge_cutoff="January 2026",
-            prices=_prices(input_usd=10.0, output_usd=50.0),
+            prices=_prices(
+                _card(
+                    request=10.0,
+                    response=50.0,
+                    cache_write=12.5,
+                    cache_write_1h=20.0,
+                    cache_read=1.0,
+                ),
+            ),
         ),
         default,
         replace(
@@ -118,10 +140,15 @@ def models() -> Mapping[str, ModelCapability]:
             wire_model_id="claude-opus-5",
             knowledge_cutoff="May 2026",
             prices=_prices(
-                input_usd=5.0,
-                output_usd=25.0,
-                priority_input_usd=10.0,
-                priority_output_usd=50.0,
+                _card(
+                    request=5.0,
+                    response=25.0,
+                    cache_write=6.25,
+                    cache_write_1h=10.0,
+                    cache_read=0.5,
+                ),
+                fast_request=10.0,
+                fast_response=50.0,
             ),
         ),
         replace(
@@ -131,10 +158,15 @@ def models() -> Mapping[str, ModelCapability]:
             knowledge_cutoff="January 2026",
             context=_limits(beta="context-1m-2025-08-07"),
             prices=_prices(
-                input_usd=5.0,
-                output_usd=25.0,
-                priority_input_usd=10.0,
-                priority_output_usd=50.0,
+                _card(
+                    request=5.0,
+                    response=25.0,
+                    cache_write=6.25,
+                    cache_write_1h=10.0,
+                    cache_read=0.5,
+                ),
+                fast_request=10.0,
+                fast_response=50.0,
             ),
         ),
         # No fast price row on 4-7 or 4-6: 4-7 lost fast mode on 2026-07-24 and
@@ -146,7 +178,15 @@ def models() -> Mapping[str, ModelCapability]:
             wire_model_id="claude-opus-4-7",
             knowledge_cutoff="January 2026",
             context=_limits(beta="context-1m-2025-08-07"),
-            prices=_prices(input_usd=5.0, output_usd=25.0),
+            prices=_prices(
+                _card(
+                    request=5.0,
+                    response=25.0,
+                    cache_write=6.25,
+                    cache_write_1h=10.0,
+                    cache_read=0.5,
+                ),
+            ),
         ),
         replace(
             default,
@@ -155,8 +195,19 @@ def models() -> Mapping[str, ModelCapability]:
             knowledge_cutoff="May 2025",
             approx_chars_per_token=3.12,
             context=_limits(beta="context-1m-2025-08-07", image_edge_px=1568),
-            prices=_prices(input_usd=5.0, output_usd=25.0),
-            thinking=replace(extended, effort={"none", "low", "medium", "high", "max"}),
+            prices=_prices(
+                _card(
+                    request=5.0,
+                    response=25.0,
+                    cache_write=6.25,
+                    cache_write_1h=10.0,
+                    cache_read=0.5,
+                ),
+            ),
+            thinking=replace(
+                extended,
+                effort=frozenset({"none", "low", "medium", "high", "max"}),
+            ),
         ),
         replace(
             default,
@@ -169,11 +220,19 @@ def models() -> Mapping[str, ModelCapability]:
                 output_tokens=64_000,
                 image_edge_px=1568,
             ),
-            prices=_prices(input_usd=5.0, output_usd=25.0),
+            prices=_prices(
+                _card(
+                    request=5.0,
+                    response=25.0,
+                    cache_write=6.25,
+                    cache_write_1h=10.0,
+                    cache_read=0.5,
+                ),
+            ),
             thinking=replace(
                 extended,
-                effort={"none", "low", "medium", "high"},
-                budget={"none", "fixed"},
+                effort=frozenset({"none", "low", "medium", "high"}),
+                budget=frozenset({"none", "fixed"}),
             ),
         ),
         # $2/$10 was introductory pricing through 2026-08-31; the scheduled
@@ -183,7 +242,15 @@ def models() -> Mapping[str, ModelCapability]:
             model_id="sonnet-5",
             wire_model_id="claude-sonnet-5",
             knowledge_cutoff="January 2026",
-            prices=_prices(input_usd=2.0, output_usd=10.0),
+            prices=_prices(
+                _card(
+                    request=2.0,
+                    response=10.0,
+                    cache_write=2.5,
+                    cache_write_1h=4.0,
+                    cache_read=0.2,
+                ),
+            ),
         ),
         replace(
             default,
@@ -192,8 +259,19 @@ def models() -> Mapping[str, ModelCapability]:
             knowledge_cutoff="August 2025",
             approx_chars_per_token=3.12,
             context=_limits(beta="context-1m-2025-08-07", image_edge_px=1568),
-            prices=_prices(input_usd=3.0, output_usd=15.0),
-            thinking=replace(extended, effort={"none", "low", "medium", "high", "max"}),
+            prices=_prices(
+                _card(
+                    request=3.0,
+                    response=15.0,
+                    cache_write=3.75,
+                    cache_write_1h=6.0,
+                    cache_read=0.3,
+                ),
+            ),
+            thinking=replace(
+                extended,
+                effort=frozenset({"none", "low", "medium", "high", "max"}),
+            ),
         ),
         replace(
             default,
@@ -206,8 +284,20 @@ def models() -> Mapping[str, ModelCapability]:
                 output_tokens=64_000,
                 image_edge_px=1568,
             ),
-            prices=_prices(input_usd=3.0, output_usd=15.0),
-            thinking=replace(extended, effort={"none"}, budget={"none", "fixed"}),
+            prices=_prices(
+                _card(
+                    request=3.0,
+                    response=15.0,
+                    cache_write=3.75,
+                    cache_write_1h=6.0,
+                    cache_read=0.3,
+                ),
+            ),
+            thinking=replace(
+                extended,
+                effort=frozenset({"none"}),
+                budget=frozenset({"none", "fixed"}),
+            ),
         ),
         replace(
             default,
@@ -220,19 +310,24 @@ def models() -> Mapping[str, ModelCapability]:
                 output_tokens=64_000,
                 image_edge_px=1568,
             ),
-            prices=_prices(input_usd=1.0, output_usd=5.0),
-            thinking=replace(extended, effort={"none"}, budget={"none", "fixed"}),
+            prices=_prices(
+                _card(
+                    request=1.0,
+                    response=5.0,
+                    cache_write=1.25,
+                    cache_write_1h=2.0,
+                    cache_read=0.1,
+                ),
+            ),
+            thinking=replace(
+                extended,
+                effort=frozenset({"none"}),
+                budget=frozenset({"none", "fixed"}),
+            ),
         ),
     )
-    # A tier is offered exactly when it is priced, so the row states it once,
-    # in ``prices``, and a fast row can never be added without being offered.
-    rows = tuple(
-        replace(
-            row,
-            service_tier={"auto", "default", *(p.service_tier for p in row.prices)},
-        )
-        for row in rows
-    )
+    # A tier is offered exactly when it is priced.
+    rows = tuple(replace(row, service_tier=row.prices.service_tiers) for row in rows)
     # Rows run newest-first within each family, so the first match is the latest
     # and a new release moves its alias without an edit here.
     latest = {
@@ -266,17 +361,17 @@ def api() -> ModelCapability:
     """
     return ModelCapability(
         thinking=ThinkingCapability(
-            effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
-            budget={"none", "auto", "fixed"},
-            output={"none", "text", "redacted"},
+            effort=frozenset({"none", "min", "low", "medium", "high", "xhigh", "max"}),
+            budget=frozenset({"none", "auto", "fixed"}),
+            output=frozenset({"none", "text", "redacted"}),
         ),
         cache_ttl_sec=CACHE_TTL_SEC,
-        manage_context_server_side={False, True},
+        manage_context_server_side=frozenset({False, True}),
         retries_internally=True,
         # No ``flex``: the Messages API takes only ``auto`` / ``standard_only``
         # (https://platform.claude.com/docs/en/api/messages/create), which map to
         # ``auto`` / ``default`` here. ``priority`` is the fast-mode beta.
-        service_tier={"auto", "default", "priority"},
+        service_tier=frozenset({"auto", "default", "priority"}),
     )
 
 
@@ -295,11 +390,11 @@ def cli() -> ModelCapability:
     """
     return ModelCapability(
         thinking=ThinkingCapability(
-            effort={"none"},
-            budget={"none", "auto", "fixed"},
-            output={"none", "text"},
+            effort=frozenset({"none"}),
+            budget=frozenset({"none", "auto", "fixed"}),
+            output=frozenset({"none", "text"}),
         ),
-        manage_context_server_side={True},
+        manage_context_server_side=frozenset({True}),
     )
 
 
@@ -317,6 +412,76 @@ def subscription() -> ModelCapability:
 
     """
     return replace(api(), account_auth=True)
+
+
+def usage_tokens(usage: Mapping[str, object], *, cache_ttl_sec: float) -> TokenCount:
+    """Read one Messages-API ``usage`` block into disjoint meters.
+
+    ``cache_creation`` splits the write by lifetime. A block without it (an
+    older transcript) is attributed wholly to ``cache_ttl_sec``, the lifetime
+    the request asked for.
+
+    Args:
+      usage: The response's ``usage`` object, as a mapping.
+      cache_ttl_sec: Lifetime the request's cache breakpoints asked for.
+
+    Returns:
+      tokens: The request's usage.
+
+    """
+    written = IntCodec.coerce(usage.get("cache_creation_input_tokens"), 0)
+    split = DictCodec.coerce(usage.get("cache_creation"))
+    if split:
+        written_1h = IntCodec.coerce(split.get("ephemeral_1h_input_tokens"), 0)
+    else:
+        written_1h = written if cache_ttl_sec >= 3600.0 else 0
+    return TokenCount(
+        request=IntCodec.coerce(usage.get("input_tokens"), 0),
+        response=IntCodec.coerce(usage.get("output_tokens"), 0),
+        cache_write=written - written_1h,
+        cache_write_1h=written_1h,
+        cache_read=IntCodec.coerce(usage.get("cache_read_input_tokens"), 0),
+    )
+
+
+def _card(
+    *,
+    request: float,
+    response: float,
+    cache_write: float,
+    cache_write_1h: float,
+    cache_read: float,
+) -> TokenPrice:
+    """Return one published price-table row: input, output, 5m/1h writes, hits."""
+    return TokenPrice(
+        request=request,
+        response=response,
+        cache_write=cache_write,
+        cache_write_1h=cache_write_1h,
+        cache_read=cache_read,
+    )
+
+
+# Fast mode publishes only input and output; "prompt caching multipliers apply
+# on top of fast mode pricing", so each cache rate keeps its ratio to input.
+def _prices(
+    standard: TokenPrice,
+    *,
+    fast_request: float = 0.0,
+    fast_response: float = 0.0,
+) -> PriceCatalog:
+    """Return the standard card, plus the fast-mode card when the model has one."""
+    cards = {PriceKey("auto"): standard}
+    if fast_request:
+        scale = fast_request / standard.request
+        cards[PriceKey("priority")] = _card(
+            request=fast_request,
+            response=fast_response,
+            cache_write=standard.cache_write * scale,
+            cache_write_1h=standard.cache_write_1h * scale,
+            cache_read=standard.cache_read * scale,
+        )
+    return PriceCatalog(cards)
 
 
 def _limits(
@@ -343,35 +508,3 @@ def _limits(
             request_betas=frozenset(),
         )
     return MappingProxyType(context)
-
-
-# Cache rates are multiples of the BASE INPUT price, so they ride every other modifier:
-# "Prompt caching multipliers apply on top of fast mode pricing"
-# (https://docs.anthropic.com/en/docs/about-claude/pricing). Leaving them unmultiplied
-# on the fast row under-billed cached fast requests by half.
-def _prices(
-    *,
-    input_usd: float,
-    output_usd: float,
-    cache_read_usd: float | None = None,
-    priority_input_usd: float | None = None,
-    priority_output_usd: float | None = None,
-) -> PriceCatalog:
-    """USD per million tokens; cache read defaults to 0.1x input."""
-    cache_read_multiple = 0.1 if cache_read_usd is None else cache_read_usd / input_usd
-    rows = {
-        PriceCatalogProduct(): TokenPrice(
-            request=input_usd,
-            response=output_usd,
-            cache_write=input_usd * 1.25,
-            cache_read=input_usd * cache_read_multiple,
-        ),
-    }
-    if priority_input_usd is not None and priority_output_usd is not None:
-        rows[PriceCatalogProduct(service_tier="priority")] = TokenPrice(
-            request=priority_input_usd,
-            response=priority_output_usd,
-            cache_write=priority_input_usd * 1.25,
-            cache_read=priority_input_usd * cache_read_multiple,
-        )
-    return PriceCatalog(rows)

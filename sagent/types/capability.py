@@ -17,7 +17,6 @@ from collections.abc import (
     Collection,
     Mapping,
     Sequence,
-    Set as AbstractSet,
 )
 from dataclasses import dataclass, field, fields, replace
 from types import MappingProxyType
@@ -80,20 +79,14 @@ class ModelLimits:
 class ThinkingCapability:
     """Reasoning knobs one model or transport accepts, one set per axis."""
 
-    effort: AbstractSet[ThinkingEffort] = frozenset({"none"})
+    effort: frozenset[ThinkingEffort] = frozenset({"none"})
     """Effort levels accepted."""
 
-    budget: AbstractSet[ThinkingBudget] = frozenset({"none"})
+    budget: frozenset[ThinkingBudget] = frozenset({"none"})
     """Budget modes accepted."""
 
-    output: AbstractSet[ThinkingOutput] = frozenset({"none"})
+    output: frozenset[ThinkingOutput] = frozenset({"none"})
     """Reasoning-visibility modes accepted."""
-
-    def __post_init__(self) -> None:
-        """Freeze every axis so callers may write a plain set literal."""
-        object.__setattr__(self, "effort", frozenset(self.effort))
-        object.__setattr__(self, "budget", frozenset(self.budget))
-        object.__setattr__(self, "output", frozenset(self.output))
 
     def __and__(self, other: ThinkingCapability) -> ThinkingCapability:
         """Narrow each axis to what BOTH offer."""
@@ -139,7 +132,7 @@ class ModelCapability:
     thinking: ThinkingCapability = field(default_factory=ThinkingCapability)
     """Reasoning effort, budget, and visibility this transport accepts."""
 
-    service_tier: AbstractSet[ServiceTier] = frozenset({"auto", "default"})
+    service_tier: frozenset[ServiceTier] = frozenset({"auto", "default"})
     """Speed/price tiers this transport accepts.
 
     ``auto`` and ``default`` are universal -- every vendor serves a request
@@ -149,14 +142,14 @@ class ModelCapability:
     # Defaults to BOTH values, not to its unset one: a model row does not know
     # whether the server rolls history, and ``&`` can only remove -- so a row
     # asserting ``{False}`` would pin every transport and empty the meet.
-    manage_context_server_side: AbstractSet[bool] = frozenset({False, True})
+    manage_context_server_side: frozenset[bool] = frozenset({False, True})
     """Whether the server may roll history under quota pressure."""
 
     # The three below are DECLARED by the transport, not narrowed from the row:
     # a catalog row cannot know who bills it, who retries it, or whether the
     # request path writes a cache breakpoint, so ``&`` takes the transport's
     # answer rather than intersecting with a meaningless one.
-    cache_ttl_sec: AbstractSet[float] = frozenset({0.0})
+    cache_ttl_sec: frozenset[float] = frozenset({0.0})
     """Prompt-cache lifetimes this transport accepts, in seconds.
 
     A set, not a ceiling: vendors sell two discrete lifetimes (Anthropic's
@@ -171,18 +164,6 @@ class ModelCapability:
 
     account_auth: bool = False
     """Whether this transport bills an account rather than an API key."""
-
-    def __post_init__(self) -> None:
-        """Freeze every axis so callers may write a plain set literal.
-
-        The axes are hashed and intersected, so they must be frozen; making
-        each of ~90 catalog entries spell ``frozenset({...})`` buys nothing
-        the constructor cannot do once.
-        """
-        for f in fields(self):
-            value: object = getattr(self, f.name)  # pyright: ignore[reportAny] -- Dataclass fields are selected by runtime name.
-            if isinstance(value, (set, frozenset)):
-                object.__setattr__(self, f.name, frozenset(cast(set[object], value)))
 
     def __and__(self, other: ModelCapability) -> Self:
         """Narrow to what BOTH offer -- a catalog row met with a transport.

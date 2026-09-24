@@ -27,7 +27,7 @@ from sagent.types.capability import (
 )
 from sagent.types.cost import (
     PriceCatalog,
-    PriceCatalogProduct,
+    PriceKey,
     TokenPrice,
 )
 from sagent.types.model import (
@@ -61,7 +61,19 @@ def _priced_model(prices: PriceCatalog) -> OpenAICompatModel:
 
 def _free_model() -> OpenAICompatModel:
     """Return a model whose every rate is zero -- cost is not what these assert."""
-    return _priced_model(PriceCatalog({PriceCatalogProduct(): TokenPrice()}))
+    return _priced_model(
+        PriceCatalog(
+            {
+                PriceKey("auto"): TokenPrice(
+                    request=0.0,
+                    response=0.0,
+                    cache_write=0.0,
+                    cache_write_1h=0.0,
+                    cache_read=0.0,
+                ),
+            },
+        ),
+    )
 
 
 def _billed_model() -> OpenAICompatModel:
@@ -69,10 +81,12 @@ def _billed_model() -> OpenAICompatModel:
     return _priced_model(
         PriceCatalog(
             {
-                PriceCatalogProduct(): TokenPrice(
+                PriceKey("auto"): TokenPrice(
                     request=1.0,
                     response=2.0,
                     cache_write=1.25,
+                    cache_write_1h=0.0,
+                    cache_read=0.0,
                 ),
             },
         ),
@@ -83,7 +97,17 @@ def _tiktoken_model() -> OpenAICompatModel:
     """Return an OpenAI model whose text counts use the local tiktoken encoding."""
     capability = ModelCapability(
         model_id="gpt-5.6-sol",
-        prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+        prices=PriceCatalog(
+            {
+                PriceKey("auto"): TokenPrice(
+                    request=0.0,
+                    response=0.0,
+                    cache_write=0.0,
+                    cache_write_1h=0.0,
+                    cache_read=0.0,
+                ),
+            },
+        ),
     )
     return OpenAICompatModel(
         provider=OpenAICompat.from_key("k"),
@@ -475,7 +499,17 @@ class _DummyProvider(OpenAICompat):
         context=MappingProxyType(
             {"": _stub_limits(1000), "+1m": _stub_limits(1_000_000)},
         ),
-        prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+        prices=PriceCatalog(
+            {
+                PriceKey("auto"): TokenPrice(
+                    request=0.0,
+                    response=0.0,
+                    cache_write=0.0,
+                    cache_write_1h=0.0,
+                    cache_read=0.0,
+                ),
+            },
+        ),
     )
 
     catalog = ModelCatalog(

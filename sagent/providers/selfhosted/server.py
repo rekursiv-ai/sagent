@@ -71,7 +71,7 @@ from sagent.types.capability import (
 )
 from sagent.types.cost import (
     PriceCatalog,
-    PriceCatalogProduct,
+    PriceKey,
     TokenCount,
     TokenPrice,
 )
@@ -499,9 +499,19 @@ class SelfHostedModel(ModelDefaults):
                     ),
                 },
             ),
-            prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+            prices=PriceCatalog(
+                {
+                    PriceKey("auto"): TokenPrice(
+                        request=0.0,
+                        response=0.0,
+                        cache_write=0.0,
+                        cache_write_1h=0.0,
+                        cache_read=0.0,
+                    ),
+                },
+            ),
             # In-process weights: there is no server to roll history.
-            manage_context_server_side={False},
+            manage_context_server_side=frozenset({False}),
         )
         self._settings = ModelSettings.narrowest(self.capability)
 

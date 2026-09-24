@@ -20,7 +20,7 @@ from sagent.providers import (
     build_provider,
     infer_provider,
 )
-from sagent.types.cost import PriceCatalogProduct, TokenCount
+from sagent.types.cost import PriceKey, TokenCount
 from sagent.types.providers import ModelResolver
 
 
@@ -284,8 +284,8 @@ def test_a_catalog_backed_provider_names_a_cheaper_utility_model(
     if utility_row.model_id == default_row.model_id:
         pytest.skip("single-model catalog: utility and default coincide")
     tokens = TokenCount(request=1_000_000, response=100_000)
-    assert (utility_row.prices[PriceCatalogProduct()] * tokens).total < (
-        default_row.prices[PriceCatalogProduct()] * tokens
+    assert (utility_row.prices[PriceKey("auto")] * tokens).total < (
+        default_row.prices[PriceKey("auto")] * tokens
     ).total, (
         f"{provider_name} utility {utility_row.model_id!r} is not cheaper than"
         f" its default {default_row.model_id!r}"

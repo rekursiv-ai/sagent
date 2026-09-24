@@ -14,7 +14,7 @@ from sagent.types.capability import (
     ModelSettings,
     ThinkingCapability,
 )
-from sagent.types.cost import PriceCatalog, PriceCatalogProduct, TokenPrice
+from sagent.types.cost import PriceCatalog, PriceKey, TokenPrice
 
 
 def _row() -> ModelCapability:
@@ -26,14 +26,24 @@ def _row() -> ModelCapability:
                 "+1m": ModelLimits(max_request_tokens=1_000_000),
             },
         ),
-        prices=PriceCatalog({PriceCatalogProduct(): TokenPrice(request=5.0)}),
+        prices=PriceCatalog(
+            {
+                PriceKey("auto"): TokenPrice(
+                    request=5.0,
+                    response=0.0,
+                    cache_write=0.0,
+                    cache_write_1h=0.0,
+                    cache_read=0.0,
+                ),
+            },
+        ),
         thinking=ThinkingCapability(
             effort=frozenset({"none", "low", "high"}),
             budget=frozenset({"none", "auto"}),
             output=frozenset({"none", "text", "redacted"}),
         ),
         service_tier=frozenset({"auto", "default", "priority"}),
-        cache_ttl_sec={300.0, 3600.0},
+        cache_ttl_sec=frozenset({300.0, 3600.0}),
         manage_context_server_side=frozenset({False, True}),
         retries_internally=True,
     )
@@ -71,7 +81,7 @@ def test_the_meet_only_removes() -> None:
             output=frozenset({"none", "text", "redacted"}),
         ),
         service_tier=frozenset({"auto", "default", "flex", "priority"}),
-        cache_ttl_sec={300.0, 3600.0, 7200.0},
+        cache_ttl_sec=frozenset({300.0, 3600.0, 7200.0}),
         manage_context_server_side=frozenset({False, True}),
         retries_internally=True,
     )
@@ -191,7 +201,7 @@ _OFF = ModelCapability(
         output=frozenset({"none"}),
     ),
     service_tier=frozenset({"auto"}),
-    cache_ttl_sec={0.0},
+    cache_ttl_sec=frozenset({0.0}),
     manage_context_server_side=frozenset({False}),
 )
 
@@ -291,7 +301,7 @@ def test_narrowest_selects_the_cache_the_wire_already_ships() -> None:
     """``0.0`` claimed no caching while a ``5m`` breakpoint shipped anyway."""
     assert ModelSettings.narrowest(_row()).cache_ttl_sec == 300.0
     assert ModelSettings.narrowest(ModelCapability()).cache_ttl_sec == 0.0
-    only_long = ModelCapability(cache_ttl_sec={3600.0})
+    only_long = ModelCapability(cache_ttl_sec=frozenset({3600.0}))
     assert ModelSettings.narrowest(only_long).cache_ttl_sec == 3600.0
 
 

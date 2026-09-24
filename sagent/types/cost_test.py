@@ -2,25 +2,63 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 from sagent.types.cost import (
     PriceCatalog,
-    PriceCatalogProduct,
+    PriceKey,
     TokenCost,
     TokenCount,
     TokenPrice,
 )
 
 
+_TODAY = date(2026, 9, 24)
+
+
+def _price(
+    request: float,
+    *,
+    response: float = 0.0,
+    cache_read: float = 0.0,
+) -> TokenPrice:
+    return TokenPrice(
+        request=request,
+        response=response,
+        cache_write=0.0,
+        cache_write_1h=0.0,
+        cache_read=cache_read,
+    )
+
+
 def test_count_is_default_constructible() -> None:
     assert TokenCount().total == 0
 
 
-def test_add_is_per_bucket() -> None:
-    a = TokenCount(request=100, response=10, cache_write=5, cache_read=1)
-    b = TokenCount(request=40, response=3, cache_write=2, cache_read=1)
-    assert a + b == TokenCount(request=140, response=13, cache_write=7, cache_read=2)
+def test_add_is_per_meter() -> None:
+    a = TokenCount(
+        request=100,
+        response=10,
+        cache_write=5,
+        cache_write_1h=3,
+        cache_read=1,
+    )
+    b = TokenCount(
+        request=40,
+        response=3,
+        cache_write=2,
+        cache_write_1h=1,
+        cache_read=1,
+    )
+    assert a + b == TokenCount(
+        request=140,
+        response=13,
+        cache_write=7,
+        cache_write_1h=4,
+        cache_read=2,
+    )
 
 
 def test_sub_deltas_cumulative_snapshots() -> None:
@@ -29,101 +67,149 @@ def test_sub_deltas_cumulative_snapshots() -> None:
     assert a - b == TokenCount(request=60, response=7)
 
 
+def test_prompt_counts_every_input_pool() -> None:
+    tokens = TokenCount(
+        request=1,
+        response=100,
+        cache_write=2,
+        cache_write_1h=4,
+        cache_read=8,
+    )
+    assert tokens.prompt == 15
+
+
 def test_price_times_count_is_cost() -> None:
-    price = TokenPrice(request=5.0, response=25.0)
-    cost = price * TokenCount(request=1_000_000, response=200_000)
-    assert cost == TokenCost(request=5.0, response=5.0)
+    price = TokenPrice(
+        request=5.0,
+        response=25.0,
+        cache_write=6.25,
+        cache_write_1h=10.0,
+        cache_read=0.5,
+    )
+    cost = price * TokenCount(
+        request=1_000_000,
+        response=200_000,
+        cache_write=1_000_000,
+        cache_write_1h=1_000_000,
+        cache_read=1_000_000,
+    )
+    assert cost == TokenCost(
+        request=5.0,
+        response=5.0,
+        cache_write=6.25,
+        cache_write_1h=10.0,
+        cache_read=0.5,
+    )
 
 
 def test_multiplication_commutes() -> None:
-    price = TokenPrice(request=5.0)
+    price = _price(5.0)
     tokens = TokenCount(request=1_000_000)
     assert price * tokens == tokens * price
 
 
-def test_price_has_no_total() -> None:
-    # ``total`` sums buckets, which is meaningless for a rate.
-    assert not hasattr(TokenPrice(), "tokens_per_unit_total")
+def test_a_price_must_state_every_rate() -> None:
+    """An unstated rate would bill $0; construction refuses it."""
+    with pytest.raises(TypeError):
+        _ = TokenPrice(request=5.0)  # ty: ignore[missing-argument] -- the missing rates are the point.  # pyright: ignore[reportCallIssue] -- same.
 
 
 def _catalog() -> PriceCatalog:
     return PriceCatalog(
         {
-            PriceCatalogProduct("auto", 0): TokenPrice(request=2.0),
-            PriceCatalogProduct("auto", 200_000): TokenPrice(request=4.0),
-            PriceCatalogProduct("priority", 0): TokenPrice(request=6.0),
+            PriceKey("auto"): _price(2.0),
+            PriceKey("auto", 200_000): _price(4.0),
+            PriceKey("priority"): _price(6.0),
         },
     )
 
 
 @pytest.mark.parametrize(
-    ("request_tokens", "expected"),
-    [(0, 2.0), (199_999, 2.0), (200_000, 4.0), (1_000_000, 4.0)],
+    ("prompt_tokens", "expected"),
+    [(0, 2.0), (200_000, 2.0), (200_001, 4.0), (1_000_000, 4.0)],
 )
-def test_floor_lookup_picks_the_tier_at_or_below(
-    request_tokens: int,
+def test_a_band_applies_to_prompts_strictly_larger(
+    prompt_tokens: int,
     expected: float,
 ) -> None:
-    catalog = _catalog()
-    key = PriceCatalogProduct("auto", request_tokens)
-    assert catalog[key].request == expected
+    """Vendors publish "prompts > 200k": exactly 200k is still the base band."""
+    rate = _catalog().rate(service_tier="auto", prompt_tokens=prompt_tokens, at=_TODAY)
+    assert rate.request == expected
 
 
-def test_tier_falls_back_to_auto_when_not_priced_separately() -> None:
-    catalog = PriceCatalog({PriceCatalogProduct("auto", 0): TokenPrice(request=2.0)})
-    assert catalog[PriceCatalogProduct("priority", 0)].request == 2.0
+def test_default_bills_the_standard_rate() -> None:
+    rate = _catalog().rate(service_tier="default", prompt_tokens=10, at=_TODAY)
+    assert rate.request == 2.0
 
 
-def test_priced_tier_wins_when_present() -> None:
-    assert _catalog()[PriceCatalogProduct("priority", 5)].request == 6.0
-
-
-def test_empty_catalog_raises_rather_than_billing_zero() -> None:
+def test_an_unpriced_tier_raises_rather_than_billing_standard() -> None:
+    """Flex once billed at the standard rate -- 2x -- through this fallback."""
     with pytest.raises(KeyError):
-        _ = PriceCatalog()[PriceCatalogProduct()]
+        _ = _catalog().rate(service_tier="flex", prompt_tokens=10, at=_TODAY)
 
 
-def test_contains_agrees_with_getitem() -> None:
-    catalog = _catalog()
-    for key in (
-        PriceCatalogProduct("auto", 0),
-        PriceCatalogProduct("priority", 10**9),
-    ):
-        assert key in catalog
-        assert catalog[key] is not None
-    assert PriceCatalogProduct() not in PriceCatalog()
+def test_a_priced_tier_prices_every_band() -> None:
+    """A tier with only a base band bills every prompt size at it."""
+    rate = _catalog().rate(service_tier="priority", prompt_tokens=10**9, at=_TODAY)
+    assert rate.request == 6.0
 
 
-def test_len_and_iter_report_declared_tiers() -> None:
-    catalog = _catalog()
-    assert len(catalog) == 3
-    assert sorted(catalog) == [
-        PriceCatalogProduct("auto", 0),
-        PriceCatalogProduct("auto", 200_000),
-        PriceCatalogProduct("priority", 0),
-    ]
-
-
-def test_contains_agrees_with_getitem_above_the_lowest_tier() -> None:
-    """``k in cat`` must mean ``cat[k]`` succeeds -- the Mapping contract.
-
-    ``__contains__`` ignored ``min_request_tokens``, so a catalog whose
-    lowest tier starts above the queried size reported membership and
-    then raised on access.
-    """
+def test_the_latest_effective_price_wins() -> None:
     catalog = PriceCatalog(
-        {PriceCatalogProduct("auto", 272_000): TokenPrice(request=1.0)},
+        {
+            PriceKey("auto"): _price(1.0),
+            PriceKey("auto", effective_date=date(2027, 1, 1)): _price(2.0),
+        },
     )
-    key = PriceCatalogProduct("auto", 0)
-    assert (key in catalog) is _resolves(catalog, key)
+    assert (
+        catalog.rate(
+            service_tier="auto",
+            prompt_tokens=1,
+            at=date(2026, 12, 31),
+        ).request
+        == 1.0
+    )
+    assert (
+        catalog.rate(service_tier="auto", prompt_tokens=1, at=date(2027, 1, 1)).request
+        == 2.0
+    )
 
 
-def _resolves(catalog: PriceCatalog, key: PriceCatalogProduct) -> bool:
-    try:
-        _ = catalog[key]
-    except KeyError:
-        return False
-    return True
+def test_a_request_before_any_price_raises() -> None:
+    catalog = PriceCatalog(
+        {PriceKey("auto", effective_date=date(2027, 1, 1)): _price(1.0)},
+    )
+    with pytest.raises(KeyError):
+        _ = catalog.rate(service_tier="auto", prompt_tokens=1, at=_TODAY)
+
+
+def test_an_empty_catalog_raises_rather_than_billing_zero() -> None:
+    with pytest.raises(KeyError):
+        _ = PriceCatalog().rate(service_tier="auto", prompt_tokens=1, at=_TODAY)
+
+
+def test_cost_sizes_the_band_from_the_whole_prompt() -> None:
+    """A mostly-cached 300k prompt is still a long prompt."""
+    cost = _catalog().cost(
+        TokenCount(request=10_000, cache_read=290_000),
+        service_tier="auto",
+        at=_TODAY,
+    )
+    assert cost.request == pytest.approx(0.04)
+
+
+def test_service_tiers_are_the_priced_tiers() -> None:
+    assert _catalog().service_tiers == {"auto", "default", "priority"}
+    assert PriceCatalog().service_tiers == frozenset()
+
+
+def test_indexing_is_exact() -> None:
+    catalog = _catalog()
+    assert catalog[PriceKey("auto", 200_000)].request == 4.0
+    with pytest.raises(KeyError):
+        _ = catalog[PriceKey("auto", 199_999)]
+    assert len(catalog) == 3
+    assert list(catalog) == sorted(catalog)
 
 
 if __name__ == "__main__":

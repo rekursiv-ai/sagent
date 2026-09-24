@@ -26,7 +26,8 @@ from sagent.types.capability import (
 )
 from sagent.types.cost import (
     PriceCatalog,
-    PriceCatalogProduct,
+    PriceKey,
+    ServiceTier,
     TokenPrice,
 )
 
@@ -40,6 +41,7 @@ __all__ = [
     "compatible",
     "models",
     "reasoning_effort",
+    "served_tier",
     "subscription",
     "subscription_models",
 ]
@@ -54,12 +56,12 @@ def compatible() -> ModelCapability:
     """
     return ModelCapability(
         thinking=ThinkingCapability(
-            effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
-            budget={"none", "auto", "fixed"},
-            output={"none", "text", "redacted"},
+            effort=frozenset({"none", "min", "low", "medium", "high", "xhigh", "max"}),
+            budget=frozenset({"none", "auto", "fixed"}),
+            output=frozenset({"none", "text", "redacted"}),
         ),
-        service_tier={"auto"},
-        manage_context_server_side={False},
+        service_tier=frozenset({"auto"}),
+        manage_context_server_side=frozenset({False}),
     )
 
 
@@ -67,10 +69,10 @@ def compatible() -> ModelCapability:
 # transport facts declared on ``API`` / ``SUBSCRIPTION``, since ``&`` can only
 # remove. Every reasoning model takes an auto budget and returns readable text.
 #
-# GPT-5.6 prices verified against the vendor table on 2026-09-04. The family
-# was repriced after this catalog first landed -- Sol $5/$30 -> $4/$20, Luna
-# $1/$6 -> $0.20/$1.20 -- so the old rows over-billed by up to 5x. Sol's rate
-# is promotional "at least through November 21, 2026" and needs rechecking then.
+# Every card is the vendor's published table (standard, flex, and fast tabs),
+# verified 2026-09-24; a model missing from a tab does not offer that tier.
+# Sol 5.6's rate is promotional "at least through November 21, 2026" and needs
+# rechecking then.
 # ``approx_chars_per_token`` measured from SERVER-reported ``usage.input_tokens``
 # on 347k chars of real session text (2026-08-22), differencing out the
 # per-request envelope. 3.71 across the whole range -- the catalog's prior
@@ -98,19 +100,34 @@ def models() -> Mapping[str, ModelCapability]:
             long=1_050_000,
         ),
         prices=_prices(
-            request=4.0,
-            response=20.0,
-            cache_write=5.0,
-            cache_read=0.4,
-            two_tier=True,
+            {
+                "auto": _card(
+                    request=4.0,
+                    cache_read=0.4,
+                    cache_write=5.0,
+                    response=20.0,
+                ),
+                "flex": _card(
+                    request=2.0,
+                    cache_read=0.2,
+                    cache_write=2.5,
+                    response=10.0,
+                ),
+                "priority": _card(
+                    request=8.0,
+                    cache_read=0.8,
+                    cache_write=10.0,
+                    response=40.0,
+                ),
+            },
+            long_context=True,
         ),
-        service_tier=frozenset({"auto", "default", "flex", "priority"}),
         thinking=ThinkingCapability(
             effort=frozenset(
                 {"none", "min", "low", "medium", "high", "xhigh", "max"},
             ),
-            budget={"none", "auto"},
-            output={"none", "text"},
+            budget=frozenset({"none", "auto"}),
+            output=frozenset({"none", "text"}),
         ),
     )
     # Pre-5.6 tiles ``detail:high`` from a 2048px square and caps the body at
@@ -120,10 +137,32 @@ def models() -> Mapping[str, ModelCapability]:
         knowledge_cutoff=None,
         thinking=replace(
             gpt56.thinking,
-            effort={"none", "low", "medium", "high", "xhigh"},
+            effort=frozenset({"none", "low", "medium", "high", "xhigh"}),
         ),
         context=_windowed(request=272_000, response=128_000, long=1_050_000),
-        prices=_prices(request=2.5, response=15.0, cache_read=0.25, two_tier=True),
+        prices=_prices(
+            {
+                "auto": _card(
+                    request=2.5,
+                    cache_read=0.25,
+                    cache_write=0.0,
+                    response=15.0,
+                ),
+                "flex": _card(
+                    request=1.25,
+                    cache_read=0.13,
+                    cache_write=0.0,
+                    response=7.5,
+                ),
+                "priority": _card(
+                    request=5.0,
+                    cache_read=0.5,
+                    cache_write=0.0,
+                    response=30.0,
+                ),
+            },
+            long_context=True,
+        ),
     )
     # No reasoning knob on the 4-x generation.
     gpt4 = replace(
@@ -148,15 +187,31 @@ def models() -> Mapping[str, ModelCapability]:
                 gpt56_images=True,
             ),
             prices=_prices(
-                request=10.0,
-                response=50.0,
-                cache_write=12.5,
-                cache_read=1.0,
-                two_tier=True,
+                {
+                    "auto": _card(
+                        request=10.0,
+                        cache_read=1.0,
+                        cache_write=12.5,
+                        response=50.0,
+                    ),
+                    "flex": _card(
+                        request=5.0,
+                        cache_read=0.5,
+                        cache_write=6.25,
+                        response=25.0,
+                    ),
+                    "priority": _card(
+                        request=20.0,
+                        cache_read=2.0,
+                        cache_write=25.0,
+                        response=100.0,
+                    ),
+                },
+                long_context=True,
             ),
             thinking=replace(
                 gpt56.thinking,
-                effort={"low", "medium", "high", "xhigh", "max"},
+                effort=frozenset({"low", "medium", "high", "xhigh", "max"}),
             ),
         ),
         replace(
@@ -165,11 +220,27 @@ def models() -> Mapping[str, ModelCapability]:
             wire_model_id="gpt-6-sol",
             knowledge_cutoff="April 20, 2026",
             prices=_prices(
-                request=2.0,
-                response=10.0,
-                cache_write=2.5,
-                cache_read=0.2,
-                two_tier=True,
+                {
+                    "auto": _card(
+                        request=2.0,
+                        cache_read=0.2,
+                        cache_write=2.5,
+                        response=10.0,
+                    ),
+                    "flex": _card(
+                        request=1.0,
+                        cache_read=0.1,
+                        cache_write=1.25,
+                        response=5.0,
+                    ),
+                    "priority": _card(
+                        request=4.0,
+                        cache_read=0.4,
+                        cache_write=5.0,
+                        response=20.0,
+                    ),
+                },
+                long_context=True,
             ),
         ),
         replace(
@@ -178,11 +249,27 @@ def models() -> Mapping[str, ModelCapability]:
             wire_model_id="gpt-6-luna",
             knowledge_cutoff="May 18, 2026",
             prices=_prices(
-                request=0.1,
-                response=0.5,
-                cache_write=0.125,
-                cache_read=0.01,
-                two_tier=True,
+                {
+                    "auto": _card(
+                        request=0.1,
+                        cache_read=0.01,
+                        cache_write=0.125,
+                        response=0.5,
+                    ),
+                    "flex": _card(
+                        request=0.05,
+                        cache_read=0.005,
+                        cache_write=0.0625,
+                        response=0.25,
+                    ),
+                    "priority": _card(
+                        request=0.2,
+                        cache_read=0.02,
+                        cache_write=0.25,
+                        response=1.0,
+                    ),
+                },
+                long_context=True,
             ),
         ),
         replace(
@@ -202,11 +289,27 @@ def models() -> Mapping[str, ModelCapability]:
             model_id="luna-5.6",
             wire_model_id="gpt-5.6-luna",
             prices=_prices(
-                request=0.2,
-                response=1.2,
-                cache_write=0.25,
-                cache_read=0.02,
-                two_tier=True,
+                {
+                    "auto": _card(
+                        request=0.2,
+                        cache_read=0.02,
+                        cache_write=0.25,
+                        response=1.2,
+                    ),
+                    "flex": _card(
+                        request=0.1,
+                        cache_read=0.01,
+                        cache_write=0.125,
+                        response=0.6,
+                    ),
+                    "priority": _card(
+                        request=0.4,
+                        cache_read=0.04,
+                        cache_write=0.5,
+                        response=2.4,
+                    ),
+                },
+                long_context=True,
             ),
         ),
         replace(
@@ -214,49 +317,170 @@ def models() -> Mapping[str, ModelCapability]:
             model_id="terra-5.6",
             wire_model_id="gpt-5.6-terra",
             prices=_prices(
-                request=2.0,
-                response=12.0,
-                cache_write=2.5,
-                cache_read=0.2,
-                two_tier=True,
+                {
+                    "auto": _card(
+                        request=2.0,
+                        cache_read=0.2,
+                        cache_write=2.5,
+                        response=12.0,
+                    ),
+                    "flex": _card(
+                        request=1.0,
+                        cache_read=0.1,
+                        cache_write=1.25,
+                        response=6.0,
+                    ),
+                    "priority": _card(
+                        request=4.0,
+                        cache_read=0.4,
+                        cache_write=5.0,
+                        response=24.0,
+                    ),
+                },
+                long_context=True,
             ),
         ),
         replace(
             legacy,
             model_id="gpt-5.5",
             context=_windowed(request=272_000, response=128_000, long=1_000_000),
-            prices=_prices(request=5.0, response=30.0, cache_read=0.5, two_tier=True),
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=5.0,
+                        cache_read=0.5,
+                        cache_write=0.0,
+                        response=30.0,
+                    ),
+                    "flex": _card(
+                        request=2.5,
+                        cache_read=0.25,
+                        cache_write=0.0,
+                        response=15.0,
+                    ),
+                    "priority": _card(
+                        request=12.5,
+                        cache_read=1.25,
+                        cache_write=0.0,
+                        response=75.0,
+                    ),
+                },
+                long_context=True,
+            ),
         ),
         replace(
             legacy,
             model_id="gpt-5.5-pro",
-            thinking=replace(legacy.thinking, effort={"medium", "high", "xhigh"}),
-            prices=_prices(request=30.0, response=180.0, two_tier=True),
+            thinking=replace(
+                legacy.thinking,
+                effort=frozenset({"medium", "high", "xhigh"}),
+            ),
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=30.0,
+                        cache_read=0.0,
+                        cache_write=0.0,
+                        response=180.0,
+                    ),
+                    "flex": _card(
+                        request=15.0,
+                        cache_read=0.0,
+                        cache_write=0.0,
+                        response=90.0,
+                    ),
+                },
+                long_context=True,
+            ),
         ),
         replace(legacy, model_id="gpt-5.4"),
         replace(
             legacy,
             model_id="gpt-5.4-pro",
-            thinking=replace(legacy.thinking, effort={"medium", "high", "xhigh"}),
-            prices=_prices(request=30.0, response=180.0, two_tier=True),
+            thinking=replace(
+                legacy.thinking,
+                effort=frozenset({"medium", "high", "xhigh"}),
+            ),
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=30.0,
+                        cache_read=0.0,
+                        cache_write=0.0,
+                        response=180.0,
+                    ),
+                    "flex": _card(
+                        request=15.0,
+                        cache_read=0.0,
+                        cache_write=0.0,
+                        response=90.0,
+                    ),
+                },
+                long_context=True,
+            ),
         ),
         replace(
             legacy,
             model_id="gpt-5.4-mini",
             context=_context(request=400_000, response=128_000),
-            prices=_prices(request=0.75, response=4.5, cache_read=0.075),
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=0.75,
+                        cache_read=0.075,
+                        cache_write=0.0,
+                        response=4.5,
+                    ),
+                    "flex": _card(
+                        request=0.375,
+                        cache_read=0.0375,
+                        cache_write=0.0,
+                        response=2.25,
+                    ),
+                    "priority": _card(
+                        request=1.5,
+                        cache_read=0.15,
+                        cache_write=0.0,
+                        response=9.0,
+                    ),
+                },
+            ),
         ),
         replace(
             legacy,
             model_id="gpt-5.4-nano",
             context=_context(request=400_000, response=128_000),
-            prices=_prices(request=0.2, response=1.25, cache_read=0.02),
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=0.2,
+                        cache_read=0.02,
+                        cache_write=0.0,
+                        response=1.25,
+                    ),
+                    "flex": _card(
+                        request=0.1,
+                        cache_read=0.01,
+                        cache_write=0.0,
+                        response=0.625,
+                    ),
+                },
+            ),
         ),
         replace(
             legacy,
             model_id="gpt-5.3-codex",
             context=_context(request=400_000, response=128_000),
-            prices=_prices(request=1.75, response=14.0, cache_read=0.175),
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=1.75,
+                        cache_read=0.175,
+                        cache_write=0.0,
+                        response=14.0,
+                    ),
+                },
+            ),
         ),
         # No `*-chat-latest` row. Those aliases are listed by `/v1/models` but
         # rejected by `/v1/responses` with `model_not_found` (verified for
@@ -267,65 +491,205 @@ def models() -> Mapping[str, ModelCapability]:
             legacy,
             model_id="gpt-5.2",
             context=_context(request=400_000, response=128_000),
-            prices=_prices(request=1.75, response=14.0, cache_read=0.175),
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=1.75,
+                        cache_read=0.175,
+                        cache_write=0.0,
+                        response=14.0,
+                    ),
+                    "flex": _card(
+                        request=0.875,
+                        cache_read=0.0875,
+                        cache_write=0.0,
+                        response=7.0,
+                    ),
+                    "priority": _card(
+                        request=3.5,
+                        cache_read=0.35,
+                        cache_write=0.0,
+                        response=28.0,
+                    ),
+                },
+            ),
         ),
         replace(
             legacy,
             model_id="o1",
-            thinking=replace(legacy.thinking, effort={"low", "medium", "high"}),
+            thinking=replace(
+                legacy.thinking,
+                effort=frozenset({"low", "medium", "high"}),
+            ),
             context=_context(request=200_000, response=100_000),
-            prices=_prices(request=15.0, response=60.0, cache_read=7.5),
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=15.0,
+                        cache_read=7.5,
+                        cache_write=0.0,
+                        response=60.0,
+                    ),
+                },
+            ),
         ),
         replace(
             legacy,
             model_id="o3-mini",
-            thinking=replace(legacy.thinking, effort={"low", "medium", "high"}),
+            thinking=replace(
+                legacy.thinking,
+                effort=frozenset({"low", "medium", "high"}),
+            ),
             context=_context(request=200_000, response=100_000),
-            prices=_prices(request=1.1, response=4.4, cache_read=0.55),
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=1.1,
+                        cache_read=0.55,
+                        cache_write=0.0,
+                        response=4.4,
+                    ),
+                },
+            ),
         ),
         replace(
             gpt4,
             model_id="gpt-4.1",
             context=_windowed(request=1_047_576, response=32_768, long=1_047_576),
-            prices=_prices(request=2.0, response=8.0, cache_read=0.5),
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=2.0,
+                        cache_read=0.5,
+                        cache_write=0.0,
+                        response=8.0,
+                    ),
+                    "priority": _card(
+                        request=3.5,
+                        cache_read=0.875,
+                        cache_write=0.0,
+                        response=14.0,
+                    ),
+                },
+            ),
         ),
         replace(
             gpt4,
             model_id="gpt-4.1-mini",
             context=_windowed(request=1_047_576, response=32_768, long=1_047_576),
-            prices=_prices(request=0.4, response=1.6, cache_read=0.1),
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=0.4,
+                        cache_read=0.1,
+                        cache_write=0.0,
+                        response=1.6,
+                    ),
+                    "priority": _card(
+                        request=0.7,
+                        cache_read=0.175,
+                        cache_write=0.0,
+                        response=2.8,
+                    ),
+                },
+            ),
         ),
         replace(
             gpt4,
             model_id="gpt-4.1-nano",
             context=_windowed(request=1_047_576, response=32_768, long=1_047_576),
-            prices=_prices(request=0.1, response=0.4, cache_read=0.025),
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=0.1,
+                        cache_read=0.025,
+                        cache_write=0.0,
+                        response=0.4,
+                    ),
+                    "priority": _card(
+                        request=0.2,
+                        cache_read=0.05,
+                        cache_write=0.0,
+                        response=0.8,
+                    ),
+                },
+            ),
         ),
         replace(
             gpt4,
             model_id="gpt-4o",
             context=_context(request=128_000, response=16_384),
-            prices=_prices(request=2.5, response=10.0, cache_read=1.25),
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=2.5,
+                        cache_read=1.25,
+                        cache_write=0.0,
+                        response=10.0,
+                    ),
+                    "priority": _card(
+                        request=4.25,
+                        cache_read=2.125,
+                        cache_write=0.0,
+                        response=17.0,
+                    ),
+                },
+            ),
         ),
         replace(
             gpt4,
             model_id="gpt-4o-mini",
             context=_context(request=128_000, response=16_384),
-            prices=_prices(request=0.15, response=0.6, cache_read=0.075),
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=0.15,
+                        cache_read=0.075,
+                        cache_write=0.0,
+                        response=0.6,
+                    ),
+                    "priority": _card(
+                        request=0.25,
+                        cache_read=0.125,
+                        cache_write=0.0,
+                        response=1.0,
+                    ),
+                },
+            ),
         ),
         replace(
             gpt4,
             model_id="gpt-4-turbo",
             context=_context(request=128_000, response=4_096),
-            prices=_prices(request=10.0, response=30.0),
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=10.0,
+                        cache_read=0.0,
+                        cache_write=0.0,
+                        response=30.0,
+                    ),
+                },
+            ),
         ),
         replace(
             gpt4,
             model_id="gpt-4",
             context=_context(request=8_192, response=8_192),
-            prices=_prices(request=30.0, response=60.0),
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=30.0,
+                        cache_read=0.0,
+                        cache_write=0.0,
+                        response=60.0,
+                    ),
+                },
+            ),
         ),
     )
+    # A tier is offered exactly when it is priced.
+    rows = tuple(replace(row, service_tier=row.prices.service_tiers) for row in rows)
     catalog = {row.model_id: row for row in rows}
     return MappingProxyType(
         {
@@ -383,11 +747,11 @@ def api() -> ModelCapability:
     """
     return ModelCapability(
         thinking=ThinkingCapability(
-            effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
-            budget={"none", "auto", "fixed"},
-            output={"none", "text", "redacted"},
+            effort=frozenset({"none", "min", "low", "medium", "high", "xhigh", "max"}),
+            budget=frozenset({"none", "auto", "fixed"}),
+            output=frozenset({"none", "text", "redacted"}),
         ),
-        service_tier={"auto", "default", "flex", "priority"},
+        service_tier=frozenset({"auto", "default", "flex", "priority"}),
     )
 
 
@@ -408,11 +772,11 @@ def subscription() -> ModelCapability:
     # ``ModelSettings()`` invalid on every Codex model.
     return ModelCapability(
         thinking=ThinkingCapability(
-            effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
-            budget={"none", "auto", "fixed"},
-            output={"none", "text", "redacted"},
+            effort=frozenset({"none", "min", "low", "medium", "high", "xhigh", "max"}),
+            budget=frozenset({"none", "auto", "fixed"}),
+            output=frozenset({"none", "text", "redacted"}),
         ),
-        service_tier={"auto", "priority"},
+        service_tier=frozenset({"auto", "priority"}),
         account_auth=True,
     )
 
@@ -441,6 +805,30 @@ def subscription_models() -> Mapping[str, ModelCapability]:
             ),
         )
     return MappingProxyType(rows)
+
+
+def served_tier(reported: str | None) -> ServiceTier:
+    """Map the ``service_tier`` a response reports to the tier it bills at.
+
+    Args:
+      reported: The response's ``service_tier``; absent means standard.
+
+    Returns:
+      tier: Catalog tier whose card priced the request.
+
+    Raises:
+      ValueError: A tier this catalog cannot price.
+
+    """
+    match reported:
+        case None | "auto" | "default":
+            return "auto"
+        case "flex":
+            return "flex"
+        case "priority" | "fast":
+            return "priority"
+        case _:
+            raise ValueError(f"unpriced OpenAI service_tier {reported!r}")
 
 
 def _one(*, request: int, response: int, gpt56_images: bool = False) -> ModelLimits:
@@ -492,34 +880,42 @@ def _windowed(
     return MappingProxyType(context)
 
 
-def _prices(
+def _card(
     *,
     request: float,
+    cache_read: float,
+    cache_write: float,
     response: float,
-    cache_write: float = 0.0,
-    cache_read: float = 0.0,
-    two_tier: bool = False,
+) -> TokenPrice:
+    """Return one published price-table row; OpenAI has one cache-write lifetime."""
+    return TokenPrice(
+        request=request,
+        response=response,
+        cache_write=cache_write,
+        cache_write_1h=0.0,
+        cache_read=cache_read,
+    )
+
+
+# "Prompts with >272K input tokens are priced at 2x input and 1.5x output for
+# the full request" -- every model page states it as this ratio, and the tables
+# publish the long column only for GPT-6, where it matches.
+def _prices(
+    tiers: Mapping[ServiceTier, TokenPrice],
+    *,
+    long_context: bool = False,
 ) -> PriceCatalog:
-    """USD per million tokens, plus the >272K surcharge row when two-tier."""
-    # Prompts above 272K input tokens bill at 2x input / 1.5x output for the
-    # whole request on gpt-5.4 and later. The untagged id exposes the full
-    # window; ``+272k`` keeps requests below the surcharge threshold.
-    two_tier_floor = 272_000
-    rows = {
-        PriceCatalogProduct(): TokenPrice(
-            request=request,
-            response=response,
-            cache_write=cache_write,
-            cache_read=cache_read,
-        ),
-    }
-    if two_tier:
-        # The >272K surcharge applies the input multiplier to all three input
-        # pools and the output multiplier to the whole response.
-        rows[PriceCatalogProduct(min_request_tokens=two_tier_floor)] = TokenPrice(
-            request=request * 2.0,
-            response=response * 1.5,
-            cache_write=cache_write * 2.0,
-            cache_read=cache_read * 2.0,
-        )
-    return PriceCatalog(rows)
+    """Return each tier's published card, plus its >272K band when it has one."""
+    cards = {PriceKey(tier): card for tier, card in tiers.items()}
+    if long_context:
+        cards |= {
+            PriceKey(tier, 272_000): replace(
+                card,
+                request=card.request * 2.0,
+                cache_write=card.cache_write * 2.0,
+                cache_read=card.cache_read * 2.0,
+                response=card.response * 1.5,
+            )
+            for tier, card in tiers.items()
+        }
+    return PriceCatalog(cards)

@@ -1,26 +1,27 @@
 """Token count, price, and cost calculus.
 
-Three parallel shapes over the same four token buckets: ``TokenCount``
+Three parallel shapes over the same five token meters: ``TokenCount``
 (integers), ``TokenPrice`` (USD per ``tokens_per_unit``), and
 ``TokenCost`` (USD). ``TokenPrice * TokenCount -> TokenCost``; the
 illegal products are absent methods rather than runtime checks.
 
-``PriceCatalog`` maps a ``PriceCatalogProduct`` -- the (service tier,
-request size) pair a vendor prices on -- to a ``TokenPrice``, resolving a
-request size to the highest tier at or below it.
+``PriceCatalog`` maps a ``PriceKey`` -- service tier, prompt-size band, and
+effective date -- to the ``TokenPrice`` a vendor publishes for it, and
+resolves one request to exactly one of them. There is no fallback: a tier
+or date nothing prices raises rather than billing some other rate.
 """
 
 from __future__ import annotations
 
-from bisect import bisect_right
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, replace
+from datetime import date
 from typing import Literal, NamedTuple, Self, override
 
 
 __all__ = [
     "PriceCatalog",
-    "PriceCatalogProduct",
+    "PriceKey",
     "ServiceTier",
     "TokenCost",
     "TokenCount",
@@ -34,28 +35,37 @@ type ServiceTier = Literal["auto", "default", "flex", "priority"]
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TokenStats[T: (int, float)]:
-    """Four token buckets, shared by counts, prices, and costs.
+    """Five token meters, shared by counts, prices, and costs.
 
-    Subclasses carry the defaults: pyright rejects ``Literal[0]`` against
-    an unbound TypeVar (microsoft/pyright#11226).
+    The four input meters are disjoint: a prompt token is exactly one of
+    uncached, cache-written (either lifetime), or cache-read.
     """
 
     request: T
-    """Non-cached prompt tokens; disjoint from the two cache pools."""
+    """Uncached prompt tokens."""
 
     response: T
-    """Generated output tokens."""
+    """Generated output tokens, reasoning included."""
 
     cache_write: T
-    """Tokens spent creating prompt-cache entries."""
+    """Prompt tokens written to cache at the vendor's default lifetime."""
+
+    cache_write_1h: T
+    """Prompt tokens written to cache at a one-hour lifetime."""
 
     cache_read: T
-    """Tokens served from prompt cache."""
+    """Prompt tokens served from cache."""
 
     @property
     def total(self) -> T:
-        """Sum across all four buckets."""
-        return self.request + self.response + self.cache_write + self.cache_read
+        """Sum across all five meters."""
+        return (
+            self.request
+            + self.response
+            + self.cache_write
+            + self.cache_write_1h
+            + self.cache_read
+        )
 
     def __add__(self, other: Self) -> Self:
         """Add two token stats, handling non-matching types gracefully."""
@@ -70,6 +80,7 @@ class TokenStats[T: (int, float)]:
             request=self.request + other.request,
             response=self.response + other.response,
             cache_write=self.cache_write + other.cache_write,
+            cache_write_1h=self.cache_write_1h + other.cache_write_1h,
             cache_read=self.cache_read + other.cache_read,
         )
 
@@ -83,6 +94,7 @@ class TokenStats[T: (int, float)]:
             request=self._floor(self.request - other.request),
             response=self._floor(self.response - other.response),
             cache_write=self._floor(self.cache_write - other.cache_write),
+            cache_write_1h=self._floor(self.cache_write_1h - other.cache_write_1h),
             cache_read=self._floor(self.cache_read - other.cache_read),
         )
 
@@ -94,25 +106,23 @@ class TokenStats[T: (int, float)]:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TokenCount(TokenStats[int]):
-    """Tokens billed, by bucket.
+    """Tokens billed, by meter.
 
-    ``request`` excludes ``cache_read`` and ``cache_write``: the three
-    pools are disjoint, so the full prompt the server counted is their
-    sum. A provider whose API reports a cache-inclusive total (OpenAI,
-    Google) subtracts the cached portion at construction.
+    ``request`` excludes both cache pools. A provider whose API reports a
+    cache-inclusive total (OpenAI, Google) subtracts the cached portion at
+    construction.
     """
 
     request: int = 0
-    """Non-cached prompt tokens."""
-
     response: int = 0
-    """Generated output tokens."""
-
     cache_write: int = 0
-    """Tokens written to prompt cache."""
-
+    cache_write_1h: int = 0
     cache_read: int = 0
-    """Tokens served from prompt cache."""
+
+    @property
+    def prompt(self) -> int:
+        """Every prompt token the server counted, cached or not."""
+        return self.request + self.cache_write + self.cache_write_1h + self.cache_read
 
     @override
     @classmethod
@@ -126,142 +136,148 @@ class TokenCount(TokenStats[int]):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TokenCost(TokenStats[float]):
-    """USD spent, by bucket."""
+    """USD spent, by meter."""
 
     request: float = 0.0
-    """USD spent on non-cached prompt tokens."""
-
     response: float = 0.0
-    """USD spent on generated output tokens."""
-
     cache_write: float = 0.0
-    """USD spent writing prompt-cache entries."""
-
+    cache_write_1h: float = 0.0
     cache_read: float = 0.0
-    """USD spent reading from prompt cache."""
 
 
+# No defaults on the rates: a meter left unstated would bill $0, which is how
+# an unpriced cache pool went free. A vendor that charges nothing says ``0.0``.
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TokenPrice(TokenStats[float]):
-    """USD per ``tokens_per_unit`` tokens, by bucket."""
-
-    request: float = 0.0
-    """USD per unit of non-cached prompt tokens."""
-
-    response: float = 0.0
-    """USD per unit of generated output tokens."""
-
-    cache_write: float = 0.0
-    """USD per unit of tokens written to prompt cache."""
-
-    cache_read: float = 0.0
-    """USD per unit of tokens served from prompt cache."""
+    """USD per ``tokens_per_unit`` tokens, by meter, as the vendor publishes it."""
 
     tokens_per_unit: int = 1_000_000
     """Tokens each rate is quoted per; vendors publish per million."""
 
     def __mul__(self, tokens: TokenCount) -> TokenCost:
         """Multiply price by token count to get cost."""
+        unit = self.tokens_per_unit
         return TokenCost(
-            request=self.request * tokens.request / self.tokens_per_unit,
-            response=self.response * tokens.response / self.tokens_per_unit,
-            cache_write=self.cache_write * tokens.cache_write / self.tokens_per_unit,
-            cache_read=self.cache_read * tokens.cache_read / self.tokens_per_unit,
+            request=self.request * tokens.request / unit,
+            response=self.response * tokens.response / unit,
+            cache_write=self.cache_write * tokens.cache_write / unit,
+            cache_write_1h=self.cache_write_1h * tokens.cache_write_1h / unit,
+            cache_read=self.cache_read * tokens.cache_read / unit,
         )
 
     __rmul__ = __mul__
 
 
-class PriceCatalogProduct(NamedTuple):
-    """The billable product a vendor quotes a ``TokenPrice`` for."""
+class PriceKey(NamedTuple):
+    """The conditions under which one ``TokenPrice`` applies."""
 
-    service_tier: ServiceTier = "auto"
-    """Which speed/price tier this row prices."""
+    service_tier: ServiceTier
+    """Tier that was served; ``auto`` is the vendor's standard rate."""
 
-    min_request_tokens: int = 0
-    """Prompt size at which this row takes over from the one below."""
+    effective_prompt_tokens: int = 0
+    """Applies to prompts LARGER than this; the lowest band covers every size."""
+
+    effective_date: date = date.min
+    """Applies to requests on or after this date."""
 
 
-class PriceCatalog(Mapping[PriceCatalogProduct, TokenPrice]):
-    """Ordered price table with floor lookup on ``min_request_tokens``.
+class PriceCatalog(Mapping[PriceKey, TokenPrice]):
+    """A model's published price table.
 
-    A vendor's long-context surcharge is a step function: the price for
-    a 300k-token request is the tier declared at or below 300k. A plain
-    dict cannot answer that predecessor query, so keys are kept sorted
-    and resolved with ``bisect_right``.
-
-    A lookup that finds no tier raises ``KeyError`` rather than
-    returning a zero price, so a missing row cannot silently bill $0.
+    Indexing is exact, like any mapping; :meth:`rate` answers "which price
+    did this request pay", and raises rather than guess when nothing does.
     """
 
-    def __init__(
-        self,
-        prices: Mapping[PriceCatalogProduct, TokenPrice] | None = None,
-    ) -> None:
+    def __init__(self, prices: Mapping[PriceKey, TokenPrice] | None = None) -> None:
         """Build the catalog.
 
         Args:
-          prices: Declared tiers. Order is irrelevant; keys are sorted.
+          prices: Every published (tier, band, date) and its rates.
 
         """
-        self._prices: dict[PriceCatalogProduct, TokenPrice] = dict(
-            sorted((prices or {}).items()),
-        )
-        self._by_tier: dict[ServiceTier, list[PriceCatalogProduct]] = {}
-        for key in self._prices:
-            self._by_tier.setdefault(key.service_tier, []).append(key)
+        self._prices: dict[PriceKey, TokenPrice] = dict(sorted((prices or {}).items()))
 
-    @override
-    def __getitem__(self, key: PriceCatalogProduct) -> TokenPrice:
-        keys = self._by_tier.get(key.service_tier, [])
-        i = bisect_right(keys, key)
-        if i:
-            return self._prices[keys[i - 1]]
-        # A tier a vendor does not price separately bills at its standard
-        # rate. Falling back rather than raising keeps a catalog from having
-        # to restate every row per tier.
-        if key.service_tier != "auto":
-            return self[PriceCatalogProduct("auto", key.min_request_tokens)]
-        raise KeyError(key)
+    @property
+    def service_tiers(self) -> frozenset[ServiceTier]:
+        """Tiers this table prices, plus ``default`` wherever ``auto`` is priced.
+
+        ``default`` is the explicit request for the standard tier, so it
+        bills whatever ``auto`` bills.
+        """
+        tiers: set[ServiceTier] = {key.service_tier for key in self._prices}
+        if "auto" in tiers:
+            tiers.add("default")
+        return frozenset(tiers)
+
+    def rate(
+        self,
+        *,
+        service_tier: ServiceTier,
+        prompt_tokens: int,
+        at: date,
+    ) -> TokenPrice:
+        """Return the price one request paid.
+
+        Args:
+          service_tier: Tier the server reports it served.
+          prompt_tokens: The request's whole prompt, every cache pool included.
+          at: Day the request was served.
+
+        Returns:
+          price: The latest-effective rate of the prompt's size band.
+
+        Raises:
+          KeyError: Nothing prices this tier on this date.
+
+        """
+        tier: ServiceTier = "auto" if service_tier == "default" else service_tier
+        # A key sorts by (tier, band, date), so the last match is the highest
+        # band the prompt exceeds, at its latest effective date. The base
+        # band (0) matches every prompt, an empty one included.
+        matches = [
+            key
+            for key in self._prices
+            if key.service_tier == tier
+            and key.effective_date <= at
+            and (
+                key.effective_prompt_tokens < prompt_tokens
+                or key.effective_prompt_tokens == 0
+            )
+        ]
+        if not matches:
+            raise KeyError(PriceKey(tier, prompt_tokens, at))
+        return self._prices[matches[-1]]
 
     def cost(
         self,
         tokens: TokenCount,
         *,
-        service_tier: ServiceTier = "auto",
+        service_tier: ServiceTier,
+        at: date,
     ) -> TokenCost:
-        """Price ONE request's ``tokens`` at the tier its whole prompt selects.
-
-        Vendors size the long-context tier from the full prompt -- cached
-        pools included -- of a single request. Summing requests first, or
-        sizing by the uncached pool alone, picks the wrong tier.
+        """Price ONE request's ``tokens`` at the band its whole prompt selects.
 
         Args:
-          tokens: One request's usage.
-          service_tier: Tier the request was served at.
+          tokens: One request's usage. Summing requests first would size the
+              band from the session rather than the request.
+          service_tier: Tier the server reports it served.
+          at: Day the request was served.
 
         Returns:
-          cost: USD, by bucket.
+          cost: USD, by meter.
 
         """
-        prompt = tokens.request + tokens.cache_write + tokens.cache_read
-        return self[PriceCatalogProduct(service_tier, prompt)] * tokens
+        return (
+            self.rate(service_tier=service_tier, prompt_tokens=tokens.prompt, at=at)
+            * tokens
+        )
 
     @override
-    def __contains__(self, key: object) -> bool:
-        # Defined as "the lookup succeeds" rather than re-deriving the floor
-        # rule: a second copy drifted, reporting membership for a key whose
-        # tier starts above it and then raising on access.
-        if not isinstance(key, PriceCatalogProduct):
-            return False
-        try:
-            _ = self[key]
-        except KeyError:
-            return False
-        return True
+    def __getitem__(self, key: PriceKey) -> TokenPrice:
+        return self._prices[key]
 
     @override
-    def __iter__(self) -> Iterator[PriceCatalogProduct]:
+    def __iter__(self) -> Iterator[PriceKey]:
         return iter(self._prices)
 
     @override
