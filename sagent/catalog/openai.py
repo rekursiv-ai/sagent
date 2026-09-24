@@ -87,135 +87,60 @@ def models() -> Mapping[str, ModelCapability]:
       models: Capability per base model id.
 
     """
-    # A GPT-5.6 row: every model below is this one with its window, price,
-    # and reasoning axes replaced. 5.6 bills images by 32x32 patch and takes
-    # a far larger request body than the generations before it.
-    gpt56 = ModelCapability(
+    # The reference row: every other model states only how it differs from it.
+    # Every GPT-6 rule here was measured on this id alone, so a later GPT-6
+    # whose contract differs does not inherit a limit nothing verified for it.
+    default = ModelCapability(
+        model_id="astra-6",
+        wire_model_id="gpt-6-astra",
+        knowledge_cutoff="April 30, 2026",
         approx_chars_per_token=3.71,
-        knowledge_cutoff="February 16, 2026",
-        context=_windowed(
-            request=272_000,
-            response=128_000,
-            gpt56_images=True,
-            long=1_050_000,
-        ),
+        context=_limits(),
         prices=_prices(
             {
                 "auto": _card(
-                    request=4.0,
-                    cache_read=0.4,
-                    cache_write=5.0,
-                    response=20.0,
+                    request=10.0,
+                    response=50.0,
+                    cache_write=12.5,
+                    cache_read=1.0,
                 ),
                 "flex": _card(
-                    request=2.0,
-                    cache_read=0.2,
-                    cache_write=2.5,
-                    response=10.0,
+                    request=5.0,
+                    response=25.0,
+                    cache_write=6.25,
+                    cache_read=0.5,
                 ),
                 "priority": _card(
-                    request=8.0,
-                    cache_read=0.8,
-                    cache_write=10.0,
-                    response=40.0,
+                    request=20.0,
+                    response=100.0,
+                    cache_write=25.0,
+                    cache_read=2.0,
                 ),
             },
             long_context=True,
         ),
+        # Measured against the live API 2026-09-04: ``reasoning.effort`` takes
+        # low..max but rejects ``none`` and ``minimal``.
         thinking=ThinkingCapability(
-            effort=frozenset(
-                {"none", "min", "low", "medium", "high", "xhigh", "max"},
-            ),
+            effort=frozenset({"low", "medium", "high", "xhigh", "max"}),
             budget=frozenset({"none", "auto"}),
             output=frozenset({"none", "text"}),
         ),
     )
-    # Pre-5.6 tiles ``detail:high`` from a 2048px square and caps the body at
-    # 20MB.
-    legacy = replace(
-        gpt56,
-        knowledge_cutoff=None,
-        thinking=replace(
-            gpt56.thinking,
-            effort=frozenset({"none", "low", "medium", "high", "xhigh"}),
-        ),
-        context=_windowed(request=272_000, response=128_000, long=1_050_000),
-        prices=_prices(
-            {
-                "auto": _card(
-                    request=2.5,
-                    cache_read=0.25,
-                    cache_write=0.0,
-                    response=15.0,
-                ),
-                "flex": _card(
-                    request=1.25,
-                    cache_read=0.13,
-                    cache_write=0.0,
-                    response=7.5,
-                ),
-                "priority": _card(
-                    request=5.0,
-                    cache_read=0.5,
-                    cache_write=0.0,
-                    response=30.0,
-                ),
-            },
-            long_context=True,
-        ),
+    # The rest of GPT-6 and all of GPT-5.6 also take ``none`` and ``min``.
+    full = replace(
+        default.thinking,
+        effort=frozenset({"none", "min", "low", "medium", "high", "xhigh", "max"}),
     )
-    # No reasoning knob on the 4-x generation.
-    gpt4 = replace(
-        legacy,
-        thinking=ThinkingCapability(),
+    # Pre-5.6: no ``min``, no ``max``.
+    legacy = replace(
+        default.thinking,
+        effort=frozenset({"none", "low", "medium", "high", "xhigh"}),
     )
     rows = (
-        # Measured against the live API 2026-09-04: ``reasoning.effort``
-        # takes low..max but rejects ``none`` and ``minimal``.
-        # Every GPT-6 rule here was measured on this id alone, so each names
-        # it exactly rather than the generation: a later GPT-6 whose contract
-        # differs would otherwise inherit a limit nothing verified for it.
+        default,
         replace(
-            gpt56,
-            model_id="astra-6",
-            wire_model_id="gpt-6-astra",
-            knowledge_cutoff="April 30, 2026",
-            context=_windowed(
-                request=272_000,
-                response=128_000,
-                long=1_050_000,
-                gpt56_images=True,
-            ),
-            prices=_prices(
-                {
-                    "auto": _card(
-                        request=10.0,
-                        cache_read=1.0,
-                        cache_write=12.5,
-                        response=50.0,
-                    ),
-                    "flex": _card(
-                        request=5.0,
-                        cache_read=0.5,
-                        cache_write=6.25,
-                        response=25.0,
-                    ),
-                    "priority": _card(
-                        request=20.0,
-                        cache_read=2.0,
-                        cache_write=25.0,
-                        response=100.0,
-                    ),
-                },
-                long_context=True,
-            ),
-            thinking=replace(
-                gpt56.thinking,
-                effort=frozenset({"low", "medium", "high", "xhigh", "max"}),
-            ),
-        ),
-        replace(
-            gpt56,
+            default,
             model_id="sol-6",
             wire_model_id="gpt-6-sol",
             knowledge_cutoff="April 20, 2026",
@@ -223,28 +148,29 @@ def models() -> Mapping[str, ModelCapability]:
                 {
                     "auto": _card(
                         request=2.0,
-                        cache_read=0.2,
-                        cache_write=2.5,
                         response=10.0,
+                        cache_write=2.5,
+                        cache_read=0.2,
                     ),
                     "flex": _card(
                         request=1.0,
-                        cache_read=0.1,
-                        cache_write=1.25,
                         response=5.0,
+                        cache_write=1.25,
+                        cache_read=0.1,
                     ),
                     "priority": _card(
                         request=4.0,
-                        cache_read=0.4,
-                        cache_write=5.0,
                         response=20.0,
+                        cache_write=5.0,
+                        cache_read=0.4,
                     ),
                 },
                 long_context=True,
             ),
+            thinking=full,
         ),
         replace(
-            gpt56,
+            default,
             model_id="luna-6",
             wire_model_id="gpt-6-luna",
             knowledge_cutoff="May 18, 2026",
@@ -252,235 +178,345 @@ def models() -> Mapping[str, ModelCapability]:
                 {
                     "auto": _card(
                         request=0.1,
-                        cache_read=0.01,
-                        cache_write=0.125,
                         response=0.5,
+                        cache_write=0.125,
+                        cache_read=0.01,
                     ),
                     "flex": _card(
                         request=0.05,
-                        cache_read=0.005,
-                        cache_write=0.0625,
                         response=0.25,
+                        cache_write=0.0625,
+                        cache_read=0.005,
                     ),
                     "priority": _card(
                         request=0.2,
-                        cache_read=0.02,
-                        cache_write=0.25,
                         response=1.0,
+                        cache_write=0.25,
+                        cache_read=0.02,
                     ),
                 },
                 long_context=True,
             ),
+            thinking=full,
         ),
         replace(
-            gpt56,
+            default,
             model_id="sol-5.6",
             wire_model_id="gpt-5.6-sol",
+            knowledge_cutoff="February 16, 2026",
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=4.0,
+                        response=20.0,
+                        cache_write=5.0,
+                        cache_read=0.4,
+                    ),
+                    "flex": _card(
+                        request=2.0,
+                        response=10.0,
+                        cache_write=2.5,
+                        cache_read=0.2,
+                    ),
+                    "priority": _card(
+                        request=8.0,
+                        response=40.0,
+                        cache_write=10.0,
+                        cache_read=0.8,
+                    ),
+                },
+                long_context=True,
+            ),
+            thinking=full,
         ),
         # Absent from ``GET /v1/models`` yet serves ``POST /v1/responses``
         # normally. Listing is an entitlement view, not the model set, so a
         # row must be dropped only on ``model_not_found`` from a real call.
         replace(
-            gpt56,
+            default,
             model_id="gpt-5.6",
-        ),
-        replace(
-            gpt56,
-            model_id="luna-5.6",
-            wire_model_id="gpt-5.6-luna",
+            wire_model_id="gpt-5.6",
+            knowledge_cutoff="February 16, 2026",
             prices=_prices(
                 {
                     "auto": _card(
-                        request=0.2,
-                        cache_read=0.02,
-                        cache_write=0.25,
-                        response=1.2,
+                        request=4.0,
+                        response=20.0,
+                        cache_write=5.0,
+                        cache_read=0.4,
                     ),
                     "flex": _card(
-                        request=0.1,
-                        cache_read=0.01,
-                        cache_write=0.125,
-                        response=0.6,
+                        request=2.0,
+                        response=10.0,
+                        cache_write=2.5,
+                        cache_read=0.2,
                     ),
                     "priority": _card(
-                        request=0.4,
-                        cache_read=0.04,
-                        cache_write=0.5,
-                        response=2.4,
+                        request=8.0,
+                        response=40.0,
+                        cache_write=10.0,
+                        cache_read=0.8,
                     ),
                 },
                 long_context=True,
             ),
+            thinking=full,
         ),
         replace(
-            gpt56,
+            default,
+            model_id="luna-5.6",
+            wire_model_id="gpt-5.6-luna",
+            knowledge_cutoff="February 16, 2026",
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=0.2,
+                        response=1.2,
+                        cache_write=0.25,
+                        cache_read=0.02,
+                    ),
+                    "flex": _card(
+                        request=0.1,
+                        response=0.6,
+                        cache_write=0.125,
+                        cache_read=0.01,
+                    ),
+                    "priority": _card(
+                        request=0.4,
+                        response=2.4,
+                        cache_write=0.5,
+                        cache_read=0.04,
+                    ),
+                },
+                long_context=True,
+            ),
+            thinking=full,
+        ),
+        replace(
+            default,
             model_id="terra-5.6",
             wire_model_id="gpt-5.6-terra",
+            knowledge_cutoff="February 16, 2026",
             prices=_prices(
                 {
                     "auto": _card(
                         request=2.0,
-                        cache_read=0.2,
-                        cache_write=2.5,
                         response=12.0,
+                        cache_write=2.5,
+                        cache_read=0.2,
                     ),
                     "flex": _card(
                         request=1.0,
-                        cache_read=0.1,
-                        cache_write=1.25,
                         response=6.0,
+                        cache_write=1.25,
+                        cache_read=0.1,
                     ),
                     "priority": _card(
                         request=4.0,
-                        cache_read=0.4,
-                        cache_write=5.0,
                         response=24.0,
+                        cache_write=5.0,
+                        cache_read=0.4,
                     ),
                 },
                 long_context=True,
             ),
+            thinking=full,
         ),
         replace(
-            legacy,
+            default,
             model_id="gpt-5.5",
-            context=_windowed(request=272_000, response=128_000, long=1_000_000),
+            wire_model_id="gpt-5.5",
+            knowledge_cutoff=None,
+            context=_limits(max_tokens=1_000_000, patch_images=False),
             prices=_prices(
                 {
                     "auto": _card(
                         request=5.0,
-                        cache_read=0.5,
-                        cache_write=0.0,
                         response=30.0,
+                        cache_write=0.0,
+                        cache_read=0.5,
                     ),
                     "flex": _card(
                         request=2.5,
-                        cache_read=0.25,
-                        cache_write=0.0,
                         response=15.0,
+                        cache_write=0.0,
+                        cache_read=0.25,
                     ),
                     "priority": _card(
                         request=12.5,
-                        cache_read=1.25,
-                        cache_write=0.0,
                         response=75.0,
+                        cache_write=0.0,
+                        cache_read=1.25,
                     ),
                 },
                 long_context=True,
             ),
+            thinking=legacy,
         ),
         replace(
-            legacy,
+            default,
             model_id="gpt-5.5-pro",
-            thinking=replace(
-                legacy.thinking,
-                effort=frozenset({"medium", "high", "xhigh"}),
-            ),
+            wire_model_id="gpt-5.5-pro",
+            knowledge_cutoff=None,
+            context=_limits(patch_images=False),
             prices=_prices(
                 {
                     "auto": _card(
                         request=30.0,
-                        cache_read=0.0,
-                        cache_write=0.0,
                         response=180.0,
+                        cache_write=0.0,
+                        cache_read=0.0,
                     ),
                     "flex": _card(
                         request=15.0,
-                        cache_read=0.0,
-                        cache_write=0.0,
                         response=90.0,
+                        cache_write=0.0,
+                        cache_read=0.0,
                     ),
                 },
                 long_context=True,
             ),
+            thinking=replace(
+                default.thinking,
+                effort=frozenset({"medium", "high", "xhigh"}),
+            ),
         ),
-        replace(legacy, model_id="gpt-5.4"),
         replace(
-            legacy,
+            default,
+            model_id="gpt-5.4",
+            wire_model_id="gpt-5.4",
+            knowledge_cutoff=None,
+            context=_limits(patch_images=False),
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=2.5,
+                        response=15.0,
+                        cache_write=0.0,
+                        cache_read=0.25,
+                    ),
+                    "flex": _card(
+                        request=1.25,
+                        response=7.5,
+                        cache_write=0.0,
+                        cache_read=0.13,
+                    ),
+                    "priority": _card(
+                        request=5.0,
+                        response=30.0,
+                        cache_write=0.0,
+                        cache_read=0.5,
+                    ),
+                },
+                long_context=True,
+            ),
+            thinking=legacy,
+        ),
+        replace(
+            default,
             model_id="gpt-5.4-pro",
-            thinking=replace(
-                legacy.thinking,
-                effort=frozenset({"medium", "high", "xhigh"}),
-            ),
+            wire_model_id="gpt-5.4-pro",
+            knowledge_cutoff=None,
+            context=_limits(patch_images=False),
             prices=_prices(
                 {
                     "auto": _card(
                         request=30.0,
-                        cache_read=0.0,
-                        cache_write=0.0,
                         response=180.0,
+                        cache_write=0.0,
+                        cache_read=0.0,
                     ),
                     "flex": _card(
                         request=15.0,
-                        cache_read=0.0,
-                        cache_write=0.0,
                         response=90.0,
+                        cache_write=0.0,
+                        cache_read=0.0,
                     ),
                 },
                 long_context=True,
             ),
+            thinking=replace(
+                default.thinking,
+                effort=frozenset({"medium", "high", "xhigh"}),
+            ),
         ),
         replace(
-            legacy,
+            default,
             model_id="gpt-5.4-mini",
-            context=_context(request=400_000, response=128_000),
+            wire_model_id="gpt-5.4-mini",
+            knowledge_cutoff=None,
+            context=_limits(max_tokens=400_000, windowed=False, patch_images=False),
             prices=_prices(
                 {
                     "auto": _card(
                         request=0.75,
-                        cache_read=0.075,
-                        cache_write=0.0,
                         response=4.5,
+                        cache_write=0.0,
+                        cache_read=0.075,
                     ),
                     "flex": _card(
                         request=0.375,
-                        cache_read=0.0375,
-                        cache_write=0.0,
                         response=2.25,
+                        cache_write=0.0,
+                        cache_read=0.0375,
                     ),
                     "priority": _card(
                         request=1.5,
-                        cache_read=0.15,
-                        cache_write=0.0,
                         response=9.0,
+                        cache_write=0.0,
+                        cache_read=0.15,
                     ),
                 },
             ),
+            thinking=legacy,
         ),
         replace(
-            legacy,
+            default,
             model_id="gpt-5.4-nano",
-            context=_context(request=400_000, response=128_000),
+            wire_model_id="gpt-5.4-nano",
+            knowledge_cutoff=None,
+            context=_limits(max_tokens=400_000, windowed=False, patch_images=False),
             prices=_prices(
                 {
                     "auto": _card(
                         request=0.2,
-                        cache_read=0.02,
-                        cache_write=0.0,
                         response=1.25,
+                        cache_write=0.0,
+                        cache_read=0.02,
                     ),
                     "flex": _card(
                         request=0.1,
-                        cache_read=0.01,
-                        cache_write=0.0,
                         response=0.625,
+                        cache_write=0.0,
+                        cache_read=0.01,
                     ),
                 },
             ),
+            thinking=legacy,
         ),
         replace(
-            legacy,
+            default,
             model_id="gpt-5.3-codex",
-            context=_context(request=400_000, response=128_000),
+            wire_model_id="gpt-5.3-codex",
+            knowledge_cutoff=None,
+            context=_limits(max_tokens=400_000, windowed=False, patch_images=False),
             prices=_prices(
                 {
                     "auto": _card(
                         request=1.75,
-                        cache_read=0.175,
-                        cache_write=0.0,
                         response=14.0,
+                        cache_write=0.0,
+                        cache_read=0.175,
+                    ),
+                    "priority": _card(
+                        request=3.5,
+                        response=28.0,
+                        cache_write=0.0,
+                        cache_read=0.35,
                     ),
                 },
             ),
+            thinking=legacy,
         ),
         # No `*-chat-latest` row. Those aliases are listed by `/v1/models` but
         # rejected by `/v1/responses` with `model_not_found` (verified for
@@ -488,216 +524,293 @@ def models() -> Mapping[str, ModelCapability]:
         # only one this provider speaks -- so a row for one is a model no
         # caller here can reach.
         replace(
-            legacy,
+            default,
             model_id="gpt-5.2",
-            context=_context(request=400_000, response=128_000),
+            wire_model_id="gpt-5.2",
+            knowledge_cutoff=None,
+            context=_limits(max_tokens=400_000, windowed=False, patch_images=False),
             prices=_prices(
                 {
                     "auto": _card(
                         request=1.75,
-                        cache_read=0.175,
-                        cache_write=0.0,
                         response=14.0,
+                        cache_write=0.0,
+                        cache_read=0.175,
                     ),
                     "flex": _card(
                         request=0.875,
-                        cache_read=0.0875,
-                        cache_write=0.0,
                         response=7.0,
+                        cache_write=0.0,
+                        cache_read=0.0875,
                     ),
                     "priority": _card(
                         request=3.5,
-                        cache_read=0.35,
-                        cache_write=0.0,
                         response=28.0,
+                        cache_write=0.0,
+                        cache_read=0.35,
                     ),
                 },
             ),
+            thinking=legacy,
         ),
         replace(
-            legacy,
+            default,
             model_id="o1",
-            thinking=replace(
-                legacy.thinking,
-                effort=frozenset({"low", "medium", "high"}),
+            wire_model_id="o1",
+            knowledge_cutoff=None,
+            context=_limits(
+                max_tokens=200_000,
+                output_tokens=100_000,
+                windowed=False,
+                patch_images=False,
             ),
-            context=_context(request=200_000, response=100_000),
             prices=_prices(
                 {
                     "auto": _card(
                         request=15.0,
-                        cache_read=7.5,
-                        cache_write=0.0,
                         response=60.0,
+                        cache_write=0.0,
+                        cache_read=7.5,
                     ),
                 },
             ),
-        ),
-        replace(
-            legacy,
-            model_id="o3-mini",
             thinking=replace(
-                legacy.thinking,
+                default.thinking,
                 effort=frozenset({"low", "medium", "high"}),
             ),
-            context=_context(request=200_000, response=100_000),
+        ),
+        replace(
+            default,
+            model_id="o3-mini",
+            wire_model_id="o3-mini",
+            knowledge_cutoff=None,
+            context=_limits(
+                max_tokens=200_000,
+                output_tokens=100_000,
+                windowed=False,
+                patch_images=False,
+            ),
             prices=_prices(
                 {
                     "auto": _card(
                         request=1.1,
-                        cache_read=0.55,
-                        cache_write=0.0,
                         response=4.4,
+                        cache_write=0.0,
+                        cache_read=0.55,
                     ),
                 },
             ),
+            thinking=replace(
+                default.thinking,
+                effort=frozenset({"low", "medium", "high"}),
+            ),
         ),
+        # No reasoning knob on the 4-x generation, so every thinking axis
+        # offers only its off value.
         replace(
-            gpt4,
+            default,
             model_id="gpt-4.1",
-            context=_windowed(request=1_047_576, response=32_768, long=1_047_576),
+            wire_model_id="gpt-4.1",
+            knowledge_cutoff=None,
+            context=_limits(
+                max_tokens=1_047_576,
+                output_tokens=32_768,
+                windowed=False,
+                patch_images=False,
+            ),
             prices=_prices(
                 {
                     "auto": _card(
                         request=2.0,
-                        cache_read=0.5,
-                        cache_write=0.0,
                         response=8.0,
+                        cache_write=0.0,
+                        cache_read=0.5,
                     ),
                     "priority": _card(
                         request=3.5,
-                        cache_read=0.875,
-                        cache_write=0.0,
                         response=14.0,
+                        cache_write=0.0,
+                        cache_read=0.875,
                     ),
                 },
             ),
+            thinking=ThinkingCapability(),
         ),
         replace(
-            gpt4,
+            default,
             model_id="gpt-4.1-mini",
-            context=_windowed(request=1_047_576, response=32_768, long=1_047_576),
+            wire_model_id="gpt-4.1-mini",
+            knowledge_cutoff=None,
+            context=_limits(
+                max_tokens=1_047_576,
+                output_tokens=32_768,
+                windowed=False,
+                patch_images=False,
+            ),
             prices=_prices(
                 {
                     "auto": _card(
                         request=0.4,
-                        cache_read=0.1,
-                        cache_write=0.0,
                         response=1.6,
+                        cache_write=0.0,
+                        cache_read=0.1,
                     ),
                     "priority": _card(
                         request=0.7,
-                        cache_read=0.175,
-                        cache_write=0.0,
                         response=2.8,
+                        cache_write=0.0,
+                        cache_read=0.175,
                     ),
                 },
             ),
+            thinking=ThinkingCapability(),
         ),
         replace(
-            gpt4,
+            default,
             model_id="gpt-4.1-nano",
-            context=_windowed(request=1_047_576, response=32_768, long=1_047_576),
+            wire_model_id="gpt-4.1-nano",
+            knowledge_cutoff=None,
+            context=_limits(
+                max_tokens=1_047_576,
+                output_tokens=32_768,
+                windowed=False,
+                patch_images=False,
+            ),
             prices=_prices(
                 {
                     "auto": _card(
                         request=0.1,
-                        cache_read=0.025,
-                        cache_write=0.0,
                         response=0.4,
+                        cache_write=0.0,
+                        cache_read=0.025,
                     ),
                     "priority": _card(
                         request=0.2,
-                        cache_read=0.05,
-                        cache_write=0.0,
                         response=0.8,
+                        cache_write=0.0,
+                        cache_read=0.05,
                     ),
                 },
             ),
+            thinking=ThinkingCapability(),
         ),
         replace(
-            gpt4,
+            default,
             model_id="gpt-4o",
-            context=_context(request=128_000, response=16_384),
+            wire_model_id="gpt-4o",
+            knowledge_cutoff=None,
+            context=_limits(
+                max_tokens=128_000,
+                output_tokens=16_384,
+                windowed=False,
+                patch_images=False,
+            ),
             prices=_prices(
                 {
                     "auto": _card(
                         request=2.5,
-                        cache_read=1.25,
-                        cache_write=0.0,
                         response=10.0,
+                        cache_write=0.0,
+                        cache_read=1.25,
                     ),
                     "priority": _card(
                         request=4.25,
-                        cache_read=2.125,
-                        cache_write=0.0,
                         response=17.0,
+                        cache_write=0.0,
+                        cache_read=2.125,
                     ),
                 },
             ),
+            thinking=ThinkingCapability(),
         ),
         replace(
-            gpt4,
+            default,
             model_id="gpt-4o-mini",
-            context=_context(request=128_000, response=16_384),
+            wire_model_id="gpt-4o-mini",
+            knowledge_cutoff=None,
+            context=_limits(
+                max_tokens=128_000,
+                output_tokens=16_384,
+                windowed=False,
+                patch_images=False,
+            ),
             prices=_prices(
                 {
                     "auto": _card(
                         request=0.15,
-                        cache_read=0.075,
-                        cache_write=0.0,
                         response=0.6,
+                        cache_write=0.0,
+                        cache_read=0.075,
                     ),
                     "priority": _card(
                         request=0.25,
-                        cache_read=0.125,
-                        cache_write=0.0,
                         response=1.0,
+                        cache_write=0.0,
+                        cache_read=0.125,
                     ),
                 },
             ),
+            thinking=ThinkingCapability(),
         ),
         replace(
-            gpt4,
+            default,
             model_id="gpt-4-turbo",
-            context=_context(request=128_000, response=4_096),
+            wire_model_id="gpt-4-turbo",
+            knowledge_cutoff=None,
+            context=_limits(
+                max_tokens=128_000,
+                output_tokens=4_096,
+                windowed=False,
+                patch_images=False,
+            ),
             prices=_prices(
                 {
                     "auto": _card(
                         request=10.0,
-                        cache_read=0.0,
-                        cache_write=0.0,
                         response=30.0,
+                        cache_write=0.0,
+                        cache_read=0.0,
                     ),
                 },
             ),
+            thinking=ThinkingCapability(),
         ),
         replace(
-            gpt4,
+            default,
             model_id="gpt-4",
-            context=_context(request=8_192, response=8_192),
+            wire_model_id="gpt-4",
+            knowledge_cutoff=None,
+            context=_limits(
+                max_tokens=8_192,
+                output_tokens=8_192,
+                windowed=False,
+                patch_images=False,
+            ),
             prices=_prices(
                 {
                     "auto": _card(
                         request=30.0,
-                        cache_read=0.0,
-                        cache_write=0.0,
                         response=60.0,
+                        cache_write=0.0,
+                        cache_read=0.0,
                     ),
                 },
             ),
+            thinking=ThinkingCapability(),
         ),
     )
     # A tier is offered exactly when it is priced.
     rows = tuple(replace(row, service_tier=row.prices.service_tiers) for row in rows)
-    catalog = {row.model_id: row for row in rows}
-    return MappingProxyType(
-        {
-            "default": catalog["astra-6"],
-            "utility": catalog["luna-6"],
-            **catalog,
-        },
-    )
+    # Rows run newest-first within each family, so the first match is the latest
+    # and a new release moves its alias without an edit here.
+    latest = {
+        alias: next(row for row in rows if row.model_id.startswith(f"{family}-"))
+        for alias, family in (
+            ("default", "astra"),
+            ("utility", "luna"),
+        )
+    }
+    return MappingProxyType(latest | {row.model_id: row for row in rows})
 
 
 def reasoning_effort(
@@ -831,61 +944,12 @@ def served_tier(reported: str | None) -> ServiceTier:
             raise ValueError(f"unpriced OpenAI service_tier {reported!r}")
 
 
-def _one(*, request: int, response: int, gpt56_images: bool = False) -> ModelLimits:
-    """Pre-5.6 tiles ``detail:high`` from a 2048px square; 5.6 does not."""
-    if gpt56_images:
-        return ModelLimits(
-            max_request_tokens=request,
-            max_response_tokens=response,
-            max_request_bytes=512 * 1024 * 1024,
-        )
-    return ModelLimits(
-        max_request_tokens=request,
-        max_response_tokens=response,
-        max_request_bytes=20 * 1024 * 1024,
-        max_image_edge_px=2048,
-        max_image_bytes=20 * 1024 * 1024,
-    )
-
-
-def _context(
-    *,
-    request: int,
-    response: int,
-    gpt56_images: bool = False,
-) -> Mapping[ContextTag, ModelLimits]:
-    """One untagged context for a model with no smaller-window selection."""
-    return MappingProxyType(
-        {"": _one(request=request, response=response, gpt56_images=gpt56_images)},
-    )
-
-
-def _windowed(
-    *,
-    request: int,
-    response: int,
-    long: int,
-    gpt56_images: bool = False,
-) -> Mapping[ContextTag, ModelLimits]:
-    """Default to the full window; ``+272k`` selects the smaller cap."""
-    context: dict[ContextTag, ModelLimits] = {
-        "": _one(request=long, response=response, gpt56_images=gpt56_images),
-    }
-    if request < long:
-        context["+272k"] = _one(
-            request=request,
-            response=response,
-            gpt56_images=gpt56_images,
-        )
-    return MappingProxyType(context)
-
-
 def _card(
     *,
     request: float,
-    cache_read: float,
-    cache_write: float,
     response: float,
+    cache_write: float,
+    cache_read: float,
 ) -> TokenPrice:
     """Return one published price-table row; OpenAI has one cache-write lifetime."""
     return TokenPrice(
@@ -919,3 +983,33 @@ def _prices(
             for tier, card in tiers.items()
         }
     return PriceCatalog(cards)
+
+
+# GPT-5.6 and later bill images by 32x32 patch and take a far larger body;
+# earlier models tile ``detail:high`` from a 2048px square under a 20MB cap.
+def _limits(
+    *,
+    max_tokens: int = 1_050_000,
+    output_tokens: int = 128_000,
+    windowed: bool = True,
+    patch_images: bool = True,
+) -> Mapping[ContextTag, ModelLimits]:
+    """Serve ``max_tokens`` by default; ``+272k`` selects the cap below the surcharge."""
+    if patch_images:
+        limits = ModelLimits(
+            max_request_tokens=max_tokens,
+            max_response_tokens=output_tokens,
+            max_request_bytes=512 * 1024 * 1024,
+        )
+    else:
+        limits = ModelLimits(
+            max_request_tokens=max_tokens,
+            max_response_tokens=output_tokens,
+            max_request_bytes=20 * 1024 * 1024,
+            max_image_edge_px=2048,
+            max_image_bytes=20 * 1024 * 1024,
+        )
+    context: dict[ContextTag, ModelLimits] = {"": limits}
+    if windowed:
+        context["+272k"] = replace(limits, max_request_tokens=272_000)
+    return MappingProxyType(context)
