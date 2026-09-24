@@ -21,6 +21,7 @@ from sagent.types.capability import (
     ContextTag,
     ModelCapability,
     ModelLimits,
+    ThinkingCapability,
     ThinkingEffort,
 )
 from sagent.types.cost import (
@@ -52,9 +53,11 @@ def compatible() -> ModelCapability:
 
     """
     return ModelCapability(
-        thinking_effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
-        thinking_budget={"none", "auto", "fixed"},
-        thinking_output={"none", "text", "redacted"},
+        thinking=ThinkingCapability(
+            effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
+            budget={"none", "auto", "fixed"},
+            output={"none", "text", "redacted"},
+        ),
         service_tier={"auto"},
         manage_context_server_side={False},
     )
@@ -102,27 +105,30 @@ def models() -> Mapping[str, ModelCapability]:
             two_tier=True,
         ),
         service_tier=frozenset({"auto", "default", "flex", "priority"}),
-        thinking_effort=frozenset(
-            {"none", "min", "low", "medium", "high", "xhigh", "max"},
+        thinking=ThinkingCapability(
+            effort=frozenset(
+                {"none", "min", "low", "medium", "high", "xhigh", "max"},
+            ),
+            budget={"none", "auto"},
+            output={"none", "text"},
         ),
-        thinking_budget={"none", "auto"},
-        thinking_output={"none", "text"},
     )
     # Pre-5.6 tiles ``detail:high`` from a 2048px square and caps the body at
     # 20MB.
     legacy = replace(
         gpt56,
         knowledge_cutoff=None,
-        thinking_effort={"none", "low", "medium", "high", "xhigh"},
+        thinking=replace(
+            gpt56.thinking,
+            effort={"none", "low", "medium", "high", "xhigh"},
+        ),
         context=_windowed(request=272_000, response=128_000, long=1_050_000),
         prices=_prices(request=2.5, response=15.0, cache_read=0.25, two_tier=True),
     )
     # No reasoning knob on the 4-x generation.
     gpt4 = replace(
         legacy,
-        thinking_effort={"none"},
-        thinking_budget={"none"},
-        thinking_output={"none"},
+        thinking=ThinkingCapability(),
     )
     rows = (
         # Measured against the live API 2026-09-04: ``reasoning.effort``
@@ -148,7 +154,10 @@ def models() -> Mapping[str, ModelCapability]:
                 cache_read=1.0,
                 two_tier=True,
             ),
-            thinking_effort={"low", "medium", "high", "xhigh", "max"},
+            thinking=replace(
+                gpt56.thinking,
+                effort={"low", "medium", "high", "xhigh", "max"},
+            ),
         ),
         replace(
             gpt56,
@@ -221,14 +230,14 @@ def models() -> Mapping[str, ModelCapability]:
         replace(
             legacy,
             model_id="gpt-5.5-pro",
-            thinking_effort={"medium", "high", "xhigh"},
+            thinking=replace(legacy.thinking, effort={"medium", "high", "xhigh"}),
             prices=_prices(request=30.0, response=180.0, two_tier=True),
         ),
         replace(legacy, model_id="gpt-5.4"),
         replace(
             legacy,
             model_id="gpt-5.4-pro",
-            thinking_effort={"medium", "high", "xhigh"},
+            thinking=replace(legacy.thinking, effort={"medium", "high", "xhigh"}),
             prices=_prices(request=30.0, response=180.0, two_tier=True),
         ),
         replace(
@@ -263,14 +272,14 @@ def models() -> Mapping[str, ModelCapability]:
         replace(
             legacy,
             model_id="o1",
-            thinking_effort={"low", "medium", "high"},
+            thinking=replace(legacy.thinking, effort={"low", "medium", "high"}),
             context=_context(request=200_000, response=100_000),
             prices=_prices(request=15.0, response=60.0, cache_read=7.5),
         ),
         replace(
             legacy,
             model_id="o3-mini",
-            thinking_effort={"low", "medium", "high"},
+            thinking=replace(legacy.thinking, effort={"low", "medium", "high"}),
             context=_context(request=200_000, response=100_000),
             prices=_prices(request=1.1, response=4.4, cache_read=0.55),
         ),
@@ -373,9 +382,11 @@ def api() -> ModelCapability:
 
     """
     return ModelCapability(
-        thinking_effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
-        thinking_budget={"none", "auto", "fixed"},
-        thinking_output={"none", "text", "redacted"},
+        thinking=ThinkingCapability(
+            effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
+            budget={"none", "auto", "fixed"},
+            output={"none", "text", "redacted"},
+        ),
         service_tier={"auto", "default", "flex", "priority"},
     )
 
@@ -396,9 +407,11 @@ def subscription() -> ModelCapability:
     # unqualified request still sends the default, so dropping it would make
     # ``ModelSettings()`` invalid on every Codex model.
     return ModelCapability(
-        thinking_effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
-        thinking_budget={"none", "auto", "fixed"},
-        thinking_output={"none", "text", "redacted"},
+        thinking=ThinkingCapability(
+            effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
+            budget={"none", "auto", "fixed"},
+            output={"none", "text", "redacted"},
+        ),
         service_tier={"auto", "priority"},
         account_auth=True,
     )

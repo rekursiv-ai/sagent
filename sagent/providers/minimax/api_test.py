@@ -42,7 +42,7 @@ def test_minimax_model_supports_thinking_via_reasoning_field() -> None:
     p = MiniMax.from_key("k")
     m = p.model("MiniMax-M2.7")
     # The provider parses ``reasoning_content``, so the row must offer it.
-    assert m.capability.thinking_output == frozenset({"none", "text"})
+    assert m.capability.thinking.output == frozenset({"none", "text"})
 
 
 def test_minimax_known_models_have_pricing() -> None:

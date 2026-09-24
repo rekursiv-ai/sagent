@@ -248,14 +248,10 @@ def audit_catalogs() -> int:
             model_id: cls.catalog.resolve(model_id)[0] for model_id in cls.catalog.rows
         }
         for mid, cap in rows.items():
-            if mid in {"default", "utility"}:
-                if cap.model_id not in rows:
-                    _out(
-                        f"  {name}.{mid}: target {cap.model_id!r} is not a catalog key",
-                    )
-                    errors += 1
-            elif cap.model_id != mid:
-                _out(f"  {name}.{mid}: model_id is {cap.model_id!r}, not the key")
+            # A key naming another row is a role alias (``default``, ``best``,
+            # ...); the roles are the catalog's to choose, so none is listed.
+            if cap.model_id != mid and cap.model_id not in rows:
+                _out(f"  {name}.{mid}: model_id is {cap.model_id!r}, not a catalog key")
                 errors += 1
             if not cap.prices:
                 _out(f"  {name}.{mid}: no price rows -- spend() would raise")

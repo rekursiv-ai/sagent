@@ -71,7 +71,7 @@ from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.lib.usage import anthropic_usage
-from sagent.types.cost import PriceCatalogProduct, TokenCount
+from sagent.types.cost import TokenCount
 from sagent.types.model import (
     ModelRequest,
     ModelResponse,
@@ -1369,13 +1369,9 @@ def _parse_response(raw: _RawMessage, model: _AnthropicModel) -> ModelResponse:
     )
     # Anthropic reports the speed it actually served: a request that asked
     # for priority and fell back must bill standard.
-    tier = model.settings.service_tier if served_fast else "auto"
-    prompt = tokens.request + tokens.cache_write + tokens.cache_read
-    spend = (
-        model.capability.prices[
-            PriceCatalogProduct(service_tier=tier, min_request_tokens=prompt)
-        ]
-        * tokens
+    spend = model.capability.prices.cost(
+        tokens,
+        service_tier=model.settings.service_tier if served_fast else "auto",
     )
     debug_log.trace(
         "api_response",

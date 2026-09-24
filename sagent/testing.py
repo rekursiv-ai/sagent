@@ -39,6 +39,7 @@ from sagent.types.capability import (
     ModelCapability,
     ModelLimits,
     ModelSettings,
+    ThinkingCapability,
     ThinkingEffort,
 )
 from sagent.types.cost import (
@@ -128,16 +129,14 @@ class MockModelCaps:
                     for t in self.service_tiers
                 },
             ),
-            thinking_effort=thinking,
-            thinking_budget=(
-                frozenset({"none", "auto", "fixed"})
+            thinking=ThinkingCapability(
+                effort=thinking,
+                budget=frozenset({"none", "auto", "fixed"})
                 if self.supports_thinking
-                else frozenset({"none"})
-            ),
-            thinking_output=(
-                frozenset({"none", "text"})
+                else frozenset({"none"}),
+                output=frozenset({"none", "text"})
                 if self.supports_thinking
-                else frozenset({"none"})
+                else frozenset({"none"}),
             ),
             service_tier={"auto", *self.service_tiers},
             retries_internally=self.supports_persistent_retry,
@@ -179,15 +178,9 @@ class MockModelCaps:
           cost: Cost at the selected service tier.
 
         """
-        prompt = tokens.request + tokens.cache_write + tokens.cache_read
-        return (
-            self.capability.prices[
-                PriceCatalogProduct(
-                    service_tier=self.settings.service_tier,
-                    min_request_tokens=prompt,
-                )
-            ]
-            * tokens
+        return self.capability.prices.cost(
+            tokens,
+            service_tier=self.settings.service_tier,
         )
 
     def approx_text_tokens(self, text: str) -> int:

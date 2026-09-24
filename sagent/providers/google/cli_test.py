@@ -207,8 +207,8 @@ def test_model_capabilities() -> None:
     """The CLI transport narrows the row it inherits from the API."""
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")
-    assert model.capability.thinking_budget != frozenset({"none"})
-    assert model.capability.thinking_effort == frozenset({"none"})
+    assert model.capability.thinking.budget != frozenset({"none"})
+    assert model.capability.thinking.effort == frozenset({"none"})
     assert model.capability.cache_ttl_sec == frozenset({0.0})
     assert model.capability.manage_context_server_side == frozenset({True})
     assert model.capability.account_auth is True
@@ -222,8 +222,8 @@ def test_google_cli_legacy_model_does_not_support_thinking() -> None:
     """
     provider = GoogleCLI()
     off = frozenset({"none"})
-    assert provider.model("gemini-1.5-flash").capability.thinking_budget == off
-    assert provider.model("gemini-1.5-pro").capability.thinking_budget == off
+    assert provider.model("gemini-1.5-flash").capability.thinking.budget == off
+    assert provider.model("gemini-1.5-pro").capability.thinking.budget == off
 
 
 def test_max_image_limits() -> None:

@@ -11,6 +11,7 @@ from sagent.types.capability import (
     ModelCapability,
     ModelLimits,
     ModelSettings,
+    ThinkingCapability,
 )
 from sagent.types.cost import PriceCatalog, PriceCatalogProduct, TokenPrice
 from sagent.types.providers import (
@@ -38,15 +39,14 @@ def _opus() -> ModelCapability:
                 PriceCatalogProduct(service_tier="priority"): TokenPrice(request=15.0),
             },
         ),
-        thinking_effort={"none", "max"},
+        thinking=ThinkingCapability(effort={"none", "max"}),
         service_tier={"auto", "default", "priority"},
     )
 
 
 def _cli() -> ModelCapability:
     return ModelCapability(
-        thinking_effort={"none"},
-        thinking_output={"none", "text"},
+        thinking=ThinkingCapability(effort={"none"}, output={"none", "text"}),
         manage_context_server_side={True},
     )
 
@@ -88,7 +88,7 @@ def test_resolve_meets_the_transport() -> None:
         models={"opus-4.8": _opus()},
         transport=_cli(),
     )
-    assert capability.thinking_effort == frozenset({"none"})
+    assert capability.thinking.effort == frozenset({"none"})
     assert capability.manage_context_server_side == frozenset({True})
 
 
@@ -97,10 +97,12 @@ def test_resolve_never_grants_what_the_row_lacks() -> None:
         "opus-4.8",
         models={"opus-4.8": _opus()},
         transport=ModelCapability(
-            thinking_effort={"none", "min", "low", "medium", "high", "max"},
+            thinking=ThinkingCapability(
+                effort={"none", "min", "low", "medium", "high", "max"},
+            ),
         ),
     )
-    assert capability.thinking_effort == frozenset({"none", "max"})
+    assert capability.thinking.effort == frozenset({"none", "max"})
 
 
 def test_resolve_rejects_a_context_the_model_lacks() -> None:

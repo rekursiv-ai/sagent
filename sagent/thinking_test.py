@@ -17,6 +17,7 @@ from sagent.types.capability import (
     ModelLimits,
     ModelSettings,
     ThinkingBudget,
+    ThinkingCapability,
     ThinkingOutput,
 )
 
@@ -29,8 +30,7 @@ def _capability(
     return ModelCapability(
         model_id="m",
         context=MappingProxyType({"": ModelLimits(max_request_tokens=1_000)}),
-        thinking_budget=budgets,
-        thinking_output=outputs,
+        thinking=ThinkingCapability(budget=budgets, output=outputs),
     )
 
 

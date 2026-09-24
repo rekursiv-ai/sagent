@@ -502,7 +502,7 @@ def _thinking_config(
     """Return Gemini thinking config, or ``None`` when thinking is off."""
     # gemini-1.5 rejects ``thinkingConfig`` outright, so an off row must send
     # no key at all rather than a zero budget.
-    if settings.thinking_budget == "none" or "none" not in capability.thinking_budget:
+    if settings.thinking_budget == "none" or "none" not in capability.thinking.budget:
         return None
     include = settings.thinking_output == "text"
     if settings.thinking_budget == "auto":

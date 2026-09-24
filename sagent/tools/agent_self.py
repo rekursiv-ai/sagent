@@ -369,7 +369,7 @@ def plan_model_options(
                 content="model_options.effort must be a string or null.",
                 is_error=True,
             )
-        valid = model.capability.thinking_effort
+        valid = model.capability.thinking.effort
         if value is not None and value not in valid:
             quoted = ", ".join(repr(e) for e in valid) or "(none)"
             return ToolResult(
@@ -418,9 +418,9 @@ def _supported_model_options(model: Model) -> dict[str, str]:
     """Return supported model option names with compact descriptions."""
     supported: dict[str, str] = {}
     capability = model.capability
-    if capability.thinking_budget != frozenset({"none"}):
+    if capability.thinking.budget != frozenset({"none"}):
         supported["thinking"] = "boolean"
-    efforts = capability.thinking_effort - {"none"}
+    efforts = capability.thinking.effort - {"none"}
     if efforts:
         supported["effort"] = " | ".join(repr(e) for e in sorted(efforts))
     if capability.cache_ttl_sec != frozenset({0.0}):
@@ -675,10 +675,10 @@ def _agent_option_lines(agent: AgentSelfAgent) -> list[str]:
     settings = agent.model.settings
     budget = settings.thinking_budget
     thinking = "off" if budget == "none" else budget
-    if capability.thinking_budget == frozenset({"none"}):
+    if capability.thinking.budget == frozenset({"none"}):
         thinking = "unsupported"
     effort = settings.thinking_effort
-    if capability.thinking_effort == frozenset({"none"}):
+    if capability.thinking.effort == frozenset({"none"}):
         effort = "unsupported"
     service_tier = settings.service_tier
     if capability.service_tier == frozenset({"auto"}):

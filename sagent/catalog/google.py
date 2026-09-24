@@ -18,6 +18,7 @@ from sagent.types.capability import (
     ContextTag,
     ModelCapability,
     ModelLimits,
+    ThinkingCapability,
     ThinkingEffort,
 )
 from sagent.types.cost import (
@@ -83,20 +84,20 @@ def models() -> Mapping[str, ModelCapability]:
     gemini = ModelCapability(
         context=_context(request=1_048_576),
         prices=_prices(request=0.5, response=3.0, cache_read=0.05),
-        thinking_effort=frozenset(
-            {"none", "min", "low", "medium", "high", "xhigh", "max"},
+        thinking=ThinkingCapability(
+            effort=frozenset(
+                {"none", "min", "low", "medium", "high", "xhigh", "max"},
+            ),
+            budget={"none", "auto", "fixed"},
+            output={"none", "text"},
         ),
-        thinking_budget={"none", "auto", "fixed"},
-        thinking_output={"none", "text"},
     )
     # gemini-1.5 rejects ``thinkingConfig`` outright, so every thinking axis
     # offers only its off value.
     legacy = replace(
         gemini,
         context=_context(request=1_000_000),
-        thinking_effort={"none"},
-        thinking_budget={"none"},
-        thinking_output={"none"},
+        thinking=ThinkingCapability(),
     )
     rows = (
         replace(gemini, model_id="gemini-3-flash-preview"),
@@ -167,9 +168,11 @@ def api() -> ModelCapability:
     # Every axis stated: ``&`` can only remove, and a defaulted axis is the
     # narrow value, so an omitted one would strip the model's real capability.
     return ModelCapability(
-        thinking_effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
-        thinking_budget={"none", "auto", "fixed"},
-        thinking_output={"none", "text", "redacted"},
+        thinking=ThinkingCapability(
+            effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
+            budget={"none", "auto", "fixed"},
+            output={"none", "text", "redacted"},
+        ),
     )
 
 
@@ -187,9 +190,11 @@ def cli() -> ModelCapability:
 
     """
     return ModelCapability(
-        thinking_effort={"none"},
-        thinking_budget={"none", "auto", "fixed"},
-        thinking_output={"none", "text", "redacted"},
+        thinking=ThinkingCapability(
+            effort={"none"},
+            budget={"none", "auto", "fixed"},
+            output={"none", "text", "redacted"},
+        ),
         manage_context_server_side={True},
         account_auth=True,
     )
@@ -209,9 +214,11 @@ def subscription() -> ModelCapability:
 
     """
     return ModelCapability(
-        thinking_effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
-        thinking_budget={"none", "auto", "fixed"},
-        thinking_output={"none", "text", "redacted"},
+        thinking=ThinkingCapability(
+            effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
+            budget={"none", "auto", "fixed"},
+            output={"none", "text", "redacted"},
+        ),
         account_auth=True,
     )
 

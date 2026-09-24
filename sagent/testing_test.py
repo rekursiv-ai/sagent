@@ -29,8 +29,8 @@ def test_mock_model_caps_static_flags() -> None:
     """Capability flags expose the documented defaults."""
     m = MockModelCaps()
     assert m.limits.max_response_tokens == 8_192
-    assert m.capability.thinking_budget == frozenset({"none"})
-    assert m.capability.thinking_effort == frozenset({"none"})
+    assert m.capability.thinking.budget == frozenset({"none"})
+    assert m.capability.thinking.effort == frozenset({"none"})
     assert m.capability.cache_ttl_sec == frozenset({0.0})
     assert m.capability.retries_internally is False
     assert m.capability.account_auth is False

@@ -30,7 +30,7 @@ def test_moonshot_default_model() -> None:
     m = p.model()
     assert m.capability.model_id == p.catalog.resolve("default")[0].model_id
     # Kimi surfaces reasoning via ``reasoning_content``.
-    assert m.capability.thinking_output == frozenset({"none", "text"})
+    assert m.capability.thinking.output == frozenset({"none", "text"})
 
 
 def test_moonshot_unknown_model_raises() -> None:

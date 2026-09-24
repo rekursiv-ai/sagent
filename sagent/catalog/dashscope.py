@@ -18,6 +18,7 @@ from sagent.types.capability import (
     ContextTag,
     ModelCapability,
     ModelLimits,
+    ThinkingCapability,
     ThinkingEffort,
 )
 from sagent.types.cost import (
@@ -76,17 +77,17 @@ def models() -> Mapping[str, ModelCapability]:
     qwen = ModelCapability(
         context=_limits(window=262_144, response=65_536),
         prices=_prices(request=1.6, response=6.4),
-        thinking_effort=_efforts(),
-        thinking_budget={"none", "auto", "fixed"},
-        thinking_output={"none", "text"},
+        thinking=ThinkingCapability(
+            effort=_efforts(),
+            budget={"none", "auto", "fixed"},
+            output={"none", "text"},
+        ),
     )
     # ``-instruct`` / ``-coder`` / ``-turbo`` reject the toggle, so every
     # thinking axis offers only its off value.
     instruct = replace(
         qwen,
-        thinking_effort={"none"},
-        thinking_budget={"none"},
-        thinking_output={"none"},
+        thinking=ThinkingCapability(),
     )
     rows = (
         replace(qwen, model_id="qwen3.6-max-preview"),
@@ -113,7 +114,7 @@ def models() -> Mapping[str, ModelCapability]:
             context=_limits(window=262_144, response=32_768),
             prices=_prices(request=0.7, response=8.4),
             # Everything but ``none``: these ids reject ``enable_thinking=false``.
-            thinking_effort=_efforts() - {"none"},
+            thinking=replace(qwen.thinking, effort=_efforts() - {"none"}),
         ),
         replace(
             instruct,

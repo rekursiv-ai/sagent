@@ -14,7 +14,12 @@ from dataclasses import replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from sagent.types.capability import ContextTag, ModelCapability, ModelLimits
+from sagent.types.capability import (
+    ContextTag,
+    ModelCapability,
+    ModelLimits,
+    ThinkingCapability,
+)
 from sagent.types.cost import (
     PriceCatalog,
     PriceCatalogProduct,
@@ -40,7 +45,7 @@ def models() -> Mapping[str, ModelCapability]:
     kimi = ModelCapability(
         context=_limits(window=256_000, response=96_000),
         prices=_prices(request=0.95, response=4.0, cache_read=0.16),
-        thinking_output={"none", "text"},
+        thinking=ThinkingCapability(output={"none", "text"}),
     )
     rows = (
         replace(kimi, model_id="kimi-k2.6"),

@@ -16,6 +16,7 @@ from sagent.types.capability import (
     ModelCapability,
     ModelSettings,
     ThinkingBudget,
+    ThinkingCapability,
     ThinkingEffort,
 )
 from sagent.types.cost import ServiceTier, TokenCost
@@ -70,9 +71,11 @@ def _StubCostTracker_factory() -> _StubCostTracker:  # noqa: N802 -- The stub mi
 
 _WIDE = ModelCapability(
     model_id="m",
-    thinking_effort={"none", "high"},
-    thinking_budget={"none", "auto", "fixed"},
-    thinking_output={"none", "text", "redacted"},
+    thinking=ThinkingCapability(
+        effort={"none", "high"},
+        budget={"none", "auto", "fixed"},
+        output={"none", "text", "redacted"},
+    ),
     service_tier={"auto", "default", "priority"},
     cache_ttl_sec={0.0, 3600.0},
 )

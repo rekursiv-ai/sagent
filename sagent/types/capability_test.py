@@ -12,6 +12,7 @@ from sagent.types.capability import (
     ModelCapability,
     ModelLimits,
     ModelSettings,
+    ThinkingCapability,
 )
 from sagent.types.cost import PriceCatalog, PriceCatalogProduct, TokenPrice
 
@@ -26,9 +27,11 @@ def _row() -> ModelCapability:
             },
         ),
         prices=PriceCatalog({PriceCatalogProduct(): TokenPrice(request=5.0)}),
-        thinking_effort=frozenset({"none", "low", "high"}),
-        thinking_budget=frozenset({"none", "auto"}),
-        thinking_output=frozenset({"none", "text", "redacted"}),
+        thinking=ThinkingCapability(
+            effort=frozenset({"none", "low", "high"}),
+            budget=frozenset({"none", "auto"}),
+            output=frozenset({"none", "text", "redacted"}),
+        ),
         service_tier=frozenset({"auto", "default", "priority"}),
         cache_ttl_sec={300.0, 3600.0},
         manage_context_server_side=frozenset({False, True}),
@@ -55,31 +58,35 @@ def test_a_bare_transport_keeps_the_axis_a_row_cannot_know() -> None:
     assert met.manage_context_server_side == _row().manage_context_server_side
     # The thinking and tier axes stay narrow: a row DOES know what it can
     # think and which tiers the vendor sells it at.
-    assert met.thinking_effort == frozenset({"none"})
+    assert met.thinking.effort == frozenset({"none"})
     assert met.service_tier == frozenset({"auto", "default"})
     assert met.cache_ttl_sec == frozenset({0.0})
 
 
 def test_the_meet_only_removes() -> None:
     transport = ModelCapability(
-        thinking_effort=frozenset({"none", "low", "medium", "high", "max"}),
-        thinking_budget=frozenset({"none", "auto", "fixed"}),
-        thinking_output=frozenset({"none", "text", "redacted"}),
+        thinking=ThinkingCapability(
+            effort=frozenset({"none", "low", "medium", "high", "max"}),
+            budget=frozenset({"none", "auto", "fixed"}),
+            output=frozenset({"none", "text", "redacted"}),
+        ),
         service_tier=frozenset({"auto", "default", "flex", "priority"}),
         cache_ttl_sec={300.0, 3600.0, 7200.0},
         manage_context_server_side=frozenset({False, True}),
         retries_internally=True,
     )
     met = _row() & transport
-    assert met.thinking_effort == frozenset({"none", "low", "high"})
+    assert met.thinking.effort == frozenset({"none", "low", "high"})
     assert met.service_tier == frozenset({"auto", "default", "priority"})
 
 
 def test_the_meet_cannot_grant() -> None:
-    met = ModelCapability(thinking_effort=frozenset({"none"})) & ModelCapability(
-        thinking_effort=frozenset({"none", "max"}),
+    met = ModelCapability(
+        thinking=ThinkingCapability(effort=frozenset({"none"})),
+    ) & ModelCapability(
+        thinking=ThinkingCapability(effort=frozenset({"none", "max"})),
     )
-    assert met.thinking_effort == frozenset({"none"})
+    assert met.thinking.effort == frozenset({"none"})
 
 
 def test_the_transport_declares_the_cache_lifetimes() -> None:
@@ -114,10 +121,11 @@ def test_the_transport_declares_retries_and_auth() -> None:
 def test_every_settings_axis_names_a_capability_field() -> None:
     """The membership check is total only if the names line up."""
     capability_names = {f.name for f in fields(ModelCapability)}
+    thinking_names = {f"thinking_{f.name}" for f in fields(ThinkingCapability)}
     for f in fields(ModelSettings):
         if f.name == "capability":
             continue
-        assert f.name in capability_names, f.name
+        assert f.name in capability_names | thinking_names, f.name
 
 
 def test_a_valid_selection_constructs() -> None:
@@ -177,9 +185,11 @@ def test_the_error_names_the_model_and_what_it_offers() -> None:
 
 
 _OFF = ModelCapability(
-    thinking_effort=frozenset({"none"}),
-    thinking_budget=frozenset({"none"}),
-    thinking_output=frozenset({"none"}),
+    thinking=ThinkingCapability(
+        effort=frozenset({"none"}),
+        budget=frozenset({"none"}),
+        output=frozenset({"none"}),
+    ),
     service_tier=frozenset({"auto"}),
     cache_ttl_sec={0.0},
     manage_context_server_side=frozenset({False}),
@@ -301,7 +311,7 @@ def test_narrowest_climbs_an_axis_that_withholds_its_unset_value() -> None:
     requires server-side history. Both make the field default unselectable.
     """
     row = ModelCapability(
-        thinking_effort=frozenset({"low", "high"}),
+        thinking=ThinkingCapability(effort=frozenset({"low", "high"})),
         manage_context_server_side=frozenset({True}),
     )
     settings = ModelSettings.narrowest(row)
@@ -326,7 +336,9 @@ def test_narrowest_builds_against_what_it_narrowed(
 def test_narrowest_rejects_an_empty_axis() -> None:
     """An empty meet is a model nothing can be requested from -- say so."""
     with pytest.raises(ValueError, match="thinking_effort offers nothing"):
-        ModelSettings.narrowest(ModelCapability(thinking_effort=frozenset()))
+        ModelSettings.narrowest(
+            ModelCapability(thinking=ThinkingCapability(effort=frozenset())),
+        )
 
 
 # ---- limits ----------------------------------------------------------------

@@ -138,8 +138,8 @@ _ROWS = _rows()
 def _settings_for(capability: ModelCapability, effort: ThinkingEffort) -> ModelSettings:
     """Return the settings that ask for ``effort`` with the widest budget offered."""
     budgets: tuple[ThinkingBudget, ...] = ("fixed", "auto", "none")
-    budget: ThinkingBudget = next(b for b in budgets if b in capability.thinking_budget)
-    output: ThinkingOutput = "text" if "text" in capability.thinking_output else "none"
+    budget: ThinkingBudget = next(b for b in budgets if b in capability.thinking.budget)
+    output: ThinkingOutput = "text" if "text" in capability.thinking.output else "none"
     # ``replace`` re-runs ``__init__``, which validates every axis against
     # the carried capability -- so an unofferable combination raises here
     # rather than reaching a wire builder.
@@ -164,7 +164,7 @@ def test_every_advertised_effort_reaches_the_wire(
     """
     make, thinking_of = _WIRE_BUILDERS[provider_name]
     model = make().model(model_id)
-    for effort in model.capability.thinking_effort - {"none"}:
+    for effort in model.capability.thinking.effort - {"none"}:
         sent = thinking_of(model, _settings_for(model.capability, effort))
         assert sent is not None, (
             f"{provider_name}/{model_id} advertises effort {effort!r} but the"
@@ -186,7 +186,7 @@ def test_a_row_with_no_efforts_sends_no_thinking_knob(
     """
     make, thinking_of = _WIRE_BUILDERS[provider_name]
     model = make().model(model_id)
-    if model.capability.thinking_effort - {"none"}:
+    if model.capability.thinking.effort - {"none"}:
         pytest.skip("row advertises efforts")
     assert thinking_of(model, _settings_for(model.capability, "none")) is None, (
         f"{provider_name}/{model_id} advertises no effort yet the wire body"
@@ -206,7 +206,7 @@ def test_distinct_efforts_stay_distinct_on_the_wire(
     """
     make, thinking_of = _WIRE_BUILDERS[provider_name]
     model = make().model(model_id)
-    efforts = sorted(model.capability.thinking_effort - {"none"})
+    efforts = sorted(model.capability.thinking.effort - {"none"})
     if not efforts:
         pytest.skip("row advertises no efforts")
     by_wire: dict[str, set[str]] = {}

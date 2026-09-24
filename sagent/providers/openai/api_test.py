@@ -180,7 +180,7 @@ def test_openai_gpt_6_astra_cannot_be_asked_not_to_think() -> None:
     them would let a caller select a value the wire refuses.
     """
     m = OpenAI.from_key("k").model("astra-6")
-    assert m.capability.thinking_effort == frozenset(
+    assert m.capability.thinking.effort == frozenset(
         {"low", "medium", "high", "xhigh", "max"},
     )
     with pytest.raises(ValueError, match="thinking_effort"):
@@ -375,7 +375,7 @@ def test_openai_effort_gating(model_id: str, expected: bool) -> None:
     a reasoning-effort table for.
     """
     m = OpenAI.from_key("k").model(model_id)
-    assert (m.capability.thinking_effort != frozenset({"none"})) is expected
+    assert (m.capability.thinking.effort != frozenset({"none"})) is expected
 
 
 def test_openai_pricing_attached_to_model() -> None:

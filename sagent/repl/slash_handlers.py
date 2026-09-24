@@ -147,7 +147,7 @@ def do_switch_effort(agent: Controllable, value: str, printer: Printer | None) -
 
     """
     settings = agent.model.settings
-    options = ", ".join(sorted(agent.model.capability.thinking_effort))
+    options = ", ".join(sorted(agent.model.capability.thinking.effort))
     if not value:
         _write(
             printer,

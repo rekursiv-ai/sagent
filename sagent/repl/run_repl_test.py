@@ -51,6 +51,7 @@ from sagent.types.capability import (
     ModelCapability,
     ModelLimits,
     ModelSettings,
+    ThinkingCapability,
     ThinkingEffort,
     ThinkingOutput,
 )
@@ -422,13 +423,13 @@ class _FakeModel:
                     ),
                 },
             ),
-            thinking_effort={"none", *self.valid_efforts},
-            thinking_budget=(
-                frozenset({"none", "auto", "fixed"})
+            thinking=ThinkingCapability(
+                effort={"none", *self.valid_efforts},
+                budget=frozenset({"none", "auto", "fixed"})
                 if self.supports_thinking
-                else frozenset({"none"})
+                else frozenset({"none"}),
+                output=outputs,
             ),
-            thinking_output=outputs,
             prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
         )
 
