@@ -102,7 +102,7 @@ class _NestedSequence(Protocol[T_co]):
 
 class device:
     type: str
-    index: _int
+    index: _int | None
     def __get__(self, instance, owner=...) -> device: ...
     @overload
     def __init__(self, device: DeviceLikeType) -> None: ...
