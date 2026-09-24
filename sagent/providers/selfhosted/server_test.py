@@ -27,7 +27,7 @@ from sagent.providers.selfhosted.server import (
     _tool_preamble,
     _tool_schema,
 )
-from sagent.types.cost import PriceCatalogProduct
+from sagent.types.cost import PriceKey
 from sagent.types.model import ModelRequest
 from sagent.types.runtime import (
     AssistantMessage,
@@ -400,7 +400,7 @@ def test_self_hosted_model_properties() -> None:
     assert m.approx_text_tokens("a" * 16) == 4
     assert m.is_context_overflow(RuntimeError("x")) is False
     assert m.is_retryable_provider_error(RuntimeError("x")) is False
-    assert m.capability.prices[PriceCatalogProduct()].request == 0.0
+    assert m.capability.prices[PriceKey("auto")].request == 0.0
 
 
 def test_self_hosted_model_accepts_model_id_by_keyword() -> None:

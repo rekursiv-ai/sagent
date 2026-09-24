@@ -89,12 +89,12 @@ def detect_cache_miss(
     """
     if model_changed or cache_ttl_sec <= 0.0:
         return None
-    prior_prefix = previous.request + previous.cache_write + previous.cache_read
+    prior_prefix = previous.prompt
     if prior_prefix <= 0:
         return None
     # A shorter prompt (compaction, ``clear``) dropped the old prefix on
     # purpose; only a prompt at least as long could have re-read it.
-    if current.request + current.cache_write + current.cache_read < prior_prefix:
+    if current.prompt < prior_prefix:
         return None
     missed = prior_prefix - current.cache_read
     if missed <= _NOISE_FLOOR_TOKENS:

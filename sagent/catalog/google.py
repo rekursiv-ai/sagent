@@ -23,7 +23,7 @@ from sagent.types.capability import (
 )
 from sagent.types.cost import (
     PriceCatalog,
-    PriceCatalogProduct,
+    PriceKey,
     TokenPrice,
 )
 
@@ -83,13 +83,13 @@ def models() -> Mapping[str, ModelCapability]:
     # positive integer the fixed one.
     gemini = ModelCapability(
         context=_context(request=1_048_576),
-        prices=_prices(request=0.5, response=3.0, cache_read=0.05),
+        prices=_prices(_card(request=0.5, response=3.0, cache_read=0.05)),
         thinking=ThinkingCapability(
             effort=frozenset(
                 {"none", "min", "low", "medium", "high", "xhigh", "max"},
             ),
-            budget={"none", "auto", "fixed"},
-            output={"none", "text"},
+            budget=frozenset({"none", "auto", "fixed"}),
+            output=frozenset({"none", "text"}),
         ),
     )
     # gemini-1.5 rejects ``thinkingConfig`` outright, so every thinking axis
@@ -104,42 +104,49 @@ def models() -> Mapping[str, ModelCapability]:
         replace(
             gemini,
             model_id="gemini-3.1-pro-preview",
-            prices=_prices(request=2.0, response=12.0, cache_read=0.2),
+            prices=_prices(
+                _card(request=2.0, response=12.0, cache_read=0.2),
+                over_200k=_card(request=4.0, response=18.0, cache_read=0.4),
+            ),
         ),
         replace(
             gemini,
             model_id="gemini-2.0-flash",
             context=_context(request=1_000_000),
-            prices=_prices(request=0.1, response=0.4, cache_read=0.025),
+            prices=_prices(_card(request=0.1, response=0.4, cache_read=0.025)),
         ),
         replace(
             gemini,
             model_id="gemini-2.5-flash-lite",
-            prices=_prices(request=0.1, response=0.4, cache_read=0.01),
+            prices=_prices(_card(request=0.1, response=0.4, cache_read=0.01)),
         ),
         replace(
             gemini,
             model_id="gemini-2.5-flash",
             context=_context(request=1_000_000),
-            prices=_prices(request=0.3, response=2.5, cache_read=0.03),
+            prices=_prices(_card(request=0.3, response=2.5, cache_read=0.03)),
         ),
         replace(
             gemini,
             model_id="gemini-2.5-pro",
             context=_context(request=1_000_000),
-            prices=_prices(request=1.25, response=10.0, cache_read=0.125),
+            prices=_prices(
+                _card(request=1.25, response=10.0, cache_read=0.125),
+                over_200k=_card(request=2.5, response=15.0, cache_read=0.25),
+            ),
         ),
         replace(
             legacy,
             model_id="gemini-1.5-flash",
-            prices=_prices(request=0.075, response=0.3, cache_read=0.01875),
+            prices=_prices(_card(request=0.075, response=0.3, cache_read=0.01875)),
         ),
         replace(
             legacy,
             model_id="gemini-1.5-pro",
-            prices=_prices(request=1.25, response=5.0, cache_read=0.3125),
+            prices=_prices(_card(request=1.25, response=5.0, cache_read=0.3125)),
         ),
     )
+    rows = tuple(replace(row, service_tier=row.prices.service_tiers) for row in rows)
     catalog = {row.model_id: row for row in rows}
     return MappingProxyType(
         {
@@ -169,9 +176,9 @@ def api() -> ModelCapability:
     # narrow value, so an omitted one would strip the model's real capability.
     return ModelCapability(
         thinking=ThinkingCapability(
-            effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
-            budget={"none", "auto", "fixed"},
-            output={"none", "text", "redacted"},
+            effort=frozenset({"none", "min", "low", "medium", "high", "xhigh", "max"}),
+            budget=frozenset({"none", "auto", "fixed"}),
+            output=frozenset({"none", "text", "redacted"}),
         ),
     )
 
@@ -191,11 +198,11 @@ def cli() -> ModelCapability:
     """
     return ModelCapability(
         thinking=ThinkingCapability(
-            effort={"none"},
-            budget={"none", "auto", "fixed"},
-            output={"none", "text", "redacted"},
+            effort=frozenset({"none"}),
+            budget=frozenset({"none", "auto", "fixed"}),
+            output=frozenset({"none", "text", "redacted"}),
         ),
-        manage_context_server_side={True},
+        manage_context_server_side=frozenset({True}),
         account_auth=True,
     )
 
@@ -215,9 +222,9 @@ def subscription() -> ModelCapability:
     """
     return ModelCapability(
         thinking=ThinkingCapability(
-            effort={"none", "min", "low", "medium", "high", "xhigh", "max"},
-            budget={"none", "auto", "fixed"},
-            output={"none", "text", "redacted"},
+            effort=frozenset({"none", "min", "low", "medium", "high", "xhigh", "max"}),
+            budget=frozenset({"none", "auto", "fixed"}),
+            output=frozenset({"none", "text", "redacted"}),
         ),
         account_auth=True,
     )
@@ -236,14 +243,27 @@ def _context(*, request: int) -> Mapping[ContextTag, ModelLimits]:
     )
 
 
-def _prices(*, request: float, response: float, cache_read: float) -> PriceCatalog:
-    """USD per million tokens; Gemini quotes one flat tier."""
-    return PriceCatalog(
-        {
-            PriceCatalogProduct(): TokenPrice(
-                request=request,
-                response=response,
-                cache_read=cache_read,
-            ),
-        },
+def _card(*, request: float, response: float, cache_read: float) -> TokenPrice:
+    """Return one published price-table row; Gemini bills no cache writes."""
+    return TokenPrice(
+        request=request,
+        response=response,
+        cache_write=0.0,
+        cache_write_1h=0.0,
+        cache_read=cache_read,
     )
+
+
+# The REST ``generateContent`` wire this catalog serves sends no
+# ``service_tier``, so only the standard tab applies; the page's flex and
+# priority tabs belong to the Interactions API.
+def _prices(
+    standard: TokenPrice,
+    *,
+    over_200k: TokenPrice | None = None,
+) -> PriceCatalog:
+    """Return the standard card, plus the "prompts > 200k tokens" card if published."""
+    cards = {PriceKey("auto"): standard}
+    if over_200k is not None:
+        cards[PriceKey("auto", 200_000)] = over_200k
+    return PriceCatalog(cards)

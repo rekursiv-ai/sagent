@@ -38,7 +38,7 @@ from sagent.types.capability import (
 )
 from sagent.types.cost import (
     PriceCatalog,
-    PriceCatalogProduct,
+    PriceKey,
     TokenCount,
     TokenPrice,
 )
@@ -80,7 +80,17 @@ def _free_model() -> _AnthropicModel:
     m = Anthropic.from_key("k").model("claude-opus-4-7")
     m._capability = replace(
         m.capability,
-        prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+        prices=PriceCatalog(
+            {
+                PriceKey("auto"): TokenPrice(
+                    request=0.0,
+                    response=0.0,
+                    cache_write=0.0,
+                    cache_write_1h=0.0,
+                    cache_read=0.0,
+                ),
+            },
+        ),
     )
     return m
 
@@ -92,10 +102,19 @@ def _fast_model() -> _AnthropicModel:
         m.capability,
         prices=PriceCatalog(
             {
-                PriceCatalogProduct(): TokenPrice(request=5.0, response=25.0),
-                PriceCatalogProduct(service_tier="priority"): TokenPrice(
+                PriceKey("auto"): TokenPrice(
+                    request=5.0,
+                    response=25.0,
+                    cache_write=0.0,
+                    cache_write_1h=0.0,
+                    cache_read=0.0,
+                ),
+                PriceKey("priority"): TokenPrice(
                     request=10.0,
                     response=50.0,
+                    cache_write=0.0,
+                    cache_write_1h=0.0,
+                    cache_read=0.0,
                 ),
             },
         ),
@@ -466,12 +485,16 @@ def _build_anthropic_message(
                 input=args,
             ),
         )
-    usage = MagicMock()
-    usage.input_tokens = input_tokens
-    usage.output_tokens = output_tokens
-    usage.cache_creation_input_tokens = cache_creation
-    usage.cache_read_input_tokens = cache_read
-    usage.speed = speed
+    # ``speed`` is an extra the SDK model keeps but does not declare.
+    usage = anthropic_sdk.types.Usage.model_validate(
+        {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_creation_input_tokens": cache_creation,
+            "cache_read_input_tokens": cache_read,
+            "speed": speed,
+        },
+    )
     msg = MagicMock()
     msg.content = text_blocks
     msg.usage = usage
@@ -540,11 +563,12 @@ def test_parse_response_cache_tokens_split_correctly() -> None:
         model.capability,
         prices=PriceCatalog(
             {
-                PriceCatalogProduct(): TokenPrice(
+                PriceKey("auto"): TokenPrice(
                     request=1.0,
                     response=2.0,
                     cache_write=4.0,
                     cache_read=0.5,
+                    cache_write_1h=0.0,
                 ),
             },
         ),
@@ -690,7 +714,7 @@ def test_anthropic_model_token_estimate_uses_profile_approx_chars_per_token() ->
 def test_anthropic_model_pricing_exposed() -> None:
     p = Anthropic.from_key("k")
     m = p.model("claude-haiku-4-5")
-    assert m.capability.prices[PriceCatalogProduct()].request > 0
+    assert m.capability.prices[PriceKey("auto")].request > 0
 
 
 def test_anthropic_fable_5_1_model_profile() -> None:
@@ -701,8 +725,8 @@ def test_anthropic_fable_5_1_model_profile() -> None:
     m = p.model("claude-fable-5-1")
     assert m.limits.max_request_tokens == 1_000_000
     assert m.limits.max_response_tokens == 128_000
-    assert m.capability.prices[PriceCatalogProduct()].request == 10.0
-    assert m.capability.prices[PriceCatalogProduct()].response == 50.0
+    assert m.capability.prices[PriceKey("auto")].request == 10.0
+    assert m.capability.prices[PriceKey("auto")].response == 50.0
     assert m.capability.thinking.effort == frozenset(
         {"none", "low", "medium", "high", "xhigh", "max"},
     )
@@ -723,10 +747,10 @@ def test_anthropic_fable_model_profile() -> None:
     m = p.model("claude-fable-5")
     assert m.limits.max_request_tokens == 1_000_000
     assert m.limits.max_response_tokens == 128_000
-    assert m.capability.prices[PriceCatalogProduct()].request == 10.0
-    assert m.capability.prices[PriceCatalogProduct()].response == 50.0
-    assert m.capability.prices[PriceCatalogProduct()].cache_write == 12.5
-    assert m.capability.prices[PriceCatalogProduct()].cache_read == 1.0
+    assert m.capability.prices[PriceKey("auto")].request == 10.0
+    assert m.capability.prices[PriceKey("auto")].response == 50.0
+    assert m.capability.prices[PriceKey("auto")].cache_write == 12.5
+    assert m.capability.prices[PriceKey("auto")].cache_read == 1.0
 
 
 def test_anthropic_fable_smaller_context() -> None:
@@ -743,8 +767,8 @@ def test_anthropic_sonnet_5_model_profile() -> None:
     assert m.limits.max_response_tokens == 128_000
     # $2/$10 launched as introductory pricing through 2026-08-31; Anthropic
     # cancelled the scheduled rise to $3/$15 and made it the standard rate.
-    assert m.capability.prices[PriceCatalogProduct()].request == 2.0
-    assert m.capability.prices[PriceCatalogProduct()].response == 10.0
+    assert m.capability.prices[PriceKey("auto")].request == 2.0
+    assert m.capability.prices[PriceKey("auto")].response == 10.0
     assert m.capability.thinking.effort == frozenset(
         {"none", "low", "medium", "high", "xhigh", "max"},
     )

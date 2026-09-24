@@ -648,7 +648,8 @@ def _format_stats(agent: AgentSelfAgent) -> list[str]:
         f"Input tokens:       {input_tokens:,} ({pct:.1f}% of max request)",
         f"Total input tokens: {tracker.total.request:,}",
         f"Total output tokens:{tracker.total.response:,}",
-        f"Cache creation:     {tracker.total.cache_write:,}",
+        f"Cache creation 5m:  {tracker.total.cache_write:,}",
+        f"Cache creation 1h:  {tracker.total.cache_write_1h:,}",
         f"Cache read:         {tracker.total.cache_read:,}",
         f"Total cost (USD):   ${tracker.spend.total:.2f}",
     ]

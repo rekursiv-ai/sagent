@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from datetime import date
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -17,7 +18,7 @@ from sagent.catalog import (
     openai,
 )
 from sagent.types.capability import ModelCapability, ModelSettings
-from sagent.types.cost import PriceCatalogProduct, TokenCount
+from sagent.types.cost import PriceKey, ServiceTier, TokenCount
 
 
 if TYPE_CHECKING:
@@ -25,6 +26,8 @@ if TYPE_CHECKING:
 
 
 _VENDORS = (anthropic, dashscope, google, llamacpp, minimax, moonshot, openai)
+
+_TODAY = date(2026, 9, 24)
 
 
 def _models(module: ModuleType) -> Mapping[str, ModelCapability]:
@@ -113,10 +116,13 @@ def test_untagged_context_is_the_largest_window(row: ModelCapability) -> None:
 
 
 @pytest.mark.parametrize("row", _ROWS)
-def test_every_row_is_priced(row: ModelCapability) -> None:
-    assert len(row.prices) > 0
-    product = PriceCatalogProduct(service_tier=ModelSettings().service_tier)
-    assert row.prices[product] * TokenCount(request=1_000) is not None
+def test_every_row_prices_its_default_tier(row: ModelCapability) -> None:
+    price = row.prices.rate(
+        service_tier=ModelSettings().service_tier,
+        prompt_tokens=1_000,
+        at=_TODAY,
+    )
+    assert price * TokenCount(request=1_000) is not None
 
 
 @pytest.mark.parametrize("row", _ROWS)
@@ -142,9 +148,20 @@ def test_only_reasoning_only_models_reject_none(row: ModelCapability) -> None:
 
 
 @pytest.mark.parametrize("row", _ROWS)
-def test_a_priced_tier_is_an_offered_tier(row: ModelCapability) -> None:
-    for product in row.prices:
-        assert product.service_tier in row.service_tier, product
+def test_a_tier_is_offered_exactly_when_priced(row: ModelCapability) -> None:
+    """Offering an unpriced tier used to bill it at the standard rate."""
+    assert row.service_tier == row.prices.service_tiers
+
+
+@pytest.mark.parametrize("row", _ROWS)
+def test_every_offered_tier_prices_every_prompt_size(row: ModelCapability) -> None:
+    for tier in row.service_tier:
+        for prompt_tokens in (0, 200_001, 272_001, 10**7):
+            _ = row.prices.rate(
+                service_tier=tier,
+                prompt_tokens=prompt_tokens,
+                at=_TODAY,
+            )
 
 
 @pytest.mark.parametrize(("models", "transport"), _TRANSPORTS, ids=_TRANSPORT_IDS)
@@ -200,12 +217,8 @@ def test_every_anthropic_row_states_its_published_cutoff(
     assert anthropic.models()[model_id].knowledge_cutoff == cutoff
 
 
-def test_a_tier_is_offered_exactly_when_it_is_priced() -> None:
-    """``service_tier`` is derived from ``prices``, so the two cannot drift."""
+def test_only_the_fast_mode_opus_models_offer_priority() -> None:
     rows = anthropic.models()
-    for row in rows.values():
-        priced = {"auto", "default", *(p.service_tier for p in row.prices)}
-        assert row.service_tier == priced, row.model_id
     fast = {m for m, row in rows.items() if "priority" in row.service_tier}
     assert fast == {"default", "opus-5.5", "opus-5", "opus-4.8"}
 
@@ -275,7 +288,7 @@ def test_a_transport_never_advertises_what_no_row_can_reach(
 
 
 # Base input/output USD per Mtok, transcribed from each vendor's pricing page
-# on 2026-09-22. Only rows whose price this repo actually bills against are
+# on 2026-09-24. Only rows whose price this repo actually bills against are
 # listed; the point is to catch a REPRICE, which no structural invariant sees.
 # Sources:
 #   https://developers.openai.com/api/docs/pricing
@@ -313,7 +326,7 @@ def test_a_row_bills_the_vendors_published_rate(
     assert a row IS priced, never that the number is right.
     """
     rows = {mid: row for module in _VENDORS for mid, row in _models(module).items()}
-    price = rows[model_id].prices[PriceCatalogProduct()]
+    price = rows[model_id].prices[PriceKey("auto")]
     assert (price.request, price.response) == published
 
 
@@ -326,13 +339,13 @@ def test_a_cache_rate_is_a_multiple_of_the_rate_it_rides() -> None:
     """
     rows = anthropic.models()
     opus = rows["opus-5"].prices
-    standard = opus[PriceCatalogProduct()]
-    fast = opus[PriceCatalogProduct(service_tier="priority")]
+    standard = opus[PriceKey("auto")]
+    fast = opus[PriceKey("priority")]
     assert (fast.request, fast.response) == (10.0, 50.0)
     assert fast.cache_write == fast.request * 1.25
     assert fast.cache_read == fast.request * 0.1
     assert fast.cache_write == standard.cache_write * 2.0
-    fable = rows["fable-5.1"].prices[PriceCatalogProduct()]
+    fable = rows["fable-5.1"].prices[PriceKey("auto")]
     assert fable.cache_read == 0.25
 
 
@@ -353,8 +366,133 @@ def test_anthropic_cache_hits_bill_the_published_rate(
     cache_read: float,
 ) -> None:
     """Fable 5.1 is 0.025x, Opus 5.5 0.05x, every other model 0.1x input."""
-    price = anthropic.models()[model_id].prices[PriceCatalogProduct()]
+    price = anthropic.models()[model_id].prices[PriceKey("auto")]
     assert price.cache_read == pytest.approx(cache_read)
+
+
+@pytest.mark.parametrize(
+    ("model_id", "write_5m", "write_1h"),
+    [
+        ("fable-5.1", 12.5, 20.0),
+        ("opus-5.5", 5.0, 8.0),
+        ("opus-5", 6.25, 10.0),
+        ("sonnet-5", 2.5, 4.0),
+        ("sonnet-4.6", 3.75, 6.0),
+        ("haiku-4.5", 1.25, 2.0),
+    ],
+)
+def test_anthropic_cache_writes_bill_the_published_rate_per_lifetime(
+    model_id: str,
+    write_5m: float,
+    write_1h: float,
+) -> None:
+    """A 1h write costs 2x input; billing it at the 5m 1.25x under-counted."""
+    price = anthropic.models()[model_id].prices[PriceKey("auto")]
+    assert (price.cache_write, price.cache_write_1h) == (write_5m, write_1h)
+
+
+# (tier, input, cached input, cache write, output), from the standard / flex /
+# fast tabs of https://developers.openai.com/api/docs/pricing, 2026-09-24.
+@pytest.mark.parametrize(
+    ("model_id", "tier", "published"),
+    [
+        ("astra-6", "auto", (10.0, 1.0, 12.5, 50.0)),
+        ("astra-6", "flex", (5.0, 0.5, 6.25, 25.0)),
+        ("astra-6", "priority", (20.0, 2.0, 25.0, 100.0)),
+        ("luna-6", "flex", (0.05, 0.005, 0.0625, 0.25)),
+        ("luna-6", "priority", (0.2, 0.02, 0.25, 1.0)),
+        ("terra-5.6", "flex", (1.0, 0.1, 1.25, 6.0)),
+        ("gpt-5.4", "flex", (1.25, 0.13, 0.0, 7.5)),
+        ("gpt-4o", "priority", (4.25, 2.125, 0.0, 17.0)),
+    ],
+)
+def test_openai_tiers_bill_the_published_rate(
+    model_id: str,
+    tier: ServiceTier,
+    published: tuple[float, float, float, float],
+) -> None:
+    price = openai.models()[model_id].prices[PriceKey(tier)]
+    assert (price.request, price.cache_read, price.cache_write, price.response) == (
+        published
+    )
+
+
+@pytest.mark.parametrize(
+    ("model_id", "offered"),
+    [
+        ("astra-6", {"auto", "default", "flex", "priority"}),
+        ("gpt-5.5-pro", {"auto", "default", "flex"}),
+        ("gpt-4.1", {"auto", "default", "priority"}),
+        ("o1", {"auto", "default"}),
+    ],
+)
+def test_openai_offers_only_the_published_tiers(
+    model_id: str,
+    offered: set[str],
+) -> None:
+    """A model absent from a tier's pricing tab cannot be billed at it."""
+    assert openai.models()[model_id].service_tier == offered
+
+
+def test_openai_long_prompts_bill_the_published_long_context_rate() -> None:
+    """GPT-6 publishes its >272K column; 2x input / 1.5x output reproduces it."""
+    prices = openai.models()["luna-6"].prices
+    short = prices.rate(service_tier="auto", prompt_tokens=272_000, at=_TODAY)
+    long = prices.rate(service_tier="auto", prompt_tokens=272_001, at=_TODAY)
+    assert (short.request, short.response) == (0.1, 0.5)
+    assert (long.request, long.cache_read, long.cache_write, long.response) == (
+        pytest.approx(0.2),
+        pytest.approx(0.02),
+        pytest.approx(0.25),
+        pytest.approx(0.75),
+    )
+    fast_long = prices.rate(service_tier="priority", prompt_tokens=300_000, at=_TODAY)
+    assert (fast_long.request, fast_long.response) == (
+        pytest.approx(0.4),
+        pytest.approx(1.5),
+    )
+
+
+@pytest.mark.parametrize(
+    ("reported", "tier"),
+    [
+        (None, "auto"),
+        ("default", "auto"),
+        ("flex", "flex"),
+        ("priority", "priority"),
+        ("fast", "priority"),
+    ],
+)
+def test_openai_bills_the_tier_it_reports_serving(
+    reported: str | None,
+    tier: ServiceTier,
+) -> None:
+    assert openai.served_tier(reported) == tier
+
+
+def test_openai_rejects_a_tier_it_cannot_price() -> None:
+    with pytest.raises(ValueError, match="scale"):
+        _ = openai.served_tier("scale")
+
+
+@pytest.mark.parametrize(
+    ("model_id", "short", "long"),
+    [
+        ("gemini-3.1-pro-preview", (2.0, 12.0, 0.2), (4.0, 18.0, 0.4)),
+        ("gemini-2.5-pro", (1.25, 10.0, 0.125), (2.5, 15.0, 0.25)),
+    ],
+)
+def test_gemini_prompts_over_200k_bill_the_published_rate(
+    model_id: str,
+    short: tuple[float, float, float],
+    long: tuple[float, float, float],
+) -> None:
+    """Gemini bands "prompts > 200k"; exactly 200k is still short."""
+    prices = google.models()[model_id].prices
+    at_200k = prices.rate(service_tier="auto", prompt_tokens=200_000, at=_TODAY)
+    over = prices.rate(service_tier="auto", prompt_tokens=200_001, at=_TODAY)
+    assert (at_200k.request, at_200k.response, at_200k.cache_read) == short
+    assert (over.request, over.response, over.cache_read) == long
 
 
 def test_anthropic_context_betas_are_catalog_data() -> None:

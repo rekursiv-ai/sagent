@@ -16,6 +16,7 @@ Usage::
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast, override
 
 import asyncio
@@ -55,7 +56,7 @@ else:
     image = lazy_import("sagent.lib.image")
 
 
-from sagent.catalog.anthropic import api, models
+from sagent.catalog.anthropic import api, models, usage_tokens
 from sagent.lib import debug_log
 from sagent.lib.custom_json import MutableJSON, MutableJSONValue, json_unfreeze
 from sagent.providers.lib.errors import (
@@ -71,7 +72,6 @@ from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.lib.usage import anthropic_usage
-from sagent.types.cost import TokenCount
 from sagent.types.model import (
     ModelRequest,
     ModelResponse,
@@ -1280,12 +1280,13 @@ def _is_valid_tool_name(name: str) -> bool:
 
 
 class _Usage(Protocol):
-    """The usage fields ``_parse_response`` reads off a raw message."""
+    """The usage surface ``_parse_response`` reads off a raw message.
 
-    @property
-    def input_tokens(self) -> int: ...
-    @property
-    def output_tokens(self) -> int: ...
+    Read as a whole mapping: ``speed`` and the per-lifetime ``cache_creation``
+    split are SDK extras a typed attribute read would not reach.
+    """
+
+    def model_dump(self) -> dict[str, object]: ...
 
 
 class _RawMessage(Protocol):
@@ -1355,30 +1356,23 @@ def _parse_response(raw: _RawMessage, model: _AnthropicModel) -> ModelResponse:
         tool_calls=tuple(tool_calls),
     )
 
-    cache_write = getattr(raw.usage, "cache_creation_input_tokens", 0) or 0
-    cache_read = getattr(raw.usage, "cache_read_input_tokens", 0) or 0
+    usage = raw.usage.model_dump()
+    tokens = usage_tokens(usage, cache_ttl_sec=model.settings.cache_ttl_sec)
     # Server-authoritative: a request that opted into fast mode but fell
     # back to standard speed reports ``usage.speed == "standard"`` and is
     # billed at standard rates.
-    served_fast = getattr(raw.usage, "speed", None) == "fast"
-    tokens = TokenCount(
-        request=raw.usage.input_tokens,
-        response=raw.usage.output_tokens,
-        cache_write=cache_write,
-        cache_read=cache_read,
-    )
-    # Anthropic reports the speed it actually served: a request that asked
-    # for priority and fell back must bill standard.
+    served_fast = usage.get("speed") == "fast"
     spend = model.capability.prices.cost(
         tokens,
-        service_tier=model.settings.service_tier if served_fast else "auto",
+        service_tier="priority" if served_fast else "auto",
+        at=datetime.now(UTC).date(),
     )
     debug_log.trace(
         "api_response",
         kind="anthropic",
-        usage_speed=getattr(raw.usage, "speed", None),
+        usage_speed=usage.get("speed"),
         billed_fast=served_fast,
-        input_cost=spend.request + spend.cache_write + spend.cache_read,
+        input_cost=spend.total - spend.response,
         output_cost=spend.response,
     )
     return ModelResponse(

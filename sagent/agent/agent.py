@@ -1556,14 +1556,8 @@ class Agent:
         )
         self._own_spend = self._own_spend + response.spend
         # Anchor the proactive compaction trigger on the provider's exact
-        # input usage. The three token pools are disjoint by the
-        # ``TokenCount`` convention (input is non-cached), so their sum is the
-        # full prompt size the server counted.
-        self._last_input_tokens = (
-            response.tokens.request
-            + response.tokens.cache_write
-            + response.tokens.cache_read
-        )
+        # prompt size, every cache pool included.
+        self._last_input_tokens = response.tokens.prompt
         self._last_measured_history = tuple(self.runtime.context().messages)
         if (
             self.max_budget_usd is not None

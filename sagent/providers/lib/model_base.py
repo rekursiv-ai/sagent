@@ -16,6 +16,7 @@ never override:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
 from sagent.lib import token_count
@@ -83,6 +84,7 @@ class ModelDefaults(_Transport, Protocol):
         return self.capability.prices.cost(
             tokens,
             service_tier=self.settings.service_tier,
+            at=datetime.now(UTC).date(),
         )
 
     def approx_request_tokens(self, request: ModelRequest) -> int:

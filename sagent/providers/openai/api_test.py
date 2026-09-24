@@ -16,7 +16,7 @@ import tiktoken
 
 from sagent.catalog.openai import models, reasoning_effort
 from sagent.providers.openai.api import OpenAI
-from sagent.types.cost import PriceCatalogProduct
+from sagent.types.cost import PriceKey
 
 
 if TYPE_CHECKING:
@@ -148,8 +148,8 @@ def test_openai_two_tier_defaults_to_full_window(
     assert small.limits.max_request_tokens == 272_000
     assert small.tagged_model_id.endswith("+272k")
     assert (
-        full.capability.prices[PriceCatalogProduct()]
-        == small.capability.prices[PriceCatalogProduct()]
+        full.capability.prices[PriceKey("auto")]
+        == small.capability.prices[PriceKey("auto")]
     )
     assert full.limits.max_request_bytes == small.limits.max_request_bytes
 
@@ -164,10 +164,10 @@ def test_openai_gpt_6_astra_profile() -> None:
     m = OpenAI.from_key("k").model("astra-6")
     assert m.limits.max_request_tokens == 1_050_000
     assert m.limits.max_response_tokens == 128_000
-    assert m.capability.prices[PriceCatalogProduct()].request == 10.0
-    assert m.capability.prices[PriceCatalogProduct()].response == 50.0
-    assert m.capability.prices[PriceCatalogProduct()].cache_write == 12.5
-    assert m.capability.prices[PriceCatalogProduct()].cache_read == 1.0
+    assert m.capability.prices[PriceKey("auto")].request == 10.0
+    assert m.capability.prices[PriceKey("auto")].response == 50.0
+    assert m.capability.prices[PriceKey("auto")].cache_write == 12.5
+    assert m.capability.prices[PriceKey("auto")].cache_read == 1.0
     assert m.capability.service_tier == frozenset(
         {"auto", "default", "flex", "priority"},
     )
@@ -254,13 +254,13 @@ def test_openai_gpt_56_profiles(
     m = OpenAI.from_key("k").model(model_id)
     assert m.limits.max_request_tokens == 1_050_000
     assert m.limits.max_response_tokens == 128_000
-    assert m.capability.prices[PriceCatalogProduct()].request == request_price
-    assert m.capability.prices[PriceCatalogProduct()].response == response_price
-    assert m.capability.prices[PriceCatalogProduct()].cache_write == cache_write_price
-    assert m.capability.prices[PriceCatalogProduct()].cache_read == request_price / 10
+    assert m.capability.prices[PriceKey("auto")].request == request_price
+    assert m.capability.prices[PriceKey("auto")].response == response_price
+    assert m.capability.prices[PriceKey("auto")].cache_write == cache_write_price
+    assert m.capability.prices[PriceKey("auto")].cache_read == request_price / 10
     # The >272K surcharge is a second catalog row, not a multiplier field:
     # 2x on every input pool, 1.5x on the response.
-    tier = m.capability.prices[PriceCatalogProduct(min_request_tokens=272_000)]
+    tier = m.capability.prices[PriceKey("auto", 272_000)]
     assert tier.request == request_price * 2.0
     assert tier.cache_write == cache_write_price * 2.0
     assert tier.cache_read == request_price / 10 * 2.0
@@ -381,7 +381,7 @@ def test_openai_effort_gating(model_id: str, expected: bool) -> None:
 def test_openai_pricing_attached_to_model() -> None:
     p = OpenAI.from_key("k")
     m = p.model("gpt-5.5")
-    price = m.capability.prices[PriceCatalogProduct()]
+    price = m.capability.prices[PriceKey("auto")]
     assert price.request > 0
     assert price.response > 0
 

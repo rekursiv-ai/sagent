@@ -16,7 +16,7 @@ from sagent.providers.openai.compat import OpenAICompat
 from sagent.types.capability import ModelCapability, ModelLimits
 from sagent.types.cost import (
     PriceCatalog,
-    PriceCatalogProduct,
+    PriceKey,
     TokenPrice,
 )
 from sagent.types.providers import ModelCatalog
@@ -41,7 +41,17 @@ class LocalOpenAI(OpenAICompat):
             },
         ),
         # A local server bills nothing, but a missing row would raise.
-        prices=PriceCatalog({PriceCatalogProduct(): TokenPrice()}),
+        prices=PriceCatalog(
+            {
+                PriceKey("auto"): TokenPrice(
+                    request=0.0,
+                    response=0.0,
+                    cache_write=0.0,
+                    cache_write_1h=0.0,
+                    cache_read=0.0,
+                ),
+            },
+        ),
     )
     catalog = ModelCatalog(
         rows=MappingProxyType({model_id: row, "default": row, "utility": row}),

@@ -13,7 +13,7 @@ from sagent.agent.state import (
     tool_state_var,
 )
 from sagent.testing import FakeAgent, MockModelCaps, with_fake_agent
-from sagent.types.cost import PriceCatalogProduct, TokenPrice
+from sagent.types.cost import PriceKey, TokenPrice
 from sagent.types.runtime import (
     AssistantMessage,
     Halt,
@@ -41,7 +41,13 @@ def test_mock_model_caps_static_flags() -> None:
 def test_mock_model_caps_pricing_zero() -> None:
     """Every rate defaults to zero, so mocks never fabricate spend."""
     m = MockModelCaps()
-    assert m.capability.prices[PriceCatalogProduct()] == TokenPrice()
+    assert m.capability.prices[PriceKey("auto")] == TokenPrice(
+        request=0.0,
+        response=0.0,
+        cache_write=0.0,
+        cache_write_1h=0.0,
+        cache_read=0.0,
+    )
 
 
 def test_mock_model_caps_estimate_text() -> None:

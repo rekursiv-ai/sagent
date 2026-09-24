@@ -504,7 +504,7 @@ async def test_diagnostics_reports_live_cost_tracker_state() -> None:
     assert "Input tokens:       10,000 (20.0% of max request)" in result.content
     assert "Total input tokens: 10,000" in result.content
     assert "Total output tokens:30" in result.content
-    assert "Cache creation:     7" in result.content
+    assert "Cache creation 5m:  7" in result.content
     assert "Cache read:         3" in result.content
     assert "Total cost (USD):   $0.42" in result.content
 

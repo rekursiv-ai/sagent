@@ -13,7 +13,7 @@ from sagent.types.capability import (
     ModelSettings,
     ThinkingCapability,
 )
-from sagent.types.cost import PriceCatalog, PriceCatalogProduct, TokenPrice
+from sagent.types.cost import PriceCatalog, PriceKey, TokenPrice
 from sagent.types.providers import (
     ModelCatalog,
     UnknownModelError,
@@ -35,19 +35,34 @@ def _opus() -> ModelCapability:
         ),
         prices=PriceCatalog(
             {
-                PriceCatalogProduct(): TokenPrice(request=5.0),
-                PriceCatalogProduct(service_tier="priority"): TokenPrice(request=15.0),
+                PriceKey("auto"): TokenPrice(
+                    request=5.0,
+                    response=0.0,
+                    cache_write=0.0,
+                    cache_write_1h=0.0,
+                    cache_read=0.0,
+                ),
+                PriceKey("priority"): TokenPrice(
+                    request=15.0,
+                    response=0.0,
+                    cache_write=0.0,
+                    cache_write_1h=0.0,
+                    cache_read=0.0,
+                ),
             },
         ),
-        thinking=ThinkingCapability(effort={"none", "max"}),
-        service_tier={"auto", "default", "priority"},
+        thinking=ThinkingCapability(effort=frozenset({"none", "max"})),
+        service_tier=frozenset({"auto", "default", "priority"}),
     )
 
 
 def _cli() -> ModelCapability:
     return ModelCapability(
-        thinking=ThinkingCapability(effort={"none"}, output={"none", "text"}),
-        manage_context_server_side={True},
+        thinking=ThinkingCapability(
+            effort=frozenset({"none"}),
+            output=frozenset({"none", "text"}),
+        ),
+        manage_context_server_side=frozenset({True}),
     )
 
 
@@ -98,7 +113,7 @@ def test_resolve_never_grants_what_the_row_lacks() -> None:
         models={"opus-4.8": _opus()},
         transport=ModelCapability(
             thinking=ThinkingCapability(
-                effort={"none", "min", "low", "medium", "high", "max"},
+                effort=frozenset({"none", "min", "low", "medium", "high", "max"}),
             ),
         ),
     )

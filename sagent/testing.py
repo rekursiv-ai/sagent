@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
@@ -44,7 +45,7 @@ from sagent.types.capability import (
 )
 from sagent.types.cost import (
     PriceCatalog,
-    PriceCatalogProduct,
+    PriceKey,
     ServiceTier,
     TokenCost,
     TokenCount,
@@ -123,9 +124,23 @@ class MockModelCaps:
                 },
             ),
             prices=PriceCatalog(
-                {PriceCatalogProduct(): TokenPrice()}
+                {
+                    PriceKey("auto"): TokenPrice(
+                        request=0.0,
+                        response=0.0,
+                        cache_write=0.0,
+                        cache_write_1h=0.0,
+                        cache_read=0.0,
+                    ),
+                }
                 | {
-                    PriceCatalogProduct(service_tier=t): TokenPrice()
+                    PriceKey(t): TokenPrice(
+                        request=0.0,
+                        response=0.0,
+                        cache_write=0.0,
+                        cache_write_1h=0.0,
+                        cache_read=0.0,
+                    )
                     for t in self.service_tiers
                 },
             ),
@@ -138,7 +153,7 @@ class MockModelCaps:
                 if self.supports_thinking
                 else frozenset({"none"}),
             ),
-            service_tier={"auto", *self.service_tiers},
+            service_tier=frozenset({"auto", *self.service_tiers}),
             retries_internally=self.supports_persistent_retry,
         )
 
@@ -181,6 +196,7 @@ class MockModelCaps:
         return self.capability.prices.cost(
             tokens,
             service_tier=self.settings.service_tier,
+            at=datetime.now(UTC).date(),
         )
 
     def approx_text_tokens(self, text: str) -> int:

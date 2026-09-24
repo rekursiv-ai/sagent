@@ -256,6 +256,7 @@ def _spend_from_json(raw: object) -> TokenCost:
         request=FloatCodec.coerce(buckets.get("request"), 0.0),
         response=FloatCodec.coerce(buckets.get("response"), 0.0),
         cache_write=FloatCodec.coerce(buckets.get("cache_write"), 0.0),
+        cache_write_1h=FloatCodec.coerce(buckets.get("cache_write_1h"), 0.0),
         cache_read=FloatCodec.coerce(buckets.get("cache_read"), 0.0),
     )
 
@@ -325,12 +326,14 @@ class SessionMeta:
                 "input_tokens": self.tokens.request,
                 "output_tokens": self.tokens.response,
                 "cache_creation_tokens": self.tokens.cache_write,
+                "cache_creation_1h_tokens": self.tokens.cache_write_1h,
                 "cache_read_tokens": self.tokens.cache_read,
             },
             "spend": {
                 "request": self.spend.request,
                 "response": self.spend.response,
                 "cache_write": self.spend.cache_write,
+                "cache_write_1h": self.spend.cache_write_1h,
                 "cache_read": self.spend.cache_read,
             },
             "num_tool_call_rounds": self.num_tool_call_rounds,
@@ -368,6 +371,10 @@ class SessionMeta:
                 request=IntCodec.coerce(tokens_d.get("input_tokens"), 0),
                 response=IntCodec.coerce(tokens_d.get("output_tokens"), 0),
                 cache_write=IntCodec.coerce(tokens_d.get("cache_creation_tokens"), 0),
+                cache_write_1h=IntCodec.coerce(
+                    tokens_d.get("cache_creation_1h_tokens"),
+                    0,
+                ),
                 cache_read=IntCodec.coerce(tokens_d.get("cache_read_tokens"), 0),
             ),
             spend=_spend_from_json(d.get("spend")),
