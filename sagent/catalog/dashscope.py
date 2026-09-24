@@ -72,120 +72,130 @@ def models() -> Mapping[str, ModelCapability]:
       models: Capability per base model id.
 
     """
-    # A reasoning Qwen row: every model below is this one with its window,
-    # price, and thinking axes replaced.
-    qwen = ModelCapability(
-        context=_limits(window=262_144, response=65_536),
-        prices=_prices(request=1.6, response=6.4),
+    # The reference row: every other model states only how it differs from it.
+    default = ModelCapability(
+        model_id="qwen3.6-plus",
+        context=_limits(),
+        prices=_prices(_card(request=0.5, response=3.0)),
         thinking=ThinkingCapability(
-            effort=_efforts(),
+            effort=frozenset({"none", "min", "low", "medium", "high", "xhigh", "max"}),
             budget=frozenset({"none", "auto", "fixed"}),
             output=frozenset({"none", "text"}),
         ),
     )
-    # ``-instruct`` / ``-coder`` / ``-turbo`` reject the toggle, so every
-    # thinking axis offers only its off value.
-    instruct = replace(
-        qwen,
-        thinking=ThinkingCapability(),
+    utility = replace(
+        default,
+        model_id="qwen3.6-flash",
+        prices=_prices(_card(request=0.05, response=0.2)),
     )
     rows = (
-        replace(qwen, model_id="qwen3.6-max-preview"),
         replace(
-            qwen,
-            model_id="qwen3.6-plus",
-            context=_limits(window=1_000_000, response=65_536),
-            prices=_prices(request=0.5, response=3.0),
+            default,
+            model_id="qwen3.6-max-preview",
+            context=_limits(max_tokens=262_144),
+            prices=_prices(_card(request=1.6, response=6.4)),
         ),
+        default,
+        utility,
+        # ``-instruct`` / ``-coder`` / ``-turbo`` reject the toggle, so every
+        # thinking axis offers only its off value.
         replace(
-            qwen,
-            model_id="qwen3.6-flash",
-            context=_limits(window=1_000_000, response=65_536),
-            prices=_prices(request=0.05, response=0.2),
-        ),
-        replace(
-            instruct,
+            default,
             model_id="qwen3-235b-a22b-instruct-2507",
-            prices=_prices(request=0.7, response=2.8),
+            context=_limits(max_tokens=262_144),
+            prices=_prices(_card(request=0.7, response=2.8)),
+            thinking=ThinkingCapability(),
         ),
         replace(
-            qwen,
+            default,
             model_id="qwen3-235b-a22b-thinking-2507",
-            context=_limits(window=262_144, response=32_768),
-            prices=_prices(request=0.7, response=8.4),
+            context=_limits(max_tokens=262_144, output_tokens=32_768),
+            prices=_prices(_card(request=0.7, response=8.4)),
             # Everything but ``none``: these ids reject ``enable_thinking=false``.
-            thinking=replace(qwen.thinking, effort=_efforts() - {"none"}),
+            thinking=replace(
+                default.thinking,
+                effort=default.thinking.effort - {"none"},
+            ),
         ),
         replace(
-            instruct,
+            default,
             model_id="qwen3-30b-a3b-instruct-2507",
-            prices=_prices(request=0.2, response=0.8),
+            context=_limits(max_tokens=262_144),
+            prices=_prices(_card(request=0.2, response=0.8)),
+            thinking=ThinkingCapability(),
         ),
         replace(
-            qwen,
+            default,
             model_id="qwen3-32b",
-            prices=_prices(request=0.4, response=1.2),
+            context=_limits(max_tokens=262_144),
+            prices=_prices(_card(request=0.4, response=1.2)),
         ),
         replace(
-            instruct,
+            default,
             model_id="qwen3-coder-480b-a35b-instruct",
-            prices=_prices(request=1.0, response=5.0),
+            context=_limits(max_tokens=262_144),
+            prices=_prices(_card(request=1.0, response=5.0)),
+            thinking=ThinkingCapability(),
         ),
         replace(
-            qwen,
+            default,
             model_id="qwen-plus",
-            context=_limits(window=1_000_000, response=32_768),
-            prices=_prices(request=0.4, response=1.2),
+            context=_limits(output_tokens=32_768),
+            prices=_prices(_card(request=0.4, response=1.2)),
         ),
         replace(
-            qwen,
+            default,
             model_id="qwen-max",
-            prices=_prices(request=1.6, response=6.4),
+            context=_limits(max_tokens=262_144),
+            prices=_prices(_card(request=1.6, response=6.4)),
         ),
         replace(
-            instruct,
+            default,
             model_id="qwen-turbo",
-            context=_limits(window=1_000_000, response=32_768),
-            prices=_prices(request=0.05, response=0.2),
+            context=_limits(output_tokens=32_768),
+            prices=_prices(_card(request=0.05, response=0.2)),
+            thinking=ThinkingCapability(),
         ),
     )
+    # A tier is offered exactly when it is priced.
+    rows = tuple(replace(row, service_tier=row.prices.service_tiers) for row in rows)
     catalog = {row.model_id: row for row in rows}
     return MappingProxyType(
         {
-            "default": catalog["qwen3.6-plus"],
-            "utility": catalog["qwen3.6-flash"],
+            "default": catalog[default.model_id],
+            "utility": catalog[utility.model_id],
             **catalog,
         },
     )
 
 
-def _limits(*, window: int, response: int) -> Mapping[ContextTag, ModelLimits]:
-    """One context tag: these vendors ship no window variants."""
+def _card(*, request: float, response: float) -> TokenPrice:
+    """Return one published price-table row; DashScope reports no cache pools."""
+    return TokenPrice(
+        request=request,
+        response=response,
+        cache_write=0.0,
+        cache_write_1h=0.0,
+        cache_read=0.0,
+    )
+
+
+def _prices(standard: TokenPrice) -> PriceCatalog:
+    """Return the one published card; DashScope quotes one flat tier."""
+    return PriceCatalog({PriceKey("auto"): standard})
+
+
+def _limits(
+    *,
+    max_tokens: int = 1_000_000,
+    output_tokens: int = 65_536,
+) -> Mapping[ContextTag, ModelLimits]:
+    """One context tag: DashScope ships no window variants."""
     return MappingProxyType(
         {
             "": ModelLimits(
-                max_request_tokens=window,
-                max_response_tokens=response,
+                max_request_tokens=max_tokens,
+                max_response_tokens=output_tokens,
             ),
         },
     )
-
-
-def _prices(*, request: float, response: float) -> PriceCatalog:
-    """Return the one published card; DashScope quotes one flat tier, and reports no cache pools."""
-    return PriceCatalog(
-        {
-            PriceKey("auto"): TokenPrice(
-                request=request,
-                response=response,
-                cache_write=0.0,
-                cache_write_1h=0.0,
-                cache_read=0.0,
-            ),
-        },
-    )
-
-
-def _efforts() -> frozenset[ThinkingEffort]:
-    """Every effort DashScope accepts."""
-    return frozenset({"none", "min", "low", "medium", "high", "xhigh", "max"})

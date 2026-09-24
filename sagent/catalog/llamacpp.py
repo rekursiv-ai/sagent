@@ -36,9 +36,11 @@ def models() -> Mapping[str, ModelCapability]:
       models: Capability per base model id.
 
     """
+    # The reference row: every other model states only how it differs from it.
     # A local server bills nothing, but a missing price row would raise.
-    local = ModelCapability(
-        context=_limits(window=16_384, response=1_024),
+    default = ModelCapability(
+        model_id="qwen3.6-27b-12gb",
+        context=_limits(),
         prices=PriceCatalog(
             {
                 PriceKey("auto"): TokenPrice(
@@ -52,35 +54,41 @@ def models() -> Mapping[str, ModelCapability]:
         ),
     )
     rows = (
-        replace(local, model_id="qwen3.6-27b-12gb"),
+        default,
         replace(
-            local,
+            default,
             model_id="qwen3.6-27b-mtp-64k",
-            context=_limits(window=65_536, response=4_096),
+            context=_limits(max_tokens=65_536, output_tokens=4_096),
         ),
         replace(
-            local,
+            default,
             model_id="local",
-            context=_limits(window=32_768, response=4_096),
+            context=_limits(max_tokens=32_768, output_tokens=4_096),
         ),
     )
+    # A tier is offered exactly when it is priced.
+    rows = tuple(replace(row, service_tier=row.prices.service_tiers) for row in rows)
     catalog = {row.model_id: row for row in rows}
     return MappingProxyType(
         {
-            "default": catalog["qwen3.6-27b-12gb"],
-            "utility": catalog["qwen3.6-27b-12gb"],
+            "default": catalog[default.model_id],
+            "utility": catalog[default.model_id],
             **catalog,
         },
     )
 
 
-def _limits(*, window: int, response: int) -> Mapping[ContextTag, ModelLimits]:
-    """One context tag: these vendors ship no window variants."""
+def _limits(
+    *,
+    max_tokens: int = 16_384,
+    output_tokens: int = 1_024,
+) -> Mapping[ContextTag, ModelLimits]:
+    """One context tag: a local server ships no window variants."""
     return MappingProxyType(
         {
             "": ModelLimits(
-                max_request_tokens=window,
-                max_response_tokens=response,
+                max_request_tokens=max_tokens,
+                max_response_tokens=output_tokens,
             ),
         },
     )

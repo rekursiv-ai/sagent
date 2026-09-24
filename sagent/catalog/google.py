@@ -78,80 +78,78 @@ def models() -> Mapping[str, ModelCapability]:
       models: Capability per base model id.
 
     """
-    # A thinking Gemini row: every model below is this one with its window
-    # and price replaced. ``thinkingBudget: -1`` is the auto budget, a
-    # positive integer the fixed one.
-    gemini = ModelCapability(
-        context=_context(request=1_048_576),
-        prices=_prices(_card(request=0.5, response=3.0, cache_read=0.05)),
+    # The reference row: every other model states only how it differs from it.
+    default = ModelCapability(
+        model_id="gemini-3.1-pro-preview",
+        context=_limits(),
+        prices=_prices(
+            _card(request=2.0, response=12.0, cache_read=0.2),
+            over_200k=_card(request=4.0, response=18.0, cache_read=0.4),
+        ),
         thinking=ThinkingCapability(
-            effort=frozenset(
-                {"none", "min", "low", "medium", "high", "xhigh", "max"},
-            ),
+            effort=frozenset({"none", "min", "low", "medium", "high", "xhigh", "max"}),
             budget=frozenset({"none", "auto", "fixed"}),
             output=frozenset({"none", "text"}),
         ),
     )
-    # gemini-1.5 rejects ``thinkingConfig`` outright, so every thinking axis
-    # offers only its off value.
-    legacy = replace(
-        gemini,
-        context=_context(request=1_000_000),
-        thinking=ThinkingCapability(),
+    utility = replace(
+        default,
+        model_id="gemini-2.5-flash-lite",
+        prices=_prices(_card(request=0.1, response=0.4, cache_read=0.01)),
     )
     rows = (
-        replace(gemini, model_id="gemini-3-flash-preview"),
         replace(
-            gemini,
-            model_id="gemini-3.1-pro-preview",
-            prices=_prices(
-                _card(request=2.0, response=12.0, cache_read=0.2),
-                over_200k=_card(request=4.0, response=18.0, cache_read=0.4),
-            ),
+            default,
+            model_id="gemini-3-flash-preview",
+            prices=_prices(_card(request=0.5, response=3.0, cache_read=0.05)),
         ),
+        default,
         replace(
-            gemini,
+            default,
             model_id="gemini-2.0-flash",
-            context=_context(request=1_000_000),
+            context=_limits(max_tokens=1_000_000),
             prices=_prices(_card(request=0.1, response=0.4, cache_read=0.025)),
         ),
+        utility,
         replace(
-            gemini,
-            model_id="gemini-2.5-flash-lite",
-            prices=_prices(_card(request=0.1, response=0.4, cache_read=0.01)),
-        ),
-        replace(
-            gemini,
+            default,
             model_id="gemini-2.5-flash",
-            context=_context(request=1_000_000),
+            context=_limits(max_tokens=1_000_000),
             prices=_prices(_card(request=0.3, response=2.5, cache_read=0.03)),
         ),
         replace(
-            gemini,
+            default,
             model_id="gemini-2.5-pro",
-            context=_context(request=1_000_000),
+            context=_limits(max_tokens=1_000_000),
             prices=_prices(
                 _card(request=1.25, response=10.0, cache_read=0.125),
                 over_200k=_card(request=2.5, response=15.0, cache_read=0.25),
             ),
         ),
+        # gemini-1.5 rejects ``thinkingConfig`` outright, so every thinking
+        # axis offers only its off value.
         replace(
-            legacy,
+            default,
             model_id="gemini-1.5-flash",
+            context=_limits(max_tokens=1_000_000),
             prices=_prices(_card(request=0.075, response=0.3, cache_read=0.01875)),
+            thinking=ThinkingCapability(),
         ),
         replace(
-            legacy,
+            default,
             model_id="gemini-1.5-pro",
+            context=_limits(max_tokens=1_000_000),
             prices=_prices(_card(request=1.25, response=5.0, cache_read=0.3125)),
+            thinking=ThinkingCapability(),
         ),
     )
+    # A tier is offered exactly when it is priced.
     rows = tuple(replace(row, service_tier=row.prices.service_tiers) for row in rows)
     catalog = {row.model_id: row for row in rows}
     return MappingProxyType(
         {
-            "default": catalog["gemini-3.1-pro-preview"],
-            "utility": catalog["gemini-2.5-flash-lite"],
+            "default": catalog[default.model_id],
+            "utility": catalog[utility.model_id],
             **catalog,
         },
     )
@@ -230,19 +228,6 @@ def subscription() -> ModelCapability:
     )
 
 
-def _context(*, request: int) -> Mapping[ContextTag, ModelLimits]:
-    """No per-image cap: images are tiled server-side, so only bytes bound."""
-    return MappingProxyType(
-        {
-            "": ModelLimits(
-                max_request_tokens=request,
-                max_response_tokens=65_536,
-                max_request_bytes=20 * 1024 * 1024,
-            ),
-        },
-    )
-
-
 def _card(*, request: float, response: float, cache_read: float) -> TokenPrice:
     """Return one published price-table row; Gemini bills no cache writes."""
     return TokenPrice(
@@ -267,3 +252,16 @@ def _prices(
     if over_200k is not None:
         cards[PriceKey("auto", 200_000)] = over_200k
     return PriceCatalog(cards)
+
+
+def _limits(*, max_tokens: int = 1_048_576) -> Mapping[ContextTag, ModelLimits]:
+    """No per-image cap: images are tiled server-side, so only bytes bound."""
+    return MappingProxyType(
+        {
+            "": ModelLimits(
+                max_request_tokens=max_tokens,
+                max_response_tokens=65_536,
+                max_request_bytes=20 * 1024 * 1024,
+            ),
+        },
+    )

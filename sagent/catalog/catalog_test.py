@@ -404,6 +404,7 @@ def test_anthropic_cache_writes_bill_the_published_rate_per_lifetime(
         ("terra-5.6", "flex", (1.0, 0.1, 1.25, 6.0)),
         ("gpt-5.4", "flex", (1.25, 0.13, 0.0, 7.5)),
         ("gpt-4o", "priority", (4.25, 2.125, 0.0, 17.0)),
+        ("gpt-5.3-codex", "priority", (3.5, 0.35, 0.0, 28.0)),
     ],
 )
 def test_openai_tiers_bill_the_published_rate(
