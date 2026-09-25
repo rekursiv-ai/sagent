@@ -304,6 +304,20 @@ extend-include = ["*.ipynb"]
 
 select = ["ALL"]
 
+extend-safe-fixes = [
+    "C4",     # Collection and comprehension rewrites.
+    "E711",   # Compare to None with identity.
+    "E712",   # Compare booleans by truthiness.
+    "F401",   # Remove unused imports.
+    "F601",   # Remove overwritten dictionary entries.
+    "F841",   # Remove unused local bindings.
+    "PT006",  # Use tuple for pytest.mark.parametrize names.
+    "RET504", # Remove unnecessary local assignment directly before return.
+    "SIM102", # Collapse nested if statements.
+    "TC",     # Type-checking import and annotation rewrites.
+    "UP",     # Python syntax upgrades.
+]
+
 ignore = [
     # COM812 is deliberately ignored here and re-enabled only by the
     # pre-commit `ruff-check` hook (`--extend-select COM812`). Selecting it in
