@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
+from types import TracebackType
 from typing import Any, Literal, Protocol, Self, overload
 from typing_extensions import TypeIs
 
@@ -19,7 +20,12 @@ class TorchDispatchMode:
     def __init__(self, _dispatch_key=...) -> None: ...
     def __torch_dispatch__(self, func, types, args=..., kwargs=...): ...
     def __enter__(self) -> Self: ...
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None: ...
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None: ...
     @classmethod
     def push(cls, *args, **kwargs) -> Self: ...
     @classmethod
