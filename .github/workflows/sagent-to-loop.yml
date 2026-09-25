@@ -51,10 +51,7 @@ jobs:
       ) ||
       (
         github.event_name == 'push' &&
-        github.event.before != '0000000000000000000000000000000000000000' &&
-        github.event.head_commit.author.email != 'rekursiv-bot@rekursiv.ai' &&
-        !contains(github.event.head_commit.message, 'sagent/export/') &&
-        !contains(github.event.head_commit.message, 'Sagent export branch:')
+        github.event.before != '0000000000000000000000000000000000000000'
       )
 
     steps:
@@ -221,6 +218,7 @@ jobs:
         run: |
           public_base_ref="${{ steps.refs.outputs.base_ref }}"
           public_head_ref="${{ steps.refs.outputs.head_ref }}"
+          public_sha="$(git -C public-head rev-parse HEAD)"
           uv --quiet run --no-project python \
             "$TRUSTED_IMPORT_SCRIPT" \
             --public-base public-base \
@@ -230,12 +228,13 @@ jobs:
             --project-path "$TARGET_PROJECT_PATH" \
             --base-branch main \
             --public-repo "$GITHUB_REPOSITORY" \
-            --public-sha "$GITHUB_SHA" \
+            --public-sha "$public_sha" \
             --public-base-ref "$public_base_ref" \
             --public-head-ref "$public_head_ref" \
             --branch-prefix "$COPYBARISTA_IMPORT_BRANCH_PREFIX" \
             --sync-label "$COPYBARISTA_SYNC_LABEL" \
             --report "$IMPORT_REPORT" \
+            --record-on-validation-failure "${{ github.event_name == 'push' }}" \
             --refresh-public-lockfile \
             --validation-command 'bash install-libjpeg-turbo.sh' \
             --validation-command 'uv sync --frozen --all-groups --extra slack' \
@@ -255,6 +254,7 @@ jobs:
         run: |
           public_base_ref="${{ steps.refs.outputs.base_ref }}"
           public_head_ref="${{ steps.refs.outputs.head_ref }}"
+          public_sha="$(git -C public-head rev-parse HEAD)"
           # The target checkout uses persist-credentials: false so the import
           # token never reaches the validation step (which executes imported
           # public code). The PR step needs git auth to push the import branch,
@@ -268,7 +268,7 @@ jobs:
             --project-path "$TARGET_PROJECT_PATH" \
             --base-branch main \
             --public-repo "$GITHUB_REPOSITORY" \
-            --public-sha "$GITHUB_SHA" \
+            --public-sha "$public_sha" \
             --public-base-ref "$public_base_ref" \
             --public-head-ref "$public_head_ref" \
             --branch-prefix "$COPYBARISTA_IMPORT_BRANCH_PREFIX" \
@@ -277,6 +277,14 @@ jobs:
             --open-pr true \
             --auto-merge "${{ vars.COPYBARISTA_IMPORT_AUTO_MERGE || 'true' }}" \
             --open-pr-only
+
+      - name: Report import validation failure
+        if: always() && steps.settings.outputs.enabled == 'true' && github.event_name == 'push'
+        run: |
+          if [ -f "$IMPORT_REPORT.validation-failed" ]; then
+            echo "::error::The public commit was imported, but package validation failed."
+            exit 1
+          fi
 
       - name: Upload import report
         if: always()
