@@ -657,6 +657,10 @@ ignore-words = ".codespell-ignore"
 # Don't add new folder paths here -- add them to .pre-commit-config.yaml's
 # codespell exclude regex instead. This list is only for file patterns.
 skip = "htmlcov,.doctrees,*.pyc,*.ico,*.png,*.jpg,*.PNG,*.inv,*.dot,*.css,*.egg-info,uv.lock,__pycache__,.git,.venv,typings,**/third_party/,*/web/data.js,*/web/*_useragents.txt"
+# URLs, inline code spans, mixed-case identifiers, and fenced code blocks are
+# names, not prose; skipping them stops `-w` rewriting ``SimPy`` -> ``simply``.
+ignore-regex = '(?:https?://[^\s)>\]]+|`[^`\n]+`|\b\w*[a-z][A-Z]\w*\b)'
+ignore-multiline-regex = '(?m)^[ \t]*```.*?^[ \t]*```'
 
 [tool.uv]
 package = true
