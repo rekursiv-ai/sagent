@@ -140,9 +140,22 @@ class TestLoads:
         assert isinstance(v, float)
         assert math.isnan(v)
 
-    def test_allow_nan_false_rejects_non_finite(self) -> None:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "NaN",
+            "Infinity",
+            "-Infinity",
+            "[Infinity]",
+            '{"a": -Infinity}',
+            "1e999",
+            "-1e999",
+            "[1.5, 2e308]",
+        ],
+    )
+    def test_allow_nan_false_rejects_non_finite(self, text: str) -> None:
         with pytest.raises(TypeError, match="non-finite"):
-            loads("Infinity", allow_nan=False)
+            loads(text, allow_nan=False)
 
     def test_rejects_non_string_keys_is_impossible_from_text(self) -> None:
         # JSON text can only carry string keys, so no TypeError path exists.
@@ -151,6 +164,15 @@ class TestLoads:
     def test_invalid_text_raises_json_decode_error(self) -> None:
         with pytest.raises(json.JSONDecodeError):
             loads("{not json")
+
+    def test_duplicate_keys_last_wins(self) -> None:
+        assert loads('{"a": 1, "a": 2}') == {"a": 2}
+
+    def test_big_ints_survive_exactly(self) -> None:
+        assert (
+            loads("123456789012345678901234567890")
+            == 123_456_789_012_345_678_901_234_567_890
+        )
 
 
 class TestJsonUnfreeze:

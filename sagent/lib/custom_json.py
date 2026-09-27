@@ -782,8 +782,11 @@ def loads(text: str | bytes, *, allow_nan: bool = True) -> MutableJSONValue:
     """Parse JSON text into a typed mutable value.
 
     The typed replacement for ``json.loads``, whose return type is ``Any``:
-    parsing and the walk that proves the result is JSON-shaped happen in one
-    call, so callers never hold an untyped value.
+    the stdlib parser only ever produces JSON-shaped values (dict with str
+    keys, list, str, int, float, bool, None), so the result is typed by
+    ``cast`` rather than walked. ``allow_nan=False`` is enforced while
+    parsing, via ``parse_constant``/``parse_float`` hooks that reject
+    non-finite floats.
 
     Args:
       text: JSON document.
@@ -797,8 +800,12 @@ def loads(text: str | bytes, *, allow_nan: bool = True) -> MutableJSONValue:
       TypeError: A non-finite float when ``allow_nan`` is false.
 
     """
-    parsed: object = json.loads(text)  # pyright: ignore[reportAny] -- The stdlib parser returns Any; the walk below is what types it.
-    return json_unfreeze(parsed, allow_nan=allow_nan)
+    parsed: object = json.loads(  # pyright: ignore[reportAny] -- The stdlib parser returns Any; the cast below is what types it.
+        text,
+        parse_constant=None if allow_nan else _reject_non_finite_constant,
+        parse_float=None if allow_nan else _finite_float,
+    )
+    return cast(MutableJSONValue, parsed)
 
 
 def validate_json_schema(schema: object, value: object) -> list[str]:
@@ -1162,6 +1169,20 @@ def _checked_json_scalar(obj: object, *, allow_nan: bool) -> JSONScalar:
             return obj
         raise TypeError("non-finite float requires allow_nan=True")
     raise TypeError(f"cannot represent {type(obj).__name__} as JSON")
+
+
+def _reject_non_finite_constant(text: str) -> float:
+    """Reject a ``json.loads`` NaN/Infinity/-Infinity constant token."""
+    del text
+    raise TypeError("non-finite float requires allow_nan=True")
+
+
+def _finite_float(text: str) -> float:
+    """Parse a JSON float literal, rejecting one that overflows to infinity."""
+    value = float(text)
+    if math.isfinite(value):
+        return value
+    raise TypeError("non-finite float requires allow_nan=True")
 
 
 def _is_plain_tuple(value: object) -> TypeGuard[tuple[object, ...]]:
