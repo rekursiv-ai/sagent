@@ -45,10 +45,13 @@ from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import base64
+import contextlib
 import copy
 import importlib
 import json
 import math
+import sys
+import weakref
 
 from sagent.lib.absent import ABSENT, Absent
 
@@ -1234,6 +1237,47 @@ class EnumCodec(Codec):
         )
 
 
+_TYPE_HINTS_CACHE: Final[weakref.WeakKeyDictionary[type, Mapping[str, object]]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+# A self-referential dataclass (a field typed as the class itself, directly or via
+# ``X | None`` / ``list[X]``) resolves a hint back to ``target``; caching it would make
+# the cache VALUE keep the ``WeakKeyDictionary`` KEY alive forever. Checked one level
+# deep only -- nested generics and mutual pairs (``A`` retains ``B``, ``B`` retains
+# ``A``) are instead caught by restricting the cache below to module-level classes.
+def _hints_retain_target(hints: Mapping[str, object], target: type) -> bool:
+    """Return whether caching ``hints`` under ``target`` would leak ``target``."""
+    return any(hint is target or target in get_args(hint) for hint in hints.values())
+
+
+# Caches per class: a field's annotation never changes, but ``get_type_hints``
+# re-evaluates every forward reference from scratch on each call. Restricted to classes
+# still bound at module level under their own name, so a function-local class or one
+# built by ``dataclasses.make_dataclass`` (never reachable that way) cannot be kept
+# alive by this cache -- covering the self/mutual-reference shapes ``_hints_retain_target``
+# above cannot see.
+def _cached_type_hints(target: type) -> Mapping[str, object]:
+    """Return a dataclass's field-type hints, memoized per module-level class."""
+    try:
+        cached = _TYPE_HINTS_CACHE.get(target)
+    except TypeError:
+        return get_type_hints(target)
+    if cached is not None:
+        return cached
+    hints = get_type_hints(target)
+    module = sys.modules.get(target.__module__)
+    if (
+        module is not None
+        and vars(module).get(target.__qualname__) is target
+        and not _hints_retain_target(hints, target)
+    ):
+        with contextlib.suppress(TypeError):
+            _TYPE_HINTS_CACHE[target] = hints
+    return hints
+
+
 class DataclassCodec(Codec):
     """Encode and decode dataclass instances."""
 
@@ -1260,7 +1304,7 @@ class DataclassCodec(Codec):
             raise TypeError(
                 f"DataclassCodec.to_json expects a dataclass instance, got {obj!r}",
             )
-        hints = get_type_hints(type(obj))
+        hints = _cached_type_hints(type(obj))
         result: dict[str, JSONValue] = {TYPE_TAG: _annotation_id(type(obj))}
         for field in fields(obj):
             if field.init:
@@ -1280,7 +1324,7 @@ class DataclassCodec(Codec):
           result: Reconstructed instance of the target type.
 
         """
-        hints = get_type_hints(target)
+        hints = _cached_type_hints(target)
         settable = cls.settable_fields(target)
         unknown = sorted(key for key in data if key != TYPE_TAG and key not in settable)
         if unknown:
@@ -4309,10 +4353,47 @@ def _type_codec_for_resolved_annotation(resolved: object) -> type[Codec] | None:
     return None
 
 
+_CODEC_FOR_DECODING_CACHE: Final[
+    weakref.WeakKeyDictionary[
+        object,
+        tuple[type[Codec] | None, weakref.ReferenceType[object] | None],
+    ]
+] = weakref.WeakKeyDictionary()
+
+
+# An annotation resolves to the same codec every time, dominated by dispatch cost
+# repeated per value. Keyed weakly so an ephemeral annotation (e.g. a dynamically
+# created dataclass) is not kept alive by this cache; unhashable/unweakrefable
+# annotations skip the cache. The value holds its OWN weak reference to ``resolved``
+# (never strong), so a self- or mutually-referential ``resolved`` can't be kept alive
+# here either -- a dead reference just falls through to recompute and re-cache.
 def _codec_for_decoding(
     annotation: object,
 ) -> tuple[type[Codec] | None, object]:
-    """Return the codec and resolved target annotation."""
+    """Return the codec and resolved target annotation, memoized per annotation."""
+    try:
+        cached = _CODEC_FOR_DECODING_CACHE.get(annotation)
+    except TypeError:
+        return _resolve_codec_for_decoding(annotation)
+    if cached is not None:
+        codec, resolved_ref = cached
+        if resolved_ref is None:
+            return codec, annotation
+        resolved = resolved_ref()
+        if resolved is not None:
+            return codec, resolved
+    codec, resolved = _resolve_codec_for_decoding(annotation)
+    with contextlib.suppress(TypeError):
+        _CODEC_FOR_DECODING_CACHE[annotation] = (
+            codec,
+            None if resolved is annotation else weakref.ref(resolved),
+        )
+    return codec, resolved
+
+
+def _resolve_codec_for_decoding(
+    annotation: object,
+) -> tuple[type[Codec] | None, object]:
     resolved = _strip_optional(_resolve_alias(annotation))
     if _UntypedCodec.is_annotation(annotation):
         return _UntypedCodec, resolved

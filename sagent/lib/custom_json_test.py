@@ -1091,6 +1091,59 @@ class _SpecialUnions:
     mapping: dict[str, Path] = dataclasses.field(default_factory=dict[str, Path])
 
 
+# Compiled without this file's ``from __future__ import annotations``, so under PEP 649
+# these annotations are real evaluated objects, unlike the string forward refs used by
+# ``make_dataclass`` elsewhere here. Direct/Tree/Ping-Pong cover self, generic-self, and
+# mutual-reference retention shapes.
+_EVALUATED_SELF_AND_MUTUAL_REFERENCES_SOURCE = """
+import dataclasses
+
+@dataclasses.dataclass(frozen=True)
+class Direct:
+    next: Direct | None = None
+
+@dataclasses.dataclass(frozen=True)
+class Tree:
+    children: list[Tree] | None = None
+
+@dataclasses.dataclass(frozen=True)
+class Ping:
+    pong: Pong | None = None
+
+@dataclasses.dataclass(frozen=True)
+class Pong:
+    ping: Ping | None = None
+
+SAMPLES = [Direct(next=Direct()), Tree(children=[Tree()]), Ping(pong=Pong(ping=Ping()))]
+"""
+
+
+def _round_trip_evaluated_refs_and_weak_ref_classes() -> dict[
+    str,
+    weakref.ReferenceType[type],
+]:
+    """Round-trip each sample, then return weak refs to its class, isolated in this frame."""
+    namespace: dict[str, object] = {}
+    exec(  # noqa: S102 -- Fixed module-level source above, not external input.
+        compile(
+            _EVALUATED_SELF_AND_MUTUAL_REFERENCES_SOURCE,
+            "<generated>",
+            "exec",
+            dont_inherit=True,
+        ),
+        namespace,
+    )
+    for sample in cast(list[_Carrier], namespace["SAMPLES"]):
+        assert (
+            DataclassCodec.from_json(type(sample), DataclassCodec.to_json(sample))
+            == sample
+        )
+    return {
+        name: weakref.ref(cast(type, namespace[name]))
+        for name in ("Direct", "Tree", "Ping", "Pong")
+    }
+
+
 class TestDataclassCodec:
     def test_generated_classes_are_collectible(self) -> None:
         gc_enabled = gc.isenabled()
@@ -1116,6 +1169,108 @@ class TestDataclassCodec:
             gc.collect(0)
 
             assert class_ref() is None
+        finally:
+            if gc_enabled:
+                gc.enable()
+
+    def test_nested_generated_classes_are_collectible(self) -> None:
+        # A nested field's annotation resolves to itself (no Optional/alias to strip)
+        # -- the shape that let the codec cache store its own weak key as a strong value.
+        gc_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            inner_cls = dataclasses.make_dataclass(
+                "Inner",
+                [("value", int)],
+                frozen=True,
+                slots=True,
+                kw_only=True,
+            )
+            outer_cls = dataclasses.make_dataclass(
+                "Outer",
+                [("inner", inner_cls)],
+                frozen=True,
+                slots=True,
+                kw_only=True,
+            )
+            inner_factory: Callable[..., _Carrier] = cast(
+                Callable[..., _Carrier],
+                inner_cls,
+            )
+            outer_factory: Callable[..., _Carrier] = cast(
+                Callable[..., _Carrier],
+                outer_cls,
+            )
+            instance = outer_factory(inner=inner_factory(value=1))
+            assert (
+                DataclassCodec.from_json(outer_cls, DataclassCodec.to_json(instance))
+                == instance
+            )
+            inner_ref = weakref.ref(inner_cls)
+            outer_ref = weakref.ref(outer_cls)
+
+            del instance, inner_cls, outer_cls, inner_factory, outer_factory
+            # ``Inner`` is reachable only through ``Outer``'s cache entry at gen-0, so
+            # it survives to gen-1 (normal generational GC, not a leak); collecting
+            # gen-1 next finds it unreachable once ``Outer``'s collection clears that
+            # entry.
+            gc.collect(0)
+            gc.collect(1)
+
+            assert inner_ref() is None
+            assert outer_ref() is None
+        finally:
+            if gc_enabled:
+                gc.enable()
+
+    def test_self_referential_generated_class_is_collectible(self) -> None:
+        # A field typed as (a union member of) its own class resolves a hint back to
+        # ``target`` -- the shape that let ``_TYPE_HINTS_CACHE`` leak via its own value.
+        gc_enabled = gc.isenabled()
+        gc.disable()
+        module = sys.modules[__name__]
+        try:
+            node_cls = dataclasses.make_dataclass(
+                "_SelfReferential",
+                [("next", "_SelfReferential | None", dataclasses.field(default=None))],
+                module=__name__,
+                frozen=True,
+                slots=True,
+                kw_only=True,
+            )
+            # The forward reference resolves by name against this module's globals.
+            vars(module)["_SelfReferential"] = node_cls
+            factory: Callable[..., _Carrier] = cast(Callable[..., _Carrier], node_cls)
+            try:
+                instance = factory(next=None)
+                assert (
+                    DataclassCodec.from_json(node_cls, DataclassCodec.to_json(instance))
+                    == instance
+                )
+            finally:
+                del vars(module)["_SelfReferential"]
+
+            node_ref = weakref.ref(node_cls)
+            del instance, node_cls, factory
+            gc.collect(0)
+
+            assert node_ref() is None
+        finally:
+            if gc_enabled:
+                gc.enable()
+
+    @pytest.mark.skipif(
+        sys.version_info < (3, 14),
+        reason="needs PEP 649 lazy annotations",
+    )
+    def test_evaluated_self_and_mutual_references_are_collectible(self) -> None:
+        gc_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            refs = _round_trip_evaluated_refs_and_weak_ref_classes()
+            gc.collect()
+
+            assert {name: ref() for name, ref in refs.items()} == dict.fromkeys(refs)
         finally:
             if gc_enabled:
                 gc.enable()
