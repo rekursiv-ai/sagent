@@ -143,30 +143,20 @@ def _message_history(draw: DrawFn) -> list[ModelContextEvent]:
 
 @settings(max_examples=100, deadline=None)
 @given(_message_history())
-def test_label_agent_sends_only_touches_agent_send_messages(
+def test_label_agent_sends_prefixes_and_preserves_non_agent_identity(
     history: list[ModelContextEvent],
 ) -> None:
-    """``_label_agent_sends`` must not mutate any non-AgentSend entry."""
+    """Label AgentSends and preserve every non-AgentSend object."""
     labelled = list(_label_agent_sends(history))
     assert len(labelled) == len(history)
     for original, output in zip(history, labelled, strict=True):
+        if isinstance(output, AgentSendMessage):
+            assert output.text.startswith(f"[from {output.source}]: "), (
+                f"AgentSend text lacks source prefix: {output.text!r}"
+            )
         if not isinstance(original, AgentSendMessage):
             assert output is original, (
                 f"non-AgentSend entry mutated: {type(original).__name__}"
-            )
-
-
-@settings(max_examples=100, deadline=None)
-@given(_message_history())
-def test_label_agent_sends_prefixes_with_source(
-    history: list[ModelContextEvent],
-) -> None:
-    """Every output AgentSend starts with its source's ``[from <source>]:`` tag."""
-    labelled = list(_label_agent_sends(history))
-    for entry in labelled:
-        if isinstance(entry, AgentSendMessage):
-            assert entry.text.startswith(f"[from {entry.source}]: "), (
-                f"AgentSend text lacks source prefix: {entry.text!r}"
             )
 
 
