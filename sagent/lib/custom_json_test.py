@@ -41,6 +41,12 @@ import math
 import sys
 import weakref
 
+from hypothesis import (
+    given,
+    settings,
+    strategies as st,
+)
+
 import pytest
 
 from sagent.lib.absent import ABSENT
@@ -71,6 +77,40 @@ from sagent.lib.custom_json import (
     resolve_import,
     take,
     validate_json_schema,
+)
+
+
+# Exclude NaN because equality cannot verify its round trip.
+_JSON_VALUES = st.recursive(
+    st.none()
+    | st.booleans()
+    | st.integers(min_value=-(2**53), max_value=2**53)
+    | st.floats(allow_nan=False, allow_infinity=False)
+    | st.text(max_size=16),
+    lambda children: (
+        st.lists(children, max_size=4)
+        | st.dictionaries(st.text(max_size=8), children, max_size=4)
+    ),
+    max_leaves=12,
+)
+
+
+_GRAPH_VALUES = st.recursive(
+    st.none()
+    | st.booleans()
+    | st.integers(min_value=-(2**53), max_value=2**53)
+    | st.floats(allow_nan=False, allow_infinity=False)
+    | st.text(max_size=16)
+    | st.binary(max_size=16)
+    | st.datetimes()
+    | st.decimals(allow_nan=False, allow_infinity=False),
+    lambda children: (
+        st.lists(children, max_size=4)
+        | st.dictionaries(st.text(max_size=8), children, max_size=4)
+        | st.tuples(children, children)
+        | st.frozensets(st.integers(max_value=64), max_size=4)
+    ),
+    max_leaves=10,
 )
 
 
@@ -123,6 +163,10 @@ class TestJsonFreeze:
     def test_rejects_non_string_mapping_keys(self) -> None:
         with pytest.raises(TypeError):
             json_freeze({1: "integer", "1": "string"})
+
+    def test_freeze_recurses_into_every_container(self) -> None:
+        frozen = json_freeze({"outer": [{"inner": [1, 2]}]})
+        assert frozen == {"outer": ({"inner": (1, 2)},)}
 
 
 class TestLoads:
@@ -208,6 +252,76 @@ class TestJsonUnfreeze:
     def test_rejects_non_string_keys_before_they_collide(self) -> None:
         with pytest.raises(TypeError):
             json_unfreeze({1: "integer", "1": "string"})
+
+
+# Keep properties at module level: mutmut reuses the interpreter, and
+# fresh test-class instances trigger Hypothesis's multiple-executors check.
+
+
+@given(_JSON_VALUES)
+def test_freeze_unfreeze_round_trips(value: object) -> None:
+    assert json_unfreeze(json_freeze(value)) == value
+
+
+@given(_JSON_VALUES, st.sampled_from([float("nan"), float("inf")]))
+def test_allow_nan_false_rejects_a_non_finite_at_any_depth(
+    value: object,
+    hidden: float,
+) -> None:
+    with pytest.raises(TypeError, match="non-finite"):
+        json_freeze({"outer": [value, {"inner": hidden}]}, allow_nan=False)
+
+
+@pytest.mark.parametrize("transform", [json_freeze, json_unfreeze])
+@pytest.mark.parametrize("non_finite", [float("nan"), float("inf"), float("-inf")])
+def test_allow_nan_true_survives_a_list_recursion(
+    transform: Callable[..., object],
+    non_finite: float,
+) -> None:
+    result = transform({"outer": [non_finite]}, allow_nan=True)
+    inner = cast(
+        float,
+        cast(Sequence[object], cast(Mapping[str, object], result)["outer"])[0],
+    )
+    assert math.isnan(inner) if math.isnan(non_finite) else inner == non_finite
+
+
+@settings(max_examples=50)
+@given(_GRAPH_VALUES)
+def test_graph_round_trips_through_encode_and_decode(value: object) -> None:
+    decoded = decode_graph(
+        encode_graph(value),
+        capabilities=DecodeCapabilities(resolve=resolve_import, apply_reduce=True),
+    )
+
+    assert decoded == value
+    assert type(decoded) is type(value)
+
+
+@settings(max_examples=50)
+@given(_JSON_VALUES)
+def test_a_value_shared_twice_stays_one_object_after_decoding(value: object) -> None:
+    shared = [value]
+    decoded = cast(
+        Sequence[object],
+        decode_graph(
+            encode_graph([shared, shared]),
+            capabilities=DecodeCapabilities(resolve=resolve_import, apply_reduce=True),
+        ),
+    )
+
+    assert decoded[0] is decoded[1]
+
+
+def test_a_cycle_survives_the_round_trip() -> None:
+    """Preserve a cycle, which the bottom-up strategies cannot generate."""
+    cyclic: list[object] = [1]
+    cyclic.append(cyclic)
+
+    decoded = cast(Sequence[object], decode_graph(encode_graph(cyclic)))
+
+    assert decoded[0] == 1
+    assert decoded[1] is decoded
 
 
 class TestBoolVal:

@@ -423,6 +423,21 @@ repos:
       # multiplies the startup cost the threshold avoids and stacks on any `-n`.
       # 60 files as 16 forked hooks burned 73s of CPU for the same 16.3s wall
       # one hook at -n5 reaches on 36s.
+      # Erase before pytest so --cov-append cannot retain earlier measurements.
+      # Run even when pytest skips every file, or the summary reports stale data.
+      - id: coverage-erase
+        name: coverage-erase
+        language: system
+        stages: [pre-commit]
+        always_run: true
+        pass_filenames: false
+        require_serial: true
+        entry: >-
+          bash -c '
+            uv --quiet run --frozen --group pre-commit python -c "import coverage" 2>/dev/null || exit 0;
+            uv --quiet run --frozen --group pre-commit coverage erase
+          ' bash
+
       - id: pytest
         name: pytest
         language: system
@@ -467,8 +482,43 @@ repos:
             [ ${#tests[@]} -eq 0 ] && exit 0;
             dist=();
             ((${#tests[@]} >= ${SIDECAR_XDIST_MIN:-16})) && dist=(-n "$WORKERS");
-            uv --quiet run --frozen --group pre-commit pytest "${dist[@]}" -q --tb=short -- "${tests[@]}"
+            cov=();
+            if uv --quiet run --frozen --group pre-commit python -c "import pytest_cov" 2>/dev/null; then
+              for f in "$@"; do
+                case "$f" in
+                  *_test.py|test_*.py|*/conftest.py) ;;
+                  *.py) mod="${f%.py}"; cov+=("--cov=${mod//\//.}") ;;
+                esac;
+              done;
+              if ((${#cov[@]})); then
+                cov+=(--cov-append --no-cov-on-fail);
+                if [ "${PRECOMMIT_COVERAGE_DETAIL:-}" = 1 ]; then
+                  cov+=(--cov-report=term-missing:skip-covered);
+                else
+                  cov+=(--cov-report=);
+                fi;
+              fi;
+            fi;
+            uv --quiet run --frozen --group pre-commit pytest "${dist[@]}" "${cov[@]}" -q --tb=short -- "${tests[@]}"
             || test "$?" = 5
+
+      # Keep after pytest: pre-commit runs hooks in declaration order.
+      # Missing coverage is normal when no source module was tested.
+      - id: coverage-summary
+        name: coverage-summary
+        language: system
+        stages: [pre-commit]
+        always_run: true
+        pass_filenames: false
+        require_serial: true
+        # Pre-commit otherwise hides the report when this hook passes.
+        verbose: true
+        entry: >-
+          bash -c '
+            uv --quiet run --frozen --group pre-commit python -c "import coverage" 2>/dev/null || exit 0;
+            [ -f .coverage ] || exit 0;
+            uv --quiet run --frozen --group pre-commit coverage report --skip-covered --precision=1 --sort=cover
+          ' bash
 
   # === Pre-Push Gates =========================================================
   #
@@ -588,6 +638,9 @@ repos:
         # touched changed code. This file is copied into every exported package,
         # not all of which carry either plugin.
         #
+        # Whole-tree coverage is opt-in because it adds tracing overhead.
+        # Replace cov rather than append: the branch above may set --no-cov.
+        #
         # The selection file is written by `selected_nodeids_plugin`, which
         # emits node ids and nothing else, so an empty selection is a byte-empty
         # file and the `-eq 0` guard below sees it. The reader still keeps only
@@ -615,6 +668,9 @@ repos:
             elif [ -n "${PYTEST_TESTMON_ARGS:-}" ]; then
             :;
             else has "import pytest_cov" && cov=(--no-cov);
+            fi;
+            if [ -n "${PYTEST_COVERAGE_REPORT:-}" ] && has "import pytest_cov"; then
+            cov=(--cov=loop --cov=ops --cov-report=term:skip-covered);
             fi;
             if [ -n "${PYTEST_COLLECT_SELECTED:-}" ]; then
             env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
