@@ -10,6 +10,7 @@ import tempfile
 import zipfile
 
 from hatchling.builders.wheel import WheelBuilder
+from rekursiv_ai_typeshed.build import ty_binary
 
 import pytest
 import rekursiv_ai_typeshed
@@ -21,6 +22,8 @@ _TYPINGS = _CWD / "rekursiv_ai_typeshed" / "typings"
 _PATCH = _CWD / "rekursiv_ai_typeshed" / "typeshed.patch"
 
 _POW_ANY = re.compile(r"def __r?pow__\(.*\) -> Any:")
+# The package re-exports the ``build`` function under the submodule's name.
+_BUILD_MODULE = sys.modules[ty_binary.__module__]
 
 
 def test_builtins_patch_is_only_the_pow_lines() -> None:
@@ -123,6 +126,20 @@ def test_bundle_still_needs_the_patch(tmp_path: Path) -> None:
     rekursiv_ai_typeshed.extract_ty_stdlib(tmp_path)
     text = (tmp_path / "stdlib" / "builtins.pyi").read_text()
     assert _POW_ANY.search(text) is not None
+
+
+def test_extract_ty_stdlib_rejects_a_binary_with_no_matching_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``ty`` binary without the embedded typeshed archive is rejected."""
+    fake_binary = tmp_path / "ty"
+    with zipfile.ZipFile(fake_binary, "w") as archive:
+        archive.writestr("stdlib/builtins.pyi", "")
+    monkeypatch.setattr(_BUILD_MODULE, "ty_binary", lambda: fake_binary)
+
+    with pytest.raises(RuntimeError, match="carries no embedded typeshed"):
+        rekursiv_ai_typeshed.extract_ty_stdlib(tmp_path)
 
 
 # Two full tree builds (1.5 s): copies both stub bundles and applies the patch.

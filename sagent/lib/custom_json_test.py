@@ -17,7 +17,7 @@ from collections.abc import (
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from types import GenericAlias, ModuleType, UnionType
+from types import GenericAlias, ModuleType, SimpleNamespace, UnionType, new_class
 from typing import (
     ClassVar,
     Literal,
@@ -51,11 +51,13 @@ import pytest
 
 from sagent.lib.absent import ABSENT
 from sagent.lib.custom_json import (
+    _GRAPH_DECLINED,
     BoolCodec,
     DataclassCodec,
     DatetimeCodec,
     DecodeCapabilities,
     DictCodec,
+    EnumCodec,
     FloatCodec,
     GraphHooks,
     IntCodec,
@@ -64,6 +66,10 @@ from sagent.lib.custom_json import (
     ListCodec,
     SchemaError,
     StrCodec,
+    _cached_type_hints,
+    _GraphEncoder,
+    _GraphObjectCodec,
+    _ReduceCodec,
     decode,
     decode_graph,
     decode_or_none,
@@ -3316,6 +3322,173 @@ def _long_nested_helpers(source: str) -> list[str]:
         if node.end_lineno - node.body[0].lineno + 1 > 3:
             nested.append(node.name)
     return nested
+
+
+class _TwoSlots:
+    """Slotted and module-level, so ``py/object`` can name it."""
+
+    __slots__ = ("dropped", "kept")
+
+    def __init__(self) -> None:
+        self.kept = 1
+        self.dropped = 2
+
+
+_IMPORTING = DecodeCapabilities(resolve=resolve_import)
+_REDUCING = DecodeCapabilities(resolve=resolve_import, apply_reduce=True)
+_RESOLVES_TO_INT = DecodeCapabilities(resolve=len)
+
+
+class TestMalformedAndEdgeInput:
+    """Malformed input and edge values a caller can produce, one input each."""
+
+    @pytest.mark.parametrize(
+        ("annotation", "raw", "match"),
+        [
+            (list[int], "not-a-list", "cannot decode"),
+            (str, [1, 2], "cannot coerce"),
+            (UUID, 42, "as UUID"),
+            (datetime, 42, "as datetime"),
+            (datetime, "2026-01-01T00:00:00+00:00[]", "invalid named zone"),
+            (dict[str, int], 42, "cannot decode"),
+            (int | str, {"py/union": "nope", "py/value": 5}, "union tag"),
+            (complex, 5, "cannot decode"),
+            (None, {"py/raw": "not-a-sequence"}, "untyped JSON object"),
+            (None, {"py/raw": [[1]]}, "untyped JSON object"),
+            (None, {"py/raw": [[42, "v"]]}, "untyped JSON object"),
+            (None, {1: "x"}, "mapping key"),
+        ],
+    )
+    def test_decode_rejects_malformed_input(
+        self,
+        annotation: object,
+        raw: object,
+        match: str,
+    ) -> None:
+        with pytest.raises(TypeError, match=match):
+            decode(annotation, raw)
+
+    @pytest.mark.parametrize(
+        ("value", "annotation", "match"),
+        [
+            ([1, 2], Sequence[int] | MutableSequence[int], "ambiguous union member"),
+            ({42: "x"}, None, "mapping key"),
+            (object(), None, "cannot encode"),
+            (SimpleNamespace(), SimpleNamespace, "cannot encode"),
+            (None, int, "cannot encode None"),
+        ],
+    )
+    def test_encode_value_rejects_unencodable_input(
+        self,
+        value: object,
+        annotation: object,
+        match: str,
+    ) -> None:
+        with pytest.raises(TypeError, match=match):
+            encode_value(value, annotation)
+
+    @pytest.mark.parametrize(
+        ("tree", "capabilities", "match"),
+        [
+            ((1, 2, 3), None, "Unexpected JSON node"),
+            ({"py/reduce": [1]}, _REDUCING, "two to five elements"),
+            ({"py/reduce": [None, [1]]}, _REDUCING, "not callable"),
+            (
+                {"py/reduce": [{"py/type": "builtins.object"}, [], None, [1]]},
+                _REDUCING,
+                "cannot accept list items",
+            ),
+            (
+                {
+                    "py/reduce": [
+                        {"py/type": "builtins.object"},
+                        [],
+                        None,
+                        None,
+                        [[1, 2]],
+                    ],
+                },
+                _REDUCING,
+                "cannot accept dict items",
+            ),
+            (
+                {"py/hook": ["path", None]},
+                _RESOLVES_TO_INT,
+                "did not resolve to a type",
+            ),
+            ({"py/object": "path"}, _RESOLVES_TO_INT, "did not resolve to a type"),
+            ({"py/inline": ["builtins.object", "x"]}, _IMPORTING, "invalid py/inline"),
+            (
+                {"py/inline": ["builtins.object", {"x": 1}]},
+                _IMPORTING,
+                "py/inline protocol",
+            ),
+        ],
+    )
+    def test_decode_graph_rejects_malformed_trees(
+        self,
+        tree: object,
+        capabilities: DecodeCapabilities | None,
+        match: str,
+    ) -> None:
+        with pytest.raises(TypeError, match=match):
+            decode_graph(tree, capabilities=capabilities)
+
+    def test_coerce_without_a_default_raises(self) -> None:
+        with pytest.raises(TypeError, match="coerce"):
+            ListCodec.coerce("x", default=None)
+        with pytest.raises(TypeError, match="coerce"):
+            DictCodec.coerce("x", default=None)
+
+    @pytest.mark.parametrize("recipe", [42, (int,), (int, "x")])
+    def test_reduce_declines_a_malformed_recipe(self, recipe: object) -> None:
+        # ``reduce_for`` calls ``__reduce_ex__(2)``.
+        value = SimpleNamespace(__reduce_ex__={2: recipe}.get)
+        assert _ReduceCodec.encode_graph(value, _GraphEncoder({})) is _GRAPH_DECLINED
+
+    def test_reduce_declines_an_object_without_reduce_ex(self) -> None:
+        no_reduce = SimpleNamespace(__reduce_ex__=None)
+        assert _GraphEncoder({}).reduce_for(no_reduce) is _GRAPH_DECLINED
+
+    def test_union_members_fall_back(self) -> None:
+        assert decode(dict[str, int] | int, 5) == 5
+        assert decode(Callable[[int], int] | int, 5) == 5
+        assert decode(int | object, "x") == "x"
+
+    def test_decoded_values_pass_through(self) -> None:
+        moment = datetime(2026, 1, 1, tzinfo=UTC)
+        assert DatetimeCodec.coerce(moment) is moment
+        assert EnumCodec.decode(_Color.RED, _Color, decode=decode) is _Color.RED
+
+    def test_type_hints_skip_the_cache_for_an_unhashable_class(self) -> None:
+        meta = type("UnhashableMeta", (type,), {"__hash__": None})
+        assert (
+            _cached_type_hints(new_class("Unhashable", (), {"metaclass": meta})) == {}
+        )
+
+    def test_graph_object_slot_edges(self) -> None:
+        value = _TwoSlots()
+        del value.dropped
+        payload = _GraphObjectCodec.encode_graph(value, _GraphEncoder({}))
+        assert payload == {"py/object": _GraphObjectCodec.path(_TwoSlots), "kept": 1}
+        string_slots = type("StringSlots", (), {"__slots__": "x"})
+        assert _GraphObjectCodec.has_finalized_slot(string_slots) is False
+
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {"version": 2, "order": [], "states": {}, "residual": {}},
+            {"version": 1, "order": "x", "states": {}, "residual": {}},
+            {"version": 1, "order": [], "states": "x", "residual": {}},
+            {"version": 1, "order": [], "states": {}, "residual": "x"},
+        ],
+    )
+    def test_replay_passes_a_malformed_envelope_through(
+        self,
+        fields: dict[str, object],
+    ) -> None:
+        stored = {"$__custom_json_fields__": fields}
+        assert replay(stored, {}) == stored
 
 
 if __name__ == "__main__":
