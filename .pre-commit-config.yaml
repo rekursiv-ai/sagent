@@ -423,6 +423,11 @@ repos:
       # multiplies the startup cost the threshold avoids and stacks on any `-n`.
       # 60 files as 16 forked hooks burned 73s of CPU for the same 16.3s wall
       # one hook at -n5 reaches on 36s.
+      #
+      # Coverage targets are directories (`--cov=${f%/*}`), never dotted modules:
+      # coverage imports a dotted target's package before collection, and a
+      # package importing torch then fails every later torch import with
+      # "'_has_torch_function' already has a docstring".
       # Erase before pytest so --cov-append cannot retain earlier measurements.
       # Run even when pytest skips every file, or the summary reports stale data.
       - id: coverage-erase
@@ -487,7 +492,7 @@ repos:
               for f in "$@"; do
                 case "$f" in
                   *_test.py|test_*.py|*/conftest.py) ;;
-                  *.py) mod="${f%.py}"; cov+=("--cov=${mod//\//.}") ;;
+                  *.py) cov+=("--cov=${f%/*}") ;;
                 esac;
               done;
               if ((${#cov[@]})); then
