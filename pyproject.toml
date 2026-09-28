@@ -596,7 +596,7 @@ ignore = [
     # NEVER ADD MORE IGNORES! SUPPRESS IN FILE!
 ]
 pythonPlatform = "Linux"
-pythonVersion = "3.12"
+pythonVersion = "3.12"  # Intentional; test at 3.12 for exports.
 
 reportCallInDefaultInitializer = false     # Immutable constructors (e.g. NamedTuple) in defaults are safe.
 reportImplicitStringConcatenation = false  # Conflicts with ruff ISC003.
@@ -616,7 +616,7 @@ reportUnnecessaryTypeIgnoreComment = false # Public package drops source-tree-on
 # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 
 [tool.ty.environment]
-python-version = "3.12"
+python-version = "3.12"  # Intentional; test at 3.12 for exports.
 # Same patch as `[tool.basedpyright] typeshedPath`, with ty's real `ty_extensions`.
 typeshed = ".venv/share/rekursiv-ai-typeshed/ty"
 extra-paths = ["typings"]
