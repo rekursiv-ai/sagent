@@ -10,9 +10,7 @@ registers the bridge via ``session/new.params.mcpServers`` with
 The terminal ACP event for each user turn is the JSON-RPC response to
 ``session/prompt`` (matched by id). Streaming chunks arrive as
 ``session/update`` notifications with ``agent_message_chunk`` /
-``agent_thought_chunk`` payloads in between. See
-``docs/private/cli_provider.md`` (§3) for protocol details, the spawn
-recipe, and per-knob rationale.
+``agent_thought_chunk`` payloads in between.
 """
 
 from __future__ import annotations

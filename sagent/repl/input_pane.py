@@ -5,8 +5,7 @@ types, the dim preview of the deferred and queue panes rendered just
 above it, and the pump that consumes slash submissions.
 
 The Up / Down navigation contract, the queue / deferred pane semantics,
-and the dispatch-vs-stage rule are specified in
-``docs/private/input_ux.md`` (the authority) and wired in
+and the dispatch-vs-stage rule are wired in
 :mod:`repl.keybindings`. Briefly: each pane holds at most one coalesced
 message; Enter stages into the queue pane (or dispatches when idle), Tab
 into the deferred pane; Up/Down walk a stop list whose entries own their

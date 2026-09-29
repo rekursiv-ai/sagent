@@ -412,8 +412,7 @@ def _splice_from_inbox_items(
 # The result is returned as the ``BackgroundTask foreground`` tool's own answer (forward
 # delivery -- the model asked for it). The original ``[Running in background]``
 # placeholder is left in place: it is the honest record that the call was backgrounded,
-# and rewriting it in-slot would be a silent back-patch (see
-# ``docs/private/design_detached_tool_results.md``).
+# and rewriting it in-slot would be a silent back-patch.
 def _splice_detached(agent: AgentLike, event: DetachedResult) -> ToolResult:
     """Return the foreground result for a drained ``DetachedResult``."""
     del agent

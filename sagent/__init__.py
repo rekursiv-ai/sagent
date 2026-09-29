@@ -14,8 +14,6 @@
     async for event in agent.run(UserMessage(text="analyze ./data/")):
         print(event)
 
-See ``docs/private/agent_v4_contract.md`` for the binding spec.
-
 Architecture
 ------------
 An ``Agent`` composes :class:`AgentRuntime` -- the runtime owns the

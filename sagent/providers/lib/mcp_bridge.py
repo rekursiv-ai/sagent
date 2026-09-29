@@ -17,7 +17,7 @@ Because the loop closes inside the CLI, sagent's ``runtime`` does not
 see the individual ``ToolCall`` items as history entries: the returned
 ``AssistantMessage`` carries the post-tool text and an empty
 ``tool_calls`` tuple. Tool-call visibility through the agent's
-observer pane is v2 work (see ``docs/private/cli_provider.md`` §1.9).
+observer pane is v2 work.
 """
 
 from __future__ import annotations

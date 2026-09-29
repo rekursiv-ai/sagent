@@ -374,8 +374,7 @@ class ToolResult(SessionMessage):
 # - ``DETACHED_PLACEHOLDER`` (``kind=PENDING``): the tool is still running
 #   after a user preempt/Compact/Clear. The permanent, honest answer to the
 #   original ``tool_use``; the real result is NOT back-patched into this slot
-#   but delivered later as a forward ``DETACHED_ARRIVED_TOOL`` pair (see
-#   ``docs/private/design_detached_tool_results.md``).
+#   but delivered later as a forward ``DETACHED_ARRIVED_TOOL`` pair.
 # - ``CANCELLED_PLACEHOLDER`` (``kind=CANCELLED``, ``is_error=True``): the tool
 #   was killed; no result will follow. Terminal.
 # - ``RUNNING_PREFIX`` (``kind=PENDING``): a tool promoted to a background job;

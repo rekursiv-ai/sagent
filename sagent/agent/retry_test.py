@@ -182,7 +182,7 @@ class _StatusCodeError(Exception):
 class _InBandRateLimitError(Exception):
     """Anthropic in-band body-typed error on a 200 stream.
 
-    Mirrors the transcript shape (session 6efa990c, repl.log:38860): the
+    Mirrors a captured transcript's shape: the
     SDK raises ``APIStatusError`` with a body-declared error type (e.g.
     ``rate_limit_error``) while the HTTP status is 200 and every
     unified-ratelimit header reports ``allowed`` -- so neither the status
@@ -444,7 +444,7 @@ def test_extract_retry_after_unified_reset_honored_on_429_without_status() -> No
 
 
 def test_extract_retry_after_unified_warning_status_not_a_limit() -> None:
-    # Captured incident (Issue#316, repl.log:3822): a 200 stream carrying an
+    # Captured incident: a 200 stream carrying an
     # in-band rate_limit_error whose representative window is at
     # ``allowed_warning`` (a heads-up, NOT a block). The always-present
     # unified-reset is the 7d window rollover (~24h). Treating

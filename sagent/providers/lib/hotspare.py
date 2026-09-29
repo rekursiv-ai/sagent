@@ -1,7 +1,7 @@
 """Hot-spare subprocess pool: one warm CLI process ready for respawn.
 
 Spawning a vendor CLI costs ~5s on a cold start (Node load + auth +
-skill scan; see ``docs/private/cli_provider.md`` §A.1). Keeping one
+skill scan). Keeping one
 fully-initialized spare hidden in the background lets respawn paths
 (sagent compaction, system-prompt change, mid-stream error, periodic
 safety valve) hand the user a fresh subprocess in the time it takes

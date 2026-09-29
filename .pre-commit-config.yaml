@@ -406,7 +406,7 @@ repos:
       #
       # `-n` is chosen from selection size because neither setting wins
       # everywhere: xdist costs a fixed ~5s startup, a sidecar is ~0.23s serial
-      # vs ~0.10s spread, so the curves cross. Measured on tron (WORKERS=5),
+      # vs ~0.10s spread, so the curves cross. Measured on the 16-thread workstation (WORKERS=5),
       # files -> wall:
       #
       #   files    8    12    16    20    60

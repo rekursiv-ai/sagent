@@ -7,9 +7,6 @@ the CLI's own MCP client invokes the bridge, which dispatches to the
 sagent ``Tool``s and returns results. The CLI handles the full
 tool-use loop internally and emits a single ``result`` event per
 sagent user turn.
-
-See ``docs/private/cli_provider.md`` (§2) for the wire-protocol
-reference, the spawn recipe, and the per-knob rationale.
 """
 
 from __future__ import annotations

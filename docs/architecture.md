@@ -31,7 +31,7 @@ Consequences:
 
 When `AgentSend` messages appear to land in an inbox but the agent never responds, the cause is almost always one of:
 
-1. A stuck in-flight model call (the gate cannot refire while `self.model_call is not None`; see `docs/private/bugs46.md` for the OpenAISubscription idle-watchdog gap). Stacked `[from X]` previews above the `>` prompt are diagnostic: the runtime is rendering `_mid_stream_queue`. `/tasks` will show `fg=1` on the stuck model call. `Ctrl+C` clears the stream and the queued messages drain.
+1. A stuck in-flight model call (the gate cannot refire while `self.model_call is not None`). Stacked `[from X]` previews above the `>` prompt are diagnostic: the runtime is rendering `_mid_stream_queue`. `/tasks` will show `fg=1` on the stuck model call. `Ctrl+C` clears the stream and the queued messages drain.
 2. A label collision routing the message to the wrong agent (regression pinned at `tools/agent_spawn_test.py::test_root_label_collision`).
 3. The response did fire but produced an unremarkable assistant turn that scrolled past unnoticed.
 

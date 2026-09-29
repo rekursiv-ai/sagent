@@ -1,6 +1,6 @@
 r"""REPL queue and deferred panes: at most one message each.
 
-The spec (``docs/private/input_ux.md``) mandates that the queue pane and
+The input spec mandates that the queue pane and
 the deferred pane each hold AT MOST ONE message. Staging into a
 populated pane coalesces by append: the new text joins the existing
 with ``\n\n``, attachments concatenate, FIFO preserved. So each pane is

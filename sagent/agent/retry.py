@@ -67,8 +67,7 @@ SUSPENSION_NOTICE_SEC = (
     5.0  # house-ignore[globals] -- Suspension-banner notice threshold.
 )
 # A throttle without a long advertised reset clears in seconds-to-minutes
-# (Issue#424, session 6efa990c: every halt recovered on an immediate manual
-# retry), so rate-limit retries run on this wall-clock budget instead of the
+# (every halt in a captured session recovered on an immediate manual retry), so rate-limit retries run on this wall-clock budget instead of the
 # attempt counter -- the generic ``max_attempts`` cap gives up after ~9s of
 # effective waiting, just before the limiter relents.
 RATE_LIMIT_RETRY_BUDGET_SEC = (

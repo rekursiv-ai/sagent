@@ -28,7 +28,7 @@ isolation entirely. Each package re-exports this fixture from its own conftest.
 One thing it CANNOT reach: a module-level constant that calls a ``userdirs``
 helper at import time. Imports run before any fixture, so the value is frozen
 against the developer's real directories and every later test sees it --
-``jobber.lifecycle.receipts.DEFAULT_RECEIPT_DIR`` is the live example, and a
+a job launcher's default receipt directory is the classic example, and a
 test that writes through one is writing to a real directory no matter what
 this fixture does. Prefer resolving inside the function (or a dataclass
 ``field(default_factory=...)``, which runs per-instance and does follow the

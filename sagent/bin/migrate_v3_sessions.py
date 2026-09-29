@@ -11,7 +11,7 @@ are left untouched.
 
 v3 records carry ``Message`` shapes (``descriptor`` + ``content``).
 The v4 schema is flat ``TapeEvent`` dataclasses encoded with
-``kind: history``; see ``docs/private/agent_v4_contract.md`` §6.
+``kind: history``.
 
 Translation rules:
 

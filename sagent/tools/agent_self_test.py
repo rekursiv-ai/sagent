@@ -474,7 +474,7 @@ async def test_diagnostics_reports_live_cost_tracker_state() -> None:
     """``diagnostics`` reads ``cost_tracker`` + ``num_tool_call_rounds``.
 
     Regression guard for the pre-existing dead ``ToolState.stats``
-    contract (``docs/private/agent_v4_review.md`` P1): diagnostics now
+    contract: diagnostics now
     pulls directly from the single cost store, so a real model response
     surfaces in the output without any separate publisher step.
     """

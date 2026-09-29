@@ -1,7 +1,6 @@
 r"""prompt-toolkit keybindings.
 
-Wires keys to the input-pane behavior contract specified in
-``docs/private/input_ux.md``. That doc is the authority; this module is
+Wires keys to the input-pane behavior contract; this module is
 the wiring:
 
 - ``enter``        -> :func:`_kb_submit` (dispatch or stage to queue pane)
@@ -248,7 +247,7 @@ def _kb_submit(
     nav: NavState,
     event: KeyPressEvent,
 ) -> None:
-    r"""Enter handler. See ``docs/private/input_ux.md`` for the contract."""
+    r"""Enter handler."""
     buf = event.current_buffer
     text = buf.text
     stripped = text.strip()
@@ -291,7 +290,7 @@ def _kb_defer(
     nav: NavState,
     event: KeyPressEvent,
 ) -> None:
-    """Tab handler. See ``docs/private/input_ux.md`` for the contract."""
+    """Tab handler."""
     buf = event.current_buffer
     text = buf.text
     if not text.strip():
