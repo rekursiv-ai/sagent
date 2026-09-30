@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, cast
+from collections.abc import Sequence
+from functools import cache
+from pathlib import Path
+from typing import TYPE_CHECKING, Final, Protocol, cast
 
+import ast
+import importlib.util
 import os
 
 import pytest
 
 
+_CWD: Final = Path(__file__).resolve().parent
+
+
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Iterator
 
 
 class MarkedItem(Protocol):
@@ -31,6 +39,24 @@ class MarkedItem(Protocol):
         append: bool = ...,
     ) -> None:
         """Add marker."""
+        ...
+
+
+class GoldenMarkedItem(MarkedItem, Protocol):
+    """Marker surface plus the collected module and test function."""
+
+    @property
+    def module(self) -> object | None:
+        """The collected module, if the item has one."""
+        ...
+
+    @property
+    def obj(self) -> object:
+        """The collected test function."""
+        ...
+
+    def get_closest_marker(self, name: str) -> pytest.Mark | None:
+        """Return the nearest marker with ``name``."""
         ...
 
 
@@ -70,17 +96,115 @@ def pytest_collection_modifyitems(
     config: pytest.Config,
     items: list[pytest.Item],
 ) -> None:
-    """Derive timeouts and skips from concrete resource markers.
+    """Derive timeouts and skips from resource markers, and mark golden tests.
 
     Args:
       config: Config.
       items: Items.
 
     """
+    marker = "golden: tests that assert against a golden"
+    if marker not in config.getini("markers"):
+        config.addinivalue_line("markers", marker)
     apply_resource_markers(
         items,
         resource_markers=registered_resource_markers(config),
     )
+    # The mark exists only for ``-m`` selection, and the call-graph walk costs
+    # tens of seconds over the whole tree, so a run that cannot select on it
+    # skips it.
+    if "golden" in str(config.getoption("markexpr", default="")):
+        apply_golden_marker(cast(Sequence[GoldenMarkedItem], items))
+
+
+def apply_golden_marker(items: Sequence[GoldenMarkedItem]) -> None:
+    """Mark test items whose call graph reaches a golden assertion.
+
+    Args:
+      items: Items.
+
+    """
+    # A golden is a host-agnostic CPU record; a GPU test's output is not portable.
+    for item in items:
+        module = item.module
+        path = getattr(module, "__file__", None)
+        name = getattr(item.obj, "__name__", None)
+        if (
+            isinstance(path, str)
+            and isinstance(name, str)
+            and not any(m.name.startswith("gpu_") for m in item.iter_markers())
+            and _test_reaches_golden(Path(path), name)
+            and item.get_closest_marker("golden") is None
+        ):
+            item.add_marker(pytest.mark.golden)
+
+
+class _ModuleSource:
+    """Parsed functions, module-level names, and imports for one source module."""
+
+    def __init__(
+        self,
+        tree: ast.Module,
+        path: Path,
+        *,
+        mentions_testdata: bool,
+    ) -> None:
+        self.path = path
+        self.mentions_testdata = mentions_testdata
+        self.functions = {
+            node.name: node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        self.golden_names = {
+            target.id
+            for node in tree.body
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and node.value is not None
+            and _names_checked_in_testdata(node.value)
+            for target in (
+                node.targets if isinstance(node, ast.Assign) else [node.target]
+            )
+            if isinstance(target, ast.Name)
+        }
+        self.imports: dict[str, tuple[str, str | None]] = {}
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    self.imports[alias.asname or alias.name.split(".")[-1]] = (
+                        alias.name,
+                        None,
+                    )
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                for alias in node.names:
+                    self.imports[alias.asname or alias.name] = (
+                        node.module,
+                        alias.name,
+                    )
+
+
+@cache
+def module_path(module_name: str) -> Path | None:
+    """Return the in-repo ``.py`` file behind ``module_name``, without importing it.
+
+    Args:
+      module_name: Dotted module name.
+
+    Returns:
+      path: The source file, or None when it is unresolvable, compiled, or outside
+        the repository.
+
+    """
+    try:
+        spec = importlib.util.find_spec(module_name)
+    except (ImportError, ValueError):
+        return None
+    if spec is None or spec.origin is None or spec.origin in {"built-in", "frozen"}:
+        return None
+    path = Path(spec.origin)
+    if path.suffix != ".py" or not path.is_relative_to(_CWD.parents[2]):
+        return None
+    return path
 
 
 def registered_resource_markers(
@@ -364,3 +488,147 @@ def _fail_on_unknown_resource_markers(
         family, separator, _specific = name.partition("_")
         if separator and family in resource_families:
             raise pytest.UsageError(f"Unknown resource marker: {name}")
+
+
+@cache
+def _test_reaches_golden(path: Path, test_name: str) -> bool:
+    """Return whether one test function's transitive calls reach a golden."""
+    seen: set[tuple[Path, str]] = set()
+    pending = [(path, test_name)]
+    while pending:
+        key = pending.pop()
+        if key in seen:
+            continue
+        seen.add(key)
+        reaches, callees = _function_facts(*key)
+        if reaches:
+            return True
+        pending.extend(callees)
+    return False
+
+
+# Every test walks the same shared helpers, so each function is read once per
+# process and the per-test walk only follows the cached edges.
+@cache
+def _function_facts(
+    path: Path,
+    function_name: str,
+) -> tuple[bool, tuple[tuple[Path, str], ...]]:
+    """Return whether a function touches a golden itself, and what it calls."""
+    module = _module_source(path)
+    if function_name.startswith("assert_") and _imports_golden_support(path):
+        return True, ()
+    function = module.functions.get(function_name)
+    if function is None:
+        module_name, symbol = module.imports.get(function_name, ("", None))
+        if symbol is None:
+            return False, ()
+        if _is_golden_symbol(module_name, symbol):
+            return True, ()
+        target_path = module_path(module_name)
+        return False, () if target_path is None else ((target_path, symbol),)
+    if module.mentions_testdata and _reads_checked_in_testdata(function, module):
+        return True, ()
+    callees: list[tuple[Path, str]] = []
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Call):
+            continue
+        target = _call_target(node, module)
+        if target is None:
+            continue
+        target_path, target_name, is_golden = target
+        if is_golden:
+            return True, ()
+        if target_path is not None:
+            callees.append((target_path, target_name))
+    return False, tuple(callees)
+
+
+@cache
+def _module_source(path: Path) -> _ModuleSource:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # A shared worktree can move a module between its import and this read.
+        text = ""
+    return _ModuleSource(
+        ast.parse(text, filename=str(path)),
+        path,
+        mentions_testdata="testdata" in text,
+    )
+
+
+@cache
+def _imports_golden_support(path: Path) -> bool:
+    """Return whether a module transitively imports the golden or bfb helpers."""
+    seen: set[Path] = set()
+    pending = [path]
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        for module_name, _symbol in _module_source(current).imports.values():
+            if module_name.rsplit(".", 1)[-1] in {"golden", "bfb"}:
+                return True
+            target_path = module_path(module_name)
+            if target_path is not None:
+                pending.append(target_path)
+    return False
+
+
+def _call_target(
+    call: ast.Call,
+    module: _ModuleSource,
+) -> tuple[Path | None, str, bool] | None:
+    function = call.func
+    module_name: str | None = None
+    symbol: str | None = None
+    if isinstance(function, ast.Name):
+        if function.id in module.functions:
+            return module.path, function.id, False
+        imported = module.imports.get(function.id)
+        if imported is None:
+            return None
+        module_name, symbol = imported
+    elif isinstance(function, ast.Attribute) and isinstance(function.value, ast.Name):
+        imported = module.imports.get(function.value.id)
+        if imported is None:
+            return None
+        parent, submodule = imported
+        # ``from pkg import mod`` binds a module; its attribute is a function there.
+        module_name = parent if submodule is None else f"{parent}.{submodule}"
+        symbol = function.attr
+    else:
+        return None
+    if symbol is not None and _is_golden_symbol(module_name, symbol):
+        return None, symbol, True
+    target_path = module_path(module_name)
+    if target_path is None or symbol is None:
+        return None
+    return target_path, symbol, False
+
+
+def _names_checked_in_testdata(node: ast.AST) -> bool:
+    """Return whether ``node`` spells a path into a checked-in ``testdata/`` dir."""
+    return any(
+        isinstance(child, ast.Constant) and child.value == "testdata"
+        for child in ast.walk(node)
+    )
+
+
+def _reads_checked_in_testdata(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    module: _ModuleSource,
+) -> bool:
+    """Return whether a test body names a ``testdata/`` path, directly or by name."""
+    return _names_checked_in_testdata(function) or any(
+        isinstance(node, ast.Name) and node.id in module.golden_names
+        for node in ast.walk(function)
+    )
+
+
+def _is_golden_symbol(module_name: str, symbol: str) -> bool:
+    return module_name.rsplit(".", 1)[-1] in {"golden", "bfb"} and (
+        symbol.startswith("assert_") or symbol == "expect_golden_mismatch"
+    )

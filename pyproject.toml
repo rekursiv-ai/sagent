@@ -312,8 +312,10 @@ extend-safe-fixes = [
     "F601",   # Remove overwritten dictionary entries.
     "F841",   # Remove unused local bindings.
     "PT006",  # Use tuple for pytest.mark.parametrize names.
+    "PT007",  # Use tuple/list consistently for pytest values.
     "RET504", # Remove unnecessary local assignment directly before return.
     "SIM102", # Collapse nested if statements.
+    "SIM105", # Use contextlib.suppress instead of try-except-pass.
     "TC",     # Type-checking import and annotation rewrites.
     "UP",     # Python syntax upgrades.
 ]
