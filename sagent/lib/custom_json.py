@@ -3619,8 +3619,6 @@ class _GraphObjectCodec(_ImportCodec):
         allocate = cast(Callable[[type], object], target.__new__)
         value = allocate(target)
         graph.register(value)
-        if cls.has_finalized_slot(target):
-            object.__setattr__(value, "_finalized", False)
         for name, member in source.items():
             if name != cls.tag:
                 object.__setattr__(value, name, graph.decode(member))
@@ -3657,26 +3655,6 @@ class _GraphObjectCodec(_ImportCodec):
                 if key not in seen and key not in skipped:
                     seen.add(key)
                     yield key
-
-    @classmethod
-    def has_finalized_slot(cls, target: type) -> bool:
-        """Return whether ``target`` declares ``_finalized`` in its MRO.
-
-        Args:
-          target: Class to inspect.
-
-        Returns:
-          result: True if _finalized appears in any base's __slots__.
-
-        """
-        del cls
-        for base in target.__mro__:
-            slots = getattr(base, "__slots__", ())
-            if isinstance(slots, str):
-                slots = (slots,)
-            if "_finalized" in slots:
-                return True
-        return False
 
 
 class _MappingProxyCodec:

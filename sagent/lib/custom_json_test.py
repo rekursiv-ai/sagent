@@ -3471,8 +3471,6 @@ class TestMalformedAndEdgeInput:
         del value.dropped
         payload = _GraphObjectCodec.encode_graph(value, _GraphEncoder({}))
         assert payload == {"py/object": _GraphObjectCodec.path(_TwoSlots), "kept": 1}
-        string_slots = type("StringSlots", (), {"__slots__": "x"})
-        assert _GraphObjectCodec.has_finalized_slot(string_slots) is False
 
     @pytest.mark.parametrize(
         "fields",
