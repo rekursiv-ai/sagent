@@ -66,8 +66,9 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
 
 # -f: without it a 404 writes an HTML error page and dpkg reports a confusing
-# archive-format error instead of a download failure.
-curl -fsSL -o "${tmp}/${deb}" \
+# archive-format error instead of a download failure. --retry: GitHub's release
+# host answers an occasional 500, which otherwise fails the whole CI job.
+curl -fsSL --retry 5 -o "${tmp}/${deb}" \
   "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/${VERSION}/${deb}"
 $SUDO dpkg -i "${tmp}/${deb}"
 
