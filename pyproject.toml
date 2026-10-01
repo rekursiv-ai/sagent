@@ -254,6 +254,21 @@ norecursedirs = [
     "__pycache__",
     "third_party",
     "typings",
+    # Copied tests require mutmut trampolines and must not join normal collection.
+    "mutants",
+]
+
+[tool.mutmut]
+# Uncovered lines cannot produce assertion failures; measure them with coverage.
+mutate_only_covered_lines = true
+source_paths = ["."]
+pytest_add_cli_args = ["-p", "no:jaxtyping"]
+# Argparse help presentation has no behavior, so a mutant there is unkillable by
+# a correct test. Mutmut skips whole lines: match only lines holding nothing but
+# that keyword, so a sibling such as `nargs="*"` on a shared line still mutates.
+do_not_mutate_patterns = [
+    '^\s*help=("[^"]*"\s*)+,?\s*$',
+    '^\s*(description|formatter_class)=[\w.]+,?\s*$',
 ]
 
 [tool.coverage.run]

@@ -30,6 +30,7 @@
 #   fires on a dirty tree) STASHES your changes -- a git mutation, and this
 #   worktree is shared.
 #
+#
 #   NUL-delimited, per AGENTS.md: a path containing a space becomes two
 #   arguments under `$(...)` or a bare `xargs`, and a rename record yields the
 #   name that no longer exists.
@@ -377,8 +378,10 @@ repos:
           - WORKERS_BASEDPYRIGHT
           - >-
             files=("$@");
-            if [ "${PRECOMMIT_CODEGRAPH:-}" = 1 ] && [ -x ops/git/precommit/affected.py ]; then
-              harvested=$(ops/git/precommit/affected.py --emit files --depth 3 --workers "$WORKERS" --explain -- "$@") &&
+            depth=${PRECOMMIT_CODEGRAPH_BASEDPYRIGHT:-};
+            case "$depth" in ""|0*|*[!0-9]*) depth=;; esac;
+            if [ -n "$depth" ] && [ -x ops/git/precommit/affected.py ]; then
+              harvested=$(ops/git/precommit/affected.py --emit files --depth "$depth" --workers "$WORKERS" --explain -- "$@") &&
                 [ -n "$harvested" ] &&
                 IFS=$'\n' read -r -d '' -a files < <(printf "%s" "$harvested" && printf '\0');
             fi;
@@ -456,7 +459,7 @@ repos:
         types: [python]
         entry: *worker-entry
         # The inline loop is the SIDECAR PROBE and it is the DEFAULT. The
-        # harvester supersedes it only under `PRECOMMIT_CODEGRAPH=1`, and never
+        # harvester supersedes it only under `PRECOMMIT_CODEGRAPH_PYTEST`, and never
         # in an exported package, which ships no `ops/` tree.
         #
         # The probe also runs whenever the harvester yields NOTHING -- a nonzero
@@ -467,8 +470,10 @@ repos:
           - WORKERS_PYTEST
           - >-
             tests=();
-            if [ "${PRECOMMIT_CODEGRAPH:-}" = 1 ] && [ -x ops/git/precommit/affected.py ]; then
-              ids=$(ops/git/precommit/affected.py --emit nodeids --workers "$WORKERS" --explain -- "$@") &&
+            depth=${PRECOMMIT_CODEGRAPH_PYTEST:-};
+            case "$depth" in ""|0*|*[!0-9]*) depth=;; esac;
+            if [ -n "$depth" ] && [ -x ops/git/precommit/affected.py ]; then
+              ids=$(ops/git/precommit/affected.py --emit nodeids --depth "$depth" --workers "$WORKERS" --explain -- "$@") &&
                 [ -n "$ids" ] &&
                 IFS=$'\n' read -r -d '' -a tests < <(printf "%s" "$ids" && printf '\0');
             fi;
