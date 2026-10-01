@@ -223,7 +223,11 @@ def number_type(
 ) -> type: ...
 def expr_type(x: sympy.Basic) -> type: ...
 def elementwise_dtypes(
-    *_args,
+    *_args: TensorOrNumberLikeType
+    | torch.SymInt
+    | torch.SymFloat
+    | torch.SymBool
+    | None,
     type_promotion_kind: ELEMENTWISE_TYPE_PROMOTION_KIND,
 ) -> tuple[torch.dtype, torch.dtype]: ...
 def reduction_dtypes(
