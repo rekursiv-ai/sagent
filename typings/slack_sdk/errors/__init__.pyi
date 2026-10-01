@@ -1,9 +1,18 @@
+from collections.abc import Mapping
+
+from slack_sdk.web.async_slack_response import AsyncSlackResponse
+
 class SlackClientError(Exception): ...
 class BotUserAccessError(SlackClientError): ...
 class SlackRequestError(SlackClientError): ...
 
 class SlackApiError(SlackClientError):
-    def __init__(self, message, response) -> None: ...
+    response: AsyncSlackResponse | Mapping[str, object]
+    def __init__(
+        self,
+        message: str,
+        response: AsyncSlackResponse | Mapping[str, object],
+    ) -> None: ...
 
 class SlackTokenRotationError(SlackClientError):
     api_error: SlackApiError
