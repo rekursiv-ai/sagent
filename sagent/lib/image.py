@@ -16,13 +16,17 @@ from __future__ import annotations
 
 from ctypes.util import find_library
 from io import BytesIO
+from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal, Protocol, cast
 
 import ctypes
 import functools
 import io
 import logging
+import platform
 import warnings
+
+from turbojpeg import DEFAULT_LIB_PATHS
 
 import imagesize
 import numpy as np
@@ -517,10 +521,15 @@ def _check_tj(lib: _TurboJpegLib, handle: int, status: int) -> None:
         raise RuntimeError(lib.tj3GetErrorStr(handle).decode())
 
 
+# ``find_library`` first, then PyTurboJPEG's per-platform install paths:
+# ``find_library`` misses Homebrew's prefix on Apple silicon.
 @functools.cache
 def _libturbojpeg() -> _TurboJpegLib:
-    """Load libturbojpeg as PyTurboJPEG's first lookup does, and declare ABIs."""
-    path = find_library("turbojpeg")
+    """Load libturbojpeg where PyTurboJPEG finds it, and declare ABIs."""
+    path = find_library("turbojpeg") or next(
+        (p for p in DEFAULT_LIB_PATHS.get(platform.system(), []) if Path(p).exists()),
+        None,
+    )
     if path is None:
         raise OSError("libturbojpeg not found.")
     lib = ctypes.CDLL(path)

@@ -3709,6 +3709,7 @@ def logsumexp(
     *,
     out: Tensor | None = ...,
 ) -> Tensor: ...
+@overload
 def lstm(
     data: Tensor,
     batch_sizes: Tensor,
@@ -3846,6 +3847,7 @@ def mean(
     dtype: _dtype | None = ...,
     out: Tensor | None = ...,
 ) -> Tensor: ...
+@overload
 def median(input: Tensor) -> Tensor: ...
 @overload
 def median(
@@ -5322,6 +5324,7 @@ def softmax(
     *,
     out: Tensor | None = ...,
 ) -> Tensor: ...
+@overload
 def sort(
     input: Tensor,
     *,
@@ -5499,6 +5502,7 @@ def std(
     correction: int | None = ...,
     out: Tensor | None = ...,
 ) -> Tensor: ...
+@overload
 def std_mean(
     input: Tensor,
     dim: _int | _size | None,

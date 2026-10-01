@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from io import BytesIO
+from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
 
+import platform
+
 from PIL import Image
 from turbojpeg import (
+    DEFAULT_LIB_PATHS,
     TJFLAG_FASTDCT,
     TJPF_RGB,
     TJSAMP_411,
@@ -22,6 +26,7 @@ import numpy as np
 import pytest
 
 from sagent.lib.image import (
+    _libturbojpeg,
     _parse_crop,
     decode_image_pil,
     decode_jpeg_turbojpeg,
@@ -591,6 +596,40 @@ class TestDecodeWebpReal:
 def test_webp_init_failure(mock_webp: MagicMock) -> None:
     mock_webp.lib.WebPInitDecoderConfig.return_value = False
     assert decode_webp_libwebp(b"x", 10, 10) is None
+
+
+def _find_nothing(name: str) -> str | None:
+    del name
+    return None
+
+
+@pytest.mark.parametrize("installed", [True, False])
+def test_libturbojpeg_falls_back_to_pyturbojpeg_install_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    installed: bool,
+) -> None:
+    # find_library misses Homebrew's prefix on Apple silicon. On Linux it returns a
+    # soname rather than a path, so the real library comes from the install paths
+    # (CI links it into /usr/local/lib).
+    system = platform.system()
+    paths = ["/nonexistent/libturbojpeg"]
+    if installed:
+        real = [p for p in DEFAULT_LIB_PATHS[system] if Path(p).exists()]
+        assert real, "libturbojpeg is not at any of PyTurboJPEG's install paths"
+        paths.append(real[0])
+    monkeypatch.setattr("sagent.lib.image.find_library", _find_nothing)
+    monkeypatch.setattr("sagent.lib.image.DEFAULT_LIB_PATHS", {system: paths})
+    _libturbojpeg.cache_clear()
+    try:
+        if installed:
+            region = decode_jpeg_turbojpeg_region(_jpeg_bytes(), x=0, y=0, w=8, h=8)
+            assert region is not None
+            assert region.shape == (8, 8, 3)
+        else:
+            with pytest.raises(OSError, match="not found"):
+                _libturbojpeg()
+    finally:
+        _libturbojpeg.cache_clear()
 
 
 if __name__ == "__main__":

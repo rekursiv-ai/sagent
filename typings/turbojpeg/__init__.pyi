@@ -2,6 +2,7 @@ from typing import Any
 
 import numpy as np
 
+DEFAULT_LIB_PATHS: dict[str, list[str]]
 TJCS_RGB: int
 TJCS_YCbCr: int
 TJCS_GRAY: int

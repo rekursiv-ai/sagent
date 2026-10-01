@@ -575,6 +575,12 @@ useLibraryCodeForTypes = false
 # `stubPath` (not `extraPaths`) is the one root that resolves ahead of an
 # installed package's inline types.
 stubPath = "typings"
+# typings/ is ALSO a source root so a stub package can ship a placeholder .py:
+# triton is linux-only (uv.lock `sys_platform == 'linux'`), so without this
+# every `import triton` fails `reportMissingModuleSource` on macOS, and an inline
+# suppression would fail `reportUnnecessaryTypeIgnoreComment` on linux. Stubs
+# still win over source, so no type changes. Mirrors [tool.ty.environment].
+extraPaths = ["typings"]
 # `rekursiv-ai-typeshed` (a `typecheck` dependency): the checkers' bundled stdlib
 # with `int`/`float` `__pow__` returning `float` rather than typeshed's `Any`,
 # which would otherwise make every `x ** 0.5` a `reportAny` violation.
