@@ -514,12 +514,21 @@ repos:
 
       # Keep after pytest: pre-commit runs hooks in declaration order.
       # Missing coverage is normal when no source module was tested.
+      #
+      # Reports the CHANGED source files only. `pytest` measures each changed
+      # file's whole directory (`--cov=${f%/*}`), so an unfiltered report lists
+      # every untested sibling at 0% -- one edit in a 70-module directory
+      # buried the changed files' numbers under 70 lines of noise.
+      #
+      # A changed file coverage never measured (`scripts/`, `tools/` are
+      # omitted) leaves `--include` matching nothing, and coverage exits 1 with
+      # "No data to report." That is an empty summary, not a failure; every
+      # other coverage error still fails the hook.
       - id: coverage-summary
         name: coverage-summary
         language: system
         stages: [pre-commit]
-        always_run: true
-        pass_filenames: false
+        types: [python]
         require_serial: true
         # Pre-commit otherwise hides the report when this hook passes.
         verbose: true
@@ -527,7 +536,20 @@ repos:
           bash -c '
             uv --quiet run --frozen --group pre-commit python -c "import coverage" 2>/dev/null || exit 0;
             [ -f .coverage ] || exit 0;
-            uv --quiet run --frozen --group pre-commit coverage report --skip-covered --precision=1 --sort=cover
+            sources=();
+            for f in "$@"; do
+              case "$f" in
+                *_test.py|test_*.py|*/conftest.py|conftest.py) ;;
+                *.py) sources+=("$f") ;;
+              esac;
+            done;
+            ((${#sources[@]})) || exit 0;
+            include=$(IFS=,; printf "%s" "${sources[*]}");
+            report=$(uv --quiet run --frozen --group pre-commit coverage report --skip-covered --precision=1 --sort=cover --include="$include");
+            status=$?;
+            [ "$report" = "No data to report." ] && exit 0;
+            printf "%s\n" "$report";
+            exit "$status"
           ' bash
 
   # === Pre-Push Gates =========================================================
