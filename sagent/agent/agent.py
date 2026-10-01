@@ -458,11 +458,23 @@ class Agent:
 
     @property
     def tool_results(self) -> ToolResultPolicy:
-        """Derive tool-result limits from the effective request window."""
+        """Derive result limits; a compactor owns aggregate context pressure.
+
+        Returns:
+          policy: Per-result limits and the applicable aggregate request budget.
+
+        """
         override = self._tool_results_override
         if override is not None:
             return override
-        return ToolResultPolicy.from_settings(self.budget)
+        policy = ToolResultPolicy.from_settings(self.budget)
+        if self._agent_compactor is not None:
+            # A newest-first request budget rewrites old results on every
+            # turn once half the window fills, invalidating the prefix cache.
+            # Keep stored results unchanged until the compactor replaces
+            # context. Per-result disk off-loading still bounds fresh results.
+            return dataclasses.replace(policy, message_budget_tokens=0)
+        return policy
 
     @property
     def max_request_bytes(self) -> int:
@@ -471,13 +483,13 @@ class Agent:
 
     @property
     def max_result_tokens(self) -> int:
-        """Tokens one tool result may occupy and still arrive whole.
+        """Return the per-result threshold for disk off-loading.
 
-        The persist threshold is the binding constraint: a result above
-        it is off-loaded to disk and replaced by a short preview, and one
-        above ``message_budget_tokens`` is elided outright. Sizing tool
-        bounds from the persist threshold keeps a single result clear of
-        both.
+        Aggregate request budgeting, when enabled, can further shorten results.
+
+        Returns:
+          tokens: Persistence threshold; zero disables per-result off-loading.
+
         """
         return self.tool_results.persist_tokens
 
