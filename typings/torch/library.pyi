@@ -6,6 +6,7 @@ from typing import (
 )
 from typing_extensions import ParamSpec, deprecated
 
+import contextlib
 import functools
 
 from torch._library.custom_ops import CustomOpDef, custom_op, device_types_t
@@ -39,18 +40,30 @@ _reserved_namespaces = ...
 def fallthrough_kernel(): ...
 
 class Library:
-    def __init__(self, ns, kind, dispatch_key=...) -> None: ...
-    def define(self, schema, alias_analysis=..., *, tags=...) -> Any: ...
+    def __init__(self, ns: str, kind: str, dispatch_key: str = ...) -> None: ...
+    def define(
+        self,
+        schema: str,
+        alias_analysis: str = ...,
+        *,
+        tags: torch.Tag | Sequence[torch.Tag] = ...,
+    ) -> str: ...
     def impl(
         self,
-        op_name,
-        fn,
-        dispatch_key=...,
+        op_name: str | torch._ops.OpOverload,
+        fn: Callable[..., object],
+        dispatch_key: str = ...,
         *,
-        with_keyset=...,
-        allow_override=...,
+        with_keyset: bool = ...,
+        allow_override: bool = ...,
     ) -> None: ...
     def fallback(self, fn, dispatch_key=..., *, with_keyset=...) -> None: ...
+
+def _scoped_library(
+    ns: str,
+    kind: str,
+    dispatch_key: str = ...,
+) -> contextlib.AbstractContextManager[Library]: ...
 
 _keep_alive: list[Library] = ...
 NAMELESS_SCHEMA = ...

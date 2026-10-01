@@ -227,8 +227,14 @@ repos:
       # under 2N GiB is free. It exists for a laptop whose browser and sibling
       # agents already hold most of RAM: there the formula's 7 workers (~1-1.8
       # GB each once torch loads) pushed into swap and froze the desktop. Reads
-      # `vm_stat` (macOS: free + inactive + speculative + purgeable) or
-      # `MemAvailable` (Linux).
+      # `vm_stat` (macOS: free + file-backed + purgeable, i.e. Activity
+      # Monitor's free plus "Cached Files") or `MemAvailable` (Linux): memory
+      # reclaimable without paging out an application. Do NOT add macOS's
+      # inactive pages. On a laptop near its limit they are mostly idle
+      # application memory, freed only by compressing or swapping it -- the
+      # stall this ceiling exists to prevent. File-backed already includes
+      # speculative read-ahead; purgeable is anonymous memory an app marked
+      # disposable.
       #
       #
       # The command also runs under `nice -n 19`, so interactive work wins the
@@ -277,7 +283,7 @@ repos:
               ((WORKERS < 2)) && WORKERS=2;
               # max(2, min(perf - 1, round(phys * 3/8))); +4 rounds to nearest.
               if command -v vm_stat >/dev/null; then
-                avail=$(vm_stat | awk "/page size of/{ps=\$8} /^Pages (free|inactive|speculative|purgeable):/{n+=\$NF} END{if (ps) print int(n*ps/1048576)}");
+                avail=$(vm_stat | awk "/page size of/{ps=\$8} /^(Pages (free|purgeable)|File-backed pages):/{n+=\$NF} END{if (ps) print int(n*ps/1048576)}");
               else
                 avail=$(awk "/^MemAvailable:/{print int(\$2/1024)}" /proc/meminfo 2>/dev/null);
               fi;
