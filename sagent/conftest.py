@@ -41,7 +41,7 @@ def pytest_configure(config: pytest.Config) -> None:
     """
     config.addinivalue_line(
         "markers",
-        "real_llm: spawns a real model CLI/binary; runs in a low-parallelism gate",
+        "cli_real_llm: spawns a live LLM CLI (claude, codex); skipped unless RUN_REAL_LLM=1",
     )
     userdirs_fixture.pytest_configure(config)
 

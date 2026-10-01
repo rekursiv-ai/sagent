@@ -5,7 +5,7 @@ from slack_sdk.models import JsonObject
 class SocketModeRequest:
     type: str
     envelope_id: str
-    payload: dict[str, Any]
+    payload: dict[str, object]
     accepts_response_payload: bool
     retry_attempt: int | None
     retry_reason: str | None

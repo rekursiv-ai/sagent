@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from ssl import SSLContext
 
 import logging
@@ -34,10 +35,10 @@ class AsyncBaseClient:
         api_method: str,
         *,
         http_verb: str = ...,
-        files: dict | None = ...,
-        data: dict | FormData | None = ...,
-        params: dict | None = ...,
-        json: dict | None = ...,
-        headers: dict | None = ...,
-        auth: dict | None = ...,
+        files: Mapping[str, object] | None = ...,
+        data: Mapping[str, object] | FormData | None = ...,
+        params: Mapping[str, object] | None = ...,
+        json: Mapping[str, object] | None = ...,
+        headers: Mapping[str, object] | None = ...,
+        auth: Mapping[str, object] | None = ...,
     ) -> AsyncSlackResponse: ...

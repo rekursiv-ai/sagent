@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from sagent.types.tools import Tool
 
 
-pytestmark = pytest.mark.cli_claude
+pytestmark = pytest.mark.cli_real_llm
 
 
 def _claude_available() -> bool:

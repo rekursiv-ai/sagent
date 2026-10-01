@@ -54,7 +54,7 @@ Usage
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast, override
 
@@ -283,8 +283,7 @@ class SlackAdapter:
         )
         if req.type != "events_api":
             return
-        payload = cast(MutableJSON, req.payload)
-        event = _extract_event(payload)
+        event = _extract_event(req.payload)
         if event is None:
             return
         try:
@@ -840,9 +839,9 @@ def main() -> int:
     return 0
 
 
-def _extract_event(payload: MutableJSON | None) -> MutableJSON | None:
+def _extract_event(payload: Mapping[str, object] | None) -> MutableJSON | None:
     """Pull the inner ``event`` dict from a Socket Mode envelope."""
-    if not isinstance(payload, dict):
+    if payload is None:
         return None
     ev = payload.get("event")
     if not isinstance(ev, dict):
