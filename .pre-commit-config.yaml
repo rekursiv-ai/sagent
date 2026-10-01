@@ -218,6 +218,23 @@ repos:
       # (24, 32 fast; 20, 28 slow -- likely CCD alignment), so a nearby value is
       # not interchangeable.
       #
+      # Then a memory CEILING, not a ratio:
+      #
+      #   WORKERS = max(1, min(WORKERS, available_RAM / 2 GiB))
+      #
+      # "Available" is RAM free at launch, not installed RAM, so the ceiling
+      # binds only when memory is already short: a host keeps N workers unless
+      # under 2N GiB is free. It exists for a laptop whose browser and sibling
+      # agents already hold most of RAM: there the formula's 7 workers (~1-1.8
+      # GB each once torch loads) pushed into swap and froze the desktop. Reads
+      # `vm_stat` (macOS: free + inactive + speculative + purgeable) or
+      # `MemAvailable` (Linux).
+      #
+      #
+      # The command also runs under `nice -n 19`, so interactive work wins the
+      # CPU; on an idle box that costs nothing. `nice` alone is not enough: it
+      # orders CPU time, not memory, so it cannot stop paging.
+      #
       # Overriding, most specific first: each hook honors the variable named as
       # its FIRST arg (`WORKERS_PYTEST_INTEGRATION_GLOBAL=1`), then
       # `WORKERS_DEFAULT`, then this formula. Per-hook is what CI needs -- the
@@ -259,9 +276,19 @@ repos:
               ((WORKERS > perf - 1)) && WORKERS=$(( perf - 1 ));
               ((WORKERS < 2)) && WORKERS=2;
               # max(2, min(perf - 1, round(phys * 3/8))); +4 rounds to nearest.
+              if command -v vm_stat >/dev/null; then
+                avail=$(vm_stat | awk "/page size of/{ps=\$8} /^Pages (free|inactive|speculative|purgeable):/{n+=\$NF} END{if (ps) print int(n*ps/1048576)}");
+              else
+                avail=$(awk "/^MemAvailable:/{print int(\$2/1024)}" /proc/meminfo 2>/dev/null);
+              fi;
+              if [ -n "$avail" ]; then
+                cap=$(( avail / 2048 ));
+                ((cap < 1)) && cap=1;
+                ((WORKERS > cap)) && WORKERS=$cap;
+              fi;
             fi;
             export WORKERS;
-            exec bash -c "$1" bash "${@:2}"
+            exec nice -n 19 bash -c "$1" bash "${@:2}"
           ' bash
 
       - id: codespell
