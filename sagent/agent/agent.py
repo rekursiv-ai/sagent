@@ -32,7 +32,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Callable, Generator, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, Literal, cast
+from typing import TYPE_CHECKING, Final, Literal
 
 import asyncio
 import contextlib
@@ -244,6 +244,10 @@ class Agent:
           can reuse across otherwise-divergent agents. Set by ``AgentSpawn``
           hot spawns (see ``tools.agent_spawn``); not meant to be toggled by
           general callers mid-session.
+      allow_background: Whether a tool call may carry ``background`` / ``delay``.
+          A host whose turn must end with its reply sets it False: tools are
+          then offered without those keys, and a call that sends them runs in
+          the foreground, so no timer or background job can hold the turn open.
 
     Side effects:
       Constructing with a non-``None`` ``model_recipe`` (and
@@ -273,6 +277,7 @@ class Agent:
         max_budget_usd: float | None = None,
         persistent_retry: bool = False,
         frozen_system: bool = False,
+        allow_background: bool = True,
     ) -> None:
         if max_attempts < 1:
             # ``send_with_retry``'s loop ``break``s on ``attempt >=
@@ -291,6 +296,7 @@ class Agent:
         self._base_system_spec: SystemPromptArg = system
         self._system_spec: SystemPromptArg = system
         self._frozen_system = frozen_system
+        self.allow_background = allow_background
         self._tools_list: list[Tool] = list(tools or [])
         self.compactor = compactor
         if budget is None:
@@ -650,7 +656,9 @@ class Agent:
             cached = (
                 self._tools_version,
                 [
-                    tool if tool.name == "BackgroundTask" else BackgroundAwareTool(tool)
+                    tool
+                    if tool.name == "BackgroundTask" or not self.allow_background
+                    else BackgroundAwareTool(tool)
                     for tool in self._tools_map.values()
                 ],
             )
@@ -1471,7 +1479,7 @@ class Agent:
         complete: type[runtime.RuntimeEvent] | tuple[type[runtime.RuntimeEvent], ...],
     ) -> None:
         """Push ``push`` and resolve when an event of ``complete`` type arrives."""
-        fut = cast(asyncio.Future[None], asyncio.get_running_loop().create_future())
+        fut = asyncio.get_running_loop().create_future()
 
         def resolver(ev: runtime.RuntimeEvent) -> None:
             if isinstance(ev, complete) and not fut.done():
@@ -2721,6 +2729,10 @@ class _AgentTool:
         # originating assistant tool_use.
         call_id = current_call_id_var.get("")
         bg_requested, delay_sec, clean_args = split_bg_args(args)
+        # A model can send the keys without being offered them; the host that forbade
+        # them is counting on the call to end with the turn.
+        if not self._agent.allow_background:
+            bg_requested, delay_sec = False, 0.0
         validation_error = validate_tool_input(
             self._inner.name,
             self._inner.directive_schema,

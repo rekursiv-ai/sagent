@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, Mock, patch
 import asyncio
 import contextlib
 import dataclasses
+import inspect
 import json
 import logging
 import re
@@ -816,6 +817,41 @@ async def test_agent_request_tools_wrapped_in_background_aware() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_agent_that_forbids_background_offers_no_such_keys_and_runs_a_delay_now() -> (
+    None
+):
+    """Turn ``background`` off for a host that cannot let a turn outlive its reply.
+
+    The tool is not advertised with ``background`` / ``delay``, and a model that
+    sends them anyway gets the call run in the foreground, not parked for 15
+    minutes with the turn held open.
+    """
+    delayed = ToolCall(id="d1", name="Echo", args={"msg": "hi", "delay": 900})
+    model = StubModel(
+        responses=[
+            AssistantMessage(tool_calls=(delayed,)),
+            AssistantMessage(text="done"),
+        ],
+    )
+    tool = StubTool(
+        directive_schema=json_freeze(
+            {"type": "object", "properties": {"msg": {"type": "string"}}},
+        ),
+    )
+    a = Agent(model=model, tools=[tool], allow_background=False)
+
+    async for _ in a.run(UserMessage(text="go")):
+        pass
+
+    first = model.received[0].tools
+    assert first is not None
+    props = dict(cast(Mapping[str, object], first[0].directive_schema["properties"]))
+    assert props.keys().isdisjoint({"background", "delay"})
+    assert tool.calls == [{"msg": "hi"}]
+    assert a.background == {}
+
+
+@pytest.mark.asyncio
 async def test_agent_run_yields_idle_at_end() -> None:
     a = _build_agent()
     events: list[str] = [
@@ -1504,6 +1540,23 @@ def test_agent_record_response_budget_exhaustion_raises() -> None:
     assert "Budget exhausted" in str(exc_info.value)
 
 
+def test_agent_record_response_spend_equal_to_the_cap_is_exhausted() -> None:
+    a = _build_agent(max_budget_usd=1.0)
+    with pytest.raises(BudgetExhaustedError):
+        a.record_response(
+            ModelResponse(
+                message=AssistantMessage(text="x"),
+                spend=TokenCost(request=1.0),
+            ),
+        )
+
+
+def test_record_response_remembers_the_history_its_tokens_measured() -> None:
+    a = _build_agent()
+    a.record_response(ModelResponse(message=AssistantMessage(text="x")))
+    assert a._last_measured_history == tuple(a.runtime.context().messages)
+
+
 def test_record_response_anchors_on_disjoint_token_pools() -> None:
     """``_last_input_tokens`` sums the disjoint pools, not double-counting cache.
 
@@ -1561,6 +1614,51 @@ def test_record_response_skips_cache_miss_on_first_response() -> None:
         ),
     )
     assert a.cost_tracker.cache_misses == []
+
+
+def test_record_response_a_model_change_is_not_a_cache_miss() -> None:
+    """A different model has its own cache, so its cold start is no prefix drift."""
+    a = _build_agent(model=StubModel(supports_cache_control=True))
+    a.record_response(
+        ModelResponse(
+            message=AssistantMessage(text="x"),
+            tokens=TokenCount(cache_read=10_000),
+        ),
+    )
+    a.model = StubModel(model_id="stub-2", supports_cache_control=True)
+    a.record_response(
+        ModelResponse(
+            message=AssistantMessage(text="y"),
+            tokens=TokenCount(request=10_000),
+        ),
+    )
+    assert a.cost_tracker.cache_misses == []
+
+
+def test_job_id_for_call_is_stable_and_maps_back_to_its_call() -> None:
+    a = _build_agent()
+    job_id = a.job_id_for_call("call-x")
+    assert a.job_id_for_call("call-x") == job_id
+    assert a.job_id_for_call("call-y") != job_id
+    assert a._call_id_for_job(job_id) == "call-x"
+
+
+@pytest.mark.asyncio
+async def test_await_event_resolves_on_its_own_event_and_leaves_no_observer() -> None:
+    a = _build_agent()
+    observers = list(a.runtime.observers)
+    waiting = asyncio.create_task(
+        a._await_event(CompactStarted(), complete=CompactComplete),
+    )
+    await asyncio.sleep(0)
+
+    a.publish(CompactStarted())
+    await asyncio.sleep(0)
+    assert not waiting.done()
+
+    a.publish(CompactComplete(records=()))
+    await asyncio.wait_for(waiting, timeout=1.0)
+    assert a.runtime.observers == observers
 
 
 def test_record_response_surfaces_usage_warning_once() -> None:
@@ -8549,7 +8647,7 @@ def test_agent_run_has_no_await_between_run_active_check_and_set() -> None:
     concurrent ``run`` callers slip past the guard. Scan the source so
     the invariant fails CI rather than failing in production.
     """
-    source = Path(Agent.run.__code__.co_filename).read_text(encoding="utf-8")
+    source = Path(inspect.getfile(Agent)).read_text(encoding="utf-8")
     lines = source.splitlines()
     check_line = next(
         i for i, line in enumerate(lines) if "if self._run_active:" in line
@@ -8695,7 +8793,7 @@ def test_job_id_for_call_is_public_on_agent() -> None:
     assert not hasattr(Agent, "_job_id_for_call"), (
         "rename leftover: remove the private alias"
     )
-    source = Path(Agent.run.__code__.co_filename).read_text(encoding="utf-8")
+    source = Path(inspect.getfile(Agent)).read_text(encoding="utf-8")
     assert "SLF001" not in source or "_job_id_for_call" not in source, (
         "SLF001 noqa should be gone with the rename"
     )

@@ -1667,7 +1667,7 @@ class AsyncWebClient(AsyncBaseClient):
         self,
         *,
         filename: str | None = ...,
-        file: str | bytes | IOBase | os.PathLike | None = ...,
+        file: str | bytes | IOBase | os.PathLike[str] | None = ...,
         content: str | bytes | None = ...,
         title: str | None = ...,
         alt_txt: str | None = ...,
