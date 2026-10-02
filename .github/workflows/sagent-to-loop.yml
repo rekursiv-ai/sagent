@@ -186,26 +186,39 @@ jobs:
           done
           echo "base_ref=$base_ref" >> "$GITHUB_OUTPUT"
           echo "head_ref=$head_ref" >> "$GITHUB_OUTPUT"
+          # The push baseline is the newest public commit the source already
+          # reflects, so a pushed commit at or behind it has nothing to import.
+          # That is every export landing here: importing it anyway records an
+          # empty ledger PR, and the export guard blocks the next export until
+          # that PR merges. Ancestry is checked, not commit text, which anyone
+          # can write; an unknown commit fails the check and imports as before.
+          if [ "${{ github.event_name }}" = "push" ] &&
+            git -C public-history merge-base --is-ancestor "$head_ref" "$base_ref"; then
+            echo "::notice::Source already reflects public commit $head_ref; nothing to import."
+            echo "import=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "import=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: steps.settings.outputs.enabled == 'true'
+        if: steps.refs.outputs.import == 'true'
         with:
           ref: ${{ steps.refs.outputs.base_ref }}
           path: public-base
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: steps.settings.outputs.enabled == 'true'
+        if: steps.refs.outputs.import == 'true'
         with:
           ref: ${{ steps.refs.outputs.head_ref }}
           path: public-head
 
       - name: Cache apt packages
-        if: steps.settings.outputs.enabled == 'true'
+        if: steps.refs.outputs.import == 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /var/cache/apt/archives
           key: apt-${{ runner.os }}-8787f28218a2ad65
       - name: Install system packages
-        if: steps.settings.outputs.enabled == 'true'
+        if: steps.refs.outputs.import == 'true'
         run: |
           for attempt in 1 2 3; do
             timeout 120 sudo apt-get update && break
@@ -214,7 +227,7 @@ jobs:
           done
           timeout 300 sudo apt-get install -y --no-install-recommends ripgrep fd-find
       - name: Import public tree into target repository
-        if: steps.settings.outputs.enabled == 'true'
+        if: steps.refs.outputs.import == 'true'
         run: |
           public_base_ref="${{ steps.refs.outputs.base_ref }}"
           public_head_ref="${{ steps.refs.outputs.head_ref }}"
@@ -248,7 +261,7 @@ jobs:
             --open-pr false
 
       - name: Open or update target import PR
-        if: steps.settings.outputs.enabled == 'true' && github.event_name != 'pull_request'
+        if: steps.refs.outputs.import == 'true' && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.COPYBARISTA_IMPORT_TOKEN }}
         run: |
@@ -279,7 +292,7 @@ jobs:
             --open-pr-only
 
       - name: Report import validation failure
-        if: always() && steps.settings.outputs.enabled == 'true' && github.event_name == 'push'
+        if: always() && steps.refs.outputs.import == 'true' && github.event_name == 'push'
         run: |
           if [ -f "$IMPORT_REPORT.validation-failed" ]; then
             echo "::error::The public commit was imported, but package validation failed."
