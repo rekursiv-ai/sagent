@@ -74,6 +74,7 @@ from sagent.agent.state import (
     agent_label_var,
     agent_registry,
 )
+from sagent.repl import slash
 from sagent.repl.render import HELP_TEXT
 from sagent.repl.slash import (
     QUIT_WORDS,
@@ -108,8 +109,6 @@ from sagent.types.runtime import (
     UserDeferredMessage,
     UserMessage,
 )
-
-import sagent.repl.slash
 
 
 if TYPE_CHECKING:
@@ -360,7 +359,7 @@ async def _input_pump(
 # (`repl/render.py`, `repl/replay.py`) consistent.
 def _dispatch_send(
     sender: Agent,
-    action: sagent.repl.slash.Send,
+    action: slash.Send,
     printer: Printer | None,
 ) -> None:
     """Dispatch ``/send`` content to matching persistent subagents."""
@@ -420,28 +419,28 @@ def _dispatch_target_control(
 ) -> None:
     """Dispatch a slash command against one targeted subagent."""
     action = parse_slash(body)
-    if isinstance(action, sagent.repl.slash.ModelSwitch):
+    if isinstance(action, slash.ModelSwitch):
         do_switch_model(target, action.args, printer)
         return
-    if isinstance(action, sagent.repl.slash.Thinking):
+    if isinstance(action, slash.Thinking):
         do_switch_thinking(target, action.command, printer)
         return
-    if isinstance(action, sagent.repl.slash.Effort):
+    if isinstance(action, slash.Effort):
         do_switch_effort(target, action.value, printer)
         return
-    if isinstance(action, sagent.repl.slash.Halt):
+    if isinstance(action, slash.Halt):
         target.halt()
         return
-    if isinstance(action, sagent.repl.slash.Quit):
+    if isinstance(action, slash.Quit):
         target.runtime.inbox.push_back(Quit())
         return
-    if isinstance(action, sagent.repl.slash.Clear):
+    if isinstance(action, slash.Clear):
         target.runtime.inbox.push_back(Clear())
         return
-    if isinstance(action, sagent.repl.slash.Compact):
+    if isinstance(action, slash.Compact):
         target.runtime.inbox.push_back(Compact(args=action.args))
         return
-    if isinstance(action, sagent.repl.slash.Kill):
+    if isinstance(action, slash.Kill):
         if action.target == "all":
             target.kill_all_tools()
         else:
@@ -496,7 +495,7 @@ def _is_serviceable(label: str, agent: AgentLike, *, caller: str) -> bool:
 # registry (exact, glob, brace-list, or regex).
 def _dispatch_halt(
     agent: Agent,
-    action: sagent.repl.slash.Halt,
+    action: slash.Halt,
     printer: Printer | None,
 ) -> None:
     """Halt the current agent, every persistent subagent, or matching labels."""
@@ -526,7 +525,7 @@ def _dispatch_halt(
 # left with a "pending" pane that no longer matches their intent.
 def _dispatch_kill(
     agent: Agent,
-    action: sagent.repl.slash.Kill,
+    action: slash.Kill,
     printer: Printer | None,
     *,
     queues: InputQueues | None = None,
@@ -624,52 +623,52 @@ async def _dispatch(
 ) -> bool:
     """Dispatch one parsed slash action; return True to exit the pump."""
     match action:
-        case sagent.repl.slash.Quit():
+        case slash.Quit():
             agent.shutdown(force=False)
             return True
-        case sagent.repl.slash.Halt():
+        case slash.Halt():
             _dispatch_halt(agent, action, printer)
-        case sagent.repl.slash.Kill():
+        case slash.Kill():
             _dispatch_kill(agent, action, printer, queues=queues)
-        case sagent.repl.slash.Clear():
+        case slash.Clear():
             agent.runtime.inbox.push_back(Clear())
             if printer is not None:
                 printer.write_slash_block("[/clear] history cleared")
-        case sagent.repl.slash.Compact(args=args):
+        case slash.Compact(args=args):
             agent.runtime.inbox.push_back(Compact(args=args))
             if printer is not None:
                 note = f" ({args})" if args else ""
                 printer.write_slash_block(f"[/compact] queued{note}")
-        case sagent.repl.slash.Recompact(args=args):
+        case slash.Recompact(args=args):
             agent.runtime.inbox.push_back(Recompact(args=args))
             if printer is not None:
                 note = f" ({args})" if args else ""
                 printer.write_slash_block(f"[/recompact] queued{note}")
-        case sagent.repl.slash.ModelSwitch(args=args):
+        case slash.ModelSwitch(args=args):
             do_switch_model(agent, args, printer)
-        case sagent.repl.slash.Thinking(command=command):
+        case slash.Thinking(command=command):
             do_switch_thinking(agent, command, printer)
-        case sagent.repl.slash.Effort(value=value):
+        case slash.Effort(value=value):
             do_switch_effort(agent, value, printer)
-        case sagent.repl.slash.Tool(spec=spec):
+        case slash.Tool(spec=spec):
             _dispatch_tool(agent, spec, printer)
-        case sagent.repl.slash.Login():
+        case slash.Login():
             await do_login(agent, printer)
             if queues is not None:
                 queues.commit_deferred_on_idle(agent)
-        case sagent.repl.slash.Help():
+        case slash.Help():
             if printer is not None:
                 printer.write_line(HELP_TEXT)
-        case sagent.repl.slash.Tasks():
+        case slash.Tasks():
             if printer is not None:
                 printer.write_line(format_tasks(agent))
-        case sagent.repl.slash.Text(content=content):
+        case slash.Text(content=content):
             agent.runtime.inbox.push_back(UserMessage(text=content))
-        case sagent.repl.slash.Defer(content=content):
+        case slash.Defer(content=content):
             agent.runtime.inbox.push_back(UserDeferredMessage(text=content))
-        case sagent.repl.slash.Send():
+        case slash.Send():
             _dispatch_send(agent, action, printer)
-        case sagent.repl.slash.Unknown(text=text):
+        case slash.Unknown(text=text):
             if printer is not None:
                 printer.write_tool_error(text)
         case _:

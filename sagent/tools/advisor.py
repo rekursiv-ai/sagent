@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
+from sagent.agent import runtime
 from sagent.lib import debug_log
 from sagent.lib.custom_json import JSON, json_freeze
 from sagent.types.model import Model, ModelRequest
@@ -27,8 +28,6 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
-
-import sagent.agent.runtime
 
 
 if TYPE_CHECKING:
@@ -156,7 +155,7 @@ class Advisor:
             uses=self._uses,
             max_uses=self._max_uses,
         )
-        agent_runtime = sagent.agent.runtime.AgentRuntime(
+        agent_runtime = runtime.AgentRuntime(
             model=_AdvisorModel(self._model, self._system),
             tools=[],
         )
