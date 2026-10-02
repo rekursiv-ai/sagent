@@ -385,6 +385,9 @@ class Agent:
         self._tools_map: dict[str, Tool] = {}
         self._tools_version: int = 0
         self._live_tools_cache: tuple[int, list[Tool]] | None = None
+        self.tool_gate: frozenset[str] | None = None
+        """Names of the only tools the next model requests offer; ``None`` offers all.
+        A host sets it for a call and clears it after; tool calls still run by name."""
         agent_tools: list[_AgentTool] = []
         for t in self._tools_list:
             self._tools_map[t.name] = t
@@ -485,6 +488,11 @@ class Agent:
             # context. Per-result disk off-loading still bounds fresh results.
             return dataclasses.replace(policy, message_budget_tokens=0)
         return policy
+
+    @tool_results.setter
+    def tool_results(self, policy: ToolResultPolicy) -> None:
+        """Replace the per-result and aggregate limits derived from the budget."""
+        self._tool_results_override = policy
 
     @property
     def max_request_bytes(self) -> int:
@@ -667,7 +675,8 @@ class Agent:
                 ],
             )
             self._live_tools_cache = cached
-        return list(cached[1])
+        gate = self.tool_gate
+        return [tool for tool in cached[1] if gate is None or tool.name in gate]
 
     @property
     def system(self) -> str:

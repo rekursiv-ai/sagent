@@ -824,6 +824,36 @@ async def test_agent_request_tools_wrapped_in_background_aware() -> None:
     assert "delay" in props
 
 
+def test_a_host_can_replace_the_tool_result_limits() -> None:
+    a = _build_agent(tools=[StubTool()])
+    a.tool_results = ToolResultPolicy(persist_tokens=9_000)
+
+    assert a.max_result_tokens == 9_000
+    assert a.tool_results.message_budget_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_a_tool_gate_limits_the_tools_a_request_offers_until_it_is_cleared() -> (
+    None
+):
+    """The host sets ``tool_gate`` for a call and clears it after."""
+    model = StubModel()
+    a = _build_agent(model=model, tools=[StubTool()])
+    a.tool_gate = frozenset({"Nothing"})
+    async for _ in a.run(UserMessage(text="hi")):
+        pass
+    hidden = model.received[-1]
+    assert hidden.tools is None
+    a.tool_gate = frozenset({"Echo"})
+    async for _ in a.run(UserMessage(text="again")):
+        pass
+    shown = model.received[-1]
+    assert shown.tools is not None
+    assert [offered.name for offered in shown.tools] == ["Echo"]
+    a.tool_gate = None
+    assert [tool.name for tool in a.live_tools()] == ["Echo"]
+
+
 @pytest.mark.asyncio
 async def test_an_agent_that_forbids_background_offers_no_such_keys_and_runs_a_delay_now() -> (
     None
