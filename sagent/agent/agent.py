@@ -248,6 +248,9 @@ class Agent:
           A host whose turn must end with its reply sets it False: tools are
           then offered without those keys, and a call that sends them runs in
           the foreground, so no timer or background job can hold the turn open.
+      tool_results: Per-result and aggregate tool-result limits; ``None`` derives
+          them from the input window, which on a million-token window lets one
+          result run to 250k tokens before it is moved to disk.
 
     Side effects:
       Constructing with a non-``None`` ``model_recipe`` (and
@@ -278,6 +281,7 @@ class Agent:
         persistent_retry: bool = False,
         frozen_system: bool = False,
         allow_background: bool = True,
+        tool_results: ToolResultPolicy | None = None,
     ) -> None:
         if max_attempts < 1:
             # ``send_with_retry``'s loop ``break``s on ``attempt >=
@@ -312,7 +316,7 @@ class Agent:
         # on the first request, where the provider rejects it.
         _reject_budget_over_model(budget, model)
         self._budget = budget
-        self._tool_results_override: ToolResultPolicy | None = None
+        self._tool_results_override: ToolResultPolicy | None = tool_results
         self.persistent_retry = persistent_retry
         self.last_compact_error: Exception | None = None
         # Cache-inclusive input-token count from the most recent response

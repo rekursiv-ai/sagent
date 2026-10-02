@@ -60,6 +60,7 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
 )
+from sagent.types.tools import ToolResultPolicy
 
 
 if TYPE_CHECKING:
@@ -884,6 +885,33 @@ def test_build_child_applies_thinking_and_effort_from_model_options() -> None:
     )
     assert child.model.settings.thinking_budget == "auto"
     assert child.model.settings.thinking_effort == "high"
+
+
+def test_build_child_takes_the_factorys_tool_result_policy() -> None:
+    """A child bounds its tool results as its host chose, not by its own window."""
+    parent = _make_parent()
+    policy = ToolResultPolicy(persist_tokens=10_000)
+    capped = AgentSpawn(tool_results=policy)._build_child(
+        system=None,
+        child_model=_ThinkingEffortModel(),
+        child_spec=None,
+        child_tools=[],
+        max_rounds=None,
+        model_options={},
+        parent_agent=parent,
+    )
+    default = AgentSpawn()._build_child(
+        system=None,
+        child_model=_ThinkingEffortModel(),
+        child_spec=None,
+        child_tools=[],
+        max_rounds=None,
+        model_options={},
+        parent_agent=parent,
+    )
+
+    assert capped.tool_results == policy
+    assert default.tool_results.persist_tokens != 10_000
 
 
 def test_build_child_inherits_the_parents_selection() -> None:

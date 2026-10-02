@@ -87,7 +87,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from sagent.types.compactor import Compactor
-    from sagent.types.tools import Tool
+    from sagent.types.tools import Tool, ToolResultPolicy
 
 
 # Prevent GC of persistent agent tasks. Keyed by label; cleaned
@@ -115,6 +115,10 @@ class AgentSpawn:
     The default ``None`` means "every provider in ``sagent.providers``".
     Restrict it at construction (typically from ``--allow-providers``)
     on hosts that only have credentials for a subset.
+
+    ``tool_results`` bounds each child's tool results; a child inherits its
+    compactor from the parent but not this policy, so a host that caps its own
+    results passes the same policy here.
     """
 
     name: str = "AgentSpawn"
@@ -137,6 +141,7 @@ class AgentSpawn:
         max_attempts: int | None = None,
         verbosity: int = 1,
         allow_providers: tuple[str, ...] | None = None,
+        tool_results: ToolResultPolicy | None = None,
     ) -> None:
         self._provider = provider
         self._auth = auth
@@ -146,6 +151,7 @@ class AgentSpawn:
         self._tools = tools
         self._max_tool_call_rounds = max_tool_call_rounds
         self._max_depth = max_depth
+        self._tool_results = tool_results
         self._compactor = compactor
         self._max_attempts = max_attempts
         self._verbosity = verbosity
@@ -547,6 +553,7 @@ class AgentSpawn:
                 max_tool_call_rounds=child_max_rounds,
                 frozen_system=hot,
                 session_dir=self._child_session_dir(parent_agent),
+                tool_results=self._tool_results,
             )
         return agent_class(
             model=child_model,
@@ -558,6 +565,7 @@ class AgentSpawn:
             frozen_system=hot,
             session_dir=self._child_session_dir(parent_agent),
             max_attempts=inherited_attempts,
+            tool_results=self._tool_results,
         )
 
     # Both lifecycles register the child under its stable ``label`` (so ``/send`` and

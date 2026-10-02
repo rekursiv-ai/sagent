@@ -514,6 +514,14 @@ def test_live_context_mutation_updates_budget_policy_without_swap() -> None:
     assert agent.tool_results.persist_tokens == 25_000
 
 
+def test_an_explicit_tool_result_policy_replaces_the_window_derived_one() -> None:
+    policy = ToolResultPolicy(persist_tokens=10_000)
+    model = StubModel(max_request_tokens=1_000_000)
+
+    assert Agent(model=model).tool_results.persist_tokens == 250_000
+    assert Agent(model=model, tool_results=policy).tool_results == policy
+
+
 def test_explicit_buffer_equal_default_remains_explicit_on_switch() -> None:
     small = StubModel(max_request_tokens=100_000)
     large = StubModel(max_request_tokens=1_000_000)
