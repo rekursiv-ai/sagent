@@ -326,6 +326,7 @@ extend-safe-fixes = [
     "F841",   # Remove unused local bindings.
     "PT006",  # Use tuple for pytest.mark.parametrize names.
     "PT007",  # Use tuple/list consistently for pytest values.
+    "PT018",  # Split composite assertions.
     "PYI034", # Annotate __enter__/__new__/__iadd__ returns as Self.
     "RET504", # Remove unnecessary local assignment directly before return.
     "SIM102", # Collapse nested if statements.
