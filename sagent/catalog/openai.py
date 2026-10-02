@@ -799,6 +799,12 @@ def models() -> Mapping[str, ModelCapability]:
             thinking=ThinkingCapability(),
         ),
     )
+    # Unverified: gpt-6.1-sol's published prices are not recorded. This row copies
+    # the sol-6 card as a stand-in so a Sol 6.1 session is priced at a Sol rate
+    # and not at the dearest card. Replace it once the published table is read.
+    # Appended last so the family alias keeps pointing at sol-6.
+    sol_6 = next(row for row in rows if row.model_id == "sol-6")
+    rows = (*rows, replace(sol_6, model_id="sol-6.1", wire_model_id="gpt-6.1-sol"))
     # A tier is offered exactly when it is priced.
     rows = tuple(replace(row, service_tier=row.prices.service_tiers) for row in rows)
     # Rows run newest-first within each family, so the first match is the latest

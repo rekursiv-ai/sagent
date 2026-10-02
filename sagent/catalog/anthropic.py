@@ -326,10 +326,19 @@ def models() -> Mapping[str, ModelCapability]:
             ),
         ),
     )
+    # Unverified: claude-sonnet-5-5's published prices are not recorded. This row
+    # copies the sonnet-5 card as a stand-in. Appended last so the family alias
+    # keeps pointing at sonnet-5.
+    sonnet_5 = next(row for row in rows if row.model_id == "sonnet-5")
+    rows = (
+        *rows,
+        replace(sonnet_5, model_id="sonnet-5.5", wire_model_id="claude-sonnet-5-5"),
+    )
     # A tier is offered exactly when it is priced.
     rows = tuple(replace(row, service_tier=row.prices.service_tiers) for row in rows)
-    # Rows run newest-first within each family, so the first match is the latest
-    # and a new release moves its alias without an edit here.
+    # Rows run newest-first within each family, so the first match is the latest.
+
+    # And a new release moves its alias without an edit here.
     latest = {
         alias: next(row for row in rows if row.model_id.startswith(f"{family}-"))
         for alias, family in (

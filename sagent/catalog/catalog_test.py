@@ -541,6 +541,20 @@ def test_no_catalog_declares_a_latency_tag() -> None:
             assert "+fast" not in model_id
 
 
+def test_sol_6_1_is_priced_by_a_stand_in_copy_of_the_sol_6_card() -> None:
+    sol = openai.models()
+    assert sol["sol-6.1"].wire_model_id == "gpt-6.1-sol"
+    assert sol["sol-6.1"].prices == sol["sol-6"].prices
+    assert sol["default"].model_id.startswith("astra-")
+
+
+def test_sonnet_5_5_is_priced_by_a_stand_in_copy_of_the_sonnet_5_card() -> None:
+    rows = anthropic.models()
+    assert rows["sonnet-5.5"].wire_model_id == "claude-sonnet-5-5"
+    assert rows["sonnet-5.5"].prices == rows["sonnet-5"].prices
+    assert rows["utility"].model_id == "sonnet-5"
+
+
 if __name__ == "__main__":
     from sagent.lib.testing.main import test_main
 
