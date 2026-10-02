@@ -227,6 +227,9 @@ class _OpenAIResponsesModel(ModelDefaults):
         }
         if request.tools:
             body["tools"] = _build_tools(request.tools)
+            # Independent reads and searches go out together in one round; the agent
+            # runtime already runs a response's independent tool calls concurrently.
+            body["parallel_tool_calls"] = True
         effort = self._reasoning_effort()
         if effort is not None:
             body["reasoning"] = {"effort": effort, "summary": "auto"}

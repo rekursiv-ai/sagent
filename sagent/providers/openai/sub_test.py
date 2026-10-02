@@ -28,6 +28,7 @@ from sagent.providers.openai.sub import (
     _jwt_exp,
     _jwt_payload,
 )
+from sagent.tools import tool
 from sagent.types.capability import (
     ModelSettings,
     ThinkingEffort,
@@ -43,6 +44,8 @@ from sagent.types.runtime import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from sagent.types.tools import Tool
 
 
 def test_subscription_context_clamps_request_tokens() -> None:
@@ -509,6 +512,31 @@ def _create_kwargs_for(
     model = _make_provider().model(model_id)
     model.settings.thinking_effort = effort
     return dict(model._build_kwargs(ModelRequest(messages=[UserMessage(text="hi")])))
+
+
+async def _look_up(*, term: str) -> str:
+    """Look a term up."""
+    return term
+
+
+def _lookup_tool() -> Tool:
+    return tool(_look_up, name="LookUp")
+
+
+def test_a_request_with_tools_allows_parallel_tool_calls() -> None:
+    model = _make_provider().model("sol-5.6")
+    request = ModelRequest(
+        messages=[UserMessage(text="hi")],
+        tools=[_lookup_tool()],
+    )
+
+    body = dict(model._build_kwargs(request))
+
+    assert body["parallel_tool_calls"] is True
+
+
+def test_a_request_with_no_tools_says_nothing_about_parallel_calls() -> None:
+    assert "parallel_tool_calls" not in _create_kwargs_for()
 
 
 def _wire_effort_for(*, model_id: str, effort: ThinkingEffort) -> object:
