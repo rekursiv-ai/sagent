@@ -342,7 +342,7 @@ def test_openai_no_cliff_model_defaults_to_full_window(base_id: str) -> None:
 
 @pytest.mark.parametrize(
     "model_id",
-    ["gpt-5.4-mini+1m", "gpt-5.4-nano+1m", "gpt-5.3-codex+1m", "gpt-5.2+1m"],
+    ["gpt-5.4-mini+1m", "gpt-5.2+1m"],
 )
 def test_openai_400k_model_has_no_plus1m(model_id: str) -> None:
     # 400K-window models have no long-context mode; ``+1m`` must not resolve.

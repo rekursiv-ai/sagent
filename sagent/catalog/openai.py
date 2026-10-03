@@ -470,54 +470,6 @@ def models() -> Mapping[str, ModelCapability]:
             ),
             thinking=legacy,
         ),
-        replace(
-            default,
-            model_id="gpt-5.4-nano",
-            wire_model_id="gpt-5.4-nano",
-            knowledge_cutoff=None,
-            context=_limits(max_tokens=400_000, windowed=False, patch_images=False),
-            prices=_prices(
-                {
-                    "auto": _card(
-                        request=0.2,
-                        response=1.25,
-                        cache_write=0.0,
-                        cache_read=0.02,
-                    ),
-                    "flex": _card(
-                        request=0.1,
-                        response=0.625,
-                        cache_write=0.0,
-                        cache_read=0.01,
-                    ),
-                },
-            ),
-            thinking=legacy,
-        ),
-        replace(
-            default,
-            model_id="gpt-5.3-codex",
-            wire_model_id="gpt-5.3-codex",
-            knowledge_cutoff=None,
-            context=_limits(max_tokens=400_000, windowed=False, patch_images=False),
-            prices=_prices(
-                {
-                    "auto": _card(
-                        request=1.75,
-                        response=14.0,
-                        cache_write=0.0,
-                        cache_read=0.175,
-                    ),
-                    "priority": _card(
-                        request=3.5,
-                        response=28.0,
-                        cache_write=0.0,
-                        cache_read=0.35,
-                    ),
-                },
-            ),
-            thinking=legacy,
-        ),
         # No `*-chat-latest` row. Those aliases are listed by `/v1/models` but
         # rejected by `/v1/responses` with `model_not_found` (verified for
         # gpt-5, gpt-5.2 and gpt-5.3 variants), and the Responses API is the

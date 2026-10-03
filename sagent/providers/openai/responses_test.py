@@ -273,7 +273,7 @@ def test_pro_catalog_has_only_supported_efforts(model_id: str) -> None:
 
 @pytest.mark.parametrize(
     "model_id",
-    ["gpt-5.2", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.5"],
+    ["gpt-5.2", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5"],
 )
 def test_earlier_gpt5_catalog_keeps_native_efforts(model_id: str) -> None:
     model = OpenAI.from_key("test-key").model(model_id)

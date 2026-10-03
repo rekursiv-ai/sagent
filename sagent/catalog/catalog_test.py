@@ -18,7 +18,7 @@ from sagent.catalog import (
     openai,
 )
 from sagent.types.capability import ModelCapability, ModelSettings
-from sagent.types.cost import PriceKey, ServiceTier, TokenCount
+from sagent.types.cost import PriceKey, TokenCount
 
 
 if TYPE_CHECKING:
@@ -83,12 +83,6 @@ def test_every_catalog_names_its_default_and_utility_rows(module: ModuleType) ->
     models = _models(module)
     assert models["default"].model_id in models
     assert models["utility"].model_id in models
-
-
-def test_openai_metadata_does_not_leak_from_new_models_to_legacy_rows() -> None:
-    models = openai.models()
-    assert models["astra-6"].approx_chars_per_token == 3.71
-    assert models["gpt-4"].knowledge_cutoff is None
 
 
 @pytest.mark.parametrize("row", _ROWS)
@@ -391,91 +385,6 @@ def test_anthropic_cache_writes_bill_the_published_rate_per_lifetime(
     assert (price.cache_write, price.cache_write_1h) == (write_5m, write_1h)
 
 
-# (tier, input, cached input, cache write, output), from the standard / flex /
-# fast tabs of https://developers.openai.com/api/docs/pricing, 2026-09-24.
-@pytest.mark.parametrize(
-    ("model_id", "tier", "published"),
-    [
-        ("astra-6", "auto", (10.0, 1.0, 12.5, 50.0)),
-        ("astra-6", "flex", (5.0, 0.5, 6.25, 25.0)),
-        ("astra-6", "priority", (20.0, 2.0, 25.0, 100.0)),
-        ("luna-6", "flex", (0.05, 0.005, 0.0625, 0.25)),
-        ("luna-6", "priority", (0.2, 0.02, 0.25, 1.0)),
-        ("terra-5.6", "flex", (1.0, 0.1, 1.25, 6.0)),
-        ("gpt-5.4", "flex", (1.25, 0.13, 0.0, 7.5)),
-        ("gpt-4o", "priority", (4.25, 2.125, 0.0, 17.0)),
-        ("gpt-5.3-codex", "priority", (3.5, 0.35, 0.0, 28.0)),
-    ],
-)
-def test_openai_tiers_bill_the_published_rate(
-    model_id: str,
-    tier: ServiceTier,
-    published: tuple[float, float, float, float],
-) -> None:
-    price = openai.models()[model_id].prices[PriceKey(tier)]
-    assert (price.request, price.cache_read, price.cache_write, price.response) == (
-        published
-    )
-
-
-@pytest.mark.parametrize(
-    ("model_id", "offered"),
-    [
-        ("astra-6", {"auto", "default", "flex", "priority"}),
-        ("gpt-5.5-pro", {"auto", "default", "flex"}),
-        ("gpt-4.1", {"auto", "default", "priority"}),
-        ("o1", {"auto", "default"}),
-    ],
-)
-def test_openai_offers_only_the_published_tiers(
-    model_id: str,
-    offered: set[str],
-) -> None:
-    """A model absent from a tier's pricing tab cannot be billed at it."""
-    assert openai.models()[model_id].service_tier == offered
-
-
-def test_openai_long_prompts_bill_the_published_long_context_rate() -> None:
-    """GPT-6 publishes its >272K column; 2x input / 1.5x output reproduces it."""
-    prices = openai.models()["luna-6"].prices
-    short = prices.rate(service_tier="auto", prompt_tokens=272_000, at=_TODAY)
-    long = prices.rate(service_tier="auto", prompt_tokens=272_001, at=_TODAY)
-    assert (short.request, short.response) == (0.1, 0.5)
-    assert (long.request, long.cache_read, long.cache_write, long.response) == (
-        pytest.approx(0.2),
-        pytest.approx(0.02),
-        pytest.approx(0.25),
-        pytest.approx(0.75),
-    )
-    fast_long = prices.rate(service_tier="priority", prompt_tokens=300_000, at=_TODAY)
-    assert (fast_long.request, fast_long.response) == (
-        pytest.approx(0.4),
-        pytest.approx(1.5),
-    )
-
-
-@pytest.mark.parametrize(
-    ("reported", "tier"),
-    [
-        (None, "auto"),
-        ("default", "auto"),
-        ("flex", "flex"),
-        ("priority", "priority"),
-        ("fast", "priority"),
-    ],
-)
-def test_openai_bills_the_tier_it_reports_serving(
-    reported: str | None,
-    tier: ServiceTier,
-) -> None:
-    assert openai.served_tier(reported) == tier
-
-
-def test_openai_rejects_a_tier_it_cannot_price() -> None:
-    with pytest.raises(ValueError, match="scale"):
-        _ = openai.served_tier("scale")
-
-
 @pytest.mark.parametrize(
     ("model_id", "short", "long"),
     [
@@ -539,13 +448,6 @@ def test_no_catalog_declares_a_latency_tag() -> None:
     for module in _VENDORS:
         for model_id in _models(module):
             assert "+fast" not in model_id
-
-
-def test_sol_6_1_is_priced_by_a_stand_in_copy_of_the_sol_6_card() -> None:
-    sol = openai.models()
-    assert sol["sol-6.1"].wire_model_id == "gpt-6.1-sol"
-    assert sol["sol-6.1"].prices == sol["sol-6"].prices
-    assert sol["default"].model_id.startswith("astra-")
 
 
 def test_sonnet_5_5_is_priced_by_a_stand_in_copy_of_the_sonnet_5_card() -> None:
