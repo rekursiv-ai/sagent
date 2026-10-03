@@ -7,6 +7,7 @@ import contextlib
 import enum
 
 from torch import Tensor
+from torch._ops import OpOverload
 from torch.utils._python_dispatch import TorchDispatchMode
 
 import torch
@@ -64,7 +65,10 @@ def checkpoint(
     function: Callable[..., _CheckpointR],
     *args: Any,
     use_reentrant: Optional[bool] = ...,
-    context_fn: Callable[[], Tuple[ContextManager[None], ContextManager[None]]] = ...,
+    context_fn: Callable[
+        [],
+        Tuple[ContextManager[object], ContextManager[object]],
+    ] = ...,
     determinism_check: str = ...,
     debug: bool = ...,
     early_stop: bool = ...,
@@ -139,6 +143,6 @@ class _CachedTorchDispatchMode(TorchDispatchMode):
     def __torch_dispatch__(self, func, types, args=..., kwargs=...) -> PyTree: ...
 
 def create_selective_checkpoint_contexts(
-    policy_fn_or_list,
-    allow_cache_entry_mutation=...,
+    policy_fn_or_list: Callable[..., CheckpointPolicy | bool] | list[OpOverload],
+    allow_cache_entry_mutation: bool = ...,
 ) -> tuple[_CachingTorchDispatchMode, _CachedTorchDispatchMode]: ...
