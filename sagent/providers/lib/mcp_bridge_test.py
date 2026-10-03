@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast, override
+from urllib import error, request
 
 import asyncio
 import base64
 import json
-import urllib.error
-import urllib.request
 
 import pytest
 
@@ -198,8 +197,8 @@ async def test_unknown_tool_path_returns_404() -> None:
 
         def probe() -> int:
             try:
-                urllib.request.urlopen(f"{base}/not-a-route", timeout=2)  # noqa: S310 -- The test probes a local fixture server, never an external URL.
-            except urllib.error.HTTPError as exc:
+                request.urlopen(f"{base}/not-a-route", timeout=2)  # noqa: S310 -- The test probes a local fixture server, never an external URL.
+            except error.HTTPError as exc:
                 try:
                     return exc.code
                 finally:
@@ -577,8 +576,8 @@ async def test_bridge_serves_http_after_another_bridge_stops() -> None:
 
         def probe(url: str) -> int:
             try:
-                urllib.request.urlopen(url, timeout=2)  # noqa: S310 -- The test probes a local fixture server, never an external URL.
-            except urllib.error.HTTPError as exc:
+                request.urlopen(url, timeout=2)  # noqa: S310 -- The test probes a local fixture server, never an external URL.
+            except error.HTTPError as exc:
                 try:
                     return exc.code
                 finally:

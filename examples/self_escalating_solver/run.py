@@ -22,6 +22,7 @@ the harness, measures the self-mutate success rate over ``--trials`` runs (defau
 
 from __future__ import annotations
 
+from http import server
 from pathlib import Path
 from typing import Any, Final
 
@@ -29,7 +30,6 @@ import argparse
 import asyncio
 import contextlib
 import functools
-import http.server
 import json
 import os
 import socket
@@ -345,7 +345,7 @@ def serve(port: int = 8000, host: str = "127.0.0.1") -> None:
     """
     web = _CWD / "web"
     handler = functools.partial(
-        http.server.SimpleHTTPRequestHandler,
+        server.SimpleHTTPRequestHandler,
         directory=str(web),
     )
     socketserver.TCPServer.allow_reuse_address = True

@@ -20,6 +20,7 @@ import pytest
 
 from sagent.agent.agent import Agent, _resolve_target_spec
 from sagent.agent.background import BackgroundTaskEntry
+from sagent.agent.runtime import AgentRuntime, Compactor, Model
 from sagent.lib import last_models
 from sagent.repl.input_queues import InputQueues, QueuedInputBlock
 from sagent.repl.keybindings import (
@@ -81,8 +82,6 @@ from sagent.types.runtime import (
     UserMessage,
 )
 from sagent.types.tape import ContextSplice, TapeRef
-
-import sagent.agent.runtime
 
 
 if TYPE_CHECKING:
@@ -478,7 +477,7 @@ class _FakeRuntime:
 
 @dataclass(slots=True, kw_only=True)
 class _RuntimeHolder:
-    runtime: sagent.agent.runtime.AgentRuntime
+    runtime: AgentRuntime
 
 
 @dataclass(slots=True, kw_only=True)
@@ -928,13 +927,13 @@ async def test_run_repl_invokes_replay_messages(
     the source text instead would pass on a commented-out call, so drive
     the real coroutine and record the invocation.
     """
-    runtime = sagent.agent.runtime.AgentRuntime(
+    runtime = AgentRuntime(
         model=_TextOnlyModel(text="ok"),
     )
 
     @dataclass(slots=True, kw_only=True)
     class _Holder:
-        runtime: sagent.agent.runtime.AgentRuntime
+        runtime: AgentRuntime
         show_thinking: bool = False
         name: str = "test"
         status: str | None = None
@@ -998,7 +997,7 @@ async def test_run_repl_unwinds_observers_and_before_tool_spawn(
     via ``install_input_queue_committer``. Without a ``finally`` that
     detaches them, repeated entries pile up across re-entries.
     """
-    runtime = sagent.agent.runtime.AgentRuntime(
+    runtime = AgentRuntime(
         model=_TextOnlyModel(text="ok"),
     )
 
@@ -1011,7 +1010,7 @@ async def test_run_repl_unwinds_observers_and_before_tool_spawn(
 
     @dataclass(slots=True, kw_only=True)
     class _Holder:
-        runtime: sagent.agent.runtime.AgentRuntime
+        runtime: AgentRuntime
         show_thinking: bool = False
         name: str = "test"
         status: str | None = None
@@ -1092,7 +1091,7 @@ async def test_run_repl_unwinds_when_setup_raises_after_install(
     those installs sit INSIDE the ``try``, the observer and the wrapped
     ``before_tool_spawn`` survive the failure and accumulate on re-entry.
     """
-    runtime = sagent.agent.runtime.AgentRuntime(
+    runtime = AgentRuntime(
         model=_TextOnlyModel(text="ok"),
     )
     observers_before = list(runtime.observers)
@@ -1100,7 +1099,7 @@ async def test_run_repl_unwinds_when_setup_raises_after_install(
 
     @dataclass(slots=True, kw_only=True)
     class _Holder:
-        runtime: sagent.agent.runtime.AgentRuntime
+        runtime: AgentRuntime
         show_thinking: bool = False
         name: str = "test"
         status: str | None = None
@@ -1174,7 +1173,7 @@ async def test_run_repl_unwinds_when_teardown_step_raises(
     raise ahead of them re-opens the exact leak the ``try`` was widened
     to close.
     """
-    runtime = sagent.agent.runtime.AgentRuntime(
+    runtime = AgentRuntime(
         model=_TextOnlyModel(text="ok"),
     )
     observers_before = list(runtime.observers)
@@ -1182,7 +1181,7 @@ async def test_run_repl_unwinds_when_teardown_step_raises(
 
     @dataclass(slots=True, kw_only=True)
     class _Holder:
-        runtime: sagent.agent.runtime.AgentRuntime
+        runtime: AgentRuntime
         show_thinking: bool = False
         name: str = "test"
         status: str | None = None
@@ -1248,13 +1247,13 @@ async def test_run_repl_creates_history_parent_directory(
     BEFORE ``buf.reset()``. The message dispatches and the input pane
     never clears.
     """
-    runtime = sagent.agent.runtime.AgentRuntime(
+    runtime = AgentRuntime(
         model=_TextOnlyModel(text="ok"),
     )
 
     @dataclass(slots=True, kw_only=True)
     class _Holder:
-        runtime: sagent.agent.runtime.AgentRuntime
+        runtime: AgentRuntime
         show_thinking: bool = False
         name: str = "test"
         status: str | None = None
@@ -1367,7 +1366,7 @@ async def test_repl_teardown_skips_subagent_tasks_after_shutdown() -> None:
 async def test_input_queue_committer_observer_pushes_deferred_on_agent_idle() -> None:
     """``AgentIdle`` with a deferred message pushes ``UserDeferredMessage``; pane cleared."""
     queues = InputQueues(deferred=QueuedInputBlock(text="elephant\n\nbanana\n\nchair"))
-    runtime = sagent.agent.runtime.AgentRuntime(
+    runtime = AgentRuntime(
         model=_TextOnlyModel(text="ok"),
     )
     holder = _RuntimeHolder(runtime=runtime)
@@ -1384,7 +1383,7 @@ async def test_input_queue_committer_observer_pushes_deferred_on_agent_idle() ->
 def test_input_queue_committer_observer_ignores_non_agent_idle_events() -> None:
     """Non-flush events leave ``queued_input`` and the inbox untouched."""
     queues = InputQueues(deferred=QueuedInputBlock(text="elephant"))
-    runtime = sagent.agent.runtime.AgentRuntime(
+    runtime = AgentRuntime(
         model=_TextOnlyModel(text="ok"),
     )
     holder = _RuntimeHolder(runtime=runtime)
@@ -1410,7 +1409,7 @@ async def test_input_queue_committer_observer_flushes_deferred_on_clear_complete
     wedge without claiming ``AWAIT_USER`` is idle.
     """
     queues = InputQueues(deferred=QueuedInputBlock(text="resume me"))
-    runtime = sagent.agent.runtime.AgentRuntime(
+    runtime = AgentRuntime(
         model=_TextOnlyModel(text="ok"),
     )
     holder = _RuntimeHolder(runtime=runtime)
@@ -1426,7 +1425,7 @@ async def test_input_queue_committer_observer_flushes_deferred_on_clear_complete
 def test_input_queue_committer_observer_ignores_agent_idle_when_empty() -> None:
     """``AgentIdle`` with an empty queue is a no-op (no spurious push)."""
     queues = InputQueues()
-    runtime = sagent.agent.runtime.AgentRuntime(
+    runtime = AgentRuntime(
         model=_TextOnlyModel(text="ok"),
     )
     holder = _RuntimeHolder(runtime=runtime)
@@ -1444,7 +1443,7 @@ async def test_startup_idle_flushes_staged_queue_on_first_agent_idle() -> None:
     queues = InputQueues(
         deferred=QueuedInputBlock(text="were we implementing issue 25?"),
     )
-    runtime = sagent.agent.runtime.AgentRuntime(
+    runtime = AgentRuntime(
         model=_TextOnlyModel(text="ok"),
     )
     holder = _RuntimeHolder(runtime=runtime)
@@ -1476,7 +1475,7 @@ async def test_startup_idle_not_fired_when_history_needs_model() -> None:
     would flush prematurely.
     """
     queues = InputQueues(deferred=QueuedInputBlock(text="for later"))
-    runtime = sagent.agent.runtime.AgentRuntime(
+    runtime = AgentRuntime(
         model=_TextOnlyModel(text="ok"),
     )
     holder = _RuntimeHolder(runtime=runtime)
@@ -1658,7 +1657,7 @@ async def _wait_for(
 # ``Quit`` is pushed at exit to drain the engine.
 @contextlib.asynccontextmanager
 async def _running_runtime(
-    runtime: sagent.agent.runtime.AgentRuntime,
+    runtime: AgentRuntime,
 ):
     """Start ``run_forever`` and tear it down on exit."""
     task = asyncio.create_task(runtime.run_forever())
@@ -1671,13 +1670,13 @@ async def _running_runtime(
 
 
 def _harness_runtime() -> tuple[
-    sagent.agent.runtime.AgentRuntime,
+    AgentRuntime,
     _RuntimeHolder,
     InputQueues,
 ]:
     """Build a runtime + queues + committer wired together."""
     queues = InputQueues()
-    runtime = sagent.agent.runtime.AgentRuntime(
+    runtime = AgentRuntime(
         model=_TextOnlyModel(text="ok"),
     )
     holder = _RuntimeHolder(runtime=runtime)
@@ -1686,13 +1685,13 @@ def _harness_runtime() -> tuple[
 
 
 def _history_user_texts(
-    runtime: sagent.agent.runtime.AgentRuntime,
+    runtime: AgentRuntime,
 ) -> list[str]:
     return [m.text for m in runtime.context().messages if isinstance(m, UserMessage)]
 
 
 def _history_has(
-    runtime: sagent.agent.runtime.AgentRuntime,
+    runtime: AgentRuntime,
     needle: str,
 ) -> bool:
     """Return True when ``needle`` appears in any user message (coalesced or not)."""
@@ -1817,7 +1816,7 @@ async def test_queued_pane_message_detaches_running_tool() -> None:
     message would wait a full round -- the "type to redirect" path lost.
     """
     queues = InputQueues()
-    runtime = sagent.agent.runtime.AgentRuntime(
+    runtime = AgentRuntime(
         model=_ScriptedModel(
             messages=[
                 AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),)),
@@ -1899,12 +1898,10 @@ async def test_typed_input_reaches_model_in_every_runtime_state() -> None:
             model = _TextOnlyModel(text="ok")
 
         compactor = _GatedCompactor(release=release) if setup == "mid_compact" else None
-        runtime = sagent.agent.runtime.AgentRuntime(
-            model=cast(sagent.agent.runtime.Model, model),
+        runtime = AgentRuntime(
+            model=cast(Model, model),
             tools=[_GatedTool(release=release)] if setup == "mid_cohort" else [],
-            compactor=cast(sagent.agent.runtime.Compactor, compactor)
-            if compactor is not None
-            else None,
+            compactor=cast(Compactor, compactor) if compactor is not None else None,
         )
         queues = InputQueues()
         holder = _RuntimeHolder(runtime=runtime)
@@ -2021,7 +2018,7 @@ async def test_enter_mid_cohort_detaches_running_tool() -> None:
     """
     queues = InputQueues()
     nav = NavState()
-    runtime = sagent.agent.runtime.AgentRuntime(
+    runtime = AgentRuntime(
         model=_ScriptedModel(
             messages=[
                 AssistantMessage(tool_calls=(ToolCall(id="t1", name="echo", args={}),)),
@@ -2128,7 +2125,7 @@ async def test_queued_input_committed_and_cleared_on_model_idle() -> None:
     at the next gate-section pass and fires a fresh round.
     """
     queues = InputQueues(deferred=QueuedInputBlock(text="elephant\n\nbanana\n\nchair"))
-    agent = sagent.agent.runtime.AgentRuntime(
+    agent = AgentRuntime(
         model=_TextOnlyModel(text="committed"),
     )
 
@@ -2173,7 +2170,7 @@ async def test_staging_path_end_to_end_renders_user_bar() -> None:
     empty buffer with a non-empty queue.
     """
     printer = RecordingPrinter()
-    agent = sagent.agent.runtime.AgentRuntime(
+    agent = AgentRuntime(
         model=_TextOnlyModel(text="ack"),
     )
     agent.observers.append(make_render_observer(printer))
@@ -2265,7 +2262,7 @@ async def test_repl_commit_during_cohort_preempts_tools_to_background() -> None:
 
     tool = _BlockingTool()
     model = _TwoRoundModel()
-    runtime = sagent.agent.runtime.AgentRuntime(
+    runtime = AgentRuntime(
         model=model,
         tools=[tool],
     )

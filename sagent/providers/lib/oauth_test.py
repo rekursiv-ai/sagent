@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from urllib import error, request
 
 import asyncio
 import base64
@@ -12,8 +13,6 @@ import hashlib
 import inspect
 import os
 import threading
-import urllib.error
-import urllib.request
 
 import pytest
 
@@ -316,8 +315,8 @@ def test_callback_without_a_code_is_an_error() -> None:
     """
     listener = AuthCodeListener("expected")
     listener.start()
-    with pytest.raises(urllib.error.HTTPError) as raised:
-        urllib.request.urlopen(  # noqa: S310 -- The test exercises the OAuth localhost callback transport, whose URL is fixed by the protocol and never user-controlled.
+    with pytest.raises(error.HTTPError) as raised:
+        request.urlopen(  # noqa: S310 -- The test exercises the OAuth localhost callback transport, whose URL is fixed by the protocol and never user-controlled.
             f"{listener.redirect_uri}?state=expected",
             timeout=5,
         ).close()

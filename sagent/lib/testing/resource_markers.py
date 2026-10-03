@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from functools import cache
+from importlib import util
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import ast
-import importlib.util
 import os
 
 import pytest
@@ -196,7 +196,7 @@ def module_path(module_name: str) -> Path | None:
 
     """
     try:
-        spec = importlib.util.find_spec(module_name)
+        spec = util.find_spec(module_name)
     except (ImportError, ValueError):
         return None
     if spec is None or spec.origin is None or spec.origin in {"built-in", "frozen"}:

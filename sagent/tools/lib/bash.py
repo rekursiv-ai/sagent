@@ -35,16 +35,17 @@ import types
 
 
 if TYPE_CHECKING:
+    from bashlex import errors
     from bashlex.ast import (
         node as Node,  # noqa: N812 -- The public Node alias mirrors the third-party AST naming.
     )
 
     import bashlex
-    import bashlex.errors
 else:
     from wrapt import lazy_import
 
     bashlex = lazy_import("bashlex")  # 88ms cold.
+    errors = lazy_import("bashlex.errors")
     Node = object
 
 __all__ = [
@@ -388,7 +389,7 @@ def parse_bash(command: str) -> tuple[Node, ...] | None:
             Sequence[Node],
             bashlex.parse(command),
         )
-    except (bashlex.errors.ParsingError, NotImplementedError, AttributeError):
+    except (errors.ParsingError, NotImplementedError, AttributeError):
         return None
     except Exception:  # noqa: BLE001 -- Parser failures from the third-party boundary must fail closed.
         return None

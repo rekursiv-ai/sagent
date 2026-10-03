@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast, override
+from urllib import parse
 
 import asyncio
 import base64
@@ -28,7 +29,6 @@ import os
 import re
 import secrets
 import threading
-import urllib.parse
 
 
 if TYPE_CHECKING:
@@ -108,11 +108,11 @@ def parse_manual_auth_code(value: str, expected_state: str) -> str:
 
     """
     text = value.strip()
-    parsed = urllib.parse.urlparse(text)
+    parsed = parse.urlparse(text)
     code = ""
     state = ""
     if parsed.scheme and parsed.netloc:
-        params = urllib.parse.parse_qs(parsed.query)
+        params = parse.parse_qs(parsed.query)
         code = (params.get("code") or [""])[0]
         state = (params.get("state") or [""])[0]
     else:
@@ -167,14 +167,14 @@ class AuthCodeHandler(http_server.BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         """Handle the OAuth redirect GET request."""
-        parsed = urllib.parse.urlparse(self.path)
+        parsed = parse.urlparse(self.path)
         expected_path = cast(AuthCodeServer, self.server).listener.callback_path
         if parsed.path != expected_path:
             self.send_response(404)
             self.end_headers()
             return
         listener = cast(AuthCodeServer, self.server).listener
-        params = urllib.parse.parse_qs(parsed.query)
+        params = parse.parse_qs(parsed.query)
         state = (params.get("state") or [""])[0]
         code = (params.get("code") or [""])[0]
         err = (params.get("error") or [""])[0]

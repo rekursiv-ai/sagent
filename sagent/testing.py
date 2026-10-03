@@ -30,6 +30,7 @@ import time
 
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.cost_tracker import CostTracker
+from sagent.agent.runtime import AgentRuntime
 from sagent.agent.state import (
     ToolState,
     current_agent_var,
@@ -66,8 +67,6 @@ from sagent.types.runtime import (
     Quit,
     RuntimeEvent,
 )
-
-import sagent.agent.runtime
 
 
 if TYPE_CHECKING:
@@ -305,8 +304,8 @@ class FakeAgent:
     chars_per_token: int = 4
     """Divisor backing :meth:`approx_text_tokens`."""
 
-    runtime: sagent.agent.runtime.AgentRuntime = field(
-        default_factory=lambda: sagent.agent.runtime.AgentRuntime(
+    runtime: AgentRuntime = field(
+        default_factory=lambda: AgentRuntime(
             model=_NullModel(),
         ),
     )

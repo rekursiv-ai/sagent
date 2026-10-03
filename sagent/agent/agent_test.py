@@ -145,8 +145,6 @@ from sagent.types.tools import (
     ToolResultPolicy,
 )
 
-import sagent.providers.providers
-
 
 # Delegates to the real ``SummaryCompactor`` so a stub that stubs only the PREDICATE
 # still reports the production scalar -- the two are one heuristic, and a stub answering
@@ -1881,10 +1879,9 @@ def test_change_model_builds_the_provider_without_construction_options(
     patched_build_provider: Mapping[str, object],
 ) -> None:
     """Construction knobs are the factory's; the swap invents none."""
-    del patched_build_provider
     a = _build_agent_with_spec()
     _ = a.change_model(model_id="claude-sonnet-4-6")
-    build_provider = sagent.providers.providers.build_provider
+    build_provider = patched_build_provider["build_provider"]
     assert isinstance(build_provider, Mock)
     build_provider.assert_called_with("Anthropic", "api", account=None)
 
@@ -2442,8 +2439,8 @@ def patched_build_provider() -> Iterator[Mapping[str, object]]:
     with patch(
         "sagent.providers.providers.build_provider",
         return_value=fake_provider,
-    ):
-        yield {"provider": fake_provider}
+    ) as build_provider:
+        yield {"provider": fake_provider, "build_provider": build_provider}
 
 
 def test_change_model_same_provider_new_model_queues_swap(

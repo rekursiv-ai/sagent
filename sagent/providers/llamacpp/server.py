@@ -6,6 +6,7 @@ from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
 from typing import TYPE_CHECKING, ClassVar, Final, Self, override
+from urllib import error, request
 
 import atexit
 import os
@@ -14,8 +15,6 @@ import shutil
 import socket
 import subprocess
 import time
-import urllib.error
-import urllib.request
 
 from sagent.catalog.llamacpp import models
 from sagent.catalog.openai import compatible
@@ -302,9 +301,9 @@ def _free_port() -> int:
 def _http_ok(url: str) -> bool:
     """Check whether a GET on ``url`` returns a 2xx response within 200ms."""
     try:
-        with urllib.request.urlopen(url, timeout=0.2) as response:  # noqa: S310 -- local/provider-supplied readiness URL only.
+        with request.urlopen(url, timeout=0.2) as response:  # noqa: S310 -- local/provider-supplied readiness URL only.
             return bool(200 <= response.status < 300)
-    except (OSError, urllib.error.URLError):
+    except (OSError, error.URLError):
         return False
 
 

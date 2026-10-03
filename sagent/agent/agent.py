@@ -44,6 +44,7 @@ import logging
 import time
 import uuid
 
+from sagent import agents_md
 from sagent.agent.background import (
     BackgroundAwareTool,
     BackgroundTaskEntry,
@@ -88,6 +89,7 @@ from sagent.compaction.scrunch import (
 )
 from sagent.lib import last_models
 from sagent.lib.tool_validation import validate_tool_input
+from sagent.providers import providers
 from sagent.request_materialization import materialize_request
 
 # The one module imported whole rather than by name: this file touches 36
@@ -129,9 +131,6 @@ from sagent.types.tools import (
     Tool,
     ToolResultPolicy,
 )
-
-import sagent.agents_md
-import sagent.providers.providers
 
 
 if TYPE_CHECKING:
@@ -877,7 +876,7 @@ class Agent:
             model_id=model_id,
             account=account,
         )
-        provider_obj = sagent.providers.providers.build_provider(
+        provider_obj = providers.build_provider(
             target.provider,
             target.auth,
             account=target.account,
@@ -925,7 +924,7 @@ class Agent:
         spec = self.model_recipe
         if spec is None:
             raise ValueError("agent has no model_recipe; cannot relogin")
-        prov_cls = sagent.providers.providers.provider_class(
+        prov_cls = providers.provider_class(
             spec.provider,
         )
         if prov_cls is None:
@@ -2373,7 +2372,7 @@ def _resolve_target_spec(
     elif prov_name == spec.provider:
         final_auth = spec.auth
     else:
-        final_auth = sagent.providers.providers.default_auth_for_provider(
+        final_auth = providers.default_auth_for_provider(
             prov_name,
         )
     final_account = account if account is not None else spec.account
@@ -2393,7 +2392,7 @@ def _resolve_target_spec(
 
 def _provider_knows_model(prov_name: str, model_id: str) -> bool:
     """Return True when the provider class's catalog includes ``model_id``."""
-    cls = sagent.providers.providers.provider_class(prov_name)
+    cls = providers.provider_class(prov_name)
     if not isinstance(cls, ModelResolver):
         return False
     try:
@@ -2835,10 +2834,10 @@ class _AgentTool:
         path = Path(raw_path)
         if not path.is_absolute():
             path = cwd / path
-        reminder, matched = sagent.agents_md.conditional_rules_for_paths(
+        reminder, matched = agents_md.conditional_rules_for_paths(
             cwd,
             [path],
-            config=sagent.agents_md.AgentsMdConfig(
+            config=agents_md.AgentsMdConfig(
                 additional_dirs=[Path(d) for d in state.additional_dirs],
             ),
             exclude=state.invoked_rules,

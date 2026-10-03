@@ -22,6 +22,7 @@ the World is a reactive feedback service on a logical clock. Engine + mechanic l
 
 from __future__ import annotations
 
+from http import server
 from pathlib import Path
 from typing import Final
 
@@ -29,7 +30,6 @@ import argparse
 import asyncio
 import contextlib
 import functools
-import http.server
 import socket
 import webbrowser
 
@@ -49,10 +49,10 @@ def serve(port: int = PORT, host: str = "127.0.0.1") -> None:
 
     """
     handler = functools.partial(
-        http.server.SimpleHTTPRequestHandler,
+        server.SimpleHTTPRequestHandler,
         directory=str(_CWD / "web"),
     )
-    httpd = http.server.HTTPServer((host, port), handler)
+    httpd = server.HTTPServer((host, port), handler)
     url = f"http://localhost:{port}/index.html"
     host_name = socket.gethostname()
     print(f"\n  ▶  Report served on this machine at:  {url}\n")

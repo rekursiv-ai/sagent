@@ -20,6 +20,7 @@ from prompt_toolkit.keys import Keys
 from prompt_toolkit.shortcuts import PromptSession
 
 from sagent.agent.agent import Agent
+from sagent.agent.runtime import AgentRuntime, GatedDeque, Model
 from sagent.repl import keybindings
 from sagent.repl.input_queues import InputQueues, QueuedInputBlock
 from sagent.repl.keybindings import NavState, build_key_bindings
@@ -30,8 +31,6 @@ from sagent.types.runtime import (
     UserDeferredMessage,
     UserMessage,
 )
-
-import sagent.agent.runtime
 
 
 @dataclass(slots=True, kw_only=True)
@@ -72,13 +71,13 @@ class _TrivialModel:
 # The dispatch predicates (``is_idle`` / ``accepts_user_dispatch`` /
 # ``accepts_deferred_dispatch``) are the real ones -- never copied -- so a keybinding
 # test cannot pass against a broken predicate.
-def _make_runtime() -> sagent.agent.runtime.AgentRuntime:
+def _make_runtime() -> AgentRuntime:
     """Return a REAL ``AgentRuntime`` with a list-backed inbox for poking state."""
-    runtime = sagent.agent.runtime.AgentRuntime(
-        model=cast(sagent.agent.runtime.Model, _TrivialModel()),
+    runtime = AgentRuntime(
+        model=cast(Model, _TrivialModel()),
     )
     runtime.inbox = cast(
-        sagent.agent.runtime.GatedDeque[RuntimeEvent],
+        GatedDeque[RuntimeEvent],
         _ListInbox(),
     )
     return runtime
@@ -97,7 +96,7 @@ class _FakeAgent:
     """Minimal stand-in for ``Agent``; wraps a REAL runtime for predicates."""
 
     work: object = None
-    runtime: sagent.agent.runtime.AgentRuntime = field(
+    runtime: AgentRuntime = field(
         default_factory=_make_runtime,
     )
     halt_calls: int = 0
