@@ -45,7 +45,7 @@ sagent --provider SelfHosted --model /opt/models/qwen3.6-27b+bfloat16+cuda
 | `--account NAME` | Optional named credential slot for providers that support one. |
 | `--model ID` | Catalog model ID. Bare IDs select the largest context window. Models with smaller profiles accept `+200k` or `+272k`; an explicit `+1m` remains valid when the bare profile is already at least one million tokens. SelfHosted IDs may include `+cuda`, `+bfloat16`, or `+compile`. |
 | `--system TEXT` | Extra system prompt instructions appended to Sagent's default prompt. |
-| `--effort LEVEL` | Provider-specific reasoning effort. GPT-5.6 accepts `none`, `low`, `medium`, `high`, `xhigh`, and `max`; its API-key Chat Completions path maps tool-free `max` to `xhigh` and forces `none` when function tools are present. |
+| `--effort LEVEL` | Reasoning effort: `none`, `min`, `low`, `medium`, `high`, `xhigh`, or `max`. Each model accepts a subset (GPT-5.6 takes all seven; GPT-6 Astra has no `none`), and an unsupported value raises. |
 | `--max-response-tokens N` | Limit response tokens for each model call. |
 | `--log-level LEVEL` | Enable stderr diagnostics. Same values as Python logging levels. |
 

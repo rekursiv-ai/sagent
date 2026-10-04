@@ -344,10 +344,9 @@ def parse_agent_args(
         default="default",
         choices=("default", *THINKING_COMMANDS),
         help=(
-            "Thinking state or partial command. Full states: adaptive-show,"
-            " adaptive-hide, on-show, on-hide, off-hide, redact-hide."
-            " Partials: adaptive, on, off, redact, show, hide."
-            " Default: no Agent override."
+            "One thinking word: adaptive, on, off or redact sets the model's"
+            " reasoning; show or hide sets whether it is rendered."
+            " Default: no override."
         ),
     )
     parser.add_argument(
@@ -355,7 +354,7 @@ def parse_agent_args(
         default=None,
         help=(
             "Provider-specific reasoning effort"
-            " (none|minimal|low|medium|high|xhigh|max)."
+            " (none|min|low|medium|high|xhigh|max)."
             " Unset = provider default; unsupported values raise."
         ),
     )

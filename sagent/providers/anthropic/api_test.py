@@ -831,12 +831,13 @@ def test_anthropic_model_supports_context_management_when_opted_in() -> None:
     assert m.capability.manage_context_server_side == frozenset({False, True})
 
 
-def test_anthropic_build_kwargs_emits_service_tier() -> None:
+def test_anthropic_build_kwargs_sends_default_tier_as_standard_only() -> None:
+    """The Messages API ``service_tier`` enum is ``auto`` | ``standard_only``."""
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-7")
     m._settings = replace(m.settings, service_tier="default")
     kwargs = m._build_kwargs(ModelRequest(messages=[UserMessage(text="x")]), [])
-    assert kwargs["service_tier"] == "default"
+    assert kwargs["service_tier"] == "standard_only"
 
 
 def test_anthropic_build_kwargs_omits_the_default_tier() -> None:
@@ -909,7 +910,8 @@ def test_anthropic_priority_tier_sets_speed_and_beta() -> None:
     """``speed`` rides ``extra_body``: the stream path is a raw POST.
 
     A first-class ``speed=`` exists only on the SDK's beta endpoints, so
-    dropping this injection silently bills standard.
+    dropping this injection silently bills standard. Fast mode is ``speed``
+    alone: ``priority`` is not a value of the API's ``service_tier`` enum.
     """
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-8")
@@ -919,6 +921,7 @@ def test_anthropic_priority_tier_sets_speed_and_beta() -> None:
     assert body["speed"] == "fast"
     headers = cast(dict[str, str], kwargs["extra_headers"])
     assert "fast-mode-2026-02-01" in headers["anthropic-beta"].split(",")
+    assert "service_tier" not in kwargs
 
 
 def test_anthropic_priority_tier_is_unselectable_on_an_unsupported_model() -> None:

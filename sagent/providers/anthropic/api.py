@@ -768,8 +768,11 @@ class _AnthropicModel(ModelDefaults):
         # ``output_config`` (the 4-5 generation); sending one earns a 400.
         if self.settings.thinking_effort != "none":
             kwargs["output_config"] = {"effort": self.settings.thinking_effort}
-        if self.settings.service_tier != "auto":
-            kwargs["service_tier"] = self.settings.service_tier
+        # The API's ``service_tier`` takes only ``auto`` / ``standard_only``; the
+        # catalog spells the latter ``default``. ``priority`` is fast mode, which
+        # travels as ``speed`` below -- sending it as a tier is not in the enum.
+        if self.settings.service_tier == "default":
+            kwargs["service_tier"] = "standard_only"
         body = self._provider.extra_body(
             has_thinking=has_thinking,
             cache_cold=self._cache_cold,

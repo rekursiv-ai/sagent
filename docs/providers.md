@@ -6,12 +6,12 @@ Sagent separates providers from models. A provider owns authentication and creat
 
 | Provider class | Environment variable | Default model | Utility model | Notes |
 | --- | --- | --- | --- | --- |
-| `Anthropic` | `ANTHROPIC_API_KEY` | `fable-5.1` | `haiku-4.5` | Anthropic API-key provider. |
+| `Anthropic` | `ANTHROPIC_API_KEY` | `opus-5.5` | `sonnet-5` | Anthropic API-key provider; `best` resolves to `fable-5.1`. |
 | `OpenAI` | `OPENAI_API_KEY` | `astra-6` | `luna-6` | OpenAI API provider. |
-| `Google` | `GOOGLE_API_KEY` | `gemini-3.1-pro-preview` | `gemini-3-flash-preview` | Google Gemini provider. |
-| `Moonshot` | `MOONSHOT_API_KEY` | `kimi-k2.6` | provider-defined | OpenAI-compatible Kimi provider. |
-| `DashScope` | `DASHSCOPE_API_KEY` | `qwen3.6-plus` | provider-defined | Alibaba DashScope provider. |
-| `MiniMax` | `MINIMAX_API_KEY` | `MiniMax-M2.7` | provider-defined | MiniMax provider. |
+| `Google` | `GOOGLE_API_KEY` | `gemini-3.1-pro-preview` | `gemini-2.5-flash-lite` | Google Gemini provider. |
+| `Moonshot` | `MOONSHOT_API_KEY` | `kimi-k2.6` | `kimi-k2-0905-preview` | OpenAI-compatible Kimi provider. |
+| `DashScope` | `DASHSCOPE_API_KEY` | `qwen3.6-plus` | `qwen3.6-flash` | Alibaba DashScope provider. |
+| `MiniMax` | `MINIMAX_API_KEY` | `MiniMax-M2.7` | `MiniMax-Text-01` | MiniMax provider. |
 | `SelfHosted` | none | `Qwen/Qwen3.6-27B` | configured snapshot | Local HF transformers provider. |
 | `OpenAICompat` | subclass-defined | subclass-defined | subclass-defined | Base class for chat-completions-compatible APIs. |
 
